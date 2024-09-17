@@ -1,0 +1,79 @@
+experiment:
+  name: "PowerGridStateEstimation_v1"
+  description: "Experiment to test new state estimation algorithm on power grid data"
+
+general:
+  database:
+    host: "localhost"
+    port: 5432
+    dbname: "mydb"
+    user: "myuser"
+    password: "mypassword"
+  backend: "torch"
+
+datasets:
+  source: "database"
+  grid_id: "Grid_1"
+  columns:
+    - "v1"
+    - "vangle1"
+    - "i1"
+    - "iangle1"
+  training:
+    source: "sql"
+    table: "harmonics_cigrelvdist_train"
+  validation:
+    source: "sql"
+    table: "harmonics_cigrelvdist_validation"
+  test:
+    source: "sql"
+    table: "harmonics_cigrelvdist_test"
+
+preprocessing:
+  scaling:
+    type: "minmax"
+    # all axes to scale. Features of axes not specified here will be scaled individually per item
+    axes_to_scale: ["batch", "nodes"]
+  feature_selection:
+    type: "correlation"
+    threshold: 0.8
+    columns:
+      - "voltage_magnitude"
+      - "voltage_angle"
+  complex_representation: # one of ["complex", "split"]
+    type: "complex"
+    # if split specify one or multiple of ['polar', 'cartesian', 'exponential'] otherwise has no effect
+    representation: ["polar"]
+
+model:
+  type: "GNN"
+  hyperparameters:
+    hidden_units: [64, 32]
+    dropout: 0.5
+    learning_rate: 0.001
+    epochs: 100
+    batch_size: 32
+  architecture:
+    type: "GAN"
+    num_layers: 2
+    activation: "relu"
+    output_activation: "linear"
+    normalization: "batch"
+    aggregation: "mean"
+    use_bias: true
+
+metrics:
+  - "mse"
+  #- "mae"
+  #- "rmse"
+
+visualization:
+  output_dir: "data/plots"
+
+tracking:
+  mlflow:
+    enabled: false
+    experiment_name: "PowerGridStateEstimation"
+    tracking_uri: "http://localhost:5000"
+
+random_seed: 42

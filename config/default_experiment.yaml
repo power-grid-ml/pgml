@@ -2,18 +2,33 @@ experiment:
   name: "PowerGridStateEstimation_v1"
   description: "Experiment to test new state estimation algorithm on power grid data"
 
-data:
+general:
+  database:
+    host: "localhost"
+    port: 5432
+    database: "mydb"
+    user: "myuser"
+    password: "mypassword"
+  backend: "torch"
+
+datasets:
   source: "database"
   grid_id: "Grid_1"
-  split_ratio:
-    train: 0.7
-    validation: 0.15
-    test: 0.15
+  training:
+    source: "sql"
+    table: "train"
+  validation:
+    source: "sql"
+    table: "validation"
+  test:
+    source: "csv"
+    files: "test"
 
 preprocessing:
   scaling:
     type: "minmax"
-    feature_range: [0, 1]
+    # all axes to scale. Features of axes not specified here will be scaled individually per item
+    axes_to_scale: ["batch", "nodes"]
   feature_selection:
     type: "correlation"
     threshold: 0.8
@@ -43,15 +58,16 @@ model:
     use_bias: true
 
 metrics:
-  - "mae"
-  - "rmse"
+  - "mse"
+  #- "mae"
+  #- "rmse"
 
 visualization:
   output_dir: "data/plots"
 
 tracking:
   mlflow:
-    enabled: true
+    enabled: false
     experiment_name: "PowerGridStateEstimation"
     tracking_uri: "http://localhost:5000"
 
