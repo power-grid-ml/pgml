@@ -68,7 +68,7 @@ def _to_complex(data: np.array, mode, indices, axis, angle_type):
         phase = np.take(data, indices=angle_idx, axis=axis)
         if angle_type == 'degrees':
             phase = rad2deg(phase)
-        return mag * np.exp(1j * phase)
+        return mag * complex_exp(1j * phase)
     elif mode == ComplexMode.EXPONENTIAL:
         mag_idx = indices.get('signed_magnitude', 0)
         imag_idx = indices.get('imag_exp', 1)
@@ -79,7 +79,7 @@ def _to_complex(data: np.array, mode, indices, axis, angle_type):
         phase = np.where(signed_magnitude < 0, math.pi - phase, phase)
         if angle_type == 'degrees':
             phase = rad2deg(phase)
-        return magnitude * np.exp(1j * phase)
+        return magnitude * complex_exp(1j * phase)
     elif mode == ComplexMode.COMPLEX:
         return data
     else:
@@ -102,7 +102,7 @@ def _from_complex(complex_data: np.array, modes, indices, axis, angle_type):
         elif mode == ComplexMode.EXPONENTIAL:
             signed_mag_index = indices.get('signed_magnitude', 0)
             imag_exp_index = indices.get('imag_exp', 1)
-            exp = np.exp(1j * angle(complex_data))
+            exp = complex_exp(1j * angle(complex_data))
             sign_real = np.sign(exp.real)
             components_dict[signed_mag_index] = abs(complex_data) * sign_real
             components_dict[imag_exp_index] = exp.imag
@@ -144,6 +144,11 @@ class ComplexConverter:
         # Ensure modes and axes are lists
         self.input_modes = input_modes if isinstance(input_modes, list) else [input_modes]
         self.output_modes = output_modes if isinstance(output_modes, list) else [output_modes]
+        if (any(not isinstance(mode, ComplexMode) for mode in self.input_modes)
+                or any(not isinstance(mode, ComplexMode) for mode in self.output_modes)):
+            raise ValueError('Invalid mode.')
+        if input_angle_type not in ['radians', 'degrees'] or output_angle_type not in ['radians', 'degrees']:
+            raise ValueError('Invalid angle type.')
         self.input_axis = input_axis
         self.output_axis = output_axis
         self.input_angle_type = input_angle_type
@@ -208,3 +213,22 @@ def rad2deg(x):
     :return: Angle in degrees
     """
     return x * (180.0 / math.pi)
+
+
+def complex_exp(z):
+    """
+    Compute the exponential of a complex number z = x + iy.
+    :param z:
+    :return:
+    """
+    x = z.real
+    y = z.imag
+
+    exp_x = np.exp(x)  # Compute e^x
+    cos_y = np.cos(y)  # Compute cos(y)
+    sin_y = np.sin(y)  # Compute sin(y)
+
+    real_part = exp_x * cos_y  # Real part of e^{x + iy}
+    imag_part = exp_x * sin_y  # Imaginary part of e^{x + iy}
+
+    return real_part + 1j * imag_part

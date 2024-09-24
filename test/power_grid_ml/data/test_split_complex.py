@@ -30,8 +30,8 @@ class TestComplexConverter(unittest.TestCase):
             output_axis=-1
         )
         data = np.array([[1, 2], [3, 4]])  # Real and imaginary parts
-        data = knp.array(data, dtype=float)
         expected = data  # Since input and output modes are both CARTESIAN
+        data = knp.array(data)
         result = converter.convert(data)
         np.testing.assert_array_equal(result, expected)
 
@@ -83,10 +83,10 @@ class TestComplexConverter(unittest.TestCase):
 class TestCoordinateConversions(unittest.TestCase):
 
     def setUp(self):
-        sample_array = np.array([[[3, 4], [0, 1]], [[5, 12], [0, 1]]], dtype=float)
+        sample_array = np.array([[[3, 4], [0, 1]], [[5, 12], [0, 1]]], dtype="float64")
         real = sample_array[..., 0]
         imag = sample_array[..., 1]
-        self.sample_array = knp.array(sample_array, dtype=float)
+        self.sample_array = knp.array(sample_array, dtype="float64")
         magnitude = np.sqrt(real ** 2 + imag ** 2)
         phase = np.arctan2(imag, real)
         self.expected_polar = np.stack((magnitude, phase), axis=-1)
