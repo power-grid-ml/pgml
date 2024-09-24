@@ -20,6 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 tests = ["pytest >= 7.3.1"]
+deep-learning = [
+    "tensorflow>=2.16.2",
+    "torch>=2.4.1",
+]
 
 [project.urls]
 Home = "https://github.com/cire-thk/power-grid-ml"

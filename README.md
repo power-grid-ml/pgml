@@ -11,3 +11,6 @@ or in editable mode:
 ```bash
 pip install -e .
 ```
+
+This project requires you to manually configure a backend (pytorch/tensorflow/jax).
+Please follow the [Keras guide](https://keras.io/getting_started/#configuring-your-backend).
