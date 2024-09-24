@@ -1,7 +1,7 @@
 import os
 
 from power_grid_ml.data.container import DataContainer
-
+from power_grid_ml.data.sample_data import create_tree_graph, get_sample_line_features, get_sample_node_features
 os.environ["KERAS_BACKEND"] = "torch"
 import keras
 from power_grid_ml.data import DataLoaderSQL
@@ -12,13 +12,15 @@ experiment = "experiment_cigrelv.yaml"
 # Load configuration
 config_manager = ConfigManager(os.path.join(config_path, experiment))
 
-# Load data
-url = config_manager.get_db_url()
-data_loader = DataLoaderSQL(url)
-datasets_config = config_manager.get_config_value('datasets')
-train_df = data_loader.load(datasets_config['training']['table'], columns=datasets_config['columns'])
-test_df = data_loader.load(datasets_config['test']['table'], columns=datasets_config['columns'])
-validation_df = data_loader.load(datasets_config['validation']['table'], columns=datasets_config['columns'])
+# get test data
+# Number of nodes in the graph
+NUM_NODES = 20
+# Create the tree graph and adjacency list
+adjacency_list = create_tree_graph(NUM_NODES)
+# Get sample line features with the correct number of lines
+line_features_df = get_sample_line_features(adjacency_list)
+# Get sample node features
+node_features_df = get_sample_node_features(NUM_NODES)
 
 # Create data container
 data_container = DataContainer()
