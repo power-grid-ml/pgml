@@ -108,7 +108,7 @@ def _from_complex(complex_data: np.array, modes, indices, axis, angle_type):
             components_dict[imag_exp_index] = exp.imag
         else:
             raise ValueError("Unknown mode")
-    num_components = max(indices.values()) + 1
+    num_components = len(modes) * 2
     components_list = []
     for i in range(num_components):
         if i in components_dict:
@@ -153,8 +153,8 @@ class ComplexConverter:
         self.output_axis = output_axis
         self.input_angle_type = input_angle_type
         self.output_angle_type = output_angle_type
-        self.input_titles, self.output_indices = _get_attributes(self.input_modes)
-        self.output_titles, self.input_indices = _get_attributes(self.output_modes)
+        self.input_titles, self.input_indices = _get_attributes(self.input_modes)
+        self.output_titles, self.output_indices = _get_attributes(self.output_modes)
 
     def convert(self, data: np.array):
         """

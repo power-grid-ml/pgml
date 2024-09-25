@@ -1,5 +1,6 @@
 import unittest
 import os
+
 os.environ["KERAS_BACKEND"] = "torch"  # required for complex tensors
 import keras.src.ops.numpy as knp
 import numpy as np
@@ -71,6 +72,42 @@ class TestComplexConverter(unittest.TestCase):
         data = knp.array(data, dtype=float)
         result = converter.convert(data)
         np.testing.assert_array_almost_equal(result, expected)
+
+    def test_convert_complex_to_cartesian(self):
+        converter = ComplexConverter(
+            input_modes=[ComplexMode.COMPLEX],
+            output_modes=[ComplexMode.CARTESIAN],
+            input_axis=-1,
+            output_axis=-1
+        )
+        data = np.array([1 + 2j, 3 + 4j])
+        expected = np.array([[1, 2], [3, 4]])
+        # keras3 does not allow conversion of complex arrays from numpy.
+        # Instead, we need to create real and imaginary parts and combine them
+        real = knp.array(np.real(data))
+        imag = knp.array(np.imag(data))
+        data = real + 1j * imag
+        result = converter.convert(data)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_convert_mixed_polar_cartesian(self):
+        converter = ComplexConverter(
+            input_modes=[ComplexMode.COMPLEX],
+            output_modes=[ComplexMode.POLAR, ComplexMode.CARTESIAN],
+            input_axis=-1,
+            output_axis=-1
+        )
+        data = np.array([1 + 2j, 3 + 4j])
+        magnitude = np.abs(data)
+        phase = np.angle(data, False)
+        expected_polar = np.stack((magnitude, phase), axis=-1)
+        expected_cartesian = np.array([[1, 2], [3, 4]])
+        expected_mixed = np.concatenate((expected_polar, expected_cartesian), axis=-1)
+        real = knp.array(np.real(data))
+        imag = knp.array(np.imag(data))
+        data = real + 1j * imag
+        result = converter.convert(data)
+        np.testing.assert_array_almost_equal(result, expected_mixed)
 
     def test_unknown_mode_error(self):
         with self.assertRaises(ValueError):
@@ -173,6 +210,16 @@ class TestCoordinateConversions(unittest.TestCase):
         polar_data = converter_to_polar.convert(cartesian_data)
         np.testing.assert_array_almost_equal(polar_data, self.expected_polar)
 
+    def test_revert(self):
+        converter = ComplexConverter(
+            input_modes=[ComplexMode.CARTESIAN],
+            output_modes=[ComplexMode.POLAR],
+            input_axis=-1,
+            output_axis=-1
+        )
+        result = converter.convert(self.sample_array)
+        reverted = converter.revert(result)
+        np.testing.assert_array_almost_equal(reverted, self.sample_array)
 
 if __name__ == "__main__":
     unittest.main()
