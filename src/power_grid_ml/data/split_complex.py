@@ -166,6 +166,7 @@ class ComplexConverter:
         """
         # 1st convert input data to complex
         # if more than one input mode is given, choose the first one - data should be equal in all modes
+        # TODO: add check if data is equal in all modes, otherwise raise an error
         complex_data = _to_complex(data, mode=self.input_modes[0], indices=self.input_indices, axis=self.input_axis,
                                    angle_type=self.input_angle_type)
         if ComplexMode.COMPLEX in self.output_modes:  # Complex mode is always alone due to different dtype

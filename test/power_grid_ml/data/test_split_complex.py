@@ -109,6 +109,40 @@ class TestComplexConverter(unittest.TestCase):
         result = converter.convert(data)
         np.testing.assert_array_almost_equal(result, expected_mixed)
 
+    def test_convert_mixed_to_complex(self):
+        converter = ComplexConverter(
+            input_modes=[ComplexMode.CARTESIAN, ComplexMode.POLAR],
+            output_modes=[ComplexMode.COMPLEX],
+            input_axis=-1,
+            output_axis=-1,
+            input_angle_type='radians'
+        )
+        data = np.array([[1, 2, 2.236, 1.107], [3, 4, 5, 0.927]])
+        real = data[..., 0]
+        imag = data[..., 1]
+        expected = np.squeeze(np.array([real + 1j * imag]))
+        result = converter.convert(knp.array(data))
+        np.testing.assert_array_almost_equal(result, expected)
+
+    @unittest.expectedFailure
+    def test_convert_mixed_to_complex_unequal(self):
+        """
+        Test converting mixed Cartesian and polar data to complex data when the input arrays
+        (Cartesian and polar) are not equal.
+        For now, this test is expected to fail because the converter does not handle this case.
+        :return:
+        """
+        converter = ComplexConverter(
+            input_modes=[ComplexMode.CARTESIAN, ComplexMode.POLAR],
+            output_modes=[ComplexMode.COMPLEX],
+            input_axis=-1,
+            output_axis=-1,
+            input_angle_type='radians'
+        )
+        data = np.array([[1, 2, 900, 1000], [3, 4, 900, 5000]])
+        with self.assertRaises(ValueError):
+            result = converter.convert(knp.array(data))
+
     def test_unknown_mode_error(self):
         with self.assertRaises(ValueError):
             converter = ComplexConverter(
