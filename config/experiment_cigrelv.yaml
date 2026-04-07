@@ -29,6 +29,30 @@ datasets:
     source: "sql"
     table: "harmonics_cigrelvdist_test"
 
+features:
+  node:
+    - nodal_voltages:
+        preprocessing:
+          - scaling:
+              type: "minmax"
+              axes_to_scale: ["batch", "nodes"]
+          - rotate_angles:
+              reference: 0
+          - unify_voltage_level:
+  edge:
+    - line_currents:
+        preprocessing:
+          - scaling:
+              - type: "minmax"
+              - axes_to_scale: ["batch", "edges"]
+          - rotate_angles:
+              - reference: 0
+          - unify_voltage_level:
+    - admittance:
+        preprocessing:
+  graph:
+    - type:
+
 preprocessing:
   scaling:
     type: "minmax"
