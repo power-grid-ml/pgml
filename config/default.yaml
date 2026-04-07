@@ -1,0 +1,13 @@
+paths:
+  input_dir: "./data/input"
+  artifact_dir: "./data/output"
+
+tracking:
+  enabled: false
+  experiment_base_name: "PowerGridStateEstimation"
+  tracking_uri: "http://localhost:5000"
+
+dataloader:
+  batch_size: 32
+  num_workers: 4
+  chunk_size_rows: 200000
