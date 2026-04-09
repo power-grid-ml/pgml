@@ -151,7 +151,11 @@ class OutOfCoreStatsCompiler:
 if __name__ == "__main__":
     default_cfg = Path(config_dir) / "default.yaml"
     config = PipelineConfig.from_yaml(default_cfg)
-    base_data = Path(resource_dir) / config.paths.input_dir
+    if Path(config.paths.input_dir).is_absolute():
+        base_data = Path(config.paths.input_dir)
+    else:
+        base_data = Path(resource_dir) / config.paths.input_dir
+
 
     # Define generically which tables to target and which polar magnitudes to parse
     specs = {
@@ -162,7 +166,7 @@ if __name__ == "__main__":
 
     compiler = OutOfCoreStatsCompiler(
         data_dir=base_data,
-        train_dataset_ids=[2, 3],  # Make sure to include all training sets
+        train_dataset_ids=[2, 3, 4],  # Make sure to include all training sets
         feature_specs=specs
     )
 

@@ -18,7 +18,10 @@ def main():
     # 1. Load dynamic configuration
     default_cfg = Path(config_dir) / "default.yaml"
     config = PipelineConfig.from_yaml(default_cfg)
-
+    if Path(config.paths.input_dir).is_absolute():
+        input_dir = Path(config.paths.input_dir)
+    else:
+        input_dir = Path(resource_dir) / config.paths.input_dir
     target_features =[
         "v1_real", "v1_imag",
         "v2_real", "v2_imag",
@@ -27,7 +30,7 @@ def main():
     # 2. Scaler
     scaler = TorchStandardScaler(dim=1, feature_names=target_features)
 
-    stats_file = Path(resource_dir) / config.paths.input_dir / "scaling_stats.json"
+    stats_file = input_dir / "scaling_stats.json"
     if not stats_file.exists():
         raise FileNotFoundError(f"Scaling stats not found at {stats_file}. Run stats_compiler.py.")
 
@@ -39,13 +42,13 @@ def main():
         scaler.load_from_stats(stats_dict=freq_stats, group_key=freq_str)
 
     # 3. Dynamic Dimensions
-    train_dataset_ids = [2, 3]
+    train_dataset_ids = [2, 3, 4]
 
     # Initialize TopologyCache to peek at the graph structure
-    topo_cache = TopologyCache(resource_dir / config.paths.input_dir)
+    topo_cache = TopologyCache(input_dir)
 
     # Read metadata of the first dataset to find its topology_id
-    with open(resource_dir / config.paths.input_dir / f"dataset_{train_dataset_ids[0]}" / "metadata.json", "r") as f:
+    with open(input_dir / f"dataset_{train_dataset_ids[0]}" / "metadata.json", "r") as f:
         meta = json.load(f)
 
     # Load the base HeteroData object for this topology
@@ -80,7 +83,7 @@ def main():
 
     # 5. DataLoaders (Utilizing the Iterable PyArrow pipeline)
     train_loader = get_train_dataloader(
-        base_data_dir=Path(resource_dir) / config.paths.input_dir,
+        base_data_dir=input_dir,
         train_dataset_ids=train_dataset_ids,
         scaler=scaler,
         feature_prefixes=["v1", "v2", "v3"],
