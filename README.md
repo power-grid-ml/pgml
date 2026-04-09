@@ -34,10 +34,10 @@ Execution environments are explicitly split into CPU and GPU contexts to manage 
 Test the installations with the following commands:
 ```bash
 pixi run --environment cpu python -c "import torch; print(torch.cuda.is_available())"
-pixi run -e gpu python -c "import torch; print(torch.cuda.is_available())"
+pixi run python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-To run the main training loop (after exporting the database to Parquet):
+To run the main training loop (after exporting the database to Parquet, and compiling stats):
 ```bash
-pixi run -e gpu python training/main.py
+pixi run python training/main.py
 ```
