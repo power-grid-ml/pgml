@@ -1,6 +1,6 @@
 paths:
   input_dir: "./data/input"
-  artifact_dir: "./data/output"
+  output_dir: "./data/output"
 
 tracking:
   enabled: false

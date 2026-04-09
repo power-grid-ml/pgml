@@ -14,8 +14,8 @@ class MLFlowConfig(BaseModel):
 
 class PathsConfig(BaseModel):
     # Validation alias allows standard env vars like ML_INPUT_DIR to override these
-    input_dir: Path = Field(default=Path("./data/export"), validation_alias="ML_INPUT_DIR")
-    artifact_dir: Path = Field(default=Path("./artifacts"), validation_alias="ML_ARTIFACT_DIR")
+    input_dir: Path = Field(default=Path("./data/input"), validation_alias="ML_INPUT_DIR")
+    output_dir: Path = Field(default=Path("./data/output"), validation_alias="ML_OUTPUT_DIR")
 
 
 class DataLoaderConfig(BaseModel):
@@ -51,7 +51,3 @@ class PipelineConfig(BaseSettings):
             yaml_data = yaml.safe_load(f) or {}
 
         return cls(**yaml_data)
-
-# Usage example:
-# config = PipelineConfig.from_yaml("configs/default.yaml")
-# print(config.paths.input_dir)

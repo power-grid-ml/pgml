@@ -14,6 +14,12 @@ class BaseTorchScaler(nn.Module):
         self.dim = dim
         self.feature_names = feature_names
 
+    def forward(self, x: torch.Tensor, group_key: str = "default") -> torch.Tensor:
+        """
+        PyTorch's required forward pass. Aliases to transform.
+        """
+        return self.transform(x, group_key)
+
     def fit(self, x: torch.Tensor, group_key: str = "default") -> "BaseTorchScaler":
         raise NotImplementedError
 
@@ -28,10 +34,6 @@ class BaseTorchScaler(nn.Module):
         return self.transform(x, group_key)
 
     def load_from_stats(self, stats_dict: Dict[str, Dict], group_key: str = "default"):
-        """
-        Populates scaler parameters from an out-of-core computed dictionary.
-        Requires self.feature_names to map dictionary keys to tensor indices.
-        """
         raise NotImplementedError
 
 

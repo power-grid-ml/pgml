@@ -30,11 +30,11 @@ class StateEstimationEngine(L.LightningModule):
     def forward(self, batch) -> torch.Tensor:
         # Extract features from the HeteroData PyG batch object
         static_x = batch['node'].static_x
-        # For training, assume the last `dynamic_feature_dim` columns are the dynamic targets
         dynamic_x = batch['node'].x[:, -self.dynamic_feature_dim:]
 
-        edge_index = batch['edge'].edge_index
-        edge_attr = batch['edge'].static_edge_attr
+        edge_type = ('node', 'physical', 'node')
+        edge_index = batch[edge_type].edge_index
+        edge_attr = batch[edge_type].static_edge_attr
 
         # Apply observability masking
         x_fused = self.masker(static_x, dynamic_x, mask_ratio=self.current_mask_ratio)

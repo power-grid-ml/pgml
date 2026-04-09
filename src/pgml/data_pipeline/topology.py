@@ -44,8 +44,10 @@ class TopologyCache:
         # Build Base HeteroData
         data = HeteroData()
         data['node'].static_x = node_features
-        data['edge'].edge_index = edge_index
-        data['edge'].static_edge_attr = edge_features
+
+        edge_type = ('node', 'physical', 'node')
+        data[edge_type].edge_index = edge_index
+        data[edge_type].static_edge_attr = edge_features
 
         self.cache[topology_id] = data
         return data.clone()
