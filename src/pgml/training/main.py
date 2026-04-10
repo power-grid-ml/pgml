@@ -1,4 +1,5 @@
 import json
+import torch.multiprocessing
 from pathlib import Path
 
 import lightning as L
@@ -15,6 +16,8 @@ from training.engine import StateEstimationEngine
 
 
 def main():
+    torch.multiprocessing.set_start_method('spawn', force=True)
+    torch.set_float32_matmul_precision('medium')
     # 1. Load dynamic configuration
     default_cfg = Path(config_dir) / "default.yaml"
     config = PipelineConfig.from_yaml(default_cfg)
@@ -70,7 +73,7 @@ def main():
     model = PowerGridGNN(
         input_dim=fused_in_dim,
         edge_dim=edge_dim,
-        hidden_dim=128,
+        hidden_dim=256,
         output_dim=dynamic_dim
     )
 
@@ -106,7 +109,7 @@ def main():
 
     # 7. Trainer
     trainer = L.Trainer(
-        max_epochs=100,
+        max_epochs=1000,
         logger=logger,
         callbacks=callbacks,
         accelerator="auto",
