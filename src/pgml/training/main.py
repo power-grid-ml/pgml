@@ -93,6 +93,7 @@ def main():
         feature_prefixes=["v1", "v2", "v3"],
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
+        chunk_size_rows=config.dataloader.chunk_size_rows,
     )
     val_loader = get_dataloader(
         base_data_dir=input_dir,
@@ -101,6 +102,7 @@ def main():
         feature_prefixes=["v1", "v2", "v3"],
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
+        chunk_size_rows=config.dataloader.chunk_size_rows,
     )
 
     # 6. MLFlow Logger setup

@@ -12,7 +12,8 @@ def get_dataloader(
         scaler: BaseTorchScaler,  # Pass the instantiated scaler here
         feature_prefixes: list[str],
         batch_size: int = 32,
-        num_workers: int = 4
+        num_workers: int = 4,
+        chunk_size_rows: int = 200_000,
 ) -> DataLoader:
     topo_cache = TopologyCache(base_data_dir)
     dataset_dirs = [base_data_dir / f"dataset_{did}" for did in dataset_ids]
@@ -22,7 +23,7 @@ def get_dataloader(
         topology_cache=topo_cache,
         scaler=scaler,
         feature_prefixes=feature_prefixes,
-        batch_size_rows=200_000
+        batch_size_rows=chunk_size_rows
     )
 
     return DataLoader(

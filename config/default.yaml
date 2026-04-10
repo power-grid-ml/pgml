@@ -10,4 +10,4 @@ tracking:
 dataloader:
   batch_size: 32
   num_workers: 4
-  chunk_size_rows: 200000
+  chunk_size_rows: 3675000
