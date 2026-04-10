@@ -166,7 +166,7 @@ if __name__ == "__main__":
 
     compiler = OutOfCoreStatsCompiler(
         data_dir=base_data,
-        train_dataset_ids=[2, 3, 4],  # Make sure to include all training sets
+        train_dataset_ids=[2, 3, 4],  # Make sure to include all training sets, do not include test or validation sets here!
         feature_specs=specs
     )
 

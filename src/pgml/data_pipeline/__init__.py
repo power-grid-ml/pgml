@@ -6,19 +6,19 @@ from pgml.data_pipeline.scaler import BaseTorchScaler
 from pgml.data_pipeline.dataset import StreamingGridDataset
 
 
-def get_train_dataloader(
+def get_dataloader(
         base_data_dir: Path,
-        train_dataset_ids: list[int],
+        dataset_ids: list[int],
         scaler: BaseTorchScaler,  # Pass the instantiated scaler here
         feature_prefixes: list[str],
         batch_size: int = 32,
         num_workers: int = 4
 ) -> DataLoader:
     topo_cache = TopologyCache(base_data_dir)
-    train_dirs = [base_data_dir / f"dataset_{did}" for did in train_dataset_ids]
+    dataset_dirs = [base_data_dir / f"dataset_{did}" for did in dataset_ids]
 
     dataset = StreamingGridDataset(
-        dataset_dirs=train_dirs,
+        dataset_dirs=dataset_dirs,
         topology_cache=topo_cache,
         scaler=scaler,
         feature_prefixes=feature_prefixes,

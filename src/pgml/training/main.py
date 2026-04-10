@@ -4,12 +4,12 @@ from pathlib import Path
 
 import lightning as L
 from lightning.pytorch.loggers import MLFlowLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, ModelSummary, RichProgressBar
 
 from config import resource_dir
 from data_pipeline.scaler import TorchStandardScaler
 from pgml.config import PipelineConfig, config_dir
-from data_pipeline import get_train_dataloader, TopologyCache
+from data_pipeline import get_dataloader, TopologyCache
 from models.gnn import PowerGridGNN
 from models.masking import ObservabilityMasker
 from training.engine import StateEstimationEngine
@@ -46,6 +46,7 @@ def main():
 
     # 3. Dynamic Dimensions
     train_dataset_ids = [2, 3, 4]
+    val_dataset_ids = [5]
 
     # Initialize TopologyCache to peek at the graph structure
     topo_cache = TopologyCache(input_dir)
@@ -85,9 +86,17 @@ def main():
     )
 
     # 5. DataLoaders (Utilizing the Iterable PyArrow pipeline)
-    train_loader = get_train_dataloader(
+    train_loader = get_dataloader(
         base_data_dir=input_dir,
-        train_dataset_ids=train_dataset_ids,
+        dataset_ids=train_dataset_ids,
+        scaler=scaler,
+        feature_prefixes=["v1", "v2", "v3"],
+        batch_size=config.dataloader.batch_size,
+        num_workers=config.dataloader.num_workers,
+    )
+    val_loader = get_dataloader(
+        base_data_dir=input_dir,
+        dataset_ids=val_dataset_ids,
         scaler=scaler,
         feature_prefixes=["v1", "v2", "v3"],
         batch_size=config.dataloader.batch_size,
@@ -104,7 +113,9 @@ def main():
 
     callbacks = [
         ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=3),
-        LearningRateMonitor(logging_interval='step')
+        LearningRateMonitor(logging_interval='step'),
+        ModelSummary(max_depth=2),
+        RichProgressBar()
     ]
 
     # 7. Trainer
@@ -117,7 +128,7 @@ def main():
         precision="16-mixed"  # Crucial for scaling TransformerConvs on modern GPUs
     )
 
-    trainer.fit(engine, train_dataloaders=train_loader)
+    trainer.fit(engine, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 
 if __name__ == "__main__":
