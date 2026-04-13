@@ -58,7 +58,6 @@ def main():
     # Load the base HeteroData object for this topology
     sample_topo = topo_cache.get_topology(meta["topology_id"])
 
-    # FIX: Use the tuple key to infer edge dimensions
     edge_type = ('node', 'physical', 'node')
 
     static_dim = sample_topo['node'].static_x.shape[1]
@@ -127,7 +126,8 @@ def main():
         callbacks=callbacks,
         accelerator="auto",
         devices="auto",
-        precision="16-mixed"  # Crucial for scaling TransformerConvs on modern GPUs
+        precision="16-mixed",  # Crucial for scaling TransformerConvs on modern GPUs
+        default_root_dir=config.paths.output_dir
     )
 
     trainer.fit(engine, train_dataloaders=train_loader, val_dataloaders=val_loader)
