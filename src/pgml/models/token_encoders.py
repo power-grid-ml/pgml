@@ -164,12 +164,16 @@ class DeviceEncoder(nn.Module):
         device_type_emb_dim: int = 8,
     ):
         super().__init__()
+        self.hidden_dim = hidden_dim
 
         self.device_type_embedding = nn.Embedding(num_device_types, device_type_emb_dim)
 
-        self.static_encoder = nn.Sequential(
-            nn.Linear(static_dim, hidden_dim) if static_dim > 0 else nn.Identity(),
-            nn.GELU() if static_dim > 0 else nn.Identity(),
+        self.static_encoder = (
+            nn.Sequential(
+                nn.Linear(static_dim, hidden_dim),
+                nn.GELU(),
+            )
+            if static_dim > 0 else None
         )
 
         self.param_token_encoder = TokenValueEncoder(
@@ -207,13 +211,12 @@ class DeviceEncoder(nn.Module):
         spec_mask: torch.Tensor,
     ) -> torch.Tensor:
         if static_x.shape[0] == 0:
-            return torch.zeros((0, self.fuse[-1].out_features), dtype=torch.float32, device=device_type.device)
+            return torch.zeros((0, self.hidden_dim), dtype=torch.float32, device=device_type.device)
 
-        if static_x.shape[1] > 0:
+        if self.static_encoder is not None and static_x.shape[1] > 0:
             static_latent = self.static_encoder(static_x)
         else:
-            hidden_dim = self.fuse[-1].out_features
-            static_latent = torch.zeros((static_x.shape[0], hidden_dim), dtype=torch.float32, device=static_x.device)
+            static_latent = torch.zeros((static_x.shape[0], self.hidden_dim), dtype=torch.float32, device=static_x.device)
 
         param_emb = self.param_token_encoder(param_value, param_frequency, param_type)
         param_latent = self.param_pool(param_emb, param_mask)

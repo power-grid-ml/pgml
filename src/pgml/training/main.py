@@ -1,110 +1,98 @@
-import json
-import torch.multiprocessing
 from pathlib import Path
 
 import lightning as L
+import torch
+import torch.multiprocessing
+from lightning.pytorch.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+    ModelSummary,
+    RichProgressBar,
+)
 from lightning.pytorch.loggers import MLFlowLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, ModelSummary, RichProgressBar
 
 from config import resource_dir
-from data_pipeline.scaler import TorchStandardScaler
 from pgml.config import PipelineConfig, config_dir
-from data_pipeline import get_dataloader, TopologyCache
-from models.gnn import PowerGridGNN
-from models.masking import ObservabilityMasker
-from training.engine import StateEstimationEngine
+from pgml.data_pipeline.step_dataloader import get_step_dataloader
+from pgml.models.state_estimator import MultiModalStateEstimator
+from pgml.training.multitask_engine import MultiTaskStateEstimationEngine
+from pgml.training.evaluation import (
+    LossHistoryPlotter,
+    ValidationEvaluator,
+    export_training_history_json,
+)
+
+
+def _resolve_input_dir(config: PipelineConfig) -> Path:
+    if Path(config.paths.input_dir).is_absolute():
+        return Path(config.paths.input_dir)
+    return Path(resource_dir) / config.paths.input_dir
+
+
+def _infer_model_dims_from_batch(batch) -> dict:
+    edge_type = ("node", "physical", "node")
+    return {
+        "node_static_dim": batch["node"].static_x.shape[1],
+        "edge_static_dim": batch[edge_type].static_edge_attr.shape[1],
+        "device_static_dim": batch["device"].static_x.shape[1],
+        "node_value_dim": batch["node"].meas_value.shape[-1],
+        "edge_value_dim": batch["edge"].meas_value.shape[-1],
+        "device_param_value_dim": batch["device"].param_value.shape[-1],
+        "device_spec_value_dim": batch["device"].spec_value.shape[-1],
+    }
 
 
 def main():
-    torch.multiprocessing.set_start_method('spawn', force=True)
-    torch.set_float32_matmul_precision('medium')
-    # 1. Load dynamic configuration
+    torch.multiprocessing.set_start_method("spawn", force=True)
+    torch.set_float32_matmul_precision("medium")
+
     default_cfg = Path(config_dir) / "default.yaml"
     config = PipelineConfig.from_yaml(default_cfg)
-    if Path(config.paths.input_dir).is_absolute():
-        input_dir = Path(config.paths.input_dir)
-    else:
-        input_dir = Path(resource_dir) / config.paths.input_dir
-    target_features =[
-        "v1_real", "v1_imag",
-        "v2_real", "v2_imag",
-        "v3_real", "v3_imag"
-    ]
-    # 2. Scaler
-    scaler = TorchStandardScaler(dim=1, feature_names=target_features)
+    input_dir = _resolve_input_dir(config)
 
-    stats_file = input_dir / "scaling_stats.json"
-    if not stats_file.exists():
-        raise FileNotFoundError(f"Scaling stats not found at {stats_file}. Run stats_compiler.py.")
-
-    with open(stats_file, 'r', encoding='utf-8') as f:
-        all_stats = json.load(f)
-
-    # Populate the scaler's PyTorch buffers out-of-core
-    for freq_str, freq_stats in all_stats.get("node_data", {}).items():
-        scaler.load_from_stats(stats_dict=freq_stats, group_key=freq_str)
-
-    # 3. Dynamic Dimensions
     train_dataset_ids = [2, 3, 4]
     val_dataset_ids = [5]
 
-    # Initialize TopologyCache to peek at the graph structure
-    topo_cache = TopologyCache(input_dir)
-
-    # Read metadata of the first dataset to find its topology_id
-    with open(input_dir / f"dataset_{train_dataset_ids[0]}" / "metadata.json", "r") as f:
-        meta = json.load(f)
-
-    # Load the base HeteroData object for this topology
-    sample_topo = topo_cache.get_topology(meta["topology_id"])
-
-    edge_type = ('node', 'physical', 'node')
-
-    static_dim = sample_topo['node'].static_x.shape[1]
-    edge_dim = sample_topo[edge_type].static_edge_attr.shape[1]
-    dynamic_dim = len(target_features)
-
-    print(f"Inferred Dimensions - Static Node: {static_dim}, Edge: {edge_dim}, Dynamic Node: {dynamic_dim}")
-
-    fused_in_dim = static_dim + dynamic_dim + 1  # +1 for Observability Mask Indicator
-
-    # 4. Model & Masker
-    masker = ObservabilityMasker(dynamic_feature_dim=dynamic_dim)
-    model = PowerGridGNN(
-        input_dim=fused_in_dim,
-        edge_dim=edge_dim,
-        hidden_dim=256,
-        output_dim=dynamic_dim
-    )
-
-    engine = StateEstimationEngine(
-        model=model,
-        masker=masker,
-        config=config,
-        dynamic_feature_dim=dynamic_dim
-    )
-
-    # 5. DataLoaders (Utilizing the Iterable PyArrow pipeline)
-    train_loader = get_dataloader(
+    train_loader = get_step_dataloader(
         base_data_dir=input_dir,
         dataset_ids=train_dataset_ids,
-        scaler=scaler,
-        feature_prefixes=["v1", "v2", "v3"],
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
-        chunk_size_rows=config.dataloader.chunk_size_rows,
     )
-    val_loader = get_dataloader(
+    val_loader = get_step_dataloader(
         base_data_dir=input_dir,
         dataset_ids=val_dataset_ids,
-        scaler=scaler,
-        feature_prefixes=["v1", "v2", "v3"],
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
-        chunk_size_rows=config.dataloader.chunk_size_rows,
     )
 
-    # 6. MLFlow Logger setup
+    sample_batch = next(iter(train_loader))
+    dims = _infer_model_dims_from_batch(sample_batch)
+
+    model = MultiModalStateEstimator(
+        node_static_dim=dims["node_static_dim"],
+        edge_static_dim=dims["edge_static_dim"],
+        device_static_dim=dims["device_static_dim"],
+        node_value_dim=dims["node_value_dim"],
+        edge_value_dim=dims["edge_value_dim"],
+        device_param_value_dim=dims["device_param_value_dim"],
+        device_spec_value_dim=dims["device_spec_value_dim"],
+        hidden_dim=64,
+    )
+
+    engine = MultiTaskStateEstimationEngine(
+        model=model,
+        lr=1e-3,
+        weight_decay=1e-4,
+        alpha_recon=1.0,
+        beta_state=1.0,
+        max_node_mask_ratio=0.95,
+        max_edge_mask_ratio=0.95,
+        max_device_noise_scale=0.20,
+        max_spectrum_drop_prob=0.80,
+        curriculum_epochs=50,
+    )
+
     logger = None
     if config.tracking.enabled:
         logger = MLFlowLogger(
@@ -113,24 +101,66 @@ def main():
         )
 
     callbacks = [
-        ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=3),
-        LearningRateMonitor(logging_interval='step'),
-        ModelSummary(max_depth=2),
-        RichProgressBar()
+        ModelCheckpoint(
+            monitor="val_loss_total",
+            mode="min",
+            save_top_k=3,
+            filename="epoch{epoch:03d}-val_loss_total{val_loss_total:.5f}",
+        ),
+        LearningRateMonitor(logging_interval="epoch"),
+        RichProgressBar(),
     ]
 
-    # 7. Trainer
     trainer = L.Trainer(
-        max_epochs=1000,
+        max_epochs=100,
         logger=logger,
         callbacks=callbacks,
         accelerator="auto",
         devices="auto",
-        precision="16-mixed",  # Crucial for scaling TransformerConvs on modern GPUs
-        default_root_dir=config.paths.output_dir
+        precision="16-mixed",
+        default_root_dir=config.paths.output_dir,
+        log_every_n_steps=1,
     )
 
     trainer.fit(engine, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+    output_dir = Path(config.paths.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Export training history collected inside the LightningModule
+    history_path = output_dir / "training_history.json"
+    export_training_history_json(engine, history_path)
+
+    # Plot loss curves
+    plotter = LossHistoryPlotter()
+    plotter.plot_from_engine(
+        engine=engine,
+        output_path=output_dir / "loss_curves.png",
+        title="Training and Validation Loss Curves",
+    )
+
+    # Full validation summary
+    evaluator = ValidationEvaluator(device=engine.device)
+    summary_text = evaluator.evaluate(
+        engine=engine,
+        dataloader=val_loader,
+        output_dir=output_dir,
+    )
+
+    summary_path = output_dir / "validation_summary.txt"
+    summary_path.write_text(summary_text, encoding="utf-8")
+
+    if logger is not None and logger.experiment is not None:
+        run_id = logger.run_id
+        try:
+            logger.experiment.log_artifact(run_id, str(history_path))
+            logger.experiment.log_artifact(run_id, str(output_dir / "loss_curves.png"))
+            logger.experiment.log_artifact(run_id, str(summary_path))
+        except Exception:
+            # TODO: add explicit MLflow artifact upload error handling if needed
+            pass
+
+    print(summary_text)
 
 
 if __name__ == "__main__":

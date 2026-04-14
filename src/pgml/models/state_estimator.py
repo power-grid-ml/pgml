@@ -6,22 +6,23 @@ import torch.nn as nn
 from pgml.models.decoders import DeviceDecoder, EdgeDecoder, NodeDecoder
 from pgml.models.fusion import NodeDeviceFusion
 from pgml.models.graph_state_estimator import GraphStateEstimator
+from pgml.models.masking import DeviceInputNoiser, LatentObservabilityMasker
 from pgml.models.token_encoders import DeviceEncoder, EdgeMeasurementEncoder, NodeMeasurementEncoder
 
 
 class MultiModalStateEstimator(nn.Module):
     """
-    First end-to-end model for the new architecture.
+    End-to-end model for the hierarchical explicit-device architecture.
 
     Pipeline:
     1. encode node measurement token sets
     2. encode edge measurement token sets
-    3. encode explicit devices
-    4. fuse device context into nodes
-    5. run graph state estimator
-    6. decode node / edge / device targets
-
-    Outputs are returned as a dictionary for flexible multitask losses.
+    3. corrupt device inputs during training if requested
+    4. encode explicit devices
+    5. apply latent observability masking to node/edge measurements
+    6. fuse device context into nodes
+    7. run graph state estimator
+    8. decode node / edge / device targets
     """
 
     def __init__(
@@ -36,6 +37,7 @@ class MultiModalStateEstimator(nn.Module):
         hidden_dim: int = 64,
     ):
         super().__init__()
+        self.hidden_dim = hidden_dim
 
         self.node_encoder = NodeMeasurementEncoder(
             value_dim=node_value_dim,
@@ -56,15 +58,25 @@ class MultiModalStateEstimator(nn.Module):
             num_token_types=16,
         )
 
+        self.node_masker = LatentObservabilityMasker(hidden_dim=hidden_dim)
+        self.edge_masker = LatentObservabilityMasker(hidden_dim=hidden_dim)
+        self.device_noiser = DeviceInputNoiser(
+            param_value_dim=device_param_value_dim,
+            spec_value_dim=device_spec_value_dim,
+        )
+
         self.node_device_fusion = NodeDeviceFusion(
             node_static_dim=node_static_dim,
             hidden_dim=hidden_dim,
         )
 
-        self.edge_static_encoder = nn.Sequential(
-            nn.Linear(edge_static_dim, hidden_dim) if edge_static_dim > 0 else nn.Identity(),
-            nn.GELU() if edge_static_dim > 0 else nn.Identity(),
-            nn.Linear(hidden_dim, hidden_dim) if edge_static_dim > 0 else nn.Identity(),
+        self.edge_static_encoder = (
+            nn.Sequential(
+                nn.Linear(edge_static_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            if edge_static_dim > 0 else None
         )
 
         self.graph_estimator = GraphStateEstimator(
@@ -81,10 +93,30 @@ class MultiModalStateEstimator(nn.Module):
             param_out_dim=device_param_value_dim,
             spec_out_dim=device_spec_value_dim,
             num_device_types=4,
+            num_token_types=16,
         )
 
-    def forward(self, batch) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        batch,
+        node_mask_ratio: float = 0.0,
+        edge_mask_ratio: float = 0.0,
+        device_noise_scale: float = 0.0,
+        spectrum_drop_prob: float = 0.0,
+    ) -> dict[str, torch.Tensor]:
         edge_type = ("node", "physical", "node")
+
+        # -------------------------
+        # Corrupt device inputs (training-time pseudo-measurement strategy)
+        # -------------------------
+        noisy_param_value, noisy_spec_value = self.device_noiser(
+            param_value=batch["device"].param_value,
+            param_mask=batch["device"].param_mask,
+            spec_value=batch["device"].spec_value,
+            spec_mask=batch["device"].spec_mask,
+            noise_scale=device_noise_scale,
+            spectrum_drop_prob=spectrum_drop_prob,
+        )
 
         # -------------------------
         # Encode local entities
@@ -106,14 +138,26 @@ class MultiModalStateEstimator(nn.Module):
         device_latent = self.device_encoder(
             static_x=batch["device"].static_x,
             device_type=batch["device"].device_type,
-            param_value=batch["device"].param_value,
+            param_value=noisy_param_value,
             param_frequency=batch["device"].param_frequency,
             param_type=batch["device"].param_type,
             param_mask=batch["device"].param_mask,
-            spec_value=batch["device"].spec_value,
+            spec_value=noisy_spec_value,
             spec_frequency=batch["device"].spec_frequency,
             spec_type=batch["device"].spec_type,
             spec_mask=batch["device"].spec_mask,
+        )
+
+        # -------------------------
+        # Apply observability masking to node / edge measurement latents
+        # -------------------------
+        masked_node_latent, node_obs_indicator = self.node_masker(
+            latent=node_meas_latent,
+            mask_ratio=node_mask_ratio,
+        )
+        masked_edge_latent, edge_obs_indicator = self.edge_masker(
+            latent=edge_meas_latent,
+            mask_ratio=edge_mask_ratio,
         )
 
         # -------------------------
@@ -121,17 +165,18 @@ class MultiModalStateEstimator(nn.Module):
         # -------------------------
         node_latent = self.node_device_fusion(
             node_static_x=batch["node"].static_x,
-            node_measurement_latent=node_meas_latent,
+            node_measurement_latent=masked_node_latent,
+            node_observability=node_obs_indicator,
             device_latent=device_latent,
             device_node_index=batch["device"].node_index,
         )
 
-        if batch[edge_type].static_edge_attr.shape[1] > 0:
+        if self.edge_static_encoder is not None and batch[edge_type].static_edge_attr.shape[1] > 0:
             edge_static_latent = self.edge_static_encoder(batch[edge_type].static_edge_attr)
         else:
-            edge_static_latent = torch.zeros_like(edge_meas_latent)
+            edge_static_latent = torch.zeros_like(masked_edge_latent)
 
-        edge_latent = edge_meas_latent + edge_static_latent
+        edge_latent = masked_edge_latent + edge_static_latent
 
         # -------------------------
         # Graph propagation
@@ -143,27 +188,35 @@ class MultiModalStateEstimator(nn.Module):
         )
 
         # -------------------------
-        # Decode targets
+        # Device graph conditioning
         # -------------------------
-        node_num_tokens = batch["target_node"].voltage_value.shape[1]
-        edge_num_tokens = batch["target_edge"].current_value.shape[1]
-        device_param_num_tokens = batch["target_device"].param_value.shape[1]
-        device_spec_num_tokens = batch["target_device"].spec_value.shape[1]
-
-        pred_node_value = self.node_decoder(updated_node_latent, num_tokens=node_num_tokens)
-        pred_edge_value = self.edge_decoder(edge_latent, num_tokens=edge_num_tokens)
-
-        # Device decoder uses graph-conditioned node context
         if device_latent.shape[0] > 0:
             conditioned_device_latent = device_latent + updated_node_latent[batch["device"].node_index]
         else:
             conditioned_device_latent = device_latent
 
+        # -------------------------
+        # Decode targets with token conditioning
+        # -------------------------
+        pred_node_value = self.node_decoder(
+            node_latent=updated_node_latent,
+            target_frequency=batch["target_node"].voltage_frequency,
+            target_type=batch["target_node"].voltage_type,
+        )
+
+        pred_edge_value = self.edge_decoder(
+            edge_latent=edge_latent,
+            target_frequency=batch["target_edge"].current_frequency,
+            target_type=batch["target_edge"].current_type,
+        )
+
         pred_device_param, pred_device_spec = self.device_decoder(
             device_latent=conditioned_device_latent,
             device_type=batch["device"].device_type,
-            num_param_tokens=device_param_num_tokens,
-            num_spec_tokens=device_spec_num_tokens,
+            param_frequency=batch["target_device"].param_frequency,
+            param_type=batch["target_device"].param_type,
+            spec_frequency=batch["target_device"].spec_frequency,
+            spec_type=batch["target_device"].spec_type,
         )
 
         return {
@@ -174,4 +227,6 @@ class MultiModalStateEstimator(nn.Module):
             "node_latent": updated_node_latent,
             "edge_latent": edge_latent,
             "device_latent": conditioned_device_latent,
+            "node_observability": node_obs_indicator,
+            "edge_observability": edge_obs_indicator,
         }

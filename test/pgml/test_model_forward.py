@@ -24,13 +24,19 @@ def debug_model_forward(base_dir: str | Path, dataset_ids: list[int]):
         device_static_dim=batch["device"].static_x.shape[1],
         node_value_dim=batch["node"].meas_value.shape[-1],
         edge_value_dim=batch["edge"].meas_value.shape[-1],
-        device_param_value_dim=batch["device"].param_value.shape[-1] if batch["device"].param_value.ndim == 3 and batch["device"].param_value.shape[1] >= 0 else 1,
-        device_spec_value_dim=batch["device"].spec_value.shape[-1] if batch["device"].spec_value.ndim == 3 and batch["device"].spec_value.shape[1] >= 0 else 6,
+        device_param_value_dim=batch["device"].param_value.shape[-1],
+        device_spec_value_dim=batch["device"].spec_value.shape[-1],
         hidden_dim=64,
     )
 
     with torch.no_grad():
-        outputs = model(batch)
+        outputs = model(
+            batch,
+            node_mask_ratio=0.5,
+            edge_mask_ratio=0.5,
+            device_noise_scale=0.1,
+            spectrum_drop_prob=0.3,
+        )
 
     print("=== Model Forward Debug ===")
     for key, value in outputs.items():

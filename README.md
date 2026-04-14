@@ -1,6 +1,8 @@
 # Power Grid ML
 Machine learning toolkit for state estimation, curriculum learning, and physical system modeling on power grids.
 
+Check out [DESIGN.md](DESIGN.md) for details on the implementation decisions.
+
 ## Data Handling Concepts
 
 The pipeline is architected to process massive simulation datasets that exceed system RAM. To maintain zero-copy data transfers and avoid the Python Global Interpreter Lock (GIL) bottlenecks, the following stack is employed:
