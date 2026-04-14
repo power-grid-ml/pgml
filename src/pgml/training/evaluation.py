@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Dict, Optional
 
 import matplotlib.pyplot as plt
 import torch
 
+from pgml.training.curriculum import StageForwardConfig
 
 EDGE_TYPE = ("node", "physical", "node")
 
@@ -17,11 +18,6 @@ def _safe_mean(total: float, count: float) -> float:
 
 
 def _masked_squared_error(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> tuple[float, float]:
-    """
-    Returns:
-    - sum_squared_error
-    - count_of_scalar_elements
-    """
     if pred.numel() == 0 or target.numel() == 0 or mask.numel() == 0:
         return 0.0, 0.0
 
@@ -38,11 +34,6 @@ def _accumulate_by_frequency(
     mask: torch.Tensor,
     frequency: torch.Tensor,
 ):
-    """
-    pred/target: [N, T, D]
-    mask: [N, T]
-    frequency: [N, T]
-    """
     if pred.numel() == 0:
         return
 
@@ -103,17 +94,6 @@ class ValidationEvaluator:
     """
     Computes text-based validation summaries for the full validation set.
 
-    Report sections:
-    - overall losses
-    - encoder/decoder vs state estimator loss
-    - split by entity type
-    - split by frequency
-    - split by device type
-
-    Important current limitation:
-    The current architecture logs reconstruction and state-estimator losses with
-    identical formulas because there is not yet a separate local pretraining path.
-
     #TODO: Once explicit local decoders/pretraining are introduced, compute true
     #      encoder/decoder loss separately from graph-conditioned state loss.
     #TODO: Add static-feature-specific evaluation once static-feature prediction
@@ -123,8 +103,17 @@ class ValidationEvaluator:
     def __init__(self, device: torch.device | str = "cpu"):
         self.device = device
 
-    def evaluate(self, engine, dataloader, output_dir: Path) -> str:
+    def evaluate(
+        self,
+        engine,
+        dataloader,
+        output_dir: Path,
+        forward_cfg: Optional[StageForwardConfig] = None,
+    ) -> str:
         engine.eval()
+
+        if forward_cfg is None:
+            forward_cfg = engine.current_val_forward
 
         totals = defaultdict(float)
 
@@ -145,10 +134,11 @@ class ValidationEvaluator:
                 batch = batch.to(engine.device)
                 outputs = engine.model(
                     batch,
-                    node_mask_ratio=engine.max_node_mask_ratio,
-                    edge_mask_ratio=engine.max_edge_mask_ratio,
-                    device_noise_scale=engine.max_device_noise_scale,
-                    spectrum_drop_prob=engine.max_spectrum_drop_prob,
+                    node_mask_ratio=float(forward_cfg.node_mask_ratio),
+                    edge_mask_ratio=float(forward_cfg.edge_mask_ratio),
+                    device_noise_scale=float(forward_cfg.device_noise_scale),
+                    spectrum_drop_prob=float(forward_cfg.spectrum_drop_prob),
+                    bypass_gnn=bool(forward_cfg.bypass_gnn),
                 )
 
                 node_se, node_count = _masked_squared_error(
@@ -226,6 +216,15 @@ class ValidationEvaluator:
         lines.append("Validation Summary")
         lines.append("=" * 80)
         lines.append("")
+        lines.append("Validation forward configuration")
+        lines.append("-" * 80)
+        lines.append(f"node_mask_ratio: {forward_cfg.node_mask_ratio}")
+        lines.append(f"edge_mask_ratio: {forward_cfg.edge_mask_ratio}")
+        lines.append(f"device_noise_scale: {forward_cfg.device_noise_scale}")
+        lines.append(f"spectrum_drop_prob: {forward_cfg.spectrum_drop_prob}")
+        lines.append(f"bypass_gnn: {forward_cfg.bypass_gnn}")
+        lines.append("")
+
         lines.append("Overall Losses")
         lines.append("-" * 80)
         lines.append(f"Encoder/Decoder Loss (current proxy): {loss_encoder_decoder:.8f}")
@@ -280,59 +279,67 @@ class ValidationEvaluator:
             spec_mse = _safe_mean(stats["spec_se"], stats["spec_count"])
             lines.append(f"{dtype:>12s} | param_mse={param_mse:.8f} | spec_mse={spec_mse:.8f}")
 
-        summary_text = "\n".join(lines)
-        return summary_text
+        return "\n".join(lines)
 
 
 class LossHistoryPlotter:
-    """
-    Creates matplotlib plots from the engine's in-memory history.
-
-    #TODO: Add optional smoothing and per-step plotting if epoch-level curves
-    #      are not sufficient for diagnosing training behavior.
-    """
-
     def plot_from_engine(self, engine, output_path: Path, title: str = "Loss Curves"):
         history = getattr(engine, "history", None)
         if not history:
             return
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
         fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
         epochs = history.get("epoch", [])
 
-        base_metrics = [
-            "loss_total", "loss_recon", "loss_state",
-            "loss_node", "loss_edge", "loss_device_param", "loss_device_spec"
+        metric_pairs = [
+            ("loss_total", "Total Loss"),
+            ("loss_recon", "Recon Loss"),
+            ("loss_state", "State Loss"),
+            ("loss_node", "Node Loss"),
+            ("loss_edge", "Edge Loss"),
+            ("loss_device_param", "Device Param Loss"),
+            ("loss_device_spec", "Device Spec Loss"),
         ]
 
-        # Use a distinct color cycle
-        colors = plt.cm.tab10.colors
+        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
         ax = axes[0]
-
-        for i, base_m in enumerate(base_metrics):
-            train_k = f"train_{base_m}"
-            val_k = f"val_{base_m}"
+        for i, (metric_key, label) in enumerate(metric_pairs):
             color = colors[i % len(colors)]
+            train_key = f"train_{metric_key}"
+            val_key = f"val_{metric_key}"
 
-            if train_k in history and len(history[train_k]) == len(epochs):
-                ax.plot(epochs, history[train_k], label=train_k, color=color, linestyle="-")
-            if val_k in history and len(history[val_k]) == len(epochs):
-                ax.plot(epochs, history[val_k], label=val_k, color=color, linestyle="--")
+            if train_key in history and len(history[train_key]) == len(epochs):
+                ax.plot(epochs, history[train_key], linestyle="-", color=color, label=f"train_{label}")
+            if val_key in history and len(history[val_key]) == len(epochs):
+                ax.plot(epochs, history[val_key], linestyle="--", color=color, label=f"val_{label}")
 
         ax.set_title(title)
         ax.set_ylabel("Loss")
         ax.legend(loc="upper right", fontsize=8, ncol=2)
         ax.grid(True, alpha=0.3)
 
-        # Plot schedule
         ax2 = axes[1]
-        sched_keys = ["node_mask_ratio", "edge_mask_ratio", "device_noise_scale", "spectrum_drop_prob"]
+        sched_keys = [
+            "train_node_mask_ratio",
+            "train_edge_mask_ratio",
+            "train_device_noise_scale",
+            "train_spectrum_drop_prob",
+            "train_bypass_gnn",
+            "lr_encoder",
+            "lr_fusion",
+            "lr_gnn",
+            "lr_decoder",
+            "lr_edge_static_encoder",
+        ]
         for key in sched_keys:
             if key in history and len(history[key]) == len(epochs):
                 ax2.plot(epochs, history[key], label=key)
 
-        ax2.set_title("Curriculum / Masking Schedule")
+        ax2.set_title("Curriculum / Training Schedule")
         ax2.set_xlabel("Epoch")
         ax2.set_ylabel("Value")
         ax2.legend(loc="upper left", fontsize=8)

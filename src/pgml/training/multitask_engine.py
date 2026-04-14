@@ -1,92 +1,157 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from typing import Dict, Iterable
+
 import lightning as L
 import torch
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-from collections import defaultdict
 
-class StepWiseCurriculum:
-    """Helper to define custom step-wise schedules."""
+from pgml.training.curriculum import TrainingCurriculum, TrainingStage, StageForwardConfig
 
-    def __init__(self, schedule: dict[int, dict[str, float]]):
-        self.schedule = schedule
-        self.sorted_epochs = sorted(schedule.keys())
-
-    def __call__(self, epoch: int) -> dict[str, float]:
-        active_key = self.sorted_epochs[0]
-        for e in self.sorted_epochs:
-            if epoch >= e:
-                active_key = e
-        return self.schedule[active_key]
 
 class MultiTaskStateEstimationEngine(L.LightningModule):
     """
-    Training engine for the hierarchical explicit-device architecture.
+    Staged training engine for the hierarchical explicit-device architecture.
 
-    Curriculum:
-    - node/edge observability masking ramps up over epochs
-    - device pseudo-measurement noise ramps up over epochs
-    - spectrum-drop probability ramps up over epochs
+    The curriculum is the single source of truth for:
+    - masking / noising / bypass_gnn
+    - optimizer group learning rates
+    - optimizer group weight decays
+    - trainability / freezing
+    - validation forward conditions
+    - loss weights alpha_recon / beta_state
 
-    Logged losses:
-    - total
-    - recon
-    - state
-    - node
-    - edge
-    - device_param
-    - device_spec
-
-    #TODO: Split local autoencoding losses from graph-estimation losses more
-    #      explicitly once a pretraining stage or separate local decoders exist.
-    #TODO: Add device-type-aware loss masks so structurally irrelevant targets
-    #      do not contribute to device losses even if padded tensors exist.
+    Optimizer groups:
+    - encoder
+    - fusion
+    - gnn
+    - decoder
+    - edge_static_encoder
     """
+
     def __init__(
-            self,
-            model: torch.nn.Module,
-            curriculum_fn: Callable[[int], Dict[str, float]],
-            lr: float = 1e-3,
-            weight_decay: float = 1e-4,
-            alpha_recon: float = 1.0,
-            beta_state: float = 1.0,
+        self,
+        model: torch.nn.Module,
+        curriculum: TrainingCurriculum,
     ):
         super().__init__()
         self.model = model
-        self.curriculum_fn = curriculum_fn
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.alpha_recon = alpha_recon
-        self.beta_state = beta_state
+        self.curriculum = curriculum
 
-        self.current_masking_params = {
-            "node_mask_ratio": 0.0,
-            "edge_mask_ratio": 0.0,
-            "device_noise_scale": 0.0,
-            "spectrum_drop_prob": 0.0,
-        }
+        self.current_stage: TrainingStage = self.curriculum.get_stage(0)
+        self.current_train_forward: StageForwardConfig = self.current_stage.train_forward
+        self.current_val_forward: StageForwardConfig = self.current_stage.get_val_forward()
 
         self.history = {
             "epoch": [],
-            "train_loss_total": [], "val_loss_total": [],
-            "train_loss_recon": [], "val_loss_recon": [],
-            "train_loss_state": [], "val_loss_state": [],
-            "train_loss_node": [], "val_loss_node": [],
-            "train_loss_edge": [], "val_loss_edge": [],
-            "train_loss_device_param": [], "val_loss_device_param": [],
-            "train_loss_device_spec": [], "val_loss_device_spec": [],
-            "node_mask_ratio": [], "edge_mask_ratio": [],
-            "device_noise_scale": [], "spectrum_drop_prob": [],
+            "stage_name": [],
+            "train_loss_total": [],
+            "val_loss_total": [],
+            "train_loss_recon": [],
+            "val_loss_recon": [],
+            "train_loss_state": [],
+            "val_loss_state": [],
+            "train_loss_node": [],
+            "val_loss_node": [],
+            "train_loss_edge": [],
+            "val_loss_edge": [],
+            "train_loss_device_param": [],
+            "val_loss_device_param": [],
+            "train_loss_device_spec": [],
+            "val_loss_device_spec": [],
+            "train_node_mask_ratio": [],
+            "train_edge_mask_ratio": [],
+            "train_device_noise_scale": [],
+            "train_spectrum_drop_prob": [],
+            "train_bypass_gnn": [],
+            "val_node_mask_ratio": [],
+            "val_edge_mask_ratio": [],
+            "val_device_noise_scale": [],
+            "val_spectrum_drop_prob": [],
+            "val_bypass_gnn": [],
+            "lr_encoder": [],
+            "lr_fusion": [],
+            "lr_gnn": [],
+            "lr_decoder": [],
+            "lr_edge_static_encoder": [],
         }
 
         self._epoch_acc = {}
-        # Ignore complex objects for hparams logging
-        self.save_hyperparameters(ignore=["model", "curriculum_fn"])
+        self._optimizer_group_name_to_index: Dict[str, int] = {}
 
-    def forward(self, batch):
+        self.save_hyperparameters(ignore=["model", "curriculum"])
+
+    def _get_named_module_groups(self) -> Dict[str, Iterable[torch.nn.Parameter]]:
+        """
+        Logical optimizer groups for staged training control.
+        """
+        groups = {
+            "encoder": list(self.model.node_encoder.parameters())
+                       + list(self.model.edge_encoder.parameters())
+                       + list(self.model.device_encoder.parameters())
+                       + list(self.model.node_masker.parameters())
+                       + list(self.model.edge_masker.parameters())
+                       + list(self.model.device_noiser.parameters()),
+            "fusion": list(self.model.node_device_fusion.parameters()),
+            "gnn": list(self.model.graph_estimator.parameters()),
+            "decoder": list(self.model.node_decoder.parameters())
+                       + list(self.model.edge_decoder.parameters())
+                       + list(self.model.device_decoder.parameters()),
+            "edge_static_encoder": list(self.model.edge_static_encoder.parameters()) if self.model.edge_static_encoder is not None else [],
+        }
+        return groups
+
+    def _get_stage_group_cfgs(self, stage: TrainingStage):
+        return {
+            "encoder": stage.encoder,
+            "fusion": stage.fusion,
+            "gnn": stage.gnn,
+            "decoder": stage.decoder,
+            "edge_static_encoder": stage.edge_static_encoder,
+        }
+
+    def _apply_stage_trainability(self, stage: TrainingStage):
+        groups = self._get_named_module_groups()
+        cfgs = self._get_stage_group_cfgs(stage)
+
+        for group_name, params in groups.items():
+            trainable = cfgs[group_name].trainable
+            for p in params:
+                p.requires_grad = trainable
+
+    def _apply_stage_optimizer_settings(self, stage: TrainingStage):
+        opt = self.optimizers()
+        if opt is None:
+            return
+
+        cfgs = self._get_stage_group_cfgs(stage)
+        for group_name, group_idx in self._optimizer_group_name_to_index.items():
+            cfg = cfgs[group_name]
+            opt.param_groups[group_idx]["lr"] = float(cfg.lr)
+            opt.param_groups[group_idx]["weight_decay"] = float(cfg.weight_decay)
+
+    def _activate_stage(self, stage: TrainingStage):
+        self.current_stage = stage
+        self.current_train_forward = stage.train_forward
+        self.current_val_forward = stage.get_val_forward()
+
+        self._apply_stage_trainability(stage)
+        self._apply_stage_optimizer_settings(stage)
+
+        self.log("stage_bypass_gnn", float(stage.train_forward.bypass_gnn))
+        self.log("train_node_mask_ratio", stage.train_forward.node_mask_ratio)
+        self.log("train_edge_mask_ratio", stage.train_forward.edge_mask_ratio)
+        self.log("train_device_noise_scale", stage.train_forward.device_noise_scale)
+        self.log("train_spectrum_drop_prob", stage.train_forward.spectrum_drop_prob)
+
+    def _forward_with_cfg(self, batch, cfg: StageForwardConfig):
         return self.model(
             batch,
-            **self.current_masking_params
+            node_mask_ratio=float(cfg.node_mask_ratio),
+            edge_mask_ratio=float(cfg.edge_mask_ratio),
+            device_noise_scale=float(cfg.device_noise_scale),
+            spectrum_drop_prob=float(cfg.spectrum_drop_prob),
+            bypass_gnn=bool(cfg.bypass_gnn),
         )
 
     def _masked_mse(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -101,11 +166,12 @@ class MultiTaskStateEstimationEngine(L.LightningModule):
 
     def _start_phase_acc_if_needed(self, phase: str):
         if phase not in self._epoch_acc:
-            self._epoch_acc[phase] = defaultdict(float)  # type: ignore[name-defined]
+            self._epoch_acc[phase] = defaultdict(float)
             self._epoch_acc[phase]["n"] = 0.0
 
     def _shared_step(self, batch, phase: str):
-        outputs = self(batch)
+        cfg = self.current_train_forward if phase == "train" else self.current_val_forward
+        outputs = self._forward_with_cfg(batch, cfg)
 
         loss_node = self._masked_mse(
             outputs["pred_node_value"],
@@ -132,8 +198,11 @@ class MultiTaskStateEstimationEngine(L.LightningModule):
         )
 
         loss_recon = loss_node + loss_edge + loss_device_param + loss_device_spec
+
+        # Still a proxy for now.
         loss_state = loss_node + loss_edge + loss_device_param + loss_device_spec
-        loss_total = self.alpha_recon * loss_recon + self.beta_state * loss_state
+
+        loss_total = self.current_stage.alpha_recon * loss_recon + self.current_stage.beta_state * loss_state
 
         self.log(f"{phase}_loss_total", loss_total, prog_bar=True, sync_dist=True, batch_size=batch.num_graphs)
         self.log(f"{phase}_loss_recon", loss_recon, sync_dist=True, batch_size=batch.num_graphs)
@@ -156,51 +225,91 @@ class MultiTaskStateEstimationEngine(L.LightningModule):
 
         return loss_total
 
+    def forward(self, batch):
+        return self._forward_with_cfg(batch, self.current_train_forward)
+
     def training_step(self, batch, batch_idx):
         return self._shared_step(batch, "train")
 
     def validation_step(self, batch, batch_idx):
-        # Force eval phase to max difficulty for validation, or specific test params
-        saved_params = self.current_masking_params.copy()
-
-        # Optionally, you can pass a specific validation config here.
-        # For now, we will evaluate using the current epoch's curriculum difficulty.
-        loss = self._shared_step(batch, "val")
-
-        self.current_masking_params = saved_params
-        return loss
+        return self._shared_step(batch, "val")
 
     def on_train_epoch_start(self):
-        new_params = self.curriculum_fn(self.current_epoch)
-        self.current_masking_params.update(new_params)
-
-        for k, v in self.current_masking_params.items():
-            self.log(k, v)
-
+        stage = self.curriculum.get_stage(self.current_epoch)
+        self._activate_stage(stage)
         self._epoch_acc = {}
 
     def on_train_epoch_end(self):
         self.history["epoch"].append(int(self.current_epoch))
-        for k, v in self.current_masking_params.items():
-            self.history[k].append(float(v))
+        self.history["stage_name"].append(self.current_stage.name)
+
+        self.history["train_node_mask_ratio"].append(float(self.current_train_forward.node_mask_ratio))
+        self.history["train_edge_mask_ratio"].append(float(self.current_train_forward.edge_mask_ratio))
+        self.history["train_device_noise_scale"].append(float(self.current_train_forward.device_noise_scale))
+        self.history["train_spectrum_drop_prob"].append(float(self.current_train_forward.spectrum_drop_prob))
+        self.history["train_bypass_gnn"].append(float(self.current_train_forward.bypass_gnn))
+
+        self.history["val_node_mask_ratio"].append(float(self.current_val_forward.node_mask_ratio))
+        self.history["val_edge_mask_ratio"].append(float(self.current_val_forward.edge_mask_ratio))
+        self.history["val_device_noise_scale"].append(float(self.current_val_forward.device_noise_scale))
+        self.history["val_spectrum_drop_prob"].append(float(self.current_val_forward.spectrum_drop_prob))
+        self.history["val_bypass_gnn"].append(float(self.current_val_forward.bypass_gnn))
+
+        self.history["lr_encoder"].append(float(self.current_stage.encoder.lr))
+        self.history["lr_fusion"].append(float(self.current_stage.fusion.lr))
+        self.history["lr_gnn"].append(float(self.current_stage.gnn.lr))
+        self.history["lr_decoder"].append(float(self.current_stage.decoder.lr))
+        self.history["lr_edge_static_encoder"].append(float(self.current_stage.edge_static_encoder.lr))
 
         for phase in ["train", "val"]:
             acc = self._epoch_acc.get(phase, None)
             if acc is None or acc["n"] == 0:
-                for metric in ["loss_total", "loss_recon", "loss_state", "loss_node", "loss_edge",
-                               "loss_device_param", "loss_device_spec"]:
+                for metric in [
+                    "loss_total",
+                    "loss_recon",
+                    "loss_state",
+                    "loss_node",
+                    "loss_edge",
+                    "loss_device_param",
+                    "loss_device_spec",
+                ]:
                     self.history[f"{phase}_{metric}"].append(None)
                 continue
 
             n = acc["n"]
-            for metric in ["loss_total", "loss_recon", "loss_state", "loss_node", "loss_edge", "loss_device_param",
-                           "loss_device_spec"]:
+            for metric in [
+                "loss_total",
+                "loss_recon",
+                "loss_state",
+                "loss_node",
+                "loss_edge",
+                "loss_device_param",
+                "loss_device_spec",
+            ]:
                 self.history[f"{phase}_{metric}"].append(acc[metric] / n)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}
-        }
+        groups = self._get_named_module_groups()
+        cfgs = self._get_stage_group_cfgs(self.current_stage)
+
+        param_groups = []
+        group_name_to_index = {}
+
+        for idx, (group_name, params) in enumerate(groups.items()):
+            params = list(params)
+            group_name_to_index[group_name] = idx
+
+            cfg = cfgs[group_name]
+            for p in params:
+                p.requires_grad = cfg.trainable
+
+            param_groups.append({
+                "params": params,
+                "lr": float(cfg.lr),
+                "weight_decay": float(cfg.weight_decay),
+                "name": group_name,
+            })
+
+        self._optimizer_group_name_to_index = group_name_to_index
+        optimizer = torch.optim.AdamW(param_groups)
+        return optimizer

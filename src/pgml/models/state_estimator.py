@@ -21,7 +21,7 @@ class MultiModalStateEstimator(nn.Module):
     4. encode explicit devices
     5. apply latent observability masking to node/edge measurements
     6. fuse device context into nodes
-    7. run graph state estimator
+    7. optionally run graph state estimator
     8. decode node / edge / device targets
     """
 
@@ -103,12 +103,10 @@ class MultiModalStateEstimator(nn.Module):
         edge_mask_ratio: float = 0.0,
         device_noise_scale: float = 0.0,
         spectrum_drop_prob: float = 0.0,
+        bypass_gnn: bool = False,
     ) -> dict[str, torch.Tensor]:
         edge_type = ("node", "physical", "node")
 
-        # -------------------------
-        # Corrupt device inputs (training-time pseudo-measurement strategy)
-        # -------------------------
         noisy_param_value, noisy_spec_value = self.device_noiser(
             param_value=batch["device"].param_value,
             param_mask=batch["device"].param_mask,
@@ -118,9 +116,6 @@ class MultiModalStateEstimator(nn.Module):
             spectrum_drop_prob=spectrum_drop_prob,
         )
 
-        # -------------------------
-        # Encode local entities
-        # -------------------------
         node_meas_latent = self.node_encoder(
             value=batch["node"].meas_value,
             frequency=batch["node"].meas_frequency,
@@ -148,9 +143,6 @@ class MultiModalStateEstimator(nn.Module):
             spec_mask=batch["device"].spec_mask,
         )
 
-        # -------------------------
-        # Apply observability masking to node / edge measurement latents
-        # -------------------------
         masked_node_latent, node_obs_indicator = self.node_masker(
             latent=node_meas_latent,
             mask_ratio=node_mask_ratio,
@@ -160,9 +152,6 @@ class MultiModalStateEstimator(nn.Module):
             mask_ratio=edge_mask_ratio,
         )
 
-        # -------------------------
-        # Fuse node context
-        # -------------------------
         node_latent = self.node_device_fusion(
             node_static_x=batch["node"].static_x,
             node_measurement_latent=masked_node_latent,
@@ -178,26 +167,20 @@ class MultiModalStateEstimator(nn.Module):
 
         edge_latent = masked_edge_latent + edge_static_latent
 
-        # -------------------------
-        # Graph propagation
-        # -------------------------
-        updated_node_latent = self.graph_estimator(
-            node_latent=node_latent,
-            edge_index=batch[edge_type].edge_index,
-            edge_latent=edge_latent,
-        )
+        if bypass_gnn:
+            updated_node_latent = node_latent
+        else:
+            updated_node_latent = self.graph_estimator(
+                node_latent=node_latent,
+                edge_index=batch[edge_type].edge_index,
+                edge_latent=edge_latent,
+            )
 
-        # -------------------------
-        # Device graph conditioning
-        # -------------------------
         if device_latent.shape[0] > 0:
             conditioned_device_latent = device_latent + updated_node_latent[batch["device"].node_index]
         else:
             conditioned_device_latent = device_latent
 
-        # -------------------------
-        # Decode targets with token conditioning
-        # -------------------------
         pred_node_value = self.node_decoder(
             node_latent=updated_node_latent,
             target_frequency=batch["target_node"].voltage_frequency,
@@ -229,4 +212,5 @@ class MultiModalStateEstimator(nn.Module):
             "device_latent": conditioned_device_latent,
             "node_observability": node_obs_indicator,
             "edge_observability": edge_obs_indicator,
+            "bypass_gnn": torch.tensor([1 if bypass_gnn else 0], device=updated_node_latent.device),
         }

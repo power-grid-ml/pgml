@@ -1,8 +1,7 @@
+import torch.multiprocessing
 from pathlib import Path
 
 import lightning as L
-import torch
-import torch.multiprocessing
 from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
@@ -15,13 +14,30 @@ from config import resource_dir
 from pgml.config import PipelineConfig, config_dir
 from pgml.data_pipeline.step_dataloader import get_step_dataloader
 from pgml.models.state_estimator import MultiModalStateEstimator
-from pgml.training.multitask_engine import MultiTaskStateEstimationEngine, StepWiseCurriculum
+from pgml.training.curriculum import (
+    OptimizerGroupConfig,
+    StageForwardConfig,
+    TrainingCurriculum,
+    TrainingStage,
+)
 from pgml.training.evaluation import (
     LossHistoryPlotter,
     ValidationEvaluator,
     export_training_history_json,
 )
+from pgml.training.multitask_engine import MultiTaskStateEstimationEngine
 
+def _infer_model_dims_from_batch(batch) -> dict:
+    edge_type = ("node", "physical", "node")
+    return {
+        "node_static_dim": batch["node"].static_x.shape[1],
+        "edge_static_dim": batch[edge_type].static_edge_attr.shape[1],
+        "device_static_dim": batch["device"].static_x.shape[1],
+        "node_value_dim": batch["node"].meas_value.shape[-1],
+        "edge_value_dim": batch["edge"].meas_value.shape[-1],
+        "device_param_value_dim": batch["device"].param_value.shape[-1],
+        "device_spec_value_dim": batch["device"].spec_value.shape[-1],
+    }
 
 def _resolve_rel_abs_path(base_path:Path, target_path:Path) -> Path:
     """
@@ -39,18 +55,6 @@ def _resolve_rel_abs_path(base_path:Path, target_path:Path) -> Path:
     full_path.mkdir(parents=True, exist_ok=True)
     return full_path
 
-
-def _infer_model_dims_from_batch(batch) -> dict:
-    edge_type = ("node", "physical", "node")
-    return {
-        "node_static_dim": batch["node"].static_x.shape[1],
-        "edge_static_dim": batch[edge_type].static_edge_attr.shape[1],
-        "device_static_dim": batch["device"].static_x.shape[1],
-        "node_value_dim": batch["node"].meas_value.shape[-1],
-        "edge_value_dim": batch["edge"].meas_value.shape[-1],
-        "device_param_value_dim": batch["device"].param_value.shape[-1],
-        "device_spec_value_dim": batch["device"].spec_value.shape[-1],
-    }
 
 
 def main():
@@ -91,18 +95,105 @@ def main():
         device_spec_value_dim=dims["device_spec_value_dim"],
         hidden_dim=64,
     )
-    curriculum = StepWiseCurriculum({
-        0: {"node_mask_ratio": 0.0, "edge_mask_ratio": 0.0, "device_noise_scale": 0.0, "spectrum_drop_prob": 0.0},
-        100: {"node_mask_ratio": 0.1, "edge_mask_ratio": 0.1, "device_noise_scale": 0.01, "spectrum_drop_prob": 0.1},
-        200: {"node_mask_ratio": 0.2, "edge_mask_ratio": 0.3, "device_noise_scale": 0.02, "spectrum_drop_prob": 0.2},
-    })
+
+    curriculum = TrainingCurriculum([
+        TrainingStage(
+            name="ae_warmup",
+            start_epoch=0,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.0,
+                edge_mask_ratio=0.0,
+                device_noise_scale=0.0,
+                spectrum_drop_prob=0.0,
+                bypass_gnn=True,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.0,
+                edge_mask_ratio=0.0,
+                device_noise_scale=0.0,
+                spectrum_drop_prob=0.0,
+                bypass_gnn=True,
+            ),
+            encoder=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
+            fusion=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
+            gnn=OptimizerGroupConfig(lr=0.0, weight_decay=0.0, trainable=False),
+            decoder=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
+        ),
+        TrainingStage(
+            name="ae_masked",
+            start_epoch=50,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.2,
+                edge_mask_ratio=0.2,
+                device_noise_scale=0.05,
+                spectrum_drop_prob=0.1,
+                bypass_gnn=True,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.2,
+                edge_mask_ratio=0.2,
+                device_noise_scale=0.05,
+                spectrum_drop_prob=0.1,
+                bypass_gnn=True,
+            ),
+            encoder=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            fusion=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            gnn=OptimizerGroupConfig(lr=0.0, weight_decay=0.0, trainable=False),
+            decoder=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+        ),
+        TrainingStage(
+            name="gnn_transition",
+            start_epoch=100,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.4,
+                edge_mask_ratio=0.4,
+                device_noise_scale=0.05,
+                spectrum_drop_prob=0.2,
+                bypass_gnn=False,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.5,
+                edge_mask_ratio=0.5,
+                device_noise_scale=0.05,
+                spectrum_drop_prob=0.2,
+                bypass_gnn=False,
+            ),
+            encoder=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
+            fusion=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
+            gnn=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            decoder=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
+        ),
+        TrainingStage(
+            name="full_state_estimation",
+            start_epoch=150,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.8,
+                edge_mask_ratio=0.8,
+                device_noise_scale=0.15,
+                spectrum_drop_prob=0.5,
+                bypass_gnn=False,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.95,
+                edge_mask_ratio=0.95,
+                device_noise_scale=0.2,
+                spectrum_drop_prob=0.8,
+                bypass_gnn=False,
+            ),
+            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            gnn=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
+            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+        ),
+    ])
+
     engine = MultiTaskStateEstimationEngine(
         model=model,
-        lr=1e-3,
-        weight_decay=1e-4,
-        alpha_recon=1.0,
-        beta_state=1.0,
-        curriculum_fn=curriculum
+        curriculum=curriculum,
     )
 
     logger = None
@@ -117,14 +208,20 @@ def main():
             monitor="val_loss_total",
             mode="min",
             save_top_k=3,
-            filename="epoch{epoch:03d}-val_loss_total{val_loss_total:.5f}",
+            filename="fullmodel-epoch{epoch:03d}-val_loss_total{val_loss_total:.5f}",
+        ),
+        ModelCheckpoint(
+            monitor="val_loss_recon",
+            mode="min",
+            save_top_k=3,
+            filename="autoencoder-epoch{epoch:03d}-val_loss_recon{val_loss_recon:.5f}",
         ),
         LearningRateMonitor(logging_interval="epoch"),
         RichProgressBar(),
     ]
 
     trainer = L.Trainer(
-        max_epochs=10,
+        max_epochs=400,
         logger=logger,
         callbacks=callbacks,
         accelerator="auto",
@@ -140,7 +237,6 @@ def main():
     history_path = output_dir / "training_history.json"
     export_training_history_json(engine, history_path)
 
-    # Plot loss curves
     plotter = LossHistoryPlotter()
     plotter.plot_from_engine(
         engine=engine,
@@ -148,7 +244,6 @@ def main():
         title="Training and Validation Loss Curves",
     )
 
-    # Full validation summary
     evaluator = ValidationEvaluator(device=engine.device)
     summary_text = evaluator.evaluate(
         engine=engine,
@@ -166,7 +261,6 @@ def main():
             logger.experiment.log_artifact(run_id, str(output_dir / "loss_curves.png"))
             logger.experiment.log_artifact(run_id, str(summary_path))
         except Exception:
-            # TODO: add explicit MLflow artifact upload error handling if needed
             pass
 
     print(summary_text)
