@@ -1,4 +1,3 @@
-# models/masking.py
 from __future__ import annotations
 
 import torch
@@ -6,6 +5,21 @@ import torch.nn as nn
 
 
 class LatentObservabilityMasker(nn.Module):
+    """
+    Applies curriculum-controlled masking to node and edge latent measurements.
+
+    Behavior:
+    - a fraction of node/edge measurement latents is replaced by a learnable mask token
+    - an observability indicator is returned for downstream conditioning
+
+    Inputs:
+    - latent: [N, H]
+    - mask_ratio: float in [0, 1]
+
+    Outputs:
+    - masked_latent: [N, H]
+    - indicator:     [N, 1]   1.0 = observed, 0.0 = masked
+    """
     def __init__(self, hidden_dim: int):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -43,6 +57,18 @@ class LatentObservabilityMasker(nn.Module):
 
 
 class DeviceInputNoiser(nn.Module):
+    """
+    Applies curriculum-controlled corruption to device parameter and spectrum tokens.
+
+    Mechanisms:
+    - additive Gaussian noise on token values
+    - optional full-spectrum replacement by a learned unknown-spectrum token
+
+    This simulates imperfect pseudo-measurements and missing harmonic priors.
+
+    #TODO: Add device-type-specific noise models if later experiments show
+    #      generators, loads, and vsources require different corruption statistics.
+    """
     def __init__(self, param_value_dim: int, spec_value_dim: int):
         super().__init__()
         self.param_value_dim = param_value_dim
@@ -74,7 +100,6 @@ class DeviceInputNoiser(nn.Module):
         if spec_out.numel() > 0 and spectrum_drop_prob > 0.0 and spec_out.shape[0] > 0:
             device_drop = torch.rand(spec_out.shape[0], device=spec_out.device) < spectrum_drop_prob
             if device_drop.any():
-                # FIX: Match AMP dtype
                 spec_out[device_drop] = self.unknown_spectrum_token.to(spec_out.dtype).expand(
                     int(device_drop.sum().item()),
                     spec_out.shape[1],

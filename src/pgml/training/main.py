@@ -15,7 +15,7 @@ from config import resource_dir
 from pgml.config import PipelineConfig, config_dir
 from pgml.data_pipeline.step_dataloader import get_step_dataloader
 from pgml.models.state_estimator import MultiModalStateEstimator
-from pgml.training.multitask_engine import MultiTaskStateEstimationEngine
+from pgml.training.multitask_engine import MultiTaskStateEstimationEngine, StepWiseCurriculum
 from pgml.training.evaluation import (
     LossHistoryPlotter,
     ValidationEvaluator,
@@ -23,10 +23,21 @@ from pgml.training.evaluation import (
 )
 
 
-def _resolve_input_dir(config: PipelineConfig) -> Path:
-    if Path(config.paths.input_dir).is_absolute():
-        return Path(config.paths.input_dir)
-    return Path(resource_dir) / config.paths.input_dir
+def _resolve_rel_abs_path(base_path:Path, target_path:Path) -> Path:
+    """
+    Checks if target path is relative or absolute.
+    If it is a relative path, prepend base_path.
+    If path does not exist yet, create it.
+    :param base_path:
+    :param target_path:
+    :return:
+    """
+    if target_path.is_absolute():
+        target_path.mkdir(parents=True, exist_ok=True)
+        return target_path
+    full_path = Path(base_path) / target_path
+    full_path.mkdir(parents=True, exist_ok=True)
+    return full_path
 
 
 def _infer_model_dims_from_batch(batch) -> dict:
@@ -48,10 +59,11 @@ def main():
 
     default_cfg = Path(config_dir) / "default.yaml"
     config = PipelineConfig.from_yaml(default_cfg)
-    input_dir = _resolve_input_dir(config)
+    input_dir = _resolve_rel_abs_path(resource_dir, config.paths.input_dir)
+    output_dir = _resolve_rel_abs_path(resource_dir, config.paths.output_dir)
 
-    train_dataset_ids = [2, 3, 4]
-    val_dataset_ids = [5]
+    train_dataset_ids = [2, 3]
+    val_dataset_ids = [4]
 
     train_loader = get_step_dataloader(
         base_data_dir=input_dir,
@@ -79,18 +91,18 @@ def main():
         device_spec_value_dim=dims["device_spec_value_dim"],
         hidden_dim=64,
     )
-
+    curriculum = StepWiseCurriculum({
+        0: {"node_mask_ratio": 0.0, "edge_mask_ratio": 0.0, "device_noise_scale": 0.0, "spectrum_drop_prob": 0.0},
+        100: {"node_mask_ratio": 0.1, "edge_mask_ratio": 0.1, "device_noise_scale": 0.01, "spectrum_drop_prob": 0.1},
+        200: {"node_mask_ratio": 0.2, "edge_mask_ratio": 0.3, "device_noise_scale": 0.02, "spectrum_drop_prob": 0.2},
+    })
     engine = MultiTaskStateEstimationEngine(
         model=model,
         lr=1e-3,
         weight_decay=1e-4,
         alpha_recon=1.0,
         beta_state=1.0,
-        max_node_mask_ratio=0.95,
-        max_edge_mask_ratio=0.95,
-        max_device_noise_scale=0.20,
-        max_spectrum_drop_prob=0.80,
-        curriculum_epochs=50,
+        curriculum_fn=curriculum
     )
 
     logger = None
@@ -112,20 +124,17 @@ def main():
     ]
 
     trainer = L.Trainer(
-        max_epochs=100,
+        max_epochs=10,
         logger=logger,
         callbacks=callbacks,
         accelerator="auto",
         devices="auto",
         precision="16-mixed",
-        default_root_dir=config.paths.output_dir,
+        default_root_dir=output_dir,
         log_every_n_steps=1,
     )
 
     trainer.fit(engine, train_dataloaders=train_loader, val_dataloaders=val_loader)
-
-    output_dir = Path(config.paths.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Export training history collected inside the LightningModule
     history_path = output_dir / "training_history.json"

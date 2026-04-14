@@ -3,9 +3,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from pgml.models.token_encoders import TokenValueEncoder
-
-
 class TokenConditionedDecoder(nn.Module):
     """
     Decodes entity latents into token-wise outputs conditioned on target token metadata.
@@ -61,7 +58,7 @@ class TokenConditionedDecoder(nn.Module):
         n, t = target_frequency.shape
         if n == 0:
             out_dim = self.mlp[-1].out_features
-            return torch.zeros((0, t, out_dim), dtype=torch.float32, device=target_frequency.device)
+            return torch.zeros((0, t, out_dim), dtype=entity_latent.dtype, device=target_frequency.device)
 
         freq_emb = self.freq_mlp(target_frequency.unsqueeze(-1))
         type_emb = self.type_embedding(target_type)
@@ -74,36 +71,18 @@ class TokenConditionedDecoder(nn.Module):
 class NodeDecoder(nn.Module):
     def __init__(self, hidden_dim: int, out_value_dim: int, num_token_types: int = 16):
         super().__init__()
-        self.decoder = TokenConditionedDecoder(
-            hidden_dim=hidden_dim,
-            out_value_dim=out_value_dim,
-            num_token_types=num_token_types,
-        )
+        self.decoder = TokenConditionedDecoder(hidden_dim, out_value_dim, num_token_types)
 
-    def forward(
-        self,
-        node_latent: torch.Tensor,
-        target_frequency: torch.Tensor,
-        target_type: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, node_latent, target_frequency, target_type):
         return self.decoder(node_latent, target_frequency, target_type)
 
 
 class EdgeDecoder(nn.Module):
     def __init__(self, hidden_dim: int, out_value_dim: int, num_token_types: int = 16):
         super().__init__()
-        self.decoder = TokenConditionedDecoder(
-            hidden_dim=hidden_dim,
-            out_value_dim=out_value_dim,
-            num_token_types=num_token_types,
-        )
+        self.decoder = TokenConditionedDecoder(hidden_dim, out_value_dim, num_token_types)
 
-    def forward(
-        self,
-        edge_latent: torch.Tensor,
-        target_frequency: torch.Tensor,
-        target_type: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, edge_latent, target_frequency, target_type):
         return self.decoder(edge_latent, target_frequency, target_type)
 
 
@@ -122,31 +101,22 @@ class DeviceDecoder(nn.Module):
     """
 
     def __init__(
-        self,
-        hidden_dim: int,
-        param_out_dim: int,
-        spec_out_dim: int,
-        num_device_types: int = 4,
-        num_token_types: int = 16,
+            self,
+            hidden_dim: int,
+            param_out_dim: int,
+            spec_out_dim: int,
+            num_device_types: int = 4,
+            num_token_types: int = 16,
     ):
         super().__init__()
+        self.param_out_dim = param_out_dim
+        self.spec_out_dim = spec_out_dim
 
         self.param_heads = nn.ModuleList([
-            TokenConditionedDecoder(
-                hidden_dim=hidden_dim,
-                out_value_dim=param_out_dim,
-                num_token_types=num_token_types,
-            )
-            for _ in range(num_device_types)
+            TokenConditionedDecoder(hidden_dim, param_out_dim, num_token_types) for _ in range(num_device_types)
         ])
-
         self.spec_heads = nn.ModuleList([
-            TokenConditionedDecoder(
-                hidden_dim=hidden_dim,
-                out_value_dim=spec_out_dim,
-                num_token_types=num_token_types,
-            )
-            for _ in range(num_device_types)
+            TokenConditionedDecoder(hidden_dim, spec_out_dim, num_token_types) for _ in range(num_device_types)
         ])
 
     def forward(
@@ -159,29 +129,15 @@ class DeviceDecoder(nn.Module):
         spec_type: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if device_latent.shape[0] == 0:
-            param_out_dim = self.param_heads[0].decoder.mlp[-1].out_features
-            spec_out_dim = self.spec_heads[0].decoder.mlp[-1].out_features
             return (
-                torch.zeros((0, param_frequency.shape[1], param_out_dim), dtype=torch.float32, device=device_latent.device),
-                torch.zeros((0, spec_frequency.shape[1], spec_out_dim), dtype=torch.float32, device=device_latent.device),
+                torch.zeros((0, param_frequency.shape[1], self.param_out_dim), dtype=device_latent.dtype, device=device_latent.device),
+                torch.zeros((0, spec_frequency.shape[1], self.spec_out_dim), dtype=device_latent.dtype, device=device_latent.device),
             )
 
-        param_preds = []
-        spec_preds = []
-
+        param_preds, spec_preds = [], []
         for i in range(device_latent.shape[0]):
             d_type = int(device_type[i].item())
-            param_pred = self.param_heads[d_type](
-                device_latent[i:i + 1],
-                param_frequency[i:i + 1],
-                param_type[i:i + 1],
-            )
-            spec_pred = self.spec_heads[d_type](
-                device_latent[i:i + 1],
-                spec_frequency[i:i + 1],
-                spec_type[i:i + 1],
-            )
-            param_preds.append(param_pred)
-            spec_preds.append(spec_pred)
+            param_preds.append(self.param_heads[d_type](device_latent[i:i + 1], param_frequency[i:i + 1], param_type[i:i + 1]))
+            spec_preds.append(self.spec_heads[d_type](device_latent[i:i + 1], spec_frequency[i:i + 1], spec_type[i:i + 1]))
 
         return torch.cat(param_preds, dim=0), torch.cat(spec_preds, dim=0)

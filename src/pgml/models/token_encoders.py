@@ -211,7 +211,7 @@ class DeviceEncoder(nn.Module):
         spec_mask: torch.Tensor,
     ) -> torch.Tensor:
         if static_x.shape[0] == 0:
-            return torch.zeros((0, self.hidden_dim), dtype=torch.float32, device=device_type.device)
+            return torch.zeros((0, self.hidden_dim), dtype=param_value.dtype, device=device_type.device)
 
         if self.static_encoder is not None and static_x.shape[1] > 0:
             static_latent = self.static_encoder(static_x)

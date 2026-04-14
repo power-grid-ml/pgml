@@ -298,47 +298,40 @@ class LossHistoryPlotter:
             return
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
         fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-
         epochs = history.get("epoch", [])
 
-        tracked = [
-            "train_loss_total",
-            "val_loss_total",
-            "train_loss_recon",
-            "val_loss_recon",
-            "train_loss_state",
-            "val_loss_state",
-            "train_loss_node",
-            "val_loss_node",
-            "train_loss_edge",
-            "val_loss_edge",
-            "train_loss_device_param",
-            "val_loss_device_param",
-            "train_loss_device_spec",
-            "val_loss_device_spec",
+        base_metrics = [
+            "loss_total", "loss_recon", "loss_state",
+            "loss_node", "loss_edge", "loss_device_param", "loss_device_spec"
         ]
 
+        # Use a distinct color cycle
+        colors = plt.cm.tab10.colors
         ax = axes[0]
-        for key in tracked:
-            if key in history and len(history[key]) == len(epochs):
-                ax.plot(epochs, history[key], label=key)
+
+        for i, base_m in enumerate(base_metrics):
+            train_k = f"train_{base_m}"
+            val_k = f"val_{base_m}"
+            color = colors[i % len(colors)]
+
+            if train_k in history and len(history[train_k]) == len(epochs):
+                ax.plot(epochs, history[train_k], label=train_k, color=color, linestyle="-")
+            if val_k in history and len(history[val_k]) == len(epochs):
+                ax.plot(epochs, history[val_k], label=val_k, color=color, linestyle="--")
+
         ax.set_title(title)
         ax.set_ylabel("Loss")
-        ax.legend(loc="upper right", fontsize=8)
+        ax.legend(loc="upper right", fontsize=8, ncol=2)
         ax.grid(True, alpha=0.3)
 
+        # Plot schedule
         ax2 = axes[1]
-        sched_keys = [
-            "node_mask_ratio",
-            "edge_mask_ratio",
-            "device_noise_scale",
-            "spectrum_drop_prob",
-        ]
+        sched_keys = ["node_mask_ratio", "edge_mask_ratio", "device_noise_scale", "spectrum_drop_prob"]
         for key in sched_keys:
             if key in history and len(history[key]) == len(epochs):
                 ax2.plot(epochs, history[key], label=key)
+
         ax2.set_title("Curriculum / Masking Schedule")
         ax2.set_xlabel("Epoch")
         ax2.set_ylabel("Value")
