@@ -1,17 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence, Dict
 
 import polars as pl
 import torch
 
-from pgml.data_pipeline.dataset_schema import (
-    DEVICE_TOKEN_TYPE_MAP,
-    DEVICE_TYPE_MAP,
-    EDGE_MEASUREMENT_TYPE_MAP,
-    NODE_MEASUREMENT_TYPE_MAP,
-)
+
+DEVICE_TYPE_MAP: Dict[str, int] = {
+    "load": 0,
+    "generator": 1,
+    "vsource": 2,
+    "injected": 3,
+}
+
+NODE_MEASUREMENT_TYPE_MAP: Dict[str, int] = {
+    "voltage": 0,
+}
+
+EDGE_MEASUREMENT_TYPE_MAP: Dict[str, int] = {
+    "current": 0,
+    "power": 1,
+}
+
+DEVICE_TOKEN_TYPE_MAP: Dict[str, int] = {
+    "param": 0,
+    "spectrum": 1,
+}
 
 
 @dataclass(frozen=True)

@@ -43,7 +43,6 @@ class NodeDeviceFusion(nn.Module):
 
         node_obs_latent = self.obs_encoder(node_observability)
 
-        # FIX: explicitly use device_latent.dtype to prevent AMP index_add_ crashes
         pooled_dtype = device_latent.dtype if device_latent.shape[0] > 0 else node_measurement_latent.dtype
 
         pooled_device = torch.zeros(

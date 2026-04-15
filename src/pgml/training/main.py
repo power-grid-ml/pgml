@@ -5,14 +5,13 @@ import lightning as L
 from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
-    ModelSummary,
     RichProgressBar,
 )
 from lightning.pytorch.loggers import MLFlowLogger
 
 from config import resource_dir
 from pgml.config import PipelineConfig, config_dir
-from pgml.data_pipeline.step_dataloader import get_step_dataloader
+from pgml.data_pipeline.dataloader import get_dataloader
 from pgml.models.state_estimator import MultiModalStateEstimator
 from pgml.training.curriculum import (
     OptimizerGroupConfig,
@@ -69,13 +68,13 @@ def main():
     train_dataset_ids = [2, 3]
     val_dataset_ids = [4]
 
-    train_loader = get_step_dataloader(
+    train_loader = get_dataloader(
         base_data_dir=input_dir,
         dataset_ids=train_dataset_ids,
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
     )
-    val_loader = get_step_dataloader(
+    val_loader = get_dataloader(
         base_data_dir=input_dir,
         dataset_ids=val_dataset_ids,
         batch_size=config.dataloader.batch_size,
@@ -122,7 +121,7 @@ def main():
         ),
         TrainingStage(
             name="ae_masked",
-            start_epoch=50,
+            start_epoch=2,
             train_forward=StageForwardConfig(
                 node_mask_ratio=0.2,
                 edge_mask_ratio=0.2,
@@ -145,7 +144,7 @@ def main():
         ),
         TrainingStage(
             name="gnn_transition",
-            start_epoch=100,
+            start_epoch=4,
             train_forward=StageForwardConfig(
                 node_mask_ratio=0.4,
                 edge_mask_ratio=0.4,
@@ -168,7 +167,7 @@ def main():
         ),
         TrainingStage(
             name="full_state_estimation",
-            start_epoch=150,
+            start_epoch=6,
             train_forward=StageForwardConfig(
                 node_mask_ratio=0.8,
                 edge_mask_ratio=0.8,
@@ -221,7 +220,7 @@ def main():
     ]
 
     trainer = L.Trainer(
-        max_epochs=400,
+        max_epochs=10,
         logger=logger,
         callbacks=callbacks,
         accelerator="auto",
@@ -248,18 +247,15 @@ def main():
     summary_text = evaluator.evaluate(
         engine=engine,
         dataloader=val_loader,
-        output_dir=output_dir,
+        output_path=output_dir / "validation_summary.txt",
     )
-
-    summary_path = output_dir / "validation_summary.txt"
-    summary_path.write_text(summary_text, encoding="utf-8")
 
     if logger is not None and logger.experiment is not None:
         run_id = logger.run_id
         try:
             logger.experiment.log_artifact(run_id, str(history_path))
             logger.experiment.log_artifact(run_id, str(output_dir / "loss_curves.png"))
-            logger.experiment.log_artifact(run_id, str(summary_path))
+            logger.experiment.log_artifact(run_id, str(output_dir / "validation_summary.txt"))
         except Exception:
             pass
 

@@ -50,7 +50,7 @@ class LatentObservabilityMasker(nn.Module):
         masked_latent = torch.where(
             is_observed.unsqueeze(-1),
             latent,
-            self.mask_token.to(latent.dtype).expand(n, -1), # FIX: Match AMP dtype
+            self.mask_token.to(latent.dtype).expand(n, -1),
         )
 
         return masked_latent, indicator

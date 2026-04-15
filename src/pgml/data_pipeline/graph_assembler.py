@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import polars as pl
 import torch
@@ -12,7 +12,7 @@ from pgml.data_pipeline.tokenizer import MeasurementTokenizer
 from pgml.data_pipeline.topology import TopologyCache
 
 
-class StepGraphAssembler:
+class GraphAssembler:
     """
     Assembles one full HeteroData graph per (dataset_id, step).
 
@@ -47,7 +47,7 @@ class StepGraphAssembler:
         self.edge_power_prefixes = edge_power_prefixes
         self.spectrum_prefixes = spectrum_prefixes
 
-    def assemble_step_graph(
+    def assemble_graph(
         self,
         dataset_dir: Path,
         step: int,

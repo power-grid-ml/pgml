@@ -22,8 +22,8 @@ class TokenConditionedDecoder(nn.Module):
 
     This is the first replacement for the simplistic repeated-token decoder.
 
-    #TODO: Upgrade to cross-attention decoding if later experiments show that
-    #      repeated conditioning is insufficient for dense harmonic structure.
+    TODO: Upgrade to cross-attention decoding if later experiments show that
+          repeated conditioning is insufficient for dense harmonic structure.
     """
 
     def __init__(

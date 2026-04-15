@@ -94,10 +94,10 @@ class ValidationEvaluator:
     """
     Computes text-based validation summaries for the full validation set.
 
-    #TODO: Once explicit local decoders/pretraining are introduced, compute true
-    #      encoder/decoder loss separately from graph-conditioned state loss.
-    #TODO: Add static-feature-specific evaluation once static-feature prediction
-    #      tasks are part of the supervised targets.
+    TODO: Once explicit local decoders/pretraining are introduced, compute true
+          encoder/decoder loss separately from graph-conditioned state loss.
+    TODO: Add static-feature-specific evaluation once static-feature prediction
+          tasks are part of the supervised targets.
     """
 
     def __init__(self, device: torch.device | str = "cpu"):
@@ -107,7 +107,7 @@ class ValidationEvaluator:
         self,
         engine,
         dataloader,
-        output_dir: Path,
+        output_path: Path,
         forward_cfg: Optional[StageForwardConfig] = None,
     ) -> str:
         engine.eval()
@@ -279,7 +279,9 @@ class ValidationEvaluator:
             spec_mse = _safe_mean(stats["spec_se"], stats["spec_count"])
             lines.append(f"{dtype:>12s} | param_mse={param_mse:.8f} | spec_mse={spec_mse:.8f}")
 
-        return "\n".join(lines)
+        summary_text = "\n".join(lines)
+        output_path.write_text(summary_text, encoding="utf-8")
+        return summary_text
 
 
 class LossHistoryPlotter:
@@ -319,6 +321,7 @@ class LossHistoryPlotter:
 
         ax.set_title(title)
         ax.set_ylabel("Loss")
+        ax.set_yscale("log")
         ax.legend(loc="upper right", fontsize=8, ncol=2)
         ax.grid(True, alpha=0.3)
 

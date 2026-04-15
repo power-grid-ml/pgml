@@ -7,11 +7,11 @@ from torch.utils.data import DataLoader
 from torch_geometric.loader import DataLoader as PyGDataLoader
 
 from pgml.data_pipeline.tokenizer import MeasurementTokenizer
-from pgml.data_pipeline.step_dataset import StreamingStepDataset
+from pgml.data_pipeline.dataset import StreamingDataset
 from pgml.data_pipeline.topology import TopologyCache
 
 
-def get_step_dataloader(
+def get_dataloader(
     base_data_dir: Path,
     dataset_ids: List[int],
     batch_size: int = 1,
@@ -25,7 +25,7 @@ def get_step_dataloader(
     topology_cache = TopologyCache(base_data_dir)
     tokenizer = MeasurementTokenizer()
 
-    dataset = StreamingStepDataset(
+    dataset = StreamingDataset(
         dataset_dirs=dataset_dirs,
         topology_cache=topology_cache,
         tokenizer=tokenizer,
