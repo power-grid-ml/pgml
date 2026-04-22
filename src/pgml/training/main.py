@@ -66,10 +66,10 @@ def main():
     input_dir = _resolve_rel_abs_path(resource_dir, config.paths.input_dir)
     output_dir = _resolve_rel_abs_path(resource_dir, config.paths.output_dir)
 
-    train_dataset_ids = [2, 3]
-    val_dataset_ids = [4]
+    train_dataset_ids = [2, 3, 4]
+    val_dataset_ids = [5]
 
-    validate_and_sort_all_datasets(input_dir,dataset_ids=train_dataset_ids+val_dataset_ids, verbose=True)
+    #validate_and_sort_all_datasets(input_dir,dataset_ids=train_dataset_ids+val_dataset_ids, verbose=True)
 
     train_loader = get_dataloader(
         base_data_dir=input_dir,
@@ -122,6 +122,29 @@ def main():
                 spectrum_drop_prob=0.0,
                 bypass_gnn=True,
             ),
+            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-5, trainable=True),
+            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-5, trainable=True),
+            gnn=OptimizerGroupConfig(lr=0.0, weight_decay=0.0, trainable=False),
+            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-5, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-5, trainable=True),
+        ),
+        TrainingStage(
+            name="ae_train",
+            start_epoch=5,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.0,
+                edge_mask_ratio=0.0,
+                device_noise_scale=0.0,
+                spectrum_drop_prob=0.0,
+                bypass_gnn=True,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.0,
+                edge_mask_ratio=0.0,
+                device_noise_scale=0.0,
+                spectrum_drop_prob=0.0,
+                bypass_gnn=True,
+            ),
             encoder=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
             fusion=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
             gnn=OptimizerGroupConfig(lr=0.0, weight_decay=0.0, trainable=False),
@@ -129,43 +152,20 @@ def main():
             edge_static_encoder=OptimizerGroupConfig(lr=1e-3, weight_decay=1e-4, trainable=True),
         ),
         TrainingStage(
-            name="ae_masked",
-            start_epoch=2,
-            train_forward=StageForwardConfig(
-                node_mask_ratio=0.2,
-                edge_mask_ratio=0.2,
-                device_noise_scale=0.05,
-                spectrum_drop_prob=0.1,
-                bypass_gnn=True,
-            ),
-            val_forward=StageForwardConfig(
-                node_mask_ratio=0.2,
-                edge_mask_ratio=0.2,
-                device_noise_scale=0.05,
-                spectrum_drop_prob=0.1,
-                bypass_gnn=True,
-            ),
-            encoder=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
-            fusion=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
-            gnn=OptimizerGroupConfig(lr=0.0, weight_decay=0.0, trainable=False),
-            decoder=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
-            edge_static_encoder=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
-        ),
-        TrainingStage(
             name="gnn_transition",
-            start_epoch=4,
+            start_epoch=20,
             train_forward=StageForwardConfig(
-                node_mask_ratio=0.4,
-                edge_mask_ratio=0.4,
-                device_noise_scale=0.05,
-                spectrum_drop_prob=0.2,
+                node_mask_ratio=0.0,
+                edge_mask_ratio=0.0,
+                device_noise_scale=0.0,
+                spectrum_drop_prob=0.0,
                 bypass_gnn=False,
             ),
             val_forward=StageForwardConfig(
-                node_mask_ratio=0.5,
-                edge_mask_ratio=0.5,
-                device_noise_scale=0.05,
-                spectrum_drop_prob=0.2,
+                node_mask_ratio=0.0,
+                edge_mask_ratio=0.0,
+                device_noise_scale=0.00,
+                spectrum_drop_prob=0.0,
                 bypass_gnn=False,
             ),
             encoder=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
@@ -175,27 +175,96 @@ def main():
             edge_static_encoder=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
         ),
         TrainingStage(
-            name="full_state_estimation",
-            start_epoch=6,
+            name="gnn_train",
+            start_epoch=40,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.2,
+                edge_mask_ratio=0.2,
+                device_noise_scale=0.05,
+                spectrum_drop_prob=0.2,
+                bypass_gnn=False,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.2,
+                edge_mask_ratio=0.2,
+                device_noise_scale=0.05,
+                spectrum_drop_prob=0.2,
+                bypass_gnn=False,
+            ),
+            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            gnn=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+        ),
+        TrainingStage(
+            name="gnn_train_half_masked",
+            start_epoch=80,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.5,
+                edge_mask_ratio=0.5,
+                device_noise_scale=0.15,
+                spectrum_drop_prob=0.5,
+                bypass_gnn=False,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.5,
+                edge_mask_ratio=0.5,
+                device_noise_scale=0.15,
+                spectrum_drop_prob=0.5,
+                bypass_gnn=False,
+            ),
+            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            gnn=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+        ),
+        TrainingStage(
+            name="gnn_train_most_masked",
+            start_epoch=100,
             train_forward=StageForwardConfig(
                 node_mask_ratio=0.8,
                 edge_mask_ratio=0.8,
                 device_noise_scale=0.15,
-                spectrum_drop_prob=0.5,
+                spectrum_drop_prob=0.8,
+                bypass_gnn=False,
+            ),
+            val_forward=StageForwardConfig(
+                node_mask_ratio=0.8,
+                edge_mask_ratio=0.8,
+                device_noise_scale=0.15,
+                spectrum_drop_prob=0.8,
+                bypass_gnn=False,
+            ),
+            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
+            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
+            gnn=OptimizerGroupConfig(lr=5e-4, weight_decay=1e-4, trainable=True),
+            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
+        ),
+        TrainingStage(
+            name="gnn_train_final",
+            start_epoch=150,
+            train_forward=StageForwardConfig(
+                node_mask_ratio=0.95,
+                edge_mask_ratio=0.95,
+                device_noise_scale=0.2,
+                spectrum_drop_prob=0.95,
                 bypass_gnn=False,
             ),
             val_forward=StageForwardConfig(
                 node_mask_ratio=0.95,
                 edge_mask_ratio=0.95,
                 device_noise_scale=0.2,
-                spectrum_drop_prob=0.8,
+                spectrum_drop_prob=0.95,
                 bypass_gnn=False,
             ),
-            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
-            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
+            fusion=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
             gnn=OptimizerGroupConfig(lr=2e-4, weight_decay=1e-4, trainable=True),
-            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
-            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=True),
+            decoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
+            edge_static_encoder=OptimizerGroupConfig(lr=1e-4, weight_decay=1e-4, trainable=False),
         ),
     ])
 
@@ -229,7 +298,7 @@ def main():
     ]
 
     trainer = L.Trainer(
-        max_epochs=10,
+        max_epochs=200,
         logger=logger,
         callbacks=callbacks,
         accelerator="auto",
