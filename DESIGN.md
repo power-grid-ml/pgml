@@ -1,303 +1,86 @@
+# DESIGN.md: Power Grid Multimodal State Estimation
 
-# Implementation Details: Power Grid Multimodal State Estimation 
+## 1. Purpose & Vision
+This repository implements a **hierarchical, multimodal machine learning architecture** for power-system state estimation. 
 
-## Purpose
+**Ultimate Goal:** Identify and attribute power-quality disturbances (e.g., harmonic distortions) to specific devices under partial grid observability.
 
-This repository implements a hierarchical machine learning architecture for power-system state estimation under partial observability, uncertain pseudo-measurements, and variable graph structure.
-
-The target use case is power-quality-aware state estimation with:
-- variable-size grids
-- variable numbers of nodes and edges
-- variable numbers of harmonic components
-- variable numbers of attached devices per node
-- explicit device-level modeling of loads, generators, voltage sources, and later direct injected disturbances
-
-The architecture is designed to preserve device identity and harmonic structure while allowing graph-based inference over the physical network topology.
+**Multimodal Vision:** The architecture uses a unified latent space. In the future, this allows the model to ingest both frequency-domain (harmonics) and time-domain (oscilloscope/wavelet) signals, fuse them across a physical grid topology, and reconstruct missing waveforms anywhere in the grid.
 
 ---
 
-## Core Strategy
+## 2. Core Strategy & Pipeline
 
-### Problem
-Conventional models using fixed vectors of harmonic components suffer from several limitations:
-- high-magnitude components dominate training loss
-- fixed harmonic counts require padding or rigid input layouts
-- oscilloscope-like or richer signal representations are hard to integrate
-- node-level aggregation of attached devices loses physically relevant detail
-- disturbance attribution to specific devices becomes difficult or impossible
+The pipeline operates in three distinct levels: **Token** $\to$ **Entity** $\to$ **Graph**.
 
-### Solution
-The implemented strategy is:
-
-1. represent each simulation step as one full graph sample
-2. represent node and edge measurements as variable-length token sets
-3. represent attached devices explicitly rather than aggregating them
-4. encode local tokens into latent vectors
-5. fuse device context into node context
-6. run a graph neural network over the physical topology
-7. decode node, edge, and device targets
-8. train with curriculum-based masking and noisy pseudo-measurements
+1.  **Tokenization (Data Layer):** Raw simulation steps are loaded from chunked parquet files. Measurements are converted into padded sets of tokens (Real/Imaginary complex values).
+2.  **Local Encoding (Entity Layer):** Local neural networks encode variable-length token sets into fixed-size latent vectors (`hidden_dim`) for Nodes, Edges, and Devices independently.
+3.  **Graph Inference (Graph Layer):** Devices are explicitly fused into their attached nodes. A Graph Neural Network (GNN) propagates information across the grid topology to infer missing states.
+4.  **Decoding:** The updated latent vectors are decoded back into physical values (voltages, currents, spectra).
 
 ---
 
-## Data Representation
+## 3. Data Representation (`HeteroData`)
 
-One `HeteroData` object corresponds to one `(dataset_id, step)`.
+One PyG `HeteroData` object corresponds to **one full simulation step**.
 
-### Node store
-Contains:
-- static node features
-- node measurement tokens
-- node voltage targets
-
-### Edge store
-Contains:
-- static edge features
-- edge measurement tokens
-- edge current/power targets
-
-### Device store
-Contains:
-- explicit static device features
-- device-to-node mapping
-- parameter tokens
-- spectrum tokens
-- device-specific targets
-
-This design preserves:
-- multiplicity of devices per node
-- device identity
-- device type
-- harmonic spectrum information
+*   **Node Store (`graph["node"]`):** Static features, Measurement Tokens, Target Tokens.
+*   **Edge Store (`graph[("node", "physical", "node")]`):** Static features, Measurement Tokens, Target Tokens.
+*   **Device Store (`graph["device"]`):** Static features, Device Type, Parameter Tokens, Spectrum Tokens.
+*   **Device Attachment (`graph[("device", "attached_to", "node")]`):** Bipartite edge mapping preserving explicit device identity without aggregating them into node features.
 
 ---
 
-## Software Architecture
+## 4. Software Architecture
 
-### Data pipeline
-Main components:
-- `topology_export.py`
-- `topology.py`
-- `measurement_tokenizer.py`
-- `step_graph_assembler.py`
-- `step_dataset.py`
-- `dataloader_step.py`
+### Data Pipeline (`pgml/data_pipeline/`)
+*   `step_graph_stream.py` / `multi_table_step_stream.py`: Streams parquet rows in out-of-core chunks to prevent memory blowups.
+*   `graph_assembler.py`: Assembles aligned parquet rows into PyG `HeteroData` objects.
+*   `tokenizer.py`: Converts complex electrical values into PyTorch token batches.
 
-### Model stack
-Main components:
-- `token_encoders.py`
-- `masking.py`
-- `fusion.py`
-- `graph_state_estimator.py`
-- `decoders.py`
-- `multimodal_state_estimator.py`
+### Model Stack (`pgml/models/`)
+*   `token_encoders.py`: Local MLPs with Masked Mean Pooling converting tokens to latent vectors.
+*   `masking.py`: Applies Latent Observability Masking (Nodes/Edges) and Pseudo-Measurement Noising (Devices).
+*   `fusion.py`: Merges Node Latents, Static Features, and pooled Device Latents.
+*   `graph_state_estimator.py`: `TransformerConv` GNN.
+*   `decoders.py`: `TokenConditionedDecoder` that predicts harmonic-specific values based on target frequency and type embeddings.
+*   `multimodal_state_estimator.py`: The orchestrator class wiring Encoders $\to$ Masking $\to$ Fusion $\to$ GNN $\to$ Decoders.
 
-### Training and evaluation
-Main components:
-- `multitask_engine.py`
-- `evaluation.py`
-- `main.py`
+### Training (`pgml/training/`)
+*   `curriculum.py`: Defines `TrainingStage` schedules (Bypass GNN, Mask Ratios, LRs).
+*   `multitask_engine.py`: Lightning Module handling the loss calculations and optimizer groups.
+*   `evaluation.py`: Computes device-type and frequency-specific validation reports.
 
 ---
 
-## Model Overview
+## 5. Training Curriculum (Staged Training)
 
-### 1. Local encoders
-Three local encoders transform token sets into fixed-size latent vectors:
-- node measurement encoder
-- edge measurement encoder
-- device encoder
+Training is controlled by a `TrainingCurriculum` consisting of `TrainingStage`s. 
 
-Current implementation uses:
-- token-value MLP
-- frequency embedding MLP
-- token-type embedding
-- masked mean pooling
-
-### 2. Masking and pseudo-measurement corruption
-The training objective follows a curriculum learning strategy.
-
-#### Node and edge masking
-A growing fraction of node and edge measurement latents is replaced by learnable mask tokens.
-
-This teaches the graph model to infer the full state from only a few live measurements.
-
-#### Device corruption
-Device parameter inputs are corrupted with Gaussian noise.
-
-Device spectra can be dropped and replaced with an unknown-spectrum token.
-
-This simulates inaccurate pseudo-measurements and missing harmonic priors.
-
-### 3. Node-device fusion
-Explicit device latents are pooled to the node they are attached to and fused with:
-- node static features
-- node measurement latents
-- observability indicators
-
-### 4. Graph state estimator
-A lightweight edge-aware graph neural network propagates information through the physical network.
-
-Current implementation uses `TransformerConv`.
-
-### 5. Decoders
-The model predicts:
-- node dynamic voltage tokens
-- edge dynamic current/power tokens
-- device parameter tokens
-- device spectrum tokens
-
-Current decoder implementation is token-conditioned using target frequency and target type.
+1.  **Autoencoder Pretraining (`bypass_gnn=True`):** The GNN is skipped. Local encoders and decoders learn to map raw signals to a stable latent space and back. Masking is 0%.
+2.  **Masked Autoencoder (`bypass_gnn=True`):** Node/Edge masks and Device noise are slowly introduced to teach the encoders robust representations.
+3.  **Graph Transition (`bypass_gnn=False`):** The GNN is unfrozen. The model learns to use grid topology to correct the masked/noisy local encodings.
+4.  **Harsh Observability:** Masking reaches realistic levels (e.g., 90% unmeasured nodes). The model performs true state estimation.
 
 ---
 
-## Inputs and Outputs
-
-## Inputs
-
-### Static inputs
-- node topology features
-- edge topology features
-- explicit static device features
-- device-to-node mappings
-
-### Dynamic inputs
-- node harmonic voltage measurements
-- edge harmonic current/power measurements
-- device parameters
-- device spectra
-
-### Curriculum / observability inputs
-- node masking ratio
-- edge masking ratio
-- device noise scale
-- spectrum drop probability
-
-## Outputs
-
-### Node outputs
-- reconstructed / estimated harmonic voltage tokens
-
-### Edge outputs
-- reconstructed / estimated harmonic current or power tokens
-
-### Device outputs
-- reconstructed / estimated parameter tokens
-- reconstructed / estimated spectrum tokens
+## 6. Current Simplifications & Technical Debt
+*   *Time-Domain Signals:* Not yet implemented. Waiting for CWT-ViT encoders.
+*   *Device Pooling:* Node-Device fusion uses simple sum/mean pooling. Should be upgraded to Attention.
+*   *Decoders:* `TokenConditionedDecoder` uses `.expand()`. A true Cross-Attention sequence decoder may be faster and more expressive.
 
 ---
 
-## Training Objective
+## 7. Important TODOs
 
-The current training engine logs:
+### High Priority (Scientific)
+1.  **Device-Type-Aware Loss Masks:** Ensure structurally irrelevant padding outputs do not contribute to the loss (e.g., a generator should not be penalized for getting a load parameter wrong).
+2.  **Explicit Injected-Device Support:** Make direct node disturbance injections first-class entities in the device table.
 
-- total loss
-- encoder/decoder loss proxy
-- state estimator loss proxy
-- node loss
-- edge loss
-- device parameter loss
-- device spectrum loss
+### Medium Priority (Performance)
+3.  **Pre-collated PyG Datasets:** Save generated PyG batches to disk as `.pt` files to bypass Polars and CPU collation during training, drastically speeding up epochs.
+4.  **Target Memory Duplication:** Stop cloning identical input/target tensors if memory pressure remains critical. 
 
-At the current implementation stage:
-- encoder/decoder loss and state estimator loss are still numerically identical proxies
-- a stricter separation will be added later when local reconstruction and graph-estimation losses are split more explicitly
-
----
-
-## Evaluation
-
-After training, the pipeline produces:
-- `training_history.json`
-- `loss_curves.png`
-- `validation_summary.txt`
-
-### Validation summary
-Includes:
-- overall losses
-- dynamic loss by target type
-- frequency-wise loss summaries
-- device-type-wise loss summaries
-
-### Loss plot
-Shows:
-- train/validation total loss
-- train/validation reconstruction loss
-- train/validation state loss
-- train/validation node/edge/device losses
-- curriculum schedule:
-  - node mask ratio
-  - edge mask ratio
-  - device noise scale
-  - spectrum drop probability
-
----
-
-## Current Simplifications
-
-The current implementation is structurally aligned with the final architecture, but several parts are intentionally lightweight:
-
-1. local token encoders use masked mean pooling instead of attention
-2. node-device fusion uses mean pooling instead of attention
-3. decoder uses token-conditioned MLP decoding instead of cross-attention or transformer decoding
-4. direct injected disturbances are not yet explicit device entities
-5. device loss is not yet masked by semantic validity per device type
-6. static features are conditioning inputs only, not supervised targets
-
-These simplifications are suitable for local debugging and format validation on small hardware.
-
----
-
-## Important TODOs
-
-### Highest priority
-- add explicit injected-device entities for direct disturbance modeling
-- add device-type-aware loss masks
-- split encoder/decoder loss from graph state estimator loss more rigorously
-- upgrade node-device fusion to attention-based fusion
-- evaluate cross-attention or transformer-based token decoders
-
-### Medium priority
-- improve frequency embeddings
-- enrich token payloads with magnitude/angle or metadata
-- add richer device noise models
-- add topology-aware sensor masking policies
-
-### Lower priority
-- preserve raw categorical identifiers for easier inverse mapping and reporting
-- improve step indexing robustness across all data tables
-- extend evaluation to static prediction tasks if those become supervised outputs
-
----
-
-## Running Training
-
-The training entry point is:
-
-```bash
-python main.py
-```
-
-This will:
-- load the new step-wise dataset
-- build the hierarchical graph model
-- train with curriculum masking/noising
-- save history, plots, and validation summaries
-- optionally log metrics and artifacts to MLflow
-
-## Scientific Motivation
-
-The overall modeling philosophy is:
-
-- preserve physically meaningful structure
-- avoid lossy aggregation of devices
-- learn under realistic partial observability
-- support variable graph sizes and variable harmonic resolutions
-- enable eventual disturbance attribution to individual devices
-
-This architecture is intended as a scalable foundation for:
-
-- dense neural state estimators
-- graph neural state estimators
-- later graph-transformer-based estimators
-- eventual multimodal expansion with oscilloscope-derived latent features
+### Future Vision (Multimodal)
+5.  Implement continuous wavelet transform (CWT) data loader for time-domain signals.
+6.  Implement ResNet/ViT Time-Domain Encoder mapping to the shared `hidden_dim` latent space.
