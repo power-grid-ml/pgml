@@ -34,7 +34,7 @@ def _infer_model_dims_from_batch(batch) -> dict:
         "edge_static_dim": batch[edge_type].static_edge_attr.shape[1],
         "device_static_dim": batch["device"].static_x.shape[1],
         "node_value_dim": batch["node"].meas_value.shape[-1],
-        "edge_value_dim": batch["edge"].meas_value.shape[-1],
+        "edge_value_dim": batch[edge_type].meas_value.shape[-1],
         "device_param_value_dim": batch["device"].param_value.shape[-1],
         "device_spec_value_dim": batch["device"].spec_value.shape[-1],
     }

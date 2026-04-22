@@ -60,39 +60,37 @@ class MeasurementTokenizer:
     #      flags, or learned metadata embeddings if later needed.
     """
 
-    def polar_to_rect(
-        self,
-        magnitudes: torch.Tensor,
-        angles: torch.Tensor,
-    ) -> torch.Tensor:
+    def __init__(
+            self,
+            max_node_tokens: int = 60,
+            max_edge_tokens: int = 60,
+            max_device_param_tokens: int = 10,
+            max_device_spec_tokens: int = 60
+    ):
+        self.max_node_tokens = max_node_tokens
+        self.max_edge_tokens = max_edge_tokens
+        self.max_device_param_tokens = max_device_param_tokens
+        self.max_device_spec_tokens = max_device_spec_tokens
+
+    def polar_to_rect(self, magnitudes: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
         real_parts = magnitudes * torch.cos(angles)
         imag_parts = magnitudes * torch.sin(angles)
-
-        rect_tensor = torch.empty(
-            (magnitudes.shape[0], magnitudes.shape[1] * 2),
-            dtype=torch.float32
-        )
+        rect_tensor = torch.empty((magnitudes.shape[0], magnitudes.shape[1] * 2), dtype=torch.float32)
         rect_tensor[:, 0::2] = real_parts
         rect_tensor[:, 1::2] = imag_parts
         return rect_tensor
 
     def pad_token_sequences(
-        self,
-        token_lists: List[torch.Tensor],
-        freq_lists: List[torch.Tensor],
-        type_lists: List[torch.Tensor],
-        value_dim: int,
+            self,
+            token_lists: List[torch.Tensor],
+            freq_lists: List[torch.Tensor],
+            type_lists: List[torch.Tensor],
+            value_dim: int,
+            max_tokens_override: int,
     ) -> TokenizedBatch:
         num_entities = len(token_lists)
-        max_tokens = max((tokens.shape[0] for tokens in token_lists), default=0)
-
-        if max_tokens == 0:
-            return TokenizedBatch(
-                value=torch.zeros((num_entities, 0, value_dim), dtype=torch.float32),
-                frequency=torch.zeros((num_entities, 0), dtype=torch.float32),
-                type_id=torch.zeros((num_entities, 0), dtype=torch.long),
-                mask=torch.zeros((num_entities, 0), dtype=torch.bool),
-            )
+        # FIX: Pad to global max_tokens so all graphs match shapes for PyG batching
+        max_tokens = max_tokens_override
 
         value = torch.zeros((num_entities, max_tokens, value_dim), dtype=torch.float32)
         frequency = torch.zeros((num_entities, max_tokens), dtype=torch.float32)
@@ -100,20 +98,15 @@ class MeasurementTokenizer:
         mask = torch.zeros((num_entities, max_tokens), dtype=torch.bool)
 
         for i, (tok, freq, typ) in enumerate(zip(token_lists, freq_lists, type_lists)):
-            n = tok.shape[0]
+            n = min(tok.shape[0], max_tokens)  # truncate if exceeds limit
             if n == 0:
                 continue
-            value[i, :n] = tok
-            frequency[i, :n] = freq
-            type_id[i, :n] = typ
+            value[i, :n] = tok[:n]
+            frequency[i, :n] = freq[:n]
+            type_id[i, :n] = typ[:n]
             mask[i, :n] = True
 
-        return TokenizedBatch(
-            value=value,
-            frequency=frequency,
-            type_id=type_id,
-            mask=mask,
-        )
+        return TokenizedBatch(value=value, frequency=frequency, type_id=type_id, mask=mask)
 
     def tokenize_node_measurements(
         self,
@@ -172,12 +165,7 @@ class MeasurementTokenizer:
             freq_lists.append(freq_tensor)
             type_lists.append(type_tensor)
 
-        return self.pad_token_sequences(
-            token_lists=token_lists,
-            freq_lists=freq_lists,
-            type_lists=type_lists,
-            value_dim=value_dim,
-        )
+        return self.pad_token_sequences(token_lists, freq_lists, type_lists, value_dim, self.max_node_tokens)
 
     def tokenize_edge_measurements(
         self,
@@ -247,12 +235,7 @@ class MeasurementTokenizer:
             freq_lists.append(freq_tensor)
             type_lists.append(type_tensor)
 
-        return self.pad_token_sequences(
-            token_lists=token_lists,
-            freq_lists=freq_lists,
-            type_lists=type_lists,
-            value_dim=value_dim,
-        )
+        return self.pad_token_sequences(token_lists, freq_lists, type_lists, value_dim, self.max_edge_tokens)
 
     def tokenize_device_parameters(
         self,
@@ -283,6 +266,7 @@ class MeasurementTokenizer:
                 freq_lists=[torch.zeros((0,), dtype=torch.float32) for _ in range(num_devices)],
                 type_lists=[torch.zeros((0,), dtype=torch.long) for _ in range(num_devices)],
                 value_dim=1,
+                max_tokens_override=self.max_device_param_tokens
             )
 
         load_cols = ["p1", "q1", "p2", "q2", "p3", "q3"]
@@ -352,12 +336,7 @@ class MeasurementTokenizer:
             freq_lists.append(freq_tensor)
             type_lists.append(type_tensor)
 
-        return self.pad_token_sequences(
-            token_lists=token_lists,
-            freq_lists=freq_lists,
-            type_lists=type_lists,
-            value_dim=1,
-        )
+        return self.pad_token_sequences(token_lists, freq_lists, type_lists, 1, self.max_device_param_tokens)
 
     def tokenize_device_spectra(
         self,
@@ -389,6 +368,7 @@ class MeasurementTokenizer:
                 freq_lists=[torch.zeros((0,), dtype=torch.float32) for _ in range(num_devices)],
                 type_lists=[torch.zeros((0,), dtype=torch.long) for _ in range(num_devices)],
                 value_dim=value_dim,
+                max_tokens_override=self.max_device_spec_tokens
             )
 
         parent_type_map = {
@@ -446,9 +426,4 @@ class MeasurementTokenizer:
             freq_lists.append(freq_tensor)
             type_lists.append(type_tensor)
 
-        return self.pad_token_sequences(
-            token_lists=token_lists,
-            freq_lists=freq_lists,
-            type_lists=type_lists,
-            value_dim=value_dim,
-        )
+        return self.pad_token_sequences(token_lists, freq_lists, type_lists, value_dim, self.max_device_spec_tokens)

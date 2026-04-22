@@ -173,28 +173,30 @@ class MultiTaskStateEstimationEngine(L.LightningModule):
         cfg = self.current_train_forward if phase == "train" else self.current_val_forward
         outputs = self._forward_with_cfg(batch, cfg)
 
+        edge_type = ("node", "physical", "node")
+
         loss_node = self._masked_mse(
             outputs["pred_node_value"],
-            batch["target_node"].voltage_value,
-            batch["target_node"].voltage_mask,
+            batch["node"].target_voltage_value,
+            batch["node"].target_voltage_mask,
         )
 
         loss_edge = self._masked_mse(
             outputs["pred_edge_value"],
-            batch["target_edge"].current_value,
-            batch["target_edge"].current_mask,
+            batch[edge_type].target_current_value,
+            batch[edge_type].target_current_mask,
         )
 
         loss_device_param = self._masked_mse(
             outputs["pred_device_param"],
-            batch["target_device"].param_value,
-            batch["target_device"].param_mask,
+            batch["device"].target_param_value,
+            batch["device"].target_param_mask,
         )
 
         loss_device_spec = self._masked_mse(
             outputs["pred_device_spec"],
-            batch["target_device"].spec_value,
-            batch["target_device"].spec_mask,
+            batch["device"].target_spec_value,
+            batch["device"].target_spec_mask,
         )
 
         loss_recon = loss_node + loss_edge + loss_device_param + loss_device_spec

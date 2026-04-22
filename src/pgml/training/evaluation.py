@@ -104,16 +104,19 @@ class ValidationEvaluator:
         self.device = device
 
     def evaluate(
-        self,
-        engine,
-        dataloader,
-        output_path: Path,
-        forward_cfg: Optional[StageForwardConfig] = None,
+            self,
+            engine,
+            dataloader,
+            output_path: Path,
+            forward_cfg: Optional[StageForwardConfig] = None,
     ) -> str:
         engine.eval()
 
         if forward_cfg is None:
             forward_cfg = engine.current_val_forward
+
+        edge_type = ("node", "physical", "node")
+        device_attach_type = ("device", "attached_to", "node")
 
         totals = defaultdict(float)
 
@@ -143,23 +146,23 @@ class ValidationEvaluator:
 
                 node_se, node_count = _masked_squared_error(
                     outputs["pred_node_value"],
-                    batch["target_node"].voltage_value,
-                    batch["target_node"].voltage_mask,
+                    batch["node"].target_voltage_value,
+                    batch["node"].target_voltage_mask,
                 )
                 edge_se, edge_count = _masked_squared_error(
                     outputs["pred_edge_value"],
-                    batch["target_edge"].current_value,
-                    batch["target_edge"].current_mask,
+                    batch[edge_type].target_current_value,
+                    batch[edge_type].target_current_mask,
                 )
                 dev_param_se, dev_param_count = _masked_squared_error(
                     outputs["pred_device_param"],
-                    batch["target_device"].param_value,
-                    batch["target_device"].param_mask,
+                    batch["device"].target_param_value,
+                    batch["device"].target_param_mask,
                 )
                 dev_spec_se, dev_spec_count = _masked_squared_error(
                     outputs["pred_device_spec"],
-                    batch["target_device"].spec_value,
-                    batch["target_device"].spec_mask,
+                    batch["device"].target_spec_value,
+                    batch["device"].target_spec_mask,
                 )
 
                 totals["node_se"] += node_se
@@ -174,33 +177,33 @@ class ValidationEvaluator:
                 _accumulate_by_frequency(
                     freq_node,
                     outputs["pred_node_value"],
-                    batch["target_node"].voltage_value,
-                    batch["target_node"].voltage_mask,
-                    batch["target_node"].voltage_frequency,
+                    batch["node"].target_voltage_value,
+                    batch["node"].target_voltage_mask,
+                    batch["node"].target_voltage_frequency,
                 )
                 _accumulate_by_frequency(
                     freq_edge,
                     outputs["pred_edge_value"],
-                    batch["target_edge"].current_value,
-                    batch["target_edge"].current_mask,
-                    batch["target_edge"].current_frequency,
+                    batch[edge_type].target_current_value,
+                    batch[edge_type].target_current_mask,
+                    batch[edge_type].target_current_frequency,
                 )
                 _accumulate_by_frequency(
                     freq_device_spec,
                     outputs["pred_device_spec"],
-                    batch["target_device"].spec_value,
-                    batch["target_device"].spec_mask,
-                    batch["target_device"].spec_frequency,
+                    batch["device"].target_spec_value,
+                    batch["device"].target_spec_mask,
+                    batch["device"].target_spec_frequency,
                 )
 
                 _accumulate_by_device_type(
                     device_type_stats,
                     outputs["pred_device_param"],
-                    batch["target_device"].param_value,
-                    batch["target_device"].param_mask,
+                    batch["device"].target_param_value,
+                    batch["device"].target_param_mask,
                     outputs["pred_device_spec"],
-                    batch["target_device"].spec_value,
-                    batch["target_device"].spec_mask,
+                    batch["device"].target_spec_value,
+                    batch["device"].target_spec_mask,
                     batch["device"].device_type,
                 )
 
