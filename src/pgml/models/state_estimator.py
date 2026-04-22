@@ -112,6 +112,7 @@ class MultiModalStateEstimator(nn.Module):
             param_value=batch["device"].param_value,
             param_mask=batch["device"].param_mask,
             spec_value=batch["device"].spec_value,
+            spec_mask=batch["device"].target_spec_mask,
             noise_scale=device_noise_scale,
             spectrum_drop_prob=spectrum_drop_prob,
         )
