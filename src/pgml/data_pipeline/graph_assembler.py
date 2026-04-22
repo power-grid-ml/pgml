@@ -1,34 +1,20 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Dict
-
 import polars as pl
 import torch
 from torch_geometric.data import HeteroData
 
 from pgml.data_pipeline.tokenizer import MeasurementTokenizer
+from pgml.data_pipeline.multi_table_step_stream import StepTableBundle
 from pgml.data_pipeline.topology import TopologyCache
 
 
 class GraphAssembler:
     """
-    Assembles one full HeteroData graph per (dataset_id, step).
+    Assembles one full HeteroData graph from a streamed StepTableBundle.
 
-    The graph contains:
-    - static topology
-    - node measurement tokens
-    - edge measurement tokens
-    - explicit device entities with parameter/spectrum tokens
-    - parallel target tensors for supervised learning
-
-    First implementation principle:
-    Inputs and targets are identical clean tensors. Masking/noise injection will
-    be introduced later as a dedicated training-time module.
-
-    #TODO: Add dedicated noisy-input / clean-target separation once masking
-    #      modules are introduced for node/edge/device inference training.
+    This version is compatible with true chunked streaming and no longer performs
+    any parquet I/O itself.
     """
 
     def __init__(
@@ -47,27 +33,17 @@ class GraphAssembler:
         self.edge_power_prefixes = edge_power_prefixes
         self.spectrum_prefixes = spectrum_prefixes
 
-    def assemble_graph(
-        self,
-        dataset_dir: Path,
-        step: int,
-    ) -> HeteroData:
-        metadata = self._read_metadata(dataset_dir)
-        topology_id = int(metadata["topology_id"])
-        dataset_id = int(metadata.get("dataset_id", self._infer_dataset_id(dataset_dir)))
-
-        base_graph = self.topology_cache.get_topology(topology_id)
-
-        node_df = self._read_step_table(dataset_dir / "node_data" / "data.parquet", step)
-        edge_df = self._read_step_table(dataset_dir / "edge_data" / "data.parquet", step)
-
-        load_param_df = self._read_step_table(dataset_dir / "load_parameters" / "data.parquet", step)
-        gen_param_df = self._read_step_table(dataset_dir / "generator_parameters" / "data.parquet", step)
-        vsource_param_df = self._read_step_table(dataset_dir / "vsource_parameters" / "data.parquet", step)
-        injected_param_df = self._read_step_table(dataset_dir / "injected_error_parameters" / "data.parquet", step)
-        spectrum_df = self._read_step_table(dataset_dir / "spectrum" / "data.parquet", step)
-
+    def assemble_graph(self, bundle: StepTableBundle) -> HeteroData:
+        base_graph = self.topology_cache.get_topology(bundle.topology_id)
         graph = base_graph.clone()
+
+        node_df = bundle.tables["node_data"]
+        edge_df = bundle.tables["edge_data"]
+        load_param_df = bundle.tables["load_parameters"]
+        gen_param_df = bundle.tables["generator_parameters"]
+        vsource_param_df = bundle.tables["vsource_parameters"]
+        injected_param_df = bundle.tables["injected_error_parameters"]
+        spectrum_df = bundle.tables["spectrum"]
 
         # -------------------------
         # Node tokens
@@ -84,7 +60,6 @@ class GraphAssembler:
         graph["node"].meas_type = node_tokens.type_id
         graph["node"].meas_mask = node_tokens.mask
 
-        # Current implementation uses same clean tensors as targets
         graph["target_node"].voltage_value = node_tokens.value.clone()
         graph["target_node"].voltage_frequency = node_tokens.frequency.clone()
         graph["target_node"].voltage_type = node_tokens.type_id.clone()
@@ -164,45 +139,11 @@ class GraphAssembler:
         # -------------------------
         # Graph metadata
         # -------------------------
-        graph.dataset_id = torch.tensor([dataset_id], dtype=torch.long)
-        graph.topology_id = torch.tensor([topology_id], dtype=torch.long)
-        graph.step = torch.tensor([step], dtype=torch.long)
+        graph.dataset_id = torch.tensor([bundle.dataset_id], dtype=torch.long)
+        graph.topology_id = torch.tensor([bundle.topology_id], dtype=torch.long)
+        graph.step = torch.tensor([bundle.step], dtype=torch.long)
 
         return graph
-
-    def list_steps(self, dataset_dir: Path) -> list[int]:
-        """
-        Uses node_data as the canonical source of available simulation steps.
-
-        #TODO: If future datasets contain missing node_data for some valid steps,
-        #      build the step index across all available tables instead.
-        """
-        file_path = dataset_dir / "node_data" / "data.parquet"
-        if not file_path.exists():
-            return []
-
-        df = pl.read_parquet(file_path, columns=["step"])
-        return sorted(df["step"].unique().cast(pl.Int64).to_list())
-
-    def _read_metadata(self, dataset_dir: Path) -> Dict:
-        with open(dataset_dir / "metadata.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    def _infer_dataset_id(self, dataset_dir: Path) -> int:
-        name = dataset_dir.name
-        if name.startswith("dataset_"):
-            return int(name.split("_")[-1])
-        raise ValueError(f"Could not infer dataset_id from directory name: {dataset_dir}")
-
-    def _read_step_table(self, file_path: Path, step: int) -> pl.DataFrame:
-        if not file_path.exists():
-            return pl.DataFrame()
-
-        df = pl.read_parquet(file_path)
-        if "step" not in df.columns:
-            return pl.DataFrame()
-
-        return df.filter(pl.col("step") == step)
 
     def _merge_parameter_tables(
         self,
@@ -219,5 +160,4 @@ class GraphAssembler:
         if not dfs:
             return pl.DataFrame()
 
-        # Diagonal concat keeps all columns
         return pl.concat(dfs, how="diagonal")

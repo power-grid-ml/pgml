@@ -10,6 +10,7 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import MLFlowLogger
 
 from config import resource_dir
+from data_pipeline.preprocess_sort_parquet_by_step import validate_and_sort_all_datasets
 from pgml.config import PipelineConfig, config_dir
 from pgml.data_pipeline.dataloader import get_dataloader
 from pgml.models.state_estimator import MultiModalStateEstimator
@@ -68,17 +69,25 @@ def main():
     train_dataset_ids = [2, 3]
     val_dataset_ids = [4]
 
+    validate_and_sort_all_datasets(input_dir,dataset_ids=train_dataset_ids+val_dataset_ids, verbose=True)
+
     train_loader = get_dataloader(
         base_data_dir=input_dir,
         dataset_ids=train_dataset_ids,
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
+        chunk_size_rows=config.dataloader.chunk_size_rows,
+        persistent_workers=True,
+        prefetch_factor=1,
     )
     val_loader = get_dataloader(
         base_data_dir=input_dir,
         dataset_ids=val_dataset_ids,
         batch_size=config.dataloader.batch_size,
         num_workers=config.dataloader.num_workers,
+        chunk_size_rows=config.dataloader.chunk_size_rows,
+        persistent_workers=True,
+        prefetch_factor=1,
     )
 
     sample_batch = next(iter(train_loader))
