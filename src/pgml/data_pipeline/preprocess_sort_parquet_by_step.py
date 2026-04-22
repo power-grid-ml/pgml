@@ -25,7 +25,7 @@ def _read_step_column(file_path: Path) -> Optional[pl.Series]:
     if "step" not in schema_names:
         return None
 
-    return pl.scan_parquet(file_path).select("step").collect(streaming=True)["step"]
+    return pl.scan_parquet(file_path).select("step").collect(engine="streaming")["step"]
 
 
 def is_sorted_by_step(file_path: Path) -> bool:
@@ -68,7 +68,7 @@ def sort_parquet_by_step(
     if secondary_sort_columns:
         sort_cols.extend([c for c in secondary_sort_columns if c in schema_names])
 
-    df = lf.collect(streaming=True).sort(sort_cols)
+    df = lf.collect(engine="streaming").sort(sort_cols)
 
     target_path = file_path if overwrite else file_path.with_name(f"{file_path.stem}_sorted{file_path.suffix}")
     df.write_parquet(target_path)
