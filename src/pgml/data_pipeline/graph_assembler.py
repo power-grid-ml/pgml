@@ -34,8 +34,8 @@ class GraphAssembler:
         self.spectrum_prefixes = spectrum_prefixes
 
     def assemble_graph(self, bundle: StepTableBundle) -> HeteroData:
-        base_graph = self.topology_cache.get_topology(bundle.topology_id)
-        graph = base_graph.clone()
+        # TopologyCache already returns a clone, no need to clone again.
+        graph = self.topology_cache.get_topology(bundle.topology_id)
 
         node_df = bundle.tables["node_data"]
         edge_df = bundle.tables["edge_data"]
@@ -48,7 +48,7 @@ class GraphAssembler:
         # -------------------------
         # Node tokens
         # -------------------------
-        node_ids = graph["node"].node_id.tolist()
+        node_ids = graph["node"].node_id.numpy()
         node_tokens = self.tokenizer.tokenize_node_measurements(
             df=node_df, entity_ids=node_ids, feature_prefixes=self.node_feature_prefixes,
         )
@@ -58,16 +58,16 @@ class GraphAssembler:
         graph["node"].meas_type = node_tokens.type_id
         graph["node"].meas_mask = node_tokens.mask
 
-        graph["node"].target_voltage_value = node_tokens.value.clone()
-        graph["node"].target_voltage_frequency = node_tokens.frequency.clone()
-        graph["node"].target_voltage_type = node_tokens.type_id.clone()
-        graph["node"].target_voltage_mask = node_tokens.mask.clone()
+        graph["node"].target_voltage_value = node_tokens.value
+        graph["node"].target_voltage_frequency = node_tokens.frequency
+        graph["node"].target_voltage_type = node_tokens.type_id
+        graph["node"].target_voltage_mask = node_tokens.mask
 
         # -------------------------
         # Edge tokens
         # -------------------------
         edge_type = ("node", "physical", "node")
-        edge_ids = graph[edge_type].edge_id.tolist()
+        edge_ids = graph[edge_type].edge_id.numpy()
         edge_tokens = self.tokenizer.tokenize_edge_measurements(
             df=edge_df, entity_ids=edge_ids, current_prefixes=self.edge_current_prefixes,
             power_prefixes=self.edge_power_prefixes,
@@ -78,10 +78,10 @@ class GraphAssembler:
         graph[edge_type].meas_type = edge_tokens.type_id
         graph[edge_type].meas_mask = edge_tokens.mask
 
-        graph[edge_type].target_current_value = edge_tokens.value.clone()
-        graph[edge_type].target_current_frequency = edge_tokens.frequency.clone()
-        graph[edge_type].target_current_type = edge_tokens.type_id.clone()
-        graph[edge_type].target_current_mask = edge_tokens.mask.clone()
+        graph[edge_type].target_current_value = edge_tokens.value
+        graph[edge_type].target_current_frequency = edge_tokens.frequency
+        graph[edge_type].target_current_type = edge_tokens.type_id
+        graph[edge_type].target_current_mask = edge_tokens.mask
 
         # -------------------------
         # Device parameter tokens
@@ -100,10 +100,10 @@ class GraphAssembler:
         graph["device"].param_type = device_param_tokens.type_id
         graph["device"].param_mask = device_param_tokens.mask
 
-        graph["device"].target_param_value = device_param_tokens.value.clone()
-        graph["device"].target_param_frequency = device_param_tokens.frequency.clone()
-        graph["device"].target_param_type = device_param_tokens.type_id.clone()
-        graph["device"].target_param_mask = device_param_tokens.mask.clone()
+        graph["device"].target_param_value = device_param_tokens.value
+        graph["device"].target_param_frequency = device_param_tokens.frequency
+        graph["device"].target_param_type = device_param_tokens.type_id
+        graph["device"].target_param_mask = device_param_tokens.mask
 
         # -------------------------
         # Device spectrum tokens
@@ -118,10 +118,10 @@ class GraphAssembler:
         graph["device"].spec_type = device_spectrum_tokens.type_id
         graph["device"].spec_mask = device_spectrum_tokens.mask
 
-        graph["device"].target_spec_value = device_spectrum_tokens.value.clone()
-        graph["device"].target_spec_frequency = device_spectrum_tokens.frequency.clone()
-        graph["device"].target_spec_type = device_spectrum_tokens.type_id.clone()
-        graph["device"].target_spec_mask = device_spectrum_tokens.mask.clone()
+        graph["device"].target_spec_value = device_spectrum_tokens.value
+        graph["device"].target_spec_frequency = device_spectrum_tokens.frequency
+        graph["device"].target_spec_type = device_spectrum_tokens.type_id
+        graph["device"].target_spec_mask = device_spectrum_tokens.mask
 
         # -------------------------
         # Graph metadata

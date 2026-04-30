@@ -5,6 +5,7 @@ from typing import List, Optional, Sequence, Dict
 
 import polars as pl
 import torch
+import numpy as np
 
 
 DEVICE_TYPE_MAP: Dict[str, int] = {
@@ -48,16 +49,10 @@ class TokenizedBatch:
 
 class MeasurementTokenizer:
     """
-    Builds padded token tensors from per-row measurement tables.
+    Builds padded token tensors from per-row measurement tables using vectorized Polars operations.
 
-    This first implementation keeps the token payload deliberately simple:
-    - electrical complex values are represented in rectangular form [real, imag]
-    - scalar parameters are represented as [value]
-    - frequencies are passed separately
-    - token type ids are passed separately
-
-    #TODO: Extend token payload to include optional magnitude/angle, source-quality
-    #      flags, or learned metadata embeddings if later needed.
+    This implementation avoids row-by-row iteration and manual grouping, which is the primary
+    bottleneck for training data collation.
     """
 
     def __init__(
@@ -72,41 +67,12 @@ class MeasurementTokenizer:
         self.max_device_param_tokens = max_device_param_tokens
         self.max_device_spec_tokens = max_device_spec_tokens
 
-    def polar_to_rect(self, magnitudes: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
-        real_parts = magnitudes * torch.cos(angles)
-        imag_parts = magnitudes * torch.sin(angles)
-        rect_tensor = torch.empty((magnitudes.shape[0], magnitudes.shape[1] * 2), dtype=torch.float32)
-        rect_tensor[:, 0::2] = real_parts
-        rect_tensor[:, 1::2] = imag_parts
-        return rect_tensor
-
-    def pad_token_sequences(
-            self,
-            token_lists: List[torch.Tensor],
-            freq_lists: List[torch.Tensor],
-            type_lists: List[torch.Tensor],
-            value_dim: int,
-            max_tokens_override: int,
-    ) -> TokenizedBatch:
-        num_entities = len(token_lists)
-        # FIX: Pad to global max_tokens so all graphs match shapes for PyG batching
-        max_tokens = max_tokens_override
-
+    def _get_preallocated_tensors(self, num_entities: int, max_tokens: int, value_dim: int):
         value = torch.zeros((num_entities, max_tokens, value_dim), dtype=torch.float32)
         frequency = torch.zeros((num_entities, max_tokens), dtype=torch.float32)
         type_id = torch.zeros((num_entities, max_tokens), dtype=torch.long)
         mask = torch.zeros((num_entities, max_tokens), dtype=torch.bool)
-
-        for i, (tok, freq, typ) in enumerate(zip(token_lists, freq_lists, type_lists)):
-            n = min(tok.shape[0], max_tokens)  # truncate if exceeds limit
-            if n == 0:
-                continue
-            value[i, :n] = tok[:n]
-            frequency[i, :n] = freq[:n]
-            type_id[i, :n] = typ[:n]
-            mask[i, :n] = True
-
-        return TokenizedBatch(value=value, frequency=frequency, type_id=type_id, mask=mask)
+        return value, frequency, type_id, mask
 
     def tokenize_node_measurements(
         self,
@@ -114,58 +80,46 @@ class MeasurementTokenizer:
         entity_ids: Sequence[int],
         feature_prefixes: Sequence[str],
     ) -> TokenizedBatch:
-        """
-        Tokenizes node voltage harmonics from node_data.
-
-        Expected columns:
-        - node_id
-        - frequency
-        - v1, v1_angle, v2, v2_angle, v3, v3_angle, ...
-        """
-        grouped = {int(node_id): [] for node_id in entity_ids}
-
-        if df.height > 0:
-            for row in df.iter_rows(named=True):
-                node_id = int(row["node_id"])
-                if node_id not in grouped:
-                    continue
-
-                freq = float(row["frequency"])
-                mags = []
-                angs = []
-                for prefix in feature_prefixes:
-                    mags.append(float(row.get(prefix, 0.0) or 0.0))
-                    angs.append(float(row.get(f"{prefix}_angle", 0.0) or 0.0))
-
-                mags_t = torch.tensor(mags, dtype=torch.float32).unsqueeze(0)
-                angs_t = torch.tensor(angs, dtype=torch.float32).unsqueeze(0)
-                rect = self.polar_to_rect(mags_t, angs_t).squeeze(0)  # [2 * num_phases]
-
-                grouped[node_id].append((rect, freq))
-
-        token_lists: List[torch.Tensor] = []
-        freq_lists: List[torch.Tensor] = []
-        type_lists: List[torch.Tensor] = []
-
-        type_id_value = NODE_MEASUREMENT_TYPE_MAP["voltage"]
+        num_entities = len(entity_ids)
+        max_tokens = self.max_node_tokens
         value_dim = 2 * len(feature_prefixes)
+        
+        value, frequency, type_id, mask = self._get_preallocated_tensors(num_entities, max_tokens, value_dim)
+        
+        if df.height == 0 or num_entities == 0:
+            return TokenizedBatch(value, frequency, type_id, mask)
 
-        for node_id in entity_ids:
-            tokens = grouped[int(node_id)]
-            if tokens:
-                tok_tensor = torch.stack([t[0] for t in tokens], dim=0)
-                freq_tensor = torch.tensor([t[1] for t in tokens], dtype=torch.float32)
-                type_tensor = torch.full((len(tokens),), type_id_value, dtype=torch.long)
-            else:
-                tok_tensor = torch.zeros((0, value_dim), dtype=torch.float32)
-                freq_tensor = torch.zeros((0,), dtype=torch.float32)
-                type_tensor = torch.zeros((0,), dtype=torch.long)
+        id_list = [int(i) for i in entity_ids]
+        id_to_idx = {id_val: i for i, id_val in enumerate(id_list)}
+        
+        df_proc = (
+            df.filter(pl.col("node_id").is_in(id_list))
+            .sort("frequency")
+            .with_columns([
+                pl.col("node_id").replace(id_to_idx, default=None).cast(pl.Int64).alias("entity_idx"),
+                pl.int_range(0, pl.len(), dtype=pl.Int64).over("node_id").alias("rank")
+            ])
+            .filter(pl.col("rank") < max_tokens)
+        )
+        
+        if df_proc.height == 0:
+            return TokenizedBatch(value, frequency, type_id, mask)
 
-            token_lists.append(tok_tensor)
-            freq_lists.append(freq_tensor)
-            type_lists.append(type_tensor)
-
-        return self.pad_token_sequences(token_lists, freq_lists, type_lists, value_dim, self.max_node_tokens)
+        e_idx = df_proc["entity_idx"].to_numpy()
+        r_idx = df_proc["rank"].to_numpy()
+        
+        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32"))
+        
+        for i, prefix in enumerate(feature_prefixes):
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            value[e_idx, r_idx, 2*i] = mags * torch.cos(angs)
+            value[e_idx, r_idx, 2*i + 1] = mags * torch.sin(angs)
+            
+        type_id[e_idx, r_idx] = NODE_MEASUREMENT_TYPE_MAP["voltage"]
+        mask[e_idx, r_idx] = True
+        
+        return TokenizedBatch(value, frequency, type_id, mask)
 
     def tokenize_edge_measurements(
         self,
@@ -174,68 +128,61 @@ class MeasurementTokenizer:
         current_prefixes: Sequence[str],
         power_prefixes: Optional[Sequence[str]] = None,
     ) -> TokenizedBatch:
-        """
-        Tokenizes edge measurements from edge_data.
-
-        First implementation stores each frequency row as a single token. If both
-        current and power are present, they are concatenated into one token.
-
-        #TODO: Consider splitting current and power into separate tokens if later
-        #      experiments show that token-type disentanglement helps learning.
-        """
+        num_entities = len(entity_ids)
+        max_tokens = self.max_edge_tokens
         power_prefixes = power_prefixes or []
-        grouped = {int(edge_id): [] for edge_id in entity_ids}
-
-        if df.height > 0:
-            for row in df.iter_rows(named=True):
-                edge_id = int(row["edge_id"])
-                if edge_id not in grouped:
-                    continue
-
-                freq = float(row["frequency"])
-
-                mags = []
-                angs = []
-
-                token_type = EDGE_MEASUREMENT_TYPE_MAP["current"]
-
-                for prefix in current_prefixes:
-                    mags.append(float(row.get(prefix, 0.0) or 0.0))
-                    angs.append(float(row.get(f"{prefix}_angle", 0.0) or 0.0))
-
-                for prefix in power_prefixes:
-                    mags.append(float(row.get(prefix, 0.0) or 0.0))
-                    angs.append(float(row.get(f"{prefix}_angle", 0.0) or 0.0))
-                    token_type = EDGE_MEASUREMENT_TYPE_MAP["power"]
-
-                mags_t = torch.tensor(mags, dtype=torch.float32).unsqueeze(0)
-                angs_t = torch.tensor(angs, dtype=torch.float32).unsqueeze(0)
-                rect = self.polar_to_rect(mags_t, angs_t).squeeze(0)
-
-                grouped[edge_id].append((rect, freq, token_type))
-
-        token_lists: List[torch.Tensor] = []
-        freq_lists: List[torch.Tensor] = []
-        type_lists: List[torch.Tensor] = []
-
         value_dim = 2 * (len(current_prefixes) + len(power_prefixes))
+        
+        value, frequency, type_id, mask = self._get_preallocated_tensors(num_entities, max_tokens, value_dim)
+        
+        if df.height == 0 or num_entities == 0:
+            return TokenizedBatch(value, frequency, type_id, mask)
 
-        for edge_id in entity_ids:
-            tokens = grouped[int(edge_id)]
-            if tokens:
-                tok_tensor = torch.stack([t[0] for t in tokens], dim=0)
-                freq_tensor = torch.tensor([t[1] for t in tokens], dtype=torch.float32)
-                type_tensor = torch.tensor([t[2] for t in tokens], dtype=torch.long)
-            else:
-                tok_tensor = torch.zeros((0, value_dim), dtype=torch.float32)
-                freq_tensor = torch.zeros((0,), dtype=torch.float32)
-                type_tensor = torch.zeros((0,), dtype=torch.long)
+        id_list = [int(i) for i in entity_ids]
+        id_to_idx = {id_val: i for i, id_val in enumerate(id_list)}
+        
+        df_proc = (
+            df.filter(pl.col("edge_id").is_in(id_list))
+            .sort("frequency")
+            .with_columns([
+                pl.col("edge_id").replace(id_to_idx, default=None).cast(pl.Int64).alias("entity_idx"),
+                pl.int_range(0, pl.len(), dtype=pl.Int64).over("edge_id").alias("rank")
+            ])
+            .filter(pl.col("rank") < max_tokens)
+        )
+        
+        if df_proc.height == 0:
+            return TokenizedBatch(value, frequency, type_id, mask)
 
-            token_lists.append(tok_tensor)
-            freq_lists.append(freq_tensor)
-            type_lists.append(type_tensor)
+        e_idx = df_proc["entity_idx"].to_numpy()
+        r_idx = df_proc["rank"].to_numpy()
+        
+        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32"))
+        
+        # Determine token type: if power prefixes are present, we label as power (1)
+        # following original logic.
+        t_id = EDGE_MEASUREMENT_TYPE_MAP["current"]
+        if power_prefixes:
+             t_id = EDGE_MEASUREMENT_TYPE_MAP["power"]
 
-        return self.pad_token_sequences(token_lists, freq_lists, type_lists, value_dim, self.max_edge_tokens)
+        curr_offset = 0
+        for i, prefix in enumerate(current_prefixes):
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            value[e_idx, r_idx, 2*i] = mags * torch.cos(angs)
+            value[e_idx, r_idx, 2*i + 1] = mags * torch.sin(angs)
+            curr_offset = 2 * (i + 1)
+            
+        for i, prefix in enumerate(power_prefixes):
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            value[e_idx, r_idx, curr_offset + 2*i] = mags * torch.cos(angs)
+            value[e_idx, r_idx, curr_offset + 2*i + 1] = mags * torch.sin(angs)
+
+        type_id[e_idx, r_idx] = t_id
+        mask[e_idx, r_idx] = True
+        
+        return TokenizedBatch(value, frequency, type_id, mask)
 
     def tokenize_device_parameters(
         self,
@@ -243,100 +190,69 @@ class MeasurementTokenizer:
         device_type: torch.Tensor,
         device_ids: torch.Tensor,
     ) -> TokenizedBatch:
-        """
-        Tokenizes per-device scalar parameter tables.
-
-        Each scalar parameter becomes one token with value_dim = 1.
-
-        Matching keys:
-        - load         -> load_id
-        - generator    -> generator_id
-        - vsource      -> vsource_id
-        - injected     -> node_id  (for injected_error_parameters)
-
-        #TODO: Later replace scalar-only tokens with richer tokens carrying
-        #      parameter-name embeddings explicitly in the value payload.
-        """
-        num_devices = int(device_ids.shape[0])
-        grouped: List[List[tuple[float, float, int]]] = [[] for _ in range(num_devices)]
-
+        num_devices = device_ids.shape[0]
+        max_tokens = self.max_device_param_tokens
+        
+        value, frequency, type_id, mask = self._get_preallocated_tensors(num_devices, max_tokens, 1)
+        
         if param_df.height == 0 or num_devices == 0:
-            return self.pad_token_sequences(
-                token_lists=[torch.zeros((0, 1), dtype=torch.float32) for _ in range(num_devices)],
-                freq_lists=[torch.zeros((0,), dtype=torch.float32) for _ in range(num_devices)],
-                type_lists=[torch.zeros((0,), dtype=torch.long) for _ in range(num_devices)],
-                value_dim=1,
-                max_tokens_override=self.max_device_param_tokens
-            )
+            return TokenizedBatch(value, frequency, type_id, mask)
+
+        # Map device type/id to entity index
+        device_ident = pl.DataFrame({
+            "type_idx": device_type.numpy().astype(np.int64),
+            "id_idx": device_ids.numpy().astype(np.int64),
+            "entity_idx": np.arange(num_devices, dtype=np.int64)
+        })
 
         load_cols = ["p1", "q1", "p2", "q2", "p3", "q3"]
         gen_cols = ["p1", "q1", "p2", "q2", "p3", "q3"]
         vsource_cols = ["pu1", "pu2", "pu3"]
         injected_cols = ["sc1_mva"]
+        
+        melted_parts = []
+        
+        specs = [
+            ("load_id", DEVICE_TYPE_MAP["load"], load_cols),
+            ("generator_id", DEVICE_TYPE_MAP["generator"], gen_cols),
+            ("vsource_id", DEVICE_TYPE_MAP["vsource"], vsource_cols),
+            ("node_id", DEVICE_TYPE_MAP["injected"], injected_cols),
+        ]
+        
+        for id_col, t_idx, cols in specs:
+            if id_col in param_df.columns:
+                df_part = param_df.filter(pl.col(id_col).is_not_null())
+                if df_part.height > 0:
+                    avail_cols = [c for c in cols if c in df_part.columns]
+                    m = df_part.select([id_col, *avail_cols]).melt(id_vars=id_col, value_name="val")
+                    m = m.filter(pl.col("val").is_not_null()).select([
+                        pl.lit(t_idx).alias("type_idx"),
+                        pl.col(id_col).alias("id_idx"),
+                        pl.col("val")
+                    ])
+                    melted_parts.append(m)
 
-        # Build fast lookup by (device_type, domain_id)
-        device_lookup = {
-            (int(device_type[i].item()), int(device_ids[i].item())): i
-            for i in range(num_devices)
-        }
-
-        for row in param_df.iter_rows(named=True):
-            matched = False
-
-            if "load_id" in row and row["load_id"] is not None:
-                key = (DEVICE_TYPE_MAP["load"], int(row["load_id"]))
-                if key in device_lookup:
-                    idx = device_lookup[key]
-                    for col_name in load_cols:
-                        if col_name in row and row[col_name] is not None:
-                            grouped[idx].append((float(row[col_name]), 0.0, DEVICE_TOKEN_TYPE_MAP["param"]))
-                    matched = True
-
-            if "generator_id" in row and row["generator_id"] is not None:
-                key = (DEVICE_TYPE_MAP["generator"], int(row["generator_id"]))
-                if key in device_lookup:
-                    idx = device_lookup[key]
-                    for col_name in gen_cols:
-                        if col_name in row and row[col_name] is not None:
-                            grouped[idx].append((float(row[col_name]), 0.0, DEVICE_TOKEN_TYPE_MAP["param"]))
-                    matched = True
-
-            if "vsource_id" in row and row["vsource_id"] is not None:
-                key = (DEVICE_TYPE_MAP["vsource"], int(row["vsource_id"]))
-                if key in device_lookup:
-                    idx = device_lookup[key]
-                    for col_name in vsource_cols:
-                        if col_name in row and row[col_name] is not None:
-                            grouped[idx].append((float(row[col_name]), 0.0, DEVICE_TOKEN_TYPE_MAP["param"]))
-                    matched = True
-
-            if "node_id" in row and row["node_id"] is not None and not matched:
-                key = (DEVICE_TYPE_MAP["injected"], int(row["node_id"]))
-                if key in device_lookup:
-                    idx = device_lookup[key]
-                    for col_name in injected_cols:
-                        if col_name in row and row[col_name] is not None:
-                            grouped[idx].append((float(row[col_name]), 0.0, DEVICE_TOKEN_TYPE_MAP["param"]))
-
-        token_lists: List[torch.Tensor] = []
-        freq_lists: List[torch.Tensor] = []
-        type_lists: List[torch.Tensor] = []
-
-        for items in grouped:
-            if items:
-                tok_tensor = torch.tensor([[x[0]] for x in items], dtype=torch.float32)
-                freq_tensor = torch.tensor([x[1] for x in items], dtype=torch.float32)
-                type_tensor = torch.tensor([x[2] for x in items], dtype=torch.long)
-            else:
-                tok_tensor = torch.zeros((0, 1), dtype=torch.float32)
-                freq_tensor = torch.zeros((0,), dtype=torch.float32)
-                type_tensor = torch.zeros((0,), dtype=torch.long)
-
-            token_lists.append(tok_tensor)
-            freq_lists.append(freq_tensor)
-            type_lists.append(type_tensor)
-
-        return self.pad_token_sequences(token_lists, freq_lists, type_lists, 1, self.max_device_param_tokens)
+        if not melted_parts:
+            return TokenizedBatch(value, frequency, type_id, mask)
+            
+        full_melted = pl.concat(melted_parts)
+        res = full_melted.join(device_ident, on=["type_idx", "id_idx"], how="inner")
+        
+        if res.height == 0:
+            return TokenizedBatch(value, frequency, type_id, mask)
+            
+        res = res.with_columns(
+            pl.int_range(0, pl.len(), dtype=pl.Int64).over("entity_idx").alias("rank")
+        ).filter(pl.col("rank") < max_tokens)
+        
+        e_idx = res["entity_idx"].to_numpy()
+        r_idx = res["rank"].to_numpy()
+        
+        value[e_idx, r_idx, 0] = torch.from_numpy(res["val"].to_numpy().astype("float32"))
+        type_id[e_idx, r_idx] = DEVICE_TOKEN_TYPE_MAP["param"]
+        mask[e_idx, r_idx] = True
+        
+        return TokenizedBatch(value, frequency, type_id, mask)
 
     def tokenize_device_spectra(
         self,
@@ -345,31 +261,14 @@ class MeasurementTokenizer:
         device_ids: torch.Tensor,
         spectrum_prefixes: Sequence[str] = ("spectrum1", "spectrum2", "spectrum3"),
     ) -> TokenizedBatch:
-        """
-        Tokenizes injected spectra. Each spectrum row becomes one token carrying
-        rectangular complex values for all available phases/components.
-
-        Parent matching:
-        - parent_type in {'load', 'generator', 'vsource'}
-        - direct injections are intentionally deferred until an explicit injected
-          device representation is added to topology.
-
-        #TODO: Add explicit synthetic "injected" devices attached to nodes so that
-        #      direct injected_error_parameters and injected/node spectra can be
-        #      represented uniformly as device entities.
-        """
-        num_devices = int(device_ids.shape[0])
-        grouped: List[List[tuple[torch.Tensor, float, int]]] = [[] for _ in range(num_devices)]
-
+        num_devices = device_ids.shape[0]
+        max_tokens = self.max_device_spec_tokens
+        value_dim = 2 * len(spectrum_prefixes)
+        
+        value, frequency, type_id, mask = self._get_preallocated_tensors(num_devices, max_tokens, value_dim)
+        
         if spectrum_df.height == 0 or num_devices == 0:
-            value_dim = 2 * len(spectrum_prefixes)
-            return self.pad_token_sequences(
-                token_lists=[torch.zeros((0, value_dim), dtype=torch.float32) for _ in range(num_devices)],
-                freq_lists=[torch.zeros((0,), dtype=torch.float32) for _ in range(num_devices)],
-                type_lists=[torch.zeros((0,), dtype=torch.long) for _ in range(num_devices)],
-                value_dim=value_dim,
-                max_tokens_override=self.max_device_spec_tokens
-            )
+            return TokenizedBatch(value, frequency, type_id, mask)
 
         parent_type_map = {
             "load": DEVICE_TYPE_MAP["load"],
@@ -377,53 +276,41 @@ class MeasurementTokenizer:
             "vsource": DEVICE_TYPE_MAP["vsource"],
         }
 
-        device_lookup = {
-            (int(device_type[i].item()), int(device_ids[i].item())): i
-            for i in range(num_devices)
-        }
+        device_ident = pl.DataFrame({
+            "type_idx": device_type.numpy().astype(np.int64),
+            "id_idx": device_ids.numpy().astype(np.int64),
+            "entity_idx": np.arange(num_devices, dtype=np.int64)
+        })
 
-        for row in spectrum_df.iter_rows(named=True):
-            parent_type = row["parent_type"]
-            if parent_type not in parent_type_map:
-                continue
+        df_proc = (
+            spectrum_df.with_columns(
+                pl.col("parent_type").replace(parent_type_map, default=None).cast(pl.Int64).alias("type_idx")
+            )
+            .filter(pl.col("type_idx").is_not_null())
+            .rename({"parent_id": "id_idx"})
+            .join(device_ident, on=["type_idx", "id_idx"], how="inner")
+            .sort("frequency")
+            .with_columns(
+                pl.int_range(0, pl.len(), dtype=pl.Int64).over("entity_idx").alias("rank")
+            )
+            .filter(pl.col("rank") < max_tokens)
+        )
 
-            key = (parent_type_map[parent_type], int(row["parent_id"]))
-            if key not in device_lookup:
-                continue
+        if df_proc.height == 0:
+            return TokenizedBatch(value, frequency, type_id, mask)
 
-            idx = device_lookup[key]
-            freq = float(row["frequency"])
+        e_idx = df_proc["entity_idx"].to_numpy()
+        r_idx = df_proc["rank"].to_numpy()
+        
+        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32"))
+        
+        for i, prefix in enumerate(spectrum_prefixes):
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            value[e_idx, r_idx, 2*i] = mags * torch.cos(angs)
+            value[e_idx, r_idx, 2*i + 1] = mags * torch.sin(angs)
 
-            mags = []
-            angs = []
-            for prefix in spectrum_prefixes:
-                mags.append(float(row.get(prefix, 0.0) or 0.0))
-                angs.append(float(row.get(f"{prefix}_angle", 0.0) or 0.0))
+        type_id[e_idx, r_idx] = DEVICE_TOKEN_TYPE_MAP["spectrum"]
+        mask[e_idx, r_idx] = True
 
-            mags_t = torch.tensor(mags, dtype=torch.float32).unsqueeze(0)
-            angs_t = torch.tensor(angs, dtype=torch.float32).unsqueeze(0)
-            rect = self.polar_to_rect(mags_t, angs_t).squeeze(0)
-
-            grouped[idx].append((rect, freq, DEVICE_TOKEN_TYPE_MAP["spectrum"]))
-
-        token_lists: List[torch.Tensor] = []
-        freq_lists: List[torch.Tensor] = []
-        type_lists: List[torch.Tensor] = []
-
-        value_dim = 2 * len(spectrum_prefixes)
-
-        for items in grouped:
-            if items:
-                tok_tensor = torch.stack([x[0] for x in items], dim=0)
-                freq_tensor = torch.tensor([x[1] for x in items], dtype=torch.float32)
-                type_tensor = torch.tensor([x[2] for x in items], dtype=torch.long)
-            else:
-                tok_tensor = torch.zeros((0, value_dim), dtype=torch.float32)
-                freq_tensor = torch.zeros((0,), dtype=torch.float32)
-                type_tensor = torch.zeros((0,), dtype=torch.long)
-
-            token_lists.append(tok_tensor)
-            freq_lists.append(freq_tensor)
-            type_lists.append(type_tensor)
-
-        return self.pad_token_sequences(token_lists, freq_lists, type_lists, value_dim, self.max_device_spec_tokens)
+        return TokenizedBatch(value, frequency, type_id, mask)
