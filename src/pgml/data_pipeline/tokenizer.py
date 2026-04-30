@@ -108,11 +108,11 @@ class MeasurementTokenizer:
         e_idx = df_proc["entity_idx"].to_numpy()
         r_idx = df_proc["rank"].to_numpy()
         
-        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32"))
+        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32").copy())
         
         for i, prefix in enumerate(feature_prefixes):
-            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
-            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32").copy())
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32").copy())
             value[e_idx, r_idx, 2*i] = mags * torch.cos(angs)
             value[e_idx, r_idx, 2*i + 1] = mags * torch.sin(angs)
             
@@ -157,7 +157,7 @@ class MeasurementTokenizer:
         e_idx = df_proc["entity_idx"].to_numpy()
         r_idx = df_proc["rank"].to_numpy()
         
-        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32"))
+        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32").copy())
         
         # Determine token type: if power prefixes are present, we label as power (1)
         # following original logic.
@@ -167,15 +167,15 @@ class MeasurementTokenizer:
 
         curr_offset = 0
         for i, prefix in enumerate(current_prefixes):
-            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
-            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32").copy())
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32").copy())
             value[e_idx, r_idx, 2*i] = mags * torch.cos(angs)
             value[e_idx, r_idx, 2*i + 1] = mags * torch.sin(angs)
             curr_offset = 2 * (i + 1)
             
         for i, prefix in enumerate(power_prefixes):
-            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
-            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32").copy())
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32").copy())
             value[e_idx, r_idx, curr_offset + 2*i] = mags * torch.cos(angs)
             value[e_idx, r_idx, curr_offset + 2*i + 1] = mags * torch.sin(angs)
 
@@ -248,7 +248,7 @@ class MeasurementTokenizer:
         e_idx = res["entity_idx"].to_numpy()
         r_idx = res["rank"].to_numpy()
         
-        value[e_idx, r_idx, 0] = torch.from_numpy(res["val"].to_numpy().astype("float32"))
+        value[e_idx, r_idx, 0] = torch.from_numpy(res["val"].to_numpy().astype("float32").copy())
         type_id[e_idx, r_idx] = DEVICE_TOKEN_TYPE_MAP["param"]
         mask[e_idx, r_idx] = True
         
@@ -302,11 +302,11 @@ class MeasurementTokenizer:
         e_idx = df_proc["entity_idx"].to_numpy()
         r_idx = df_proc["rank"].to_numpy()
         
-        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32"))
+        frequency[e_idx, r_idx] = torch.from_numpy(df_proc["frequency"].to_numpy().astype("float32").copy())
         
         for i, prefix in enumerate(spectrum_prefixes):
-            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32"))
-            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32"))
+            mags = torch.from_numpy(df_proc[prefix].fill_null(0.0).to_numpy().astype("float32").copy())
+            angs = torch.from_numpy(df_proc[f"{prefix}_angle"].fill_null(0.0).to_numpy().astype("float32").copy())
             value[e_idx, r_idx, 2*i] = mags * torch.cos(angs)
             value[e_idx, r_idx, 2*i + 1] = mags * torch.sin(angs)
 
