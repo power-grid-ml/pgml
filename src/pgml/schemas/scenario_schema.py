@@ -41,7 +41,7 @@ from typing import Literal, Optional
 
 from pydantic import Field, model_validator
 
-from grid_schema import GridModel, Phase, si_field
+from .grid_schema import GridModel, Phase, si_field
 
 
 def _check_phase_lengths(phases: tuple, **named) -> None:
