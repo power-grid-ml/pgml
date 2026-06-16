@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index
-from pgml.solver import solve_harmonic
+from pgml.solver import solve_harmonic, solve_power_flow
 
 from tests.fixtures.tiny_grids import single_phase_chain, three_phase_two_bus
 
@@ -77,3 +77,18 @@ def test_cuda_ideal_slack_parity():
     )
 
     torch.testing.assert_close(v_cuda.cpu(), v_cpu, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("grid_fn", GRIDS)
+@pytest.mark.parametrize("slack", ["ideal", "norton"])
+def test_cpu_cuda_power_flow_parity(grid_fn, slack):
+    """Nonlinear const-power power flow gives identical V on CPU and CUDA."""
+    grid = grid_fn()
+    res_cpu = solve_power_flow(
+        grid, slack=slack, dtype=torch.complex128, device=torch.device("cpu")
+    )
+    res_cuda = solve_power_flow(
+        grid, slack=slack, dtype=torch.complex128, device=torch.device("cuda")
+    )
+    assert res_cuda.v.device.type == "cuda"
+    torch.testing.assert_close(res_cuda.v.cpu(), res_cpu.v, rtol=1e-9, atol=1e-9)

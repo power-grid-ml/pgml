@@ -108,3 +108,49 @@ it but do not implement in M1.
 - Honor input `device`/`dtype`; complex128 for gradcheck, complex64 ok otherwise.
 - Self-check: a tiny hand-built grid whose Y is verifiable in numpy, plus gradcheck
   of Y entries w.r.t. line R/L/C and source Z.
+
+# =====================================================================
+# Phase-2: network/device split for NONLINEAR power flow (FROZEN — IMPLEMENTED)
+# =====================================================================
+The const-Z `assemble_ybus` above is the LINEAR-model assembler and STAYS (its
+docstring now labels it "LINEAR (const-Z) = assemble_network_ybus + const-Z device
+shunts + source Norton"; the IEEE33 oracle tests keep using it as a regression
+suite — behaviour UNCHANGED). For nonlinear (const-P / ZIP) power flow, loads are
+NOT baked into Y; split as implemented below.
+
+- `assemble_network_ybus(grid, frequencies_hz, *, dtype=torch.complex128,
+     device=None, param_overrides=None) -> YBus`  — IMPLEMENTED (`ybus.py`).
+  The PASSIVE network only: lines, switches, generic branches, shunt reactors,
+  transformers, and ShuntAppliance (a fixed linear shunt). **No loads/generators,
+  no source Norton.** Constant, differentiable w.r.t. network params. Same compact
+  index + `[*batch, H, N, N]` shapes and scalar-frequency squeeze as `assemble_ybus`.
+  Shares the `_stamp_network` core with `assemble_ybus` (which adds source Norton +
+  const-Z device shunts on top).
+
+- `assemble_ybus(...)` — IMPLEMENTED, behaviour UNCHANGED, relabelled LINEAR ==
+  `assemble_network_ybus` + const-Z device shunts (loads/gens at nominal V) +
+  source Norton shunt. Kept for the linear path / regression oracle.
+
+- `device_current_injections(grid, v, index, frequencies_hz, *,
+     dtype=torch.complex128, device=None, operating_point=None,
+     param_overrides=None) -> Tensor`  complex `[*batch, H, N]`  — IMPLEMENTED.
+  Voltage-dependent nodal current ABSORBED by Load/Generator per `LoadModel`:
+      S_eff(V) = S0 * ( z*(|Vt|/|V0|)^2 + i*(|Vt|/|V0|) + p ),  I_term = conj(S_eff)/conj(Vt)
+  with S0 = sign*(P+jQ) (sign +1 load / -1 generator), V0 = NOMINAL line-to-neutral
+  voltage (`u_rated`, /sqrt(3) for 3-phase nodes per the existing convention), Vt =
+  the terminal voltage gathered from `v`. ZIP triples (z,i,p) taken PER power
+  component (P and Q independently) from the load model: const_power=(0,0,1),
+  const_impedance=(1,0,0), const_current=(0,1,0), `zip` from `ZipCoefficients`.
+  Sign matches the const-Z fold: at z=1 `I_term == Y_devZ @ Vt`, so a const-Z ZIP
+  solve reproduces the linear `assemble_ybus` system EXACTLY (verified, machine
+  precision — a required regression link). `v` may be `[*batch, (H,) N]`; a missing
+  H axis is broadcast. Batched, differentiable, device/dtype-honoring. Tensor P/Q
+  (tensor duality) and per-phase split are handled autograd-safely (`_per_phase_
+  power_tensor`); a per-load/scenario leading batch dim broadcasts over `v`.
+  The nodal balance used by the solver is `Y_eff @ V = I_slack - I_device(V)`.
+  `param_overrides` keys: `("load"|"generator", id, "p_nom_per_phase_w"
+  |"q_nom_per_phase_var")` inject leaf per-phase P/Q.
+
+Verification (CPU): const-Z consistency (norton + ideal, 1ph + 3ph) exact to
+1e-9..1e-10; gradcheck (float64) of the downstream power-flow V w.r.t. line R/L and
+load P/Q passes; full suite green.

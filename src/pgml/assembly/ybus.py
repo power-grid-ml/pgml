@@ -35,6 +35,7 @@ from pgml.schemas.grid_schema import (
     Grid,
     Line,
     Load,
+    LoadModel,
     ShuntAppliance,
     ShuntReactor,
     Source,
@@ -143,7 +144,15 @@ def assemble_ybus(
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
 ) -> YBus:
-    """Assemble the complex nodal admittance ``Y(f)`` for a materialised ``grid``.
+    """Assemble the LINEAR (const-Z) complex nodal admittance ``Y(f)``.
+
+    This is the **linear-model** assembler: it equals
+    :func:`assemble_network_ybus` (the passive network) PLUS the const-Z device
+    shunts (loads/generators folded as constant impedance at nominal voltage) PLUS
+    the source Norton (Thévenin) shunt. The nonlinear (const-P / ZIP) power flow
+    instead uses :func:`assemble_network_ybus` + :func:`device_current_injections`
+    (see ``assembly/CONTEXT.md``). The IEEE33 / tiny-grid oracle tests keep using
+    this function as their regression suite, so its behaviour is UNCHANGED.
 
     Parameters
     ----------
@@ -185,13 +194,10 @@ def assemble_ybus(
 
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
 
-    y = _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides)
-    y = _stamp_switches(grid, f, y, index, cdt, rdt, device, param_overrides)
-    y = _stamp_generic_branches(grid, f, y, index, cdt, rdt, device, param_overrides)
-    y = _stamp_shunt_reactors(grid, f, y, index, cdt, rdt, device, param_overrides)
-    y = _stamp_transformers(grid, f, y, index, cdt, rdt, device, param_overrides)
+    # Passive network (shared with assemble_network_ybus).
+    y = _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides)
+    # Linear-model device folding: source Norton + const-Z loads/gens.
     y = _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides)
-    y = _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides)
     y = _stamp_const_z_loads(
         grid, f, y, index, cdt, rdt, device, operating_point, param_overrides
     )
@@ -204,6 +210,78 @@ def assemble_ybus(
     if scalar_freq:
         y = y.reshape(n, n)
     return YBus(Y=y, index=index, frequencies_hz=f)
+
+
+def assemble_network_ybus(
+    grid: Grid,
+    frequencies_hz,
+    *,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+) -> YBus:
+    """Assemble the PASSIVE-NETWORK nodal admittance ``Y_net(f)``.
+
+    Contains ONLY the passive network: lines, transformers, switches, shunt
+    reactors, generic branches, and :class:`ShuntAppliance` (a fixed linear
+    shunt). It does **not** stamp loads/generators and does **not** fold the
+    source as a Norton shunt — both are handled on the RHS by the nonlinear
+    power-flow path (:func:`device_current_injections` and the slack handling in
+    :func:`pgml.solver.solve_power_flow`).
+
+    It is constant (voltage-independent) and differentiable w.r.t. network params,
+    and uses the SAME compact :class:`NodePhaseIndex` layout and ``[*batch, H, N,
+    N]`` shapes as :func:`assemble_ybus`.
+
+    Parameters
+    ----------
+    grid, frequencies_hz, dtype, device, param_overrides:
+        Identical meaning to :func:`assemble_ybus` (no ``operating_point`` — there
+        is no device folding here).
+
+    Returns
+    -------
+    YBus
+        ``Y`` complex ``[H, N, N]`` (``[N, N]`` for a scalar frequency), the
+        :class:`NodePhaseIndex`, and the frequencies.
+    """
+    if device is None and isinstance(frequencies_hz, Tensor):
+        device = frequencies_hz.device
+    f = _as_freq_tensor(frequencies_hz, dtype, device)
+    device = f.device
+    h = f.shape[0]
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+
+    index = node_phase_index(grid)
+    n = index.size
+
+    y = torch.zeros((h, n, n), dtype=cdt, device=device)
+    y = _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides)
+
+    scalar_freq = (
+        not isinstance(frequencies_hz, Tensor)
+        and not isinstance(frequencies_hz, (list, tuple))
+        and h == 1
+    )
+    if scalar_freq:
+        y = y.reshape(n, n)
+    return YBus(Y=y, index=index, frequencies_hz=f)
+
+
+def _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides):
+    """Accumulate every PASSIVE contribution into ``y`` (shared assembler core).
+
+    Lines, switches, generic branches, shunt reactors, transformers, and
+    ShuntAppliance. NO source Norton, NO load/generator folding.
+    """
+    y = _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_switches(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_generic_branches(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_shunt_reactors(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_transformers(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides)
+    return y
 
 
 # ---- series-branch stamps -------------------------------------------------
@@ -782,10 +860,245 @@ def _scatter_injection(i: Tensor, values: Tensor, rows: Tensor) -> Tensor:
     return i_full
 
 
+# ---------------------------------------------------------------------------
+# ZIP device current injections (voltage-dependent, nonlinear power flow)
+# ---------------------------------------------------------------------------
+def _zip_coeffs(appliance, rdt, device) -> tuple[Tensor, Tensor]:
+    """Per-power-component ZIP coefficient pairs ``(zip_p[3], zip_q[3])`` = (z, i, p).
+
+    Mapping per the frozen CONTEXT: const_power=(0,0,1), const_impedance=(1,0,0),
+    const_current=(0,1,0); ``zip`` reads ``ZipCoefficients`` (z_*, i_*, p_*).
+    Returned as real tensors ``[3]`` ordered (z, i, p) for P and for Q.
+    """
+    model = appliance.load_model
+    if model == LoadModel.ZIP:
+        zc = appliance.zip_coefficients
+        zip_p = torch.as_tensor([zc.z_p, zc.i_p, zc.p_p], dtype=rdt, device=device)
+        zip_q = torch.as_tensor([zc.z_q, zc.i_q, zc.p_q], dtype=rdt, device=device)
+        return zip_p, zip_q
+    if model == LoadModel.CONST_IMPEDANCE:
+        coeff = torch.as_tensor([1.0, 0.0, 0.0], dtype=rdt, device=device)
+    elif model == LoadModel.CONST_CURRENT:
+        coeff = torch.as_tensor([0.0, 1.0, 0.0], dtype=rdt, device=device)
+    else:  # CONST_POWER (default)
+        coeff = torch.as_tensor([0.0, 0.0, 1.0], dtype=rdt, device=device)
+    return coeff, coeff
+
+
+def _per_phase_power_tensor(
+    total, per_phase, n_phases: int, rdt: torch.dtype, device
+) -> Tensor:
+    """Autograd-safe per-phase power tensor ``[P]`` from a total or per-phase value.
+
+    Preserves the graph when ``total`` / ``per_phase`` carry torch tensor leaves
+    (tensor duality): a per-phase value is converted element-wise without
+    ``torch.as_tensor`` over a list of tensors (which would detach); a total scalar
+    is split equally across phases with a tensor-safe divide.
+    """
+    if per_phase is not None:
+        parts = [
+            x if isinstance(x, Tensor) else torch.as_tensor(x, dtype=rdt, device=device)
+            for x in per_phase
+        ]
+        # Stack along the phase axis (last): supports per-load batch leading dims.
+        return torch.stack([pp.to(dtype=rdt, device=device) for pp in parts], -1)
+    # total split equally across phases (tensor-safe). ``total`` may be a scalar or
+    # carry a leading scenario/batch shape -> per-phase tensor [*batch, P].
+    tot = (
+        total
+        if isinstance(total, Tensor)
+        else torch.as_tensor(total, dtype=rdt, device=device)
+    )
+    tot = tot.to(dtype=rdt, device=device)
+    per = (tot / n_phases).unsqueeze(-1)  # [*batch, 1]
+    return per.expand(*tot.shape, n_phases)  # [*batch, P]
+
+
+def device_current_injections(
+    grid: Grid,
+    v: Tensor,
+    index: NodePhaseIndex,
+    frequencies_hz,
+    *,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    operating_point: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
+) -> Tensor:
+    """Voltage-dependent ZIP nodal current ``I_device(V)`` absorbed by loads/gens.
+
+    For every in-service :class:`Load` / :class:`Generator`, the per-terminal
+    (per phase) current drawn under the ZIP model is
+
+        S_eff(V) = S0 * ( z*(|Vt|/|V0|)**2 + i*(|Vt|/|V0|) + p )
+        I_term   = conj(S_eff) / conj(Vt)
+
+    with ``S0 = sign * (P + jQ)`` (sign +1 load / -1 generator, identical to the
+    const-Z stamp), ``V0`` = NOMINAL line-to-neutral voltage (``u_rated``), and
+    ``Vt`` = the terminal voltage gathered from ``v``. The ZIP triples
+    ``(z, i, p)`` are taken per power component (P and Q independently) from the
+    load model: const_power=(0,0,1), const_impedance=(1,0,0), const_current=
+    (0,1,0), ``zip`` from :class:`ZipCoefficients`.
+
+    The result has the SAME sign convention as the const-Z fold in
+    :func:`assemble_ybus`: a const-impedance ZIP solve reproduces the linear
+    ``assemble_ybus`` system exactly (``I_device = Y_devZ @ V``). The nonlinear
+    nodal balance is ``Y_eff @ V = I_slack - I_device(V)``.
+
+    Parameters
+    ----------
+    grid:
+        Materialised grid.
+    v:
+        Complex terminal voltages ``[*batch, H, N]`` (or ``[*batch, N]`` / ``[N]``;
+        a missing H axis is broadcast). Must be on ``device`` / convertible.
+    index:
+        The compact :class:`NodePhaseIndex` (must match ``v``'s row layout).
+    frequencies_hz:
+        Frequencies; only the count ``H`` matters here (the ZIP model is at f0 and
+        frequency-independent) — used to align the output H axis.
+    dtype, device:
+        Complex dtype / target device. ``device`` defaults to ``v``'s device.
+    operating_point:
+        Optional override of nameplate P/Q (see :func:`resolve_operating_power`).
+    param_overrides:
+        Optional differentiability hook; keys ``("load"|"generator", id, "p_nom_w"
+        |"q_nom_var"|"p_nom_per_phase_w"|"q_nom_per_phase_var")`` inject leaf P/Q.
+
+    Returns
+    -------
+    Tensor
+        Complex ``I_device`` ``[*batch, H, N]`` (matching ``v``'s batch broadcast).
+        Purely passive grids -> zeros. Aligned to ``index``.
+    """
+    if device is None:
+        device = v.device
+    f = _as_freq_tensor(frequencies_hz, dtype, device)
+    h = f.shape[0]
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    n = index.size
+
+    v = v.to(dtype=cdt, device=device)
+    # Normalise v to leading shape [*batch, H, N]: insert an H axis if absent.
+    if v.shape[-1] != n:
+        raise ValueError(
+            f"device_current_injections: v last dim {v.shape[-1]} != N={n}"
+        )
+    if v.ndim == 1:
+        v = v.reshape(1, n)  # [1, N]; treated as [H=1, N] -> broadcast over H below
+    # If there is no explicit H axis matching h, broadcast a singleton H in.
+    has_h = v.ndim >= 2 and v.shape[-2] == h
+    if not has_h:
+        v = v.unsqueeze(-2)  # [..., 1, N]
+    batch_lead = v.shape[:-2]
+
+    out = torch.zeros((*batch_lead, h, n), dtype=cdt, device=device)
+
+    loads = [
+        a for a in grid.appliances if isinstance(a, (Load, Generator)) and a.in_service
+    ]
+    if not loads:
+        return out
+
+    node_map = {nd.id: nd for nd in grid.nodes}
+    by_p: dict[int, list] = {}
+    for a in loads:
+        by_p.setdefault(len(a.phases), []).append(a)
+
+    for p, group in by_p.items():
+        p_list, q_list, v0_list, zipp_list, zipq_list, row_list = [], [], [], [], [], []
+        for a in group:
+            kind = "load" if isinstance(a, Load) else "generator"
+            sign = 1.0 if isinstance(a, Load) else -1.0
+            node = node_map[a.node]
+            u_ln = phase_voltage_magnitude(node.u_rated_v, len(node.phases))
+
+            # Resolve total / per-phase honoring operating_point, keeping tensors.
+            p_total, q_total = a.p_nom_w, a.q_nom_var
+            p_per, q_per = a.p_nom_per_phase_w, a.q_nom_per_phase_var
+            if operating_point is not None and a.id in operating_point:
+                op = operating_point[a.id]
+                if "p_per_phase_w" in op:
+                    p_per = op["p_per_phase_w"]
+                elif "p_w" in op:
+                    p_total, p_per = op["p_w"], None
+                if "q_per_phase_var" in op:
+                    q_per = op["q_per_phase_var"]
+                elif "q_var" in op:
+                    q_total, q_per = op["q_var"], None
+
+            p_t = _override(
+                param_overrides,
+                (kind, a.id, "p_nom_per_phase_w"),
+                _per_phase_power_tensor(p_total, p_per, p, rdt, device),
+            )
+            q_t = _override(
+                param_overrides,
+                (kind, a.id, "q_nom_per_phase_var"),
+                _per_phase_power_tensor(q_total, q_per, p, rdt, device),
+            )
+            p_list.append(sign * p_t)  # [P]
+            q_list.append(sign * q_t)  # [P]
+            u_ln_t = (
+                u_ln
+                if isinstance(u_ln, Tensor)
+                else torch.as_tensor(u_ln, dtype=rdt, device=device)
+            )
+            v0_list.append(
+                u_ln_t.to(dtype=rdt, device=device).reshape(()).expand(p)
+            )  # [P]
+            zp, zq = _zip_coeffs(a, rdt, device)
+            zipp_list.append(zp)  # [3]
+            zipq_list.append(zq)
+            row_list.append([index.row(a.node, ph) for ph in a.phases])
+
+        k = len(p_list)
+        # Stack with K at dim -2 so any per-load batch dims stay leading and
+        # broadcast against the [*b, H, K, P] voltage tensor: [*pbatch, K, P].
+        p_pp = torch.stack(p_list, -2)  # [*pbatch, K, P]
+        q_pp = torch.stack(q_list, -2)
+        v0 = torch.stack(v0_list, -2)  # [K, P] (no power batch)
+        zip_p = torch.stack(zipp_list, 0)  # [K, 3]
+        zip_q = torch.stack(zipq_list, 0)
+        rows = torch.as_tensor(row_list, dtype=torch.int64, device=device)  # [K,P]
+
+        # Insert a singleton H axis into power tensors so they broadcast over H:
+        # [*pbatch, K, P] -> [*pbatch, 1, K, P].
+        p_pp = p_pp.unsqueeze(-3)
+        q_pp = q_pp.unsqueeze(-3)
+
+        # Gather terminal voltages Vt at these rows: v[*batch, H, N] -> [*b, H, K, P].
+        flat_rows = rows.reshape(-1)  # [K*P]
+        vt = v.index_select(-1, flat_rows)  # [*b, H, K*P]
+        vt = vt.reshape(*batch_lead, h, k, p)  # [*b, H, K, P]
+
+        vmag = torch.abs(vt)  # [*b, H, K, P] real
+        ratio = vmag / v0  # |Vt| / |V0|  -> broadcasts [K,P] over [*b,H,K,P]
+
+        # ZIP scaling per power component: z*ratio^2 + i*ratio + p.
+        z_p, i_p, pp_p = zip_p[..., 0], zip_p[..., 1], zip_p[..., 2]  # [K]
+        z_q, i_q, pp_q = zip_q[..., 0], zip_q[..., 1], zip_q[..., 2]
+        scale_p = (
+            z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
+        )  # [*b,H,K,P]
+        scale_q = z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
+
+        s_eff = torch.complex(p_pp * scale_p, q_pp * scale_q).to(cdt)  # [*b,H,K,P]
+        # I_term = conj(S_eff) / conj(Vt).
+        i_term = torch.conj(s_eff) / torch.conj(vt)  # [*b,H,K,P]
+
+        out = _scatter_injection(out, i_term, rows)
+
+    return out
+
+
 __all__ = [
     "YBus",
     "assemble_ybus",
+    "assemble_network_ybus",
     "build_injections",
+    "device_current_injections",
     "node_phase_index",
     "NodePhaseIndex",
 ]

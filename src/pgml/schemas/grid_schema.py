@@ -76,17 +76,79 @@ implicitly derived from geometry.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PlainSerializer,
+    PlainValidator,
     field_validator,
     model_validator,
 )
 
-PerPhaseMatrix = list[list[float]]  # row-major, SI scalars
+# =============================================================================
+# Float / tensor duality (torch-free, duck-typed)
+# =============================================================================
+# Physical fields accept EITHER plain python numbers/lists (the serializable
+# default) OR any array-like object (e.g. a torch.Tensor or numpy.ndarray), which
+# is passed through UNTOUCHED so autograd gradients flow grid -> Y-bus -> solve ->
+# outputs without a separate parameter container. The schema imports NO compute
+# framework: "array-like" is detected by duck typing (`.detach` / `__array__`).
+# Note: pydantic numeric constraints (gt/ge) are NOT applied to these Any-typed
+# fields, so positivity is enforced inside the validators below (floats only).
+
+
+def _is_arraylike(v: Any) -> bool:
+    return hasattr(v, "detach") or hasattr(v, "__array__")
+
+
+def _ser_numeric(v: Any) -> Any:
+    """JSON serializer: detach array-like to nested python lists/scalars."""
+    if hasattr(v, "detach"):
+        v = v.detach()
+    if hasattr(v, "tolist"):
+        return v.tolist()
+    return v
+
+
+def _scalar_validator(*, positive: bool = False, nonneg: bool = False):
+    def _v(x: Any) -> Any:
+        if _is_arraylike(x):
+            return x
+        x = float(x)
+        if positive and not x > 0.0:
+            raise ValueError("must be > 0")
+        if nonneg and not x >= 0.0:
+            raise ValueError("must be >= 0")
+        return x
+
+    return _v
+
+
+def _matrix_validator(x: Any) -> Any:
+    if _is_arraylike(x):
+        return x
+    return [[float(e) for e in row] for row in x]
+
+
+def _vector_validator(x: Any) -> Any:
+    if _is_arraylike(x):
+        return x
+    return tuple(float(e) for e in x)
+
+
+_SER = PlainSerializer(_ser_numeric, when_used="json")
+
+# Dual scalar/vector/matrix types: use in place of float / tuple[float, ...] /
+# list[list[float]]. Each accepts plain python OR an array-like (tensor) untouched.
+Num = Annotated[Any, PlainValidator(_scalar_validator()), _SER]
+PosNum = Annotated[Any, PlainValidator(_scalar_validator(positive=True)), _SER]
+NonNegNum = Annotated[Any, PlainValidator(_scalar_validator(nonneg=True)), _SER]
+Vec = Annotated[Any, PlainValidator(_vector_validator), _SER]
+# PerPhaseMatrix is the canonical row-major SI matrix type, now tensor-capable.
+PerPhaseMatrix = Annotated[Any, PlainValidator(_matrix_validator), _SER]
 
 
 def si_field(description: str, *, short: Optional[str] = None, long: Optional[str] = None,
@@ -106,7 +168,9 @@ def si_field(description: str, *, short: Optional[str] = None, long: Optional[st
 class GridModel(BaseModel):
     """Base: forbid unknown fields so a subagent inventing a field fails loudly."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(
+        extra="forbid", validate_assignment=True, arbitrary_types_allowed=True
+    )
 
 
 # =============================================================================
@@ -343,9 +407,9 @@ class Provenance(GridModel):
 class Node(GridModel):
     id: int = Field(description="Unique node id within the grid.")
     name: Optional[str] = Field(default=None)
-    u_rated_v: float = si_field(
+    u_rated_v: PosNum = si_field(
         "Rated voltage.", short="V", long="volt",
-        reference="line-to-line (3-phase) / line-to-neutral (1-phase)", gt=0.0,
+        reference="line-to-line (3-phase) / line-to-neutral (1-phase)",
     )
     phases: tuple[Phase, ...] = Field(
         description="Ordered phases present; fixes matrix row/column order for this node."
@@ -387,7 +451,7 @@ class Line(BranchBase):
     being given explicitly; a resolver materialises them before assembly."""
 
     component: Literal["line"] = "line"
-    length_m: float = si_field("Electrical line length.", short="m", long="metre", gt=0.0)
+    length_m: PosNum = si_field("Electrical line length.", short="m", long="metre")
     type_ref: Optional[str] = Field(
         default=None, description="Catalog LineType id in Grid.types.lines; resolved/materialised."
     )
@@ -431,16 +495,16 @@ class ComplexTap(GridModel):
     """Off-nominal tap as a complex ratio: magnitude + phase shift (clock/vector group).
     Dimensionless; the one place a complex value is parameterised, as mag+angle."""
 
-    ratio_magnitude: float = Field(description="Tap ratio magnitude (1.0 = nominal).", gt=0.0)
-    shift_deg: float = si_field("Phase shift from tap/vector group.", short="deg", long="degree",
+    ratio_magnitude: PosNum = Field(description="Tap ratio magnitude (1.0 = nominal).")
+    shift_deg: Num = si_field("Phase shift from tap/vector group.", short="deg", long="degree",
                                 default=0.0)
 
 
 class GroundingImpedance(GridModel):
     """Neutral-to-ground impedance of a grounded-wye / zigzag winding (r=x=0 = solid)."""
 
-    r_ohm: float = si_field("Neutral grounding resistance.", short="Ohm", long="ohm", default=0.0)
-    x_ohm: float = si_field("Neutral grounding reactance at f0.", short="Ohm", long="ohm",
+    r_ohm: Num = si_field("Neutral grounding resistance.", short="Ohm", long="ohm", default=0.0)
+    x_ohm: Num = si_field("Neutral grounding reactance at f0.", short="Ohm", long="ohm",
                             default=0.0)
 
 
@@ -449,9 +513,9 @@ class TransformerZeroSeq(GridModel):
     zero-sequence PATH is always derived from winding connections + clock; this
     overrides only the value. None => Z0 = Z1 connected per topology."""
 
-    r0_ohm: float = si_field("Zero-sequence series resistance.", short="Ohm", long="ohm",
+    r0_ohm: Num = si_field("Zero-sequence series resistance.", short="Ohm", long="ohm",
                              reference="referred to HV side")
-    x0_ohm: float = si_field("Zero-sequence series reactance at f0.", short="Ohm", long="ohm",
+    x0_ohm: Num = si_field("Zero-sequence series reactance at f0.", short="Ohm", long="ohm",
                              reference="referred to HV side")
 
 
@@ -465,27 +529,27 @@ class Transformer(BranchBase):
     type_ref: Optional[str] = Field(
         default=None, description="Catalog TransformerType id; resolved/materialised."
     )
-    s_rated_va: Optional[float] = si_field("Rated apparent power.", short="VA",
-                                           long="volt-ampere", default=None, gt=0.0)
-    u_rated_from_v: Optional[float] = si_field("Rated voltage, from/HV side.", short="V",
-                                               long="volt", default=None, gt=0.0)
-    u_rated_to_v: Optional[float] = si_field("Rated voltage, to/LV side.", short="V",
-                                             long="volt", default=None, gt=0.0)
+    s_rated_va: Optional[PosNum] = si_field("Rated apparent power.", short="VA",
+                                           long="volt-ampere", default=None)
+    u_rated_from_v: Optional[PosNum] = si_field("Rated voltage, from/HV side.", short="V",
+                                               long="volt", default=None)
+    u_rated_to_v: Optional[PosNum] = si_field("Rated voltage, to/LV side.", short="V",
+                                             long="volt", default=None)
     from_connection: Optional[WindingConnection] = Field(default=None, description="HV connection.")
     to_connection: Optional[WindingConnection] = Field(default=None, description="LV connection.")
-    series_resistance_ohm: Optional[float] = si_field(
+    series_resistance_ohm: Optional[Num] = si_field(
         "Positive-sequence series (leakage) resistance, per-phase scalar.", short="Ohm", long="ohm",
         reference="referred to HV side", default=None,
     )
-    series_inductance_h: Optional[float] = si_field(
+    series_inductance_h: Optional[Num] = si_field(
         "Positive-sequence series (leakage) inductance. X(h)=2*pi*h*f0*L.", short="H", long="henry",
         reference="referred to HV side", default=None,
     )
-    magnetizing_conductance_s: float = si_field(
+    magnetizing_conductance_s: Num = si_field(
         "Core-loss (no-load) conductance G_m.", short="S", long="siemens",
         reference="referred to HV side", default=0.0,
     )
-    magnetizing_inductance_h: Optional[float] = si_field(
+    magnetizing_inductance_h: Optional[Num] = si_field(
         "Magnetizing inductance L_m; B_m(h)=1/(2*pi*h*f0*L_m). None = no branch.",
         short="H", long="henry", reference="referred to HV side", default=None,
     )
@@ -516,14 +580,14 @@ class Switch(BranchBase):
 
     component: Literal["switch"] = "switch"
     closed: bool = Field(description="True = conducting, False = open.")
-    resistance_ohm: float = si_field("Longitudinal resistance when closed (0 = ideal).",
-                                     short="Ohm", long="ohm", default=0.0, ge=0.0)
-    inductance_h: float = si_field("Longitudinal inductance when closed.", short="H", long="henry",
-                                   default=0.0, ge=0.0)
-    shunt_conductance_s: float = si_field("Shunt conductance per end.", short="S", long="siemens",
-                                          default=0.0, ge=0.0)
-    shunt_capacitance_f: float = si_field("Shunt capacitance per end.", short="F", long="farad",
-                                          default=0.0, ge=0.0)
+    resistance_ohm: NonNegNum = si_field("Longitudinal resistance when closed (0 = ideal).",
+                                     short="Ohm", long="ohm", default=0.0)
+    inductance_h: NonNegNum = si_field("Longitudinal inductance when closed.", short="H", long="henry",
+                                   default=0.0)
+    shunt_conductance_s: NonNegNum = si_field("Shunt conductance per end.", short="S", long="siemens",
+                                          default=0.0)
+    shunt_capacitance_f: NonNegNum = si_field("Shunt capacitance per end.", short="F", long="farad",
+                                          default=0.0)
 
 
 class ShuntReactor(BranchBase):
@@ -571,9 +635,9 @@ class Source(ApplianceBase):
     Z(h)=R + j*2*pi*h*f0*L). Sequence / short-circuit-power inputs convert in."""
 
     component: Literal["source"] = "source"
-    u_ref_v: tuple[float, ...] = si_field("Per-phase reference voltage magnitude.", short="V",
+    u_ref_v: Vec = si_field("Per-phase reference voltage magnitude.", short="V",
                                           long="volt")
-    u_angle_deg: tuple[float, ...] = si_field("Per-phase reference voltage angle.", short="deg",
+    u_angle_deg: Vec = si_field("Per-phase reference voltage angle.", short="deg",
                                               long="degree")
     resistance_ohm: PerPhaseMatrix = si_field("Per-phase Thevenin resistance matrix.", short="Ohm",
                                               long="ohm")
@@ -635,6 +699,8 @@ def _check_per_phase_power(obj) -> None:
         if per is not None:
             if len(per) != n:
                 raise ValueError(f"`{label}_nom_per_phase_*` length must match phase count.")
+            if _is_arraylike(per) or _is_arraylike(tot):
+                continue  # tensor params: caller owns per-phase/total consistency
             if abs(sum(per) - tot) > 1e-6 * max(1.0, abs(tot)):
                 raise ValueError(f"`{label}_nom_per_phase_*` must sum to the total `{label}_nom`.")
 
@@ -647,14 +713,14 @@ class Load(ApplianceBase):
     component: Literal["load"] = "load"
     connection: WindingConnection = Field(default=WindingConnection.WYE)
     load_model: LoadModel = Field(default=LoadModel.CONST_POWER)
-    p_nom_w: float = si_field("Rated TOTAL active power (nameplate).", short="W", long="watt")
-    q_nom_var: float = si_field("Rated TOTAL reactive power (nameplate).", short="var", long="var",
+    p_nom_w: Num = si_field("Rated TOTAL active power (nameplate).", short="W", long="watt")
+    q_nom_var: Num = si_field("Rated TOTAL reactive power (nameplate).", short="var", long="var",
                                 default=0.0)
-    p_nom_per_phase_w: Optional[tuple[float, ...]] = si_field(
+    p_nom_per_phase_w: Optional[Vec] = si_field(
         "Optional asymmetric per-phase active power; must sum to p_nom_w.", short="W", long="watt",
         default=None,
     )
-    q_nom_per_phase_var: Optional[tuple[float, ...]] = si_field(
+    q_nom_per_phase_var: Optional[Vec] = si_field(
         "Optional asymmetric per-phase reactive power; must sum to q_nom_var.", short="var",
         long="var", default=None,
     )
@@ -685,14 +751,14 @@ class Generator(ApplianceBase):
     component: Literal["generator"] = "generator"
     connection: WindingConnection = Field(default=WindingConnection.WYE)
     load_model: LoadModel = Field(default=LoadModel.CONST_POWER)
-    p_nom_w: float = si_field("Rated TOTAL active power (nameplate).", short="W", long="watt")
-    q_nom_var: float = si_field("Rated TOTAL reactive power (nameplate).", short="var", long="var",
+    p_nom_w: Num = si_field("Rated TOTAL active power (nameplate).", short="W", long="watt")
+    q_nom_var: Num = si_field("Rated TOTAL reactive power (nameplate).", short="var", long="var",
                                 default=0.0)
-    p_nom_per_phase_w: Optional[tuple[float, ...]] = si_field(
+    p_nom_per_phase_w: Optional[Vec] = si_field(
         "Optional asymmetric per-phase active power; must sum to p_nom_w.", short="W", long="watt",
         default=None,
     )
-    q_nom_per_phase_var: Optional[tuple[float, ...]] = si_field(
+    q_nom_per_phase_var: Optional[Vec] = si_field(
         "Optional asymmetric per-phase reactive power; must sum to q_nom_var.", short="var",
         long="var", default=None,
     )
@@ -716,9 +782,9 @@ class Generator(ApplianceBase):
 
 class ShuntAppliance(ApplianceBase):
     component: Literal["shunt"] = "shunt"
-    conductance_s: tuple[float, ...] = si_field("Per-phase shunt conductance G.", short="S",
+    conductance_s: Vec = si_field("Per-phase shunt conductance G.", short="S",
                                                 long="siemens")
-    capacitance_f: tuple[float, ...] = si_field("Per-phase shunt capacitance C (B(h)=2*pi*h*f0*C).",
+    capacitance_f: Vec = si_field("Per-phase shunt capacitance C (B(h)=2*pi*h*f0*C).",
                                                 short="F", long="farad")
 
 

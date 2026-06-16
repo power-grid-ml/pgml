@@ -44,3 +44,39 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
 - Tests: `tests/differentiability/test_solver_gradcheck.py` (gradcheck both modes,
   batched, + finite-difference spot check). The end-to-end grid path (assemble +
   solve) gradcheck is `tests/differentiability/test_gradcheck.py`.
+
+# =====================================================================
+# Phase-2: NONLINEAR fundamental power flow (FROZEN — to implement)
+# =====================================================================
+`solve_harmonic` stays as the LINEAR per-frequency solve (used by the const-Z path
+and, later, by each harmonic). Add the nonlinear fundamental solver:
+
+- `solve_power_flow(grid, *, slack="ideal", method="current_injection",
+     tol=1e-8, max_iter=100, dtype=torch.complex128, device=None,
+     operating_point=None, param_overrides=None) -> PowerFlowResult`
+  - Solves the const-P / ZIP fundamental power flow at f0 = `grid.base_frequency_hz`.
+  - `PowerFlowResult` (frozen dataclass): `v` complex `[*batch, N]` (DIFFERENTIABLE),
+    `index: NodePhaseIndex`, `iterations: int`, `residual: Tensor`, `converged: bool`.
+  - Forward = current-injection FIXED POINT: with `Y_net = assemble_network_ybus`
+    (+ folded constant-admittance device part + source Norton if `slack="norton"`),
+    iterate `V_{k+1} = solve_harmonic(Y_eff, device_current_injections(grid,V_k)+I_slack,
+    slack...)` until `||V_{k+1}-V_k|| < tol` or `max_iter`. Run the iterations under
+    `torch.no_grad()`.
+  - Backward = IMPLICIT FUNCTION THEOREM at the converged `V*` (do NOT unroll
+    iterations): one adjoint linear solve with the transposed power-flow Jacobian.
+    Implement as a `torch.autograd.Function` whose backward solves `J^T λ = grad_V`
+    and forms parameter grads via a vjp of the residual `F(V*,θ)` (autograd on a
+    single residual evaluation at `V*`). Gradients must flow to network params,
+    device powers (P/Q), and slack voltage. **Use REAL (re/im split) coordinates**
+    for the residual/Jacobian/adjoint (the power flow is non-holomorphic in V).
+  - `slack`: `"ideal"` (fix source-node V = `u_ref∠u_angle` via the Schur path in
+    `solve_harmonic`; matches pandapower/pgm) or `"norton"` (source folded; OpenDSS).
+  - Batched over leading/scenario dims; `method="newton"` is a later add (autograd
+    Jacobian via `torch.func.jacrev`), interface unchanged.
+
+## Required validation links
+- A const-impedance ZIP run of `solve_power_flow` must reproduce the linear
+  `assemble_ybus` + `solve_harmonic` result EXACTLY (same linear system).
+- A const-power run must match pandapower/pgm with their DEFAULT const-power loads
+  (the real PF) on IEEE33 (and CIGRE LV) — owned by the reference agents.
+- gradcheck (float64) of `v` w.r.t. line R/L and a load's P/Q through the IFT path.

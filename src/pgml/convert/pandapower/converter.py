@@ -42,6 +42,7 @@ import math
 from typing import Any
 
 from pgml.schemas.grid_schema import (
+    ComplexTap,
     ConstantParam,
     Grid,
     GridMetadata,
@@ -53,11 +54,15 @@ from pgml.schemas.grid_schema import (
     ResistanceFrequencyModel,
     Source,
     SourceConvention,
+    Switch,
+    Transformer,
+    WindingConnection,
 )
 
 _PHASE_A = (Phase.A,)
-_TINY_R = 1.0e-6   # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
-_TINY_L = 1.0e-12  # H   — near-ideal Thevenin for ext_grid in Norton stamp
+_TINY_R = 1.0e-6    # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
+_TINY_L = 1.0e-12   # H   — near-ideal Thevenin for ext_grid in Norton stamp
+_SWITCH_R = 1.0e-4  # Ohm — near-ideal resistance for closed bus-bus switches
 _PROVENANCE = Provenance(
     source_convention=SourceConvention.SEQUENCE,
     notes=(
@@ -100,7 +105,14 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
     # ------------------------------------------------------------------ #
     _id = _IdCounter()
 
-    id_map: dict[str, Any] = {"bus": {}, "line": {}, "load": {}, "ext_grid": {}}
+    id_map: dict[str, Any] = {
+        "bus": {},
+        "line": {},
+        "trafo": {},
+        "switch": {},
+        "load": {},
+        "ext_grid": {},
+    }
 
     # ------------------------------------------------------------------ #
     # 1. Nodes (buses)                                                     #
@@ -176,7 +188,149 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
         )
 
     # ------------------------------------------------------------------ #
-    # 3. ext_grid -> Source (Thevenin with near-zero Z; ideal-slack mode   #
+    # 3. Transformers (two-winding, positive-sequence equivalent)          #
+    # ------------------------------------------------------------------ #
+    # Conversion formulas for our assembly's transformer stamp convention: #
+    #                                                                      #
+    # Our assembly uses the MATPOWER off-nominal-tap PI model:             #
+    #   Y_ff = y_se/|t|^2,  Y_ft = -y_se/conj(t)                         #
+    #   Y_tf = -y_se/t,      Y_tt = y_se                                  #
+    # where t = tap.ratio_magnitude * exp(j*tap.shift_deg).               #
+    #                                                                      #
+    # The model is correct in PER-UNIT where `y_se` is on the LV base and #
+    # `t` is the off-nominal ratio (≈1).  In SI we use the full turns      #
+    # ratio t = n = vn_hv/vn_lv as `tap.ratio_magnitude`, so `y_se` must  #
+    # be referred to the LV side: Z_sc_LV = Z_sc_HV / n^2.  Then:         #
+    #   Y_ff = y_se_LV/n^2 = y_se_HV  (HV SI)    ✓                        #
+    #   Y_tt = y_se_LV = n^2*y_se_HV  (LV SI)    ✓                        #
+    #                                                                      #
+    # All quantities:                                                       #
+    #   Z_base_LV = V_n_LV^2 / S_n  (LV SI ohm base)                      #
+    #   Z_sc_LV = (vk_percent/100) * Z_base_LV                            #
+    #   R_sc_LV = (vkr_percent/100) * Z_base_LV                           #
+    #   X_sc_LV = sqrt(Z_sc_LV^2 - R_sc_LV^2);  L_sc_LV = X/(2*pi*f0)   #
+    #   tap_ratio = vn_hv_kv / vn_lv_kv  (full turns ratio, SI)           #
+    #   shift_deg = shift_degree from pandapower nameplate                 #
+    # Magnetizing branch (referred to HV side for the shunt):              #
+    #   G_m = P_fe / V_n_HV^2;  B_m = sqrt(...) / V_n_HV^2               #
+    #   L_m = 1 / (2*pi*f0 * B_m) when B_m > 0, else None                #
+    # ------------------------------------------------------------------ #
+    if hasattr(net, "trafo") and len(net.trafo):
+        for pp_idx, row in net.trafo.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            hv_bus = int(row["hv_bus"])
+            lv_bus = int(row["lv_bus"])
+            if hv_bus not in id_map["bus"] or lv_bus not in id_map["bus"]:
+                continue
+
+            trafo_id = _id.next()
+            id_map["trafo"][pp_idx] = trafo_id
+
+            sn_va = float(row["sn_mva"]) * 1.0e6         # VA
+            vn_hv_v = float(row["vn_hv_kv"]) * 1.0e3    # V
+            vn_lv_v = float(row["vn_lv_kv"]) * 1.0e3    # V
+            vk_pct = float(row["vk_percent"])
+            vkr_pct = float(row["vkr_percent"])
+            pfe_w = float(row.get("pfe_kw", 0.0) or 0.0) * 1.0e3  # W
+            i0_pct = float(row.get("i0_percent", 0.0) or 0.0)
+            shift_deg = float(row.get("shift_degree", 0.0) or 0.0)
+
+            # Leakage impedance referred to LV side (required by our stamp convention)
+            # Z_base_LV = Vn_LV^2 / Sn;  Z_sc_LV = vk%/100 * Z_base_LV
+            z_base_lv = vn_lv_v ** 2 / sn_va
+            z_sc_lv = vk_pct / 100.0 * z_base_lv
+            r_sc_lv = vkr_pct / 100.0 * z_base_lv
+            x_sc_sq = z_sc_lv ** 2 - r_sc_lv ** 2
+            x_sc_lv = math.sqrt(max(x_sc_sq, 0.0))
+            l_sc_lv = x_sc_lv / two_pi_f0
+
+            # Magnetizing branch (referred to HV side; added to the HV diagonal)
+            if pfe_w > 0.0:
+                g_m = pfe_w / (vn_hv_v ** 2)
+            else:
+                g_m = 0.0
+
+            l_m = None
+            if i0_pct > 0.0:
+                # no-load current amplitude as a fraction of rated current
+                # I0 = i0_pct/100 * Sn / Vn_HV  (line-to-line, positive-seq)
+                i0_amp = i0_pct / 100.0 * sn_va / vn_hv_v
+                s_nl = vn_hv_v * i0_amp  # VA
+                q_nl_sq = s_nl ** 2 - pfe_w ** 2
+                if q_nl_sq > 0.0:
+                    b_m = math.sqrt(q_nl_sq) / (vn_hv_v ** 2)
+                    if b_m > 0.0:
+                        l_m = 1.0 / (two_pi_f0 * b_m)
+
+            # Off-nominal tap: full turns ratio = HV_rated / LV_rated (SI), plus
+            # the nameplate phase shift from pandapower.
+            tap_ratio = vn_hv_v / vn_lv_v
+
+            branches.append(
+                Transformer(
+                    id=trafo_id,
+                    name=str(row.get("name", f"trafo_{pp_idx}") or f"trafo_{pp_idx}"),
+                    from_node=id_map["bus"][hv_bus],    # from = HV side
+                    to_node=id_map["bus"][lv_bus],      # to   = LV side
+                    from_phases=_PHASE_A,
+                    to_phases=_PHASE_A,
+                    s_rated_va=sn_va,
+                    u_rated_from_v=vn_hv_v,
+                    u_rated_to_v=vn_lv_v,
+                    from_connection=WindingConnection.DELTA,   # HV of Dyn
+                    to_connection=WindingConnection.WYE_GROUNDED,  # LV of Dyn
+                    series_resistance_ohm=r_sc_lv,
+                    series_inductance_h=l_sc_lv,
+                    magnetizing_conductance_s=g_m,
+                    magnetizing_inductance_h=l_m,
+                    tap=ComplexTap(ratio_magnitude=tap_ratio, shift_deg=shift_deg),
+                    provenance=_PROVENANCE,
+                )
+            )
+
+    # ------------------------------------------------------------------ #
+    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch)      #
+    # ------------------------------------------------------------------ #
+    # pandapower's bus-bus switches (et='b') represent closed busbars or  #
+    # coupling breakers that merge buses internally.  We convert each     #
+    # closed bus-bus switch to a Switch with a small series resistance so  #
+    # the series admittance is large but finite (no division-by-zero).    #
+    # Open bus-bus switches are skipped (no branch stamped).              #
+    # ------------------------------------------------------------------ #
+    if hasattr(net, "switch") and len(net.switch):
+        for pp_idx, row in net.switch.iterrows():
+            if str(row.get("et", "")) != "b":
+                continue                             # only bus-bus switches
+            if not bool(row.get("closed", True)):
+                continue                             # open switch: no branch
+            bus_from = int(row["bus"])
+            bus_to = int(row["element"])
+            if bus_from not in id_map["bus"] or bus_to not in id_map["bus"]:
+                continue
+
+            sw_id = _id.next()
+            id_map["switch"][pp_idx] = sw_id
+            z_ohm = float(row.get("z_ohm", 0.0) or 0.0)
+            # Use z_ohm if provided; fall back to _SWITCH_R for numerical stability.
+            r_sw = z_ohm if z_ohm > 0.0 else _SWITCH_R
+            branches.append(
+                Switch(
+                    id=sw_id,
+                    name=str(row.get("name", f"switch_{pp_idx}") or f"switch_{pp_idx}"),
+                    from_node=id_map["bus"][bus_from],
+                    to_node=id_map["bus"][bus_to],
+                    from_phases=_PHASE_A,
+                    to_phases=_PHASE_A,
+                    closed=True,
+                    resistance_ohm=r_sw,
+                    inductance_h=0.0,
+                    provenance=_PROVENANCE,
+                )
+            )
+
+    # ------------------------------------------------------------------ #
+    # 5. ext_grid -> Source (Thevenin with near-zero Z; ideal-slack mode   #
     #    overrides this in the solver)                                     #
     # ------------------------------------------------------------------ #
     appliances: list = []
@@ -215,7 +369,7 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
         )
 
     # ------------------------------------------------------------------ #
-    # 4. Loads                                                             #
+    # 5. Loads                                                             #
     # ------------------------------------------------------------------ #
     for pp_idx, row in net.load.iterrows():
         if not bool(row.get("in_service", True)):
