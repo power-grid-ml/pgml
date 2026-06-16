@@ -13,6 +13,13 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 from __future__ import annotations
 
 from .harmonic import solve_harmonic
+from .harmonic_flow import HarmonicFlowResult, solve_harmonic_flow
 from .power_flow import PowerFlowResult, solve_power_flow
 
-__all__ = ["solve_harmonic", "solve_power_flow", "PowerFlowResult"]
+__all__ = [
+    "solve_harmonic",
+    "solve_power_flow",
+    "PowerFlowResult",
+    "solve_harmonic_flow",
+    "HarmonicFlowResult",
+]

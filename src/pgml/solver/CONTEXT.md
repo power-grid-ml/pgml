@@ -78,5 +78,72 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
 - A const-impedance ZIP run of `solve_power_flow` must reproduce the linear
   `assemble_ybus` + `solve_harmonic` result EXACTLY (same linear system).
 - A const-power run must match pandapower/pgm with their DEFAULT const-power loads
-  (the real PF) on IEEE33 (and CIGRE LV) — owned by the reference agents.
+  (the real PF) on IEEE33 (and CIGRE LV) — owned by the reference agents. DONE:
+  IEEE33 ~3e-9 pu, CIGRE LV ~1e-7 pu.
 - gradcheck (float64) of `v` w.r.t. line R/L and a load's P/Q through the IFT path.
+
+# =====================================================================
+# Phase-3: HARMONIC power flow (IMPLEMENTED — harmonic_flow.py)
+# =====================================================================
+Reuses `assemble_network_ybus` (builds Y at any `h·f0`) + `solve_harmonic` (batched
+per-frequency linear solve). The OpenDSS conventions are pinned in
+`references/opendss/harmonics.md` (READ IT — esp. the spectrum phase convention,
+verified empirically). New orchestration:
+
+- `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", operating_point=None,
+     harmonic_injection=None, include_load_shunt=False, tol=1e-10, max_iter=100,
+     dtype=torch.complex128, device=None) -> HarmonicFlowResult`
+  - `harmonic_orders`: iterable of orders (e.g. `[1,5,7]`; order 1 = fundamental).
+  - `HarmonicFlowResult` (frozen dataclass): `v` complex `[*batch, H, N]` (V per
+    order; **order 1 = the nonlinear `solve_power_flow` solution**, other orders =
+    the linear per-harmonic solve), `frequencies_hz [H]`, `index`, `pf`
+    (the fundamental `PowerFlowResult`).
+  - DIFFERENTIABLE end to end (network params, load P/Q, AND harmonic injections)
+    and BATCHED over scenario dims, same conventions as `solve_power_flow`.
+
+### Steps (per the OpenDSS model)
+1. Fundamental: `pf = solve_power_flow(grid, slack=slack, operating_point=...)`.
+   Compute each device's FUNDAMENTAL current phasor `I1` (per phase) from the
+   converged `pf.v` — needs a PER-DEVICE current (add a helper / option to
+   `device_current_injections` to return per-device, not just the nodal sum).
+2. Per harmonic `h>1` (batched over all orders at once):
+   - `Y(h) = assemble_network_ybus(grid, [h·f0]) + source Norton shunt Y_s(h)`
+     (+ load Norton shunt `Y_load(h)` from `HarmonicShuntModel` when
+     `include_load_shunt=True`; `False` = OpenDSS `NeglectLoadY` pure-source model).
+   - `I(h)` = sum of per-device harmonic injections using the verified convention
+     `|I_h|=(mag_h/mag_1)|I1|`, `arg(I_h)=ang_h + h·(arg(I1) − ang_1)` from each
+     device's `Spectrum` (or the `harmonic_injection` override).
+   - `V(h) = solve_harmonic(Y(h), I(h))` in NORTON mode (no ideal slack at
+     harmonics: the source is a Norton shunt held at 0 harmonic voltage unless it
+     has its own spectrum).
+3. Stack order 1 (from PF) + harmonics into `v [*batch, H, N]`.
+
+### `harmonic_injection` override (scenario-ready, tensor-friendly)
+A per-device override of the stored Spectrum, carrying tensors so scenarios can vary
+harmonic injections DIFFERENTIABLY (the stored `Spectrum`/`HarmonicComponent` are
+plain floats; do NOT hard-bind to them). FINAL format:
+`{appliance_id: {order:int -> (magnitude_pu, phase_deg)}}`, where each value is a
+python float OR a tensor (0-d, or a leading SCENARIO-batched tensor). Overrides the
+stored Spectrum. Analogous to `operating_point` for P/Q.
+
+## Implementation notes (DONE)
+- `slack="norton"` matches OpenDSS Vsource (use for OpenDSS parity); `slack="ideal"`
+  matches pandapower/pgm at the fundamental. At harmonics the source is ALWAYS a
+  Norton shunt held at 0 V (regardless of `slack`).
+- Per-device fundamental current `I1 = sign*conj(S0)/conj(Vt)` computed inline in
+  `_harmonic_injections` from `pf.v` (no change to `device_current_injections`).
+- `harmonic_injection` magnitudes/phases may carry a leading scenario batch dim
+  (batched harmonic injection works; full scenario batching is the next phase).
+- DEFERRED: `include_load_shunt=True` (load Norton shunt at harmonics) raises
+  `NotImplementedError` — the OpenDSS shunt split is unpinned. EXACT OpenDSS
+  per-order VOLTAGE parity also needs the Carson earth-return line model (the
+  harmonic line impedance differs ~2.5%/h; see `references/opendss/harmonics.md`),
+  which is the POSTPONED geometry path. The INJECTION convention IS OpenDSS-exact.
+
+### Validation (DONE)
+`tests/reference/test_harmonic_flow.py`: independent numpy oracle (exact, ~1e-9),
+fundamental==PF, OpenDSS ballpark (fundamental exact, harmonics within 4% — Carson
+gap), shapes/orders. `tests/differentiability/test_harmonic_flow_gradcheck.py`:
+gradcheck of `V(h)` w.r.t. line R/L, load P/Q, and injection magnitude (incl.
+batched). The live-OpenDSS per-order comparison (with Carson + load shunt) is for
+the opendss-reference agent when those models land.
