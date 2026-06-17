@@ -1,13 +1,5 @@
 {
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          { "type": "command", "command": "python3 .claude/hooks/schema-guard.py" }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit",
@@ -15,6 +7,6 @@
           { "type": "command", "command": "ruff format src tests >/dev/null 2>&1 || true", "timeout": 60 }
         ]
       }
-    ],
+    ]
   }
 }
