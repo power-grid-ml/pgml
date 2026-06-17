@@ -22,6 +22,7 @@ A change that breaks gradcheck (float64) or the GPU device/dtype test is not don
 - `src/pgml/assembly/`  per-phase, per-harmonic, batched, differentiable Y-bus.
 - `src/pgml/solver/`    complex batched linear solve (Y(h) V(h) = I(h)).
 - `src/pgml/convert/`   converters from pandapower / power-grid-model / OpenDSS -> our schema.
+- `src/pgml/geometry/`  differentiable Carson/Deri line constants (geometry -> Z(h)/Yc(h), bit-exact vs OpenDSS) + R/X->geometry synthesis. See `geometry/CONTEXT.md`.
 - `src/pgml/scenarios/` reproducible config-driven batched sampling (QMC/cartesian). See `scenarios/CONTEXT.md` + `scenarios/ROADMAP.md` (deferred batching options).
 - `src/pgml/evaluation/` comparison & evaluation plots (refs vs ours): Y-bus heatmaps, voltage/harmonic profiles, 3D plotly. See `evaluation/CONTEXT.md`; demo `examples/evaluate_ieee33.py`.
 - `references/`         distilled library briefs + ARCHITECTURE.md (the big picture).

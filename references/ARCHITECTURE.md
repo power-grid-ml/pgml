@@ -29,9 +29,12 @@ bridged to PyG via DLPack. Do not start there.)
 1. Differentiable load flow: equations + Y-bus assembly + complex solve;
    validate Y against OpenDSS (and pandapower), validate results against
    pandapower; confirm gradcheck + GPU. (CURRENT)
-2. Geometry -> impedance differentiable path (Carson, skin effect).
-3. Full harmonic range; validate harmonic results against OpenDSS.
-4. Batching/scale; parquet persistence.
+2. Geometry -> impedance differentiable path (Carson, skin effect). DONE
+   (`pgml.geometry`): Deri earth return + skin effect + Maxwell capacitance, bit-exact
+   vs OpenDSS, differentiable/GPU/batched; closes the harmonic line-impedance gap.
+3. Full harmonic range; validate harmonic results against OpenDSS. DONE — harmonic
+   flow + OpenDSS-vs-pgml harmonic comparison on IEEE-33 + CIGRE LV (match via Carson).
+4. Batching/scale (`pgml.scenarios`, increment 1 done); parquet persistence (deferred).
 5. PyG state estimation + the inverse (parameter recovery) path.
 
 ## Validation philosophy

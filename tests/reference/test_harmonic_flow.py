@@ -40,7 +40,9 @@ SPEC = [(1, 1.0, 0.0), (5, 0.2, 0.0), (7, 0.14, 0.0)]  # (order, mag_pu, phase_d
 
 
 def _grid(spec=SPEC) -> Grid:
-    comps = [HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a) for o, m, a in spec]
+    comps = [
+        HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a) for o, m, a in spec
+    ]
     return Grid(
         base_frequency_hz=F0,
         nodes=[
@@ -49,7 +51,11 @@ def _grid(spec=SPEC) -> Grid:
         ],
         branches=[
             Line(
-                id=1, from_node=1, to_node=2, from_phases=(Phase.A,), to_phases=(Phase.A,),
+                id=1,
+                from_node=1,
+                to_node=2,
+                from_phases=(Phase.A,),
+                to_phases=(Phase.A,),
                 length_m=1.0,
                 series_resistance_ohm_per_m=[[R_LINE]],
                 series_inductance_h_per_m=[[X_LINE / W0]],
@@ -58,11 +64,20 @@ def _grid(spec=SPEC) -> Grid:
         ],
         appliances=[
             Source(
-                id=1, node=1, phases=(Phase.A,), u_ref_v=(230.0,), u_angle_deg=(0.0,),
-                resistance_ohm=[[R_SRC]], inductance_h=[[X_SRC / W0]],
+                id=1,
+                node=1,
+                phases=(Phase.A,),
+                u_ref_v=(230.0,),
+                u_angle_deg=(0.0,),
+                resistance_ohm=[[R_SRC]],
+                inductance_h=[[X_SRC / W0]],
             ),
             Load(
-                id=2, node=2, phases=(Phase.A,), p_nom_w=P_LOAD, q_nom_var=Q_LOAD,
+                id=2,
+                node=2,
+                phases=(Phase.A,),
+                p_nom_w=P_LOAD,
+                q_nom_var=Q_LOAD,
                 load_model=LoadModel.CONST_POWER,
                 spectrum=StaticSpectrum(spectrum=SpectrumPoint(components=comps)),
             ),
@@ -92,8 +107,12 @@ def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex
         y_src = 1.0 / z_src
         Y = np.array([[y_src + y_line, -y_line], [-y_line, y_line]], dtype=complex)
         mag_h, ang_h = spec.get(h, (0.0, 0.0))
-        i_drawn = (mag_h / mag1) * abs(i1) * cmath.exp(
-            1j * (math.radians(ang_h) + h * (cmath.phase(i1) - math.radians(ang1)))
+        i_drawn = (
+            (mag_h / mag1)
+            * abs(i1)
+            * cmath.exp(
+                1j * (math.radians(ang_h) + h * (cmath.phase(i1) - math.radians(ang1)))
+            )
         )
         rhs = np.array([0.0, -i_drawn], dtype=complex)  # nodal injection = -I_drawn
         v = np.linalg.solve(Y, rhs)
@@ -112,7 +131,10 @@ def test_matches_numpy_oracle():
     for k, h in enumerate(orders):
         got = complex(res.v[k, ld])
         np.testing.assert_allclose(
-            [got.real, got.imag], [ref[h].real, ref[h].imag], rtol=1e-7, atol=1e-9,
+            [got.real, got.imag],
+            [ref[h].real, ref[h].imag],
+            rtol=1e-7,
+            atol=1e-9,
             err_msg=f"order {h} mismatch vs numpy oracle",
         )
 
@@ -140,7 +162,9 @@ def test_opendss_ballpark():
         mag = abs(complex(res.v[k, ld]))
         rel = abs(mag - oracle_mag[h]) / oracle_mag[h]
         tol = 1e-4 if h == 1 else 0.04
-        assert rel < tol, f"order {h}: |V|={mag:.5f} vs OpenDSS {oracle_mag[h]} (rel {rel:.4f})"
+        assert rel < tol, (
+            f"order {h}: |V|={mag:.5f} vs OpenDSS {oracle_mag[h]} (rel {rel:.4f})"
+        )
 
 
 def test_orders_shapes_and_frequencies():

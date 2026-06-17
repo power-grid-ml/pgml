@@ -63,7 +63,7 @@ import pytest
 import torch
 
 # numpy 2.x compatibility shim for pandapower 2.14
-np.Inf = np.inf    # type: ignore[attr-defined]
+np.Inf = np.inf  # type: ignore[attr-defined]
 np.in1d = np.isin  # type: ignore[attr-defined]
 
 import pandapower.networks as pn  # noqa: E402
@@ -84,6 +84,7 @@ from pgml.schemas.grid_schema import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Canonical data / circuit builders
 # ---------------------------------------------------------------------------
+
 
 def _canonical_net():
     """Return the canonical case33bw pandapower network (no modifications)."""
@@ -107,7 +108,7 @@ def _build_dss_circuit_passive(net) -> None:
     vn_kv = float(net.bus.at[0, "vn_kv"])  # 12.66 kV (all buses same)
 
     # Tiny Thevenin impedance for the Vsource (matches pandapower converter)
-    r1_tiny = 1.0e-6                         # Ohm
+    r1_tiny = 1.0e-6  # Ohm
     x1_tiny = 2.0 * math.pi * f0 * 1.0e-12  # Ohm (X = 2*pi*f*L, L=1e-12 H)
 
     dss.Text.Command("Clear")
@@ -199,7 +200,9 @@ def _extract_dss_y() -> tuple[np.ndarray, list[str]]:
     return y_matrix, node_order
 
 
-def _build_alignment(node_order: list[str], grid, id_map: dict, index) -> dict[int, int]:
+def _build_alignment(
+    node_order: list[str], grid, id_map: dict, index
+) -> dict[int, int]:
     """Map DSS Y matrix row index -> our compact node-phase row index.
 
     The circuit is single-phase (all entries end in ``.1``), so every DSS
@@ -224,7 +227,7 @@ def _build_alignment(node_order: list[str], grid, id_map: dict, index) -> dict[i
     for dss_i, entry in enumerate(node_order):
         # entry: "BUS{n}.1" (uppercase, single-phase)
         bus_name = entry.upper().split(".")[0]  # "BUSn"
-        bus_num = int(bus_name[3:])             # strip "BUS" prefix
+        bus_num = int(bus_name[3:])  # strip "BUS" prefix
         node_id = id_map["bus"][bus_num]
         our_row = index.row(node_id, Phase.A)
         alignment[dss_i] = our_row
@@ -244,7 +247,7 @@ def _compute_load_shunts(grid, index) -> np.ndarray:
         if isinstance(app, GridLoad) and app.in_service:
             node = node_by_id[app.node]
             u_v = node.u_rated_v
-            y_load = complex(app.p_nom_w, -app.q_nom_var) / (u_v ** 2)
+            y_load = complex(app.p_nom_w, -app.q_nom_var) / (u_v**2)
             our_row = index.rows(app.node)[0]  # Phase.A row
             load_shunts[our_row] += y_load
     return load_shunts
@@ -253,6 +256,7 @@ def _compute_load_shunts(grid, index) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Y-bus oracle tests
 # ---------------------------------------------------------------------------
+
 
 class TestIEEE33YBusVsOpenDSS:
     """Validate our assembled Y(60 Hz) against OpenDSS SystemY on IEEE 33-bus.
@@ -405,7 +409,9 @@ class TestIEEE33YBusVsOpenDSS:
         # Both should have the same large diagonal
         dss_diag0 = Y_dss[0, 0]
         our_diag0 = Y_ours[0, 0]
-        assert abs(dss_diag0).real > 1e5, f"Expected large Vsource shunt, got {dss_diag0}"
+        assert abs(dss_diag0).real > 1e5, (
+            f"Expected large Vsource shunt, got {dss_diag0}"
+        )
         err = abs(dss_diag0 - our_diag0)
         rtol = err / abs(dss_diag0)
         assert rtol < self.RTOL_DIAG, (
@@ -421,8 +427,12 @@ class TestIEEE33YBusVsOpenDSS:
         sym_err_dss = np.max(np.abs(Y_dss - Y_dss.T))
         sym_err_ours = np.max(np.abs(Y_ours - Y_ours.T))
 
-        assert sym_err_dss < 1e-10, f"DSS Y is not symmetric: max|Y-Y^T|={sym_err_dss:.2e}"
-        assert sym_err_ours < 1e-10, f"Our Y is not symmetric: max|Y-Y^T|={sym_err_ours:.2e}"
+        assert sym_err_dss < 1e-10, (
+            f"DSS Y is not symmetric: max|Y-Y^T|={sym_err_dss:.2e}"
+        )
+        assert sym_err_ours < 1e-10, (
+            f"Our Y is not symmetric: max|Y-Y^T|={sym_err_ours:.2e}"
+        )
 
     def test_topology_matches_expected_sparsity(self) -> None:
         """Non-zero off-diagonal entries match IEEE 33-bus topology (32 lines)."""
@@ -433,14 +443,14 @@ class TestIEEE33YBusVsOpenDSS:
         mask = ~np.eye(n, dtype=bool)
         n_nonzero = int(np.sum(np.abs(Y_ours[mask]) > 1e-10))
         assert n_nonzero == 64, (
-            f"Expected 64 non-zero off-diagonal entries (32 lines * 2), "
-            f"got {n_nonzero}"
+            f"Expected 64 non-zero off-diagonal entries (32 lines * 2), got {n_nonzero}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Load and Vsource shunt accounting tests
 # ---------------------------------------------------------------------------
+
 
 class TestShuntAccounting:
     """Document and verify the shunt admittances that explain the diagonal delta.
@@ -481,7 +491,7 @@ class TestShuntAccounting:
         p_w = float(net.load[net.load["bus"] == 1]["p_mw"].iloc[0]) * 1e6
         q_var = float(net.load[net.load["bus"] == 1]["q_mvar"].iloc[0]) * 1e6
         v_ll = float(net.bus.at[1, "vn_kv"]) * 1_000.0
-        y_expected = complex(p_w, -q_var) / (v_ll ** 2)
+        y_expected = complex(p_w, -q_var) / (v_ll**2)
 
         err = abs(delta - y_expected)
         assert err < self.ATOL_SHUNT, (
@@ -527,6 +537,7 @@ class TestShuntAccounting:
 # OpenDSS converter round-trip tests
 # ---------------------------------------------------------------------------
 
+
 class TestOpenDSSConverterRoundTrip:
     """Verify that ``convert.opendss.to_grid`` reproduces the canonical Grid.
 
@@ -569,7 +580,9 @@ class TestOpenDSSConverterRoundTrip:
         """Series resistance per meter matches the pandapower converter to rtol=1e-12."""
         id_map_pp = self._id_map_pp
         pp_lines = {b.id: b for b in self._grid_pp.branches if isinstance(b, GridLine)}
-        dss_lines = {b.name: b for b in self._grid_dss.branches if isinstance(b, GridLine)}
+        dss_lines = {
+            b.name: b for b in self._grid_dss.branches if isinstance(b, GridLine)
+        }
 
         max_rtol = 0.0
         for pp_idx in id_map_pp["line"]:
@@ -593,7 +606,9 @@ class TestOpenDSSConverterRoundTrip:
         """Series inductance per meter matches the pandapower converter to rtol=1e-12."""
         id_map_pp = self._id_map_pp
         pp_lines = {b.id: b for b in self._grid_pp.branches if isinstance(b, GridLine)}
-        dss_lines = {b.name: b for b in self._grid_dss.branches if isinstance(b, GridLine)}
+        dss_lines = {
+            b.name: b for b in self._grid_dss.branches if isinstance(b, GridLine)
+        }
 
         max_rtol = 0.0
         for pp_idx in id_map_pp["line"]:

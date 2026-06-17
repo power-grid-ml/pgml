@@ -79,21 +79,30 @@ def run_scenarios(
         sampled = sample(grid, spec)
     if calculation == "power_flow":
         res = solve_power_flow(
-            grid, slack=slack, operating_point=sampled.operating_point,
-            dtype=dtype, device=device,
+            grid,
+            slack=slack,
+            operating_point=sampled.operating_point,
+            dtype=dtype,
+            device=device,
         )
         return ScenarioResult(v=res.v, index=res.index, sampled=sampled)
     if calculation == "harmonic":
         if not harmonic_orders:
             raise ValueError("calculation='harmonic' requires harmonic_orders.")
         res = solve_harmonic_flow(
-            grid, harmonic_orders, slack=slack,
-            operating_point=sampled.operating_point, dtype=dtype, device=device,
+            grid,
+            harmonic_orders,
+            slack=slack,
+            operating_point=sampled.operating_point,
+            dtype=dtype,
+            device=device,
         )
         return ScenarioResult(
             v=res.v, index=res.index, sampled=sampled, frequencies_hz=res.frequencies_hz
         )
-    raise ValueError(f"Unknown calculation {calculation!r} (use 'power_flow'/'harmonic').")
+    raise ValueError(
+        f"Unknown calculation {calculation!r} (use 'power_flow'/'harmonic')."
+    )
 
 
 __all__ = ["ScenarioResult", "run_scenarios"]

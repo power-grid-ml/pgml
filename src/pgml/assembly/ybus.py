@@ -304,11 +304,96 @@ def _series_terminal_indices(
 
 
 def _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
-    lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
-    if not lines:
+    # Explicit-R/L/C lines go through the matrix path; lines carrying a
+    # `conductor_geometry` go through the Carson/Deri geometry path.
+    rx_lines = [
+        b
+        for b in grid.branches
+        if isinstance(b, Line) and b.in_service and b.conductor_geometry is None
+    ]
+    if rx_lines:
+        y = _stamp_line_groups(rx_lines, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_geometry_lines(grid, f, y, index, cdt, rdt, device, param_overrides)
+    return y
+
+
+def _geom_scalar(v, rdt: torch.dtype, device) -> Tensor:
+    """Coerce a geometry field (python float OR tensor) to a 0-d real tensor (grad-safe)."""
+    if isinstance(v, Tensor):
+        return v.to(dtype=rdt, device=device).reshape(())
+    return torch.as_tensor(float(v), dtype=rdt, device=device)
+
+
+def _geom_conductor_arrays(ln, rdt, device):
+    """Per-conductor arrays ``[Ncond]`` ordered phases-first (per from_phases) then neutrals."""
+    geo = ln.conductor_geometry
+    phase_conds = []
+    for ph in ln.from_phases:
+        phase_conds.append(
+            next(c for c in geo.conductors if not c.is_neutral and c.phase == ph)
+        )
+    ordered = phase_conds + [c for c in geo.conductors if c.is_neutral]
+    x = torch.stack([_geom_scalar(c.x_m, rdt, device) for c in ordered])
+    y = torch.stack([_geom_scalar(c.y_m, rdt, device) for c in ordered])
+    gmr = torch.stack([_geom_scalar(c.gmr_m, rdt, device) for c in ordered])
+    rdc = torch.stack([_geom_scalar(c.r_dc_ohm_per_m, rdt, device) for c in ordered])
+    rad = torch.stack([_geom_scalar(c.radius_m, rdt, device) for c in ordered])
+    return x, y, gmr, rdc, rad
+
+
+def _stamp_geometry_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
+    """Stamp lines whose impedance comes from conductor geometry (Carson/Deri)."""
+    glines = [
+        b
+        for b in grid.branches
+        if isinstance(b, Line) and b.in_service and b.conductor_geometry is not None
+    ]
+    if not glines:
         return y
-    # Group by phase count so each group stacks into a rectangular tensor.
-    return _stamp_line_groups(lines, f, y, index, cdt, rdt, device, param_overrides)
+    from pgml.geometry.carson import line_constants
+
+    by_key: dict[tuple[int, int], list] = {}
+    for ln in glines:
+        key = (len(ln.from_phases), len(ln.conductor_geometry.conductors))
+        by_key.setdefault(key, []).append(ln)
+
+    two_pi_f = (2.0 * torch.pi) * f  # [H]
+    for (nph, _ncond), group in by_key.items():
+        xs, ys_, gmrs, rdcs, rads, lengths, rhos = [], [], [], [], [], [], []
+        for ln in group:
+            cx, cy, cg, cr, cra = _geom_conductor_arrays(ln, rdt, device)
+            xs.append(cx)
+            ys_.append(cy)
+            gmrs.append(cg)
+            rdcs.append(cr)
+            rads.append(cra)
+            lengths.append(_geom_scalar(ln.length_m, rdt, device))
+            rhos.append(
+                _geom_scalar(ln.conductor_geometry.earth_resistivity_ohm_m, rdt, device)
+            )
+        X, Y = torch.stack(xs), torch.stack(ys_)  # [K, Ncond]
+        GMR, RDC, RAD = torch.stack(gmrs), torch.stack(rdcs), torch.stack(rads)
+        RHO, LEN = torch.stack(rhos), torch.stack(lengths)  # [K]
+
+        z, c = line_constants(
+            X, Y, GMR, RDC, RAD, RHO, f, nph
+        )  # Z[K,H,P,P] Ω/m, C[K,P,P] F/m
+        z_len = (z * LEN[:, None, None, None]).to(cdt)
+        ys_adm = torch.linalg.inv(z_len).transpose(0, 1)  # [H,K,P,P] series admittance
+        series_block = pi_series_blocks(ys_adm)
+
+        c_len = (c * LEN[:, None, None]).to(cdt)  # [K,P,P]
+        yc = (1j * two_pi_f).to(cdt)[:, None, None, None] * c_len[None]  # [H,K,P,P]
+        half = 0.5 * yc
+        zeros = torch.zeros_like(half)
+        shunt_block = torch.cat(
+            [torch.cat([half, zeros], dim=-1), torch.cat([zeros, half], dim=-1)], dim=-2
+        )
+
+        block = series_block + shunt_block
+        rows, cols = _series_terminal_indices(group, index, device)
+        y = scatter_blocks_into(y, block, rows, cols)
+    return y
 
 
 def _stamp_line_groups(lines, f, y, index, cdt, rdt, device, param_overrides):

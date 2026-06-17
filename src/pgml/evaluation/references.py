@@ -140,6 +140,263 @@ def opendss_ybus(
 
 
 # ---------------------------------------------------------------------------
+# Feeder builders (pandapower -> pgml grid + synthesized Carson geometry + spectra)
+# ---------------------------------------------------------------------------
+# Typical 6-pulse converter line-current spectrum (fraction of fundamental).
+CONVERTER_SPECTRUM = [
+    (1, 1.0, 0.0),
+    (5, 0.20, 0.0),
+    (7, 0.14, 0.0),
+    (11, 0.09, 0.0),
+    (13, 0.07, 0.0),
+]
+
+
+def _attach_spectrum_farthest(grid, n_loads: int, spectrum) -> None:
+    from pgml.schemas.grid_schema import (
+        HarmonicComponent,
+        Load,
+        SpectrumPoint,
+        StaticSpectrum,
+    )
+
+    from .topology import distance_from_slack
+
+    dist = distance_from_slack(grid)
+    loads = [a for a in grid.appliances if isinstance(a, Load) and a.in_service]
+    loads.sort(key=lambda a: dist.get(int(a.node), 0.0), reverse=True)
+    comps = [
+        HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a) for o, m, a in spectrum
+    ]
+    for ld in loads[:n_loads]:
+        ld.spectrum = StaticSpectrum(spectrum=SpectrumPoint(components=comps))
+
+
+def ieee33_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
+    """IEEE-33 as a pgml grid with synthesized Carson geometry + converter spectra."""
+    _numpy_shim()
+    import pandapower as pp
+    import pandapower.networks as pn
+
+    from pgml.convert.pandapower import to_grid
+    from pgml.geometry.synthesis import synthesize_grid_geometry
+
+    net = pn.case33bw()
+    pp.runpp(net, numba=False)
+    grid, id_map = to_grid(net)
+    synthesize_grid_geometry(grid)
+    _attach_spectrum_farthest(grid, n_harmonic_loads, spectrum or CONVERTER_SPECTRUM)
+    return grid, id_map
+
+
+def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
+    """CIGRE LV residential feeder (fed by a Thévenin source at its LV busbar) as a
+    pgml grid with synthesized Carson geometry + converter spectra.
+
+    The 20/0.4 kV transformer + MV grid are abstracted to a stiff 0.4 kV source so the
+    comparison isolates the LV line (Carson) model.
+    """
+    _numpy_shim()
+    import networkx as nx
+    import pandapower as pp
+    import pandapower.networks as pn
+    import pandapower.topology as top
+
+    from pgml.convert.pandapower import to_grid
+    from pgml.geometry.synthesis import synthesize_grid_geometry
+
+    net = pn.create_cigre_network_lv()
+    mg = top.create_nxgraph(net, include_trafos=False)
+    comp = list(nx.node_connected_component(mg, 2))  # residential LV busbar = bus 2
+    sub = pp.select_subnet(net, comp, include_results=False)
+    pp.create_ext_grid(sub, bus=2, vm_pu=1.0)
+    pp.runpp(sub, numba=False)
+    grid, id_map = to_grid(sub)
+    synthesize_grid_geometry(grid)
+    _attach_spectrum_farthest(grid, n_harmonic_loads, spectrum or CONVERTER_SPECTRUM)
+    return grid, id_map
+
+
+# ---------------------------------------------------------------------------
+# OpenDSS from a pgml conductor-geometry grid (the Carson harmonic comparison)
+# ---------------------------------------------------------------------------
+def build_opendss_geometry_circuit(grid, *, slack_node: Optional[int] = None) -> dict:
+    """Build a PASSIVE single-phase OpenDSS circuit from a pgml geometry ``grid``.
+
+    Emits the slack Vsource (Thévenin from the :class:`Source`) and one WireData +
+    LineGeometry + Line per geometry line, using the SAME synthesized conductor data
+    pgml uses — so OpenDSS's ``SystemY(h)`` equals pgml's harmonic ``Y(h)`` up to the
+    Carson model (which is bit-exact). No loads (harmonic injection is applied
+    externally). Returns ``{node_id: dss_bus_name}``. DERI earth model (OpenDSS default).
+    """
+    import opendssdirect as dss
+
+    from pgml.schemas.grid_schema import Line as GridLine, Source as GridSource
+
+    f0 = float(grid.base_frequency_hz)
+    src = next(a for a in grid.appliances if isinstance(a, GridSource) and a.in_service)
+    if slack_node is None:
+        slack_node = int(src.node)
+    node_by_id = {int(n.id): n for n in grid.nodes}
+    busname = {int(n.id): f"bus{int(n.id)}" for n in grid.nodes}
+
+    kv = float(node_by_id[slack_node].u_rated_v) / 1000.0
+    u_ref = (
+        float(src.u_ref_v[0])
+        if isinstance(src.u_ref_v, (list, tuple))
+        else float(src.u_ref_v)
+    )
+    ang = (
+        float(src.u_angle_deg[0])
+        if isinstance(src.u_angle_deg, (list, tuple))
+        else float(src.u_angle_deg)
+    )
+    rs = float(src.resistance_ohm[0][0])
+    xs = 2.0 * math.pi * f0 * float(src.inductance_h[0][0])
+
+    dss.Text.Command("Clear")
+    dss.Text.Command(
+        f"New Circuit.pgml_geom basekv={kv} phases=1 bus1={busname[slack_node]}.1 "
+        f"pu={u_ref / (kv * 1000.0):.10g} angle={ang} frequency={f0} r1={rs} x1={xs}"
+    )
+    dss.Text.Command("Set earthmodel=Deri")
+    for ln in grid.branches:
+        if not (
+            isinstance(ln, GridLine)
+            and ln.in_service
+            and ln.conductor_geometry is not None
+        ):
+            continue
+        c = ln.conductor_geometry.conductors[0]  # single-phase synthesized geometry
+        rho = float(ln.conductor_geometry.earth_resistivity_ohm_m)
+        wd, gn = f"wd{ln.id}", f"geo{ln.id}"
+        dss.Text.Command(
+            f"New WireData.{wd} Rdc={to_float(c.r_dc_ohm_per_m)} GMRac={to_float(c.gmr_m)} "
+            f"radius={to_float(c.radius_m)} Runits=m GMRunits=m radunits=m"
+        )
+        dss.Text.Command(
+            f"New LineGeometry.{gn} nconds=1 nphases=1 cond=1 wire={wd} "
+            f"x={to_float(c.x_m)} h={to_float(c.y_m)} units=m"
+        )
+        dss.Text.Command(
+            f"New Line.l{ln.id} phases=1 bus1={busname[ln.from_node]}.1 "
+            f"bus2={busname[ln.to_node]}.1 geometry={gn} length={to_float(ln.length_m)} "
+            f"units=m rho={rho}"
+        )
+    dss.Text.Command(f"Set voltagebases=[{kv}]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+    return busname
+
+
+def _pgml_harmonic_y(grid, index, h: int):
+    """pgml's harmonic admittance ``Y(h)`` = passive network + source Norton (numpy)."""
+    import torch
+
+    from pgml.assembly import assemble_network_ybus
+    from pgml.assembly._stamps import _cdtype, _rdtype
+    from pgml.assembly.ybus import _stamp_sources
+
+    f0 = float(grid.base_frequency_hz)
+    cdt = torch.complex128
+    f = torch.tensor([h * f0], dtype=torch.float64)
+    yb = assemble_network_ybus(grid, [h * f0], dtype=cdt).Y.clone()
+    yb = _stamp_sources(
+        grid, f, yb, index, _cdtype(cdt), _rdtype(cdt), torch.device("cpu"), None
+    )
+    return yb[0].detach().cpu().numpy()
+
+
+def opendss_geometry_harmonic_profiles(
+    grid,
+    hres,
+    orders,
+    *,
+    slack_node: Optional[int] = None,
+    unit: str = "pu",
+    label: str = "OpenDSS (Carson)",
+) -> list[HarmonicProfile]:
+    """OpenDSS line-model harmonic voltage profiles for the SAME geometry as pgml.
+
+    Builds OpenDSS ``SystemY(h)`` from the grid's conductor geometry and solves each
+    harmonic with the SAME nodal injection pgml converged to (``I(h)=Y_pgml(h)·V_pgml(h)``,
+    a fixed physical current). The only difference vs pgml is the line admittance, so
+    this isolates the Carson line model — paired with :func:`pgml.evaluation.data.harmonic_profiles`
+    it is a true OpenDSS-vs-pgml harmonic comparison. Single-phase feeders only.
+    """
+    index = hres.index
+    f0 = float(grid.base_frequency_hz)
+    freqs = hres.frequencies_hz.detach().cpu().numpy()
+    dssY = opendss_geometry_systemy(grid, index, orders, slack_node=slack_node)
+    dist = distance_from_slack(grid, slack_node)
+    v = hres.v.detach().cpu().numpy()  # [H, N]
+    profs = []
+    for h in orders:
+        k = int(np.argmin(np.abs(freqs - h * f0)))
+        vp = v[k]
+        i_inj = _pgml_harmonic_y(grid, index, h) @ vp
+        vd = np.linalg.solve(dssY[int(h)], i_inj)
+        ds, mags, angs, nids = [], [], [], []
+        for node in grid.nodes:
+            row = index.row(int(node.id), Phase.A)
+            base = to_float(node.u_rated_v) if unit == "pu" else 1.0
+            ds.append(dist[int(node.id)])
+            mags.append(abs(vd[row]) / base)
+            angs.append(np.degrees(np.angle(vd[row])))
+            nids.append(int(node.id))
+        o = np.argsort(ds)
+        profs.append(
+            HarmonicProfile(
+                distances_km=np.asarray(ds)[o],
+                magnitude=np.asarray(mags)[o],
+                angle_deg=np.asarray(angs)[o],
+                order=int(h),
+                frequency_hz=float(h * f0),
+                label=label,
+                node_ids=np.asarray(nids)[o],
+                unit=unit,
+            )
+        )
+    return profs
+
+
+def _align_systemy_by_nodeid(y_dss, node_order, index) -> np.ndarray:
+    """Align OpenDSS SystemY whose buses are named ``bus<node_id>.1`` to our rows."""
+    rowmap = {}
+    for di, entry in enumerate(node_order):
+        nid = int(entry.upper().split(".")[0][3:])  # 'BUS<nid>'
+        rowmap[di] = index.row(nid, Phase.A)
+    n = index.size
+    out = np.zeros((n, n), dtype=complex)
+    for di in range(len(node_order)):
+        for dj in range(len(node_order)):
+            out[rowmap[di], rowmap[dj]] = y_dss[di, dj]
+    return out
+
+
+def opendss_geometry_systemy(
+    grid, index, orders, *, slack_node: Optional[int] = None
+) -> dict:
+    """``{order: SystemY(order·f0) aligned to our rows}`` from a pgml geometry grid.
+
+    Builds the passive OpenDSS circuit once (Carson/DERI) and reads ``SystemY`` at each
+    harmonic order (forcing a Y rebuild at each frequency). This is OpenDSS's harmonic
+    admittance for the SAME geometry pgml uses — the ground truth for the comparison.
+    """
+    import opendssdirect as dss
+
+    build_opendss_geometry_circuit(grid, slack_node=slack_node)
+    f0 = float(grid.base_frequency_hz)
+    out = {}
+    for h in orders:
+        dss.Text.Command(f"set frequency={h * f0}")
+        dss.Solution.BuildYMatrix(2, 1)
+        y, node_order = dss_systemy()
+        out[int(h)] = _align_systemy_by_nodeid(y, node_order, index)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # independent numpy harmonic oracle (single phase)
 # ---------------------------------------------------------------------------
 def _resolve_spectrum(app, harmonic_injection):
@@ -287,10 +544,15 @@ def numpy_harmonic_profiles(
 
 
 __all__ = [
+    "ieee33_geometry_grid",
+    "cigre_lv_geometry_grid",
     "pandapower_ybus",
     "pandapower_voltage_profile",
     "dss_systemy",
     "align_dss_systemy",
     "opendss_ybus",
+    "build_opendss_geometry_circuit",
+    "opendss_geometry_systemy",
+    "opendss_geometry_harmonic_profiles",
     "numpy_harmonic_profiles",
 ]

@@ -180,7 +180,9 @@ def _resolve_spectrum(appliance, harmonic_injection: Optional[dict]) -> Optional
         return dict(harmonic_injection[appliance.id])
     spec = getattr(appliance, "spectrum", None)
     if isinstance(spec, StaticSpectrum):
-        return {c.order: (c.magnitude_pu, c.phase_deg) for c in spec.spectrum.components}
+        return {
+            c.order: (c.magnitude_pu, c.phase_deg) for c in spec.spectrum.components
+        }
     return None
 
 
@@ -233,14 +235,20 @@ def _harmonic_injections(
     for h in harm_orders:
         contribs = []  # (rows, i_h [*batch, P])
         for spec, i1_mag, i1_ang, rows, mag1, ang1 in devs:
-            ratio = _broadcast_last(_as_rt(spec.get(h, (0.0, 0.0))[0], rdt, device) / mag1)
+            ratio = _broadcast_last(
+                _as_rt(spec.get(h, (0.0, 0.0))[0], rdt, device) / mag1
+            )
             ang_h = _broadcast_last(
                 _as_rt(spec.get(h, (0.0, 0.0))[1], rdt, device) * (math.pi / 180.0)
             )
             mag = ratio * i1_mag  # [*batch, P]
             phase = ang_h + float(h) * (i1_ang - ang1)  # [*batch, P]
             contribs.append((rows, torch.polar(mag, phase)))
-        bshape = torch.broadcast_shapes(*[c.shape[:-1] for _, c in contribs]) if contribs else ()
+        bshape = (
+            torch.broadcast_shapes(*[c.shape[:-1] for _, c in contribs])
+            if contribs
+            else ()
+        )
         col = torch.zeros((*bshape, n), dtype=cdt, device=device)
         for rows, i_h in contribs:
             i_h_b = i_h.broadcast_to(*bshape, rows.shape[0])

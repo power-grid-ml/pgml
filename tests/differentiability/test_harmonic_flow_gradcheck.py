@@ -37,7 +37,9 @@ def _grid(r, ind, p, q, *, spectrum=True) -> Grid:
         HarmonicComponent(order=5, magnitude_pu=0.2, phase_deg=0.0),
         HarmonicComponent(order=7, magnitude_pu=0.14, phase_deg=0.0),
     ]
-    spec = StaticSpectrum(spectrum=SpectrumPoint(components=comps)) if spectrum else None
+    spec = (
+        StaticSpectrum(spectrum=SpectrumPoint(components=comps)) if spectrum else None
+    )
     return Grid(
         base_frequency_hz=F0,
         nodes=[
@@ -46,19 +48,35 @@ def _grid(r, ind, p, q, *, spectrum=True) -> Grid:
         ],
         branches=[
             Line(
-                id=1, from_node=1, to_node=2, from_phases=(Phase.A,), to_phases=(Phase.A,),
-                length_m=1.0, series_resistance_ohm_per_m=r, series_inductance_h_per_m=ind,
+                id=1,
+                from_node=1,
+                to_node=2,
+                from_phases=(Phase.A,),
+                to_phases=(Phase.A,),
+                length_m=1.0,
+                series_resistance_ohm_per_m=r,
+                series_inductance_h_per_m=ind,
                 shunt_capacitance_f_per_m=[[0.0]],
             )
         ],
         appliances=[
             Source(
-                id=1, node=1, phases=(Phase.A,), u_ref_v=(230.0,), u_angle_deg=(0.0,),
-                resistance_ohm=[[0.1]], inductance_h=[[0.1 / W0]],
+                id=1,
+                node=1,
+                phases=(Phase.A,),
+                u_ref_v=(230.0,),
+                u_angle_deg=(0.0,),
+                resistance_ohm=[[0.1]],
+                inductance_h=[[0.1 / W0]],
             ),
             Load(
-                id=2, node=2, phases=(Phase.A,), p_nom_w=p, q_nom_var=q,
-                load_model=LoadModel.CONST_POWER, spectrum=spec,
+                id=2,
+                node=2,
+                phases=(Phase.A,),
+                p_nom_w=p,
+                q_nom_var=q,
+                load_model=LoadModel.CONST_POWER,
+                spectrum=spec,
             ),
         ],
     )
@@ -97,7 +115,10 @@ def test_gradcheck_harmonic_injection_override():
         inj = {2: {1: (1.0, 0.0), 5: (m5, 0.0), 7: (m7, 0.0)}}
         return solve_harmonic_flow(
             _grid([[0.5]], [[0.5 / W0]], 2000.0, 500.0, spectrum=False),
-            [1, 5, 7], slack="norton", harmonic_injection=inj, dtype=CDT,
+            [1, 5, 7],
+            slack="norton",
+            harmonic_injection=inj,
+            dtype=CDT,
         ).v
 
     assert torch.autograd.gradcheck(fn, (m5, m7), eps=1e-4, atol=1e-5, rtol=1e-3)
@@ -111,7 +132,10 @@ def test_gradcheck_batched_injection_scenarios():
         inj = {2: {1: (1.0, 0.0), 5: (m5, 0.0), 7: (0.14, 0.0)}}
         return solve_harmonic_flow(
             _grid([[0.5]], [[0.5 / W0]], 2000.0, 500.0, spectrum=False),
-            [1, 5, 7], slack="norton", harmonic_injection=inj, dtype=CDT,
+            [1, 5, 7],
+            slack="norton",
+            harmonic_injection=inj,
+            dtype=CDT,
         ).v
 
     out = fn(m5)

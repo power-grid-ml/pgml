@@ -38,7 +38,7 @@ import numpy as np
 import torch
 
 # --- numpy 2.x compatibility shim for pandapower 2.14 ----------------------
-np.Inf = np.inf   # type: ignore[attr-defined]
+np.Inf = np.inf  # type: ignore[attr-defined]
 np.in1d = np.isin  # type: ignore[attr-defined]
 
 import pandapower as pp  # noqa: E402
@@ -52,6 +52,7 @@ from pgml.solver import solve_power_flow  # noqa: E402
 # ---------------------------------------------------------------------------
 # fixtures / helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_ref_net() -> pp.pandapowerNet:
     """Return a case33bw net with default (constant-power) loads and converged PF."""
@@ -78,12 +79,13 @@ def _cmath_angle(c: complex) -> float:
 # main oracle test
 # ---------------------------------------------------------------------------
 
+
 class TestIEEE33ConstPowerVsPandapower:
     """Compare our nonlinear const-power solve vs pandapower on IEEE 33-bus."""
 
     # Documented achievable tolerances (both sides solve identical equations)
-    ATOL_VM_PU: float = 1e-6    # magnitude tolerance in per-unit
-    ATOL_VA_DEG: float = 1e-5   # angle tolerance in degrees
+    ATOL_VM_PU: float = 1e-6  # magnitude tolerance in per-unit
+    ATOL_VA_DEG: float = 1e-5  # angle tolerance in degrees
 
     def test_node_voltages_match_pandapower_const_power(self) -> None:
         """End-to-end: convert -> solve_power_flow(slack='ideal') -> compare."""
@@ -155,13 +157,15 @@ class TestIEEE33ConstPowerVsPandapower:
             va_deg_pp[i] = float(net.res_bus.at[pp_bus_idx, "va_degree"])
 
         np.testing.assert_allclose(
-            vm_pu_ours, vm_pu_pp,
-            atol=self.ATOL_VM_PU, rtol=0,
+            vm_pu_ours,
+            vm_pu_pp,
+            atol=self.ATOL_VM_PU,
+            rtol=0,
             err_msg="Voltage magnitude (pu) mismatch vs pandapower const-power",
         )
-        angle_diff = np.array([
-            _angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)
-        ])
+        angle_diff = np.array(
+            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)]
+        )
         assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
             f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
             f"max err = {np.max(np.abs(angle_diff)):.4e} deg at bus indices "

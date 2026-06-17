@@ -28,12 +28,15 @@ def _cfg(method="sobol", n=128, seed=0, **spec_kw):
 # --- distribution icdf closed forms ----------------------------------------
 def test_icdf_closed_forms():
     u = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
-    torch.testing.assert_close(Uniform(low=2.0, high=6.0).icdf(u),
-                               torch.tensor([2.0, 4.0, 6.0], dtype=torch.float64))
+    torch.testing.assert_close(
+        Uniform(low=2.0, high=6.0).icdf(u),
+        torch.tensor([2.0, 4.0, 6.0], dtype=torch.float64),
+    )
     # Normal icdf(0.5) == loc (0 and 1 are clamped, so only check the median).
     assert abs(float(Normal(loc=3.0, scale=2.0).icdf(torch.tensor([0.5]))) - 3.0) < 1e-9
-    torch.testing.assert_close(Constant(value=7.0).icdf(u),
-                               torch.full((3,), 7.0, dtype=torch.float64))
+    torch.testing.assert_close(
+        Constant(value=7.0).icdf(u), torch.full((3,), 7.0, dtype=torch.float64)
+    )
 
 
 # --- reproducibility --------------------------------------------------------
@@ -42,7 +45,9 @@ def test_same_config_same_samples(grid3):
     b = sample(grid3, _cfg(seed=42))
     torch.testing.assert_close(a.samples["load_pq"], b.samples["load_pq"])
     for cid in (10, 11):
-        torch.testing.assert_close(a.operating_point[cid]["p_w"], b.operating_point[cid]["p_w"])
+        torch.testing.assert_close(
+            a.operating_point[cid]["p_w"], b.operating_point[cid]["p_w"]
+        )
 
 
 def test_different_seed_differs(grid3):
@@ -73,7 +78,9 @@ def test_per_shared_applies_one_sample_to_all(grid3):
 
 # --- selectors --------------------------------------------------------------
 def test_selector_consumer_type(grid3):
-    s = sample(grid3, _cfg(selector=Selector(component="load", consumer_type="ev_charging")))
+    s = sample(
+        grid3, _cfg(selector=Selector(component="load", consumer_type="ev_charging"))
+    )
     assert set(s.operating_point) == {11}
 
 
@@ -84,8 +91,10 @@ def test_selector_ids(grid3):
 
 # --- modes / fields ---------------------------------------------------------
 def test_absolute_p_only_leaves_q_nominal(grid3):
-    s = sample(grid3, _cfg(field="p", mode="absolute",
-                           distribution=Uniform(low=0.0, high=5000.0)))
+    s = sample(
+        grid3,
+        _cfg(field="p", mode="absolute", distribution=Uniform(low=0.0, high=5000.0)),
+    )
     e = s.operating_point[10]
     assert "p_w" in e and "q_var" not in e  # q untouched -> solver keeps nominal
     assert e["p_w"].min() >= 0.0 and e["p_w"].max() <= 5000.0

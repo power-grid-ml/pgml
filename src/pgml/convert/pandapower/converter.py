@@ -60,8 +60,8 @@ from pgml.schemas.grid_schema import (
 )
 
 _PHASE_A = (Phase.A,)
-_TINY_R = 1.0e-6    # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
-_TINY_L = 1.0e-12   # H   — near-ideal Thevenin for ext_grid in Norton stamp
+_TINY_R = 1.0e-6  # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
+_TINY_L = 1.0e-12  # H   — near-ideal Thevenin for ext_grid in Norton stamp
 _SWITCH_R = 1.0e-4  # Ohm — near-ideal resistance for closed bus-bus switches
 _PROVENANCE = Provenance(
     source_convention=SourceConvention.SEQUENCE,
@@ -151,15 +151,15 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
         length_m = float(row["length_km"]) * 1_000.0
 
         # Per-length SI parameters (1/m)
-        r_per_m = float(row["r_ohm_per_km"]) / 1_000.0       # Ohm/m
-        x_per_m = float(row["x_ohm_per_km"]) / 1_000.0       # Ohm/m (=2*pi*f0*L per m)
-        l_per_m = x_per_m / two_pi_f0                         # H/m
+        r_per_m = float(row["r_ohm_per_km"]) / 1_000.0  # Ohm/m
+        x_per_m = float(row["x_ohm_per_km"]) / 1_000.0  # Ohm/m (=2*pi*f0*L per m)
+        l_per_m = x_per_m / two_pi_f0  # H/m
 
         c_nf_km = float(row.get("c_nf_per_km", 0.0) or 0.0)
-        c_per_m = c_nf_km * 1.0e-9 / 1_000.0                 # F/m  (nF/km -> F/m)
+        c_per_m = c_nf_km * 1.0e-9 / 1_000.0  # F/m  (nF/km -> F/m)
 
         g_us_km = float(row.get("g_us_per_km", 0.0) or 0.0)
-        g_per_m = g_us_km * 1.0e-6 / 1_000.0                 # S/m  (µS/km -> S/m)
+        g_per_m = g_us_km * 1.0e-6 / 1_000.0  # S/m  (µS/km -> S/m)
 
         # 1x1 matrices for single-phase equivalent
         r_mat = [[r_per_m]]
@@ -227,9 +227,9 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
             trafo_id = _id.next()
             id_map["trafo"][pp_idx] = trafo_id
 
-            sn_va = float(row["sn_mva"]) * 1.0e6         # VA
-            vn_hv_v = float(row["vn_hv_kv"]) * 1.0e3    # V
-            vn_lv_v = float(row["vn_lv_kv"]) * 1.0e3    # V
+            sn_va = float(row["sn_mva"]) * 1.0e6  # VA
+            vn_hv_v = float(row["vn_hv_kv"]) * 1.0e3  # V
+            vn_lv_v = float(row["vn_lv_kv"]) * 1.0e3  # V
             vk_pct = float(row["vk_percent"])
             vkr_pct = float(row["vkr_percent"])
             pfe_w = float(row.get("pfe_kw", 0.0) or 0.0) * 1.0e3  # W
@@ -238,16 +238,16 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
 
             # Leakage impedance referred to LV side (required by our stamp convention)
             # Z_base_LV = Vn_LV^2 / Sn;  Z_sc_LV = vk%/100 * Z_base_LV
-            z_base_lv = vn_lv_v ** 2 / sn_va
+            z_base_lv = vn_lv_v**2 / sn_va
             z_sc_lv = vk_pct / 100.0 * z_base_lv
             r_sc_lv = vkr_pct / 100.0 * z_base_lv
-            x_sc_sq = z_sc_lv ** 2 - r_sc_lv ** 2
+            x_sc_sq = z_sc_lv**2 - r_sc_lv**2
             x_sc_lv = math.sqrt(max(x_sc_sq, 0.0))
             l_sc_lv = x_sc_lv / two_pi_f0
 
             # Magnetizing branch (referred to HV side; added to the HV diagonal)
             if pfe_w > 0.0:
-                g_m = pfe_w / (vn_hv_v ** 2)
+                g_m = pfe_w / (vn_hv_v**2)
             else:
                 g_m = 0.0
 
@@ -257,9 +257,9 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
                 # I0 = i0_pct/100 * Sn / Vn_HV  (line-to-line, positive-seq)
                 i0_amp = i0_pct / 100.0 * sn_va / vn_hv_v
                 s_nl = vn_hv_v * i0_amp  # VA
-                q_nl_sq = s_nl ** 2 - pfe_w ** 2
+                q_nl_sq = s_nl**2 - pfe_w**2
                 if q_nl_sq > 0.0:
-                    b_m = math.sqrt(q_nl_sq) / (vn_hv_v ** 2)
+                    b_m = math.sqrt(q_nl_sq) / (vn_hv_v**2)
                     if b_m > 0.0:
                         l_m = 1.0 / (two_pi_f0 * b_m)
 
@@ -271,14 +271,14 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
                 Transformer(
                     id=trafo_id,
                     name=str(row.get("name", f"trafo_{pp_idx}") or f"trafo_{pp_idx}"),
-                    from_node=id_map["bus"][hv_bus],    # from = HV side
-                    to_node=id_map["bus"][lv_bus],      # to   = LV side
+                    from_node=id_map["bus"][hv_bus],  # from = HV side
+                    to_node=id_map["bus"][lv_bus],  # to   = LV side
                     from_phases=_PHASE_A,
                     to_phases=_PHASE_A,
                     s_rated_va=sn_va,
                     u_rated_from_v=vn_hv_v,
                     u_rated_to_v=vn_lv_v,
-                    from_connection=WindingConnection.DELTA,   # HV of Dyn
+                    from_connection=WindingConnection.DELTA,  # HV of Dyn
                     to_connection=WindingConnection.WYE_GROUNDED,  # LV of Dyn
                     series_resistance_ohm=r_sc_lv,
                     series_inductance_h=l_sc_lv,
@@ -301,9 +301,9 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
     if hasattr(net, "switch") and len(net.switch):
         for pp_idx, row in net.switch.iterrows():
             if str(row.get("et", "")) != "b":
-                continue                             # only bus-bus switches
+                continue  # only bus-bus switches
             if not bool(row.get("closed", True)):
-                continue                             # open switch: no branch
+                continue  # open switch: no branch
             bus_from = int(row["bus"])
             bus_to = int(row["element"])
             if bus_from not in id_map["bus"] or bus_to not in id_map["bus"]:

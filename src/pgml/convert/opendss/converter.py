@@ -76,18 +76,18 @@ from pgml.schemas.grid_schema import (
 
 # Length unit codes in opendssdirect -> meters per unit
 _DSS_UNIT_TO_METERS: dict[int, float] = {
-    0: 1.0,        # none (total values, length=1 by convention)
-    1: 1609.344,   # miles
-    2: 304.8,      # kft
-    3: 1000.0,     # km
-    4: 1.0,        # m
-    5: 0.3048,     # ft
-    6: 0.0254,     # in
-    7: 0.01,       # cm
+    0: 1.0,  # none (total values, length=1 by convention)
+    1: 1609.344,  # miles
+    2: 304.8,  # kft
+    3: 1000.0,  # km
+    4: 1.0,  # m
+    5: 0.3048,  # ft
+    6: 0.0254,  # in
+    7: 0.01,  # cm
 }
 
 _PHASE_A = (Phase.A,)
-_TINY_R = 1.0e-6   # Ohm — near-ideal Thevenin for Vsource in Norton stamp
+_TINY_R = 1.0e-6  # Ohm — near-ideal Thevenin for Vsource in Norton stamp
 _TINY_L = 1.0e-12  # H   — near-ideal Thevenin for Vsource in Norton stamp
 _PROVENANCE = Provenance(
     source_convention=SourceConvention.IMPEDANCE,
@@ -208,7 +208,10 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         to_bus_name, to_phases = _parse_bus_connection(bus2_str, n_phases)
 
         # Skip lines whose buses are not in our node map
-        if from_bus_name not in bus_name_to_node_id or to_bus_name not in bus_name_to_node_id:
+        if (
+            from_bus_name not in bus_name_to_node_id
+            or to_bus_name not in bus_name_to_node_id
+        ):
             ret = dss.Lines.Next()
             continue
 
@@ -222,19 +225,19 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         length_m = length_in_unit * meters_per_unit
 
         # Get R/X matrices (per length-unit)
-        r_mat_flat = list(dss.Lines.RMatrix())   # Ohm/length-unit
-        x_mat_flat = list(dss.Lines.XMatrix())   # Ohm/length-unit
-        c_mat_flat = list(dss.Lines.CMatrix())   # nF/length-unit
+        r_mat_flat = list(dss.Lines.RMatrix())  # Ohm/length-unit
+        x_mat_flat = list(dss.Lines.XMatrix())  # Ohm/length-unit
+        c_mat_flat = list(dss.Lines.CMatrix())  # nF/length-unit
 
         # Convert to total Ohm / H / F
-        r_total = [v * length_in_unit for v in r_mat_flat]   # Ohm
-        x_total = [v * length_in_unit for v in x_mat_flat]   # Ohm
+        r_total = [v * length_in_unit for v in r_mat_flat]  # Ohm
+        x_total = [v * length_in_unit for v in x_mat_flat]  # Ohm
         c_total_nf = [v * length_in_unit for v in c_mat_flat]  # nF
 
         # Convert to SI per-meter
-        r_per_m_flat = [v / length_m for v in r_total]          # Ohm/m
+        r_per_m_flat = [v / length_m for v in r_total]  # Ohm/m
         l_per_m_flat = [v / two_pi_f0 / length_m for v in x_total]  # H/m
-        c_per_m_flat = [v * 1e-9 / length_m for v in c_total_nf]   # F/m
+        c_per_m_flat = [v * 1e-9 / length_m for v in c_total_nf]  # F/m
 
         # Reshape to n_phases x n_phases matrices
         r_mat = _flat_to_matrix(r_per_m_flat, n_phases)
@@ -272,7 +275,7 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
     while ret:
         vsrc_name = dss.Vsources.Name().lower()
         n_phases = dss.Vsources.Phases()
-        basekv = dss.Vsources.BasekV()    # L-L kV
+        basekv = dss.Vsources.BasekV()  # L-L kV
         pu = dss.Vsources.PU()
         angle_deg = dss.Vsources.AngleDeg()
 
@@ -308,8 +311,13 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         u_ref_tuple = tuple(u_ref_v for _ in range(n_phases))
         u_angle_deg_tuple = tuple(angle_deg - 120.0 * i for i in range(n_phases))
 
-        r_mat = [[r1_ohm if i == j else 0.0 for j in range(n_phases)] for i in range(n_phases)]
-        l_mat = [[l1_h if i == j else 0.0 for j in range(n_phases)] for i in range(n_phases)]
+        r_mat = [
+            [r1_ohm if i == j else 0.0 for j in range(n_phases)]
+            for i in range(n_phases)
+        ]
+        l_mat = [
+            [l1_h if i == j else 0.0 for j in range(n_phases)] for i in range(n_phases)
+        ]
 
         src_id = _id.next()
         id_map["vsource"][vsrc_name] = src_id
@@ -347,7 +355,7 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
             ret = dss.Loads.Next()
             continue
 
-        p_w = dss.Loads.kW() * 1_000.0    # W total
+        p_w = dss.Loads.kW() * 1_000.0  # W total
         q_var = dss.Loads.kvar() * 1_000.0  # VAR total
 
         load_id = _id.next()
@@ -386,6 +394,7 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _phase_num_to_enum(phase_num: int) -> Phase:
     """Map OpenDSS phase number (1, 2, 3) to our Phase enum (A, B, C).
 
@@ -396,9 +405,7 @@ def _phase_num_to_enum(phase_num: int) -> Phase:
     return _MAP.get(phase_num, Phase.A)
 
 
-def _parse_bus_connection(
-    bus_str: str, n_phases: int
-) -> tuple[str, list[Phase]]:
+def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]]:
     """Parse a DSS bus connection string 'busname.1.2.3' into (bus_name, [phases]).
 
     Parameters

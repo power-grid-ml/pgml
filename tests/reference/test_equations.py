@@ -21,11 +21,15 @@ def test_reactance_and_susceptance_values():
 
     # solve_for X should give the reactance directly.
     x_fn = registry.solve_for("reactance_from_inductance", "X")
-    xval = x_fn(f=torch.tensor(f, dtype=torch.float64), L=torch.tensor(ind, dtype=torch.float64))
+    xval = x_fn(
+        f=torch.tensor(f, dtype=torch.float64), L=torch.tensor(ind, dtype=torch.float64)
+    )
     assert math.isclose(float(xval), 2 * math.pi * f * ind, rel_tol=1e-12)
 
     b_fn = registry.solve_for("susceptance_from_capacitance", "B")
-    bval = b_fn(f=torch.tensor(f, dtype=torch.float64), C=torch.tensor(c, dtype=torch.float64))
+    bval = b_fn(
+        f=torch.tensor(f, dtype=torch.float64), C=torch.tensor(c, dtype=torch.float64)
+    )
     assert math.isclose(float(bval), 2 * math.pi * f * c, rel_tol=1e-12)
 
 

@@ -57,7 +57,7 @@ import torch
 # --- numpy 2.x compatibility shim for pandapower 2.14 ----------------------
 # pandapower 2.14 references removed numpy aliases (Inf, in1d).
 # Applying the shim before the first pandapower import fixes the ImportError.
-np.Inf = np.inf   # type: ignore[attr-defined]
+np.Inf = np.inf  # type: ignore[attr-defined]
 np.in1d = np.isin  # type: ignore[attr-defined]
 
 import pandapower as pp  # noqa: E402
@@ -71,6 +71,7 @@ from pgml.solver import solve_harmonic  # noqa: E402
 # ---------------------------------------------------------------------------
 # fixtures / helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_ref_net() -> pp.pandapowerNet:
     """Return a case33bw net with const-Z loads and a converged power flow."""
@@ -88,11 +89,12 @@ def _build_ref_net() -> pp.pandapowerNet:
 # main oracle test
 # ---------------------------------------------------------------------------
 
+
 class TestIEEE33VsReference:
     """Compare our solved node voltages to pandapower on IEEE 33-bus."""
 
     # Tolerance targets (documented in module docstring)
-    ATOL_VM_PU: float = 1e-4   # magnitude tolerance in per-unit
+    ATOL_VM_PU: float = 1e-4  # magnitude tolerance in per-unit
     ATOL_VA_DEG: float = 1e-4  # angle tolerance in degrees
 
     def test_node_voltages_match_pandapower(self) -> None:
@@ -100,7 +102,7 @@ class TestIEEE33VsReference:
         net = _build_ref_net()
         grid, id_map = to_grid(net)
 
-        f0 = grid.base_frequency_hz   # 60 Hz for case33bw
+        f0 = grid.base_frequency_hz  # 60 Hz for case33bw
         index = node_phase_index(grid)
 
         # ---- assemble Y and I -----------------------------------------------
@@ -112,6 +114,7 @@ class TestIEEE33VsReference:
         slack_pp_bus = int(net.ext_grid.at[0, "bus"])
         slack_node_id = id_map["bus"][slack_pp_bus]
         from pgml.schemas.grid_schema import Phase
+
         slack_row = index.row(slack_node_id, Phase.A)
         fixed_rows = torch.tensor([slack_row], dtype=torch.int64)
 
@@ -122,7 +125,7 @@ class TestIEEE33VsReference:
         # ---- solve -----------------------------------------------------------
         v_all = solve_harmonic(
             ybus.Y,  # [1, N, N]
-            i_inj,   # [1, N]
+            i_inj,  # [1, N]
             fixed_rows=fixed_rows,
             v_fixed=v_fixed,
         )  # [1, N]
@@ -164,6 +167,7 @@ class TestIEEE33VsReference:
         i_inj = build_injections(grid, [f0], index, dtype=torch.complex128)
 
         from pgml.schemas.grid_schema import Phase
+
         slack_pp_bus = int(net.ext_grid.at[0, "bus"])
         slack_node_id = id_map["bus"][slack_pp_bus]
         slack_row = index.row(slack_node_id, Phase.A)
@@ -189,14 +193,16 @@ class TestIEEE33VsReference:
             va_deg_pp[i] = float(net.res_bus.at[pp_bus_idx, "va_degree"])
 
         np.testing.assert_allclose(
-            vm_pu_ours, vm_pu_pp,
-            atol=self.ATOL_VM_PU, rtol=0,
+            vm_pu_ours,
+            vm_pu_pp,
+            atol=self.ATOL_VM_PU,
+            rtol=0,
             err_msg="Voltage magnitude (pu) mismatch vs pandapower const-Z reference",
         )
         # Angle comparison (handle 360-degree wrap)
-        angle_diff = np.array([
-            _angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)
-        ])
+        angle_diff = np.array(
+            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)]
+        )
         assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
             f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
             f"max err = {np.max(np.abs(angle_diff)):.4e} deg at buses "
@@ -207,6 +213,7 @@ class TestIEEE33VsReference:
 # ---------------------------------------------------------------------------
 # Ybus comparison (secondary check)
 # ---------------------------------------------------------------------------
+
 
 class TestIEEE33YbusVsReference:
     """Secondary check: our Y(60 Hz) vs pandapower's internal Ybus (pu -> SI).
@@ -229,8 +236,8 @@ class TestIEEE33YbusVsReference:
        pure network contribution visible in pandapower's Ybus.
     """
 
-    RTOL_OFF: float = 1e-4   # relative tolerance for off-diagonal entries
-    ATOL_OFF: float = 1e-9   # negligible entries treated as zero
+    RTOL_OFF: float = 1e-4  # relative tolerance for off-diagonal entries
+    ATOL_OFF: float = 1e-9  # negligible entries treated as zero
 
     def test_ybus_off_diagonal_matches(self) -> None:
         """Off-diagonal entries of our SI Y-bus match pandapower's (pu->SI)."""
@@ -246,7 +253,7 @@ class TestIEEE33YbusVsReference:
         Ybus_pp_pu = net._ppc["internal"]["Ybus"].toarray()
         base_mva = float(net._ppc["baseMVA"])
         base_kv = float(net._ppc["bus"][0, 9])
-        z_base = (base_kv ** 2) / base_mva
+        z_base = (base_kv**2) / base_mva
         y_base = 1.0 / z_base
         Ybus_pp_si = Ybus_pp_pu * y_base
 
@@ -277,7 +284,11 @@ class TestIEEE33YbusVsReference:
         Our diagonal = same lines + Source Thevenin shunt (slack) + const-Z load shunts.
         After subtracting our load and source shunts, the remainder should match.
         """
-        from pgml.schemas.grid_schema import Load as GridLoad, Phase, Source as GridSource
+        from pgml.schemas.grid_schema import (
+            Load as GridLoad,
+            Phase,
+            Source as GridSource,
+        )
 
         net = _build_ref_net()
         grid, id_map = to_grid(net)
@@ -289,7 +300,7 @@ class TestIEEE33YbusVsReference:
         Ybus_pp_pu = net._ppc["internal"]["Ybus"].toarray()
         base_mva = float(net._ppc["baseMVA"])
         base_kv = float(net._ppc["bus"][0, 9])
-        z_base = (base_kv ** 2) / base_mva
+        z_base = (base_kv**2) / base_mva
         y_base = 1.0 / z_base
         Ybus_pp_si = Ybus_pp_pu * y_base
 
@@ -304,7 +315,7 @@ class TestIEEE33YbusVsReference:
                 node_id = app.node
                 pp_bus_idx = node_id_of[node_id]
                 u_rated_v = float(net.bus.at[pp_bus_idx, "vn_kv"]) * 1_000.0
-                y = complex(app.p_nom_w, -app.q_nom_var) / (u_rated_v ** 2)
+                y = complex(app.p_nom_w, -app.q_nom_var) / (u_rated_v**2)
                 load_shunt[node_id] = load_shunt.get(node_id, 0.0) + y
 
         # Source (Thevenin) Norton shunt: Y_s = Z_s^{-1} at frequency f0
@@ -325,7 +336,11 @@ class TestIEEE33YbusVsReference:
 
             y_diag_ours = Y_ours[row, row]
             # Subtract our shunts to get pure network diagonal
-            y_net_ours = y_diag_ours - load_shunt.get(node_id, 0.0) - source_shunt.get(node_id, 0.0)
+            y_net_ours = (
+                y_diag_ours
+                - load_shunt.get(node_id, 0.0)
+                - source_shunt.get(node_id, 0.0)
+            )
             y_diag_pp = Ybus_pp_si[ppc_idx, ppc_idx]
 
             err = abs(y_net_ours - y_diag_pp)
@@ -339,6 +354,7 @@ class TestIEEE33YbusVsReference:
 # ---------------------------------------------------------------------------
 # converter unit tests
 # ---------------------------------------------------------------------------
+
 
 class TestToGridConverter:
     """Unit tests for the to_grid converter (no solve needed)."""
@@ -385,8 +401,10 @@ class TestToGridConverter:
         pp_line_idx = net.line[net.line["in_service"]].index[0]
         line_id = id_map["line"][pp_line_idx]
         from pgml.schemas.grid_schema import Line as GridLine
-        line = next(b for b in grid.branches
-                    if isinstance(b, GridLine) and b.id == line_id)
+
+        line = next(
+            b for b in grid.branches if isinstance(b, GridLine) and b.id == line_id
+        )
         pp_row = net.line.loc[pp_line_idx]
         assert line.length_m == pytest.approx(float(pp_row["length_km"]) * 1_000.0)
         assert line.series_resistance_ohm_per_m[0][0] == pytest.approx(
@@ -424,6 +442,7 @@ class TestToGridConverter:
 # ---------------------------------------------------------------------------
 # utilities
 # ---------------------------------------------------------------------------
+
 
 def cmath_angle(c: complex) -> float:
     """Phase angle of complex number c in radians (math.atan2 convention)."""

@@ -78,8 +78,8 @@ import torch
 # ---------------------------------------------------------------------------
 # numpy 2.x compatibility shim (pandapower 2.14 uses removed aliases)
 # ---------------------------------------------------------------------------
-np.Inf = np.inf       # type: ignore[attr-defined]
-np.in1d = np.isin     # type: ignore[attr-defined]
+np.Inf = np.inf  # type: ignore[attr-defined]
+np.in1d = np.isin  # type: ignore[attr-defined]
 
 import pandapower.networks as pn  # noqa: E402
 
@@ -97,10 +97,10 @@ from pgml.solver import solve_harmonic  # noqa: E402
 # ---------------------------------------------------------------------------
 
 # pgm id ranges (non-overlapping to avoid collisions)
-_NODE_ID_OFFSET = 0      # node ids = bus index (0..32)
-_LINE_ID_OFFSET = 100    # line ids = 100 + line index
-_LOAD_ID_OFFSET = 200    # load ids = 200 + load index
-_SOURCE_ID = 300         # single source id
+_NODE_ID_OFFSET = 0  # node ids = bus index (0..32)
+_LINE_ID_OFFSET = 100  # line ids = 100 + line index
+_LOAD_ID_OFFSET = 200  # load ids = 200 + load index
+_SOURCE_ID = 300  # single source id
 
 # Source: near-ideal slack — sk large enough that pgm slack ≈ 1.0 pu (error < 1e-8)
 _SOURCE_SK_VA = 1.0e16
@@ -132,10 +132,10 @@ def _build_pgm_input() -> dict[str, np.ndarray]:
         line_arr["to_node"][i] = int(row["to_bus"]) + _NODE_ID_OFFSET
         line_arr["from_status"][i] = 1
         line_arr["to_status"][i] = 1
-        line_arr["r1"][i] = float(row["r_ohm_per_km"]) * lkm     # Ohm total
-        line_arr["x1"][i] = float(row["x_ohm_per_km"]) * lkm     # Ohm total
+        line_arr["r1"][i] = float(row["r_ohm_per_km"]) * lkm  # Ohm total
+        line_arr["x1"][i] = float(row["x_ohm_per_km"]) * lkm  # Ohm total
         c_nf_km = float(row.get("c_nf_per_km", 0.0) or 0.0)
-        line_arr["c1"][i] = c_nf_km * lkm * 1.0e-9               # F total
+        line_arr["c1"][i] = c_nf_km * lkm * 1.0e-9  # F total
         line_arr["tan1"][i] = 0.0
         # Positive-sequence = zero-sequence for this network (homogeneous cables)
         line_arr["r0"][i] = line_arr["r1"][i]
@@ -158,12 +158,10 @@ def _build_pgm_input() -> dict[str, np.ndarray]:
     # -- source (near-ideal slack at bus 0) -----------------------------------
     source_arr = pgm.initialize_array("input", "source", 1)
     source_arr["id"][0] = _SOURCE_ID
-    source_arr["node"][0] = 0 + _NODE_ID_OFFSET   # bus 0 is slack
+    source_arr["node"][0] = 0 + _NODE_ID_OFFSET  # bus 0 is slack
     source_arr["status"][0] = 1
-    source_arr["u_ref"][0] = float(net.ext_grid.at[0, "vm_pu"])   # pu (1.0)
-    source_arr["u_ref_angle"][0] = math.radians(
-        float(net.ext_grid.at[0, "va_degree"])
-    )
+    source_arr["u_ref"][0] = float(net.ext_grid.at[0, "vm_pu"])  # pu (1.0)
+    source_arr["u_ref_angle"][0] = math.radians(float(net.ext_grid.at[0, "va_degree"]))
     source_arr["sk"][0] = _SOURCE_SK_VA  # near-ideal slack
     source_arr["rx_ratio"][0] = _SOURCE_RX
     source_arr["z01_ratio"][0] = 1.0
@@ -185,6 +183,7 @@ def _pgm_node_id(pp_bus_idx: int) -> int:
 # helper utilities
 # ---------------------------------------------------------------------------
 
+
 def _cmath_angle(c: complex) -> float:
     """Phase angle in radians."""
     return math.atan2(c.imag, c.real)
@@ -202,6 +201,7 @@ def _angle_diff_deg(a: float, b: float) -> float:
 # converter unit tests
 # ---------------------------------------------------------------------------
 
+
 class TestPgmConverterUnit:
     """Unit tests for ``to_grid`` (no solver or pgm power flow needed)."""
 
@@ -214,8 +214,11 @@ class TestPgmConverterUnit:
         input_data = _build_pgm_input()
         grid, id_map = to_grid(input_data, base_frequency_hz=60.0)
         in_svc_lines = int(
-            sum(1 for r in input_data["line"]
-                if int(r["from_status"]) == 1 and int(r["to_status"]) == 1)
+            sum(
+                1
+                for r in input_data["line"]
+                if int(r["from_status"]) == 1 and int(r["to_status"]) == 1
+            )
         )
         assert len(grid.branches) == in_svc_lines
 
@@ -242,6 +245,7 @@ class TestPgmConverterUnit:
     def test_line_impedance(self) -> None:
         """First line: r_per_m == r1 (virtual 1m length), l_per_m == x1/(2*pi*f0)."""
         import math as _math
+
         f0 = 60.0
         input_data = _build_pgm_input()
         grid, id_map = to_grid(input_data, base_frequency_hz=f0)
@@ -249,8 +253,10 @@ class TestPgmConverterUnit:
         first_pgm_line = next(iter(id_map["line"].keys()))
         our_line_id = id_map["line"][first_pgm_line]
         from pgml.schemas.grid_schema import Line as GridLine
-        line_obj = next(b for b in grid.branches
-                        if isinstance(b, GridLine) and b.id == our_line_id)
+
+        line_obj = next(
+            b for b in grid.branches if isinstance(b, GridLine) and b.id == our_line_id
+        )
         pgm_row = next(r for r in input_data["line"] if int(r["id"]) == first_pgm_line)
         r1 = float(pgm_row["r1"])
         x1 = float(pgm_row["x1"])
@@ -267,6 +273,7 @@ class TestPgmConverterUnit:
             input_data, base_frequency_hz=60.0, load_model=LoadModel.CONST_IMPEDANCE
         )
         from pgml.schemas.grid_schema import Load as GridLoad
+
         for app in grid.appliances:
             if isinstance(app, GridLoad):
                 assert app.load_model == LoadModel.CONST_IMPEDANCE
@@ -306,6 +313,7 @@ class TestPgmConverterUnit:
 # main oracle test: our solver vs pgm power flow
 # ---------------------------------------------------------------------------
 
+
 class TestIEEE33VsPgm:
     """Compare our solved node voltages to power-grid-model on IEEE 33-bus.
 
@@ -320,7 +328,7 @@ class TestIEEE33VsPgm:
     """
 
     # Documented tolerance: achieved < 1e-8 pu in practice (well within 1e-4).
-    ATOL_VM_PU: float = 1e-4   # voltage magnitude tolerance, per-unit
+    ATOL_VM_PU: float = 1e-4  # voltage magnitude tolerance, per-unit
     ATOL_VA_DEG: float = 1e-4  # voltage angle tolerance, degrees
 
     def test_node_voltages_match_pgm(self) -> None:
@@ -419,8 +427,10 @@ class TestIEEE33VsPgm:
             va_deg_pgm[i] = math.degrees(float(pgm_row["u_angle"]))
 
         np.testing.assert_allclose(
-            vm_pu_ours, vm_pu_pgm,
-            atol=self.ATOL_VM_PU, rtol=0,
+            vm_pu_ours,
+            vm_pu_pgm,
+            atol=self.ATOL_VM_PU,
+            rtol=0,
             err_msg="Voltage magnitude (pu) mismatch vs pgm const-Z reference",
         )
         angle_diff = np.array(
@@ -452,7 +462,9 @@ class TestIEEE33VsPgm:
         i_inj = build_injections(grid, [f0], index, dtype=torch.complex128)
 
         slack_our_node = id_map["node"][_pgm_node_id(0)]
-        fixed_rows = torch.tensor([index.row(slack_our_node, Phase.A)], dtype=torch.int64)
+        fixed_rows = torch.tensor(
+            [index.row(slack_our_node, Phase.A)], dtype=torch.int64
+        )
         v_fixed = torch.tensor([id_map["slack_v_complex"]], dtype=torch.complex128)
         v_all = solve_harmonic(ybus.Y, i_inj, fixed_rows=fixed_rows, v_fixed=v_fixed)
 
@@ -476,6 +488,7 @@ class TestIEEE33VsPgm:
 # ---------------------------------------------------------------------------
 # cross-check: pgm grid matches pandapower grid (same physical network)
 # ---------------------------------------------------------------------------
+
 
 class TestPgmGridMatchesPandapowerGrid:
     """Assert the pgm-derived Grid produces the same node voltages as the
@@ -505,8 +518,12 @@ class TestPgmGridMatchesPandapowerGrid:
         pp_i_inj = build_injections(pp_grid, [f0], pp_index, dtype=torch.complex128)
         pp_slack_row = pp_index.row(pp_id_map["bus"][0], Phase.A)
         pp_fixed = torch.tensor([pp_slack_row], dtype=torch.int64)
-        pp_v_fixed = torch.tensor([pp_id_map["slack_v_complex"]], dtype=torch.complex128)
-        pp_v_all = solve_harmonic(pp_ybus.Y, pp_i_inj, fixed_rows=pp_fixed, v_fixed=pp_v_fixed)
+        pp_v_fixed = torch.tensor(
+            [pp_id_map["slack_v_complex"]], dtype=torch.complex128
+        )
+        pp_v_all = solve_harmonic(
+            pp_ybus.Y, pp_i_inj, fixed_rows=pp_fixed, v_fixed=pp_v_fixed
+        )
 
         # pgm grid
         pgm_input = _build_pgm_input()
@@ -517,8 +534,12 @@ class TestPgmGridMatchesPandapowerGrid:
         pgm_ybus = assemble_ybus(pgm_grid, [f0], dtype=torch.complex128)
         pgm_i_inj = build_injections(pgm_grid, [f0], pgm_index, dtype=torch.complex128)
         pgm_slack_our = pgm_id_map["node"][_pgm_node_id(0)]
-        pgm_fixed = torch.tensor([pgm_index.row(pgm_slack_our, Phase.A)], dtype=torch.int64)
-        pgm_v_fixed = torch.tensor([pgm_id_map["slack_v_complex"]], dtype=torch.complex128)
+        pgm_fixed = torch.tensor(
+            [pgm_index.row(pgm_slack_our, Phase.A)], dtype=torch.int64
+        )
+        pgm_v_fixed = torch.tensor(
+            [pgm_id_map["slack_v_complex"]], dtype=torch.complex128
+        )
         pgm_v_all = solve_harmonic(
             pgm_ybus.Y, pgm_i_inj, fixed_rows=pgm_fixed, v_fixed=pgm_v_fixed
         )

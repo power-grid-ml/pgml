@@ -89,7 +89,9 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     return resolved, dim
 
 
-def _apply(entry: dict, spec: ParameterSpec, col: Tensor, p_nom: float, q_nom: float) -> None:
+def _apply(
+    entry: dict, spec: ParameterSpec, col: Tensor, p_nom: float, q_nom: float
+) -> None:
     """Write a sampled per-scenario column ``[B]`` into an operating_point entry."""
     if spec.field in ("p", "pq"):
         entry["p_w"] = col * p_nom if spec.mode == "scale" else col
@@ -136,7 +138,9 @@ def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:
     resolved = [(ax, ax.selector.resolve(grid)) for ax in config.axes]
     for ax, ids in resolved:
         if not ids:
-            raise ValueError(f"Cartesian axis {ax.name!r} matched no in-service components.")
+            raise ValueError(
+                f"Cartesian axis {ax.name!r} matched no in-service components."
+            )
     levels = [torch.tensor(ax.values, dtype=torch.float64) for ax, _ in resolved]
     combos = torch.cartesian_prod(*levels)  # [B, n_axes] (or [B] for a single axis)
     if combos.ndim == 1:
@@ -153,7 +157,9 @@ def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:
             _apply(operating_point.setdefault(cid, {}), ax, col, p_nom, q_nom)
 
     return SampledScenarios(
-        operating_point=operating_point, samples=samples, n_samples=combos.shape[0],
+        operating_point=operating_point,
+        samples=samples,
+        n_samples=combos.shape[0],
         config=config,
     )
 

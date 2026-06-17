@@ -48,7 +48,7 @@ import numpy as np
 import torch
 
 # --- numpy 2.x compatibility shim for pandapower 2.14 ----------------------
-np.Inf = np.inf   # type: ignore[attr-defined]
+np.Inf = np.inf  # type: ignore[attr-defined]
 np.in1d = np.isin  # type: ignore[attr-defined]
 
 import pandapower as pp  # noqa: E402
@@ -62,6 +62,7 @@ from pgml.solver import solve_power_flow  # noqa: E402
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_cigre_net() -> pp.pandapowerNet:
     """Return a converged CIGRE LV network (default const-power loads)."""
@@ -83,11 +84,12 @@ def _angle_diff_deg(a: float, b: float) -> float:
 # main oracle test
 # ---------------------------------------------------------------------------
 
+
 class TestCIGRELVVsPandapower:
     """Compare our nonlinear const-power solve vs pandapower on CIGRE LV."""
 
-    ATOL_VM_PU: float = 1e-5    # achievable: ~1e-7 pu
-    ATOL_VA_DEG: float = 1e-4   # achievable: ~2e-6 deg
+    ATOL_VM_PU: float = 1e-5  # achievable: ~1e-7 pu
+    ATOL_VA_DEG: float = 1e-4  # achievable: ~2e-6 deg
 
     def test_node_voltages_match_pandapower(self) -> None:
         """End-to-end: convert CIGRE LV -> solve_power_flow -> compare voltages."""
@@ -162,13 +164,15 @@ class TestCIGRELVVsPandapower:
             va_deg_pp[i] = float(net.res_bus.at[pp_bus_idx, "va_degree"])
 
         np.testing.assert_allclose(
-            vm_pu_ours, vm_pu_pp,
-            atol=self.ATOL_VM_PU, rtol=0,
+            vm_pu_ours,
+            vm_pu_pp,
+            atol=self.ATOL_VM_PU,
+            rtol=0,
             err_msg="Voltage magnitude (pu) mismatch vs pandapower CIGRE LV",
         )
-        angle_diff = np.array([
-            _angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)
-        ])
+        angle_diff = np.array(
+            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)]
+        )
         assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
             f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
             f"max err = {np.max(np.abs(angle_diff)):.4e} deg"
@@ -192,6 +196,7 @@ class TestCIGRELVVsPandapower:
     def test_transformer_count_in_grid(self) -> None:
         """Converter must produce exactly 3 Transformer objects (one per CIGRE trafo)."""
         from pgml.schemas.grid_schema import Transformer
+
         net = pn.create_cigre_network_lv()
         grid, id_map = to_grid(net)
         trafos = [b for b in grid.branches if isinstance(b, Transformer)]
@@ -201,6 +206,7 @@ class TestCIGRELVVsPandapower:
     def test_switch_count_in_grid(self) -> None:
         """Converter must produce exactly 3 Switch objects (one per bus-bus CB)."""
         from pgml.schemas.grid_schema import Switch
+
         net = pn.create_cigre_network_lv()
         grid, id_map = to_grid(net)
         switches = [b for b in grid.branches if isinstance(b, Switch)]

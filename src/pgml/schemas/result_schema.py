@@ -70,7 +70,9 @@ def _check_phase_lengths(phases: tuple, **named) -> None:
     n = len(phases)
     for name, val in named.items():
         if val is not None and len(val) != n:
-            raise ValueError(f"`{name}` length ({len(val)}) must match phase count ({n}).")
+            raise ValueError(
+                f"`{name}` length ({len(val)}) must match phase count ({n})."
+            )
 
 
 # =============================================================================
@@ -83,17 +85,32 @@ class ResultSet(GridModel):
     id: int = Field(description="Unique result-set id.")
     description: Optional[str] = Field(default=None)
     experiment_id: Optional[str] = Field(default=None)
-    experiment_details: dict = Field(default_factory=dict, description="Free-form experiment config.")
-    grid_id: Optional[int] = Field(default=None, description="Loose ref to the grid description.")
-    grid_topology_id: Optional[int] = Field(default=None, description="Loose ref to grid topology.")
-    scenario_id: Optional[int] = Field(
-        default=None, description="Loose ref to the Scenario (scenario_schema) of realized inputs."
+    experiment_details: dict = Field(
+        default_factory=dict, description="Free-form experiment config."
     )
-    set: Optional[str] = Field(default=None, description="ML split label, e.g. train/val/test.")
-    base_frequency_hz: float = si_field("System fundamental f0 used in this set.", short="Hz",
-                                        long="hertz", gt=0.0, default=50.0)
-    step_size_ms: Optional[float] = si_field("Time between steps.", short="ms", long="millisecond",
-                                            default=None)
+    grid_id: Optional[int] = Field(
+        default=None, description="Loose ref to the grid description."
+    )
+    grid_topology_id: Optional[int] = Field(
+        default=None, description="Loose ref to grid topology."
+    )
+    scenario_id: Optional[int] = Field(
+        default=None,
+        description="Loose ref to the Scenario (scenario_schema) of realized inputs.",
+    )
+    set: Optional[str] = Field(
+        default=None, description="ML split label, e.g. train/val/test."
+    )
+    base_frequency_hz: float = si_field(
+        "System fundamental f0 used in this set.",
+        short="Hz",
+        long="hertz",
+        gt=0.0,
+        default=50.0,
+    )
+    step_size_ms: Optional[float] = si_field(
+        "Time between steps.", short="ms", long="millisecond", default=None
+    )
     date_created: datetime = Field(default_factory=datetime.now)
 
 
@@ -106,9 +123,12 @@ class SolverDiagnostics(GridModel):
     step: int = Field(description="Time/scenario step index.")
     converged: bool = Field(default=True)
     iterations: Optional[int] = Field(default=None)
-    process_time_us: Optional[float] = si_field("Wall-clock solve time.", short="us",
-                                                long="microsecond", default=None)
-    residual_norm: Optional[float] = Field(default=None, description="Final residual norm.")
+    process_time_us: Optional[float] = si_field(
+        "Wall-clock solve time.", short="us", long="microsecond", default=None
+    )
+    residual_norm: Optional[float] = Field(
+        default=None, description="Final residual norm."
+    )
     convergence_details: dict = Field(default_factory=dict)
 
 
@@ -121,22 +141,45 @@ class NodeResult(GridModel):
 
     result_set_id: int = Field(description="Loose ref to ResultSet.id.")
     node_id: int = Field(description="Loose ref to the grid node id.")
-    frequency_hz: float = si_field("Frequency of this record.", short="Hz", long="hertz", gt=0.0)
+    frequency_hz: float = si_field(
+        "Frequency of this record.", short="Hz", long="hertz", gt=0.0
+    )
     step: int = Field(description="Time/scenario step index.")
-    phases: tuple[Phase, ...] = Field(description="Phases present, fixing per-phase array order.")
-    v_re: tuple[float, ...] = si_field("Per-phase voltage, real part.", short="V", long="volt")
-    v_im: tuple[float, ...] = si_field("Per-phase voltage, imaginary part.", short="V", long="volt")
-    p_w: Optional[tuple[float, ...]] = si_field("Per-phase net active power injected at node.",
-                                               short="W", long="watt", default=None)
-    q_var: Optional[tuple[float, ...]] = si_field("Per-phase net reactive power at node.",
-                                                 short="var", long="var", default=None)
-    s_va: Optional[tuple[float, ...]] = si_field("Per-phase apparent power at node.", short="VA",
-                                                long="volt-ampere", default=None)
+    phases: tuple[Phase, ...] = Field(
+        description="Phases present, fixing per-phase array order."
+    )
+    v_re: tuple[float, ...] = si_field(
+        "Per-phase voltage, real part.", short="V", long="volt"
+    )
+    v_im: tuple[float, ...] = si_field(
+        "Per-phase voltage, imaginary part.", short="V", long="volt"
+    )
+    p_w: Optional[tuple[float, ...]] = si_field(
+        "Per-phase net active power injected at node.",
+        short="W",
+        long="watt",
+        default=None,
+    )
+    q_var: Optional[tuple[float, ...]] = si_field(
+        "Per-phase net reactive power at node.", short="var", long="var", default=None
+    )
+    s_va: Optional[tuple[float, ...]] = si_field(
+        "Per-phase apparent power at node.",
+        short="VA",
+        long="volt-ampere",
+        default=None,
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "NodeResult":
-        _check_phase_lengths(self.phases, v_re=self.v_re, v_im=self.v_im, p_w=self.p_w,
-                             q_var=self.q_var, s_va=self.s_va)
+        _check_phase_lengths(
+            self.phases,
+            v_re=self.v_re,
+            v_im=self.v_im,
+            p_w=self.p_w,
+            q_var=self.q_var,
+            s_va=self.s_va,
+        )
         return self
 
 
@@ -147,40 +190,69 @@ class BranchResult(GridModel):
 
     result_set_id: int = Field(description="Loose ref to ResultSet.id.")
     branch_id: int = Field(description="Loose ref to the grid branch id.")
-    branch_kind: Literal["line", "transformer", "switch", "shunt_reactor", "generic_branch"] = Field(
-        description="Branch component kind (mirrors grid_schema discriminator)."
+    branch_kind: Literal[
+        "line", "transformer", "switch", "shunt_reactor", "generic_branch"
+    ] = Field(description="Branch component kind (mirrors grid_schema discriminator).")
+    frequency_hz: float = si_field(
+        "Frequency of this record.", short="Hz", long="hertz", gt=0.0
     )
-    frequency_hz: float = si_field("Frequency of this record.", short="Hz", long="hertz", gt=0.0)
     step: int = Field(description="Time/scenario step index.")
-    from_phases: tuple[Phase, ...] = Field(description="From-terminal phases, array order.")
+    from_phases: tuple[Phase, ...] = Field(
+        description="From-terminal phases, array order."
+    )
     to_phases: tuple[Phase, ...] = Field(description="To-terminal phases, array order.")
-    i_from_re: tuple[float, ...] = si_field("From-terminal current, real part.", short="A",
-                                           long="ampere")
-    i_from_im: tuple[float, ...] = si_field("From-terminal current, imaginary part.", short="A",
-                                           long="ampere")
-    i_to_re: tuple[float, ...] = si_field("To-terminal current, real part.", short="A",
-                                         long="ampere")
-    i_to_im: tuple[float, ...] = si_field("To-terminal current, imaginary part.", short="A",
-                                         long="ampere")
-    p_from_w: Optional[tuple[float, ...]] = si_field("From-terminal active power (into branch).",
-                                                    short="W", long="watt", default=None)
-    q_from_var: Optional[tuple[float, ...]] = si_field("From-terminal reactive power.", short="var",
-                                                      long="var", default=None)
-    s_from_va: Optional[tuple[float, ...]] = si_field("From-terminal apparent power.", short="VA",
-                                                     long="volt-ampere", default=None)
-    p_to_w: Optional[tuple[float, ...]] = si_field("To-terminal active power (into branch).",
-                                                  short="W", long="watt", default=None)
-    q_to_var: Optional[tuple[float, ...]] = si_field("To-terminal reactive power.", short="var",
-                                                    long="var", default=None)
-    s_to_va: Optional[tuple[float, ...]] = si_field("To-terminal apparent power.", short="VA",
-                                                   long="volt-ampere", default=None)
+    i_from_re: tuple[float, ...] = si_field(
+        "From-terminal current, real part.", short="A", long="ampere"
+    )
+    i_from_im: tuple[float, ...] = si_field(
+        "From-terminal current, imaginary part.", short="A", long="ampere"
+    )
+    i_to_re: tuple[float, ...] = si_field(
+        "To-terminal current, real part.", short="A", long="ampere"
+    )
+    i_to_im: tuple[float, ...] = si_field(
+        "To-terminal current, imaginary part.", short="A", long="ampere"
+    )
+    p_from_w: Optional[tuple[float, ...]] = si_field(
+        "From-terminal active power (into branch).",
+        short="W",
+        long="watt",
+        default=None,
+    )
+    q_from_var: Optional[tuple[float, ...]] = si_field(
+        "From-terminal reactive power.", short="var", long="var", default=None
+    )
+    s_from_va: Optional[tuple[float, ...]] = si_field(
+        "From-terminal apparent power.", short="VA", long="volt-ampere", default=None
+    )
+    p_to_w: Optional[tuple[float, ...]] = si_field(
+        "To-terminal active power (into branch).", short="W", long="watt", default=None
+    )
+    q_to_var: Optional[tuple[float, ...]] = si_field(
+        "To-terminal reactive power.", short="var", long="var", default=None
+    )
+    s_to_va: Optional[tuple[float, ...]] = si_field(
+        "To-terminal apparent power.", short="VA", long="volt-ampere", default=None
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "BranchResult":
-        _check_phase_lengths(self.from_phases, i_from_re=self.i_from_re, i_from_im=self.i_from_im,
-                             p_from_w=self.p_from_w, q_from_var=self.q_from_var, s_from_va=self.s_from_va)
-        _check_phase_lengths(self.to_phases, i_to_re=self.i_to_re, i_to_im=self.i_to_im,
-                             p_to_w=self.p_to_w, q_to_var=self.q_to_var, s_to_va=self.s_to_va)
+        _check_phase_lengths(
+            self.from_phases,
+            i_from_re=self.i_from_re,
+            i_from_im=self.i_from_im,
+            p_from_w=self.p_from_w,
+            q_from_var=self.q_from_var,
+            s_from_va=self.s_from_va,
+        )
+        _check_phase_lengths(
+            self.to_phases,
+            i_to_re=self.i_to_re,
+            i_to_im=self.i_to_im,
+            p_to_w=self.p_to_w,
+            q_to_var=self.q_to_var,
+            s_to_va=self.s_to_va,
+        )
         return self
 
 
@@ -193,25 +265,44 @@ class InjectionResult(GridModel):
     injection_kind: Literal["load", "generator", "source", "shunt"] = Field(
         description="Appliance kind (mirrors grid_schema discriminator)."
     )
-    frequency_hz: float = si_field("Frequency of this record.", short="Hz", long="hertz", gt=0.0)
+    frequency_hz: float = si_field(
+        "Frequency of this record.", short="Hz", long="hertz", gt=0.0
+    )
     step: int = Field(description="Time/scenario step index.")
     phases: tuple[Phase, ...] = Field(description="Connected phases, array order.")
-    i_re: tuple[float, ...] = si_field("Per-phase current, real part.", short="A", long="ampere")
-    i_im: tuple[float, ...] = si_field("Per-phase current, imaginary part.", short="A", long="ampere")
-    p_w: Optional[tuple[float, ...]] = si_field("Per-phase active power (into appliance).",
-                                               short="W", long="watt", default=None)
-    q_var: Optional[tuple[float, ...]] = si_field("Per-phase reactive power.", short="var",
-                                                 long="var", default=None)
-    s_va: Optional[tuple[float, ...]] = si_field("Per-phase apparent power.", short="VA",
-                                                long="volt-ampere", default=None)
+    i_re: tuple[float, ...] = si_field(
+        "Per-phase current, real part.", short="A", long="ampere"
+    )
+    i_im: tuple[float, ...] = si_field(
+        "Per-phase current, imaginary part.", short="A", long="ampere"
+    )
+    p_w: Optional[tuple[float, ...]] = si_field(
+        "Per-phase active power (into appliance).", short="W", long="watt", default=None
+    )
+    q_var: Optional[tuple[float, ...]] = si_field(
+        "Per-phase reactive power.", short="var", long="var", default=None
+    )
+    s_va: Optional[tuple[float, ...]] = si_field(
+        "Per-phase apparent power.", short="VA", long="volt-ampere", default=None
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "InjectionResult":
-        _check_phase_lengths(self.phases, i_re=self.i_re, i_im=self.i_im, p_w=self.p_w,
-                             q_var=self.q_var, s_va=self.s_va)
+        _check_phase_lengths(
+            self.phases,
+            i_re=self.i_re,
+            i_im=self.i_im,
+            p_w=self.p_w,
+            q_var=self.q_var,
+            s_va=self.s_va,
+        )
         return self
 
 
 __all__ = [
-    "ResultSet", "SolverDiagnostics", "NodeResult", "BranchResult", "InjectionResult",
+    "ResultSet",
+    "SolverDiagnostics",
+    "NodeResult",
+    "BranchResult",
+    "InjectionResult",
 ]

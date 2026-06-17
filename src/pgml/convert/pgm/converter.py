@@ -91,7 +91,7 @@ _PROVENANCE = Provenance(
 
 # Fallback source impedance when sk is not finite / usably large.
 # Any finite, non-zero value works because ideal-slack mode ignores Z_s.
-_FALLBACK_R = 1.0e-6   # Ohm
+_FALLBACK_R = 1.0e-6  # Ohm
 _FALLBACK_L = 1.0e-12  # H
 
 
@@ -185,17 +185,17 @@ def to_grid(
             continue
 
         # pgm: r1/x1 in Ohm (total), c1 in F (total), tan1 dimensionless
-        r1 = float(row["r1"])   # Ohm total
-        x1 = float(row["x1"])   # Ohm total
-        c1 = float(row["c1"])   # F total
+        r1 = float(row["r1"])  # Ohm total
+        x1 = float(row["x1"])  # Ohm total
+        c1 = float(row["c1"])  # F total
         tan1 = float(row.get("tan1", 0.0) if hasattr(row, "get") else row["tan1"])
 
         # Virtual length = 1 m so that per-m params equal total values
         length_m = 1.0
 
-        l_per_m = x1 / two_pi_f0   # H/m (= H since length=1)
-        c_per_m = c1                 # F/m (= F since length=1)
-        r_per_m = r1                 # Ohm/m
+        l_per_m = x1 / two_pi_f0  # H/m (= H since length=1)
+        c_per_m = c1  # F/m (= F since length=1)
+        r_per_m = r1  # Ohm/m
 
         # Shunt conductance from loss angle: G = tan(delta) * omega * C
         g_per_m = tan1 * two_pi_f0 * c1 if (c1 > 0.0 and tan1 != 0.0) else None
@@ -236,9 +236,9 @@ def to_grid(
         if pgm_node not in id_map["node"]:
             continue
 
-        u_ref_pu = float(row["u_ref"])    # per-unit
+        u_ref_pu = float(row["u_ref"])  # per-unit
         u_ref_angle_rad = float(row["u_ref_angle"])  # radians
-        sk_va = float(row["sk"])           # short-circuit VA
+        sk_va = float(row["sk"])  # short-circuit VA
         rx_ratio = float(row["rx_ratio"])  # R/X
 
         # Rated voltage of the source node (LL, V)
@@ -247,7 +247,7 @@ def to_grid(
         node_matches = [r for r in pgm_node_arr if int(r["id"]) == pgm_node]
         u_rated_v = float(node_matches[0]["u_rated"]) if node_matches else 12660.0
 
-        u_ref_v = u_ref_pu * u_rated_v   # magnitude (V, LL)
+        u_ref_v = u_ref_pu * u_rated_v  # magnitude (V, LL)
         u_ref_angle_deg = math.degrees(u_ref_angle_rad)
 
         # Derive Thevenin impedance from sk and rx_ratio
@@ -287,9 +287,9 @@ def to_grid(
         if pgm_node not in id_map["node"]:
             continue
 
-        p_w = float(row["p_specified"])   # W
-        q_var = float(row["q_specified"]) # VAr
-        pgm_type = int(row["type"])        # LoadGenType int value
+        p_w = float(row["p_specified"])  # W
+        q_var = float(row["q_specified"])  # VAr
+        pgm_type = int(row["type"])  # LoadGenType int value
 
         load_id = _id.next()
         id_map["sym_load"][pgm_id] = load_id
@@ -343,8 +343,8 @@ def _thevenin_from_sk(
     if sk_va <= 0.0 or sk_va > 1.0e15:
         return _FALLBACK_R, _FALLBACK_L
 
-    z_mag = (u_rated_v ** 2) / sk_va
-    denom = math.sqrt(1.0 + rx_ratio ** 2)
+    z_mag = (u_rated_v**2) / sk_va
+    denom = math.sqrt(1.0 + rx_ratio**2)
     x_s = z_mag / denom
     r_s = x_s * rx_ratio
     l_s = x_s / two_pi_f0 if two_pi_f0 > 0.0 else _FALLBACK_L
