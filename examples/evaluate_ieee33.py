@@ -56,7 +56,7 @@ CONVERTER_SPECTRUM = [
     (11, 0.09, 0.0),
     (13, 0.07, 0.0),
 ]
-HARMONIC_ORDERS_3D = [3, 5, 7, 9]
+HARMONIC_ORDERS_3D = [5, 7, 9, 11, 13]
 
 
 def _build_dss_passive(net) -> None:
@@ -125,7 +125,7 @@ def main(out_dir: str = "evaluation_output") -> None:
     ours_v = ev.voltage_profile(pf, grid, label="pgml")
     pp_v = ref.pandapower_voltage_profile(net, grid, id_map, label="pandapower")
     fig, _ = ev.plot_voltage_profile(
-        [ours_v, pp_v], alpha=0.7, title="IEEE 33-bus voltage profile"
+        [ours_v, pp_v], grid=grid, alpha=0.7, title="IEEE 33-bus voltage profile"
     )
     ev.save_figure(fig, out / "voltage_profile.svg")
     fig, _ = ev.plot_profile_error(pp_v, ours_v)
@@ -149,11 +149,12 @@ def main(out_dir: str = "evaluation_output") -> None:
 
     o5_ours = next(p for p in ours_h if p.order == 5)
     o5_ref = next(p for p in oracle_h if p.order == 5)
-    fig, _ = ev.plot_harmonic_profile([o5_ours, o5_ref])
+    fig, _ = ev.plot_harmonic_profile([o5_ours, o5_ref], grid=grid)
     ev.save_figure(fig, out / "harmonic_h5.svg")
 
     ev.plot_harmonic_profile_3d(
         [*ours_h, *oracle_h],
+        grid=grid,
         reference_labels=["numpy oracle"],
         title="IEEE 33-bus harmonic voltage profiles (h=3,5,7,9)",
         out_html=str(out / "harmonic_3d.html"),

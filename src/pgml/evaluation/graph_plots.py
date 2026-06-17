@@ -59,7 +59,22 @@ def plot_grid_graph(
     else:
         pos = nx.spring_layout(g, seed=0, weight=None)
 
-    nx.draw_networkx_edges(g, pos, ax=ax, edge_color="0.6", width=1.2)
+    # Lines solid, closed switches dashed (open switches are already absent from g).
+    line_edges = [(u, v) for u, v, k in g.edges(data="kind") if k != "switch"]
+    switch_edges = [(u, v) for u, v, k in g.edges(data="kind") if k == "switch"]
+    nx.draw_networkx_edges(
+        g, pos, ax=ax, edgelist=line_edges, edge_color="0.6", width=1.2
+    )
+    if switch_edges:
+        nx.draw_networkx_edges(
+            g,
+            pos,
+            ax=ax,
+            edgelist=switch_edges,
+            edge_color="0.4",
+            width=1.2,
+            style="dashed",
+        )
     values = _node_value_array(grid, node_values, g)
     nodes = nx.draw_networkx_nodes(
         g,

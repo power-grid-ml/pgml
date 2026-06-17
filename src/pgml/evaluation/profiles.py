@@ -40,13 +40,17 @@ def _node_xy(node_ids, xs, ys) -> dict[int, tuple[float, float]]:
 
 def _circmean_deg(a: float, b: float) -> float:
     """Circular mean of two angles in degrees (handles the +-180 wrap)."""
-    return float(np.rad2deg(np.angle(np.exp(1j * np.deg2rad(a)) + np.exp(1j * np.deg2rad(b)))))
+    return float(
+        np.rad2deg(np.angle(np.exp(1j * np.deg2rad(a)) + np.exp(1j * np.deg2rad(b))))
+    )
 
 
 def _branch_kind_legend(ax, kinds: set[str]) -> list[Line2D]:
     """Proxy handles describing the branch-type line styles actually drawn."""
     return [
-        Line2D([], [], color="0.35", linestyle=_LINESTYLE_BY_KIND[k], label=_KIND_LABEL[k])
+        Line2D(
+            [], [], color="0.35", linestyle=_LINESTYLE_BY_KIND[k], label=_KIND_LABEL[k]
+        )
         for k in ("line", "switch", "other")
         if k in kinds
     ]
@@ -82,19 +86,37 @@ def plot_voltage_profile(
     for i, p in enumerate(profiles):
         color = cycle[i % len(cycle)]
         if markers:
-            ax.plot(p.distances_km, p.v_pu, linestyle="none", marker="o", markersize=4,
-                    color=color, alpha=alpha, zorder=3)
+            ax.plot(
+                p.distances_km,
+                p.v_pu,
+                linestyle="none",
+                marker="o",
+                markersize=4,
+                color=color,
+                alpha=alpha,
+                zorder=3,
+            )
         if edges is not None and p.node_ids is not None:
             xy = _node_xy(p.node_ids, p.distances_km, p.v_pu)
             for kind in {e.kind for e in edges}:
-                segs = [[xy[e.a], xy[e.b]] for e in edges
-                        if e.kind == kind and e.a in xy and e.b in xy]
+                segs = [
+                    [xy[e.a], xy[e.b]]
+                    for e in edges
+                    if e.kind == kind and e.a in xy and e.b in xy
+                ]
                 if not segs:
                     continue
                 kinds.add(kind)
-                ax.add_collection(LineCollection(
-                    segs, colors=[color], linestyles=_LINESTYLE_BY_KIND.get(kind, "-"),
-                    linewidths=1.9, alpha=alpha, zorder=2))
+                ax.add_collection(
+                    LineCollection(
+                        segs,
+                        colors=[color],
+                        linestyles=_LINESTYLE_BY_KIND.get(kind, "-"),
+                        linewidths=1.9,
+                        alpha=alpha,
+                        zorder=2,
+                    )
+                )
         else:  # legacy: connect in distance order
             ax.plot(p.distances_km, p.v_pu, linewidth=1.9, color=color, alpha=alpha)
         ax.plot([], [], color=color, marker="o", label=p.label)  # legend proxy (impl)
@@ -155,23 +177,50 @@ def plot_harmonic_profile(
                     segs.append([xy[e.a], xy[e.b]])
                     seg_ang.append(_circmean_deg(ang_by_node[e.a], ang_by_node[e.b]))
             if segs:
-                lc = LineCollection(segs, cmap=cmap, norm=norm, linestyles=style,
-                                    linewidths=2.2, alpha=alpha)
+                lc = LineCollection(
+                    segs,
+                    cmap=cmap,
+                    norm=norm,
+                    linestyles=style,
+                    linewidths=2.2,
+                    alpha=alpha,
+                )
                 lc.set_array(np.asarray(seg_ang))
                 ax.add_collection(lc)
                 mappable = mappable or lc
         elif x.size >= 2:  # legacy: connect in distance order
             pts = np.column_stack([x, y]).reshape(-1, 1, 2)
             segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-            lc = LineCollection(segs, cmap=cmap, norm=norm, linestyles=style,
-                                linewidths=2.2, alpha=alpha)
-            lc.set_array(np.rad2deg(np.angle(
-                np.exp(1j * np.deg2rad(ang[:-1])) + np.exp(1j * np.deg2rad(ang[1:])))))
+            lc = LineCollection(
+                segs,
+                cmap=cmap,
+                norm=norm,
+                linestyles=style,
+                linewidths=2.2,
+                alpha=alpha,
+            )
+            lc.set_array(
+                np.rad2deg(
+                    np.angle(
+                        np.exp(1j * np.deg2rad(ang[:-1]))
+                        + np.exp(1j * np.deg2rad(ang[1:]))
+                    )
+                )
+            )
             ax.add_collection(lc)
             mappable = mappable or lc
         if markers:
-            mappable = ax.scatter(x, y, c=ang, cmap=cmap, norm=norm, s=24,
-                                  edgecolors="k", linewidths=0.3, zorder=3)
+            mappable = ax.scatter(
+                x,
+                y,
+                c=ang,
+                cmap=cmap,
+                norm=norm,
+                s=24,
+                edgecolors="k",
+                linewidths=0.3,
+                zorder=3,
+            )
         ax.plot([], [], linestyle=style, color="0.35", label=p.label)  # legend (impl)
 
     ax.autoscale()
@@ -180,7 +229,9 @@ def plot_harmonic_profile(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel or (f"|V| [{profiles[0].unit}]" if profiles else "|V|"))
     ax.set_title(
-        title or (f"Harmonic voltage profile (h={order})" if order else "Harmonic profile"))
+        title
+        or (f"Harmonic voltage profile (h={order})" if order else "Harmonic profile")
+    )
     ax.grid(True, alpha=0.3)
     if colorbar and mappable is not None:
         fig.colorbar(mappable, ax=ax, label="Voltage angle [deg]", pad=0.02)

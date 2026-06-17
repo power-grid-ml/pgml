@@ -27,11 +27,18 @@ from pgml.evaluation import (
     voltage_profile,
 )
 from pgml.evaluation import references as ref
+from pgml.evaluation.topology import branch_edges
 from pgml.schemas.grid_schema import (
+    Grid,
     HarmonicComponent,
+    Line,
     Load,
+    Node,
+    Phase,
+    Source,
     SpectrumPoint,
     StaticSpectrum,
+    Switch,
 )
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
@@ -114,7 +121,7 @@ def test_voltage_profile_plot_and_save(tmp_path):
     p2 = voltage_profile(
         pf, grid, label="copy"
     )  # second line to exercise overlay/alpha
-    fig, ax = plot_voltage_profile([p1, p2], alpha=0.6)
+    fig, ax = plot_voltage_profile([p1, p2], grid=grid, alpha=0.6)
     out = save_figure(fig, tmp_path / "vp.png")
     assert (tmp_path / "vp.png").exists()
     # svg path works too (vector, paper-ready)
@@ -154,13 +161,15 @@ def test_harmonic_profile_2d_and_3d(tmp_path):
     oracle5 = ref.numpy_harmonic_profiles(
         grid, hres.pf.v, hres.index, [5], label="oracle"
     )[0]
-    fig, ax = plot_harmonic_profile([p5, oracle5])
+    fig, ax = plot_harmonic_profile([p5, oracle5], grid=grid)
     save_figure(fig, tmp_path / "h5.png")
     assert (tmp_path / "h5.png").exists()
     plt.close("all")
 
     profs = harmonic_profiles(hres, grid, [5, 7], label="pgml")
-    figp = plot_harmonic_profile_3d(profs, out_html=str(tmp_path / "h3d.html"))
+    figp = plot_harmonic_profile_3d(
+        profs, grid=grid, out_html=str(tmp_path / "h3d.html")
+    )
     assert (tmp_path / "h3d.html").exists()
     assert figp is not None
 
@@ -185,3 +194,83 @@ def test_differentiability_unaffected_by_plotting():
     _ = voltage_profile(pf, grid, label="pgml")  # detaches internally
     pf.v.abs().sum().backward()  # graph still intact
     assert r.grad is not None and torch.isfinite(r.grad).all()
+
+
+# ---------------------------------------------------------------------------
+# topology-driven connecting lines (branches, not data order) + switch state
+# ---------------------------------------------------------------------------
+def _switch_grid(switch_closed: bool) -> Grid:
+    """Source@1 --line(100 m)--> 2 --switch--> 3, with a load at node 3."""
+    ph = (Phase.A,)
+    return Grid(
+        base_frequency_hz=50.0,
+        nodes=[Node(id=i, u_rated_v=230.0, phases=ph) for i in (1, 2, 3)],
+        branches=[
+            Line(
+                id=20,
+                from_node=1,
+                to_node=2,
+                from_phases=ph,
+                to_phases=ph,
+                length_m=100.0,
+                series_resistance_ohm_per_m=[[1e-3]],
+                series_inductance_h_per_m=[[1e-6]],
+                shunt_capacitance_f_per_m=[[1e-9]],
+            ),
+            Switch(
+                id=21,
+                from_node=2,
+                to_node=3,
+                from_phases=ph,
+                to_phases=ph,
+                closed=switch_closed,
+                resistance_ohm=1e-6,
+                inductance_h=1e-9,
+            ),
+        ],
+        appliances=[
+            Source(
+                id=10,
+                node=1,
+                phases=ph,
+                u_ref_v=(230.0,),
+                u_angle_deg=(0.0,),
+                resistance_ohm=[[0.1]],
+                inductance_h=[[1e-3]],
+            ),
+            Load(id=30, node=3, phases=ph, p_nom_w=1000.0, q_nom_var=200.0),
+        ],
+    )
+
+
+def test_branch_edges_closed_switch_is_dashed_kind():
+    edges = branch_edges(_switch_grid(switch_closed=True))
+    kinds = {(e.a, e.b): e.kind for e in edges}
+    assert kinds == {(1, 2): "line", (2, 3): "switch"}
+
+
+def test_branch_edges_omits_open_switch():
+    edges = branch_edges(_switch_grid(switch_closed=False))
+    assert {(e.a, e.b) for e in edges} == {(1, 2)}  # open switch (2,3) dropped
+    # ...unless explicitly requested
+    edges_all = branch_edges(
+        _switch_grid(switch_closed=False), include_open_switches=True
+    )
+    assert {(e.a, e.b) for e in edges_all} == {(1, 2), (2, 3)}
+
+
+def test_distance_does_not_traverse_open_switch():
+    dist_closed = distance_from_slack(_switch_grid(switch_closed=True))
+    assert dist_closed[3] == 0.1  # reachable through the closed switch (0 length)
+    dist_open = distance_from_slack(_switch_grid(switch_closed=False))
+    assert dist_open[3] == float("inf")  # unreachable across the open switch
+
+
+def test_voltage_profile_with_switch_grid_plots(tmp_path):
+    grid = _switch_grid(switch_closed=True)
+    pf = solve_power_flow(grid, slack="ideal", dtype=CDT)
+    prof = voltage_profile(pf, grid, label="pgml")
+    fig, ax = plot_voltage_profile([prof], grid=grid)
+    save_figure(fig, tmp_path / "sw.png")
+    assert (tmp_path / "sw.png").exists()
+    plt.close("all")

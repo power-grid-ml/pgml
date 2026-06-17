@@ -70,7 +70,9 @@ def slack_node_id(grid: Grid) -> int:
     return int(src.node)
 
 
-def branch_edges(grid: Grid, *, include_open_switches: bool = False) -> list[ProfileEdge]:
+def branch_edges(
+    grid: Grid, *, include_open_switches: bool = False
+) -> list[ProfileEdge]:
     """Drawable branch interconnections ``[(a, b, kind)]`` for profile line-drawing.
 
     In-service branches connecting two distinct nodes; CLOSED switches are kept
@@ -122,4 +124,10 @@ def distance_from_slack(
     }
 
 
-__all__ = ["ProfileEdge", "slack_node_id", "branch_edges", "grid_graph", "distance_from_slack"]
+__all__ = [
+    "ProfileEdge",
+    "slack_node_id",
+    "branch_edges",
+    "grid_graph",
+    "distance_from_slack",
+]
