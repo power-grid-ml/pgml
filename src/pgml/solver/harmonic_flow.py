@@ -243,10 +243,10 @@ def _harmonic_injections(
         bshape = torch.broadcast_shapes(*[c.shape[:-1] for _, c in contribs]) if contribs else ()
         col = torch.zeros((*bshape, n), dtype=cdt, device=device)
         for rows, i_h in contribs:
-            p = rows.shape[0]
-            i_h_b = i_h.broadcast_to(*bshape, p)
-            idx = rows.view(*([1] * len(bshape)), p).expand(*bshape, p)
-            col = col.scatter_add(-1, idx, -i_h_b)  # nodal injection = -I_drawn
+            i_h_b = i_h.broadcast_to(*bshape, rows.shape[0])
+            # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add);
+            # accumulates the nodal injection = -I_drawn at the device's rows.
+            col = col.index_add(-1, rows, -i_h_b)
         cols.append(col)
 
     bshape = torch.broadcast_shapes(*[c.shape[:-1] for c in cols])
