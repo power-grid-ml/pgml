@@ -43,6 +43,12 @@ and `references` adapts the reference libraries to the SAME containers.
   ...) -> plotly.Figure` — x=distance, y=magnitude, z=angle; COLOR=order (show 3,5,7,9
   at once), DASH=implementation; lines follow branches when `grid` given; writes
   self-contained interactive HTML.
+- `plot_harmonic_profile_interactive(profiles, *, grid=None, out_html=None,
+  line_alpha=0.6, ...) -> plotly.Figure` (`evaluation.interactive`) — 2D companion for a
+  fixed order: x=distance, y=magnitude, ONE colour per implementation, translucent lines;
+  each model is its own legend group, click to toggle on/off (`groupclick=togglegroup`).
+  For heavily-overlapping models. The matplotlib `plot_harmonic_profile` also takes
+  `alpha` to keep overlaps legible in the static SVG.
 - `plot_grid_graph(grid, *, node_values=None, layout="spring"|"kamada", ...) -> (fig,
   ax)` — topology colored by a per-node value; slack outlined.
 

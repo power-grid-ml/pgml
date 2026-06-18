@@ -32,6 +32,7 @@ from .data import (
 )
 from .graph_plots import plot_grid_graph
 from .harmonic3d import plot_harmonic_profile_3d
+from .interactive import plot_harmonic_profile_interactive
 from .profiles import plot_harmonic_profile, plot_profile_error, plot_voltage_profile
 from .style import save_figure
 from .topology import distance_from_slack, grid_graph, slack_node_id
@@ -57,6 +58,7 @@ __all__ = [
     "plot_harmonic_profile",
     "plot_profile_error",
     "plot_harmonic_profile_3d",
+    "plot_harmonic_profile_interactive",
     "plot_grid_graph",
     # io
     "save_figure",

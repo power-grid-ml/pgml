@@ -19,6 +19,7 @@ from pgml.evaluation import (
     plot_grid_graph,
     plot_harmonic_profile,
     plot_harmonic_profile_3d,
+    plot_harmonic_profile_interactive,
     plot_profile_error,
     plot_voltage_profile,
     plot_ybus_difference,
@@ -172,6 +173,26 @@ def test_harmonic_profile_2d_and_3d(tmp_path):
     )
     assert (tmp_path / "h3d.html").exists()
     assert figp is not None
+
+
+def test_harmonic_profile_interactive_toggleable(tmp_path):
+    """The interactive 2D plot writes HTML with one toggleable legend group per model."""
+    grid = _harmonic_grid()
+    hres = solve_harmonic_flow(grid, [1, 5, 7], slack="norton", dtype=CDT)
+    a = harmonic_profile(hres, grid, 5, label="pgml")
+    b = ref.numpy_harmonic_profiles(grid, hres.pf.v, hres.index, [5], label="oracle")[0]
+
+    fig = plot_harmonic_profile_interactive(
+        [a, b], grid=grid, out_html=str(tmp_path / "h5_interactive.html")
+    )
+    assert (tmp_path / "h5_interactive.html").exists()
+    # one line + one marker trace per model, sharing a per-model legend group.
+    assert len(fig.data) == 4
+    assert sorted({t.legendgroup for t in fig.data}) == ["oracle", "pgml"]
+    # clicking a legend entry toggles the whole model group, and lines are translucent.
+    assert fig.layout.legend.groupclick == "togglegroup"
+    line_colors = [t.line.color for t in fig.data if t.mode == "lines"]
+    assert all(c.startswith("rgba(") for c in line_colors)
 
 
 def test_grid_graph_plot(tmp_path):

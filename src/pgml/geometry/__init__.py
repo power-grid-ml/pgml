@@ -14,19 +14,47 @@ from __future__ import annotations
 
 from .carson import (
     i0_over_i1,
+    internal_impedance,
     kron_reduce,
     line_constants,
     potential_coefficients,
     series_impedance,
 )
-from .synthesis import synthesize_line_geometry, synthesize_grid_geometry
+from .sequence import (
+    fit_equivalent_rdc,
+    phase_to_sequence,
+    positive_sequence_z,
+    sequence_impedances,
+    skin_resistance_multiplier,
+    two_conductor_geometry,
+    two_conductor_loop_z,
+)
+from .synthesis import (
+    apply_positive_sequence_harmonic_model,
+    positive_sequence_resistance_model,
+    synthesize_grid_geometry,
+    synthesize_line_geometry,
+)
 
 __all__ = [
+    # carson (geometry -> Z/Yc, full earth return)
     "series_impedance",
+    "internal_impedance",
     "potential_coefficients",
     "kron_reduce",
     "line_constants",
     "i0_over_i1",
+    # sequence (positive-sequence harmonic model, no earth floor)
+    "positive_sequence_z",
+    "skin_resistance_multiplier",
+    "fit_equivalent_rdc",
+    "two_conductor_geometry",
+    "two_conductor_loop_z",
+    "phase_to_sequence",
+    "sequence_impedances",
+    # synthesis (R/X -> geometry / harmonic model)
     "synthesize_line_geometry",
     "synthesize_grid_geometry",
+    "positive_sequence_resistance_model",
+    "apply_positive_sequence_harmonic_model",
 ]

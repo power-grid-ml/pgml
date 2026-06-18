@@ -329,7 +329,9 @@ def _geom_conductor_arrays(ln, rdt, device):
     geo = ln.conductor_geometry
     phase_conds = []
     for ph in ln.from_phases:
-        c = next((c for c in geo.conductors if not c.is_neutral and c.phase == ph), None)
+        c = next(
+            (c for c in geo.conductors if not c.is_neutral and c.phase == ph), None
+        )
         if c is None:
             raise ValueError(
                 f"Line {ln.id}: conductor_geometry has no phase conductor for {ph!r} "
@@ -476,19 +478,54 @@ def _stamp_line_groups(lines, f, y, index, cdt, rdt, device, param_overrides):
 def _resistance_multiplier(line, f, rdt, device) -> Tensor:
     """Per-frequency resistance multiplier m(f) ``[H]`` from ResistanceFrequencyModel.
 
-    Only the ``constant`` multiplier is wired in M1 (returns its scalar value);
-    analytic/curve/equation laws are a Phase-2 (geometry/skin-effect) concern and
-    fall back to the constant value if present, else 1.0.
+    Supported multipliers:
+    - ``constant`` -> its scalar value (M1 default).
+    - ``analytic`` with ``law == "carson_skin_multiplier"`` -> the differentiable
+      positive-sequence skin-effect curve (``pgml.geometry.sequence``), the Bessel
+      ``I0/I1`` internal-resistance growth WITHOUT the earth-return floor; ``params``
+      carry ``r1_ohm_per_m`` and ``f0_hz`` (see ``synthesize_positive_sequence_*``).
+      Other analytic laws fall back to ``base_value``.
+    - ``curve`` -> linear interpolation of the sampled multiplier (constant
+      extrapolation outside the sampled band).
+    Anything else -> 1.0 (no skin effect).
     """
     rfm = getattr(line, "resistance_frequency", None)
-    val = 1.0
-    if rfm is not None:
-        mult = rfm.multiplier
-        if getattr(mult, "kind", None) == "constant":
-            val = mult.value
-        elif getattr(mult, "kind", None) == "analytic":
-            val = mult.base_value
-    return torch.full((f.shape[0],), float(val), dtype=rdt, device=device)
+    if rfm is None:
+        return torch.ones(f.shape[0], dtype=rdt, device=device)
+    mult = rfm.multiplier
+    kind = getattr(mult, "kind", None)
+    if kind == "constant":
+        return torch.full((f.shape[0],), float(mult.value), dtype=rdt, device=device)
+    if kind == "analytic":
+        if getattr(mult, "law", None) == "carson_skin_multiplier":
+            from pgml.geometry.sequence import skin_resistance_multiplier
+
+            m = skin_resistance_multiplier(
+                mult.params["r1_ohm_per_m"], mult.params["f0_hz"], f
+            )  # [H]
+            return (float(mult.base_value) * m).to(dtype=rdt, device=device)
+        return torch.full(
+            (f.shape[0],), float(mult.base_value), dtype=rdt, device=device
+        )
+    if kind == "curve":
+        fr = torch.as_tensor(mult.frequencies_hz, dtype=rdt, device=device)
+        val = torch.as_tensor(mult.values, dtype=rdt, device=device)
+        return _interp1d_constant_edges(f, fr, val)
+    return torch.ones(f.shape[0], dtype=rdt, device=device)
+
+
+def _interp1d_constant_edges(xq: Tensor, xp: Tensor, fp: Tensor) -> Tensor:
+    """Piecewise-linear interp of ``fp`` over strictly increasing ``xp`` at ``xq`` ``[H]``.
+
+    Constant extrapolation beyond the sampled endpoints. Pure torch (autograd-safe).
+    """
+    idx = torch.searchsorted(xp, xq).clamp(1, xp.shape[0] - 1)
+    x0 = xp[idx - 1]
+    x1 = xp[idx]
+    y0 = fp[idx - 1]
+    y1 = fp[idx]
+    t = ((xq - x0) / (x1 - x0)).clamp(0.0, 1.0)  # clamp -> constant extrapolation
+    return y0 + t * (y1 - y0)
 
 
 def _stamp_switches(grid, f, y, index, cdt, rdt, device, param_overrides):

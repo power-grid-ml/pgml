@@ -22,12 +22,14 @@ import math
 from typing import Optional
 
 from pgml.schemas.grid_schema import (
+    AnalyticParam,
     ConductorPlacement,
     Grid,
     Line,
     LineGeometry,
     Phase,
     Provenance,
+    ResistanceFrequencyModel,
     SourceConvention,
 )
 
@@ -157,4 +159,64 @@ def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
     return grid
 
 
-__all__ = ["synthesize_line_geometry", "synthesize_grid_geometry"]
+def _float0(v) -> float:
+    """Representative python float from a possibly-tensor scalar (skin-curve shape only)."""
+    if hasattr(v, "detach"):
+        return float(v.detach().reshape(-1)[0])
+    return float(v)
+
+
+def positive_sequence_resistance_model(
+    r1_ohm_per_m: float, *, f0: float
+) -> ResistanceFrequencyModel:
+    """A :class:`ResistanceFrequencyModel` carrying the positive-sequence skin curve.
+
+    Encodes the ``carson_skin_multiplier`` analytic law (evaluated differentiably in
+    assembly via :func:`pgml.geometry.sequence.skin_resistance_multiplier`): the Bessel
+    ``I0/I1`` internal-resistance growth WITHOUT the earth-return floor. ``base_value``
+    is the f0 multiplier (1.0); ``params`` carry the representative ``R1`` and ``f0``.
+    """
+    return ResistanceFrequencyModel(
+        multiplier=AnalyticParam(
+            law="carson_skin_multiplier",
+            base_value=1.0,
+            params={"r1_ohm_per_m": float(r1_ohm_per_m), "f0_hz": float(f0)},
+        )
+    )
+
+
+def apply_positive_sequence_harmonic_model(
+    grid: Grid, *, f0: Optional[float] = None, skin: bool = True
+) -> Grid:
+    """In place: give every R/X line the positive-sequence harmonic model (no earth floor).
+
+    The corrected harmonic line model (TODO #1, option B): the EXPLICIT R/L/C path
+    already scales the geometric reactance ``X(h)=X1*h`` (constant ``L``) with NO earth
+    return; this adds the physically-correct skin-effect growth on ``R`` via the line's
+    :class:`ResistanceFrequencyModel` (``carson_skin_multiplier``). Unlike
+    :func:`synthesize_grid_geometry`, it does NOT reverse-synthesise a single-conductor
+    earth-return geometry, so it never hits the GMR floor and stays well defined for
+    cables / low-X feeders. Lines that already carry a ``conductor_geometry`` (genuine
+    geometry -> full Carson) are left untouched. ``skin=False`` keeps R constant (the
+    naive model). Returns ``grid``.
+    """
+    f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
+    for ln in grid.branches:
+        if not (isinstance(ln, Line) and ln.conductor_geometry is None):
+            continue
+        diag = ln.series_resistance_ohm_per_m
+        p = len(ln.from_phases)
+        r1 = sum(_float0(diag[i][i]) for i in range(p)) / p  # representative R1
+        if skin:
+            ln.resistance_frequency = positive_sequence_resistance_model(r1, f0=f0)
+        else:
+            ln.resistance_frequency = ResistanceFrequencyModel()  # constant 1.0
+    return grid
+
+
+__all__ = [
+    "synthesize_line_geometry",
+    "synthesize_grid_geometry",
+    "positive_sequence_resistance_model",
+    "apply_positive_sequence_harmonic_model",
+]

@@ -5,7 +5,24 @@ from __future__ import annotations
 import pytest
 import torch
 
-from pgml.assembly import assemble_ybus, build_injections, node_phase_index
+from pgml.assembly import (
+    assemble_network_ybus,
+    assemble_ybus,
+    build_injections,
+    node_phase_index,
+)
+from pgml.geometry.sequence import positive_sequence_z
+from pgml.geometry.synthesis import apply_positive_sequence_harmonic_model
+from pgml.schemas.grid_schema import (
+    ConductorPlacement,
+    Grid,
+    Line,
+    LineGeometry,
+    Load,
+    Node,
+    Phase,
+    Source,
+)
 from pgml.solver import solve_harmonic, solve_power_flow
 
 from tests.fixtures.tiny_grids import single_phase_chain, three_phase_two_bus
@@ -77,6 +94,91 @@ def test_cuda_ideal_slack_parity():
     )
 
     torch.testing.assert_close(v_cuda.cpu(), v_cpu, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_cpu_cuda_positive_sequence_z_parity(dtype):
+    """The positive-sequence harmonic line model runs identically on CPU and CUDA."""
+    freqs = [50.0, 250.0, 650.0]
+    f_cpu = torch.tensor(freqs, dtype=dtype)
+    z_cpu = positive_sequence_z(3.6e-4, 3.0e-4, 50.0, f_cpu)
+    z_cuda = positive_sequence_z(3.6e-4, 3.0e-4, 50.0, f_cpu.to("cuda"))
+    assert z_cuda.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.float64 else 1e-4
+    torch.testing.assert_close(z_cuda.cpu(), z_cpu, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("dtype", [torch.complex128, torch.complex64])
+def test_cpu_cuda_positive_sequence_assembly_parity(dtype):
+    """Assembling a feeder with the positive-sequence skin law matches on CPU/CUDA."""
+    grid = single_phase_chain()
+    apply_positive_sequence_harmonic_model(grid)
+    rdt = torch.float64 if dtype == torch.complex128 else torch.float32
+    f = torch.tensor([50.0, 550.0], dtype=rdt)
+    yb_cpu = assemble_network_ybus(grid, f, dtype=dtype, device=torch.device("cpu"))
+    yb_cuda = assemble_network_ybus(grid, f.to("cuda"), dtype=dtype, device="cuda")
+    assert yb_cuda.Y.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.complex128 else 1e-3
+    torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)
+
+
+def _carson_geometry_grid() -> Grid:
+    """Tiny single-phase grid whose line gets Z(h) from Carson conductor geometry."""
+    geom = LineGeometry(
+        conductors=[
+            ConductorPlacement(
+                phase=Phase.A,
+                x_m=0.0,
+                y_m=10.0,
+                gmr_m=0.0078,
+                radius_m=0.0102,
+                r_dc_ohm_per_m=1.2e-4,
+            )
+        ]
+    )
+    return Grid(
+        base_frequency_hz=50.0,
+        nodes=[
+            Node(id=1, u_rated_v=12660.0, phases=(Phase.A,)),
+            Node(id=2, u_rated_v=12660.0, phases=(Phase.A,)),
+        ],
+        branches=[
+            Line(
+                id=20,
+                from_node=1,
+                to_node=2,
+                from_phases=(Phase.A,),
+                to_phases=(Phase.A,),
+                length_m=1000.0,
+                conductor_geometry=geom,
+            )
+        ],
+        appliances=[
+            Source(
+                id=10,
+                node=1,
+                phases=(Phase.A,),
+                u_ref_v=(12660.0,),
+                u_angle_deg=(0.0,),
+                resistance_ohm=[[0.1]],
+                inductance_h=[[1e-3]],
+            ),
+            Load(id=30, node=2, phases=(Phase.A,), p_nom_w=2e5, q_nom_var=5e4),
+        ],
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.complex128, torch.complex64])
+def test_cpu_cuda_carson_geometry_assembly_parity(dtype):
+    """The Carson/Deri geometry assembly path is CPU/CUDA identical (TODO #6 follow-up)."""
+    grid = _carson_geometry_grid()
+    rdt = torch.float64 if dtype == torch.complex128 else torch.float32
+    f = torch.tensor([50.0, 250.0, 750.0], dtype=rdt)
+    yb_cpu = assemble_network_ybus(grid, f, dtype=dtype, device=torch.device("cpu"))
+    yb_cuda = assemble_network_ybus(grid, f.to("cuda"), dtype=dtype, device="cuda")
+    assert yb_cuda.Y.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.complex128 else 1e-3
+    torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)
 
 
 @pytest.mark.parametrize("grid_fn", GRIDS)

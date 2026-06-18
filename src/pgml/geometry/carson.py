@@ -47,6 +47,27 @@ def i0_over_i1(z: Tensor, *, terms: int = 40) -> Tensor:
     return torch.where(z.abs() > 35.0, torch.ones_like(ratio), ratio)
 
 
+def internal_impedance(rdc: Tensor, freqs: Tensor) -> Tensor:
+    """Skin-effect internal impedance ``Zint(f)`` ``[*B, H]`` (Ω/m), Bessel I0/I1 model.
+
+    ``alpha = (1+j)*sqrt(f*mu0/Rdc)``; ``Zint = (1+j)*(I0/I1)(alpha)*sqrt(Rdc*f*mu0)/2``.
+    ``rdc`` carries a trailing batch shape ``[*B]`` (e.g. one entry per conductor) and
+    ``freqs`` is ``[H]``; ``rdc`` broadcasts against an appended frequency axis so the
+    result is ``[*B, H]``. Both the internal RESISTANCE (real part) and the internal
+    REACTANCE (imag part) are returned; OpenDSS (and :func:`series_impedance`) keep only
+    the real part in the 40-1000 Hz band (the internal inductance is carried by GMR),
+    while the positive-sequence model (:mod:`pgml.geometry.sequence`) reuses the real
+    part for the skin-effect resistance growth. Pure torch / autograd-safe.
+    """
+    rdt = rdc.dtype
+    cdt = _cdtype(rdt)
+    rdc_f = rdc.unsqueeze(-1)  # [*B, 1]
+    f = freqs.to(rdt)  # [H]
+    alpha = (1.0 + 1j) * torch.sqrt((f * MU0) / rdc_f).to(cdt)  # [*B, H]
+    i0i1 = i0_over_i1(alpha)
+    return (1.0 + 1j) * i0i1 * torch.sqrt((rdc_f * f * MU0).to(cdt)) / 2.0  # [*B, H]
+
+
 def _pair_terms(x: Tensor, y: Tensor):
     """Pairwise distance helpers ``[*B, N, N]``: |Δ|, image dist, (yi+yj), (xi−xj).
 
@@ -107,20 +128,7 @@ def series_impedance(
     ze = lfactor.reshape(*([1] * (lnarg.dim() - 3)), -1, 1, 1) * torch.log(lnarg)
 
     # Skin-effect internal resistance (Rdc, Bessel I0/I1); internal reactance dropped.
-    alpha = (1.0 + 1j) * torch.sqrt(
-        (freqs.to(rdt).reshape(*([1] * rdc.dim()), -1) * MU0) / rdc.unsqueeze(-1)
-    ).to(cdt)  # [*B, N, H]
-    i0i1 = i0_over_i1(alpha)
-    zint = (
-        (1.0 + 1j)
-        * i0i1
-        * torch.sqrt(
-            (
-                rdc.unsqueeze(-1) * freqs.to(rdt).reshape(*([1] * rdc.dim()), -1) * MU0
-            ).to(cdt)
-        )
-        / 2.0
-    )  # [*B, N, H]
+    zint = internal_impedance(rdc, freqs)  # [*B, N, H]
     zint_re = zint.real.movedim(-1, -2)  # [*B, H, N]
     diag_int = torch.diag_embed(zint_re).to(cdt)  # [*B, H, N, N]
 
@@ -176,6 +184,7 @@ def line_constants(
 
 __all__ = [
     "i0_over_i1",
+    "internal_impedance",
     "series_impedance",
     "potential_coefficients",
     "kron_reduce",
