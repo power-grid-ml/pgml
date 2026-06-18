@@ -14,15 +14,18 @@ import torch
 from pgml.assembly import assemble_ybus, device_current_injections, node_phase_index
 from pgml.schemas.grid_schema import (
     Grid,
+    HarmonicComponent,
     Line,
     Load,
     LoadModel,
     Node,
     Phase,
     Source,
+    SpectrumPoint,
+    StaticSpectrum,
     WindingConnection,
 )
-from pgml.solver import solve_power_flow
+from pgml.solver import solve_harmonic_flow, solve_power_flow
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"
@@ -170,3 +173,72 @@ def test_device_current_injection_cpu_cuda_parity():
     )
     assert i_cuda.device.type == "cuda"
     torch.testing.assert_close(i_cuda.cpu(), i_cpu, rtol=1e-9, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Increment 2: connection-aware per-phase harmonic injection CPU-vs-CUDA parity.
+# ---------------------------------------------------------------------------
+def _spec(comps):
+    return StaticSpectrum(
+        spectrum=SpectrumPoint(
+            components=[
+                HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a)
+                for o, m, a in comps
+            ]
+        )
+    )
+
+
+DELTA_HARM_LOAD = Load(
+    id=30,
+    node=2,
+    phases=ABC,
+    p_nom_w=4500.0,
+    q_nom_var=900.0,
+    p_nom_per_phase_w=(2000.0, 1500.0, 1000.0),
+    q_nom_per_phase_var=(400.0, 300.0, 200.0),
+    connection=WindingConnection.DELTA,
+    spectrum=_spec([(1, 1.0, 0.0), (5, 0.2, 0.0), (7, 0.14, 30.0)]),
+)
+WYE_PER_PHASE_LOAD = Load(
+    id=30,
+    node=2,
+    phases=ABC,
+    p_nom_w=4500.0,
+    q_nom_var=900.0,
+    p_nom_per_phase_w=(2000.0, 1500.0, 1000.0),
+    q_nom_per_phase_var=(400.0, 300.0, 200.0),
+    spectrum_per_phase={
+        Phase.A: _spec([(1, 1.0, 0.0), (5, 0.3, 10.0)]),
+        Phase.C: _spec([(1, 1.0, 0.0), (7, 0.1, -20.0)]),
+    },
+)
+
+HARM_CASES = [
+    ("delta_spectrum", DELTA_HARM_LOAD, ABC),
+    ("wye_per_phase", WYE_PER_PHASE_LOAD, ABCN),
+]
+
+
+@pytest.mark.parametrize("name,load,nph", HARM_CASES, ids=[c[0] for c in HARM_CASES])
+def test_harmonic_per_phase_cpu_cuda_parity(name, load, nph):
+    grid = _grid(load, nph)
+    dev = torch.device("cuda")
+    res_cpu = solve_harmonic_flow(
+        grid,
+        [1, 5, 7],
+        slack="norton",
+        dtype=torch.complex128,
+        device=torch.device("cpu"),
+        symmetry="asymmetric",
+    )
+    res_cuda = solve_harmonic_flow(
+        grid,
+        [1, 5, 7],
+        slack="norton",
+        dtype=torch.complex128,
+        device=dev,
+        symmetry="asymmetric",
+    )
+    assert res_cuda.v.device.type == "cuda"
+    torch.testing.assert_close(res_cuda.v.cpu(), res_cpu.v, rtol=1e-9, atol=1e-9)

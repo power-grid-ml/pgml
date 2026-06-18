@@ -125,9 +125,82 @@ element (terminal) voltages:
 - **DELTA-3**: used rows are the three phase rows; `M` is the circulant
   difference matrix.  The base voltage is line-to-line.
 
-**Current limitations:** DELTA with `n != 3` phases and connection-aware
-harmonic injection (DELTA or 4-wire WYE) raise `NotImplementedError` and are
-deferred to a later increment.
+DELTA and 4-wire WYE connections are fully modelled in the harmonic solver
+(connection-aware injection via the incidence matrix `M`); see the
+"Per-phase / connection-aware harmonic injection" section below.
+`NotImplementedError` is only raised for `include_load_shunt=True` (Norton
+shunt from `HarmonicShuntModel`) and for DELTA with fewer than two phases,
+neither of which is a topology restriction.
+
+## Per-phase / connection-aware harmonic injection
+
+Harmonic current sources are modelled per *element* (terminal) using the same
+incidence matrix `M` that the fundamental power flow uses, so the correct
+terminal voltage appears in the normalisation:
+
+- **WYE, no neutral**: `M = I` — per-phase injection reduces exactly to the
+  historical diagonal form.
+- **WYE, 4-wire with neutral** (`Phase.N` present): `M = [I | -1]` — the
+  terminal voltage is `V_phase - V_N`; the neutral row receives the return
+  current automatically.
+- **DELTA-3**: `M` is the circulant difference matrix — the terminal voltage
+  is the relevant line-to-line voltage.
+
+Both connections were guarded by `NotImplementedError` in Increment 1; that
+guard is removed as of Increment 2.
+
+### Symmetric vs per-phase spectra
+
+| Field | Behaviour |
+|-------|-----------|
+| `spectrum` on `Load` / `Generator` | One `Spectrum` broadcast to every connected phase / delta branch (OpenDSS multi-phase semantics). |
+| `spectrum_per_phase` on `Load` / `Generator` | `dict[Phase, Spectrum]` — each key maps a connected phase (for WYE) or the delta-branch starting phase (for DELTA) to its own `Spectrum`. Keys must be a subset of `phases`; a phase with no entry injects no harmonics. |
+
+The two fields are **mutually exclusive**.  Set one or the other, never both.
+
+Example — single-phase EV charger distorting only phase A on a three-phase load:
+
+```python
+from pgml.schemas.grid_schema import Load, Phase, StaticSpectrum, SpectrumPoint
+
+load = Load(
+    id="ev_load",
+    node_id="bus_1",
+    phases=(Phase.A, Phase.B, Phase.C),
+    p_nom_w=7400.0,
+    q_nom_var=0.0,
+    spectrum_per_phase={
+        Phase.A: StaticSpectrum(spectrum=SpectrumPoint(
+            components=[{"order": 5, "magnitude_pu": 0.08, "phase_deg": 0.0},
+                        {"order": 7, "magnitude_pu": 0.05, "phase_deg": 0.0}]
+        )),
+        # Phase.B and Phase.C are absent → no harmonic injection
+    },
+)
+```
+
+### Runtime override convention (`harmonic_injection`)
+
+`solve_harmonic_flow` accepts a `harmonic_injection` dict that overrides
+stored spectra for scenario-level or differentiable variation:
+
+```
+{appliance_id: {order: (magnitude_pu, phase_deg)}}
+```
+
+Each `magnitude_pu` / `phase_deg` value follows an **unambiguous** convention
+that avoids silent misreads when the scenario batch size happens to equal the
+element count:
+
+- A Python **`list` or `tuple`** is always **per-element** — its length *must*
+  equal `n_elem` (number of connected phases or delta branches).  Each entry
+  may be a Python float or a `[*batch]` tensor (gradients are preserved).
+- A **scalar, 0-d tensor, or `[*batch]` tensor** (no element axis) is
+  **broadcast** identically to every element.  This is the backward-compatible
+  path for symmetric overrides.
+
+The override takes precedence over any stored `spectrum` or
+`spectrum_per_phase`.
 
 ## Validation philosophy
 

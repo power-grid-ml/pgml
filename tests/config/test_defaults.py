@@ -48,7 +48,7 @@ def test_documented_constants_match_legacy_values():
 
 
 def test_asymmetry_defaults():
-    """Increment-0 keys: calculation symmetry + appliance connection defaults."""
+    """ calculation symmetry + appliance connection defaults."""
     assert config.get("calculation.symmetry") == "auto"
     assert config.get("appliance.load.default_connection") == "wye"
     assert config.get("appliance.load.single_phase_connection") == "wye"

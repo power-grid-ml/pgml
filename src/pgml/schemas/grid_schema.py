@@ -945,6 +945,30 @@ def _check_load_connection(obj) -> None:
         )
 
 
+def _check_spectrum_per_phase(obj) -> None:
+    """Validate per-phase harmonic spectra on a Load/Generator.
+
+    ``spectrum_per_phase`` (asymmetric distortion) is mutually exclusive with the
+    all-phases ``spectrum`` shorthand; its keys must be a subset of the appliance's
+    ``phases`` (a phase with no entry injects no harmonics). See
+    ``references/asymmetric_modeling.md`` §5.
+    """
+    spp = obj.spectrum_per_phase
+    if spp is None:
+        return
+    if obj.spectrum is not None:
+        raise ValueError(
+            "Set either `spectrum` (same on all phases) or `spectrum_per_phase` "
+            "(asymmetric per phase), not both."
+        )
+    extra = set(spp) - set(obj.phases)
+    if extra:
+        raise ValueError(
+            f"`spectrum_per_phase` keys {sorted(p.value for p in extra)} are not in "
+            f"`phases` {tuple(p.value for p in obj.phases)}."
+        )
+
+
 def _check_per_phase_power(obj) -> None:
     n = len(obj.phases)
     for tot, per, label in (
@@ -984,6 +1008,13 @@ class Load(ApplianceBase):
     neutral (the 4-wire case), else ground (3-wire / solidly grounded). DELTA needs
     ``len(phases) >= 2``; ZIGZAG is transformer-only. See
     ``references/asymmetric_modeling.md`` §2-4.
+
+    *Harmonics.* ``spectrum`` is one harmonic current source applied to every phase
+    (OpenDSS multi-phase Load semantics). ``spectrum_per_phase`` instead gives an
+    ASYMMETRIC spectrum per phase (e.g. a single-phase EV charger distorting only phase
+    A); the two are mutually exclusive. For a DELTA load a per-phase spectrum key
+    identifies the delta branch starting at that phase. See
+    ``references/asymmetric_modeling.md`` §5.
     """
 
     component: Literal["load"] = "load"
@@ -1023,7 +1054,15 @@ class Load(ApplianceBase):
         default=None, description="External operating-point profile."
     )
     spectrum: Optional[Spectrum] = Field(
-        default=None, description="Harmonic current source. None = linear."
+        default=None,
+        description="Harmonic current source applied to ALL phases. None = linear. "
+        "Mutually exclusive with spectrum_per_phase.",
+    )
+    spectrum_per_phase: Optional[dict[Phase, Spectrum]] = Field(
+        default=None,
+        description="Asymmetric per-phase harmonic current sources: maps a connected "
+        "Phase to its Spectrum (keys subset of phases; missing phase = no harmonics). "
+        "Mutually exclusive with spectrum. DELTA key = the delta branch at that phase.",
     )
     harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
 
@@ -1033,6 +1072,7 @@ class Load(ApplianceBase):
             raise ValueError("load_model=ZIP requires zip_coefficients.")
         _check_per_phase_power(self)
         _check_load_connection(self)
+        _check_spectrum_per_phase(self)
         return self
 
 
@@ -1074,7 +1114,14 @@ class Generator(ApplianceBase):
     )
     profile_ref: Optional[str] = Field(default=None)
     spectrum: Optional[Spectrum] = Field(
-        default=None, description="e.g. inverter spectrum."
+        default=None,
+        description="e.g. inverter spectrum, applied to ALL phases. Mutually "
+        "exclusive with spectrum_per_phase.",
+    )
+    spectrum_per_phase: Optional[dict[Phase, Spectrum]] = Field(
+        default=None,
+        description="Asymmetric per-phase harmonic current sources (keys subset of "
+        "phases; missing phase = no harmonics). Mutually exclusive with spectrum.",
     )
     harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
 
@@ -1084,6 +1131,7 @@ class Generator(ApplianceBase):
             raise ValueError("load_model=ZIP requires zip_coefficients.")
         _check_per_phase_power(self)
         _check_load_connection(self)
+        _check_spectrum_per_phase(self)
         return self
 
 

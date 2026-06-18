@@ -1,18 +1,19 @@
-"""Deferred-boundary guard for connection-aware harmonic injection.
+"""Increment 2 lifted the connection-aware harmonic-injection guard.
 
-The harmonic power flow forms each device's fundamental current ``i1`` from
-PHASE-ROW voltages, which only equals the device TERMINAL voltage for a
-WYE-to-ground load. Full connection-aware (DELTA / 4-wire) harmonic injection is
-deferred to the per-phase-harmonics increment, so a device that actually injects a
-harmonic on an unsupported topology must raise ``NotImplementedError`` rather than
-silently produce wrong numbers. WYE-to-ground harmonic flow is unaffected.
+DELTA and WYE-on-a-Phase.N-node harmonic injection used to raise
+``NotImplementedError`` (the deferred-boundary guard) because the fundamental
+current was formed from phase-row voltages, not the device terminal voltage. The
+per-phase / connection-aware increment now models the terminal voltage via the
+same incidence ``M`` the load flow uses, so these topologies solve instead of
+raising. This file pins that the guard is GONE and the solve is finite. The
+numerical correctness vs an independent oracle lives in
+``test_harmonic_per_phase.py``.
 """
 
 from __future__ import annotations
 
 import math
 
-import pytest
 import torch
 
 from pgml.schemas.grid_schema import (
@@ -92,8 +93,8 @@ def _grid(load, node_phases):
     )
 
 
-def test_delta_load_with_spectrum_raises():
-    """A DELTA load that injects a harmonic raises NotImplementedError."""
+def test_delta_load_with_spectrum_solves():
+    """A DELTA load that injects a harmonic now SOLVES (guard lifted)."""
     load = Load(
         id=30,
         node=2,
@@ -105,12 +106,13 @@ def test_delta_load_with_spectrum_raises():
         spectrum=_spectrum(),
     )
     grid = _grid(load, ABC)
-    with pytest.raises(NotImplementedError, match="connection-aware"):
-        solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
+    res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
+    assert res.v.shape[-2] == 2
+    assert torch.isfinite(res.v.real).all() and torch.isfinite(res.v.imag).all()
 
 
-def test_wye_on_abcn_node_with_spectrum_raises():
-    """A WYE load on a node carrying Phase.N that injects a harmonic raises."""
+def test_wye_on_abcn_node_with_spectrum_solves():
+    """A WYE load on a node carrying Phase.N that injects a harmonic now solves."""
     load = Load(
         id=30,
         node=2,
@@ -121,12 +123,13 @@ def test_wye_on_abcn_node_with_spectrum_raises():
         spectrum=_spectrum(),
     )
     grid = _grid(load, ABCN)
-    with pytest.raises(NotImplementedError, match="connection-aware"):
-        solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
+    res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
+    assert res.v.shape[-2] == 2
+    assert torch.isfinite(res.v.real).all() and torch.isfinite(res.v.imag).all()
 
 
 def test_wye_to_ground_harmonic_flow_unaffected():
-    """A WYE-to-ground load (no Phase.N) with a spectrum solves without raising."""
+    """A WYE-to-ground load (no Phase.N) with a spectrum solves (unchanged path)."""
     load = Load(
         id=30,
         node=2,
@@ -138,12 +141,12 @@ def test_wye_to_ground_harmonic_flow_unaffected():
     )
     grid = _grid(load, ABC)
     res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
-    assert res.v.shape[-2] == 2  # two requested orders
+    assert res.v.shape[-2] == 2
     assert torch.isfinite(res.v.real).all() and torch.isfinite(res.v.imag).all()
 
 
 def test_delta_load_without_spectrum_is_allowed():
-    """A DELTA load with NO spectrum does not inject a harmonic, so it is allowed."""
+    """A DELTA load with NO spectrum injects no harmonic, so it stays linear."""
     load = Load(
         id=30,
         node=2,
@@ -154,6 +157,5 @@ def test_delta_load_without_spectrum_is_allowed():
         load_model=LoadModel.CONST_POWER,
     )
     grid = _grid(load, ABC)
-    # No spectrum -> _resolve_spectrum returns None -> the guard is never reached.
     res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
     assert res.v.shape[-2] == 2

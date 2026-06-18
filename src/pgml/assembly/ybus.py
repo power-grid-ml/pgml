@@ -1245,7 +1245,7 @@ def device_current_injections(
         (silently — no logging in the iteration). When the caller already resolved it,
         pass the resolved string through so the iteration stays consistent.
 
-    Connection-aware (Increment 1): each Load/Generator's per-element current is
+    Connection-aware: each Load/Generator's per-element current is
     ``i_elem = conj(S_eff(V_term)) / conj(V_term)`` with ``V_term = M @ V_used``
     (the WYE/DELTA/neutral incidence ``M``); the NODAL current is ``M^T @ i_elem``.
     WYE-to-ground (``M = I``) reduces to the historical per-phase form exactly.
@@ -1380,7 +1380,11 @@ def device_current_injections(
         scale_q = z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
 
         s_eff = torch.complex(p_pp * scale_p, q_pp * scale_q).to(cdt)  # [*b,H,K,n_elem]
-        # i_elem = conj(S_eff) / conj(V_term).
+        # i_elem = conj(S_eff) / conj(V_term). NOTE: terminal voltage is assumed
+        # non-zero here (a converged PF never has a 0 V live terminal), so this
+        # divide is UNGUARDED — unlike the otherwise-identical conj(vt) divide in
+        # solver/harmonic_flow.py::_harmonic_injections, which DOES mask vt==0
+        # because a gradcheck perturbation / dead harmonic terminal can hit zero.
         i_elem = torch.conj(s_eff) / torch.conj(vt)  # [*b,H,K,n_elem]
         # Nodal current at the used rows: I_used = M^T @ i_elem -> [*b,H,K,n_used].
         i_used = torch.einsum("eu,...ke->...ku", m_c, i_elem)

@@ -42,6 +42,11 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   rejected on appliances. Whether a run honors per-phase vs splits totals equally is the
   config `calculation.symmetry` decision (`auto`/`symmetric`/`asymmetric`), resolved by
   `pgml.assembly._symmetry`. Cross-tool basis: `references/asymmetric_modeling.md`.
+- Per-phase harmonics (rev: Increment 2): `Load`/`Generator` gain
+  `spectrum_per_phase: Optional[dict[Phase, Spectrum]]` (asymmetric distortion), mutually
+  exclusive with the all-phases `spectrum`; keys must be a subset of `phases`. Consumed
+  by `solve_harmonic_flow` (connection-aware harmonic injection). The runtime
+  `harmonic_injection` override also accepts per-phase magnitudes/phases.
 - NOT yet converted (plain float; convert when their differentiable path lands):
   catalog `LineType`/`TransformerType`, `ZipCoefficients`, `HarmonicShuntModel` +
   spectra (Phase 3), and the converter input-convention DTOs.

@@ -108,13 +108,23 @@ verified empirically). New orchestration:
   - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
     ONCE here; threaded into the fundamental `solve_power_flow` (which emits the single
     modeling-summary log) and into the harmonic-injection power resolution
-    (`resolve_operating_power(..., asymmetric=...)`). The per-order harmonic injection
-    stays the OpenDSS per-phase current-source model (connection-aware DELTA / 4-wire
-    harmonic injection is a later increment). DEFERRED-BOUNDARY GUARD: a device that
-    actually injects a harmonic (resolved spectrum OR `harmonic_injection` entry) and
-    resolves to DELTA, or to WYE on a node carrying `Phase.N`, RAISES
-    `NotImplementedError` (its terminal voltage is not the phase-row voltage, so `i1`
-    would be wrong). WYE-to-ground devices behave exactly as before (bit-exact).
+    (`resolve_operating_power(..., asymmetric=...)`).
+  - Increment 2 (CONNECTION-AWARE / PER-PHASE HARMONIC INJECTION): the inc-1
+    DELTA / 4-wire NotImplementedError guard is LIFTED. `_harmonic_injections` now
+    mirrors `device_current_injections`: each injecting Load/Generator has a terminal
+    incidence `M [n_elem, n_used]` (`pgml.assembly._incidence`; WYE-ground `M=I`,
+    WYE-neutral `[I|-1]`, DELTA-3 circulant). The per-ELEMENT fundamental current is
+    `I1_elem = sign*conj(S0_elem)/conj(V_term)` with `V_term = M @ V_used` (TERMINAL
+    voltage: WYE phase row, WYE-N `V_phase - V_N`, DELTA L-L), and per element/order
+    `|I_h^e|=(mag_h^e/mag_1^e)|I1_elem|`, `arg=ang_h^e + h*(arg(I1_elem)-ang_1^e)`.
+    The NODAL injection is `-(M^T @ i_h_elem)` scattered into `used_rows` (out-of-place
+    complex `index_add`). WYE-to-ground reduces EXACTLY to the pre-inc-2 per-phase form
+    (bit-exact: `tests/reference/test_harmonic_flow.py` + `test_carson_harmonics_feeders.py`).
+    Spectrum coefficients are PER ELEMENT, from three sources (override > schema):
+    device `spectrum` (StaticSpectrum, same on all elements), `spectrum_per_phase`
+    (element k <- `phases[k]`; a phase/element with no entry injects 0; for DELTA-3 the
+    key is the branch's starting phase `phases[k]`), and the runtime `harmonic_injection`
+    override (see below).
   - `harmonic_orders`: iterable of orders (e.g. `[1,5,7]`; order 1 = fundamental).
   - `HarmonicFlowResult` (frozen dataclass): `v` complex `[*batch, H, N]` (V per
     order; **order 1 = the nonlinear `solve_power_flow` solution**, other orders =
@@ -140,20 +150,36 @@ verified empirically). New orchestration:
      has its own spectrum).
 3. Stack order 1 (from PF) + harmonics into `v [*batch, H, N]`.
 
-### `harmonic_injection` override (scenario-ready, tensor-friendly)
-A per-device override of the stored Spectrum, carrying tensors so scenarios can vary
+### `harmonic_injection` override (scenario-ready, tensor-friendly, per-element)
+A per-device override of the stored spectrum, carrying tensors so scenarios can vary
 harmonic injections DIFFERENTIABLY (the stored `Spectrum`/`HarmonicComponent` are
-plain floats; do NOT hard-bind to them). FINAL format:
-`{appliance_id: {order:int -> (magnitude_pu, phase_deg)}}`, where each value is a
-python float OR a tensor (0-d, or a leading SCENARIO-batched tensor). Overrides the
-stored Spectrum. Analogous to `operating_point` for P/Q.
+plain floats; do NOT hard-bind to them). FORMAT:
+`{appliance_id: {order:int -> (magnitude_pu, phase_deg)}}`. Each `magnitude_pu` /
+`phase_deg` value follows an UNAMBIGUOUS, type-driven convention (NO trailing-dim
+sniffing — a bare length-`n_elem` tensor is NOT treated as per-element, so a SCENARIO
+batch of length `n_elem` can never be silently misread):
+- a python `list`/`tuple` is ALWAYS PER-ELEMENT — it MUST have length `n_elem`
+  (aligned to the device's elements: WYE phase `k` / DELTA branch `k`); each entry may
+  itself be a python float or a 0-d / `[*batch]` tensor (per-entry grad preserved via
+  `torch.stack`). A list/tuple of any OTHER length raises `ValueError`. E.g.
+  `{30:{1:(1.0,0.0),5:([m_a,m_b,m_c],0.0)}}`.
+- a SCALAR or bare TENSOR (python float, 0-d tensor, or a `[*batch]` tensor carrying
+  ONLY leading SCENARIO batch dims, NO element axis) is BROADCAST identically to every
+  element (the backward-compatible inc-1 path: `{2:{1:(1.0,0.0),5:(m5,0.0)}}`).
+The override wins over the stored `spectrum` / `spectrum_per_phase`. Analogous to
+`operating_point` for P/Q. Implemented in `_device_element_spectra` + `_element_coeff`
+(broadcast via unsqueeze+expand on the element axis). Guarded 0/0: an element with no
+order-1 coefficient (mag1==0) injects 0 (torch.where, gradient-finite on live
+elements); the per-element `conj(vt)` divide is likewise masked for a dead/zero
+terminal (vt==0 -> 0, gradient-safe) so a gradcheck perturbation cannot poison it.
 
 ## Implementation notes (DONE)
 - `slack="norton"` matches OpenDSS Vsource (use for OpenDSS parity); `slack="ideal"`
   matches pandapower/pgm at the fundamental. At harmonics the source is ALWAYS a
   Norton shunt held at 0 V (regardless of `slack`).
-- Per-device fundamental current `I1 = sign*conj(S0)/conj(Vt)` computed inline in
-  `_harmonic_injections` from `pf.v` (no change to `device_current_injections`).
+- Per-element fundamental current `I1_elem = sign*conj(S0_elem)/conj(V_term)` computed
+  inline in `_harmonic_injections` from `pf.v` via the incidence `M` (no change to
+  `device_current_injections`; reuses `group_appliances`/`build_incidence`/`used_rows`).
 - `harmonic_injection` magnitudes/phases may carry a leading scenario batch dim
   (batched harmonic injection works; full scenario batching is the next phase).
 - DEFERRED: `include_load_shunt=True` (load Norton shunt at harmonics) raises
@@ -169,3 +195,15 @@ gap), shapes/orders. `tests/differentiability/test_harmonic_flow_gradcheck.py`:
 gradcheck of `V(h)` w.r.t. line R/L, load P/Q, and injection magnitude (incl.
 batched). The live-OpenDSS per-order comparison (with Carson + load shunt) is for
 the opendss-reference agent when those models land.
+
+Increment 2 (per-phase / connection-aware): `tests/asymmetric/test_harmonic_per_phase.py`
+(WYE `spectrum_per_phase` A-only, DELTA L-L terminal voltage + `M^T` scatter vs numpy
+oracle, DELTA `spectrum_per_phase` branch-k<-phases[k] mapping + missing-branch-injects-0
+vs numpy oracle, WYE-N Kirchhoff return into the N row, device-spectrum WYE-ground
+regression, scalar-broadcast == device-spectrum and per-element override differs);
+`tests/asymmetric/test_harmonic_connection_guard.py` now asserts DELTA / WYE-N SOLVE
+(guard lifted); `tests/differentiability/test_harmonic_per_phase_gradcheck.py` float64
+gradcheck of `V(h)` w.r.t. a per-element injection magnitude (a python list of leaf
+tensors) on WYE AND DELTA, plus the `mag1==0` dead-element guard (finite + zero grad);
+`tests/gpu/test_asymmetric_parity.py` CPU-vs-CUDA `solve_harmonic_flow` parity for a
+DELTA-spectrum and a WYE `spectrum_per_phase` grid (skips without CUDA).
