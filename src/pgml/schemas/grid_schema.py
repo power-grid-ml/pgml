@@ -39,17 +39,26 @@ either a symmetric or an asymmetric calculation may run on the same grid:
 - ``p_nom_w`` / ``q_nom_var`` are ALWAYS the total over the connected phases.
 - Optional ``p_nom_per_phase_w`` / ``q_nom_per_phase_var`` give an asymmetric
   nameplate split (length == ``len(phases)``; must sum to the totals).
-- Connection sets terminal pairing: WYE = each listed phase to neutral
+- Connection sets terminal pairing: WYE = each listed phase to neutral/ground
   (European LV single-phase L-N is ``phases=(A,)``, ``connection=WYE``); DELTA =
   between listed phases (``phases=(A,B)``, ``connection=DELTA`` is an L-L load).
-- Resolution at assembly time:
+  ``connection=None`` resolves from config (``appliance.load.default_connection`` /
+  ``single_phase_connection``, both WYE by default).
+- Neutral: a WYE appliance returns into its node's ``Phase.N`` row when that node
+  carries a neutral (the explicit 4-wire case — assembly logs that the neutral is
+  modeled); with no ``Phase.N`` it returns to ground (3-wire / solidly grounded,
+  matching pandapower/pgm and the OpenDSS grounded-neutral default).
+- Resolution at assembly time (config ``calculation.symmetry``):
 
   - Symmetric calculation: asymmetric / 1-ph / 2-ph appliances are averaged
     into an equivalent balanced appliance.
   - Asymmetric calculation: a symmetric appliance is split equally across its
     phases UNLESS a per-phase profile or ``*_per_phase_*`` is given, which wins.
+  - ``auto`` (default): asymmetric iff any appliance / operating point carries
+    per-phase data, else symmetric (the power-grid-model rule).
 
-- Whether a run is symmetric/asymmetric is SOLVER CONFIG, not grid data.
+- Whether a run is symmetric/asymmetric is SOLVER CONFIG, not grid data. See
+  ``references/asymmetric_modeling.md`` for the cross-tool basis and citations.
 
 *Rated vs operating point.* Every ``*_rated`` / ``*_nom`` field is a NAMEPLATE
 RATING, not an operating point. Actual loading/generation comes from profiles
@@ -916,6 +925,26 @@ class ZipCoefficients(GridModel):
         return self
 
 
+def _check_load_connection(obj) -> None:
+    """Validate a Load/Generator ``connection`` (``None`` = resolve from config).
+
+    DELTA (line-to-line) needs at least two phases; ZIGZAG is a transformer-only
+    winding and is rejected on appliances. See ``references/asymmetric_modeling.md``.
+    """
+    c = obj.connection
+    if c is None:
+        return
+    if c in (WindingConnection.ZIGZAG, WindingConnection.ZIGZAG_GROUNDED):
+        raise ValueError(
+            "Load/Generator `connection` cannot be zigzag (transformer winding only)."
+        )
+    if c == WindingConnection.DELTA and len(obj.phases) < 2:
+        raise ValueError(
+            "`connection`=DELTA requires at least 2 phases (it is line-to-line); "
+            "a single-phase load is line-to-neutral (WYE)."
+        )
+
+
 def _check_per_phase_power(obj) -> None:
     n = len(obj.phases)
     for tot, per, label in (
@@ -936,12 +965,33 @@ def _check_per_phase_power(obj) -> None:
 
 
 class Load(ApplianceBase):
-    """Consumer. Fundamental behaviour set by `load_model`; harmonic behaviour by the
-    Norton `harmonic_model`. `p_nom_w`/`q_nom_var` are TOTAL over connected phases;
-    optional per-phase tuples give an asymmetric nameplate split."""
+    """Consumer. Fundamental behaviour set by ``load_model``; harmonic behaviour by the
+    Norton ``harmonic_model``.
+
+    *Power.* ``p_nom_w``/``q_nom_var`` are the TOTAL over the connected phases; the
+    optional ``p_nom_per_phase_w``/``q_nom_per_phase_var`` tuples give an ASYMMETRIC
+    per-phase nameplate split (length == ``len(phases)``, summing to the totals). A
+    per-phase ``operating_point`` overrides either at assembly time. Whether the totals
+    are split equally (balanced) or the per-phase values are honored is the CALCULATION
+    SYMMETRY decision (config ``calculation.symmetry``; see
+    ``references/asymmetric_modeling.md`` §1) — it is solver config, not grid data.
+
+    *Connection.* ``connection`` is WYE (each phase to neutral/ground) or DELTA
+    (phase-to-phase, line-to-line). ``None`` (default) means "resolve from config" at
+    assembly: ``appliance.load.single_phase_connection`` for a 1-phase load,
+    ``appliance.load.default_connection`` otherwise (both default to WYE — the LV norm).
+    For a WYE load the return path is the node's ``Phase.N`` row when that node carries a
+    neutral (the 4-wire case), else ground (3-wire / solidly grounded). DELTA needs
+    ``len(phases) >= 2``; ZIGZAG is transformer-only. See
+    ``references/asymmetric_modeling.md`` §2-4.
+    """
 
     component: Literal["load"] = "load"
-    connection: WindingConnection = Field(default=WindingConnection.WYE)
+    connection: Optional[WindingConnection] = Field(
+        default=None,
+        description="WYE (phase-to-neutral/ground) or DELTA (phase-to-phase). None "
+        "resolves from config (appliance.load.{single_phase_,}default_connection).",
+    )
     load_model: LoadModel = Field(default=LoadModel.CONST_POWER)
     p_nom_w: Num = si_field(
         "Rated TOTAL active power (nameplate).", short="W", long="watt"
@@ -982,15 +1032,21 @@ class Load(ApplianceBase):
         if self.load_model == LoadModel.ZIP and self.zip_coefficients is None:
             raise ValueError("load_model=ZIP requires zip_coefficients.")
         _check_per_phase_power(self)
+        _check_load_connection(self)
         return self
 
 
 class Generator(ApplianceBase):
-    """Generation unit. Same rated-vs-operating-point and Norton-harmonic semantics
-    as Load; injected-power sign handled at assembly."""
+    """Generation unit. Same rated-vs-operating-point, per-phase asymmetry and
+    connection semantics as :class:`Load` (see its docstring and
+    ``references/asymmetric_modeling.md``); injected-power sign handled at assembly."""
 
     component: Literal["generator"] = "generator"
-    connection: WindingConnection = Field(default=WindingConnection.WYE)
+    connection: Optional[WindingConnection] = Field(
+        default=None,
+        description="WYE (phase-to-neutral/ground) or DELTA (phase-to-phase). None "
+        "resolves from config (appliance.load.{single_phase_,}default_connection).",
+    )
     load_model: LoadModel = Field(default=LoadModel.CONST_POWER)
     p_nom_w: Num = si_field(
         "Rated TOTAL active power (nameplate).", short="W", long="watt"
@@ -1027,6 +1083,7 @@ class Generator(ApplianceBase):
         if self.load_model == LoadModel.ZIP and self.zip_coefficients is None:
             raise ValueError("load_model=ZIP requires zip_coefficients.")
         _check_per_phase_power(self)
+        _check_load_connection(self)
         return self
 
 

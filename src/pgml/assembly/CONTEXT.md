@@ -101,6 +101,19 @@ inverts P,Q). `operating_point` defaults to nameplate `p_nom_w/q_nom_var`. The
 const-power (nonlinear) successive-admittance iteration is a later milestone; note
 it but do not implement in M1.
 
+## Asymmetry groundwork (Increment 0 — module present, NOT yet wired into stamps)
+`_symmetry.py` (torch-free, runs once per assemble/solve on python schema objects):
+- `resolve_asymmetric(grid, operating_point=None, *, mode=None) -> bool` — resolves the
+  config `calculation.symmetry` (`auto`/`symmetric`/`asymmetric`) to True==per-phase;
+  `auto` => asymmetric iff any appliance `*_per_phase_*` or per-phase operating point.
+- `resolve_connection(appliance) -> WindingConnection` — explicit `connection` else the
+  config default (single- vs multi-phase).
+- `log_modeling_summary(grid, *, asymmetric)` — INFO log of the FINAL modeling (neutral
+  modeled iff a node carries `Phase.N`; WYE/DELTA mix; symmetry).
+Increment 1 wires these into `_stamp_const_z_loads` + `device_current_injections` via a
+connection-aware terminal incidence (`Mᵀ·diag·M`); WYE-to-ground reduces to today's
+diagonal stamp (regression-safe). Basis: `references/asymmetric_modeling.md`.
+
 ## Rules
 - DIFFERENTIABLE + GPU (CLAUDE.md): every Y/I entry differentiable w.r.t. R,L,G,C,
   length, tap, source Z, and operating P,Q. No `.item()/.detach()/.numpy()`, no

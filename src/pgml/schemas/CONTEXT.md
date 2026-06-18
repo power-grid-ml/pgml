@@ -36,6 +36,12 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
 - Converted (load-flow path): Node.u_rated_v; Line R/L/G/C + length; Source u_ref/
   angle + R/L; Switch; ShuntReactor; GenericBranch; ShuntAppliance; Load/Generator
   P/Q (+per-phase); Transformer R/L/ratings + ComplexTap + grounding/zero-seq.
+- Asymmetry (rev: Increment 0): `Load.connection`/`Generator.connection` are now
+  `Optional[WindingConnection]` defaulting to `None` (= resolve from config
+  `appliance.load.{single_phase_,}default_connection`); DELTA needs >=2 phases, zigzag
+  rejected on appliances. Whether a run honors per-phase vs splits totals equally is the
+  config `calculation.symmetry` decision (`auto`/`symmetric`/`asymmetric`), resolved by
+  `pgml.assembly._symmetry`. Cross-tool basis: `references/asymmetric_modeling.md`.
 - NOT yet converted (plain float; convert when their differentiable path lands):
   catalog `LineType`/`TransformerType`, `ZipCoefficients`, `HarmonicShuntModel` +
   spectra (Phase 3), and the converter input-convention DTOs.

@@ -22,6 +22,14 @@ documented, never hidden implicit constants scattered in code.
   user override); `PGML_CONFIG=/path/to.yaml` overrides the packaged file.
 
 ## defaults.yaml layout (ordered by component; extend as the library grows)
+- `calculation.symmetry` — `auto | symmetric | asymmetric`; how an appliance's power is
+  distributed across phases (pgml is always phase-domain, so this is operating-point
+  resolution, not a network change). `auto` (default) = asymmetric iff any per-phase data
+  is present (power-grid-model rule). Resolved by `pgml.assembly._symmetry.resolve_asymmetric`.
+- `appliance.load.{default_connection, single_phase_connection}` — WYE/DELTA used for a
+  Load/Generator with no explicit `connection` (multi- vs single-phase; both WYE by
+  default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
+  `references/asymmetric_modeling.md`.
 - `line.harmonic_model.{three_phase, single_phase, skin_effect}` — which
   frequency-dependent line model `apply_default_harmonic_model(grid)` applies to an R/X
   line (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =

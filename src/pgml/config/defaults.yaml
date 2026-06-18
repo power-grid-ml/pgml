@@ -16,6 +16,44 @@
 # Schema of every leaf:  { value: <default>, units: <str>, description: <str> }.
 # Ordered by component; extend with new components / parameters as the library grows.
 
+# How a simulation distributes appliance power across phases. pgml is ALWAYS phase-
+# domain, so this is operating-point RESOLUTION, not a change to the network solve.
+calculation:
+  symmetry:
+    value: auto
+    units: "enum{auto, symmetric, asymmetric}"
+    description: >
+      Whether a calculation is SYMMETRIC (each appliance's total P/Q split equally over
+      its connected phases — balanced) or ASYMMETRIC (per-phase values honored, falling
+      back to an equal split where a given appliance has none). `auto` (default) selects
+      asymmetric iff ANY appliance or operating point carries per-phase data
+      (*_per_phase_* or a per-phase operating point), else symmetric — so an asymmetric
+      load distribution in the simulation config promotes the whole calculation to
+      asymmetric even on a symmetrically-defined grid. Mirrors power-grid-model's
+      symmetric=True/False (a symmetric calc averages an asymmetric load). See
+      references/asymmetric_modeling.md §1.
+
+# Default terminal connection for appliances that do not set `connection` explicitly.
+appliance:
+  load:
+    default_connection:
+      value: wye
+      units: "enum{wye, wye_grounded, delta}"
+      description: >
+        Connection for a MULTI-phase Load/Generator with no explicit `connection`. `wye`
+        = each phase to neutral/ground; `delta` = phase-to-phase (line-to-line). LV
+        distribution is predominantly wye; matches the OpenDSS `conn=wye` default. For
+        wye, the return path is the node's Phase.N row if present, else ground. See
+        references/asymmetric_modeling.md §2, §4.
+    single_phase_connection:
+      value: wye
+      units: "enum{wye, wye_grounded}"
+      description: >
+        Connection for a 1-phase Load/Generator with no explicit `connection`. `wye` =
+        line-to-neutral (the European LV residential convention; the node's L-N voltage
+        is the base). A line-to-line single-phase load is modeled as a 2-phase delta load
+        instead. See references/asymmetric_modeling.md §3.
+
 line:
 
   # Which frequency-dependent line model is applied to an R/X line that has NO explicit

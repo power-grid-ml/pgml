@@ -47,6 +47,13 @@ def test_documented_constants_match_legacy_values():
     assert config.get("line.harmonic_model.skin_effect") is True
 
 
+def test_asymmetry_defaults():
+    """Increment-0 keys: calculation symmetry + appliance connection defaults."""
+    assert config.get("calculation.symmetry") == "auto"
+    assert config.get("appliance.load.default_connection") == "wye"
+    assert config.get("appliance.load.single_phase_connection") == "wye"
+
+
 def test_module_constants_are_sourced_from_config():
     """The geometry modules read their constants from the config (no drift)."""
     from pgml.geometry import sequence as sq
