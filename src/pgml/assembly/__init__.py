@@ -26,6 +26,12 @@ from .ybus import (
     device_current_injections,
 )
 
+# Set canonical __module__ so autodoc registers symbols under the public
+# package path rather than the private sub-module, avoiding "duplicate object
+# description" warnings when viewcode and autodoc both traverse the codebase.
+NodePhaseIndex.__module__ = __name__
+YBus.__module__ = __name__
+
 __all__ = [
     "NodePhaseIndex",
     "node_phase_index",

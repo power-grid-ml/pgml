@@ -1,37 +1,34 @@
-"""
-scenario_schema.py — realized simulation INPUTS (rev 1).
+"""Realized simulation INPUTS (rev 1).
 
 The per-step operating points, realized harmonic spectra, and deliberate
 parameter perturbations that were fed into a simulation. Kept SEPARATE from
-results (result_schema.py) and from the static grid (grid_schema.py), linked by
-integer ids, so a surrogate / inverse model can join inputs to outputs by
-(scenario, component, step) without the grid description carrying time-varying
-state.
+results (:mod:`pgml.schemas.result_schema`) and from the static grid
+(:mod:`pgml.schemas.grid_schema`), linked by integer ids, so a surrogate /
+inverse model can join inputs to outputs by (scenario, component, step) without
+the grid description carrying time-varying state.
 
-================================================================================
-CONVENTIONS
-================================================================================
+**Conventions**
 
-INPUTS, NOT RESULTS. These are the realized values applied during simulation: the
-actual operating-point P/Q (from the profile service, NOT the nameplate ratings
-in grid_schema), the actual harmonic spectrum injected at each step (after any
-random/distribution sampling), and any injected parameter errors. They are the
-ground-truth INPUT side for learning input->output relations and for parameter
-recovery.
+*Inputs, not results.* These are the realized values applied during simulation:
+the actual operating-point P/Q (from the profile service, NOT the nameplate
+ratings in the grid schema), the actual harmonic spectrum injected at each step
+(after any random/distribution sampling), and any injected parameter errors. They
+are the ground-truth INPUT side for learning input/output relations and for
+parameter recovery.
 
-AUTHORING-NATURAL FORMS. Unlike results (which use real/imag for ML), inputs are
-stored in their natural setpoint forms: P [W] / Q [var] for loads & generators;
-reference voltage magnitude + angle for sources; spectra as magnitude relative to
-the fundamental + phase, per harmonic (consistent with grid_schema spectra). A
-downstream adapter converts to whatever encoding a model needs.
+*Authoring-natural forms.* Unlike results (which use real/imag for ML), inputs
+are stored in their natural setpoint forms: P [W] / Q [var] for loads &
+generators; reference voltage magnitude + angle for sources; spectra as magnitude
+relative to the fundamental + phase, per harmonic (consistent with grid-schema
+spectra). A downstream adapter converts to whatever encoding a model needs.
 
-PER PHASE, PER STEP, PER FREQUENCY (spectra). Operating points are per step;
-realized spectra add a `frequency_hz` axis (interharmonic-ready, matching the
-result schema). All per-phase arrays align to an explicit `phases` tuple.
+*Per phase, per step, per frequency (spectra).* Operating points are per step;
+realized spectra add a ``frequency_hz`` axis (interharmonic-ready, matching the
+result schema). All per-phase arrays align to an explicit ``phases`` tuple.
 
-SIGN/REFERENCE. Operating-point P/Q use the appliance's natural sense: a load's
-p_w is consumption (positive), a generator's p_w is production (positive) — the
-component kind disambiguates, since these are setpoints, not signed flows.
+*Sign/reference.* Operating-point P/Q use the appliance's natural sense: a load's
+``p_w`` is consumption (positive), a generator's ``p_w`` is production (positive)
+-- the component kind disambiguates, since these are setpoints, not signed flows.
 """
 
 from __future__ import annotations

@@ -2,10 +2,10 @@
 
 Public API
 ----------
-- ``assemble_ybus(grid, frequencies_hz, *, dtype, device, operating_point,
-   param_overrides=None) -> YBus``
-- ``build_injections(grid, frequencies_hz, index, *, dtype, device,
-   operating_point, param_overrides=None) -> Tensor``
+- ``assemble_ybus`` — ``(grid, frequencies_hz, *, dtype, device, operating_point,
+  param_overrides=None) -> YBus``
+- ``build_injections`` — ``(grid, frequencies_hz, index, *, dtype, device,
+  operating_point, param_overrides=None) -> Tensor``
 - ``node_phase_index`` / ``NodePhaseIndex`` (re-exported from ``.index``).
 
 See ``assembly/CONTEXT.md`` for the frozen layout and stamp definitions.
@@ -1162,7 +1162,7 @@ def device_current_injections(
     """Voltage-dependent ZIP nodal current ``I_device(V)`` absorbed by loads/gens.
 
     For every in-service :class:`Load` / :class:`Generator`, the per-terminal
-    (per phase) current drawn under the ZIP model is
+    (per phase) current drawn under the ZIP model is::
 
         S_eff(V) = S0 * ( z*(|Vt|/|V0|)**2 + i*(|Vt|/|V0|) + p )
         I_term   = conj(S_eff) / conj(Vt)

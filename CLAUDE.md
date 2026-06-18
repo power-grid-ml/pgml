@@ -30,7 +30,10 @@ A change that breaks gradcheck (float64) or the GPU device/dtype test is not don
 
 ## Frozen-contract rule
 The three files in `src/pgml/schemas/` are the single source of truth. They are
-ORCHESTRATOR-ONLY. Subagents import them and conform to them.
+ORCHESTRATOR-ONLY: subagents import them and conform to them, never modify them.
+The orchestrator MAY modify a schema, but only after asking the user first.
+(Docstring-only schema edits, e.g. keeping the docs build RST-clean, are still
+preferred over working around the schemas in `docs/conf.py`.)
 
 ## Core conventions (all defined in the schemas; do not reinvent)
 - Phase-domain canonical form; SI base units; reactive elements store L and C
@@ -45,6 +48,22 @@ ORCHESTRATOR-ONLY. Subagents import them and conform to them.
 - Differentiability gate: `pytest -q tests/differentiability`
 - GPU gate:         `pytest -q tests/gpu`
 - Lint/format:      `ruff check src tests && ruff format src tests`
+- Docs (build HTML): `pixi run --environment docs docs` (clean rebuild: `docs-clean`).
+  Strict/CI-mirror build: `pixi run --environment docs sphinx-build -b html -W --keep-going docs docs/_build/html`.
+
+## Documentation (Read-the-Docs / Sphinx)
+- Sphinx project lives in `docs/` (autodoc + autosummary + napoleon + MyST, furo theme);
+  RTD config is `.readthedocs.yaml`; RTD pip deps are `docs/requirements.txt`; the local
+  build env is the pixi `docs` feature/environment. The API reference is generated from
+  the public `__init__.py` `__all__` of each subpackage, so docstrings ARE the docs.
+- `pandapower` is mocked at autodoc time (NumPy-2 import break); `pydantic`/`torch` are real.
+  Schema docstrings are kept RST-safe IN SOURCE (no build-time docstring rewriting). `docs/conf.py`
+  keeps only one structural hook: a Python-domain dedup that silences "duplicate object
+  description" warnings from re-exporting the pydantic schema types via `pgml.schemas.__all__`
+  (not a docstring issue — cannot be fixed by editing docstrings). A docs build with import
+  errors or broken autosummary is NOT done; keep new docstrings valid reStructuredText (wrap
+  inline math/identifiers containing `*` or trailing `_` in double backticks; use `::` before
+  indented blocks; blank line before bullet lists).
 
 ## Delegation policy
 - Delegate heavy, isolatable work to subagents (see `.claude/agents/`). Keep the
@@ -53,6 +72,13 @@ ORCHESTRATOR-ONLY. Subagents import them and conform to them.
   coupled core (assembly+solver) — that is one focused agent.
 - After a subagent ships a module, record its PUBLIC SIGNATURES in that module's
   `CONTEXT.md`. That file is how the next agent learns the interface.
+- **rtd-docs-builder** (`.claude/agents/`): owns the Sphinx/Read-the-Docs pipeline and the
+  authored docs under `docs/`. Run it at the END of any API-changing code refactor — i.e.
+  whenever public signatures, `__all__` exports, or module docstrings change, or a module is
+  added/removed. It re-authors/updates the affected API + narrative pages, keeps docstrings
+  and the published docs in sync, and validates by running a clean local Sphinx build that
+  mirrors CI (RTD). Treat the docs build as a gate: an API change is not done until
+  rtd-docs-builder has refreshed the docs and the build passes.
 
 @references/ARCHITECTURE.md
 @src/pgml/schemas/CONTEXT.md

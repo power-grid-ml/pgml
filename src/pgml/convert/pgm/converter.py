@@ -26,11 +26,13 @@ Source convention
 -----------------
 pgm ``source`` carries ``u_ref`` (fraction of rated voltage, dimensionless pu),
 ``u_ref_angle`` (radians), ``sk`` (short-circuit apparent power, VA) and
-``rx_ratio`` (R/X of the source impedance).  We derive the Thevenin impedance:
+``rx_ratio`` (R/X of the source impedance).  We derive the Thevenin impedance::
+
     |Z_s|  = (u_rated)^2 / sk
     X_s    = |Z_s| / sqrt(1 + rx_ratio^2)
     R_s    = X_s * rx_ratio
     L_s    = X_s / (2*pi*f0)
+
 Very large ``sk`` (ideal slack) produces near-zero Z, which is correct; the
 oracle test uses ideal-slack mode so the Thevenin value is irrelevant.
 

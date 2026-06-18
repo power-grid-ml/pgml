@@ -110,13 +110,13 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
 
     Returns
     -------
-    (Grid, id_map)
-        ``Grid`` — materialised schema object (no ``type_ref``).
-        ``id_map`` — ``dict`` mapping DSS element names to our schema ids:
-            - ``"bus"``     : ``{dss_bus_name_lower: Node.id}``
-            - ``"line"``    : ``{dss_line_name_lower: Line.id}``
-            - ``"load"``    : ``{dss_load_name_lower: Load.id}``
-            - ``"vsource"`` : ``{dss_vsrc_name_lower: Source.id}``
+    tuple[Grid, dict]
+        A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
+        (no ``type_ref``).  ``id_map`` maps DSS element names to our schema ids:
+        ``"bus"`` → ``{dss_bus_name_lower: Node.id}``,
+        ``"line"`` → ``{dss_line_name_lower: Line.id}``,
+        ``"load"`` → ``{dss_load_name_lower: Load.id}``,
+        ``"vsource"`` → ``{dss_vsrc_name_lower: Source.id}``.
 
     Notes
     -----

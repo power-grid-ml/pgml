@@ -16,6 +16,10 @@ from .harmonic import solve_harmonic
 from .harmonic_flow import HarmonicFlowResult, solve_harmonic_flow
 from .power_flow import PowerFlowResult, solve_power_flow
 
+# Canonical __module__ for public re-exports (avoids autodoc duplicate warnings).
+PowerFlowResult.__module__ = __name__
+HarmonicFlowResult.__module__ = __name__
+
 __all__ = [
     "solve_harmonic",
     "solve_power_flow",

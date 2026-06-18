@@ -1,15 +1,17 @@
 """Grid topology helpers for evaluation plots.
 
 Two jobs:
-- electrical DISTANCE from the slack bus (the x-axis of the profile plots), walked
-  along the branch graph;
-- the branch INTERCONNECTIONS used to draw lines on a profile — in power-grid plots
-  the connecting lines are the actual branches (only adjacent nodes are joined), NOT
-  the data-sorted sequence. Closed switches are drawable (dashed); OPEN switches are
-  omitted entirely (they carry no current and don't define a path).
 
-Pure topology bookkeeping (no differentiable quantities), so plain python/networkx
-is fine here.
+- Electrical DISTANCE from the slack bus (the x-axis of the profile plots),
+  walked along the branch graph.
+- Branch INTERCONNECTIONS used to draw lines on a profile — in power-grid
+  plots the connecting lines are the actual branches (only adjacent nodes are
+  joined), NOT the data-sorted sequence. Closed switches are drawable (dashed);
+  OPEN switches are omitted entirely (they carry no current and don't define a
+  path).
+
+Pure topology bookkeeping (no differentiable quantities), so plain
+python/networkx is fine here.
 """
 
 from __future__ import annotations

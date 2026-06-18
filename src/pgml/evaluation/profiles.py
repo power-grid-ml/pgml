@@ -11,7 +11,7 @@ distance-sorted polyline (legacy).
   implementation a different color; adjustable ``alpha`` so close lines stay visible.
 - :func:`plot_harmonic_profile` — one harmonic order: distance (x) vs magnitude (y),
   LINE/MARKER COLOR = voltage angle, LINE STYLE = implementation.
-- :func:`plot_profile_error` — companion bar chart of |Δ| between two voltage profiles.
+- :func:`plot_profile_error` — companion bar chart of \|Δ\| between two voltage profiles.
 """
 
 from __future__ import annotations

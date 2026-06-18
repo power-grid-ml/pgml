@@ -15,4 +15,8 @@ from .registry import Equation, SymbolMeta, registry
 # Side effect: register the M1 laws on import.
 from . import laws  # noqa: F401  (import for registration side effect)
 
+# Canonical __module__ for public re-exports (avoids autodoc duplicate warnings).
+Equation.__module__ = __name__
+SymbolMeta.__module__ = __name__
+
 __all__ = ["Equation", "SymbolMeta", "registry"]

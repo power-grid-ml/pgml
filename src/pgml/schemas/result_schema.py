@@ -1,59 +1,60 @@
-"""
-result_schema.py — simulation OUTPUT contract (rev 1).
+"""Simulation OUTPUT contract (rev 1).
 
 Per-component results for the differentiable harmonic power-flow simulation:
 voltages per node, currents per branch terminal, currents per injection, with
-optional powers. Companion to grid_schema.py (input) and scenario_schema.py
-(realized inputs). Validation/compliance metrics (EN 50160 etc.) are derived and
-live in a separate, later artifact; this schema is results only.
+optional powers. Companion to :mod:`pgml.schemas.grid_schema` (input) and
+:mod:`pgml.schemas.scenario_schema` (realized inputs). Validation/compliance
+metrics (EN 50160 etc.) are derived and live in a separate, later artifact; this
+schema is results only.
 
-================================================================================
-CONVENTIONS
-================================================================================
+**Conventions**
 
-PER-COMPONENT, FULL STATE. Results are stored per node / per branch / per
+*Per-component, full state.* Results are stored per node / per branch / per
 injection (not per monitor), giving the complete grid state with unambiguous
 location and direction. This is the chosen model over emulating physical meters.
 
-PHASORS AS REAL/IMAG. Every complex phasor (voltage, current) is stored as a
-(real, imag) pair in SI units, NOT magnitude/angle. This is the solver's native
-differentiable output, is lossless, and avoids the 2*pi angle-wrap discontinuity
-that harms ML targets (state estimation). Magnitude/angle, P/Q/S aggregates,
-THD, unbalance and EN 50160 compliance are all DERIVED VIEWS computed on demand;
-they are not part of this contract (except the optional P/Q/S below, kept for
-convenience).
+*Phasors as real/imag.* Every complex phasor (voltage, current) is stored as a
+``(real, imag)`` pair in SI units, NOT magnitude/angle. This is the solver's
+native differentiable output, is lossless, and avoids the ``2*pi`` angle-wrap
+discontinuity that harms ML targets (state estimation). Magnitude/angle, P/Q/S
+aggregates, THD, unbalance and EN 50160 compliance are all DERIVED VIEWS computed
+on demand; they are not part of this contract (except the optional P/Q/S below,
+kept for convenience).
 
-PER FREQUENCY, ALWAYS. Every record is indexed by `frequency_hz` (float), not by
-integer harmonic order, so interharmonics are representable. The harmonic order
-h = frequency_hz / base_frequency_hz is derivable (need not be integer). Results
-are never aggregated across frequency in this schema; THD and other cross-
-frequency metrics are computed downstream.
+*Per frequency, always.* Every record is indexed by ``frequency_hz`` (float), not
+by integer harmonic order, so interharmonics are representable. The harmonic
+order ``h = frequency_hz / base_frequency_hz`` is derivable (need not be integer).
+Results are never aggregated across frequency in this schema; THD and other
+cross-frequency metrics are computed downstream.
 
-POWERS ARE OPTIONAL, PER FREQUENCY. P [W], Q [var] and S [VA] may be stored
+*Powers are optional, per frequency.* P [W], Q [var] and S [VA] may be stored
 alongside V and I (per phase, per frequency) when convenient, but are derivable
-from V and I and may be omitted. At harmonic h, P_h=Re(V_h conj(I_h)),
-Q_h=Im(V_h conj(I_h)), S_h=|V_h||I_h|.
+from V and I and may be omitted. At harmonic h, ``P_h = Re(V_h conj(I_h))``,
+``Q_h = Im(V_h conj(I_h))``, ``S_h = abs(V_h) abs(I_h)``.
 
-REFERENCE DIRECTIONS.
-  * Branch terminals: i_from / i_to (and their powers) are positive when flowing
-    FROM the respective node INTO the branch. Hence p_from + p_to over all phases
-    equals the branch losses. Direction is anchored to the component's
-    from_node/to_node from grid_schema.
-  * Injections (load/generator/source/shunt): current and power are positive when
-    flowing FROM the node INTO the appliance (LOAD reference). A consuming load
-    reports positive P; a generator injecting into the grid reports negative P.
-    One rule for all appliance kinds; the sign carries the direction.
+*Reference directions.*
 
-PER-PHASE. Each record carries an explicit `phases` tuple (from grid_schema) and
-parallel per-phase value tuples aligned to it, supporting 1/2/3/4-phase uniformly
-(branches may have different from/to phase sets). The ML tensor materialisation
-uses a fixed (A,B,C,N) layout with masking; this object/columnar form is variable.
+- Branch terminals: ``i_from`` / ``i_to`` (and their powers) are positive when
+  flowing FROM the respective node INTO the branch. Hence ``p_from + p_to`` over
+  all phases equals the branch losses. Direction is anchored to the component's
+  ``from_node`` / ``to_node`` from the grid schema.
+- Injections (load/generator/source/shunt): current and power are positive when
+  flowing FROM the node INTO the appliance (LOAD reference). A consuming load
+  reports positive P; a generator injecting into the grid reports negative P.
+  One rule for all appliance kinds; the sign carries the direction.
 
-MATERIALISATIONS. Object (these models) / columnar (parquet, one table per record
-type) / tensor (dense complex arrays V[step, freq, node, phase],
-I_from/I_to[step, freq, branch, phase]). Bulk storage is columnar/tensor; the
-object form is for interchange and small/interactive use. Loose coupling to the
-grid and scenario is by integer id (result_set_id, *_id), as in the prior design.
+*Per-phase.* Each record carries an explicit ``phases`` tuple (from the grid
+schema) and parallel per-phase value tuples aligned to it, supporting
+1/2/3/4-phase uniformly (branches may have different from/to phase sets). The ML
+tensor materialisation uses a fixed (A,B,C,N) layout with masking; this
+object/columnar form is variable.
+
+*Materialisations.* Object (these models) / columnar (parquet, one table per
+record type) / tensor (dense complex arrays ``V[step, freq, node, phase]``,
+``I_from`` / ``I_to[step, freq, branch, phase]``). Bulk storage is
+columnar/tensor; the object form is for interchange and small/interactive use.
+Loose coupling to the grid and scenario is by integer id (``result_set_id``,
+``*_id``), as in the prior design.
 """
 
 from __future__ import annotations
@@ -185,8 +186,12 @@ class NodeResult(GridModel):
 
 class BranchResult(GridModel):
     """Per-branch terminal currents (both ends) and optional terminal powers at one
-    frequency and step. from_/to_ are anchored to the component's from_node/to_node;
-    currents are positive flowing INTO the branch at each terminal."""
+    frequency and step.
+
+    The ``from_*`` fields are anchored to the component's ``from_node`` and the
+    ``to_*`` fields to its ``to_node``; currents are positive flowing INTO the
+    branch at each terminal.
+    """
 
     result_set_id: int = Field(description="Loose ref to ResultSet.id.")
     branch_id: int = Field(description="Loose ref to the grid branch id.")

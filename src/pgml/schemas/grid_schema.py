@@ -1,75 +1,77 @@
-"""
-grid_schema.py — Phase 0 canonical data contract (rev 3).
+"""Phase-0 canonical data contract for the grid description (rev 3).
 
-SINGLE SOURCE OF TRUTH for the grid description. Every other subsystem (Y-bus
+**SINGLE SOURCE OF TRUTH** for the grid description. Every other subsystem (Y-bus
 assembly, solver, parquet/SQL persistence, JSON export, the PyTorch-Geometric
 adapter) consumes these models and MUST NOT redefine them. Edits are
 orchestrator-only; subagents import, they do not modify.
 
 The data OUTPUT contract (per-harmonic, per-phase voltages/currents/powers and
-derived THD) lives in a separate artifact, result_schema.py, not here.
+derived THD) lives in a separate artifact, :mod:`pgml.schemas.result_schema`, not
+here.
 
-================================================================================
-CONVENTIONS (read before using any field)
-================================================================================
+**Conventions (read before using any field)**
 
-CANONICAL FORM IS PHASE-DOMAIN. The internal representation of every element is
-its per-phase primitive admittance contribution (an n_phase x n_phase complex
+*Canonical form is phase-domain.* The internal representation of every element is
+its per-phase primitive admittance contribution (an ``n_phase x n_phase`` complex
 stamp per harmonic). Sequence data (Z1/Z2/Z0, vk/vk0) and nameplate data are
-INPUT CONVENTIONS handled by converters (section 8) that emit phase-domain
-objects. This mirrors OpenDSS, the only established harmonic engine.
+INPUT CONVENTIONS handled by converters that emit phase-domain objects. This
+mirrors OpenDSS, the only established harmonic engine.
 
-NO COMPLEX NUMBERS IN THE CANONICAL SCHEMA. Every impedance-like quantity is
+*No complex numbers in the canonical schema.* Every impedance-like quantity is
 stored as the physical REAL pair: series (R [Ohm], L [H]); shunt (G [S], C [F]).
 Complex admittances are formed only at assembly time. This keeps frequency
-scaling physical (X(h)=2*pi*h*f0*L, B(h)=2*pi*h*f0*C) and gradients attached to
-physical parameters. The sole exception is ComplexTap (magnitude + angle), which
-is a dimensionless ratio, not an impedance.
+scaling physical (``X(h) = 2*pi*h*f0*L``, ``B(h) = 2*pi*h*f0*C``) and gradients
+attached to physical parameters. The sole exception is ``ComplexTap`` (magnitude
++ angle), which is a dimensionless ratio, not an impedance.
 
-UNITS ARE STRUCTURED METADATA. Every physical field carries machine-readable
-unit info in its JSON Schema under `unit` = {short, long, [reference]} (via the
-si_field helper). Dashboards read `Grid.model_json_schema()` and never parse the
-description string. The unit is also echoed in the description for humans.
+*Units are structured metadata.* Every physical field carries machine-readable
+unit info in its JSON Schema under ``unit = {short, long, [reference]}`` (via the
+``si_field`` helper). Dashboards read ``Grid.model_json_schema()`` and never parse
+the description string. The unit is also echoed in the description for humans.
 
-PER-PHASE / ASYMMETRY. Nodes carry an ordered phase set; multi-phase element
-parameters are full n x n matrices (diagonal = self, off-diagonal = mutual).
+*Per-phase / asymmetry.* Nodes carry an ordered phase set; multi-phase element
+parameters are full ``n x n`` matrices (diagonal = self, off-diagonal = mutual).
 
-COMPONENT SYMMETRY vs CALCULATION SYMMETRY (adopted from power-grid-model) are
+*Component symmetry vs calculation symmetry* (adopted from power-grid-model) are
 independent. A grid may define symmetric and asymmetric appliances together, and
 either a symmetric or an asymmetric calculation may run on the same grid:
-  * `p_nom_w`/`q_nom_var` are ALWAYS the total over the connected phases.
-  * Optional `p_nom_per_phase_w`/`q_nom_per_phase_var` give an asymmetric
-    nameplate split (length == len(phases); must sum to the totals).
-  * Connection sets terminal pairing: WYE = each listed phase to neutral
-    (European LV single-phase L-N is phases=(A,), connection=WYE); DELTA =
-    between listed phases (phases=(A,B), connection=DELTA is an L-L load).
-  * Resolution at assembly time:
-      - Symmetric calculation: asymmetric / 1-ph / 2-ph appliances are averaged
-        into an equivalent balanced appliance.
-      - Asymmetric calculation: a symmetric appliance is split equally across its
-        phases UNLESS a per-phase profile or `*_per_phase_*` is given, which wins.
-  * Whether a run is symmetric/asymmetric is SOLVER CONFIG, not grid data.
 
-RATED vs OPERATING POINT. Every *_rated / *_nom field is a NAMEPLATE RATING, not
-an operating point. Actual loading/generation comes from profiles (external
-service). For loads/generators the harmonic SHUNT ADMITTANCE is derived at
-assembly time from the OPERATING-POINT P,Q, while the schema stores only model
+- ``p_nom_w`` / ``q_nom_var`` are ALWAYS the total over the connected phases.
+- Optional ``p_nom_per_phase_w`` / ``q_nom_per_phase_var`` give an asymmetric
+  nameplate split (length == ``len(phases)``; must sum to the totals).
+- Connection sets terminal pairing: WYE = each listed phase to neutral
+  (European LV single-phase L-N is ``phases=(A,)``, ``connection=WYE``); DELTA =
+  between listed phases (``phases=(A,B)``, ``connection=DELTA`` is an L-L load).
+- Resolution at assembly time:
+
+  - Symmetric calculation: asymmetric / 1-ph / 2-ph appliances are averaged
+    into an equivalent balanced appliance.
+  - Asymmetric calculation: a symmetric appliance is split equally across its
+    phases UNLESS a per-phase profile or ``*_per_phase_*`` is given, which wins.
+
+- Whether a run is symmetric/asymmetric is SOLVER CONFIG, not grid data.
+
+*Rated vs operating point.* Every ``*_rated`` / ``*_nom`` field is a NAMEPLATE
+RATING, not an operating point. Actual loading/generation comes from profiles
+(external service). For loads/generators the harmonic SHUNT ADMITTANCE is derived
+at assembly time from the OPERATING-POINT P,Q, while the schema stores only model
 parameters.
 
-FREQUENCY SCALING. Reactive elements store L and C, not X and B. Series
+*Frequency scaling.* Reactive elements store L and C, not X and B. Series
 resistance frequency dependence (skin effect) is an explicit optional law.
 
-STANDARD TYPES ARE AN AUTHORING/STORAGE LAYER. Lines/transformers may reference a
-catalog entry via `type_ref` (resolved from `Grid.types`) instead of repeating
-parameters. A resolver materialises parameters before assembly; per-instance
-explicit values may override a referenced type (the resolver warns on override).
-By the time assembly runs, every element carries materialised parameters; the
-solver core never resolves a type. A canonical element is "materialised" when it
-either has no type_ref or has had its type_ref expanded; `type_ref` is retained
-afterwards as provenance and as an ML categorical feature.
+*Standard types are an authoring/storage layer.* Lines/transformers may reference
+a catalog entry via ``type_ref`` (resolved from ``Grid.types``) instead of
+repeating parameters. A resolver materialises parameters before assembly;
+per-instance explicit values may override a referenced type (the resolver warns
+on override). By the time assembly runs, every element carries materialised
+parameters; the solver core never resolves a type. A canonical element is
+"materialised" when it either has no ``type_ref`` or has had its ``type_ref``
+expanded; ``type_ref`` is retained afterwards as provenance and as an ML
+categorical feature.
 
-GEO. Nodes and lines may carry GeoJSON-shaped geometry. The CRS is grid-wide
-(`GridMetadata.crs`). `Line.length_m` is the ELECTRICAL length and is never
+*Geo.* Nodes and lines may carry GeoJSON-shaped geometry. The CRS is grid-wide
+(``GridMetadata.crs``). ``Line.length_m`` is the ELECTRICAL length and is never
 implicitly derived from geometry.
 """
 
@@ -557,10 +559,15 @@ class BranchBase(GridModel):
 
 class Line(BranchBase):
     """Multi-phase line/cable, canonical SI per-length phase-domain form.
+
+    Series impedance and shunt admittance per harmonic ``h``::
+
         Z_series(h) = (R0 .* r_mult(h) + j*2*pi*h*f0 * L) * length_m
         Y_shunt(h)  = (G + j*2*pi*h*f0 * C) * length_m   (split half to each end)
-    Electrical matrices may come from `type_ref` (Grid.types.lines) instead of
-    being given explicitly; a resolver materialises them before assembly."""
+
+    Electrical matrices may come from ``type_ref`` (``Grid.types.lines``) instead
+    of being given explicitly; a resolver materialises them before assembly.
+    """
 
     component: Literal["line"] = "line"
     length_m: PosNum = si_field("Electrical line length.", short="m", long="metre")

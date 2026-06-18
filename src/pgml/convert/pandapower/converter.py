@@ -87,14 +87,15 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
 
     Returns
     -------
-    (Grid, id_map)
-        ``Grid`` — materialised schema object (no ``type_ref``).
-        ``id_map`` — ``dict`` mapping source element tables to our ids:
-            - ``"bus"``      : ``{pp_bus_idx: Node.id}``
-            - ``"line"``     : ``{pp_line_idx: Line.id}``
-            - ``"load"``     : ``{pp_load_idx: Load.id}``
-            - ``"ext_grid"`` : ``{pp_eg_idx: Source.id}``
-            - ``"slack_v_complex"`` : complex slack voltage phasor (V, LL) for ideal-slack mode
+    tuple[Grid, dict]
+        A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
+        (no ``type_ref``).  ``id_map`` maps source element tables to our ids:
+        ``"bus"`` → ``{pp_bus_idx: Node.id}``,
+        ``"line"`` → ``{pp_line_idx: Line.id}``,
+        ``"load"`` → ``{pp_load_idx: Load.id}``,
+        ``"ext_grid"`` → ``{pp_eg_idx: Source.id}``,
+        ``"slack_v_complex"`` → complex slack voltage phasor (V, LL) for
+        ideal-slack mode.
     """
     f0_hz: float = float(getattr(net, "f_hz", 50.0))
     two_pi_f0 = 2.0 * math.pi * f0_hz
