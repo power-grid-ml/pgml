@@ -1,4 +1,6 @@
 data
+evaluation_output
+.gemini
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
