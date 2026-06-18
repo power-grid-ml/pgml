@@ -10,13 +10,20 @@ sequence feeders and what the corrected model does instead:
 2. ``gmr_floor.svg`` — sweeping X1, the single-conductor earth-return synthesis drives
    GMR PAST the conductor radius (non-physical) below the earth floor, while the
    two-conductor go/return synthesis keeps a physical GMR and spacing for every X1.
-3. ``feeder_h<k>.svg`` (+ ``feeder_h<k>_interactive.html``) — IEEE-33 harmonic voltage
-   profile under the corrected model vs the naive (R const, X∝h) model vs the
-   single-conductor Carson model (== OpenDSS, overlaid when OpenDSS is available). The
-   single-conductor earth correction inflates the harmonic voltage drop; the corrected
-   positive-sequence model removes that artifact while keeping the skin-effect resistance
-   growth. The static SVG draws semi-transparent lines; the interactive HTML colours one
-   model per legend entry so you can click to activate/deactivate each model.
+3. ``feeder_h<k>.svg`` / ``feeder_h<k>_interactive.html`` / ``feeder_h<k>_default_vs_opendss.svg``
+   — IEEE-33 (1-phase lines): the config-default model, the naive model and the
+   single-conductor Carson model (== OpenDSS) overlaid; the interactive HTML carries every
+   model at once (click the legend to toggle); the pairwise SVG diffs the config default
+   against the OpenDSS line model.
+4. ``unbalanced_h<k>.svg`` / ``unbalanced_interactive.html`` / ``unbalanced_h<k>_earth_effect.svg``
+   — a 3-phase UNBALANCED feeder (single-phase nonlinear load → zero-sequence current):
+   the config default (sequence-aware, Z0 earth-damped) vs the same model with no earth
+   damping vs naive. The interactive HTML shows several harmonics × models together; the
+   pairwise SVG isolates the Z0 earth-return damping. This is the config DEFAULT for a
+   4-wire unbalanced harmonic study.
+
+All model choices go through the config-driven entry points (`apply_default_harmonic_model`
+etc.), so defaults are explicit and documented (`pgml.config`), never hidden.
 
 Run::
 
@@ -33,6 +40,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from pgml import config
 from pgml import evaluation as ev
 from pgml.evaluation import references as ref
 from pgml.geometry.carson import kron_reduce, series_impedance
@@ -42,10 +50,22 @@ from pgml.geometry.sequence import (
     two_conductor_geometry,
 )
 from pgml.geometry.synthesis import (
+    apply_default_harmonic_model,
     apply_positive_sequence_harmonic_model,
+    apply_sequence_aware_harmonic_model,
     synthesize_line_geometry,
 )
-from pgml.schemas.grid_schema import Line
+from pgml.schemas.grid_schema import (
+    Grid,
+    HarmonicComponent,
+    Line,
+    Load,
+    Node,
+    Phase,
+    Source,
+    SpectrumPoint,
+    StaticSpectrum,
+)
 from pgml.solver import solve_harmonic_flow
 
 RDT = torch.float64
@@ -167,36 +187,47 @@ def _strip_geometry(grid):
     return grid
 
 
-def plot_feeder(out: Path, order: int = 13) -> None:
-    # single-conductor Carson model (== OpenDSS line model) — geometry intact.
-    grid_geom, _ = ref.ieee33_geometry_grid()
-    res_geom = solve_harmonic_flow(grid_geom, ORDERS, slack="norton", dtype=CDT)
+def _ieee33_models(orders):
+    """Build every 1-phase IEEE-33 line model -> {label: (grid, harmonic result)}.
 
-    # corrected positive-sequence model — no geometry, no earth floor.
-    grid_pos = apply_positive_sequence_harmonic_model(
-        _strip_geometry(ref.ieee33_geometry_grid()[0])
-    )
-    res_pos = solve_harmonic_flow(grid_pos, ORDERS, slack="norton", dtype=CDT)
+    Uses the config-driven model application so the example exercises the SAME deliberate
+    entry points a user would (`apply_default_harmonic_model` etc.), not ad-hoc tweaks.
+    """
+    models: dict[str, tuple] = {}
 
-    # naive model — R const, X ∝ h (no skin, no earth).
-    grid_naive = apply_positive_sequence_harmonic_model(
+    # config default for these (1-phase) lines -> positive_sequence (skin on R).
+    g_def = apply_default_harmonic_model(_strip_geometry(ref.ieee33_geometry_grid()[0]))
+    models["config default"] = (g_def, None)
+
+    # naive: R const, X∝h (skin disabled).
+    g_naive = apply_positive_sequence_harmonic_model(
         _strip_geometry(ref.ieee33_geometry_grid()[0]), skin=False
     )
-    res_naive = solve_harmonic_flow(grid_naive, ORDERS, slack="norton", dtype=CDT)
+    models["naive (R const, X∝h)"] = (g_naive, None)
 
+    # single-conductor Carson (== OpenDSS 1-phase line) — geometry kept.
+    g_geom, _ = ref.ieee33_geometry_grid()
+    models["single-conductor Carson"] = (g_geom, None)
+
+    for label, (g, _) in models.items():
+        models[label] = (g, solve_harmonic_flow(g, orders, slack="norton", dtype=CDT))
+    return models
+
+
+def plot_feeder(out: Path, order: int = 13) -> None:
+    """IEEE-33 (1-phase lines): every model overlaid + a pairwise matplotlib diff."""
+    models = _ieee33_models(ORDERS)
     profs = [
-        ev.harmonic_profile(res_pos, grid_pos, order, label="positive-seq (corrected)"),
-        ev.harmonic_profile(res_naive, grid_naive, order, label="naive (R const, X∝h)"),
-        ev.harmonic_profile(
-            res_geom, grid_geom, order, label="single-conductor Carson"
-        ),
+        ev.harmonic_profile(res, g, order, label=label)
+        for label, (g, res) in models.items()
     ]
+    g_geom, res_geom = models["single-conductor Carson"]
     try:
         profs.append(
             next(
                 p
                 for p in ref.opendss_geometry_harmonic_profiles(
-                    grid_geom, res_geom, [order], label="OpenDSS (Carson)"
+                    g_geom, res_geom, [order], label="OpenDSS (Carson)"
                 )
                 if p.order == order
             )
@@ -204,25 +235,171 @@ def plot_feeder(out: Path, order: int = 13) -> None:
     except Exception as exc:  # OpenDSS optional
         print(f"[feeder] OpenDSS overlay skipped: {exc}")
 
-    title = (
-        f"IEEE-33 harmonic voltage profile (h={order}): "
-        "corrected vs naive vs single-conductor Carson"
-    )
+    title = f"IEEE-33 harmonic voltage profile (h={order})"
     # Static SVG: semi-transparent lines so the heavily-overlapping models stay legible.
-    fig, _ = ev.plot_harmonic_profile(profs, grid=grid_geom, alpha=0.55, title=title)
+    fig, _ = ev.plot_harmonic_profile(profs, grid=g_geom, alpha=0.55, title=title)
     ev.save_figure(fig, out / f"feeder_h{order}.svg")
     plt.close(fig)
 
-    # Interactive HTML: one colour per model, click the legend to toggle models on/off.
+    # Interactive HTML: ALL models at once, one colour each, click the legend to toggle.
     ev.plot_harmonic_profile_interactive(
         profs,
-        grid=grid_geom,
-        title=title + " — click legend to toggle",
+        grid=g_geom,
+        title=title + " — click legend to toggle models",
         out_html=str(out / f"feeder_h{order}_interactive.html"),
     )
+
+    # Pairwise matplotlib comparison: config default vs single-conductor Carson (==OpenDSS).
+    g_def, res_def = models["config default"]
+    a = ev.harmonic_profile(res_def, g_def, order, label="config default")
+    b = ev.harmonic_profile(
+        res_geom, g_geom, order, label="single-conductor Carson (=OpenDSS)"
+    )
+    fig_cmp, fig_diff = ev.plot_harmonic_model_comparison(
+        a,
+        b,
+        grid=g_geom,
+        title=f"IEEE-33 h={order}: config default vs OpenDSS line model",
+    )
+    ev.save_figure(fig_cmp, out / f"feeder_h{order}_default_vs_opendss.svg")
+    ev.save_figure(fig_diff, out / f"feeder_h{order}_default_vs_opendss_diff.svg")
+    plt.close("all")
+    print(f"[feeder] wrote h={order} overlay + interactive + pairwise comparison")
+
+
+# --- (4) unbalanced 3-phase feeder: the sequence-aware (Z1+Z0) model ---------
+def _unbalanced_3phase_grid(n_bus: int = 5):
+    """A small 3-phase radial feeder with a SINGLE-PHASE harmonic load (-> zero seq)."""
+    z1, z0 = complex(0.32e-3, 0.30e-3), complex(0.88e-3, 1.20e-3)  # Ω/m, LV-ish
+    zs, zm = (z0 + 2 * z1) / 3, (z0 - z1) / 3
+    w = 2.0 * np.pi * F0
+    ph = (Phase.A, Phase.B, Phase.C)
+    rmat = [[zs.real if i == j else zm.real for j in range(3)] for i in range(3)]
+    lmat = [[(zs.imag if i == j else zm.imag) / w for j in range(3)] for i in range(3)]
+    nodes = [Node(id=i, u_rated_v=400.0, phases=ph) for i in range(1, n_bus + 1)]
+    branches = [
+        Line(
+            id=100 + i,
+            from_node=i,
+            to_node=i + 1,
+            from_phases=ph,
+            to_phases=ph,
+            length_m=120.0,
+            series_resistance_ohm_per_m=rmat,
+            series_inductance_h_per_m=lmat,
+            shunt_capacitance_f_per_m=[[0.0] * 3 for _ in range(3)],
+        )
+        for i in range(1, n_bus)
+    ]
+    spec = StaticSpectrum(
+        spectrum=SpectrumPoint(
+            components=[
+                HarmonicComponent(order=o, magnitude_pu=m, phase_deg=0.0)
+                for o, m in [(3, 0.6), (5, 0.5), (7, 0.3), (9, 0.2), (11, 0.12)]
+            ]
+        )
+    )
+    appliances = [
+        Source(
+            id=1,
+            node=1,
+            phases=ph,
+            u_ref_v=(230.0, 230.0, 230.0),
+            u_angle_deg=(0.0, -120.0, 120.0),
+            resistance_ohm=[
+                [1e-3 if i == j else 0.0 for j in range(3)] for i in range(3)
+            ],
+            inductance_h=[
+                [1e-5 if i == j else 0.0 for j in range(3)] for i in range(3)
+            ],
+        ),
+        # small balanced base load + a DOMINANT single-phase nonlinear load (phase A) at
+        # the end, so the harmonic injection is strongly zero-sequence (residual current).
+        Load(id=2, node=n_bus, phases=ph, p_nom_w=2400.0, q_nom_var=600.0),
+        Load(
+            id=3,
+            node=n_bus,
+            phases=(Phase.A,),
+            p_nom_w=8000.0,
+            q_nom_var=1500.0,
+            spectrum=spec,
+        ),
+    ]
+    return Grid(
+        base_frequency_hz=F0, nodes=nodes, branches=branches, appliances=appliances
+    )
+
+
+def plot_unbalanced_feeder(out: Path, order: int = 9) -> None:
+    """3-phase unbalanced feeder: config-default sequence-aware vs no-earth vs naive.
+
+    The single-phase nonlinear load drives a zero-sequence (residual / neutral-return)
+    harmonic current. The Carson earth-return resistance is a REAL, frequency-growing
+    impedance that this current must flow through, so modelling it (the config default,
+    OpenDSS-consistent) RAISES the zero-sequence harmonic voltage versus neglecting it —
+    i.e. the earth-free model UNDER-predicts the zero-sequence harmonics. Demonstrates the
+    config DEFAULT for an unbalanced 4-wire study (`line.harmonic_model.three_phase`).
+    """
+
+    def build(apply, **kw):
+        g = _unbalanced_3phase_grid()
+        apply(g, **kw)
+        return g, solve_harmonic_flow(g, [1, 3, 5, 7, 9, 11], slack="norton", dtype=CDT)
+
+    default_model = config.get("line.harmonic_model.three_phase")
+    models = {
+        # full sequence-aware model: Z0 carries the Carson earth-return damping (default).
+        f"config default ({default_model})": build(apply_default_harmonic_model),
+        # same model with the earth-return coefficient zeroed -> isolates that damping.
+        "no earth damping (coeff=0)": build(
+            apply_sequence_aware_harmonic_model, earth_resistance_coeff=0.0
+        ),
+        # no skin either -> the naive R-const, X∝h reference.
+        "naive (R const, X∝h)": build(
+            apply_sequence_aware_harmonic_model, skin=False, earth_resistance_coeff=0.0
+        ),
+    }
+
+    profs = [
+        ev.harmonic_profile(res, g, order, phase=Phase.A, label=label)
+        for label, (g, res) in models.items()
+    ]
+    g0 = next(iter(models.values()))[0]
+    title = f"Unbalanced 3-phase feeder, phase A (h={order})"
+    fig, _ = ev.plot_harmonic_profile(profs, grid=g0, alpha=0.6, title=title)
+    ev.save_figure(fig, out / f"unbalanced_h{order}.svg")
+    plt.close(fig)
+
+    # interactive: multiple models AND several harmonics at once; each (order, model)
+    # is its own toggleable legend group ("h{order} · {model}").
+    interactive = [
+        ev.harmonic_profile(res, g, od, phase=Phase.A, label=label)
+        for od in (5, 7, 9)
+        for label, (g, res) in models.items()
+    ]
+    ev.plot_harmonic_profile_interactive(
+        interactive,
+        grid=g0,
+        title="Unbalanced feeder, phase A — sequence-aware vs Z1-only vs naive (toggle)",
+        out_html=str(out / "unbalanced_interactive.html"),
+    )
+
+    # pairwise matplotlib: config default (earth in Z0) vs no-earth -> the earth effect.
+    a, b = profs[0], profs[1]
+    fig_cmp, fig_diff = ev.plot_harmonic_model_comparison(
+        a,
+        b,
+        grid=g0,
+        title=f"Phase A h={order}: Z0 earth-return effect (config default − no earth)",
+    )
+    ev.save_figure(fig_cmp, out / f"unbalanced_h{order}_earth_effect.svg")
+    ev.save_figure(fig_diff, out / f"unbalanced_h{order}_earth_effect_diff.svg")
+    plt.close("all")
+    peak_a = float(a.magnitude.max())
+    peak_b = float(b.magnitude.max())
     print(
-        f"[feeder] wrote h={order} profile + interactive html "
-        f"({'corrected / naive / single-conductor / OpenDSS' if len(profs) == 4 else 'corrected / naive / single-conductor'})"
+        f"[unbalanced] wrote h={order} overlay + interactive + earth-effect comparison "
+        f"(peak |V_h| phase A: config default {peak_a:.4g} vs no-earth {peak_b:.4g} pu)"
     )
 
 
@@ -232,6 +409,7 @@ def main(out_dir: str = "evaluation_output/sequence") -> None:
     plot_sequence_xr(out)
     plot_gmr_floor(out)
     plot_feeder(out, order=13)
+    plot_unbalanced_feeder(out, order=9)
     print(f"wrote figures to {out.resolve()}")
 
 

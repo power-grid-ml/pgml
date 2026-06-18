@@ -32,6 +32,7 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | Need… | Package | CONTEXT |
 |---|---|---|
 | Input/output **contracts** (Grid, Node, Branch, Appliance, Result, Scenario) — FROZEN | `src/pgml/schemas/` | `schemas/CONTEXT.md` |
+| **Modeling defaults** (documented default values + model choices; explicit>config>converter) | `src/pgml/config/` | `config/CONTEXT.md` |
 | The **physics equations** (residual `0=a-b` registry + torch evaluators; skin/seq laws) | `src/pgml/equations/` | `equations/CONTEXT.md` |
 | **Y-bus assembly** (per-phase/per-harmonic/batched stamps; linear + network + injections) | `src/pgml/assembly/` | `assembly/CONTEXT.md` |
 | **Solve** (complex batched linear; nonlinear const-P/ZIP via IFT; harmonic flow) | `src/pgml/solver/` | `solver/CONTEXT.md` |

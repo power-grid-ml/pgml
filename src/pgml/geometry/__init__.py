@@ -34,6 +34,7 @@ from .sequence import (
     zero_sequence_harmonic_z,
 )
 from .synthesis import (
+    apply_default_harmonic_model,
     apply_positive_sequence_harmonic_model,
     apply_sequence_aware_harmonic_model,
     positive_sequence_resistance_model,
@@ -68,4 +69,5 @@ __all__ = [
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",
     "apply_sequence_aware_harmonic_model",
+    "apply_default_harmonic_model",
 ]

@@ -33,7 +33,12 @@ from .data import (
 from .graph_plots import plot_grid_graph
 from .harmonic3d import plot_harmonic_profile_3d
 from .interactive import plot_harmonic_profile_interactive
-from .profiles import plot_harmonic_profile, plot_profile_error, plot_voltage_profile
+from .profiles import (
+    plot_harmonic_model_comparison,
+    plot_harmonic_profile,
+    plot_profile_error,
+    plot_voltage_profile,
+)
 from .style import save_figure
 from .topology import distance_from_slack, grid_graph, slack_node_id
 from .ybus_plots import plot_ybus_difference, plot_ybus_heatmaps
@@ -56,6 +61,7 @@ __all__ = [
     "plot_ybus_difference",
     "plot_voltage_profile",
     "plot_harmonic_profile",
+    "plot_harmonic_model_comparison",
     "plot_profile_error",
     "plot_harmonic_profile_3d",
     "plot_harmonic_profile_interactive",

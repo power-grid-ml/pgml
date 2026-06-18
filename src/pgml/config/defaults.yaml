@@ -1,0 +1,89 @@
+# pgml — modeling defaults (single source of truth for default VALUES & MODEL choices)
+#
+# Why this file exists
+# --------------------
+# Every modeling decision should be a DELIBERATE, documented choice — not a hidden
+# implicit default buried in code (the opacity that makes OpenDSS discrepancies hard to
+# explain). All default constants and default model selections live here, each with a
+# short precise description and units.
+#
+# Resolution precedence (highest first) — see `pgml.config.resolve`:
+#   1. explicit  — a value the user set on the component / grid (ALWAYS wins).
+#   2. config    — the default in this file.
+#   3. converter — inferred from a source library during conversion (e.g. an OpenDSS
+#                  `LineGeometry`); the last-resort fallback when 1 and 2 do not apply.
+#
+# Schema of every leaf:  { value: <default>, units: <str>, description: <str> }.
+# Ordered by component; extend with new components / parameters as the library grows.
+
+line:
+
+  # Which frequency-dependent line model is applied to an R/X line that has NO explicit
+  # `conductor_geometry` and NO explicit `harmonic_line_model` tag. Applied deliberately
+  # via `pgml.geometry.apply_default_harmonic_model(grid)` (never silently at solve time).
+  harmonic_model:
+    three_phase:
+      value: sequence_aware
+      units: "enum{sequence_aware, positive_sequence, naive, none}"
+      description: >
+        Default model for a 3-phase R/X line. `sequence_aware` decomposes Z_abc into
+        Z1 (earth-free, X∝h + skin) and Z0 (carries the Carson earth-return resistance),
+        then recombines — the model a 4-wire UNBALANCED LV harmonic study needs. Earth
+        return is excited only by zero-sequence / residual current, so it correctly
+        vanishes for balanced operation. `positive_sequence` = Z1 only (no Z0 damping);
+        `naive` = R const, X∝h; `none` = leave the line untouched.
+    single_phase:
+      value: positive_sequence
+      units: "enum{sequence_aware, positive_sequence, naive, none}"
+      description: >
+        Default model for a 1- or 2-phase R/X line: skin-corrected R, X∝h, no earth
+        floor. A genuine single-wire-earth-return (SWER) line should instead carry an
+        explicit `conductor_geometry` so the full Carson earth return applies.
+    skin_effect:
+      value: true
+      units: "bool"
+      description: >
+        Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and
+        sequence-aware models. false → R constant (the naive X∝h, R-const model).
+
+  # Carson/Deri earth-return path (zero-sequence and geometry lines).
+  earth_return:
+    resistivity_ohm_m:
+      value: 100.0
+      units: "ohm*m"
+      description: >
+        Soil resistivity ρ for the Carson/Deri earth-return path (Z0 and geometry lines).
+        100 Ω·m is the OpenDSS / IEEE standard default (average soil).
+    resistance_coeff_ohm_per_m_per_hz:
+      value: 9.869604401089357e-07   # = math.pi**2 * 1e-7 = omega*mu0/8 per Hz
+      units: "ohm/(m*Hz)"
+      description: >
+        Carson earth-return resistance per unit length per Hz: Re(f) = coeff·f. The
+        physical Carson value is π²·1e-7 Ω/m/Hz (= ω·μ0/8 divided by f). Geometry-
+        independent; the dominant frequency-dependent DAMPING of zero-sequence harmonics.
+        Mirrors OpenDSS's user-settable per-LineCode Rg.
+
+  # R/X → conductor-geometry synthesis (when a feeder ships only R/X, no coordinates).
+  conductor:
+    gmr_over_radius:
+      value: 0.7788                  # = e^{-1/4}, solid round conductor
+      units: "ratio"
+      description: >
+        Geometric-mean-radius / physical-radius for a solid round conductor (e^{-1/4}).
+        Used to pick a PHYSICAL GMR when synthesizing a two-conductor go/return
+        equivalent from positive-sequence R1/X1 (so the GMR never exceeds the radius).
+    radius_m:
+      value: 0.0102
+      units: "m"
+      description: >
+        Default conductor outer radius (~ACSR) for R/X→geometry synthesis when no
+        conductor data is supplied. Affects only the (tiny) synthesized capacitance.
+    height_overhead_m:
+      value: 10.0
+      units: "m"
+      description: Default conductor height above ground for an overhead ('ol') line.
+    height_cable_m:
+      value: 1.0
+      units: "m"
+      description: >
+        Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 import torch
 
 from pgml.assembly import assemble_ybus, node_phase_index
@@ -19,6 +20,7 @@ from pgml.evaluation import (
     plot_grid_graph,
     plot_harmonic_profile,
     plot_harmonic_profile_3d,
+    plot_harmonic_model_comparison,
     plot_harmonic_profile_interactive,
     plot_profile_error,
     plot_voltage_profile,
@@ -193,6 +195,29 @@ def test_harmonic_profile_interactive_toggleable(tmp_path):
     assert fig.layout.legend.groupclick == "togglegroup"
     line_colors = [t.line.color for t in fig.data if t.mode == "lines"]
     assert all(c.startswith("rgba(") for c in line_colors)
+
+
+def test_harmonic_model_comparison(tmp_path):
+    """The pairwise 2-model comparison renders a separate overlay and difference figure."""
+    grid = _harmonic_grid()
+    hres = solve_harmonic_flow(grid, [1, 5, 7], slack="norton", dtype=CDT)
+    a = harmonic_profile(hres, grid, 5, label="model A")
+    b = ref.numpy_harmonic_profiles(grid, hres.pf.v, hres.index, [5], label="model B")[
+        0
+    ]
+    fig_cmp, fig_diff = plot_harmonic_model_comparison(a, b, grid=grid)
+    # the difference figure is a per-node scatter on a "Node id" x-axis (not distance).
+    diff_ax = fig_diff.axes[0]
+    assert diff_ax.get_xlabel() == "Node id"
+    assert any(coll.get_offsets().shape[0] > 0 for coll in diff_ax.collections)
+    save_figure(fig_cmp, tmp_path / "cmp.png")
+    save_figure(fig_diff, tmp_path / "cmp_diff.png")
+    assert (tmp_path / "cmp.png").exists() and (tmp_path / "cmp_diff.png").exists()
+    plt.close("all")
+    # different orders must be rejected.
+    a7 = harmonic_profile(hres, grid, 7, label="A")
+    with pytest.raises(ValueError):
+        plot_harmonic_model_comparison(a, a7, grid=grid)
 
 
 def test_grid_graph_plot(tmp_path):

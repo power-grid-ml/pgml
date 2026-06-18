@@ -41,6 +41,7 @@ sympy = ">=1.14.0,<2"
 matplotlib = ">=3.11.0,<4"
 networkx = ">=3.6.1,<4"
 plotly = ">=5,<7"
+pyyaml = ">=6,<7"
 
 [environments]
 cpu = ["cpu"]

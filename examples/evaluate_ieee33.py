@@ -12,6 +12,9 @@ Produces (default ``evaluation_output/``):
 - ``voltage_error.svg``       — per-node |Δpu| bar chart.
 - ``harmonic_h5.svg``         — h=5 magnitude/angle profile, pgml vs numpy oracle.
 - ``harmonic_3d.html``        — interactive 3D (h=3,5,7,9), pgml vs numpy oracle.
+- ``harmonic_models_interactive.html`` — config-default vs naive line model, every
+                                harmonic × model toggleable.
+- ``harmonic_default_vs_naive_h5.svg`` — pairwise h=5: config default vs naive.
 - ``grid_voltage_map.svg``    — topology colored by voltage pu.
 
 The harmonic figures attach a typical 6-pulse converter spectrum to a few loads.
@@ -41,6 +44,7 @@ from pgml.schemas.grid_schema import (  # noqa: E402
     SpectrumPoint,
     StaticSpectrum,
 )
+from pgml.geometry.synthesis import apply_default_harmonic_model  # noqa: E402
 from pgml.solver import solve_harmonic_flow, solve_power_flow  # noqa: E402
 
 from pgml import evaluation as ev  # noqa: E402
@@ -160,6 +164,35 @@ def main(out_dir: str = "evaluation_output") -> None:
         out_html=str(out / "harmonic_3d.html"),
     )
 
+    # ---- 3b. Line-model comparison: config default vs naive (X∝h) ----------
+    # `hres` above used the raw R/L path (naive X∝h). Re-solve with the deliberate
+    # config-default model (positive-seq + skin for these 1-phase lines) and compare.
+    grid_default = apply_default_harmonic_model(to_grid(net)[0])
+    for app in grid_default.appliances:
+        if isinstance(app, Load) and app.node in (17, 32, 24):
+            app.spectrum = StaticSpectrum(spectrum=SpectrumPoint(components=comps))
+    hres_default = solve_harmonic_flow(grid_default, orders, slack="ideal", dtype=CDT)
+    default_h = ev.harmonic_profiles(
+        hres_default, grid_default, HARMONIC_ORDERS_3D, label="config default (pos-seq)"
+    )
+    naive_h = ev.harmonic_profiles(
+        hres, grid, HARMONIC_ORDERS_3D, label="naive (R const, X∝h)"
+    )
+    # interactive: both models across several harmonics, each (order, model) toggleable.
+    ev.plot_harmonic_profile_interactive(
+        [*default_h, *naive_h],
+        grid=grid,
+        title="IEEE 33-bus: config default vs naive line model — click legend to toggle",
+        out_html=str(out / "harmonic_models_interactive.html"),
+    )
+    d5 = next(p for p in default_h if p.order == 5)
+    n5 = next(p for p in naive_h if p.order == 5)
+    fig_cmp, fig_diff = ev.plot_harmonic_model_comparison(
+        d5, n5, grid=grid, title="IEEE 33-bus h=5: config default vs naive line model"
+    )
+    ev.save_figure(fig_cmp, out / "harmonic_default_vs_naive_h5.svg")
+    ev.save_figure(fig_diff, out / "harmonic_default_vs_naive_h5_diff.svg")
+
     # ---- 4. Topology colored by voltage -----------------------------------
     v_by_node = dict(zip([int(i) for i in ours_v.node_ids], ours_v.v_pu))
     fig, _ = ev.plot_grid_graph(
@@ -174,4 +207,4 @@ def main(out_dir: str = "evaluation_output") -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output")
+    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/references")

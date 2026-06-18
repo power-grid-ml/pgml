@@ -240,6 +240,71 @@ def plot_harmonic_profile(
     return fig, ax
 
 
+def plot_harmonic_model_comparison(
+    a: HarmonicProfile,
+    b: HarmonicProfile,
+    *,
+    grid=None,
+    title: Optional[str] = None,
+    relative: bool = False,
+):
+    """Compare TWO harmonic line models -> ``(fig_overlay, fig_diff)`` (two figures).
+
+    ``fig_overlay`` overlays the two models' harmonic magnitude vs distance (one colour
+    each, lines following the real branches when ``grid`` is given). ``fig_diff`` is a
+    per-NODE difference SCATTER (``|a| − |b|``, or relative ``/|b|`` if ``relative``) with
+    node id on the x-axis — distance is not used here because several nodes share a
+    distance. The deliberate "model A vs model B" diagnostic.
+    """
+    if a.order != b.order:
+        raise ValueError(f"comparing different orders: h={a.order} vs h={b.order}")
+
+    # --- overlay figure (magnitude vs distance) ---
+    fig0, ax0 = plt.subplots(figsize=(7.6, 4.2), constrained_layout=True)
+    cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    edges = branch_edges(grid) if grid is not None else None
+    for i, p in enumerate((a, b)):
+        color = cycle[i % len(cycle)]
+        ax0.plot(
+            p.distances_km, p.magnitude, "o", ms=4, color=color, alpha=0.9, zorder=3
+        )
+        if edges is not None and p.node_ids is not None:
+            xy = _node_xy(p.node_ids, p.distances_km, p.magnitude)
+            segs = [[xy[e.a], xy[e.b]] for e in edges if e.a in xy and e.b in xy]
+            ax0.add_collection(
+                LineCollection(segs, colors=[color], linewidths=1.8, alpha=0.7)
+            )
+        else:
+            ax0.plot(p.distances_km, p.magnitude, "-", color=color, alpha=0.7)
+        ax0.plot([], [], "o-", color=color, label=p.label)
+    ax0.set_xlabel("Distance from slack [km]")
+    ax0.set_ylabel(f"|V| [{a.unit}]")
+    ax0.set_title(title or f"Harmonic line models compared (h={a.order})")
+    ax0.grid(True, alpha=0.3)
+    ax0.legend(frameon=False)
+
+    # --- difference figure (per-node scatter, node id on x) ---
+    b_by_node = {int(n): float(m) for n, m in zip(b.node_ids, b.magnitude)}
+    nids, diff = [], []
+    for n, m in zip(a.node_ids, a.magnitude):
+        if int(n) in b_by_node:
+            nids.append(int(n))
+            delta = float(m) - b_by_node[int(n)]
+            diff.append(delta / (b_by_node[int(n)] + 1e-30) if relative else delta)
+    order = np.argsort(nids)
+    nids = np.asarray(nids)[order]
+    diff = np.asarray(diff)[order]
+    fig1, ax1 = plt.subplots(figsize=(7.6, 3.2), constrained_layout=True)
+    ax1.axhline(0.0, color="0.6", lw=0.8)
+    ax1.scatter(nids, diff, s=22, color="tab:red", zorder=3)
+    ax1.set_xlabel("Node id")
+    ax1.set_ylabel("Δ / ref" if relative else f"Δ|V| [{a.unit}]")
+    ax1.grid(True, alpha=0.3)
+    peak = float(np.max(np.abs(diff))) if len(diff) else 0.0
+    ax1.set_title(f"{a.label} − {b.label}  (max |Δ| = {peak:.3g})")
+    return fig0, fig1
+
+
 def plot_profile_error(
     reference: VoltageProfile,
     ours: VoltageProfile,
@@ -265,4 +330,9 @@ def plot_profile_error(
     return fig, ax
 
 
-__all__ = ["plot_voltage_profile", "plot_harmonic_profile", "plot_profile_error"]
+__all__ = [
+    "plot_voltage_profile",
+    "plot_harmonic_profile",
+    "plot_harmonic_model_comparison",
+    "plot_profile_error",
+]

@@ -21,6 +21,7 @@ import cmath
 import math
 from typing import Optional
 
+from pgml.config import get as _cfg
 from pgml.schemas.grid_schema import (
     AnalyticParam,
     ConductorPlacement,
@@ -35,8 +36,13 @@ from pgml.schemas.grid_schema import (
 
 from .carson import MU0
 
-_DEFAULT_HEIGHT = {"ol": 10.0, "cs": 1.0}  # m: overhead vs cable (Deri needs y>0)
-_DEFAULT_RADIUS = 0.0102  # m, typical ACSR-ish (capacitance only; negligible here)
+# Defaults sourced from the top-level config (`pgml.config` / defaults.yaml).
+_DEFAULT_HEIGHT = {  # m: overhead vs cable (Deri needs y>0)
+    "ol": _cfg("line.conductor.height_overhead_m"),
+    "cs": _cfg("line.conductor.height_cable_m"),
+}
+_DEFAULT_RADIUS = _cfg("line.conductor.radius_m")  # m, ~ACSR (capacitance only)
+_DEFAULT_EARTH_RHO = _cfg("line.earth_return.resistivity_ohm_m")  # ohm*m
 
 
 def _self_ze(h: float, rho: float, f: float) -> complex:
@@ -66,7 +72,7 @@ def synthesize_line_geometry(
     f0: float,
     phase: Phase = Phase.A,
     line_type: str = "ol",
-    earth_resistivity_ohm_m: float = 100.0,
+    earth_resistivity_ohm_m: float = _DEFAULT_EARTH_RHO,
     height_m: Optional[float] = None,
     radius_m: float = _DEFAULT_RADIUS,
     notes: str = "",
@@ -76,6 +82,7 @@ def synthesize_line_geometry(
     GMR is set in closed form from the reactance; Rdc from the resistance with a few
     skin-effect fixed-point refinements (clamped to a small positive value if the
     target resistance is below the earth-return floor). Provenance records the origin.
+    Defaults (radius, heights, earth resistivity) come from ``pgml.config``.
     """
     h = height_m if height_m is not None else _DEFAULT_HEIGHT.get(line_type, 10.0)
     ze = _self_ze(h, earth_resistivity_ohm_m, f0)
@@ -185,8 +192,33 @@ def positive_sequence_resistance_model(
     )
 
 
+def _line_representative_r1(ln: Line) -> float:
+    """Mean of the diagonal series resistance (Ω/m) — the representative ``R1``."""
+    diag = ln.series_resistance_ohm_per_m
+    p = len(ln.from_phases)
+    return sum(_float0(diag[i][i]) for i in range(p)) / p
+
+
+def _apply_positive_sequence_line(ln: Line, *, f0: float, skin: bool) -> None:
+    """Tag a single R/X line with the positive-sequence (Z1) harmonic model."""
+    if skin:
+        ln.resistance_frequency = positive_sequence_resistance_model(
+            _line_representative_r1(ln), f0=f0
+        )
+    else:
+        ln.resistance_frequency = ResistanceFrequencyModel()  # constant 1.0
+
+
+def _apply_sequence_aware_line(ln: Line, *, skin: bool, coeff: float) -> None:
+    """Tag a single 3-phase R/X line with the sequence-aware (Z1+Z0) harmonic model."""
+    ln.tags = dict(ln.tags or {})
+    ln.tags["harmonic_line_model"] = "sequence_aware"
+    ln.tags["seq_skin"] = "true" if skin else "false"
+    ln.tags["seq_earth_coeff"] = repr(coeff)
+
+
 def apply_positive_sequence_harmonic_model(
-    grid: Grid, *, f0: Optional[float] = None, skin: bool = True
+    grid: Grid, *, f0: Optional[float] = None, skin: Optional[bool] = None
 ) -> Grid:
     """In place: give every R/X line the positive-sequence harmonic model (no earth floor).
 
@@ -197,25 +229,24 @@ def apply_positive_sequence_harmonic_model(
     :func:`synthesize_grid_geometry`, it does NOT reverse-synthesise a single-conductor
     earth-return geometry, so it never hits the GMR floor and stays well defined for
     cables / low-X feeders. Lines that already carry a ``conductor_geometry`` (genuine
-    geometry -> full Carson) are left untouched. ``skin=False`` keeps R constant (the
-    naive model). Returns ``grid``.
+    geometry -> full Carson) are left untouched. ``skin`` defaults to the config value
+    ``line.harmonic_model.skin_effect``; ``skin=False`` keeps R constant (naive model).
+    Returns ``grid``.
     """
     f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
+    skin = _cfg("line.harmonic_model.skin_effect") if skin is None else bool(skin)
     for ln in grid.branches:
         if not (isinstance(ln, Line) and ln.conductor_geometry is None):
             continue
-        diag = ln.series_resistance_ohm_per_m
-        p = len(ln.from_phases)
-        r1 = sum(_float0(diag[i][i]) for i in range(p)) / p  # representative R1
-        if skin:
-            ln.resistance_frequency = positive_sequence_resistance_model(r1, f0=f0)
-        else:
-            ln.resistance_frequency = ResistanceFrequencyModel()  # constant 1.0
+        _apply_positive_sequence_line(ln, f0=f0, skin=skin)
     return grid
 
 
 def apply_sequence_aware_harmonic_model(
-    grid: Grid, *, skin: bool = True, earth_resistance_coeff: Optional[float] = None
+    grid: Grid,
+    *,
+    skin: Optional[bool] = None,
+    earth_resistance_coeff: Optional[float] = None,
 ) -> Grid:
     """In place: tag every 3-phase R/X line for the sequence-aware harmonic model.
 
@@ -229,14 +260,14 @@ def apply_sequence_aware_harmonic_model(
 
     Needs a full 3x3 R/L matrix (the off-diagonal mutuals are what carry ``Z0``); a
     diagonal matrix gives ``Z0 = Z1`` plus the universal earth term. Single-/two-phase and
-    geometry-defined lines are left untouched. ``earth_resistance_coeff`` overrides the
-    Carson default (``π²·1e-7`` Ω/m/Hz); ``skin=False`` drops the conductor skin rise.
+    geometry-defined lines are left untouched. ``skin`` and ``earth_resistance_coeff``
+    default to the config (``line.harmonic_model.skin_effect`` /
+    ``line.earth_return.resistance_coeff_ohm_per_m_per_hz``); pass them to override.
     Returns ``grid``.
     """
-    from pgml.geometry.sequence import CARSON_EARTH_R_PER_HZ
-
+    skin = _cfg("line.harmonic_model.skin_effect") if skin is None else bool(skin)
     coeff = (
-        CARSON_EARTH_R_PER_HZ
+        _cfg("line.earth_return.resistance_coeff_ohm_per_m_per_hz")
         if earth_resistance_coeff is None
         else float(earth_resistance_coeff)
     )
@@ -245,10 +276,67 @@ def apply_sequence_aware_harmonic_model(
             continue
         if len(ln.from_phases) != 3:
             continue
-        ln.tags = dict(ln.tags or {})
-        ln.tags["harmonic_line_model"] = "sequence_aware"
-        ln.tags["seq_skin"] = "true" if skin else "false"
-        ln.tags["seq_earth_coeff"] = repr(coeff)
+        _apply_sequence_aware_line(ln, skin=skin, coeff=coeff)
+    return grid
+
+
+def _line_has_explicit_harmonic_model(ln: Line) -> bool:
+    """Whether a line already carries a user-set harmonic model (precedence 1, explicit)."""
+    if (ln.tags or {}).get("harmonic_line_model"):
+        return True
+    rfm = getattr(ln, "resistance_frequency", None)
+    mult = getattr(rfm, "multiplier", None)
+    # A non-default (non-constant, or constant != 1.0) resistance-frequency law counts.
+    if getattr(mult, "kind", None) == "constant":
+        return float(getattr(mult, "value", 1.0)) != 1.0
+    return mult is not None
+
+
+def apply_default_harmonic_model(
+    grid: Grid, *, f0: Optional[float] = None, skin: Optional[bool] = None
+) -> Grid:
+    """In place: apply the CONFIG-DEFAULT harmonic line model to each R/X line.
+
+    The single deliberate entry point that turns the documented defaults in
+    ``pgml.config`` (``line.harmonic_model.three_phase`` / ``.single_phase``) into actual
+    per-line models — so the choice is explicit and config-sourced, never silently
+    implicit at solve time. Per the precedence contract, a line that ALREADY carries an
+    explicit harmonic model (a ``harmonic_line_model`` tag or a non-default
+    ``resistance_frequency``) or a ``conductor_geometry`` is left untouched; only the
+    remaining R/X lines get the config default (``sequence_aware`` for 3-phase,
+    ``positive_sequence`` for 1-/2-phase by default). ``skin`` defaults to
+    ``line.harmonic_model.skin_effect``. Returns ``grid``.
+    """
+    f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
+    skin = _cfg("line.harmonic_model.skin_effect") if skin is None else bool(skin)
+    coeff = _cfg("line.earth_return.resistance_coeff_ohm_per_m_per_hz")
+    model_3ph = _cfg("line.harmonic_model.three_phase")
+    model_other = _cfg("line.harmonic_model.single_phase")
+
+    for ln in grid.branches:
+        if not (isinstance(ln, Line) and ln.conductor_geometry is None):
+            continue
+        if _line_has_explicit_harmonic_model(ln):  # precedence 1: explicit wins
+            continue
+        model = model_3ph if len(ln.from_phases) == 3 else model_other
+        if model == "sequence_aware":
+            if len(ln.from_phases) != 3:
+                raise ValueError(
+                    f"Line {ln.id}: sequence_aware needs 3 phases "
+                    f"(config single_phase={model_other!r} should not be sequence_aware)."
+                )
+            _apply_sequence_aware_line(ln, skin=skin, coeff=coeff)
+        elif model == "positive_sequence":
+            _apply_positive_sequence_line(ln, f0=f0, skin=skin)
+        elif model == "naive":
+            _apply_positive_sequence_line(ln, f0=f0, skin=False)
+        elif model == "none":
+            continue
+        else:
+            raise ValueError(
+                f"Unknown harmonic line model {model!r} in config "
+                "(expected sequence_aware | positive_sequence | naive | none)."
+            )
     return grid
 
 
@@ -258,4 +346,5 @@ __all__ = [
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",
     "apply_sequence_aware_harmonic_model",
+    "apply_default_harmonic_model",
 ]

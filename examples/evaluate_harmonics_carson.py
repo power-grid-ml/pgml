@@ -14,7 +14,10 @@ Per feeder (default ``evaluation_output/carson/<feeder>/``):
 - ``ybus_h5_diff.svg``     — |ΔY| of the two (near floating-point zero).
 - ``harmonic_h5.svg``      — h=5 magnitude/angle profile, pgml vs OpenDSS.
 - ``harmonic_3d.html``     — interactive 3D (h=5,7,11,13), pgml vs OpenDSS.
-- ``carson_vs_naive.svg``  — h=7 profile: Carson vs the naive R-const/X∝h model.
+- ``models_h7.svg`` / ``models_h7_interactive.html`` — h=7: single-conductor Carson
+  (=OpenDSS), the config-default model, positive-seq and naive overlaid (the HTML carries
+  every model at once; click the legend to toggle).
+- ``carson_vs_default_h7.svg`` — pairwise: Carson geometry vs the config-default model.
 """
 
 from __future__ import annotations
@@ -27,6 +30,10 @@ import torch
 from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly.ybus import _stamp_sources
+from pgml.geometry.synthesis import (
+    apply_default_harmonic_model,
+    apply_positive_sequence_harmonic_model,
+)
 from pgml.schemas.grid_schema import Line
 from pgml.solver import solve_harmonic_flow
 
@@ -98,16 +105,54 @@ def run_feeder(name: str, builder, out_dir: Path) -> None:
         out_html=str(out / "harmonic_3d.html"),
     )
 
-    # ---- Carson vs naive (R const, X∝h) at h=7 ------------------------------
+    # ---- line models at h=7: Carson geometry vs config default vs naive -----
+    # config default for these 1-phase feeders -> positive_sequence (skin on R).
+    res_default = solve_harmonic_flow(
+        apply_default_harmonic_model(_strip_geometry(builder()[0])),
+        [1, 7],
+        slack="norton",
+        dtype=CDT,
+    )
+    res_pos = solve_harmonic_flow(
+        apply_positive_sequence_harmonic_model(_strip_geometry(builder()[0])),
+        [1, 7],
+        slack="norton",
+        dtype=CDT,
+    )
     res_naive = solve_harmonic_flow(
         _strip_geometry(builder()[0]), [1, 7], slack="norton", dtype=CDT
     )
     carson7 = next(p for p in pgml_h if p.order == 7)
-    naive7 = ev.harmonic_profile(res_naive, grid, 7, label="naive (R const, X∝h)")
-    fig, _ = ev.plot_harmonic_profile(
-        [carson7, naive7], grid=grid, title=f"{name}: Carson vs naive line model (h=7)"
+    default7 = ev.harmonic_profile(
+        res_default, grid, 7, label="config default (pos-seq)"
     )
-    ev.save_figure(fig, out / "carson_vs_naive.svg")
+    pos7 = ev.harmonic_profile(res_pos, grid, 7, label="positive-seq (skin)")
+    naive7 = ev.harmonic_profile(res_naive, grid, 7, label="naive (R const, X∝h)")
+    dss7 = next(
+        (p for p in dss_h if p.order == 7), None
+    )  # OpenDSS (Carson geometry) overlay
+    models7 = [carson7, default7, pos7, naive7] + ([dss7] if dss7 else [])
+
+    # static overlay (semi-transparent) + interactive (ALL models, toggle each).
+    fig, _ = ev.plot_harmonic_profile(
+        models7, grid=grid, alpha=0.55, title=f"{name}: line models compared (h=7)"
+    )
+    ev.save_figure(fig, out / "models_h7.svg")
+    ev.plot_harmonic_profile_interactive(
+        models7,
+        grid=grid,
+        title=f"{name}: harmonic line models (h=7) — click legend to toggle",
+        out_html=str(out / "models_h7_interactive.html"),
+    )
+    # pairwise matplotlib: single-conductor Carson (=OpenDSS) vs the config default.
+    fig_cmp, fig_diff = ev.plot_harmonic_model_comparison(
+        carson7,
+        default7,
+        grid=grid,
+        title=f"{name} h=7: Carson geometry vs config default",
+    )
+    ev.save_figure(fig_cmp, out / "carson_vs_default_h7.svg")
+    ev.save_figure(fig_diff, out / "carson_vs_default_h7_diff.svg")
     print(f"[{name}] wrote figures to {out.resolve()}")
 
 

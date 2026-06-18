@@ -39,6 +39,10 @@ and `references` adapts the reference libraries to the SAME containers.
   cmap), LINE STYLE per implementation; lines follow branches when `grid` given.
 - `plot_profile_error(reference, ours, *, ax=None, ...) -> (fig, ax)` — per-node |Δpu|
   bar chart (aligned by node id).
+- `plot_harmonic_model_comparison(a, b, *, grid=None, relative=False, ...) ->
+  (fig_overlay, fig_diff)` — pairwise TWO-model diagnostic for one order, as TWO figures:
+  `fig_overlay` = magnitude vs distance; `fig_diff` = per-node difference SCATTER (`|a|−|b|`)
+  with node id on the x-axis (not distance — several nodes share a distance).
 - `plot_harmonic_profile_3d(profiles, *, grid=None, reference_labels=(), out_html=None,
   ...) -> plotly.Figure` — x=distance, y=magnitude, z=angle; COLOR=order (show 3,5,7,9
   at once), DASH=implementation; lines follow branches when `grid` given; writes
@@ -47,8 +51,9 @@ and `references` adapts the reference libraries to the SAME containers.
   line_alpha=0.6, ...) -> plotly.Figure` (`evaluation.interactive`) — 2D companion for a
   fixed order: x=distance, y=magnitude, ONE colour per implementation, translucent lines;
   each model is its own legend group, click to toggle on/off (`groupclick=togglegroup`).
-  For heavily-overlapping models. The matplotlib `plot_harmonic_profile` also takes
-  `alpha` to keep overlaps legible in the static SVG.
+  Carries MULTIPLE models (and orders — `h{order} · {label}` groups) at once. For
+  heavily-overlapping models. The matplotlib `plot_harmonic_profile` also takes `alpha`
+  to keep overlaps legible in the static SVG.
 - `plot_grid_graph(grid, *, node_values=None, layout="spring"|"kamada", ...) -> (fig,
   ax)` — topology colored by a per-node value; slack outlined.
 

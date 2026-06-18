@@ -194,14 +194,31 @@ The **sequence-aware** model is opt-in via a `Line.tags` marker (also schema-fre
   frequency-corrects each (lazy import of `sequence.sequence_aware_phase_z`), recombines to
   `Z_abc(h)`, and stamps it. Untagged lines are unaffected.
 
+## Defaults are explicit and config-tracked (no hidden implicit model)
+Modeling decisions are **deliberate, documented choices**, not silent implicit defaults —
+the opacity that makes OpenDSS discrepancies hard to explain. Every default value and
+default model choice lives in `src/pgml/config/defaults.yaml` (one ordered, self-describing
+file), resolved with precedence **explicit > config > converter** (`pgml.config`). The
+constants that used to be hard-coded (`gmr_over_radius = 0.7788`, the earth-return
+coefficient `π²·1e-7`, conductor radius/heights, soil resistivity) now live there.
+
+`apply_default_harmonic_model(grid)` is the **single deliberate entry point** that turns
+the config defaults into per-line models: it reads `line.harmonic_model.three_phase`
+(default `sequence_aware` — for 4-wire unbalanced LV studies) and `.single_phase`
+(default `positive_sequence`), and applies them — but only to lines that do **not** already
+carry an explicit model or a `conductor_geometry` (precedence 1 wins). Nothing is applied
+silently at solve time; you call it (or set a per-line model) on purpose.
+
 ## Choosing the model in pgml — where to set it, and what it matches
-There are three line-impedance behaviours; you select them per grid. **What you compare
-against in OpenDSS decides whether they "agree" — the same R/X data modelled as a 3-phase
-line vs. a 1-phase line gives different harmonic answers in OpenDSS itself.**
+You select the model per grid; the recommended path is the config-default dispatcher.
+**What you compare against in OpenDSS decides whether they "agree" — the same R/X data
+modelled as a 3-phase line vs. a 1-phase line gives different harmonic answers in OpenDSS
+itself.**
 
 | You have / want | How to set it in pgml | Harmonic line model | Matches OpenDSS… |
 |---|---|---|---|
-| R/X feeder, balanced study (**default**) | do nothing | `Z1(h) = R1 + j·X1·(f/f0)` | native **3-phase** `R1/X1` LineCode (`Z1`) |
+| **config defaults** (recommended) | `apply_default_harmonic_model(grid)` | per `line.harmonic_model.*`: 3-phase→`sequence_aware`, 1-phase→`positive_sequence` | 3-phase R/X with `Rg`/`Xg` (earth in `Z0`) |
+| R/X feeder, raw `X∝h` (no skin/earth) | do nothing | `Z1(h) = R1 + j·X1·(f/f0)` | native **3-phase** `R1/X1` LineCode (`Z1`) |
 | R/X feeder + physical skin on R | `apply_positive_sequence_harmonic_model(grid)` | `Z1(h) = R1·m_skin(h) + j·X1·(f/f0)` | 3-phase R/X **plus** a skin rise OpenDSS only adds for `LineGeometry` |
 | **unbalanced 4-wire** R/X feeder (`Z1`+`Z0`) | `apply_sequence_aware_harmonic_model(grid)` | `Z_abc(h)`: `Z1` earth-free + `Z0` earth-damped | native 3-phase R/X with `Rg`/`Xg` (earth in `Z0`); reactance sub-linearity only via geometry |
 | real 3-phase conductor coordinates | set `Line.conductor_geometry` | full Carson (earth in `Z0`, skin on R) | OpenDSS `LineGeometry` (bit-exact) |
