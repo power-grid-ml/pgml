@@ -3,6 +3,7 @@ name: feature-implementer
 description: Implements core numerical modules (equation registry, Y-bus assembly, complex solver) to a frozen spec. Use for the differentiable, GPU-ready compute core. Do NOT use for converters or reference comparisons.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
+memory: project
 ---
 You implement the differentiable compute core of pgml. You do not have the
 orchestrator's conversation — your context is only this prompt and the files you

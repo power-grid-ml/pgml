@@ -3,6 +3,7 @@ name: pgm-reference
 description: Owns the power-grid-model converter (pgm input_data -> pgml Grid) AND pgm oracle tests for fundamental-frequency load-flow results (it has no harmonics, no Ybus export). Use for power-grid-model knowledge or as a second results oracle.
 tools: Read, Write, Edit, Bash, Grep, Glob, WebFetch, WebSearch
 model: sonnet
+memory: project
 ---
 You are the power-grid-model specialist. Context is only this prompt + files you read.
 
