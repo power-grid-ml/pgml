@@ -21,16 +21,21 @@ from .carson import (
     series_impedance,
 )
 from .sequence import (
+    carson_earth_resistance,
     fit_equivalent_rdc,
     phase_to_sequence,
     positive_sequence_z,
+    sequence_aware_phase_z,
     sequence_impedances,
+    sequence_to_phase_z,
     skin_resistance_multiplier,
     two_conductor_geometry,
     two_conductor_loop_z,
+    zero_sequence_harmonic_z,
 )
 from .synthesis import (
     apply_positive_sequence_harmonic_model,
+    apply_sequence_aware_harmonic_model,
     positive_sequence_resistance_model,
     synthesize_grid_geometry,
     synthesize_line_geometry,
@@ -52,9 +57,15 @@ __all__ = [
     "two_conductor_loop_z",
     "phase_to_sequence",
     "sequence_impedances",
+    # sequence-aware harmonic model (unbalanced / 4-wire: earth return in Z0)
+    "carson_earth_resistance",
+    "zero_sequence_harmonic_z",
+    "sequence_to_phase_z",
+    "sequence_aware_phase_z",
     # synthesis (R/X -> geometry / harmonic model)
     "synthesize_line_geometry",
     "synthesize_grid_geometry",
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",
+    "apply_sequence_aware_harmonic_model",
 ]

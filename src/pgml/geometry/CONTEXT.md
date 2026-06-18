@@ -39,6 +39,21 @@ internal + geometric, earth return lives only in `Z0`. So `X1(h) = X1·h` (geome
   `sequence_impedances(z) -> (Z0, Z1, Z2)` diagonal — shows 3-phase geometry keeps earth
   return only in `Z0`.
 
+### Sequence-aware model (UNBALANCED / 4-wire: earth return lives in Z0)
+For asymmetric studies the full coupled `Z_abc(h)` is needed: `Z1` earth-free, `Z0`
+carrying the earth/neutral return (excited by zero-sequence/residual current).
+- `carson_earth_resistance(freqs, *, coeff=π²·1e-7) -> Re[H]` (Ω/m): Carson earth-return
+  resistance `Re(f)=coeff·f`, geometry-independent, ∝ f (the zero-seq damping).
+- `zero_sequence_harmonic_z(r0, x0, f0, freqs, *, skin=True, earth_resistance_coeff=π²·1e-7)
+  -> Z0[*B,H]`: conductor part (`X0∝h`+skin) `+ 3·(Re(f)−Re(f0))`; monotone, never
+  non-physical; `coeff=0` -> pure conductor. (Earth REACTANCE sub-linearity is return-path
+  dependent -> geometry path; `X0∝h` here.)
+- `sequence_to_phase_z(z1, z0) -> [*,H,3,3]`: inverse Fortescue, `Zself=(Z0+2Z1)/3`,
+  `Zmutual=(Z0−Z1)/3` (balanced/transposed).
+- `sequence_aware_phase_z(r1, x1, r0, x0, f0, freqs, *, skin, earth_resistance_coeff)
+  -> Z_abc[*B,H,3,3]`: positive seq (earth-free) + damped zero seq, recombined.
+  Differentiable in R1/X1/R0/X0; batched.
+
 ## synthesis.py
 - `synthesize_line_geometry(r1, x1, *, f0, phase, line_type, ...) -> LineGeometry` —
   single-conductor earth-return geometry reproducing `R1 + jX1` (Ω/m) at f0 (GMR sets
@@ -54,6 +69,12 @@ internal + geometric, earth return lives only in `Z0`. So `X1(h) = X1·h` (geome
   NO geometry, NO earth floor. `positive_sequence_resistance_model(r1, *, f0)` builds the
   model object. Assembly `_resistance_multiplier` evaluates the law differentiably (and
   also supports `curve` multipliers via linear interp).
+- `apply_sequence_aware_harmonic_model(grid, *, skin=True, earth_resistance_coeff=None)
+  -> grid` (in place, for UNBALANCED 4-wire studies): tags each 3-phase R/X line
+  `harmonic_line_model=sequence_aware`; assembly `_stamp_sequence_aware_lines` decomposes
+  `Z_abc(f0)` -> `Z1`/`Z0`, frequency-corrects each (`sequence_aware_phase_z`), and stamps
+  `Z_abc(h)`. Needs a full 3×3 R/L matrix (off-diagonals carry `Z0`). Untagged lines and
+  geometry lines unaffected.
 
 ## Schema (grid_schema.py)
 - `ConductorPlacement(phase, x_m, y_m, gmr_m, radius_m, r_dc_ohm_per_m, is_neutral)` —
@@ -72,7 +93,12 @@ internal + geometric, earth return lives only in `Z0`. So `X1(h) = X1·h` (geome
 - Positive-sequence model: `Z1` from a genuine 3-phase Carson geometry scales ∝ h to
   ~1e-3 while `Z0` carries the earth floor (`X0(h)/(h·X0(f0))→0.88`, `R0/R1≈5`);
   `positive_sequence_z` X is ∝ h to floating point and agrees with the two-conductor
-  Carson loop. gradcheck w.r.t. R1/X1 and through assemble. Tests:
-  `tests/reference/test_carson_sequence.py`,
-  `tests/differentiability/test_sequence_gradcheck.py`. Decision record:
-  `references/positive_sequence_harmonic_line_model.md`.
+  Carson loop. Native-OpenDSS oracle: 3-phase R/X -> `Z1=R1+jX1·(f/f0)` (pgml default),
+  1-phase -> earth floor.
+- Sequence-aware (unbalanced) model: `Z0(h)` gains a frequency-growing earth-return
+  resistance the positive sequence lacks; `Z_abc(h)` recombines to exactly `(Z0,Z1,Z1)`;
+  a tagged 3-phase line assembled at harmonics recovers an earth-free `Z1` and a damped
+  `Z0`. gradcheck w.r.t. R1/X1/R0/X0 and through both assembly paths; CPU/CUDA parity.
+  Tests: `tests/reference/test_carson_sequence.py`,
+  `tests/differentiability/test_sequence_gradcheck.py`, `tests/gpu/test_device_parity.py`.
+  Decision record: `references/positive_sequence_harmonic_line_model.md`.

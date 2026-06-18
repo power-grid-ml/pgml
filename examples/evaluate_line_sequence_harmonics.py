@@ -1,4 +1,4 @@
-"""Positive-sequence-aware harmonic line model — comparative figures (TODO #1, option B).
+"""Positive-sequence-aware harmonic line model — comparative figures.
 
 Visualises WHY the single-conductor R/X->geometry synthesis is wrong for positive-
 sequence feeders and what the corrected model does instead:

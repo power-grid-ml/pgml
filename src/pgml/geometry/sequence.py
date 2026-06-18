@@ -208,6 +208,98 @@ def sequence_impedances(z_phase: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     return zseq[..., 0, 0], zseq[..., 1, 1], zseq[..., 2, 2]
 
 
+# ---------------------------------------------------------------------------
+# Sequence-aware harmonic model (UNBALANCED / 4-wire studies)
+# ---------------------------------------------------------------------------
+# Carson's earth-return resistance is geometry-INDEPENDENT: Re(f) = mu0*omega/8 =
+# pi^2 * f * 1e-7 (Ohm/m), growing linearly with frequency. It is the dominant
+# frequency-dependent DAMPING of zero-sequence (ground-loop) harmonics, and it does
+# NOT appear in the positive sequence. (OpenDSS exposes the same physics through its
+# per-LineCode Rg/Xg parameters; its defaults are calibrated for imperial length units,
+# so on a metric line they are ~3.28x smaller than this physical per-metre value — hence
+# the coefficient is configurable here.)
+CARSON_EARTH_R_PER_HZ = math.pi**2 * 1e-7  # Ohm/m per Hz
+
+
+def carson_earth_resistance(freqs: Tensor, *, coeff: float = CARSON_EARTH_R_PER_HZ):
+    """Carson earth-return resistance ``Re(f) = coeff*f`` (Ω/m), one phase (∝ frequency)."""
+    return coeff * freqs.to(_rdtype(freqs))
+
+
+def zero_sequence_harmonic_z(
+    r0,
+    x0,
+    f0,
+    freqs: Tensor,
+    *,
+    skin: bool = True,
+    earth_resistance_coeff: float = CARSON_EARTH_R_PER_HZ,
+) -> Tensor:
+    """Zero-sequence harmonic impedance ``Z0(h)`` ``[*B, H]`` (Ω/m or Ω).
+
+    The conductor part scales like the positive sequence (``X0 ∝ h``, optional skin on
+    ``R0``); ADDED to it is the Carson earth/ground-loop resistance growth
+    ``3·(Re(f) − Re(f0))`` (``Re`` per :func:`carson_earth_resistance`), the
+    frequency-dependent DAMPING that a balanced positive-sequence current never sees.
+    The growth is ``≥ 0`` and monotone, so ``Z0(h)`` can never become non-physical.
+    Set ``earth_resistance_coeff=0`` to recover a pure conductor (no earth) zero
+    sequence. (The earth-return REACTANCE sub-linearity is geometry / return-path
+    dependent — deep earth vs nearby neutral/sheath — and is left to the full Carson
+    geometry path; here ``X0`` scales ∝ h.) Differentiable in ``R0``/``X0``; batched.
+    """
+    z = positive_sequence_z(r0, x0, f0, freqs, skin=skin)  # [*B, H] conductor-like
+    rdt = _rdtype(freqs)
+    f = freqs.to(rdt).reshape(-1)  # [H]
+    f0t = _to(f0, rdt, freqs.device).reshape(())
+    d_re = (3.0 * earth_resistance_coeff) * (f - f0t)  # [H] Ω/m, >= 0
+    return z + d_re.to(z.dtype)
+
+
+def sequence_to_phase_z(z1: Tensor, z0: Tensor) -> Tensor:
+    """Phase impedance matrix ``Z_abc`` ``[*, 3, 3]`` from sequence ``Z1`` (=Z2) and ``Z0``.
+
+    ``Z_self = (Z0 + 2·Z1)/3`` on the diagonal, ``Z_mutual = (Z0 − Z1)/3`` off-diagonal
+    — the inverse Fortescue for a balanced/transposed line (``Z2 = Z1``). The earth
+    return, carried only by ``Z0``, therefore appears in BOTH the self and mutual terms,
+    coupling the phases; it cancels again in any balanced (positive-sequence) current.
+    ``z1``/``z0`` are complex ``[*B, H]`` -> ``[*B, H, 3, 3]``.
+    """
+    zs = (z0 + 2.0 * z1) / 3.0
+    zm = (z0 - z1) / 3.0
+    eye = torch.eye(3, dtype=z1.dtype, device=z1.device)
+    off = 1.0 - eye
+    return zs[..., None, None] * eye + zm[..., None, None] * off
+
+
+def sequence_aware_phase_z(
+    r1,
+    x1,
+    r0,
+    x0,
+    f0,
+    freqs: Tensor,
+    *,
+    skin: bool = True,
+    earth_resistance_coeff: float = CARSON_EARTH_R_PER_HZ,
+) -> Tensor:
+    """Full coupled phase impedance ``Z_abc(h)`` ``[*B, H, 3, 3]`` for UNBALANCED studies.
+
+    Combines an earth-free positive sequence ``Z1(h)`` (:func:`positive_sequence_z`,
+    ``X1 ∝ h`` + skin) with a damped zero sequence ``Z0(h)``
+    (:func:`zero_sequence_harmonic_z`, conductor + Carson earth-return resistance) and
+    recombines them (:func:`sequence_to_phase_z`). An unbalanced / zero-sequence current
+    then sees the earth-return damping in ``Z0``, while a balanced positive-sequence
+    current still sees only the earth-free ``Z1``. This is the model an asymmetric
+    4-wire LV harmonic study needs; differentiable in ``R1/X1/R0/X0``, batched over
+    lines and ``H``.
+    """
+    z1 = positive_sequence_z(r1, x1, f0, freqs, skin=skin)
+    z0 = zero_sequence_harmonic_z(
+        r0, x0, f0, freqs, skin=skin, earth_resistance_coeff=earth_resistance_coeff
+    )
+    return sequence_to_phase_z(z1, z0)
+
+
 __all__ = [
     "fit_equivalent_rdc",
     "skin_resistance_multiplier",
@@ -217,4 +309,8 @@ __all__ = [
     "fortescue_matrix",
     "phase_to_sequence",
     "sequence_impedances",
+    "carson_earth_resistance",
+    "zero_sequence_harmonic_z",
+    "sequence_to_phase_z",
+    "sequence_aware_phase_z",
 ]

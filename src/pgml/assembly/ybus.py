@@ -303,17 +303,125 @@ def _series_terminal_indices(
     return rows, rows
 
 
+def _is_sequence_aware(line) -> bool:
+    """A line opted into the sequence-aware harmonic model (UNBALANCED studies)."""
+    return (line.tags or {}).get("harmonic_line_model") == "sequence_aware"
+
+
 def _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
     # Explicit-R/L/C lines go through the matrix path; lines carrying a
-    # `conductor_geometry` go through the Carson/Deri geometry path.
-    rx_lines = [
+    # `conductor_geometry` go through the Carson/Deri geometry path; lines tagged
+    # `harmonic_line_model=sequence_aware` go through the Z1/Z0 sequence-aware path
+    # (frequency-correct each sequence: earth return only in Z0). See
+    # `geometry/sequence.py` / `apply_sequence_aware_harmonic_model`.
+    flow_lines = [
         b
         for b in grid.branches
         if isinstance(b, Line) and b.in_service and b.conductor_geometry is None
     ]
+    rx_lines = [b for b in flow_lines if not _is_sequence_aware(b)]
+    seq_lines = [b for b in flow_lines if _is_sequence_aware(b)]
     if rx_lines:
         y = _stamp_line_groups(rx_lines, f, y, index, cdt, rdt, device, param_overrides)
+    if seq_lines:
+        y = _stamp_sequence_aware_lines(
+            seq_lines, grid, f, y, index, cdt, rdt, device, param_overrides
+        )
     y = _stamp_geometry_lines(grid, f, y, index, cdt, rdt, device, param_overrides)
+    return y
+
+
+def _stamp_sequence_aware_lines(
+    lines, grid, f, y, index, cdt, rdt, device, param_overrides
+):
+    """Stamp 3-phase lines with the sequence-aware harmonic model (Z1 + earth-damped Z0).
+
+    Each line's reference-frequency phase matrix ``Z_abc(f0) = R + j·2πf0·L`` is
+    decomposed into ``Z1(f0)``/``Z0(f0)`` (balanced/transposed), each sequence is
+    frequency-corrected separately (``Z1``: ``X∝h`` + skin, NO earth; ``Z0``: conductor
+    + Carson earth-return resistance), and the result recombined to ``Z_abc(h)`` — the
+    model an asymmetric 4-wire study needs. Differentiable in R/L; the shunt ``C`` keeps
+    the usual ``B∝h`` split.
+    """
+    from pgml.geometry.sequence import CARSON_EARTH_R_PER_HZ, sequence_aware_phase_z
+
+    f0 = float(grid.base_frequency_hz)
+    two_pi_f0 = 2.0 * math.pi * f0
+    two_pi_f = (2.0 * torch.pi) * f  # [H]
+
+    # Group by (skin, earth coeff) so each batched call shares its model options.
+    by_opts: dict[tuple, list] = {}
+    for ln in lines:
+        if len(ln.from_phases) != 3:
+            raise ValueError(
+                f"Line {ln.id}: harmonic_line_model=sequence_aware requires a 3-phase "
+                f"line (got {len(ln.from_phases)} phases); it is a Z1/Z0 model."
+            )
+        tags = ln.tags or {}
+        skin = tags.get("seq_skin", "true") == "true"
+        coeff = float(tags.get("seq_earth_coeff", CARSON_EARTH_R_PER_HZ))
+        by_opts.setdefault((skin, coeff), []).append(ln)
+
+    for (skin, coeff), group in by_opts.items():
+        r_list, l_list, c_list, len_list = [], [], [], []
+        for ln in group:
+            r_list.append(
+                _override(
+                    param_overrides,
+                    ("line", ln.id, "series_resistance_ohm_per_m"),
+                    _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
+                )
+            )
+            l_list.append(
+                _override(
+                    param_overrides,
+                    ("line", ln.id, "series_inductance_h_per_m"),
+                    _real_matrix(ln.series_inductance_h_per_m, rdt, device),
+                )
+            )
+            c_list.append(
+                _real_matrix(ln.shunt_capacitance_f_per_m, rdt, device)
+                if ln.shunt_capacitance_f_per_m is not None
+                else torch.zeros((3, 3), dtype=rdt, device=device)
+            )
+            len_list.append(_geom_scalar(ln.length_m, rdt, device))
+        r = torch.stack(r_list, 0)  # [K,3,3]
+        ind = torch.stack(l_list, 0)
+        c = torch.stack(c_list, 0)
+        length = torch.stack(len_list, 0)  # [K]
+
+        # Z_abc(f0) -> sequence (Z1, Z0) via the symmetric (transposed) decomposition.
+        z_f0 = torch.complex(r, two_pi_f0 * ind).to(cdt)  # [K,3,3]
+        diag = z_f0.diagonal(dim1=-2, dim2=-1)  # [K,3]
+        zs = diag.mean(-1)  # [K] self
+        zm = (z_f0.sum((-2, -1)) - diag.sum(-1)) / 6.0  # [K] mutual (6 off-diagonals)
+        z1 = zs - zm  # [K]
+        z0 = zs + 2.0 * zm
+        z_abc = sequence_aware_phase_z(
+            z1.real,
+            z1.imag,
+            z0.real,
+            z0.imag,
+            f0,
+            f,
+            skin=skin,
+            earth_resistance_coeff=coeff,
+        )  # [K,H,3,3]  Ω/m
+
+        z_len = (z_abc * length[:, None, None, None]).to(cdt)  # [K,H,3,3]
+        ys_adm = torch.linalg.inv(z_len).transpose(0, 1)  # [H,K,3,3]
+        series_block = pi_series_blocks(ys_adm)
+
+        c_len = (c * length[:, None, None]).to(cdt)  # [K,3,3]
+        yc = (1j * two_pi_f).to(cdt)[:, None, None, None] * c_len[None]  # [H,K,3,3]
+        half = 0.5 * yc
+        zeros = torch.zeros_like(half)
+        shunt_block = torch.cat(
+            [torch.cat([half, zeros], dim=-1), torch.cat([zeros, half], dim=-1)], dim=-2
+        )
+        block = series_block + shunt_block
+        rows, cols = _series_terminal_indices(group, index, device)
+        y = scatter_blocks_into(y, block, rows, cols)
     return y
 
 

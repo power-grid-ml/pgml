@@ -1,4 +1,4 @@
-"""Positive-sequence-aware harmonic line model (TODO #1, option B).
+"""Positive-sequence-aware harmonic line model.
 
 The physics being asserted: a balanced positive-sequence current produces no net
 ground current, so the Carson/Deri earth-return term CANCELS in ``Z1`` and survives
@@ -19,9 +19,12 @@ import torch
 from pgml.geometry.carson import kron_reduce, series_impedance
 from pgml.geometry.sequence import (
     positive_sequence_z,
+    sequence_aware_phase_z,
     sequence_impedances,
+    sequence_to_phase_z,
     two_conductor_geometry,
     two_conductor_loop_z,
+    zero_sequence_harmonic_z,
 )
 from pgml.geometry.synthesis import synthesize_line_geometry
 
@@ -143,3 +146,230 @@ def test_positive_sequence_batched_equals_per_line():
     z0 = positive_sequence_z(r1[0], x1[0], F0, freqs)
     z1 = positive_sequence_z(r1[1], x1[1], F0, freqs)
     assert torch.allclose(zb[0], z0) and torch.allclose(zb[1], z1)
+
+
+# --- native OpenDSS R/X lines (how OpenDSS frequency-adjusts an R/X LineCode) ----
+_DSS_F0 = 60.0  # OpenDSS default base frequency
+_DSS_ORDERS = [1, 5, 7, 11, 13]
+
+
+def _dss_series_z(line_cmd: str, nph: int, orders):
+    """Series Z(h) [len(orders), nph, nph] (Ω/km) of an OpenDSS R/X line at harmonics."""
+    import opendssdirect as dss
+
+    dss.Text.Command("Clear")
+    dss.Text.Command(
+        f"New Circuit.t basekv=12.47 phases={nph} bus1=s frequency={_DSS_F0} "
+        "r1=1e-6 x1=1e-6"
+    )
+    dss.Text.Command(line_cmd)
+    dss.Text.Command("Set voltagebases=[12.47]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+    out = []
+    for h in orders:
+        dss.Text.Command(f"set frequency={h * _DSS_F0}")
+        dss.Solution.BuildYMatrix(2, 1)
+        dss.Circuit.SetActiveElement("Line.l1")
+        yp = np.array(dss.CktElement.YPrim())
+        n = int(round((len(yp) / 2) ** 0.5))
+        yy = (yp[0::2] + 1j * yp[1::2]).reshape(n, n)
+        half = n // 2
+        out.append(np.linalg.inv(-yy[:half, half:]))
+    return np.array(out)
+
+
+def test_opendss_native_3phase_rx_positive_sequence_is_naive():
+    """Native OpenDSS 3-phase R/X line: Z1(h)=R1+jX1·(f/f0) (earth only in Z0).
+
+    This is the standard way to enter a balanced feeder in OpenDSS, and it is exactly the
+    pgml DEFAULT R/X behaviour (``X∝h``, ``R`` const) — i.e. the simplified R/X model does
+    NOT diverge from native 3-phase OpenDSS.
+    """
+    r1, x1 = 0.36, 0.30
+    zabc = _dss_series_z(
+        "New Line.l1 phases=3 bus1=a.1.2.3 bus2=b.1.2.3 "
+        f"r1={r1} x1={x1} r0=0.6 x0=1.2 length=1 units=km",
+        3,
+        _DSS_ORDERS,
+    )
+    a = np.exp(2j * np.pi / 3)
+    A = np.array([[1, 1, 1], [1, a * a, a], [1, a, a * a]])
+    Ainv = np.linalg.inv(A)
+    z1 = np.array([(Ainv @ zabc[i] @ A)[1, 1] for i in range(len(_DSS_ORDERS))])
+    z0 = np.array([(Ainv @ zabc[i] @ A)[0, 0] for i in range(len(_DSS_ORDERS))])
+
+    # OpenDSS positive sequence: R1 constant, X1 ∝ h (earth cancels).
+    for i, h in enumerate(_DSS_ORDERS):
+        assert abs(z1[i].real - r1) < 1e-4, (h, z1[i].real)
+        assert abs(z1[i].imag - x1 * h) / (x1 * h) < 1e-4, (h, z1[i].imag)
+    # earth return shows up in Z0 (X0 sub-linear, R0 grows).
+    assert (z0[-1].imag / (z0[0].imag * _DSS_ORDERS[-1])) < 0.95
+    assert z0[-1].real > z0[0].real * 1.2
+
+    # pgml DEFAULT (naive: skin=False) reproduces the OpenDSS Z1 to floating point.
+    freqs = torch.tensor([h * _DSS_F0 for h in _DSS_ORDERS], dtype=RDT)
+    z_pgml = positive_sequence_z(r1, x1, _DSS_F0, freqs, skin=False).numpy()
+    np.testing.assert_allclose(z_pgml, z1, rtol=1e-4, atol=1e-4)
+
+
+# --- sequence-aware model (unbalanced / 4-wire: earth return in Z0) -------------
+def _seq_line():
+    """A representative LV line: R0/X0 > R1/X1 (a real zero-sequence/earth loop)."""
+    return dict(r1=0.21e-3, x1=0.08e-3, r0=0.82e-3, x0=0.32e-3)
+
+
+def test_zero_sequence_carries_earth_damping_positive_does_not():
+    """Z0 gains a frequency-growing earth-return resistance; Z1 stays earth-free."""
+    freqs = _freqs()
+    p = _seq_line()
+    z1 = positive_sequence_z(p["r1"], p["x1"], F0, freqs)
+    z0 = zero_sequence_harmonic_z(p["r0"], p["x0"], F0, freqs)
+
+    # at f0 both reproduce their inputs.
+    assert abs(float(z0[0].real) - p["r0"]) < 1e-12
+    assert abs(float(z1[0].real) - p["r1"]) < 1e-12
+    # X scales ∝ h in BOTH sequences (geometric); R0 grows much faster than R1 (earth).
+    assert torch.allclose(z0.imag, p["x0"] * (freqs / F0), rtol=0, atol=1e-18)
+    r0_growth = float(z0.real[-1] - z0.real[0])
+    r1_growth = float(z1.real[-1] - z1.real[0])
+    assert (
+        r0_growth > 5.0 * r1_growth
+    )  # earth-return damping lives in the zero sequence
+
+
+def test_zero_sequence_reduces_to_positive_without_earth():
+    """earth_resistance_coeff=0 -> Z0 is a pure conductor sequence (== positive model)."""
+    freqs = _freqs()
+    p = _seq_line()
+    z0_no_earth = zero_sequence_harmonic_z(
+        p["r1"], p["x1"], F0, freqs, earth_resistance_coeff=0.0
+    )
+    z1 = positive_sequence_z(p["r1"], p["x1"], F0, freqs)
+    assert torch.allclose(z0_no_earth, z1, atol=1e-15)
+
+
+def test_sequence_aware_phase_matrix_roundtrips():
+    """Z_abc(h) decomposes back to exactly (Z0, Z1, Z1) — recombination is consistent."""
+    freqs = _freqs()
+    p = _seq_line()
+    zabc = sequence_aware_phase_z(p["r1"], p["x1"], p["r0"], p["x0"], F0, freqs)
+    assert zabc.shape == (len(ORDERS), 3, 3)
+    z1 = positive_sequence_z(p["r1"], p["x1"], F0, freqs)
+    z0 = zero_sequence_harmonic_z(p["r0"], p["x0"], F0, freqs)
+    zr0, zr1, zr2 = sequence_impedances(zabc)
+    assert torch.allclose(zr1, z1, atol=1e-12)
+    assert torch.allclose(zr2, z1, atol=1e-12)
+    assert torch.allclose(zr0, z0, atol=1e-12)
+    # symmetric/transposed structure: equal diagonals, equal off-diagonals.
+    diag = zabc.diagonal(dim1=-2, dim2=-1)
+    assert torch.allclose(diag, diag[..., :1].expand_as(diag), atol=1e-15)
+
+
+def test_sequence_to_phase_z_matches_textbook():
+    """Z_self=(Z0+2Z1)/3, Z_mutual=(Z0-Z1)/3 (inverse Fortescue, balanced)."""
+    freqs = torch.tensor([F0], dtype=RDT)
+    z1 = torch.tensor([[1.0 + 2.0j]], dtype=torch.complex128)
+    z0 = torch.tensor([[3.0 + 9.0j]], dtype=torch.complex128)
+    zabc = sequence_to_phase_z(z1, z0)
+    zs = (z0 + 2 * z1) / 3
+    zm = (z0 - z1) / 3
+    assert torch.allclose(zabc[0, 0, 0, 0], zs[0, 0])
+    assert torch.allclose(zabc[0, 0, 0, 1], zm[0, 0])
+    _ = freqs
+
+
+def test_sequence_aware_assembly_recovers_damped_zero_sequence():
+    """End-to-end: a tagged 3-phase line's assembled Y(h) -> Z1 earth-free, Z0 damped."""
+    import math
+
+    import numpy as np
+
+    from pgml.assembly import assemble_network_ybus
+    from pgml.geometry.synthesis import apply_sequence_aware_harmonic_model
+    from pgml.schemas.grid_schema import Grid, Line, Node, Phase, Source
+
+    f0 = 50.0
+    r1, x1, r0, x0 = 0.30e-3, 0.30e-3, 0.60e-3, 1.20e-3
+    z1c, z0c = complex(r1, x1), complex(r0, x0)
+    zs, zm = (z0c + 2 * z1c) / 3, (z0c - z1c) / 3
+    w = 2 * math.pi * f0
+    rm = [[zs.real if i == j else zm.real for j in range(3)] for i in range(3)]
+    lm = [[(zs.imag if i == j else zm.imag) / w for j in range(3)] for i in range(3)]
+    ph = (Phase.A, Phase.B, Phase.C)
+    grid = Grid(
+        base_frequency_hz=f0,
+        nodes=[
+            Node(id=1, u_rated_v=400.0, phases=ph),
+            Node(id=2, u_rated_v=400.0, phases=ph),
+        ],
+        branches=[
+            Line(
+                id=10,
+                from_node=1,
+                to_node=2,
+                from_phases=ph,
+                to_phases=ph,
+                length_m=100.0,
+                series_resistance_ohm_per_m=rm,
+                series_inductance_h_per_m=lm,
+                shunt_capacitance_f_per_m=[[0.0] * 3 for _ in range(3)],
+            )
+        ],
+        appliances=[
+            Source(
+                id=1,
+                node=1,
+                phases=ph,
+                u_ref_v=(230.0, 230.0, 230.0),
+                u_angle_deg=(0.0, -120.0, 120.0),
+                resistance_ohm=[
+                    [1e-3 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                inductance_h=[
+                    [1e-6 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+            )
+        ],
+    )
+    apply_sequence_aware_harmonic_model(grid)
+    assert grid.branches[0].tags["harmonic_line_model"] == "sequence_aware"
+
+    a = np.exp(2j * np.pi / 3)
+    amat = np.array([[1, 1, 1], [1, a * a, a], [1, a, a * a]])
+    ainv = np.linalg.inv(amat)
+
+    def seq_z(h):
+        yb = assemble_network_ybus(grid, [h * f0], dtype=torch.complex128).Y[0].numpy()
+        z = np.linalg.inv(-yb[0:3, 3:6]) / 100.0
+        zseq = ainv @ z @ amat
+        return zseq[1, 1], zseq[0, 0]
+
+    z1_1, z0_1 = seq_z(1)
+    z1_13, z0_13 = seq_z(13)
+    # h=1 recovers the input sequence impedances.
+    assert abs(z1_1 - z1c) < 1e-9 and abs(z0_1 - z0c) < 1e-9
+    # positive sequence: R ~ constant, X ∝ h (earth-free).
+    assert abs(z1_13.real - r1) / r1 < 0.2
+    assert abs(z1_13.imag - x1 * 13) / (x1 * 13) < 1e-6
+    # zero sequence: R grows strongly (earth-return damping concentrated here).
+    assert z0_13.real > 3.0 * z0_1.real
+    assert (z0_13.real / z1_13.real) > 2.0 * (z0_1.real / z1_1.real)
+
+
+def test_opendss_native_1phase_rx_carries_earth_floor():
+    """Native OpenDSS 1-phase R/X line: the earth term enters the single self-Z (floor).
+
+    With no second phase to cancel against, the Carson Rg/Xg of the line code surface
+    directly — R rises and X scales sub-linearly. This is the OpenDSS setup our
+    single-conductor synthesis matches, and why it differs from the positive sequence.
+    """
+    r1, x1 = 0.36, 0.30
+    z = _dss_series_z(
+        f"New Line.l1 phases=1 bus1=a bus2=b r1={r1} x1={x1} length=1 units=km",
+        1,
+        _DSS_ORDERS,
+    )[:, 0, 0]
+    # earth floor: reactance below naive h·X1, resistance grows with frequency.
+    assert (z[-1].imag / (x1 * _DSS_ORDERS[-1])) < 0.95
+    assert z[-1].real > z[0].real * 1.2

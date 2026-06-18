@@ -190,7 +190,7 @@ def apply_positive_sequence_harmonic_model(
 ) -> Grid:
     """In place: give every R/X line the positive-sequence harmonic model (no earth floor).
 
-    The corrected harmonic line model (TODO #1, option B): the EXPLICIT R/L/C path
+    The corrected positive-sequence harmonic line model: the EXPLICIT R/L/C path
     already scales the geometric reactance ``X(h)=X1*h`` (constant ``L``) with NO earth
     return; this adds the physically-correct skin-effect growth on ``R`` via the line's
     :class:`ResistanceFrequencyModel` (``carson_skin_multiplier``). Unlike
@@ -214,9 +214,48 @@ def apply_positive_sequence_harmonic_model(
     return grid
 
 
+def apply_sequence_aware_harmonic_model(
+    grid: Grid, *, skin: bool = True, earth_resistance_coeff: Optional[float] = None
+) -> Grid:
+    """In place: tag every 3-phase R/X line for the sequence-aware harmonic model.
+
+    For ASYMMETRIC (unbalanced) 4-wire studies. Assembly decomposes each tagged line's
+    reference-frequency phase matrix ``Z_abc(f0)`` into ``Z1``/``Z0`` and
+    frequency-corrects each sequence separately: ``Z1`` stays earth-free (``X∝h`` + skin)
+    while ``Z0`` carries the Carson earth-return resistance damping (see
+    :func:`pgml.geometry.sequence.sequence_aware_phase_z`). The zero-sequence path that an
+    unbalanced/neutral-return current excites is therefore modelled with its earth-return
+    damping, which a balanced positive-sequence current never sees.
+
+    Needs a full 3x3 R/L matrix (the off-diagonal mutuals are what carry ``Z0``); a
+    diagonal matrix gives ``Z0 = Z1`` plus the universal earth term. Single-/two-phase and
+    geometry-defined lines are left untouched. ``earth_resistance_coeff`` overrides the
+    Carson default (``π²·1e-7`` Ω/m/Hz); ``skin=False`` drops the conductor skin rise.
+    Returns ``grid``.
+    """
+    from pgml.geometry.sequence import CARSON_EARTH_R_PER_HZ
+
+    coeff = (
+        CARSON_EARTH_R_PER_HZ
+        if earth_resistance_coeff is None
+        else float(earth_resistance_coeff)
+    )
+    for ln in grid.branches:
+        if not (isinstance(ln, Line) and ln.conductor_geometry is None):
+            continue
+        if len(ln.from_phases) != 3:
+            continue
+        ln.tags = dict(ln.tags or {})
+        ln.tags["harmonic_line_model"] = "sequence_aware"
+        ln.tags["seq_skin"] = "true" if skin else "false"
+        ln.tags["seq_earth_coeff"] = repr(coeff)
+    return grid
+
+
 __all__ = [
     "synthesize_line_geometry",
     "synthesize_grid_geometry",
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",
+    "apply_sequence_aware_harmonic_model",
 ]

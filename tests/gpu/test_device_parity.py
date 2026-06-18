@@ -11,8 +11,11 @@ from pgml.assembly import (
     build_injections,
     node_phase_index,
 )
-from pgml.geometry.sequence import positive_sequence_z
-from pgml.geometry.synthesis import apply_positive_sequence_harmonic_model
+from pgml.geometry.sequence import positive_sequence_z, sequence_aware_phase_z
+from pgml.geometry.synthesis import (
+    apply_positive_sequence_harmonic_model,
+    apply_sequence_aware_harmonic_model,
+)
 from pgml.schemas.grid_schema import (
     ConductorPlacement,
     Grid,
@@ -122,6 +125,84 @@ def test_cpu_cuda_positive_sequence_assembly_parity(dtype):
     torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)
 
 
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_cpu_cuda_sequence_aware_z_parity(dtype):
+    """The sequence-aware phase matrix Z_abc(h) runs identically on CPU and CUDA."""
+    f = torch.tensor([50.0, 250.0, 650.0], dtype=dtype)
+    z_cpu = sequence_aware_phase_z(0.21e-3, 0.08e-3, 0.82e-3, 0.32e-3, 50.0, f)
+    z_cuda = sequence_aware_phase_z(
+        0.21e-3, 0.08e-3, 0.82e-3, 0.32e-3, 50.0, f.to("cuda")
+    )
+    assert z_cuda.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.float64 else 1e-4
+    torch.testing.assert_close(z_cuda.cpu(), z_cpu, rtol=tol, atol=tol)
+
+
+def _sequence_aware_grid() -> Grid:
+    """Tiny 3-phase grid whose line uses the sequence-aware (Z1/Z0) harmonic model."""
+    import math
+
+    f0 = 50.0
+    z1c, z0c = complex(0.3e-3, 0.3e-3), complex(0.6e-3, 1.2e-3)
+    zs, zm = (z0c + 2 * z1c) / 3, (z0c - z1c) / 3
+    w = 2 * math.pi * f0
+    ph = (Phase.A, Phase.B, Phase.C)
+    grid = Grid(
+        base_frequency_hz=f0,
+        nodes=[
+            Node(id=1, u_rated_v=400.0, phases=ph),
+            Node(id=2, u_rated_v=400.0, phases=ph),
+        ],
+        branches=[
+            Line(
+                id=10,
+                from_node=1,
+                to_node=2,
+                from_phases=ph,
+                to_phases=ph,
+                length_m=100.0,
+                series_resistance_ohm_per_m=[
+                    [zs.real if i == j else zm.real for j in range(3)] for i in range(3)
+                ],
+                series_inductance_h_per_m=[
+                    [(zs.imag if i == j else zm.imag) / w for j in range(3)]
+                    for i in range(3)
+                ],
+                shunt_capacitance_f_per_m=[[0.0] * 3 for _ in range(3)],
+            )
+        ],
+        appliances=[
+            Source(
+                id=1,
+                node=1,
+                phases=ph,
+                u_ref_v=(230.0, 230.0, 230.0),
+                u_angle_deg=(0.0, -120.0, 120.0),
+                resistance_ohm=[
+                    [1e-3 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                inductance_h=[
+                    [1e-6 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+            )
+        ],
+    )
+    return apply_sequence_aware_harmonic_model(grid)
+
+
+@pytest.mark.parametrize("dtype", [torch.complex128, torch.complex64])
+def test_cpu_cuda_sequence_aware_assembly_parity(dtype):
+    """The sequence-aware (Z1/Z0) assembly path is CPU/CUDA identical."""
+    grid = _sequence_aware_grid()
+    rdt = torch.float64 if dtype == torch.complex128 else torch.float32
+    f = torch.tensor([50.0, 350.0, 650.0], dtype=rdt)
+    yb_cpu = assemble_network_ybus(grid, f, dtype=dtype, device=torch.device("cpu"))
+    yb_cuda = assemble_network_ybus(grid, f.to("cuda"), dtype=dtype, device="cuda")
+    assert yb_cuda.Y.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.complex128 else 1e-3
+    torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)
+
+
 def _carson_geometry_grid() -> Grid:
     """Tiny single-phase grid whose line gets Z(h) from Carson conductor geometry."""
     geom = LineGeometry(
@@ -170,7 +251,7 @@ def _carson_geometry_grid() -> Grid:
 
 @pytest.mark.parametrize("dtype", [torch.complex128, torch.complex64])
 def test_cpu_cuda_carson_geometry_assembly_parity(dtype):
-    """The Carson/Deri geometry assembly path is CPU/CUDA identical (TODO #6 follow-up)."""
+    """The Carson/Deri geometry assembly path is CPU/CUDA identical."""
     grid = _carson_geometry_grid()
     rdt = torch.float64 if dtype == torch.complex128 else torch.float32
     f = torch.tensor([50.0, 250.0, 750.0], dtype=rdt)
