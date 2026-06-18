@@ -80,7 +80,9 @@ def resolve_asymmetric(
         or ``"auto"`` (asymmetric iff any appliance / operating point carries per-phase
         data, else symmetric — the power-grid-model rule).
 
-    Logs the resolved decision and its reason at INFO.
+    PURE (no logging / no side effects): it is called once per assemble/solve AND on
+    every power-flow residual evaluation, so it must not spam logs. The single INFO
+    summary is emitted by :func:`log_modeling_summary`.
     """
     if mode is None:
         mode = config.get("calculation.symmetry")
@@ -91,29 +93,13 @@ def resolve_asymmetric(
         )
 
     if m == "symmetric":
-        resolved, reason = False, "forced symmetric"
-    elif m == "asymmetric":
-        resolved, reason = True, "forced asymmetric"
-    else:  # auto
-        pp_grid = _has_per_phase_appliance(grid)
-        pp_op = _has_per_phase_operating_point(operating_point)
-        resolved = pp_grid or pp_op
-        if not resolved:
-            reason = "auto: no per-phase data"
-        else:
-            src = []
-            if pp_grid:
-                src.append("appliance *_per_phase_*")
-            if pp_op:
-                src.append("operating point")
-            reason = "auto: per-phase data in " + " + ".join(src)
-
-    logger.info(
-        "pgml calculation symmetry: %s (%s).",
-        "ASYMMETRIC (per-phase)" if resolved else "SYMMETRIC (balanced split)",
-        reason,
+        return False
+    if m == "asymmetric":
+        return True
+    # auto
+    return _has_per_phase_appliance(grid) or _has_per_phase_operating_point(
+        operating_point
     )
-    return resolved
 
 
 def resolve_connection(appliance) -> WindingConnection:

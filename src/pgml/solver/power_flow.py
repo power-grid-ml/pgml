@@ -65,6 +65,7 @@ from pgml.assembly import (
     node_phase_index,
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
+from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
 from pgml.schemas.grid_schema import Grid, Source
 
@@ -216,6 +217,7 @@ def solve_power_flow(
     device: Optional[torch.device] = None,
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
+    symmetry: Optional[str] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -242,6 +244,12 @@ def solve_power_flow(
         Optional override of nameplate P/Q (see ``resolve_operating_power``).
     param_overrides:
         Optional differentiability hook (network R/L/C/Z, device P/Q) for gradcheck.
+    symmetry:
+        Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
+        ``"asymmetric"`` (``None`` -> config ``calculation.symmetry``). Resolved ONCE
+        here (logged once); the resolved decision is threaded into every
+        :func:`device_current_injections` call of the iteration (which resolves
+        silently — no per-iteration logging).
 
     Returns
     -------
@@ -260,6 +268,15 @@ def solve_power_flow(
     index = node_phase_index(grid)
     n = index.size
     f0 = float(grid.base_frequency_hz)
+
+    # Resolve calculation symmetry ONCE (and log once); thread the canonical string
+    # into every device_current_injections call so the iteration stays consistent.
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+    # Single INFO modeling summary for this entry point (logs once per
+    # solve_power_flow call). solve_harmonic_flow does NOT log separately — it
+    # delegates its modeling summary to this call, so there is no double logging.
+    log_modeling_summary(grid, asymmetric=asymmetric)
+    sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
     leaves = _grid_param_leaves(grid, param_overrides, None)
     if device is None:
@@ -298,6 +315,7 @@ def solve_power_flow(
             device=device,
             operating_point=operating_point,
             param_overrides=param_overrides,
+            symmetry=sym_resolved,
         ).squeeze(-2)  # [*b, N]
         yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
         return yv + i_dev - i_slack
@@ -310,17 +328,60 @@ def solve_power_flow(
     with torch.no_grad():
         y_eff0, i_slack0 = build_system()
         lead = torch.broadcast_shapes(i_slack0.shape[:-1], y_eff0.shape[:-2])
-        # Flat warm start: the source reference magnitude at every row (or 1∠0).
-        if v_fixed is not None:
-            v0_scalar = v_fixed.reshape(-1)[0]
+        # Phase-aware balanced warm start: the source reference magnitude rotated by
+        # the standard positive-sequence angle of each row's phase (a=0, b=-120,
+        # c=+120, n=0). A FLAT start would make DELTA element voltages identically
+        # zero (V_a - V_b = 0), giving 0/0 in the const-P device current — so the
+        # start must carry the phase rotation. Whole block is under no_grad: it only
+        # seeds the fixed point and never enters the converged value / its gradient.
+        #
+        # Magnitude is derived PER ROW (not by scaling everything by one fixed row):
+        # each fixed (source, phase) row is seeded with its OWN |v_fixed|, and every
+        # other (non-source) row with a sensible balanced default = the source's
+        # Phase-A reference magnitude (not row 0, which may be a non-A phase or a
+        # differently-rated source). This is correct when a source's first listed
+        # phase is not Phase.A or when sources carry differing per-phase magnitudes.
+        phase_codes = index.phase_codes.to(device)
+        phase_angle = torch.tensor(
+            [0.0, -2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0, 0.0],
+            dtype=rdt,
+            device=device,
+        )
+        is_neutral = (phase_codes == 3).to(rdt)  # [N]
+        row_ang = phase_angle[phase_codes]  # [N]
+
+        # Resolve the (rows, |v_fixed|) used for both the per-row seed and the
+        # balanced default. ``v_fixed`` is the ideal-slack reference; for norton (no
+        # fixed rows) fall back to the source reference magnitudes directly.
+        sl_rows, sl_vref = _slack_rows_and_vref(grid, index, rdt, cdt, device)
+        ref_rows = fixed_rows if (fixed_rows is not None) else sl_rows
+        ref_v = v_fixed if (v_fixed is not None) else sl_vref
+
+        # Balanced default magnitude for non-source rows: the source Phase-A
+        # reference magnitude where available, else the first reference magnitude,
+        # else 1.0 (purely passive grid).
+        if ref_v is not None and ref_rows is not None:
+            ref_mag = ref_v.abs().to(rdt)  # [S]
+            ref_phase = phase_codes.index_select(0, ref_rows)  # [S]
+            a_mask = ref_phase == 0
+            if bool(a_mask.any()):
+                default_mag = ref_mag[a_mask][0]
+            else:
+                default_mag = ref_mag.reshape(-1)[0]
         else:
-            _, vr = _slack_rows_and_vref(grid, index, rdt, cdt, device)
-            v0_scalar = (
-                vr.reshape(-1)[0]
-                if vr is not None
-                else torch.ones((), dtype=cdt, device=device)
-            )
-        v = v0_scalar.to(cdt).reshape(()).expand(*lead, n).clone()
+            default_mag = torch.ones((), dtype=rdt, device=device)
+
+        # Start from the balanced default on every row, then overwrite each fixed
+        # (source, phase) row with its own reference magnitude (out-of-place scatter).
+        row_mag = default_mag.to(rdt).reshape(()).expand(n).clone()  # [N]
+        if ref_v is not None and ref_rows is not None:
+            row_mag = row_mag.scatter(0, ref_rows, ref_v.abs().to(rdt))
+        # Neutral rows start at ~0 V (a grounded/return conductor): otherwise V_N
+        # would collide with phase A and a WYE-with-neutral element voltage
+        # V_A - V_N would be 0 -> 0/0 in the const-P device current.
+        row_mag = row_mag * (1.0 - is_neutral)
+        v_row = torch.polar(row_mag, row_ang).to(cdt)
+        v = v_row.expand(*lead, n).clone()
 
         residual_norm = torch.zeros((), dtype=rdt, device=device)
         iterations = 0
@@ -335,6 +396,7 @@ def solve_power_flow(
                 device=device,
                 operating_point=operating_point,
                 param_overrides=param_overrides,
+                symmetry=sym_resolved,
             ).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
             v_new = solve_harmonic(y_eff0, rhs, fixed_rows=fixed_rows, v_fixed=v_fixed)

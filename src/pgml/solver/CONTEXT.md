@@ -53,7 +53,19 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
 
 - `solve_power_flow(grid, *, slack="ideal", method="current_injection",
      tol=1e-8, max_iter=100, dtype=torch.complex128, device=None,
-     operating_point=None, param_overrides=None) -> PowerFlowResult`
+     operating_point=None, param_overrides=None, symmetry=None) -> PowerFlowResult`
+  - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
+    -> config `calculation.symmetry`). Resolved ONCE here (`resolve_asymmetric`),
+    logged ONCE (`log_modeling_summary`), and threaded as the resolved string into
+    every `device_current_injections` call of the iteration (which resolves silently,
+    no per-iteration logging). `symmetric` ignores per-phase data (equal split);
+    loads/gens are folded connection-aware (WYE/DELTA/neutral). Existing kwargs/
+    defaults unchanged. The forward warm start is PHASE-AWARE (balanced rotation;
+    neutral rows ~0 V) so DELTA / WYE-neutral const-P currents do not hit 0/0. Its
+    MAGNITUDE is per-row: each fixed (source,phase) row seeded with its own
+    `|v_fixed|`, other rows with a balanced default = the source's Phase-A reference
+    magnitude (not row 0 — robust to a non-A first phase / mixed source magnitudes).
+    Entire warm start under `no_grad`; never changes the converged fixed point.
   - Solves the const-P / ZIP fundamental power flow at f0 = `grid.base_frequency_hz`.
   - `PowerFlowResult` (frozen dataclass): `v` complex `[*batch, N]` (DIFFERENTIABLE),
     `index: NodePhaseIndex`, `iterations: int`, `residual: Tensor`, `converged: bool`.
@@ -92,7 +104,17 @@ verified empirically). New orchestration:
 
 - `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", operating_point=None,
      harmonic_injection=None, include_load_shunt=False, tol=1e-10, max_iter=100,
-     dtype=torch.complex128, device=None) -> HarmonicFlowResult`
+     dtype=torch.complex128, device=None, symmetry=None) -> HarmonicFlowResult`
+  - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
+    ONCE here; threaded into the fundamental `solve_power_flow` (which emits the single
+    modeling-summary log) and into the harmonic-injection power resolution
+    (`resolve_operating_power(..., asymmetric=...)`). The per-order harmonic injection
+    stays the OpenDSS per-phase current-source model (connection-aware DELTA / 4-wire
+    harmonic injection is a later increment). DEFERRED-BOUNDARY GUARD: a device that
+    actually injects a harmonic (resolved spectrum OR `harmonic_injection` entry) and
+    resolves to DELTA, or to WYE on a node carrying `Phase.N`, RAISES
+    `NotImplementedError` (its terminal voltage is not the phase-row voltage, so `i1`
+    would be wrong). WYE-to-ground devices behave exactly as before (bit-exact).
   - `harmonic_orders`: iterable of orders (e.g. `[1,5,7]`; order 1 = fundamental).
   - `HarmonicFlowResult` (frozen dataclass): `v` complex `[*batch, H, N]` (V per
     order; **order 1 = the nonlinear `solve_power_flow` solution**, other orders =

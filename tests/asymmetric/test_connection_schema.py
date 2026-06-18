@@ -22,25 +22,37 @@ def test_connection_defaults_to_none_not_wye():
 
 def test_explicit_wye_and_delta_three_phase_ok():
     assert (
-        Load(id=1, node=1, phases=ABC, p_nom_w=3000.0,
-             connection=WindingConnection.WYE).connection
+        Load(
+            id=1, node=1, phases=ABC, p_nom_w=3000.0, connection=WindingConnection.WYE
+        ).connection
         == WindingConnection.WYE
     )
     assert (
-        Load(id=2, node=1, phases=(Phase.A, Phase.B), p_nom_w=2000.0,
-             connection=WindingConnection.DELTA).connection
+        Load(
+            id=2,
+            node=1,
+            phases=(Phase.A, Phase.B),
+            p_nom_w=2000.0,
+            connection=WindingConnection.DELTA,
+        ).connection
         == WindingConnection.DELTA
     )
 
 
 def test_delta_single_phase_rejected():
     with pytest.raises(ValueError, match="DELTA requires at least 2 phases"):
-        Load(id=1, node=1, phases=(Phase.A,), p_nom_w=1000.0,
-             connection=WindingConnection.DELTA)
+        Load(
+            id=1,
+            node=1,
+            phases=(Phase.A,),
+            p_nom_w=1000.0,
+            connection=WindingConnection.DELTA,
+        )
 
 
-@pytest.mark.parametrize("conn", [WindingConnection.ZIGZAG,
-                                  WindingConnection.ZIGZAG_GROUNDED])
+@pytest.mark.parametrize(
+    "conn", [WindingConnection.ZIGZAG, WindingConnection.ZIGZAG_GROUNDED]
+)
 def test_zigzag_rejected_on_appliances(conn):
     with pytest.raises(ValueError, match="zigzag"):
         Load(id=1, node=1, phases=ABC, p_nom_w=3000.0, connection=conn)

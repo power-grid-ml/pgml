@@ -41,14 +41,17 @@ from pgml.schemas.grid_schema import (
     Source,
     Switch,
     Transformer,
+    WindingConnection,
 )
 
+from ._incidence import build_incidence, group_appliances, used_rows
 from ._params import (
     const_z_shunt_admittance,
     phase_voltage_magnitude,
     resolve_operating_power,
 )
 from ._scatter import scatter_blocks_into
+from ._symmetry import log_modeling_summary, resolve_asymmetric
 from ._stamps import (
     _cdtype,
     _rdtype,
@@ -143,6 +146,7 @@ def assemble_ybus(
     device: Optional[torch.device] = None,
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
+    symmetry: Optional[str] = None,
 ) -> YBus:
     """Assemble the LINEAR (const-Z) complex nodal admittance ``Y(f)``.
 
@@ -174,6 +178,11 @@ def assemble_ybus(
         Optional differentiability hook (see :func:`_override`): map
         ``(kind, id, field) -> leaf tensor`` to inject gradient-bearing parameters
         without editing the schema. Used by gradcheck tests.
+    symmetry:
+        Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
+        ``"asymmetric"`` (``None`` -> config ``calculation.symmetry``). Resolved ONCE
+        via :func:`resolve_asymmetric`: ``True`` honors per-phase data, ``False``
+        splits each total equally over the phases (ignoring per-phase data).
 
     Returns
     -------
@@ -192,6 +201,12 @@ def assemble_ybus(
     index = node_phase_index(grid)
     n = index.size
 
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+    # Single INFO modeling summary for this entry point (logs once per assemble_ybus
+    # call; solve_power_flow logs its own, and harmonic_flow delegates its log to
+    # solve_power_flow — so no double logging across the public entry points).
+    log_modeling_summary(grid, asymmetric=asymmetric)
+
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
 
     # Passive network (shared with assemble_network_ybus).
@@ -199,7 +214,16 @@ def assemble_ybus(
     # Linear-model device folding: source Norton + const-Z loads/gens.
     y = _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides)
     y = _stamp_const_z_loads(
-        grid, f, y, index, cdt, rdt, device, operating_point, param_overrides
+        grid,
+        f,
+        y,
+        index,
+        cdt,
+        rdt,
+        device,
+        operating_point,
+        param_overrides,
+        asymmetric,
     )
 
     scalar_freq = (
@@ -845,30 +869,47 @@ def _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides):
 
 # ---- const-Z load / generator ---------------------------------------------
 def _stamp_const_z_loads(
-    grid, f, y, index, cdt, rdt, device, operating_point, param_overrides
+    grid, f, y, index, cdt, rdt, device, operating_point, param_overrides, asymmetric
 ):
+    """Fold each Load/Generator as a connection-aware const-Z shunt.
+
+    The internal per-ELEMENT admittance ``y_elem = conj(P_k + jQ_k)/|V0|^2`` is
+    mapped to a nodal block ``M^T diag(y_elem) M`` via the terminal incidence ``M``
+    (``_incidence``): WYE-to-ground reduces to ``M = I`` (the historical diagonal
+    stamp, bit-exact); WYE-with-neutral uses ``[I|-1]`` (the neutral row receives
+    the phase return); DELTA-3 uses the circulant difference. ``asymmetric=False``
+    forces the equal split inside ``resolve_operating_power``. ``V0`` is L-N for WYE
+    and L-L for DELTA (:func:`phase_voltage_magnitude`).
+    """
     loads = [
         a for a in grid.appliances if isinstance(a, (Load, Generator)) and a.in_service
     ]
     if not loads:
         return y
     node_map = {nd.id: nd for nd in grid.nodes}
-    by_p: dict[int, list] = {}
-    for a in loads:
-        by_p.setdefault(len(a.phases), []).append(a)
-    for p, group in by_p.items():
-        diag_list = []
-        for a in group:
+    for grp in group_appliances(loads, node_map):
+        is_delta = grp.connection == WindingConnection.DELTA
+        m = build_incidence(grp, rdt, device)  # [n_elem, n_used] real
+        m_c = m.to(cdt)
+        elem_list = []
+        for a in grp.appliances:
             node = node_map[a.node]
-            u_ln = phase_voltage_magnitude(node.u_rated_v, len(node.phases))
+            v0 = phase_voltage_magnitude(
+                node.u_rated_v, len(node.phases), line_to_line=is_delta
+            )
             sign = 1.0 if isinstance(a, Load) else -1.0
-            p_pp, q_pp = resolve_operating_power(a, operating_point)
-            y_pp = const_z_shunt_admittance(p_pp, q_pp, u_ln, sign, cdt, device)  # [P]
-            diag_list.append(torch.diag_embed(y_pp))  # [P,P]
-        block = torch.stack(diag_list, 0)  # [K,P,P]
-        block = block[None].expand(f.shape[0], *block.shape)  # [H,K,P,P]
-        rows, cols = _shunt_node_indices(group, index, device, terminal="node")
-        y = scatter_blocks_into(y, block, rows, cols)
+            p_pp, q_pp = resolve_operating_power(
+                a, operating_point, asymmetric=asymmetric
+            )
+            # Per-element admittance y_elem = conj(P+jQ)/|V0|^2  -> [n_elem].
+            y_elem = const_z_shunt_admittance(p_pp, q_pp, v0, sign, cdt, device)
+            elem_list.append(y_elem)  # [n_elem]
+        y_elem_k = torch.stack(elem_list, 0)  # [K, n_elem]
+        # Y_block = M^T diag(y_elem) M  -> [K, n_used, n_used].
+        block = torch.einsum("ei,ke,ej->kij", m_c, y_elem_k, m_c)
+        block = block[None].expand(f.shape[0], *block.shape)  # [H,K,n_used,n_used]
+        rows = used_rows(grp, index, device)  # [K, n_used]
+        y = scatter_blocks_into(y, block, rows, rows)
     return y
 
 
@@ -1158,6 +1199,7 @@ def device_current_injections(
     device: Optional[torch.device] = None,
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
+    symmetry: Optional[str] = None,
 ) -> Tensor:
     """Voltage-dependent ZIP nodal current ``I_device(V)`` absorbed by loads/gens.
 
@@ -1196,8 +1238,17 @@ def device_current_injections(
     operating_point:
         Optional override of nameplate P/Q (see :func:`resolve_operating_power`).
     param_overrides:
-        Optional differentiability hook; keys ``("load"|"generator", id, "p_nom_w"
-        |"q_nom_var"|"p_nom_per_phase_w"|"q_nom_per_phase_var")`` inject leaf P/Q.
+        Optional differentiability hook; keys ``("load"|"generator", id,
+        "p_nom_per_phase_w"|"q_nom_per_phase_var")`` inject leaf per-phase P/Q.
+    symmetry:
+        Calculation-symmetry mode (``None`` -> config). Resolved internally to a bool
+        (silently — no logging in the iteration). When the caller already resolved it,
+        pass the resolved string through so the iteration stays consistent.
+
+    Connection-aware (Increment 1): each Load/Generator's per-element current is
+    ``i_elem = conj(S_eff(V_term)) / conj(V_term)`` with ``V_term = M @ V_used``
+    (the WYE/DELTA/neutral incidence ``M``); the NODAL current is ``M^T @ i_elem``.
+    WYE-to-ground (``M = I``) reduces to the historical per-phase form exactly.
 
     Returns
     -------
@@ -1235,18 +1286,24 @@ def device_current_injections(
     if not loads:
         return out
 
-    node_map = {nd.id: nd for nd in grid.nodes}
-    by_p: dict[int, list] = {}
-    for a in loads:
-        by_p.setdefault(len(a.phases), []).append(a)
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
 
-    for p, group in by_p.items():
-        p_list, q_list, v0_list, zipp_list, zipq_list, row_list = [], [], [], [], [], []
-        for a in group:
+    node_map = {nd.id: nd for nd in grid.nodes}
+
+    for grp in group_appliances(loads, node_map):
+        n_elem = grp.n_elem
+        is_delta = grp.connection == WindingConnection.DELTA
+        m = build_incidence(grp, rdt, device)  # [n_elem, n_used] real
+        m_c = m.to(cdt)
+
+        p_list, q_list, v0_list, zipp_list, zipq_list = [], [], [], [], []
+        for a in grp.appliances:
             kind = "load" if isinstance(a, Load) else "generator"
             sign = 1.0 if isinstance(a, Load) else -1.0
             node = node_map[a.node]
-            u_ln = phase_voltage_magnitude(node.u_rated_v, len(node.phases))
+            v0 = phase_voltage_magnitude(
+                node.u_rated_v, len(node.phases), line_to_line=is_delta
+            )
 
             # Resolve total / per-phase honoring operating_point, keeping tensors.
             p_total, q_total = a.p_nom_w, a.q_nom_var
@@ -1261,70 +1318,88 @@ def device_current_injections(
                     q_per = op["q_per_phase_var"]
                 elif "q_var" in op:
                     q_total, q_per = op["q_var"], None
+            if not asymmetric:
+                # Symmetric calc: ignore the per-phase split, distribute the total
+                # equally over the elements (power-grid-model rule).
+                if p_per is not None:
+                    p_total, p_per = _tensor_sum(p_per, rdt, device), None
+                if q_per is not None:
+                    q_total, q_per = _tensor_sum(q_per, rdt, device), None
 
             p_t = _override(
                 param_overrides,
                 (kind, a.id, "p_nom_per_phase_w"),
-                _per_phase_power_tensor(p_total, p_per, p, rdt, device),
+                _per_phase_power_tensor(p_total, p_per, n_elem, rdt, device),
             )
             q_t = _override(
                 param_overrides,
                 (kind, a.id, "q_nom_per_phase_var"),
-                _per_phase_power_tensor(q_total, q_per, p, rdt, device),
+                _per_phase_power_tensor(q_total, q_per, n_elem, rdt, device),
             )
-            p_list.append(sign * p_t)  # [P]
-            q_list.append(sign * q_t)  # [P]
-            u_ln_t = (
-                u_ln
-                if isinstance(u_ln, Tensor)
-                else torch.as_tensor(u_ln, dtype=rdt, device=device)
+            p_list.append(sign * p_t)  # [n_elem]
+            q_list.append(sign * q_t)  # [n_elem]
+            v0_t = (
+                v0
+                if isinstance(v0, Tensor)
+                else torch.as_tensor(v0, dtype=rdt, device=device)
             )
-            v0_list.append(
-                u_ln_t.to(dtype=rdt, device=device).reshape(()).expand(p)
-            )  # [P]
+            v0_list.append(v0_t.to(dtype=rdt, device=device).reshape(()).expand(n_elem))
             zp, zq = _zip_coeffs(a, rdt, device)
             zipp_list.append(zp)  # [3]
             zipq_list.append(zq)
-            row_list.append([index.row(a.node, ph) for ph in a.phases])
 
         k = len(p_list)
         # Stack with K at dim -2 so any per-load batch dims stay leading and
-        # broadcast against the [*b, H, K, P] voltage tensor: [*pbatch, K, P].
-        p_pp = torch.stack(p_list, -2)  # [*pbatch, K, P]
+        # broadcast against the [*b, H, K, n_elem] voltage tensor.
+        p_pp = torch.stack(p_list, -2)  # [*pbatch, K, n_elem]
         q_pp = torch.stack(q_list, -2)
-        v0 = torch.stack(v0_list, -2)  # [K, P] (no power batch)
+        v0 = torch.stack(v0_list, -2)  # [K, n_elem]
         zip_p = torch.stack(zipp_list, 0)  # [K, 3]
         zip_q = torch.stack(zipq_list, 0)
-        rows = torch.as_tensor(row_list, dtype=torch.int64, device=device)  # [K,P]
+        rows = used_rows(grp, index, device)  # [K, n_used] int64
 
-        # Insert a singleton H axis into power tensors so they broadcast over H:
-        # [*pbatch, K, P] -> [*pbatch, 1, K, P].
-        p_pp = p_pp.unsqueeze(-3)
+        # Insert a singleton H axis into power tensors so they broadcast over H.
+        p_pp = p_pp.unsqueeze(-3)  # [*pbatch, 1, K, n_elem]
         q_pp = q_pp.unsqueeze(-3)
 
-        # Gather terminal voltages Vt at these rows: v[*batch, H, N] -> [*b, H, K, P].
-        flat_rows = rows.reshape(-1)  # [K*P]
-        vt = v.index_select(-1, flat_rows)  # [*b, H, K*P]
-        vt = vt.reshape(*batch_lead, h, k, p)  # [*b, H, K, P]
+        # Gather USED-row voltages, then form the ELEMENT (terminal) voltages
+        # V_term = M @ V_used.  v[*b, H, N] -> V_used[*b, H, K, n_used].
+        flat_rows = rows.reshape(-1)  # [K*n_used]
+        v_used = v.index_select(-1, flat_rows)  # [*b, H, K*n_used]
+        v_used = v_used.reshape(*batch_lead, h, k, grp.n_used)  # [*b,H,K,n_used]
+        # V_term[..., e] = sum_u M[e,u] V_used[..., u]  -> [*b,H,K,n_elem].
+        vt = torch.einsum("eu,...ku->...ke", m_c, v_used)
 
-        vmag = torch.abs(vt)  # [*b, H, K, P] real
-        ratio = vmag / v0  # |Vt| / |V0|  -> broadcasts [K,P] over [*b,H,K,P]
+        vmag = torch.abs(vt)  # [*b, H, K, n_elem] real
+        ratio = vmag / v0  # |V_term| / |V0|  broadcasts [K,n_elem]
 
         # ZIP scaling per power component: z*ratio^2 + i*ratio + p.
         z_p, i_p, pp_p = zip_p[..., 0], zip_p[..., 1], zip_p[..., 2]  # [K]
         z_q, i_q, pp_q = zip_q[..., 0], zip_q[..., 1], zip_q[..., 2]
-        scale_p = (
-            z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
-        )  # [*b,H,K,P]
+        scale_p = z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
         scale_q = z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
 
-        s_eff = torch.complex(p_pp * scale_p, q_pp * scale_q).to(cdt)  # [*b,H,K,P]
-        # I_term = conj(S_eff) / conj(Vt).
-        i_term = torch.conj(s_eff) / torch.conj(vt)  # [*b,H,K,P]
+        s_eff = torch.complex(p_pp * scale_p, q_pp * scale_q).to(cdt)  # [*b,H,K,n_elem]
+        # i_elem = conj(S_eff) / conj(V_term).
+        i_elem = torch.conj(s_eff) / torch.conj(vt)  # [*b,H,K,n_elem]
+        # Nodal current at the used rows: I_used = M^T @ i_elem -> [*b,H,K,n_used].
+        i_used = torch.einsum("eu,...ke->...ku", m_c, i_elem)
 
-        out = _scatter_injection(out, i_term, rows)
+        out = _scatter_injection(out, i_used, rows)
 
     return out
+
+
+def _tensor_sum(per_phase, rdt: torch.dtype, device):
+    """Autograd-safe sum of a per-phase list (mixed floats / tensors) -> 0-d tensor."""
+    total = None
+    for x in per_phase:
+        xt = (
+            x if isinstance(x, Tensor) else torch.as_tensor(x, dtype=rdt, device=device)
+        )
+        xt = xt.to(dtype=rdt, device=device)
+        total = xt if total is None else total + xt
+    return total
 
 
 __all__ = [

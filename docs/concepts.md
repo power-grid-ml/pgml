@@ -88,6 +88,47 @@ grid parameters (tensors) → assemble_ybus → solve → outputs
 The schema imports no compute framework; "array-like" is detected by duck typing
 (`hasattr(v, "detach")` or `hasattr(v, "__array__")`).
 
+## Symmetric vs asymmetric calculation
+
+`pgml` is always phase-domain, so "symmetric" and "asymmetric" refer to how
+**appliance power** is resolved across phases — not to the network solve itself.
+
+The `symmetry` argument accepted by `assemble_ybus`, `device_current_injections`,
+`solve_power_flow`, and `solve_harmonic_flow` controls this:
+
+| Mode | Behaviour |
+|------|-----------|
+| `"symmetric"` | Total P/Q split equally over the connected phases (balanced). |
+| `"asymmetric"` | Per-phase nameplate values or per-phase operating-point keys are honoured. |
+| `"auto"` | Asymmetric iff any appliance or operating point carries per-phase data; otherwise symmetric. |
+| `None` | Reads `calculation.symmetry` from the config (default `"auto"`). |
+
+This mirrors power-grid-model's `symmetric=True/False` rule.  A single INFO
+modeling summary is logged per top-level call showing the resolved mode.
+
+## WYE/DELTA connection and neutral modeling
+
+A `Load` or `Generator` can set `connection` explicitly
+(`WindingConnection.WYE`, `WYE_GROUNDED`, or `DELTA`).  When `connection` is
+`None`, the config defaults `appliance.load.default_connection` (multi-phase)
+and `appliance.load.single_phase_connection` (1-phase) are used (both `"wye"`
+by default).
+
+`pgml` uses a **terminal incidence matrix** `M` to map node-phase voltages to
+element (terminal) voltages:
+
+- **WYE, no neutral row** (`Phase.N` absent from the node): `M = I_n`.
+  Reduces exactly to the historical diagonal per-phase stamp.
+- **WYE, with neutral** (`Phase.N` present, 4-wire network): used rows are the
+  phase rows plus the neutral row; `M = [I_n | -1]`.  The neutral row receives
+  the return current automatically (Kirchhoff).
+- **DELTA-3**: used rows are the three phase rows; `M` is the circulant
+  difference matrix.  The base voltage is line-to-line.
+
+**Current limitations:** DELTA with `n != 3` phases and connection-aware
+harmonic injection (DELTA or 4-wire WYE) raise `NotImplementedError` and are
+deferred to a later increment.
+
 ## Validation philosophy
 
 `pgml` validates against two reference implementations:

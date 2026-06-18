@@ -41,8 +41,16 @@ from torch import Tensor
 from pgml.assembly import NodePhaseIndex, assemble_network_ybus, node_phase_index
 from pgml.assembly._params import resolve_operating_power
 from pgml.assembly._stamps import _cdtype, _rdtype
+from pgml.assembly._symmetry import resolve_asymmetric, resolve_connection
 from pgml.assembly.ybus import _stamp_sources
-from pgml.schemas.grid_schema import Generator, Grid, Load, StaticSpectrum
+from pgml.schemas.grid_schema import (
+    Generator,
+    Grid,
+    Load,
+    Phase,
+    StaticSpectrum,
+    WindingConnection,
+)
 
 from .harmonic import solve_harmonic
 from .power_flow import PowerFlowResult, solve_power_flow
@@ -85,6 +93,7 @@ def solve_harmonic_flow(
     max_iter: int = 100,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
+    symmetry: Optional[str] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -105,6 +114,11 @@ def solve_harmonic_flow(
         ``False`` (default) = OpenDSS ``NeglectLoadY`` pure current-source model.
         ``True`` (load Norton shunt from ``HarmonicShuntModel``) is NOT yet
         implemented (the exact OpenDSS shunt split is unpinned) and raises.
+    symmetry:
+        Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
+        ``"asymmetric"`` (``None`` -> config). Resolved ONCE here and threaded into
+        the fundamental :func:`solve_power_flow` (single log) and the harmonic
+        injection power resolution.
 
     Returns
     -------
@@ -127,6 +141,11 @@ def solve_harmonic_flow(
     f0 = float(grid.base_frequency_hz)
     index = node_phase_index(grid)
 
+    # Resolve calculation symmetry ONCE; thread the canonical string into the
+    # fundamental PF (which emits the single modeling-summary log).
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+    sym_resolved = "asymmetric" if asymmetric else "symmetric"
+
     # 1. Fundamental nonlinear power flow (order 1).
     pf = solve_power_flow(
         grid,
@@ -136,6 +155,7 @@ def solve_harmonic_flow(
         max_iter=max_iter,
         dtype=dtype,
         device=device,
+        symmetry=sym_resolved,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -152,7 +172,16 @@ def solve_harmonic_flow(
             yh = yh.unsqueeze(0)
         yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
         ih = _harmonic_injections(
-            grid, v1, index, harm, operating_point, harmonic_injection, cdt, rdt, device
+            grid,
+            v1,
+            index,
+            harm,
+            operating_point,
+            harmonic_injection,
+            cdt,
+            rdt,
+            device,
+            asymmetric,
         )  # [*batch, Hh, N]
         vh = solve_harmonic(yh, ih)  # Norton mode -> [*batch, Hh, N]
         for k, h in enumerate(harm):
@@ -199,7 +228,16 @@ def _broadcast_last(x: Tensor) -> Tensor:
 
 
 def _harmonic_injections(
-    grid, v1, index, harm_orders, operating_point, harmonic_injection, cdt, rdt, device
+    grid,
+    v1,
+    index,
+    harm_orders,
+    operating_point,
+    harmonic_injection,
+    cdt,
+    rdt,
+    device,
+    asymmetric=True,
 ) -> Tensor:
     """Per-device harmonic nodal current injection ``[*batch, Hh, N]``.
 
@@ -210,6 +248,7 @@ def _harmonic_injections(
     magnitudes/phases may carry a SCENARIO batch dim (differentiable override).
     """
     n = index.size
+    node_map = {nd.id: nd for nd in grid.nodes}
 
     # Precompute per-device fundamental current info.
     devs = []
@@ -219,8 +258,31 @@ def _harmonic_injections(
         spec = _resolve_spectrum(a, harmonic_injection)
         if spec is None:
             continue
+        # DEFERRED-BOUNDARY GUARD: the per-device fundamental current `i1` below is
+        # formed from PHASE-ROW voltages `vt`, which only equals the device TERMINAL
+        # voltage for a WYE-to-ground load. For a DELTA load the terminal voltage is
+        # L-L (V_phaseA - V_phaseB); for a WYE load on a node carrying Phase.N it is
+        # V_phase - V_N. Connection-aware harmonic injection is deferred to the
+        # per-phase-harmonics increment, so rather than silently computing wrong
+        # numbers we refuse a device that actually injects on an unsupported topology.
+        conn = resolve_connection(a)
+        node_has_neutral = Phase.N in node_map[a.node].phases
+        is_wye = conn in (WindingConnection.WYE, WindingConnection.WYE_GROUNDED)
+        if conn == WindingConnection.DELTA or (is_wye and node_has_neutral):
+            raise NotImplementedError(
+                "connection-aware (DELTA / 4-wire) harmonic injection is not yet "
+                "supported: device "
+                f"{a.id!r} has a harmonic spectrum but resolves to "
+                f"{'DELTA' if conn == WindingConnection.DELTA else 'WYE on a node with Phase.N'}"
+                ". Its terminal voltage is not the phase-row voltage, so the "
+                "fundamental injection current would be wrong. Use WYE-to-ground "
+                "loads for harmonic studies; full connection-aware harmonic "
+                "injection is deferred to the per-phase-harmonics increment."
+            )
         sign = 1.0 if isinstance(a, Load) else -1.0
-        p_list, q_list = resolve_operating_power(a, operating_point)
+        p_list, q_list = resolve_operating_power(
+            a, operating_point, asymmetric=asymmetric
+        )
         p_t = torch.stack([_as_rt(x, rdt, device) for x in p_list])  # [P]
         q_t = torch.stack([_as_rt(x, rdt, device) for x in q_list])  # [P]
         s0 = torch.complex(sign * p_t, sign * q_t).to(cdt)  # [P]

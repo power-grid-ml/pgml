@@ -33,13 +33,29 @@ def diag_from_tuple(values: Sequence[float], dtype: torch.dtype, device) -> Tens
     return torch.diag(v)
 
 
-def phase_voltage_magnitude(u_rated_v: float, n_phases: int) -> float:
-    """Line-to-neutral voltage magnitude used for the const-Z load model.
+def phase_voltage_magnitude(
+    u_rated_v: float, n_phases: int, *, line_to_line: bool = False
+) -> float:
+    """Nominal element voltage magnitude ``V0`` for the const-Z / ZIP load model.
 
     The schema stores ``Node.u_rated_v`` as line-to-line for 3-phase nodes and
-    line-to-neutral for 1-phase nodes. For the per-phase const-Z conversion we use
-    a line-to-neutral magnitude: divide by sqrt(3) when 3 phases are present.
+    line-to-neutral for 1-phase nodes.
+
+    - ``line_to_line=False`` (WYE, the default): a line-to-NEUTRAL element voltage —
+      divide by sqrt(3) when 3 (or more) phases are present (``u_rated`` for 1-phase
+      nodes is already L-N).
+    - ``line_to_line=True`` (DELTA): the element sees the full line-to-LINE voltage,
+      so return ``u_rated_v`` directly for a 3-phase node (no sqrt(3) division).
+
+    Connection-aware per ``references/asymmetric_modeling.md`` section 2 (OpenDSS
+    ``VBase``: wye 3-phase uses ``kVLL/sqrt(3)``; delta uses the supplied kV).
     """
+    if line_to_line:
+        return u_rated_v
+    # ``n_phases >= 3`` intentionally also covers a 4-wire ABCN node (4 phases):
+    # ``u_rated`` is the line-to-line value for ANY node with >= 3 phases, so a WYE
+    # element there sees ``u_rated / sqrt(3)`` regardless of whether a neutral row
+    # is modeled.
     if n_phases >= 3:
         return u_rated_v / math.sqrt(3.0)
     return u_rated_v
@@ -79,17 +95,41 @@ def const_z_shunt_admittance(
     return s / u2
 
 
+def _tensor_sum(per_phase: Sequence):
+    """Autograd-safe sum of a per-phase sequence (mixed python floats / tensors).
+
+    Mirrors :func:`pgml.assembly.ybus._tensor_sum` but does NOT coerce dtype/device:
+    a pure-float input stays a python float (so the const-Z reference path remains
+    bit-exact), while a tensor anywhere in the sequence makes the running total a
+    graph-preserving tensor (gradients flow back to each per-phase leaf). Uses plain
+    ``+`` accumulation, which is autograd-safe and never an in-place op.
+    """
+    total = None
+    for x in per_phase:
+        total = x if total is None else total + x
+    return total
+
+
 def resolve_operating_power(
     appliance,
     operating_point: Optional[dict],
+    *,
+    asymmetric: bool = True,
 ) -> tuple[list[float], list[float]]:
     """Per-phase (P, Q) operating point for a Load/Generator, length == phases.
 
-    Resolution order:
+    Resolution order (when ``asymmetric=True``):
     1. ``operating_point[appliance.id]`` if given, a dict with ``p_w`` / ``q_var``
        (totals) and/or ``p_per_phase_w`` / ``q_per_phase_var``.
     2. The appliance's ``*_per_phase_*`` nameplate split if present.
     3. The total nameplate ``p_nom_w`` / ``q_nom_var`` split equally across phases.
+
+    When ``asymmetric=False`` (a SYMMETRIC calculation), every per-phase value is
+    IGNORED and the total is split equally over the phases (the power-grid-model
+    rule: a symmetric calculation averages an asymmetric load —
+    ``references/asymmetric_modeling.md`` section 1). The total is taken from a
+    total operating-point override if given, else from the per-phase override / the
+    per-phase nameplate (summed), else from the total nameplate.
     """
     n = len(appliance.phases)
     p_total = appliance.p_nom_w
@@ -109,6 +149,19 @@ def resolve_operating_power(
         elif "q_var" in op:
             q_total = op["q_var"]
             q_per = None
+
+    if not asymmetric:
+        # Symmetric calc: ignore per-phase data, split the total equally. Prefer an
+        # explicit total; otherwise sum a per-phase spec back to a total with the
+        # autograd-safe reduction (``_tensor_sum`` keeps the graph when the per-phase
+        # entries are tensor leaves; a plain ``sum`` over tensors is graph-preserving
+        # too but goes through python ``+``, which we make explicit here).
+        p_t = _tensor_sum(p_per) if p_per is not None else p_total
+        q_t = _tensor_sum(q_per) if q_per is not None else q_total
+        # Build n INDEPENDENT entries (each ``/ n`` is a fresh autograd node). A
+        # ``[x] * n`` literal would alias ONE object into every slot, so a per-phase
+        # gradient would wrongly perturb all phases under tensor duality.
+        return [p_t / n for _ in range(n)], [q_t / n for _ in range(n)]
 
     p_list = list(p_per) if p_per is not None else [p_total / n] * n
     q_list = list(q_per) if q_per is not None else [q_total / n] * n

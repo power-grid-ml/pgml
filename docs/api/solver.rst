@@ -21,6 +21,25 @@ The solver package provides three entry points:
 ``solve_power_flow`` uses an explicit IFT adjoint (the only sanctioned
 ``.detach()`` in the codebase) so gradients flow through the converged solution.
 
+Symmetry kwarg
+--------------
+
+Both :func:`~pgml.solver.solve_power_flow` and
+:func:`~pgml.solver.solve_harmonic_flow` accept a ``symmetry`` keyword argument
+(``None`` / ``"auto"`` / ``"symmetric"`` / ``"asymmetric"``).  It is resolved
+**once** at the start of each top-level call:
+
+- ``solve_power_flow`` resolves and logs the modeling summary once, then
+  passes the resolved string into every :func:`~pgml.assembly.device_current_injections`
+  call of the fixed-point iteration (no per-iteration logging).
+- ``solve_harmonic_flow`` resolves once, threads the result into the fundamental
+  ``solve_power_flow`` call (which logs once), and also into the harmonic
+  injection power resolution.
+
+``None`` reads the config key ``calculation.symmetry`` (default ``"auto"``).
+For the semantics of each mode, see the "Symmetric vs asymmetric calculation"
+section on the :doc:`assembly` page.
+
 .. automodule:: pgml.solver
    :members:
    :show-inheritance:

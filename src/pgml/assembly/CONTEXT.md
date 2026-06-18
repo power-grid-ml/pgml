@@ -30,7 +30,12 @@ Module: `pgml.assembly`
 (`from pgml.assembly import assemble_ybus, build_injections, node_phase_index, NodePhaseIndex, YBus`).
 
 - `assemble_ybus(grid, frequencies_hz, *, dtype=torch.complex128, device=None,
-     operating_point=None, param_overrides=None) -> YBus`
+     operating_point=None, param_overrides=None, symmetry=None) -> YBus`
+  - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
+    -> config `calculation.symmetry`). Resolved ONCE via `resolve_asymmetric` and
+    logged ONCE via `log_modeling_summary`; `False` ignores per-phase data and
+    splits each total equally over the phases (power-grid-model rule). Loads/gens are
+    folded connection-aware (WYE/DELTA/neutral) — see the incidence model below.
   - `frequencies_hz`: 1-D real tensor/sequence of H absolute frequencies (Hz). f0 =
     `grid.base_frequency_hz`; harmonic order h = f/f0 (need not be integer).
   - `YBus` (frozen dataclass): `Y: Tensor` complex `[*batch, H, N, N]`,
@@ -101,18 +106,46 @@ inverts P,Q). `operating_point` defaults to nameplate `p_nom_w/q_nom_var`. The
 const-power (nonlinear) successive-admittance iteration is a later milestone; note
 it but do not implement in M1.
 
-## Asymmetry groundwork (Increment 0 — module present, NOT yet wired into stamps)
-`_symmetry.py` (torch-free, runs once per assemble/solve on python schema objects):
+## Asymmetry: connection-aware load/gen modeling (Increment 1 — DONE)
+`_symmetry.py` (torch-free, PURE; runs on every assemble/solve + PF residual eval):
 - `resolve_asymmetric(grid, operating_point=None, *, mode=None) -> bool` — resolves the
   config `calculation.symmetry` (`auto`/`symmetric`/`asymmetric`) to True==per-phase;
   `auto` => asymmetric iff any appliance `*_per_phase_*` or per-phase operating point.
+  PURE (NO logging — it is called per residual eval; the single INFO emitter is
+  `log_modeling_summary`).
 - `resolve_connection(appliance) -> WindingConnection` — explicit `connection` else the
-  config default (single- vs multi-phase).
+  config default (single- vs multi-phase). WYE_GROUNDED folds to WYE for a terminal.
 - `log_modeling_summary(grid, *, asymmetric)` — INFO log of the FINAL modeling (neutral
-  modeled iff a node carries `Phase.N`; WYE/DELTA mix; symmetry).
-Increment 1 wires these into `_stamp_const_z_loads` + `device_current_injections` via a
-connection-aware terminal incidence (`Mᵀ·diag·M`); WYE-to-ground reduces to today's
-diagonal stamp (regression-safe). Basis: `references/asymmetric_modeling.md`.
+  modeled iff a node carries `Phase.N`; WYE/DELTA mix; symmetry). Emitted ONCE per
+  user entry point (`assemble_ybus` / `solve_power_flow` / `solve_harmonic_flow`).
+
+`_incidence.py` — the terminal incidence model wired into `_stamp_const_z_loads` +
+`device_current_injections`. A constant real `M [n_elem, n_used]` maps used node-rows
+to element ("terminal") voltages `V_term = M @ V_used`; nodal admittance block =
+`Mᵀ diag(y_elem) M [n_used, n_used]`, nodal current = `Mᵀ i_elem`. Cases (n=len(phases)):
+- WYE, node NO `Phase.N` (to ground): `M = I_n` (== the historical diagonal stamp,
+  bit-exact — THE regression guarantee). V0 = L-N (`u_rated/√3` for ≥3-phase nodes).
+- WYE, node HAS `Phase.N` (4-wire): `M = [I_n | -1]`; element k = V_phase_k − V_N; the
+  N row receives `-Σ i_k` (Kirchhoff). used_rows = phase rows + the node's N row.
+- DELTA, n==3: `M = [[1,-1,0],[0,1,-1],[-1,0,1]]` (circulant; element k between phase_k
+  and phase_{(k+1)%3}; per-phase value k -> delta branch k). V0 = L-L (`u_rated`).
+- DELTA, n!=3: raises `NotImplementedError` (open/2-phase delta not modeled).
+Public helpers: `group_appliances(appliances, node_map) -> list[IncidenceGroup]`
+(groups by `(connection, n_phases, has_neutral_return)`), `build_incidence(grp, rdt,
+device) -> M`, `used_rows(grp, index, device) -> [K, n_used]`. `phase_voltage_magnitude`
+gained a `line_to_line: bool` arg (DELTA ⇒ True; `n_phases>=3` covers 4-wire ABCN).
+`resolve_operating_power` gained an `asymmetric: bool` arg (False ⇒ ignore per-phase,
+split totals equally). Its symmetric branch returns n INDEPENDENT entries
+(`[t/n for _ in range(n)]`, NOT `[t/n]*n` which would alias one leaf into all phases)
+and totals via the autograd-safe `_tensor_sum` (graph-preserving for tensor leaves).
+Vectorized per group (one `M`, blocks `[K, n_used, n_used]` scattered via `_scatter`);
+differentiable (autograd flows through `y_elem`/`i_elem`, not the constant `M`); GPU/
+dtype-honoring. Basis: `references/asymmetric_modeling.md`.
+
+NOTE (PF warm start): `solve_power_flow` uses a PHASE-AWARE balanced warm start (source
+magnitude rotated by the row's positive-sequence phase angle; neutral rows start at
+~0 V). A flat start would make DELTA element voltages identically 0 (V_a−V_b=0) and a
+WYE-neutral element collide V_a with V_N, both giving 0/0 in the const-P current.
 
 ## Rules
 - DIFFERENTIABLE + GPU (CLAUDE.md): every Y/I entry differentiable w.r.t. R,L,G,C,
@@ -146,7 +179,13 @@ NOT baked into Y; split as implemented below.
 
 - `device_current_injections(grid, v, index, frequencies_hz, *,
      dtype=torch.complex128, device=None, operating_point=None,
-     param_overrides=None) -> Tensor`  complex `[*batch, H, N]`  — IMPLEMENTED.
+     param_overrides=None, symmetry=None) -> Tensor`  complex `[*batch, H, N]`  — IMPLEMENTED.
+  - `symmetry` (Increment 1): resolved to a bool internally (SILENTLY — no
+    `log_modeling_summary` in the PF iteration). `solve_power_flow` resolves once and
+    passes the resolved string through. Connection-aware: `V_term = M @ V_used`,
+    element current `i_elem = conj(S_eff(V_term))/conj(V_term)`, nodal `I_used =
+    M^T @ i_elem`. WYE-to-ground (`M=I`) is bit-identical to the historical per-phase
+    form.
   Voltage-dependent nodal current ABSORBED by Load/Generator per `LoadModel`:
       S_eff(V) = S0 * ( z*(|Vt|/|V0|)^2 + i*(|Vt|/|V0|) + p ),  I_term = conj(S_eff)/conj(Vt)
   with S0 = sign*(P+jQ) (sign +1 load / -1 generator), V0 = NOMINAL line-to-neutral

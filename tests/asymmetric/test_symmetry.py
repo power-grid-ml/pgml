@@ -42,8 +42,15 @@ def _balanced_grid(node_phases=ABC):
 def _per_phase_grid():
     return _grid(
         [Node(id=1, u_rated_v=400.0, phases=ABC)],
-        [Load(id=1, node=1, phases=ABC, p_nom_w=3000.0,
-              p_nom_per_phase_w=(1500.0, 1000.0, 500.0))],
+        [
+            Load(
+                id=1,
+                node=1,
+                phases=ABC,
+                p_nom_w=3000.0,
+                p_nom_per_phase_w=(1500.0, 1000.0, 500.0),
+            )
+        ],
     )
 
 
@@ -72,7 +79,9 @@ def test_auto_asymmetric_from_operating_point():
     op = {1: {"p_per_phase_w": (1500.0, 1000.0, 500.0)}}
     assert resolve_asymmetric(_balanced_grid(), op, mode="auto") is True
     # total-only operating point does NOT trigger asymmetric
-    assert resolve_asymmetric(_balanced_grid(), {1: {"p_w": 3000.0}}, mode="auto") is False
+    assert (
+        resolve_asymmetric(_balanced_grid(), {1: {"p_w": 3000.0}}, mode="auto") is False
+    )
 
 
 def test_default_mode_is_config_auto():
@@ -83,8 +92,13 @@ def test_default_mode_is_config_auto():
 
 # --- resolve_connection ------------------------------------------------------
 def test_connection_explicit_wins():
-    a = Load(id=1, node=1, phases=(Phase.A, Phase.B), p_nom_w=2000.0,
-             connection=WindingConnection.DELTA)
+    a = Load(
+        id=1,
+        node=1,
+        phases=(Phase.A, Phase.B),
+        p_nom_w=2000.0,
+        connection=WindingConnection.DELTA,
+    )
     assert resolve_connection(a) == WindingConnection.DELTA
 
 
@@ -122,7 +136,10 @@ def test_logs_ground_return_when_no_neutral(caplog):
     assert "SYMMETRIC" in caplog.text
 
 
-def test_resolve_asymmetric_emits_info(caplog):
+def test_resolve_asymmetric_is_pure_no_logging(caplog):
+    # resolve_asymmetric is PURE (Increment 1): it must NOT log — it runs on every
+    # power-flow residual evaluation. log_modeling_summary is the single INFO emitter.
     with caplog.at_level(logging.INFO, logger="pgml"):
-        resolve_asymmetric(_balanced_grid(), mode="auto")
-    assert "calculation symmetry: SYMMETRIC" in caplog.text
+        result = resolve_asymmetric(_balanced_grid(), mode="auto")
+    assert result is False
+    assert caplog.text == ""
