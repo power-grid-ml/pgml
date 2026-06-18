@@ -15,6 +15,14 @@ correlated / "shared-by-physics" sampling + per-phase symmetry, harmonic-spectru
 distribution sampling (EN50160), per-node structured perturbation sweep, parquet
 persistence, beta/scipy distributions.
 
+**Deferred (no priority) — appliance-state harmonic mixture.** Beyond the planned
+node-coherent harmonic sampler (per-node base modes + Markov/AR(1) step dynamics),
+a more physical "Model C" can later replace a node's fingerprint with a sum of
+PER-APPLIANCE state spectra: each appliance has a small state→spectrum library
+(e.g. washing-machine heating vs spinning), states evolve over time, and the node
+injection is the current-domain sum. Needs an archetype spectrum library keyed by
+`consumer_type`. Capture only; revisit after the modes+jitter sampler ships.
+
 **Production / performance work still to scope.**
 - GPU throughput: batched `torch.linalg.solve` memory vs batch size; pick CHUNK SIZES
   (scenario batch tiling) to fit VRAM; stream chunks; mixed precision (complex64 for
