@@ -24,11 +24,11 @@ bridged to PyG via DLPack. Do not start there.)
   source (spectrum) in parallel with a frequency-dependent shunt admittance.
 - Batched over: harmonics, scenarios/steps, (later) time. Optional leading dims.
 
-## Roadmap (we are at Phase 1)
+## Roadmap (phases 1-3 done; next: batching/scale + PyG state estimation)
 0. Schemas frozen (done): grid / result / scenario.
 1. Differentiable load flow: equations + Y-bus assembly + complex solve;
    validate Y against OpenDSS (and pandapower), validate results against
-   pandapower; confirm gradcheck + GPU. (CURRENT)
+   pandapower; confirm gradcheck + GPU. DONE (linear + nonlinear const-P/ZIP).
 2. Geometry -> impedance differentiable path (Carson, skin effect). DONE
    (`pgml.geometry`): Deri earth return + skin effect + Maxwell capacitance, bit-exact
    vs OpenDSS, differentiable/GPU/batched; closes the harmonic line-impedance gap.

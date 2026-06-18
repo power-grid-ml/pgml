@@ -54,6 +54,13 @@ and `references` adapts the reference libraries to the SAME containers.
   label)` -> LabeledMatrix (aligns single-phase `BUS<n>.1` SystemY to our rows).
 - `numpy_harmonic_profiles(grid, v1, index, orders, *, ...)` -> [HarmonicProfile] —
   INDEPENDENT single-phase numpy harmonic solve (R-const/X∝h), shared fundamental v1.
+- Carson feeder builders (pandapower -> pgml grid + synthesized geometry + spectra):
+  `ieee33_geometry_grid()`, `cigre_lv_geometry_grid()` -> `(grid, id_map)`.
+- OpenDSS-from-geometry (Carson harmonic comparison): `build_opendss_geometry_circuit(grid)`,
+  `opendss_geometry_systemy(grid, index, orders) -> {order: aligned SystemY(order·f0)}`,
+  `opendss_geometry_harmonic_profiles(grid, hres, orders) -> [HarmonicProfile]` (OpenDSS
+  line model solved with pgml's converged injection — true OpenDSS-vs-pgml harmonic check).
+  Demo: `examples/evaluate_harmonics_carson.py` (IEEE-33 + CIGRE LV).
 
 ## IO + style (`pgml.evaluation.style`)
 - `save_figure(fig, path, *, dpi=300)` — format from extension; raster >=300 DPI.

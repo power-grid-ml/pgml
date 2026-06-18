@@ -329,9 +329,13 @@ def _geom_conductor_arrays(ln, rdt, device):
     geo = ln.conductor_geometry
     phase_conds = []
     for ph in ln.from_phases:
-        phase_conds.append(
-            next(c for c in geo.conductors if not c.is_neutral and c.phase == ph)
-        )
+        c = next((c for c in geo.conductors if not c.is_neutral and c.phase == ph), None)
+        if c is None:
+            raise ValueError(
+                f"Line {ln.id}: conductor_geometry has no phase conductor for {ph!r} "
+                f"(from_phases={ln.from_phases}); each phase needs a non-neutral conductor."
+            )
+        phase_conds.append(c)
     ordered = phase_conds + [c for c in geo.conductors if c.is_neutral]
     x = torch.stack([_geom_scalar(c.x_m, rdt, device) for c in ordered])
     y = torch.stack([_geom_scalar(c.y_m, rdt, device) for c in ordered])

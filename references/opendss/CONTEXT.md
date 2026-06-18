@@ -1,7 +1,6 @@
 # Reference brief: OpenDSS (EPRI) — the HARMONIC ground truth
 
-Distilled context; consult OpenDSSDirect.py / dss-python (`pip install
-opendssdirect.py`). OpenDSS is the established harmonic engine and our Y-matrix +
+Distilled context; consult OpenDSSDirect.py / dss-python (`pixi add --pypi opendssdirect.py`). OpenDSS is the established harmonic engine and our Y-matrix +
 harmonic-flow oracle. Phase-domain, full per-phase. Not differentiable.
 
 ## Key modelling facts (harmonic-relevant)

@@ -109,6 +109,12 @@ def synthesize_line_geometry(
                 "synth_height_m": str(h),
                 "synth_gmr_m": f"{gmr:.6g}",
                 "synth_rdc_ohm_per_m": f"{rdc:.6g}",
+                # GMR >= radius is physically impossible for a real conductor: it means
+                # the target X1 is below the single-conductor earth-return reactance
+                # floor (typical of cables / low-X positive-sequence lines). The result
+                # still reproduces R1/X1 at f0 and matches OpenDSS on the SAME geometry,
+                # but is not a physical conductor — see geometry/CONTEXT.md.
+                "synth_unphysical": str(gmr >= radius_m),
             },
         ),
     )
@@ -121,6 +127,8 @@ def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
     skipped (the single-conductor synthesis is positive-sequence). Returns ``grid``.
     """
     f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
+    n_unphysical = 0
+    n_synth = 0
     for ln in grid.branches:
         if not (isinstance(ln, Line) and ln.conductor_geometry is None):
             continue
@@ -131,6 +139,20 @@ def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
         ltype = (ln.tags or {}).get("pp_type", "ol")
         ln.conductor_geometry = synthesize_line_geometry(
             r1, x1, f0=f0, phase=ln.from_phases[0], line_type=ltype
+        )
+        n_synth += 1
+        if ln.conductor_geometry.provenance.extra.get("synth_unphysical") == "True":
+            n_unphysical += 1
+    if n_unphysical:
+        import warnings
+
+        warnings.warn(
+            f"synthesize_grid_geometry: {n_unphysical}/{n_synth} lines have X1 below the "
+            "single-conductor earth-return reactance floor, yielding a non-physical "
+            "GMR (>= radius). The geometry still reproduces R1/X1 at f0 and matches "
+            "OpenDSS on the same geometry, but is not a physical conductor (typical of "
+            "cables / low-X positive-sequence feeders). See geometry/CONTEXT.md.",
+            stacklevel=2,
         )
     return grid
 

@@ -6,7 +6,9 @@ These three files are the single source of truth. Import them; never edit them.
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/ShuntAppliance),
   FrequencyParam, Spectrum, TypeLibrary, plus input-convention DTOs and converters'
   target types. Phase-domain, SI, L/C storage, pi-form + ComplexTap, no complex in
-  the schema (real pairs), structured unit metadata via `si_field`.
+  the schema (real pairs), structured unit metadata via `si_field`. Conductor geometry:
+  `ConductorPlacement` (x/y/GMR/radius/Rdc, tensor-capable) + `LineGeometry`; a
+  `Line.conductor_geometry` makes assembly use the Carson/Deri path (`pgml.geometry`).
 - `result_schema.py` — output: ResultSet, SolverDiagnostics, NodeResult (v_re/v_im),
   BranchResult (i_from_*, i_to_*), InjectionResult; optional per-phase P/Q/S;
   indexed by frequency_hz; phasors as (real, imag).
