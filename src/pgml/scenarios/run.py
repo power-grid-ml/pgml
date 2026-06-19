@@ -53,6 +53,7 @@ def run_scenarios(
     calculation: str = "power_flow",
     harmonic_orders: Optional[Sequence[int]] = None,
     slack: str = "ideal",
+    symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
 ) -> ScenarioResult:
@@ -70,6 +71,10 @@ def run_scenarios(
         ``"power_flow"`` (fundamental) or ``"harmonic"`` (requires ``harmonic_orders``).
     harmonic_orders:
         Orders for the harmonic calculation (e.g. ``[1, 5, 7]``).
+    symmetry:
+        Calculation symmetry forwarded to the solver: ``None`` / ``"auto"`` (default;
+        per-phase sampled operating points auto-promote to asymmetric), ``"symmetric"``
+        (force equal split, ignore per-phase samples), or ``"asymmetric"``.
     """
     if isinstance(spec, SampledScenarios):
         sampled = spec
@@ -82,6 +87,7 @@ def run_scenarios(
             grid,
             slack=slack,
             operating_point=sampled.operating_point,
+            symmetry=symmetry,
             dtype=dtype,
             device=device,
         )
@@ -94,6 +100,7 @@ def run_scenarios(
             harmonic_orders,
             slack=slack,
             operating_point=sampled.operating_point,
+            symmetry=symmetry,
             dtype=dtype,
             device=device,
         )
