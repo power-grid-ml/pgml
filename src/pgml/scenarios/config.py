@@ -276,6 +276,36 @@ class CartesianConfig(_Base):
 
 
 # =============================================================================
+# Per-target structured perturbation sweep (inject one error per node)
+# =============================================================================
+class Perturbation(_Base):
+    """One injected error swept across targets by :func:`perturbation_sweep`.
+
+    The sweep builds ``B = #targets`` scenarios, each perturbing exactly ONE selected
+    target's operating point (all other targets nominal) — the "inject an error at each
+    node and measure how it spreads" use case. The ground truth is recorded as
+    :class:`~pgml.schemas.scenario_schema.ParameterPerturbation` rows.
+
+    - ``field``: the operating-point quantity perturbed — ``"p"`` / ``"q"`` (one) or
+      ``"pq"`` (both at constant power factor; requires ``mode="scale"``).
+    - ``mode``: ``"scale"`` (× ``value``), ``"delta"`` (+ ``value``, an absolute Δ in
+      W / var), or ``"set"`` (= ``value``).
+    - ``value``: the perturbation magnitude.
+    """
+
+    name: str = "perturbation"
+    field: Literal["p", "q", "pq"] = "pq"
+    mode: Literal["scale", "delta", "set"] = "scale"
+    value: float
+
+    @model_validator(mode="after")
+    def _check(self) -> "Perturbation":
+        if self.field == "pq" and self.mode != "scale":
+            raise ValueError("Perturbation field='pq' requires mode='scale'.")
+        return self
+
+
+# =============================================================================
 # Node-coherent harmonic "fingerprint" sampling (temporal sequences)
 # =============================================================================
 class CoherentSpectrumConfig(_Base):
@@ -337,4 +367,5 @@ __all__ = [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "Perturbation",
 ]

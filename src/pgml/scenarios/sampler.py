@@ -33,6 +33,7 @@ from .config import (
     CartesianConfig,
     CoherentSpectrumConfig,
     ParameterSpec,
+    Perturbation,
     ScenarioConfig,
 )
 from .en50160 import en50160_limit
@@ -71,14 +72,19 @@ class SampledScenarios:
     n_samples:
         Batch size ``B``.
     config:
-        The originating :class:`ScenarioConfig` (provenance / reproducibility).
+        The originating config (provenance / reproducibility).
+    perturbations:
+        Ground-truth :class:`~pgml.schemas.scenario_schema.ParameterPerturbation` rows
+        for a :func:`~pgml.scenarios.perturbation.perturbation_sweep` (which scenario
+        perturbed which component, nominal vs perturbed value); empty otherwise.
     """
 
     operating_point: dict
     samples: dict
     n_samples: int
-    config: "ScenarioConfig | CartesianConfig | CoherentSpectrumConfig"
+    config: "ScenarioConfig | CartesianConfig | CoherentSpectrumConfig | Perturbation"
     harmonic_injection: dict = field(default_factory=dict)
+    perturbations: list = field(default_factory=list)
 
 
 class _Nominal(NamedTuple):

@@ -258,6 +258,73 @@ orders, N nodes)::
 ``{device_id: {order: (mag[B, T], phase[B, T])}}``; this is passed directly to
 ``solve_harmonic_flow`` by :func:`~pgml.scenarios.run_scenarios`.
 
+Perturbation sweep
+------------------
+
+:func:`~pgml.scenarios.perturbation_sweep` implements roadmap use-case 1: "inject
+a specific error ONCE at each selected node and measure how it spreads."  Rather
+than sampling a distribution, it builds a *diagonal* batch of ``B = #targets``
+scenarios in which scenario ``j`` perturbs exactly target ``j``'s operating point
+(P / Q injection) while every other target stays at its nominal value::
+
+    from pgml.scenarios import (
+        Perturbation, Selector, perturbation_sweep, run_scenarios
+    )
+
+    sweep = perturbation_sweep(
+        grid,
+        selector=Selector(component="load"),
+        perturbation=Perturbation(
+            name="load_error",
+            field="p",
+            mode="scale",
+            value=1.10,          # +10 % active-power error
+        ),
+    )
+    # sweep.n_samples == number of matched loads (one scenario per target)
+    result = run_scenarios(grid, sweep)
+
+The :class:`~pgml.scenarios.Perturbation` config controls what is perturbed:
+
+- ``field`` — ``"p"`` / ``"q"`` (one quantity) or ``"pq"`` (both at constant power
+  factor; requires ``mode="scale"``).
+- ``mode`` — ``"scale"`` (multiply the nominal by ``value``), ``"delta"`` (add
+  ``value`` as an absolute offset in W / var), or ``"set"`` (replace the operating
+  point with ``value`` directly).
+- ``value`` — the perturbation magnitude.
+
+Ground truth and sample record
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:func:`~pgml.scenarios.perturbation_sweep` records the full perturbation ground
+truth in two places:
+
+- :attr:`~pgml.scenarios.SampledScenarios.perturbations` — a list of
+  :class:`~pgml.schemas.scenario_schema.ParameterPerturbation` objects (one per
+  perturbed (scenario, field) pair), each carrying the ``scenario_id``,
+  ``component_id``, ``nominal_value``, ``perturbed_value``, and ``unit_short``.
+  This is the ML ground truth — it says exactly which component was perturbed and
+  by how much.
+- :attr:`~pgml.scenarios.SampledScenarios.samples` — two tensors keyed by the
+  perturbation ``name``:
+
+  - ``"<name>_target_id"`` — shape ``[B]`` (``long``): the perturbed component id
+    in scenario ``j``.
+  - ``"<name>_perturbed_<field>"`` — shape ``[B]``: the applied value (one entry
+    per perturbed field; ``"pq"`` produces both ``_p`` and ``_q`` keys).
+
+For non-perturbation batches (random, cartesian, coherent),
+:attr:`~pgml.scenarios.SampledScenarios.perturbations` is always an empty list.
+
+Scope note
+~~~~~~~~~~~
+
+The sweep perturbs **operating-point** quantities (P / Q injection at a load or
+generator).  Perturbing a **network parameter** (line or transformer impedance) —
+the inverse / parameter-recovery use case — is deferred to a later phase: it
+requires a branch-aware selector and matrix-valued ground truth that the schema's
+scalar ``nominal_value`` / ``perturbed_value`` fields cannot represent.
+
 Running scenarios
 -----------------
 

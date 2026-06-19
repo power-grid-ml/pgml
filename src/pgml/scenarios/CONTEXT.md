@@ -52,6 +52,13 @@ verified `batched == loop-of-individual`).
   field, mode)`, `CartesianConfig(axes=[...])` -> `cartesian_sample(grid, config) ->
   SampledScenarios` (B = prod(len(axis.values)); each axis level applied to all matched
   comps; list id-selector axes for per-component sweeps).
+- PERTURBATION sweep (one error per node): `Perturbation(name, field="p"|"q"|"pq",
+  mode="scale"|"delta"|"set", value)`, `perturbation_sweep(grid, selector, perturbation) ->
+  SampledScenarios` with `B = #targets` — scenario `j` perturbs ONLY target `j`'s operating
+  point (diagonal; off-diagonal nominal). Records `ParameterPerturbation` ground truth in
+  `SampledScenarios.perturbations`; `samples` has `<name>_target_id [B]` + `<name>_perturbed_<f> [B]`.
+  Scope = P/Q injection errors; network-parameter (line/transformer) perturbation is deferred
+  to the inverse/parameter-recovery phase (needs a branch selector + matrix-valued ground truth).
 - `run_scenarios(grid, spec, *, calculation="power_flow"|"harmonic", harmonic_orders=None,
   slack="ideal", symmetry=None, dtype, device) -> ScenarioResult(v, index, sampled, frequencies_hz)`.
   `symmetry` forwards to the solver (None/"auto" lets per-phase samples promote to asymmetric).
@@ -74,9 +81,8 @@ verified `batched == loop-of-individual`).
   sets W/var directly. Unset of P or Q -> solver keeps the nominal for that one.
 
 ## Deferred (next increments — see memory `batching-scenarios-design`)
-- Structured "one perturbation per node" sweep (use case: inject an error at each
-  node, measure spread) — an enumeration over selector targets (not a cartesian of
-  levels); needs a small dedicated builder.
+- Network-parameter perturbation sweep (line/transformer impedance errors, for parameter
+  recovery) — extends `perturbation_sweep` with a branch-aware selector + matrix ground truth.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
 - Parquet persistence of (scenario, component, step, frequency) -> result_schema.
 - Beta / scipy-backed distributions (no closed-form icdf).

@@ -22,12 +22,14 @@ from .config import (
     LogUniform,
     Normal,
     ParameterSpec,
+    Perturbation,
     ScenarioConfig,
     Selector,
     Uniform,
 )
 from .en50160 import en50160_limit, en50160_limits
 from .harmonics import sample_coherent_spectra
+from .perturbation import perturbation_sweep
 from .run import ScenarioResult, run_scenarios
 from .sampler import SampledScenarios, cartesian_sample, sample
 
@@ -47,6 +49,7 @@ for _name in [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "Perturbation",
 ]:
     _obj = locals().get(_name)
     if _obj is not None and hasattr(_obj, "__module__"):
@@ -69,10 +72,12 @@ __all__ = [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "Perturbation",
     "SampledScenarios",
     "sample",
     "cartesian_sample",
     "sample_coherent_spectra",
+    "perturbation_sweep",
     "en50160_limits",
     "en50160_limit",
     "ScenarioResult",
