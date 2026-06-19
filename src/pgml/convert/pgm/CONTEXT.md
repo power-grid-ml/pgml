@@ -19,12 +19,17 @@ to_grid(
     *,
     base_frequency_hz: float = 50.0,    # must match the network (pgm has no f0 field)
     load_model: LoadModel = LoadModel.CONST_IMPEDANCE,
+    phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,  # see convert/CONTEXT.md
 ) -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function. Converts a power-grid-model ``input_data`` dict to a schema
 ``Grid`` and an ``id_map``.  Handles: ``node``, ``line``, ``sym_load``,
-``source``.  Unknown keys in ``input_data`` are silently ignored.
+``asym_load``, ``source``.  Unknown keys in ``input_data`` are silently ignored.
+``phase_mode`` (the shared `convert._common.PhaseMode`) selects the
+positive-sequence single-phase equivalent (default, bit-exact) vs a genuine abc
+expansion; see `convert/CONTEXT.md` for the scaffold + abc/asymmetric details. pgm
+has NO load connection field, so a converted ``asym_load`` is always ``WYE``.
 
 ### id_map format
 ```python
@@ -32,6 +37,7 @@ Pure function. Converts a power-grid-model ``input_data`` dict to a schema
     "node":           {pgm_node_id: Node.id, ...},
     "line":           {pgm_line_id: Line.id, ...},
     "sym_load":       {pgm_load_id: Load.id, ...},
+    "asym_load":      {pgm_load_id: Load.id, ...},  # THREE_PHASE only
     "source":         {pgm_source_id: Source.id, ...},
     "slack_v_complex": complex,   # phasor V (line-to-line, V) for ideal-slack solve
     "load_types":     {pgm_load_id: int},  # original LoadGenType int value
@@ -65,12 +71,19 @@ field.  The converter sets ``length_m=1.0`` and uses the pgm total values as
     Z_total = r_per_m * length_m = r1 * 1 = r1 [Ohm]
 which is numerically identical to the pgm value.
 
-### Single-phase positive-sequence convention
+### Single-phase positive-sequence convention (default phase_mode)
 Same as the pandapower converter:
 - Every node: ``phases=(Phase.A,)``, ``u_rated_v = node.u_rated`` (line-to-line V).
 - All loads: ``load_model=LoadModel.CONST_IMPEDANCE`` (caller-specified; default).
   This matches pgm ``LoadGenType.const_impedance`` so both sides solve the same
   linear system.
+
+### Three-phase (abc) convention (phase_mode=THREE_PHASE)
+See `convert/CONTEXT.md` for the shared behaviour. pgm-specific: line zero-sequence
+from ``r0/x0/c0`` fields when present (NaN/absent -> config default); sources become
+balanced 3-phase Thevenins; ``asym_load`` ``p_specified``/``q_specified`` (shape
+(3,)) become ``p_nom_per_phase_w``/``q_nom_per_phase_var`` with ``connection=WYE``;
+``sym_load`` stays a balanced total (``connection=None`` -> WYE from config).
 
 ### Validated on
 IEEE 33-bus Baran & Wu (built from pandapower ``case33bw()`` data), 60 Hz,

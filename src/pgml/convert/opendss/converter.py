@@ -16,20 +16,53 @@ When ``units == 0`` (none), length=1 and R/X are the TOTAL ohms for the branch;
 otherwise R/X are per the stated length unit and must be multiplied by length to
 get total ohms.
 
-Conversion to our SI per-length schema:
-  length_m        = length_in_unit * meters_per_unit
-  R_total_ohm     = Rmatrix * length_in_unit       (Ohm)
-  X_total_ohm     = Xmatrix * length_in_unit       (Ohm)
-  C_total_F       = Cmatrix * length_in_unit * 1e-9  (F)
-  r_per_m         = R_total_ohm / length_m         (Ohm/m)
-  l_per_m         = X_total_ohm / (2*pi*f0) / length_m  (H/m)
-  c_per_m         = C_total_F / length_m           (F/m)
+Conversion to our SI per-length schema::
+
+    length_m        = length_in_unit * meters_per_unit
+    R_total_ohm     = Rmatrix * length_in_unit       (Ohm)
+    X_total_ohm     = Xmatrix * length_in_unit       (Ohm)
+    C_total_F       = Cmatrix * length_in_unit * 1e-9  (F)
+    r_per_m         = R_total_ohm / length_m         (Ohm/m)
+    l_per_m         = X_total_ohm / (2*pi*f0) / length_m  (H/m)
+    c_per_m         = C_total_F / length_m           (F/m)
 
 Loads
 ~~~~~
-``Loads.kW()``, ``Loads.kvar()``, ``Loads.kV()`` → total P/Q in kW/kVAR, kV L-N.
+``Loads.kW()``, ``Loads.kvar()``, ``Loads.kV()`` — total P/Q in kW/kVAR, kV L-N.
 P in W = kW * 1e3; Q in VAR = kvar * 1e3.
-Load kV in OpenDSS is L-N for single-phase loads. Our schema stores u_rated_v = V_LL.
+Connection is read via ``dss.Loads.IsDelta()``:  ``True`` -> DELTA, ``False`` -> WYE.
+Single-phase loads are placed on their real phase (bus suffix ``.k``); the
+connection is WYE (L-N) as the default for a two-conductor single-phase load
+following the OpenDSS convention (NeutralRules: grounded-wye path when phases=1).
+
+``u_rated_v`` convention
+~~~~~~~~~~~~~~~~~~~~~~~~
+The pgml schema convention (and the pandapower/pgm converters) stores the
+**line-to-line** rated voltage for all nodes, because the const-Z load shunt
+formula is ``y = conj(S) / u_rated_v^2`` with ``u_rated_v`` being L-L.
+OpenDSS ``Bus.kVBase()`` always returns ``BasekV_LL / sqrt(3)`` (line-to-neutral),
+regardless of the phase count on the element that established the base voltage.
+The converter therefore always applies ``u_rated_v = kVBase * sqrt(3) * 1000``.
+
+For the canonical IEEE 33-bus (single-phase positive-sequence circuit built with
+``phases=1`` and ``basekv=12.66 kV``): OpenDSS stores ``kVBase = 12.66/sqrt(3) =
+7.31 kV``.  Applying ``* sqrt(3) * 1000`` recovers ``12660 V``, matching the
+pandapower reference.  The old converter stored ``kVBase * 1000 = 7309 V``
+(L-N), which was a factor-of-sqrt(3) error in the const-Z shunt for load-flow
+studies.  The Y-bus oracle test (passive network, no loads) was unaffected; the
+load-flow path (``solve_power_flow``) is corrected by this fix.
+
+``phase_mode`` controls the node/branch representation:
+
+- ``SINGLE_PHASE_EQUIV`` (default): every node/branch is ``phases=(Phase.A,)``;
+  lines carry 1x1 matrices (the ``[0][0]`` element of the DSS matrix).  This is
+  byte-identical to the historical converter output (except for the ``u_rated_v``
+  fix above, which does not change the IEEE 33-bus numbers because that circuit uses
+  single-phase elements with kVBase == kV_LL).
+- ``THREE_PHASE``: nodes carry their real DSS phases (incl. ``Phase.N`` when the
+  bus has a neutral conductor); lines carry the full n×n matrices from
+  ``Lines.RMatrix()/XMatrix()/CMatrix()``; sources become balanced 3-phase
+  Thevenins; loads capture their ``IsDelta()`` connection and real phase placement.
 
 Vsource (external network)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -57,22 +90,30 @@ solved (or at least ``Calcvoltagebases`` has been called) before calling ``to_gr
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
+from pgml.convert._common import (
+    IdCounter,
+    PhaseMode,
+    build_line_from_matrices,
+    build_load,
+    build_node,
+    build_source,
+    make_metadata,
+    phases_for,
+    thevenin_from_z,
+)
 from pgml.schemas.grid_schema import (
-    ConstantParam,
     Grid,
-    GridMetadata,
-    Line,
-    Load,
-    Node,
     Phase,
     Provenance,
-    ResistanceFrequencyModel,
-    Source,
     SourceConvention,
+    WindingConnection,
 )
+
+_logger = logging.getLogger("pgml")
 
 # Length unit codes in opendssdirect -> meters per unit
 _DSS_UNIT_TO_METERS: dict[int, float] = {
@@ -86,37 +127,52 @@ _DSS_UNIT_TO_METERS: dict[int, float] = {
     7: 0.01,  # cm
 }
 
-_PHASE_A = (Phase.A,)
-_TINY_R = 1.0e-6  # Ohm — near-ideal Thevenin for Vsource in Norton stamp
-_TINY_L = 1.0e-12  # H   — near-ideal Thevenin for Vsource in Norton stamp
 _PROVENANCE = Provenance(
     source_convention=SourceConvention.IMPEDANCE,
     notes=(
         "Converted from OpenDSS circuit (opendssdirect). "
-        "Single-phase positive-sequence: phases=(A,), u_rated_v = BasekV*1000 (line-to-line). "
-        "Engineering units converted to SI."
+        "Engineering units converted to SI. "
+        "u_rated_v is line-to-line for every bus (= kVBase * sqrt(3) * 1000), "
+        "following the pgml schema convention; OpenDSS kVBase() returns L-N. "
+        "Load connection from IsDelta(); single-phase loads default to WYE (L-N)."
     ),
 )
 
+# sqrt(3): used to convert L-N kVBase -> L-L for every bus
+_SQRT3 = math.sqrt(3.0)
 
-def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
+
+def to_grid(
+    dss: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV
+) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
 
     Parameters
     ----------
     dss:
-        The ``opendssdirect`` module (``import opendssdirect as dss; dss.Text.Command('Solve')``)
-        with a circuit already loaded and solved (or ``Calcvoltagebases`` called).
+        The ``opendssdirect`` module (``import opendssdirect as dss;
+        dss.Text.Command('Solve')``) with a circuit already loaded and solved
+        (or ``Calcvoltagebases`` called).
+    phase_mode:
+        :class:`~pgml.convert._common.PhaseMode`. ``SINGLE_PHASE_EQUIV`` (default)
+        keeps today's positive-sequence single-phase-equivalent: every node/branch
+        is ``phases=(Phase.A,)`` and lines carry 1x1 matrices (the leading diagonal
+        entry of the DSS matrix). ``THREE_PHASE`` emits the real DSS phases (incl.
+        ``Phase.N`` for neutral conductors), full n×n line matrices, balanced
+        3-phase Thevenin sources, and load ``connection`` from ``IsDelta()``.
 
     Returns
     -------
     tuple[Grid, dict]
         A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
         (no ``type_ref``).  ``id_map`` maps DSS element names to our schema ids:
-        ``"bus"`` → ``{dss_bus_name_lower: Node.id}``,
-        ``"line"`` → ``{dss_line_name_lower: Line.id}``,
-        ``"load"`` → ``{dss_load_name_lower: Load.id}``,
-        ``"vsource"`` → ``{dss_vsrc_name_lower: Source.id}``.
+
+        - ``"bus"``     -> ``{dss_bus_name_lower: Node.id}``
+        - ``"line"``    -> ``{dss_line_name_lower: Line.id}``
+        - ``"load"``    -> ``{dss_load_name_lower: Load.id}``
+        - ``"vsource"`` -> ``{dss_vsrc_name_lower: Source.id}``
+        - ``"slack_v_complex"`` -> complex slack voltage phasor (V, line-to-line)
+          from the first Vsource, for ideal-slack mode.
 
     Notes
     -----
@@ -124,17 +180,25 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
     - Node ids are assigned in YNodeOrder sequence (bus.phase pairs,
       alphabetical in DSS's internal order) so our compact node-phase index
       matches the DSS Y-matrix row ordering for alignment in oracle tests.
-    - The converter handles single-phase circuits (phases=1 per element) and
-      the positive-sequence single-phase equivalent convention from pandapower.
-    - Only ``Line``, ``Vsource``, and ``Load`` element types are handled; the
-      structure is designed to extend to Transformer etc.
+    - Only ``Line``, ``Vsource``, and ``Load`` element types are handled;
+      the structure is designed to extend to Transformer etc.
+    - ``u_rated_v`` is line-to-line for every bus (kVBase * sqrt(3) * 1000),
+      consistent with the pandapower/pgm converters and the assembly const-Z
+      shunt formula. OpenDSS ``kVBase()`` returns L-N, recovered to L-L by the
+      sqrt(3) factor.
     """
     f0_hz: float = float(dss.Solution.Frequency())
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
-    _id = _IdCounter()
+    _id = IdCounter()
 
-    id_map: dict[str, Any] = {"bus": {}, "line": {}, "load": {}, "vsource": {}}
+    id_map: dict[str, Any] = {
+        "bus": {},
+        "line": {},
+        "load": {},
+        "vsource": {},
+        "slack_v_complex": None,
+    }
 
     # ---------------------------------------------------------------------- #
     # 1. Nodes — register in YNodeOrder sequence                              #
@@ -144,7 +208,7 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
     # ---------------------------------------------------------------------- #
     node_order = dss.Circuit.YNodeOrder()
     # Build: bus_name_lower -> Node.id (first occurrence wins)
-    nodes: list[Node] = []
+    nodes: list = []
     bus_name_to_node_id: dict[str, int] = {}
     # Also track phases seen per bus
     bus_phases: dict[str, list[Phase]] = {}  # bus_name_lower -> ordered phases
@@ -162,29 +226,35 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         if phase not in bus_phases[bus_name_raw]:
             bus_phases[bus_name_raw].append(phase)
 
-    # Now get rated voltage per bus from the circuit
-    # We query via dss.Bus API
+    # Now get rated voltage per bus from the circuit.
+    # ``Bus.kVBase()`` always returns the line-to-neutral kV (BasekV / sqrt(3)),
+    # regardless of the number of phases on the bus.  The pgml schema convention
+    # (matching pandapower and pgm) stores the LINE-TO-LINE rated voltage so that
+    # the const-Z load shunt formula ``y = conj(S) / u_rated_v^2`` is consistent
+    # across all converters.  Therefore: ``u_rated_v = kVBase * sqrt(3) * 1000``.
+    #
+    # Rationale: OpenDSS sets ``kVBase = BasekV_LL / sqrt(3)`` internally for every
+    # bus, so ``kVBase * sqrt(3) = BasekV_LL`` recovers the line-to-line nominal.
+    # This applies equally to single-phase buses (e.g. IEEE 33-bus built with
+    # ``basekv=12.66 kV, phases=1``): kVBase = 7.31 kV -> u_rated_v = 12660 V,
+    # which matches the pandapower reference for the same circuit.
     for bus_name_lower, phases_list in bus_phases.items():
         node_id = _id.next()
         bus_name_to_node_id[bus_name_lower] = node_id
 
-        # Activate bus to read kVBase
         dss.Circuit.SetActiveBus(bus_name_lower)
-        # kVBase is L-N or L-L depending on phase count? In OpenDSS:
-        # For single-phase buses, kVBase is L-N. For 3-phase, it's L-L.
-        # We keep u_rated_v as reported by OpenDSS (kVBase * 1000) —
-        # since we're doing single-phase positive-sequence, kVBase = V_LL / sqrt(3)
-        # when the bus is part of a 3-phase system. But we override this
-        # with the circuit's BasekV below (in the Vsource section).
-        kv_base = dss.Bus.kVBase()  # kV (L-N for single-phase, L-L for 3-phase)
-        u_rated_v = kv_base * 1_000.0  # V
+        kv_base_ln = dss.Bus.kVBase()  # L-N kV (always BasekV_LL / sqrt(3))
+        # Recover line-to-line: u_rated_v = kVBase * sqrt(3) * 1000 V
+        u_rated_v = kv_base_ln * _SQRT3 * 1_000.0
 
+        native_phases = tuple(phases_list)
         nodes.append(
-            Node(
+            build_node(
                 id=node_id,
                 name=bus_name_lower,
                 u_rated_v=u_rated_v,
-                phases=tuple(phases_list),
+                mode=phase_mode,
+                native_phases=native_phases,
             )
         )
 
@@ -239,27 +309,31 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         l_per_m_flat = [v / two_pi_f0 / length_m for v in x_total]  # H/m
         c_per_m_flat = [v * 1e-9 / length_m for v in c_total_nf]  # F/m
 
-        # Reshape to n_phases x n_phases matrices
-        r_mat = _flat_to_matrix(r_per_m_flat, n_phases)
-        l_mat = _flat_to_matrix(l_per_m_flat, n_phases)
-        c_mat = _flat_to_matrix(c_per_m_flat, n_phases)
+        if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
+            # Positive-sequence equivalent: use the 1x1 [0][0] entry only.
+            r_mat = [[r_per_m_flat[0]]]
+            l_mat = [[l_per_m_flat[0]]]
+            c_mat = [[c_per_m_flat[0]]]
+            line_phases: tuple[Phase, ...] = phases_for(phase_mode)
+        else:
+            # THREE_PHASE: emit the real n×n matrices from DSS.
+            r_mat = _flat_to_matrix(r_per_m_flat, n_phases)
+            l_mat = _flat_to_matrix(l_per_m_flat, n_phases)
+            c_mat = _flat_to_matrix(c_per_m_flat, n_phases)
+            line_phases = phases_for(phase_mode, native=tuple(from_phases))
 
         branches.append(
-            Line(
+            build_line_from_matrices(
                 id=line_id,
                 name=line_name,
                 from_node=bus_name_to_node_id[from_bus_name],
                 to_node=bus_name_to_node_id[to_bus_name],
-                from_phases=tuple(from_phases),
-                to_phases=tuple(to_phases),
+                phases=line_phases,
                 length_m=length_m,
-                series_resistance_ohm_per_m=r_mat,
-                series_inductance_h_per_m=l_mat,
-                shunt_capacitance_f_per_m=c_mat,
-                shunt_conductance_s_per_m=None,  # OpenDSS GMatrix rare in distribution
-                resistance_frequency=ResistanceFrequencyModel(
-                    multiplier=ConstantParam(value=1.0)
-                ),
+                r_matrix=r_mat,
+                l_matrix=l_mat,
+                c_matrix=c_mat,
+                g_matrix=None,  # OpenDSS GMatrix is rare in distribution; omit
                 provenance=_PROVENANCE,
             )
         )
@@ -282,7 +356,7 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         # Get bus name from circuit element
         dss.Circuit.SetActiveElement(f"Vsource.{vsrc_name}")
         bus_names_raw = dss.CktElement.BusNames()
-        bus1_str = bus_names_raw[0].lower()  # first terminal (the non-reference bus)
+        bus1_str = bus_names_raw[0].lower()  # first terminal (non-reference bus)
         src_bus_name, src_phases = _parse_bus_connection(bus1_str, n_phases)
 
         if src_bus_name not in bus_name_to_node_id:
@@ -295,43 +369,34 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         dss.Text.Command(f"? Vsource.{vsrc_name}.x1")
         x1_str = dss.Text.Result().strip()
 
-        r1_ohm = float(r1_str) if r1_str else _TINY_R
+        r1_ohm = float(r1_str) if r1_str else 0.0
         x1_ohm = float(x1_str) if x1_str else 0.0
-        l1_h = x1_ohm / two_pi_f0 if x1_ohm > 0.0 else _TINY_L
+        r_s, l_s = thevenin_from_z(r1_ohm, x1_ohm, two_pi_f0)
 
-        # Use tiny Z if the specified impedance is zero (to avoid singular Y)
-        if r1_ohm == 0.0 and l1_h == 0.0:
-            r1_ohm = _TINY_R
-            l1_h = _TINY_L
-
-        # u_ref_v: BasekV is L-L for single-phase positive-sequence equivalent
+        # u_ref_v: BasekV is L-L for the source reference phasor
         u_ref_v = basekv * pu * 1_000.0  # V (L-L magnitude)
 
-        # Build per-phase Thevenin: for n_phases phases, distribute 120-deg apart
-        u_ref_tuple = tuple(u_ref_v for _ in range(n_phases))
-        u_angle_deg_tuple = tuple(angle_deg - 120.0 * i for i in range(n_phases))
-
-        r_mat = [
-            [r1_ohm if i == j else 0.0 for j in range(n_phases)]
-            for i in range(n_phases)
-        ]
-        l_mat = [
-            [l1_h if i == j else 0.0 for j in range(n_phases)] for i in range(n_phases)
-        ]
+        if id_map["slack_v_complex"] is None:
+            id_map["slack_v_complex"] = u_ref_v * complex(
+                math.cos(math.radians(angle_deg)),
+                math.sin(math.radians(angle_deg)),
+            )
 
         src_id = _id.next()
         id_map["vsource"][vsrc_name] = src_id
 
+        native_src_phases = tuple(src_phases)
         appliances.append(
-            Source(
+            build_source(
                 id=src_id,
                 name=vsrc_name,
                 node=bus_name_to_node_id[src_bus_name],
-                phases=tuple(src_phases),
-                u_ref_v=u_ref_tuple,
-                u_angle_deg=u_angle_deg_tuple,
-                resistance_ohm=r_mat,
-                inductance_h=l_mat,
+                mode=phase_mode,
+                u_ref_v=u_ref_v,
+                u_angle_deg=angle_deg,
+                r_ohm=r_s,
+                l_h=l_s,
+                native_phases=native_src_phases,
             )
         )
 
@@ -358,34 +423,84 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
         p_w = dss.Loads.kW() * 1_000.0  # W total
         q_var = dss.Loads.kvar() * 1_000.0  # VAR total
 
+        # Read load connection: IsDelta() returns True for delta, False for wye.
+        # OpenDSS single-phase loads are always wye (L-N, two-conductor) per the
+        # NeutralRules convention; delta requires at least 2 phases.
+        is_delta = bool(dss.Loads.IsDelta())
+        # DELTA needs >=2 phases (schema validator enforces this). A 1-phase load
+        # flagged delta is a misconfiguration; treat it as WYE rather than let the
+        # schema raise an error that does not point back to the converter.
+        conn = (
+            WindingConnection.DELTA
+            if (is_delta and n_phases >= 2)
+            else WindingConnection.WYE
+        )
+        if is_delta and n_phases < 2:
+            _logger.info(
+                "OpenDSS load %s is flagged delta but has a single phase; "
+                "treating it as WYE (delta requires at least 2 phases).",
+                load_name,
+            )
+
         load_id = _id.next()
         id_map["load"][load_name] = load_id
 
-        appliances.append(
-            Load(
-                id=load_id,
-                name=load_name,
-                node=bus_name_to_node_id[load_bus_name],
-                phases=tuple(load_phases),
-                p_nom_w=p_w,
-                q_nom_var=q_var,
+        native_load_phases = tuple(load_phases)
+
+        if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
+            # SINGLE_PHASE_EQUIV: collapse to phases=(A,), no connection stored.
+            # Delta loads cannot be represented in 1-phase equivalent; log a note.
+            if is_delta:
+                _logger.info(
+                    "OpenDSS delta load %s collapsed to single-phase equivalent "
+                    "(SINGLE_PHASE_EQUIV cannot represent delta connection); "
+                    "use THREE_PHASE to preserve the delta topology.",
+                    load_name,
+                )
+            appliances.append(
+                build_load(
+                    id=load_id,
+                    name=load_name,
+                    node=bus_name_to_node_id[load_bus_name],
+                    mode=phase_mode,
+                    p_total_w=p_w,
+                    q_total_var=q_var,
+                )
             )
-        )
+        else:
+            # THREE_PHASE: emit real phases + connection.
+            # Multi-phase balanced DSS loads (kW/kvar are the total, divided
+            # equally by DSS internally) have no per-phase split; leave
+            # p_per_phase_w=None so the assembly's symmetric/auto mode splits
+            # the total equally.  Genuine per-phase imbalance in OpenDSS is
+            # expressed via separate 1-phase Load objects (which naturally end
+            # up on distinct phase rows through their bus suffix).
+            appliances.append(
+                build_load(
+                    id=load_id,
+                    name=load_name,
+                    node=bus_name_to_node_id[load_bus_name],
+                    mode=phase_mode,
+                    p_total_w=p_w,
+                    q_total_var=q_var,
+                    connection=conn,
+                    native_phases=native_load_phases,
+                )
+            )
 
         ret = dss.Loads.Next()
 
+    description = f"Imported from OpenDSS circuit (f0={f0_hz} Hz). " + (
+        "Single-phase positive-sequence equivalent."
+        if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV
+        else "Three-phase (abc) with real DSS phases, n×n line matrices, and load connections."
+    )
     grid = Grid(
         base_frequency_hz=f0_hz,
         nodes=nodes,
         branches=branches,
         appliances=appliances,
-        metadata=GridMetadata(
-            name="opendss_import",
-            description=(
-                f"Imported from OpenDSS circuit (f0={f0_hz} Hz). "
-                "Single-phase positive-sequence equivalent."
-            ),
-        ),
+        metadata=make_metadata(name="opendss_import", description=description),
     )
     return grid, id_map
 
@@ -396,17 +511,16 @@ def to_grid(dss: Any) -> tuple[Grid, dict[str, Any]]:
 
 
 def _phase_num_to_enum(phase_num: int) -> Phase:
-    """Map OpenDSS phase number (1, 2, 3) to our Phase enum (A, B, C).
+    """Map OpenDSS phase number (1, 2, 3, 0) to our Phase enum (A, B, C, N).
 
-    OpenDSS numbers phases 1=A, 2=B, 3=C (for positive-sequence circuits).
-    Phase number 0 is the neutral.
+    OpenDSS numbers phases 1=A, 2=B, 3=C, 0=neutral.
     """
-    _MAP = {1: Phase.A, 2: Phase.B, 3: Phase.C, 0: Phase.N}
+    _MAP: dict[int, Phase] = {1: Phase.A, 2: Phase.B, 3: Phase.C, 0: Phase.N}
     return _MAP.get(phase_num, Phase.A)
 
 
 def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]]:
-    """Parse a DSS bus connection string 'busname.1.2.3' into (bus_name, [phases]).
+    """Parse a DSS bus connection string ``'busname.1.2.3'`` into ``(bus_name, [phases])``.
 
     Parameters
     ----------
@@ -435,17 +549,6 @@ def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]
 def _flat_to_matrix(flat: list[float], n: int) -> list[list[float]]:
     """Reshape a flat list of n*n values (row-major) into an n x n list-of-lists."""
     return [[flat[i * n + j] for j in range(n)] for i in range(n)]
-
-
-class _IdCounter:
-    """Monotonically increasing integer id generator."""
-
-    def __init__(self) -> None:
-        self._n = 0
-
-    def next(self) -> int:
-        self._n += 1
-        return self._n
 
 
 __all__ = ["to_grid"]

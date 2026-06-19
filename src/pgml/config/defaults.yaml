@@ -84,6 +84,35 @@ line:
         Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and
         sequence-aware models. false → R constant (the naive X∝h, R-const model).
 
+  # Assumed zero-sequence/positive-sequence ratios used ONLY when expanding a
+  # positive-sequence (r1/x1/c1) line into a 3-phase phase-domain matrix for an
+  # asymmetric calculation, and the source grid carries no explicit zero-sequence
+  # data (typical for balanced pandapower / power-grid-model datasets). The phase
+  # matrix follows the symmetric-component identity: Z_self=(Z0+2*Z1)/3,
+  # Z_mutual=(Z0-Z1)/3 (and likewise for the shunt C). An explicit per-line value or
+  # native zero-sequence data always wins over these defaults.
+  zero_sequence:
+    r0_over_r1:
+      value: 4.0
+      units: "ratio"
+      description: >
+        Assumed series RESISTANCE ratio R0/R1 for sequence->phase line expansion when no
+        explicit R0 is available. ~4 is a common overhead-line rule of thumb (the earth
+        return dominates the zero-sequence resistance).
+    x0_over_x1:
+      value: 3.0
+      units: "ratio"
+      description: >
+        Assumed series REACTANCE ratio X0/X1 for sequence->phase line expansion when no
+        explicit X0 is available (~3 typical for overhead lines).
+    c0_over_c1:
+      value: 0.5
+      units: "ratio"
+      description: >
+        Assumed shunt CAPACITANCE ratio C0/C1 for sequence->phase line expansion when no
+        explicit C0 is available (~0.5 typical: less zero-sequence than positive-sequence
+        capacitance).
+
   # Carson/Deri earth-return path (zero-sequence and geometry lines).
   earth_return:
     resistivity_ohm_m:

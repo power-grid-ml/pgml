@@ -12,13 +12,22 @@ Unit conversion (engineering -> SI):
   - p_mw         -> p_nom_w [W]   : multiply by 1e6
   - q_mvar       -> q_nom_var [VAr]: multiply by 1e6
 
-Single-phase positive-sequence equivalent
------------------------------------------
-Every node is modelled as a single-phase node with ``phases=(Phase.A,)`` and
-``u_rated_v = vn_kv * 1000`` (line-to-line magnitude, retained as-is for the
-1-phase node because ``phase_voltage_magnitude`` returns ``u_rated_v`` unchanged
-for nodes with fewer than 3 phases).  This matches pandapower's const-Z
-reference: y_const = conj(S_total)/(V_LL)^2 = (P - jQ)/(V_LL)^2.
+Phase mode
+----------
+``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) keeps today's positive-sequence
+single-phase equivalent: every node/branch is ``phases=(Phase.A,)`` and lines carry
+1x1 matrices. ``u_rated_v = vn_kv * 1000`` (line-to-line magnitude, retained as-is for
+the 1-phase node because ``phase_voltage_magnitude`` returns ``u_rated_v`` unchanged
+for nodes with fewer than 3 phases); this matches pandapower's const-Z reference
+``y_const = conj(S_total)/(V_LL)^2``.
+
+``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches become
+``(A, B, C)``; lines are expanded from sequence quantities via the symmetric-component
+identity (zero-sequence from ``net.line`` ``r0/x0/c0`` columns when present, else from
+``pgml.config`` defaults); the slack becomes a balanced 3-phase Thevenin (angles
+``0 / -120 / +120``); a non-empty ``net.asymmetric_load`` table is captured with its
+WYE/DELTA connection and per-phase P/Q. The shared scaffold in
+:mod:`pgml.convert._common` is the single place the phase decision lives.
 
 ext_grid -> Source
 ------------------
@@ -26,7 +35,8 @@ The slack (ext_grid) is converted to a ``Source`` with a very small Thevenin
 impedance (1e-6 Ohm, 1e-12 H) so the Norton stamp is near-zero.  In the oracle
 test we use **ideal-slack mode** (``fixed_rows`` / ``v_fixed``) which makes the
 Thevenin impedance irrelevant; the Source is still required by the schema so the
-slack bus has an appliance.
+slack bus has an appliance. Its zero-sequence source impedance equals the
+positive-sequence impedance (no short-circuit data is read here).
 
 Slack voltage phasor stored in id_map
 --------------------------------------
@@ -38,28 +48,32 @@ Only in-service elements are converted.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
+from pgml.convert._common import (
+    IdCounter,
+    PhaseMode,
+    build_line_from_sequence,
+    build_load,
+    build_node,
+    build_source,
+    make_metadata,
+    phases_for,
+)
 from pgml.schemas.grid_schema import (
     ComplexTap,
-    ConstantParam,
     Grid,
-    GridMetadata,
-    Line,
-    Load,
-    Node,
-    Phase,
     Provenance,
-    ResistanceFrequencyModel,
-    Source,
     SourceConvention,
     Switch,
     Transformer,
     WindingConnection,
 )
 
-_PHASE_A = (Phase.A,)
+_logger = logging.getLogger("pgml")
+
 _TINY_R = 1.0e-6  # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
 _TINY_L = 1.0e-12  # H   — near-ideal Thevenin for ext_grid in Norton stamp
 _SWITCH_R = 1.0e-4  # Ohm — near-ideal resistance for closed bus-bus switches
@@ -67,13 +81,14 @@ _PROVENANCE = Provenance(
     source_convention=SourceConvention.SEQUENCE,
     notes=(
         "Converted from pandapower positive-sequence network. "
-        "Single-phase-equivalent: phases=(A,), u_rated_v = vn_kv*1000 (line-to-line). "
         "Engineering units converted to SI."
     ),
 )
 
 
-def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
+def to_grid(
+    net: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV
+) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
 
     Parameters
@@ -84,27 +99,32 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
         basic DataFrames (``bus``, ``line``, ``load``, ``ext_grid``).
         Unmaterialised std_type references in lines are accepted as long as
         explicit per-km parameters are present.
+    phase_mode:
+        :class:`~pgml.convert._common.PhaseMode`. ``SINGLE_PHASE_EQUIV`` (default)
+        reproduces the positive-sequence single-phase-equivalent output exactly;
+        ``THREE_PHASE`` expands to a genuine abc grid (sequence->phase line
+        matrices, balanced 3-phase source, asymmetric-load capture). Caveat:
+        under ``THREE_PHASE`` transformers use a per-phase diagonal stamp with no
+        vector-group phase coupling or zero-sequence path, so results are
+        approximate for non-Dyn vector groups (e.g. Yyn/YNyn).
 
     Returns
     -------
     tuple[Grid, dict]
         A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
         (no ``type_ref``).  ``id_map`` maps source element tables to our ids:
-        ``"bus"`` → ``{pp_bus_idx: Node.id}``,
-        ``"line"`` → ``{pp_line_idx: Line.id}``,
-        ``"load"`` → ``{pp_load_idx: Load.id}``,
-        ``"ext_grid"`` → ``{pp_eg_idx: Source.id}``,
-        ``"slack_v_complex"`` → complex slack voltage phasor (V, LL) for
+        ``"bus"`` -> ``{pp_bus_idx: Node.id}``,
+        ``"line"`` -> ``{pp_line_idx: Line.id}``,
+        ``"load"`` -> ``{pp_load_idx: Load.id}``,
+        ``"asymmetric_load"`` -> ``{pp_asym_idx: Load.id}`` (THREE_PHASE only),
+        ``"ext_grid"`` -> ``{pp_eg_idx: Source.id}``,
+        ``"slack_v_complex"`` -> complex slack voltage phasor (V, LL) for
         ideal-slack mode.
     """
     f0_hz: float = float(getattr(net, "f_hz", 50.0))
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
-    # ------------------------------------------------------------------ #
-    # ID counter: allocate monotonically increasing integer ids for all   #
-    # elements (nodes then branches then appliances) to avoid collisions.  #
-    # ------------------------------------------------------------------ #
-    _id = _IdCounter()
+    _id = IdCounter()
 
     id_map: dict[str, Any] = {
         "bus": {},
@@ -112,24 +132,26 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
         "trafo": {},
         "switch": {},
         "load": {},
+        "asymmetric_load": {},
         "ext_grid": {},
+        "slack_v_complex": None,
     }
 
     # ------------------------------------------------------------------ #
     # 1. Nodes (buses)                                                     #
     # ------------------------------------------------------------------ #
-    nodes: list[Node] = []
+    nodes: list = []
     for pp_idx, row in net.bus.iterrows():
         if not bool(row.get("in_service", True)):
             continue
         node_id = _id.next()
         id_map["bus"][pp_idx] = node_id
         nodes.append(
-            Node(
+            build_node(
                 id=node_id,
                 name=str(row.get("name", f"bus_{pp_idx}") or f"bus_{pp_idx}"),
                 u_rated_v=float(row["vn_kv"]) * 1_000.0,
-                phases=_PHASE_A,
+                mode=phase_mode,
             )
         )
 
@@ -151,39 +173,34 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
 
         length_m = float(row["length_km"]) * 1_000.0
 
-        # Per-length SI parameters (1/m)
-        r_per_m = float(row["r_ohm_per_km"]) / 1_000.0  # Ohm/m
-        x_per_m = float(row["x_ohm_per_km"]) / 1_000.0  # Ohm/m (=2*pi*f0*L per m)
-        l_per_m = x_per_m / two_pi_f0  # H/m
+        # Per-length positive-sequence SI parameters (1/m)
+        r1 = float(row["r_ohm_per_km"]) / 1_000.0  # Ohm/m
+        x1 = float(row["x_ohm_per_km"]) / 1_000.0  # Ohm/m (=2*pi*f0*L per m)
+        c1 = float(row.get("c_nf_per_km", 0.0) or 0.0) * 1.0e-9 / 1_000.0  # F/m
+        g1 = float(row.get("g_us_per_km", 0.0) or 0.0) * 1.0e-6 / 1_000.0  # S/m
 
-        c_nf_km = float(row.get("c_nf_per_km", 0.0) or 0.0)
-        c_per_m = c_nf_km * 1.0e-9 / 1_000.0  # F/m  (nF/km -> F/m)
-
-        g_us_km = float(row.get("g_us_per_km", 0.0) or 0.0)
-        g_per_m = g_us_km * 1.0e-6 / 1_000.0  # S/m  (µS/km -> S/m)
-
-        # 1x1 matrices for single-phase equivalent
-        r_mat = [[r_per_m]]
-        l_mat = [[l_per_m]]
-        c_mat = [[c_per_m]]
-        g_mat = [[g_per_m]] if g_per_m != 0.0 else None
+        # Native zero-sequence columns (THREE_PHASE only; else config defaults).
+        r0 = _opt_per_km(row, "r0_ohm_per_km", 1_000.0)
+        x0 = _opt_per_km(row, "x0_ohm_per_km", 1_000.0)
+        c0_nf = _opt_per_km(row, "c0_nf_per_km", None)
+        c0 = c0_nf * 1.0e-12 if c0_nf is not None else None
 
         branches.append(
-            Line(
+            build_line_from_sequence(
                 id=line_id,
                 name=str(row.get("name", f"line_{pp_idx}") or f"line_{pp_idx}"),
                 from_node=id_map["bus"][from_bus],
                 to_node=id_map["bus"][to_bus],
-                from_phases=_PHASE_A,
-                to_phases=_PHASE_A,
+                mode=phase_mode,
                 length_m=length_m,
-                series_resistance_ohm_per_m=r_mat,
-                series_inductance_h_per_m=l_mat,
-                shunt_capacitance_f_per_m=c_mat,
-                shunt_conductance_s_per_m=g_mat,
-                resistance_frequency=ResistanceFrequencyModel(
-                    multiplier=ConstantParam(value=1.0)
-                ),
+                r1=r1,
+                x1=x1,
+                c1=c1,
+                two_pi_f0=two_pi_f0,
+                r0=r0,
+                x0=x0,
+                c0=c0,
+                g1=g1,
                 provenance=_PROVENANCE,
             )
         )
@@ -191,32 +208,29 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
     # ------------------------------------------------------------------ #
     # 3. Transformers (two-winding, positive-sequence equivalent)          #
     # ------------------------------------------------------------------ #
-    # Conversion formulas for our assembly's transformer stamp convention: #
-    #                                                                      #
     # Our assembly uses the MATPOWER off-nominal-tap PI model:             #
     #   Y_ff = y_se/|t|^2,  Y_ft = -y_se/conj(t)                         #
     #   Y_tf = -y_se/t,      Y_tt = y_se                                  #
-    # where t = tap.ratio_magnitude * exp(j*tap.shift_deg).               #
-    #                                                                      #
-    # The model is correct in PER-UNIT where `y_se` is on the LV base and #
-    # `t` is the off-nominal ratio (≈1).  In SI we use the full turns      #
-    # ratio t = n = vn_hv/vn_lv as `tap.ratio_magnitude`, so `y_se` must  #
-    # be referred to the LV side: Z_sc_LV = Z_sc_HV / n^2.  Then:         #
-    #   Y_ff = y_se_LV/n^2 = y_se_HV  (HV SI)    ✓                        #
-    #   Y_tt = y_se_LV = n^2*y_se_HV  (LV SI)    ✓                        #
-    #                                                                      #
-    # All quantities:                                                       #
-    #   Z_base_LV = V_n_LV^2 / S_n  (LV SI ohm base)                      #
-    #   Z_sc_LV = (vk_percent/100) * Z_base_LV                            #
-    #   R_sc_LV = (vkr_percent/100) * Z_base_LV                           #
-    #   X_sc_LV = sqrt(Z_sc_LV^2 - R_sc_LV^2);  L_sc_LV = X/(2*pi*f0)   #
-    #   tap_ratio = vn_hv_kv / vn_lv_kv  (full turns ratio, SI)           #
-    #   shift_deg = shift_degree from pandapower nameplate                 #
-    # Magnetizing branch (referred to HV side for the shunt):              #
-    #   G_m = P_fe / V_n_HV^2;  B_m = sqrt(...) / V_n_HV^2               #
-    #   L_m = 1 / (2*pi*f0 * B_m) when B_m > 0, else None                #
+    # where t = tap.ratio_magnitude * exp(j*tap.shift_deg).  The model is  #
+    # correct in PER-UNIT where `y_se` is on the LV base and `t` is the    #
+    # off-nominal ratio (~1).  In SI we use the full turns ratio           #
+    # t = n = vn_hv/vn_lv as `tap.ratio_magnitude`, so `y_se` is referred  #
+    # to the LV side: Z_sc_LV = Z_sc_HV / n^2. Full vector-group / zero-   #
+    # sequence phase coupling is positive-sequence only here.              #
     # ------------------------------------------------------------------ #
     if hasattr(net, "trafo") and len(net.trafo):
+        if phase_mode is PhaseMode.THREE_PHASE:
+            # The transformer is stamped from a fixed Dyn from/to connection
+            # (positive-sequence equivalent). Under THREE_PHASE this becomes a
+            # per-phase diagonal stamp with no vector-group phase coupling or
+            # zero-sequence path, so non-Dyn groups (e.g. Yyn/YNyn) are only
+            # approximate. Warn once.
+            _logger.warning(
+                "THREE_PHASE conversion: transformer vector-group phase coupling "
+                "and zero-sequence are not yet modeled; 3-phase transformers use a "
+                "per-phase diagonal stamp, so results are approximate for non-Dyn "
+                "vector groups."
+            )
         for pp_idx, row in net.trafo.iterrows():
             if not bool(row.get("in_service", True)):
                 continue
@@ -238,7 +252,6 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
             shift_deg = float(row.get("shift_degree", 0.0) or 0.0)
 
             # Leakage impedance referred to LV side (required by our stamp convention)
-            # Z_base_LV = Vn_LV^2 / Sn;  Z_sc_LV = vk%/100 * Z_base_LV
             z_base_lv = vn_lv_v**2 / sn_va
             z_sc_lv = vk_pct / 100.0 * z_base_lv
             r_sc_lv = vkr_pct / 100.0 * z_base_lv
@@ -254,8 +267,6 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
 
             l_m = None
             if i0_pct > 0.0:
-                # no-load current amplitude as a fraction of rated current
-                # I0 = i0_pct/100 * Sn / Vn_HV  (line-to-line, positive-seq)
                 i0_amp = i0_pct / 100.0 * sn_va / vn_hv_v
                 s_nl = vn_hv_v * i0_amp  # VA
                 q_nl_sq = s_nl**2 - pfe_w**2
@@ -264,18 +275,17 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
                     if b_m > 0.0:
                         l_m = 1.0 / (two_pi_f0 * b_m)
 
-            # Off-nominal tap: full turns ratio = HV_rated / LV_rated (SI), plus
-            # the nameplate phase shift from pandapower.
             tap_ratio = vn_hv_v / vn_lv_v
 
+            tx_phases = phases_for(phase_mode)
             branches.append(
                 Transformer(
                     id=trafo_id,
                     name=str(row.get("name", f"trafo_{pp_idx}") or f"trafo_{pp_idx}"),
                     from_node=id_map["bus"][hv_bus],  # from = HV side
                     to_node=id_map["bus"][lv_bus],  # to   = LV side
-                    from_phases=_PHASE_A,
-                    to_phases=_PHASE_A,
+                    from_phases=tx_phases,
+                    to_phases=tx_phases,
                     s_rated_va=sn_va,
                     u_rated_from_v=vn_hv_v,
                     u_rated_to_v=vn_lv_v,
@@ -293,12 +303,6 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
     # ------------------------------------------------------------------ #
     # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch)      #
     # ------------------------------------------------------------------ #
-    # pandapower's bus-bus switches (et='b') represent closed busbars or  #
-    # coupling breakers that merge buses internally.  We convert each     #
-    # closed bus-bus switch to a Switch with a small series resistance so  #
-    # the series admittance is large but finite (no division-by-zero).    #
-    # Open bus-bus switches are skipped (no branch stamped).              #
-    # ------------------------------------------------------------------ #
     if hasattr(net, "switch") and len(net.switch):
         for pp_idx, row in net.switch.iterrows():
             if str(row.get("et", "")) != "b":
@@ -313,16 +317,16 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
             sw_id = _id.next()
             id_map["switch"][pp_idx] = sw_id
             z_ohm = float(row.get("z_ohm", 0.0) or 0.0)
-            # Use z_ohm if provided; fall back to _SWITCH_R for numerical stability.
             r_sw = z_ohm if z_ohm > 0.0 else _SWITCH_R
+            sw_phases = phases_for(phase_mode)
             branches.append(
                 Switch(
                     id=sw_id,
                     name=str(row.get("name", f"switch_{pp_idx}") or f"switch_{pp_idx}"),
                     from_node=id_map["bus"][bus_from],
                     to_node=id_map["bus"][bus_to],
-                    from_phases=_PHASE_A,
-                    to_phases=_PHASE_A,
+                    from_phases=sw_phases,
+                    to_phases=sw_phases,
                     closed=True,
                     resistance_ohm=r_sw,
                     inductance_h=0.0,
@@ -347,30 +351,32 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
 
         vm_pu = float(row.get("vm_pu", 1.0))
         va_deg = float(row.get("va_degree", 0.0))
-        # u_rated_v of the slack bus (LL for 1-phase node)
         u_rated_v = float(net.bus.at[bus_pp, "vn_kv"]) * 1_000.0
         u_ref_v = vm_pu * u_rated_v  # magnitude of the slack phasor (LL)
 
-        # Store complex phasor for ideal-slack use
-        id_map["slack_v_complex"] = u_ref_v * complex(
-            math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg))
-        )
+        # First slack wins: a network may have several ext_grids, but the ideal
+        # slack solve takes a single fixed phasor. Guard so the last ext_grid does
+        # not silently overwrite it (matches the pgm converter).
+        if id_map["slack_v_complex"] is None:
+            id_map["slack_v_complex"] = u_ref_v * complex(
+                math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg))
+            )
 
         appliances.append(
-            Source(
+            build_source(
                 id=src_id,
                 name=str(row.get("name", f"ext_grid_{pp_idx}") or f"ext_grid_{pp_idx}"),
                 node=id_map["bus"][bus_pp],
-                phases=_PHASE_A,
-                u_ref_v=(u_ref_v,),
-                u_angle_deg=(va_deg,),
-                resistance_ohm=[[_TINY_R]],
-                inductance_h=[[_TINY_L]],
+                mode=phase_mode,
+                u_ref_v=u_ref_v,
+                u_angle_deg=va_deg,
+                r_ohm=_TINY_R,
+                l_h=_TINY_L,
             )
         )
 
     # ------------------------------------------------------------------ #
-    # 5. Loads                                                             #
+    # 6. Loads (balanced net.load)                                         #
     # ------------------------------------------------------------------ #
     for pp_idx, row in net.load.iterrows():
         if not bool(row.get("in_service", True)):
@@ -385,42 +391,124 @@ def to_grid(net: Any) -> tuple[Grid, dict[str, Any]]:
         p_w = float(row["p_mw"]) * 1.0e6
         q_var = float(row["q_mvar"]) * 1.0e6
 
+        # Balanced total: connection=None resolves to WYE from config; under
+        # THREE_PHASE the symmetric/auto calc splits the total equally.
         appliances.append(
-            Load(
+            build_load(
                 id=load_id,
                 name=str(row.get("name", f"load_{pp_idx}") or f"load_{pp_idx}"),
                 node=id_map["bus"][bus_pp],
-                phases=_PHASE_A,
-                p_nom_w=p_w,
-                q_nom_var=q_var,
+                mode=phase_mode,
+                p_total_w=p_w,
+                q_total_var=q_var,
             )
         )
 
+    # ------------------------------------------------------------------ #
+    # 7. Asymmetric loads (net.asymmetric_load) — genuine per-phase split  #
+    # ------------------------------------------------------------------ #
+    # Under THREE_PHASE each asymmetric_load becomes an abc Load carrying    #
+    # its WYE/DELTA connection and the per-phase P/Q. Under SINGLE_PHASE_    #
+    # EQUIV the per-phase split cannot be represented, so the three phases   #
+    # are summed into a balanced 1-phase total (logged at INFO).             #
+    # ------------------------------------------------------------------ #
+    asym = getattr(net, "asymmetric_load", None)
+    if asym is not None and len(asym):
+        for pp_idx, row in asym.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+
+            p_a = float(row.get("p_a_mw", 0.0) or 0.0) * 1.0e6
+            p_b = float(row.get("p_b_mw", 0.0) or 0.0) * 1.0e6
+            p_c = float(row.get("p_c_mw", 0.0) or 0.0) * 1.0e6
+            q_a = float(row.get("q_a_mvar", 0.0) or 0.0) * 1.0e6
+            q_b = float(row.get("q_b_mvar", 0.0) or 0.0) * 1.0e6
+            q_c = float(row.get("q_c_mvar", 0.0) or 0.0) * 1.0e6
+            p_total = p_a + p_b + p_c
+            q_total = q_a + q_b + q_c
+            conn = (
+                WindingConnection.DELTA
+                if str(row.get("type", "wye")).lower() == "delta"
+                else WindingConnection.WYE
+            )
+
+            load_id = _id.next()
+            id_map["asymmetric_load"][pp_idx] = load_id
+            name = str(row.get("name", f"asym_load_{pp_idx}") or f"asym_load_{pp_idx}")
+
+            if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
+                _logger.info(
+                    "pandapower asymmetric_load %s collapsed to a balanced "
+                    "single-phase total under SINGLE_PHASE_EQUIV "
+                    "(per-phase split discarded); use THREE_PHASE to keep it.",
+                    pp_idx,
+                )
+                appliances.append(
+                    build_load(
+                        id=load_id,
+                        name=name,
+                        node=id_map["bus"][bus_pp],
+                        mode=phase_mode,
+                        p_total_w=p_total,
+                        q_total_var=q_total,
+                    )
+                )
+            else:
+                appliances.append(
+                    build_load(
+                        id=load_id,
+                        name=name,
+                        node=id_map["bus"][bus_pp],
+                        mode=phase_mode,
+                        p_total_w=p_total,
+                        q_total_var=q_total,
+                        connection=conn,
+                        p_per_phase_w=(p_a, p_b, p_c),
+                        q_per_phase_var=(q_a, q_b, q_c),
+                    )
+                )
+
+    description = f"Imported from pandapower (f0={f0_hz} Hz). " + (
+        "Single-phase positive-sequence equivalent."
+        if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV
+        else "Three-phase (abc) expansion from sequence quantities."
+    )
     grid = Grid(
         base_frequency_hz=f0_hz,
         nodes=nodes,
         branches=branches,
         appliances=appliances,
-        metadata=GridMetadata(
+        metadata=make_metadata(
             name=str(getattr(net, "name", "") or "pandapower_import"),
-            description=(
-                f"Imported from pandapower (f0={f0_hz} Hz). "
-                "Single-phase positive-sequence equivalent."
-            ),
+            description=description,
         ),
     )
     return grid, id_map
 
 
-class _IdCounter:
-    """Monotonically increasing integer id generator."""
+def _opt_per_km(row: Any, column: str, divisor: float | None) -> float | None:
+    """Read an optional per-km column from a pandapower line row, SI-scaled.
 
-    def __init__(self) -> None:
-        self._n = 0
-
-    def next(self) -> int:
-        self._n += 1
-        return self._n
+    Returns ``None`` when the column is absent or NaN (so the line falls back to
+    config zero-sequence defaults). ``divisor`` converts per-km -> per-m when given
+    (e.g. ``r0_ohm_per_km`` / 1000); pass ``None`` to leave the raw value (the
+    caller scales it, e.g. nF -> F).
+    """
+    if not hasattr(row, "get"):
+        return None
+    val = row.get(column, None)
+    if val is None:
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f):
+        return None
+    return f / divisor if divisor is not None else f
 
 
 __all__ = ["to_grid"]

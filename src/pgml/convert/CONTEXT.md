@@ -5,13 +5,94 @@ function producing a valid `grid_schema.Grid` (and, where relevant, the id map b
 to the source so tests can align components).
 
 Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.md):
-- [x] `convert.pandapower.to_grid(net) -> (Grid, id_map)` — this file, below.
+- [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+      -> (Grid, id_map)` — this file, below.
 - [x] `convert.pgm.to_grid(input_data, *, base_frequency_hz=50.0,
-      load_model=LoadModel.CONST_IMPEDANCE) -> (Grid, id_map)` — see `pgm/CONTEXT.md`.
-- [x] `convert.opendss.to_grid(dss_handle) -> (Grid, id_map)` — see `opendss/CONTEXT.md`.
+      load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+      -> (Grid, id_map)` — see `pgm/CONTEXT.md`.
+- [x] `convert.opendss.to_grid(dss_handle, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+      -> (Grid, id_map)` — see `opendss/CONTEXT.md`.
 Conventions: convert engineering units -> SI; record source convention in
 Provenance; map sequence/nameplate inputs via the schema's input-convention DTOs;
 never invent fields (schema has extra="forbid").
+
+## `convert._common` — the shared scaffold (library-agnostic)
+
+The duplicated plumbing of every `to_grid` lives in `convert/_common.py`; each
+per-library converter contains only the source-specific field reading and calls
+these helpers so all sources stamp identical schema objects for the same physical
+input. Designed to also serve the OpenDSS converter (native multi-phase + explicit
+n x n line matrices). Every helper is unit-tested in `tests/convert/test_common.py`.
+
+API:
+- `IdCounter` — the single monotonic id allocator (one instance per conversion).
+- `PhaseMode(str, Enum)` — `SINGLE_PHASE_EQUIV` (today's positive-sequence 1-phase
+  equivalent, `phases=(Phase.A,)`, 1x1 line matrices) vs `THREE_PHASE` (genuine abc).
+  Re-exported from `convert`, `convert.pandapower`, `convert.pgm`.
+- `phases_for(mode, *, native=None) -> tuple[Phase, ...]` — the one place the phase
+  tuple is decided: `SINGLE_PHASE_EQUIV -> (A,)`; `THREE_PHASE -> native` if given
+  (OpenDSS passes real phases incl. `Phase.N`) else `(A, B, C)`.
+- `zero_sequence_ratios() -> (r0/r1, x0/x1, c0/c1)` — read from `pgml.config`
+  (`line.zero_sequence.*`).
+- `sequence_to_phase_matrices(r1, x1, c1, *, r0=None, x0=None, c0=None, two_pi_f0,
+  g0=0, g1=0) -> (R, L, C, G)` — sequence -> 3x3 phase matrices via
+  `self=(Z0+2*Z1)/3`, `mutual=(Z0-Z1)/3` (applied to R, X, C, G); `L=X/two_pi_f0`.
+  A balanced sequence input (Z0==Z1) yields a pure diagonal (decoupled) matrix; in
+  general a symmetric circulant (off-diagonal == mutual). `r0/x0/c0` default to
+  `r1*ratio` etc. from `zero_sequence_ratios()` when `None`.
+- `single_phase_matrix(value) -> [[value]]` — the exact 1x1 wrapper used by the
+  positive-sequence-equivalent line path (preserves `[[r1]]`/`[[l1]]`/`[[c1]]`).
+- `thevenin_from_z(r_ohm, x_ohm, two_pi_f0) -> (R, L)` and
+  `thevenin_from_sk(u_rated_v, sk_va, rx_ratio, two_pi_f0) -> (R, L)` — source
+  Thevenin from an explicit impedance / from short-circuit power + R/X ratio (the
+  latter moved verbatim from the pgm converter; same fallback floors).
+- `make_metadata(name, description) -> GridMetadata`.
+- Emit helpers (the single place the phase decision + per-phase mapping live):
+  `build_node`, `build_load`, `build_source`, `build_line_from_sequence`,
+  `build_line_from_matrices`. `build_line_from_matrices` takes explicit n x n
+  R/L/C(/G) matrices + a `phases` tuple — implemented and unit-tested for the
+  OpenDSS converter (pp/pgm route through `build_line_from_sequence`).
+
+**Zero-sequence assumption (THREE_PHASE line expansion).** When a positive-sequence
+line is expanded to abc and the dataset has no native zero-sequence data, the
+zero-sequence quantity defaults to `r1*(R0/R1)` etc. from config. An explicit native
+`r0/x0/c0` always wins.
+
+## `phase_mode` + asymmetric capture (pandapower / pgm / opendss)
+
+`phase_mode=PhaseMode.SINGLE_PHASE_EQUIV` (the DEFAULT) reproduces the historical
+positive-sequence single-phase-equivalent output BYTE-FOR-BYTE (same phases, 1x1
+matrices, ids, id_map) — the bit-exact regression gate; the reference oracle suite
+calls `to_grid(net)` with no `phase_mode` and stays green.
+
+`phase_mode=PhaseMode.THREE_PHASE`:
+- nodes/branches become `(A, B, C)`; lines use `sequence_to_phase_matrices`
+  (pandapower: per-m `r1/x1/c1` from `r_ohm_per_km/x_ohm_per_km/c_nf_per_km`, with
+  `r0/x0/c0` from `net.line` columns `r0_ohm_per_km/x0_ohm_per_km/c0_nf_per_km` IF
+  present else config defaults; pgm: total `r1/x1/c1` and `r0/x0/c0` if present else
+  defaults);
+- sources become BALANCED 3-phase Thevenins (angles `u_angle / -120 / +120`,
+  diagonal R/L); zero-seq source impedance = positive-seq (no short-circuit data read);
+- standard balanced `net.load` / `sym_load`: `connection=None` (resolves to WYE from
+  config), no per-phase split (the symmetric/auto calc splits the total equally);
+- ASYMMETRIC loads captured: pandapower `net.asymmetric_load` -> `connection=WYE`
+  (`type=="wye"`) or `DELTA`, `p_nom_per_phase_w=(p_a,p_b,p_c)*1e6`,
+  `q_nom_per_phase_var=(q_a,q_b,q_c)*1e6`; pgm `asym_load` -> `p_specified`/
+  `q_specified` shape (3,) per-phase, `connection=WYE` ALWAYS (pgm has no load
+  connection field). Both add an `"asymmetric_load"` / `"asym_load"` id_map bucket.
+- Under `SINGLE_PHASE_EQUIV` an asymmetric load cannot be represented; its phases are
+  summed to a balanced 1-phase total and an INFO is logged on `logging.getLogger("pgml")`.
+
+`phase_mode` for opendss (added with the scaffold migration):
+- `SINGLE_PHASE_EQUIV` (default): every node/branch `phases=(A,)`, 1×1 line matrices
+  (the `[0][0]` entry of the DSS matrix).  Load `connection=None`.
+- `THREE_PHASE`: nodes carry real DSS phases (incl. `Phase.N`); lines carry the full
+  n×n matrices from `RMatrix()/XMatrix()/CMatrix()`; loads get `IsDelta()` connection
+  (`WYE` or `DELTA`); sources become balanced Thevenins with per-phase angles.
+  Single-phase loads land on their real bus-suffix phase (`.1`→`(A,)`) with `WYE`.
+  A delta load under `SINGLE_PHASE_EQUIV` logs INFO on `logging.getLogger("pgml")`.
+OpenDSS provides native multi-phase matrices directly, so `build_line_from_matrices`
+is used (not `build_line_from_sequence`); no sequence assumption is made.
 
 ## `convert.pandapower.to_grid` — final signature and id_map format
 
@@ -23,7 +104,8 @@ grid, id_map = to_grid(net)
 
 ### Signature
 ```
-to_grid(net: pandapowerNet) -> tuple[Grid, dict[str, Any]]
+to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+    -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function. Converts a (materialised) pandapower network to a schema `Grid`
@@ -101,14 +183,14 @@ shift (matches the assembly's off-nominal-tap pi stamp `Y_ff=y_se/|t|^2, Y_tt=y_
 Full vector-group / zero-sequence phase coupling is M2 (positive-sequence only now).
 
 ## Cross-converter conventions (single-phase positive-sequence equivalent)
-- CANONICAL `u_rated_v` for a 1-phase positive-sequence node is LINE-TO-LINE
-  (`vn_kv*1000`), validated against pandapower's const-Z reference
-  (`y = conj(P+jQ)/V_LL^2`). pandapower and pgm converters follow this.
-- KNOWN INCONSISTENCY (follow-up): the OpenDSS converter stores `u_rated_v` as
-  LINE-TO-NEUTRAL (`kVBase = basekv/sqrt(3)` for 1-phase DSS buses). This does NOT
-  affect the Y oracle (built load-free) but would give a factor-of-3 wrong const-Z
-  load shunt if the DSS-converted Grid is used on the load-flow path. Reconcile to
-  line-to-line before using `opendss.to_grid` for load flow.
+- CANONICAL `u_rated_v` for any node is LINE-TO-LINE (`vn_kv*1000` / `u_rated*1`
+  for nodes that are already L-L), validated against pandapower's const-Z reference
+  (`y = conj(P+jQ)/V_LL^2`). All three converters follow this convention.
+  OpenDSS `Bus.kVBase()` returns L-N (= `BasekV_LL/sqrt(3)`); the OpenDSS converter
+  recovers L-L via `kVBase * sqrt(3) * 1000`. The old converter stored `kVBase * 1000`
+  (L-N), which was a factor-of-sqrt(3) error in the const-Z shunt on the load-flow
+  path. The Y-bus oracle test (passive, load-free) was unaffected; the fix was applied
+  together with the phase_mode scaffold migration.
 - `base_frequency_hz` is read from the source (`net.f_hz`,
   `dss.Solution.Frequency()`); pgm has no f0 field so the caller passes it. For
   IEEE33 (no line charging) the absolute f0 cancels in `X=2πf·L`; it matters once
