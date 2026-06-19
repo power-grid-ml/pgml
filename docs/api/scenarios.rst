@@ -358,6 +358,73 @@ automatically forces ``calculation="harmonic"`` and sets ``harmonic_orders`` to
     result = run_scenarios(grid, CoherentSpectrumConfig(...))
     # result.v  shape [B, T, H, N]
 
+Persistence (parquet training data)
+------------------------------------
+
+:func:`~pgml.scenarios.write_dataset` and :func:`~pgml.scenarios.read_dataset`
+persist a :class:`~pgml.scenarios.ScenarioResult` to a **self-describing dataset
+directory** suitable for use as ML training data.  A dataset is fully reproducible:
+the ``meta.json`` sidecar embeds the serialized config, seed, node/phase index,
+frequencies, and full shape information, so the exact batch that produced it can be
+regenerated from the config and seed alone.
+
+.. note::
+
+   Persistence is result I/O, not the differentiable core — tensors are detached and
+   moved to CPU before writing.  Do not use ``write_dataset`` inside a gradient tape.
+
+Dataset directory layout
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each call to :func:`~pgml.scenarios.write_dataset` creates three files under the
+target directory:
+
+- ``voltages.parquet`` — node voltages in the chosen layout (see below).
+- ``samples.parquet`` — the realized sampled inputs (B-leading per-scenario records,
+  dtype-preserving; absent if there are no per-scenario samples).
+- ``meta.json`` — sidecar: serialized config + seed + ``frequencies_hz`` + node/phase
+  index + shape dims + ``ParameterPerturbation`` ground-truth rows.
+
+Voltage layouts
+~~~~~~~~~~~~~~~
+
+Two interchangeable on-disk layouts for ``voltages.parquet`` are supported.
+:func:`~pgml.scenarios.read_dataset` is layout-agnostic and always restores an
+identical :attr:`~pgml.scenarios.LoadedDataset.v` tensor regardless of which layout
+was used to write.
+
+**Wide layout** (``layout="wide"``, default)
+    One row per ``(scenario, step)`` with ``v_re`` / ``v_im`` as compact
+    fixed-size-array columns flattened over ``[H*N]``.  This is the fast
+    training-loop tensor cache — minimal deserialization overhead when streaming
+    batches into a model.
+
+**Long layout** (``layout="long"``)
+    A tidy table with one row per ``(scenario, step, frequency, node-phase)`` and
+    scalar ``v_re`` / ``v_im`` columns (the ``result_schema`` phasor convention).
+    Larger on disk, but joins cleanly by ``node_id`` and ``frequency_hz`` — the
+    preferred format for exploratory analysis with DuckDB or polars.
+
+Usage example::
+
+    from pgml.scenarios import write_dataset, read_dataset, run_scenarios
+
+    result = run_scenarios(grid, cfg, calculation="harmonic",
+                           harmonic_orders=[1, 3, 5, 7])
+
+    # Persist (wide is the default; use layout="long" for analysis)
+    dataset_path = write_dataset(result, "data/ieee33_harmonic", layout="wide")
+
+    # Reload — identical tensor, layout-agnostic
+    ds = read_dataset(dataset_path)
+    # ds.v         complex tensor, shape [B, H, N] (harmonic) or [B, N] (power flow)
+    # ds.samples   dict of tensors — the sampled inputs record
+    # ds.config    reconstructed ScenarioConfig / CartesianConfig / ...
+    # ds.frequencies_hz  [H] real tensor (None for power flow)
+    # ds.node_ids  int64 [N], ds.phase_codes  int64 [N]
+    # ds.perturbations   list of ground-truth dicts (perturbation_sweep only)
+    # ds.meta      full sidecar dict
+
 .. automodule:: pgml.scenarios
    :members:
    :show-inheritance:

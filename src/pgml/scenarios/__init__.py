@@ -29,6 +29,7 @@ from .config import (
 )
 from .en50160 import en50160_limit, en50160_limits
 from .harmonics import sample_coherent_spectra
+from .persistence import LoadedDataset, read_dataset, write_dataset
 from .perturbation import perturbation_sweep
 from .run import ScenarioResult, run_scenarios
 from .sampler import SampledScenarios, cartesian_sample, sample
@@ -56,6 +57,7 @@ for _name in [
         _obj.__module__ = __name__
 SampledScenarios.__module__ = __name__
 ScenarioResult.__module__ = __name__
+LoadedDataset.__module__ = __name__
 
 __all__ = [
     "Uniform",
@@ -80,6 +82,9 @@ __all__ = [
     "perturbation_sweep",
     "en50160_limits",
     "en50160_limit",
+    "write_dataset",
+    "read_dataset",
+    "LoadedDataset",
     "ScenarioResult",
     "run_scenarios",
 ]

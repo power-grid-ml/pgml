@@ -68,6 +68,15 @@ verified `batched == loop-of-individual`).
   `sampled.samples["time_s"]`).
 - `SampledScenarios` also carries `harmonic_injection = {id: {order: (mag, phase)}}` (mag/phase
   `[B]` for random specs, `[B,T]` for coherent), passed to `solve_harmonic_flow`.
+- PERSISTENCE (parquet training data): `write_dataset(result, path, *, layout="wide"|"long",
+  compression="zstd") -> Path`, `read_dataset(path) -> LoadedDataset(v, samples,
+  frequencies_hz, node_ids, phase_codes, config, perturbations, meta)`. Writes a dataset DIR:
+  `voltages.parquet` (long = tidy row per scenario×step×freq×node-phase; wide = compact
+  array cols of `v_re`/`v_im` flattened over `[H*N]` per scenario×step), `samples.parquet`
+  (B-leading sampled inputs as array cols, dtype-preserving), `meta.json` sidecar (config
+  JSON + seed + frequencies + node/phase index + dims + ParameterPerturbation rows). Both
+  layouts read back the IDENTICAL `v` (re-`torch.complex`-ed to the original shape/dtype);
+  wide is the fast tensor cache, long the analysis/interchange table. Result I/O (detached).
 
 ## Conventions
 - Unit-cube layout `U[B,D]`: one column per declared factor, then per spec a BASE block
@@ -84,5 +93,4 @@ verified `batched == loop-of-individual`).
 - Network-parameter perturbation sweep (line/transformer impedance errors, for parameter
   recovery) — extends `perturbation_sweep` with a branch-aware selector + matrix ground truth.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
-- Parquet persistence of (scenario, component, step, frequency) -> result_schema.
 - Beta / scipy-backed distributions (no closed-form icdf).
