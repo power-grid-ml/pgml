@@ -13,6 +13,7 @@ from __future__ import annotations
 from .config import (
     CartesianAxis,
     CartesianConfig,
+    CoherentSpectrumConfig,
     Constant,
     Correlation,
     Distribution,
@@ -25,6 +26,8 @@ from .config import (
     Selector,
     Uniform,
 )
+from .en50160 import en50160_limit, en50160_limits
+from .harmonics import sample_coherent_spectra
 from .run import ScenarioResult, run_scenarios
 from .sampler import SampledScenarios, cartesian_sample, sample
 
@@ -43,6 +46,7 @@ for _name in [
     "ScenarioConfig",
     "CartesianAxis",
     "CartesianConfig",
+    "CoherentSpectrumConfig",
 ]:
     _obj = locals().get(_name)
     if _obj is not None and hasattr(_obj, "__module__"):
@@ -64,9 +68,13 @@ __all__ = [
     "ScenarioConfig",
     "CartesianAxis",
     "CartesianConfig",
+    "CoherentSpectrumConfig",
     "SampledScenarios",
     "sample",
     "cartesian_sample",
+    "sample_coherent_spectra",
+    "en50160_limits",
+    "en50160_limit",
     "ScenarioResult",
     "run_scenarios",
 ]

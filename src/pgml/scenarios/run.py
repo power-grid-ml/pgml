@@ -18,7 +18,8 @@ from pgml.assembly import NodePhaseIndex
 from pgml.schemas.grid_schema import Grid
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
-from .config import CartesianConfig, ScenarioConfig
+from .config import CartesianConfig, CoherentSpectrumConfig, ScenarioConfig
+from .harmonics import sample_coherent_spectra
 from .sampler import SampledScenarios, cartesian_sample, sample
 
 
@@ -29,8 +30,9 @@ class ScenarioResult:
     Attributes
     ----------
     v:
-        Node voltages — ``[B, N]`` for ``calculation="power_flow"`` or
-        ``[B, H, N]`` for ``"harmonic"`` (B = n_samples).
+        Node voltages — ``[B, N]`` for ``calculation="power_flow"``, ``[B, H, N]`` for
+        ``"harmonic"``, or ``[B, T, H, N]`` for a node-coherent
+        :class:`CoherentSpectrumConfig` (T = steps; timestamps in ``sampled.samples``).
     index:
         The compact :class:`NodePhaseIndex` (row layout of ``v``).
     sampled:
@@ -66,7 +68,9 @@ def run_scenarios(
         its operating point via the sampled batched ``operating_point`` override).
     spec:
         A :class:`ScenarioConfig` (random/QMC), a :class:`CartesianConfig` (grid
-        sweep), or a pre-built :class:`SampledScenarios`.
+        sweep), a :class:`CoherentSpectrumConfig` (node-coherent harmonic sequences —
+        forces ``calculation="harmonic"`` and defaults ``harmonic_orders`` to
+        ``[1, *config.orders]``), or a pre-built :class:`SampledScenarios`.
     calculation:
         ``"power_flow"`` (fundamental) or ``"harmonic"`` (requires ``harmonic_orders``).
     harmonic_orders:
@@ -76,7 +80,12 @@ def run_scenarios(
         per-phase sampled operating points auto-promote to asymmetric), ``"symmetric"``
         (force equal split, ignore per-phase samples), or ``"asymmetric"``.
     """
-    if isinstance(spec, SampledScenarios):
+    if isinstance(spec, CoherentSpectrumConfig):
+        sampled = sample_coherent_spectra(grid, spec)
+        calculation = "harmonic"
+        if harmonic_orders is None:
+            harmonic_orders = [1, *spec.orders]
+    elif isinstance(spec, SampledScenarios):
         sampled = spec
     elif isinstance(spec, CartesianConfig):
         sampled = cartesian_sample(grid, spec)
@@ -100,6 +109,7 @@ def run_scenarios(
             harmonic_orders,
             slack=slack,
             operating_point=sampled.operating_point,
+            harmonic_injection=sampled.harmonic_injection or None,
             symmetry=symmetry,
             dtype=dtype,
             device=device,

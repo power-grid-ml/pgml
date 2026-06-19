@@ -19,12 +19,30 @@ verified `batched == loop-of-individual`).
   - `correlation=Correlation(factor, rho)` couples matched components through a shared
     `LatentFactor` (single-factor Gaussian copula; rho=0 == `per="each"`, rho=1 ==
     `per="shared"`; supersedes `per`). Marginal distribution preserved.
-  - `symmetry` (per-phase): `balanced` writes a scalar total (`p_w`/`q_var`, split equally
-    downstream); `independent` draws each phase separately; `small_imbalance` = balanced
-    base × (1 + small per-phase perturbation of fractional std `imbalance`). The latter two
-    write per-phase `p_per_phase_w`/`q_per_phase_var`, which auto-promote the solve to
-    ASYMMETRIC (`resolve_asymmetric` mode="auto"). `imbalance>0` required iff `small_imbalance`.
+  - `symmetry` (per-phase, power fields only): `balanced` writes a scalar total
+    (`p_w`/`q_var`, split equally downstream); `independent` draws each phase separately;
+    `small_imbalance` = balanced base × (1 + small per-phase perturbation of fractional std
+    `imbalance`). The latter two write per-phase `p_per_phase_w`/`q_per_phase_var`, which
+    auto-promote the solve to ASYMMETRIC (`resolve_asymmetric` mode="auto"). `imbalance>0`
+    required iff `small_imbalance`.
+  - HARMONIC fields `field="h_mag"|"h_phase"` + `orders=[...]` (>=2): write a batched
+    `harmonic_injection` instead of an operating point. `h_mag` magnitude = sampled value ×
+    per-order EN 50160 limit (`harmonic_reference="en50160"`, distribution in [0,1]), ×
+    stored spectrum mag (`mode="scale"`), or absolute pu. `h_phase` sets the phase (deg,
+    `mode="absolute"`). Per-device injection is seeded from the stored `StaticSpectrum` so
+    unspecified orders survive. Harmonic fields reject `correlation`/per-phase `symmetry`.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
+- EN 50160 per-order limits: `en50160_limits() -> {order: max_pu}`, `en50160_limit(order)`
+  (loads `config/max_harmonic_values_din-en50160.yaml`; `PGML_EN50160` env override).
+- NODE-COHERENT harmonic "fingerprints" (temporal sequences):
+  `CoherentSpectrumConfig(selector, orders, n_steps T, n_scenarios B, n_modes=2, seed,
+  mag_distribution, harmonic_reference="en50160", phase_distribution, jitter_mag, ar1_rho,
+  dwell, step_size_s, resample_modes_per_scenario)` ->
+  `sample_coherent_spectra(grid, config) -> SampledScenarios`. Each device draws `n_modes`
+  base spectra (fingerprint); over T steps it STICKS to a mode (Markov `dwell`) and WANDERS
+  (AR(1) `ar1_rho` jitter), clamped to EN 50160. `harmonic_injection` is `[B,T]` per
+  (device, order); `samples` records `<name>_mode [B,n_dev,T]` (attribution label),
+  `<name>_mag`/`<name>_phase [B,n_dev,n_ord,T]`, `<name>_device_ids`, `time_s [T]`.
 - `ScenarioConfig(n_samples, seed=0, method="sobol"|"lhs"|"independent", parameters=[...],
   factors=[LatentFactor(...)])`. A spec's `correlation.factor` must name a declared factor.
 - `sample(grid, config) -> SampledScenarios(operating_point, samples, n_samples, config)`
@@ -37,8 +55,12 @@ verified `batched == loop-of-individual`).
 - `run_scenarios(grid, spec, *, calculation="power_flow"|"harmonic", harmonic_orders=None,
   slack="ideal", symmetry=None, dtype, device) -> ScenarioResult(v, index, sampled, frequencies_hz)`.
   `symmetry` forwards to the solver (None/"auto" lets per-phase samples promote to asymmetric).
-  `spec` = `ScenarioConfig` | `CartesianConfig` | a pre-built `SampledScenarios`.
-  `v` is `[B,N]` (power_flow) or `[B,H,N]` (harmonic).
+  `spec` = `ScenarioConfig` | `CartesianConfig` | `CoherentSpectrumConfig` (forces harmonic,
+  defaults `harmonic_orders=[1, *orders]`) | a pre-built `SampledScenarios`.
+  `v` is `[B,N]` (power_flow), `[B,H,N]` (harmonic), or `[B,T,H,N]` (coherent; timestamps in
+  `sampled.samples["time_s"]`).
+- `SampledScenarios` also carries `harmonic_injection = {id: {order: (mag, phase)}}` (mag/phase
+  `[B]` for random specs, `[B,T]` for coherent), passed to `solve_harmonic_flow`.
 
 ## Conventions
 - Unit-cube layout `U[B,D]`: one column per declared factor, then per spec a BASE block
@@ -55,8 +77,6 @@ verified `batched == loop-of-individual`).
 - Structured "one perturbation per node" sweep (use case: inject an error at each
   node, measure spread) — an enumeration over selector targets (not a cartesian of
   levels); needs a small dedicated builder.
-- HARMONIC SPECTRUM distributions (vary injection mag/phase; EN50160-bounded) ->
-  feed `solve_harmonic_flow(harmonic_injection=...)`.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
 - Parquet persistence of (scenario, component, step, frequency) -> result_schema.
 - Beta / scipy-backed distributions (no closed-form icdf).

@@ -21,15 +21,21 @@ per-phase overrides that promote the solve to asymmetric automatically.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 import torch
 from torch import Tensor
 
-from pgml.schemas.grid_schema import Generator, Grid, Load
+from pgml.schemas.grid_schema import Generator, Grid, Load, StaticSpectrum
 
-from .config import CartesianConfig, ParameterSpec, ScenarioConfig
+from .config import (
+    CartesianConfig,
+    CoherentSpectrumConfig,
+    ParameterSpec,
+    ScenarioConfig,
+)
+from .en50160 import en50160_limit
 
 # A built batch may originate from a random/QMC config or a cartesian config.
 _AnyConfig = "ScenarioConfig | CartesianConfig"
@@ -50,12 +56,18 @@ class SampledScenarios:
         (``p_w`` / ``q_var``, balanced specs) and/or per-phase overrides
         (``p_per_phase_w`` / ``q_per_phase_var``, asymmetric specs; per-phase keys
         auto-promote the solve to asymmetric).
+    harmonic_injection:
+        ``{appliance_id: {order: (mag_pu, phase_deg)}}`` (mag/phase are ``[B]`` tensors)
+        — pass to ``solve_harmonic_flow(harmonic_injection=...)``. Built from ``h_mag``
+        / ``h_phase`` specs, seeded from each device's stored ``StaticSpectrum`` so
+        unspecified orders survive. Empty unless the config has harmonic fields.
     samples:
         ``{parameter_name: Tensor}`` — the raw sampled values (the reproducible ML
         input record). Shape ``[B, d]`` for component-level specs (d = #matched
-        components for ``per="each"``/correlated, else 1) or ``[B, n_comp, n_phase]``
-        for ``symmetry="independent"`` specs. Full per-phase detail of every spec is
-        always present in ``operating_point``.
+        components for ``per="each"``/correlated, else 1), ``[B, n_comp, n_phase]``
+        for ``symmetry="independent"`` specs, or ``[B, n_eff, n_orders]`` for harmonic
+        specs. Full per-phase / per-order detail is always in ``operating_point`` /
+        ``harmonic_injection``.
     n_samples:
         Batch size ``B``.
     config:
@@ -65,7 +77,8 @@ class SampledScenarios:
     operating_point: dict
     samples: dict
     n_samples: int
-    config: "ScenarioConfig | CartesianConfig"
+    config: "ScenarioConfig | CartesianConfig | CoherentSpectrumConfig"
+    harmonic_injection: dict = field(default_factory=dict)
 
 
 class _Nominal(NamedTuple):
@@ -119,6 +132,14 @@ class _SpecLayout(NamedTuple):
     phase_dim: int  # #per-phase columns
 
 
+class _HarmLayout(NamedTuple):
+    spec: ParameterSpec
+    ids: list  # matched component ids
+    off: int  # first unit-cube column
+    dim: int  # #columns (= n_eff * n_orders)
+    n_eff: int  # #independent component draws (n_comp for each, 1 for shared)
+
+
 def _spec_dims(spec: ParameterSpec, n_comp: int, nph: list) -> tuple[int, int]:
     """``(base_dim, phase_dim)`` unit-cube columns this spec consumes."""
     correlated = spec.correlation is not None
@@ -133,9 +154,11 @@ def _spec_dims(spec: ParameterSpec, n_comp: int, nph: list) -> tuple[int, int]:
 
 
 def _resolve(grid: Grid, config: ScenarioConfig):
-    """``(factor_index, layouts, total_dim)`` for the unit-cube layout.
+    """``(factor_index, op_layouts, harm_layouts, total_dim)`` for the unit-cube layout.
 
-    Columns: one per declared factor, then per spec a base block then a per-phase block.
+    Columns: one per declared factor, then per power spec a base + per-phase block, then
+    per harmonic spec a ``n_eff * n_orders`` block. Power and harmonic specs share one
+    QMC cube (better space-filling across power and spectrum together).
     """
     if not config.parameters:
         raise ValueError("ScenarioConfig has no parameters / sampling dimensions.")
@@ -149,13 +172,20 @@ def _resolve(grid: Grid, config: ScenarioConfig):
         factor_index[f.name] = dim
         dim += 1
 
-    layouts: list[_SpecLayout] = []
+    op_layouts: list[_SpecLayout] = []
+    harm_layouts: list[_HarmLayout] = []
     for spec in config.parameters:
         ids = spec.selector.resolve(grid)
         if not ids:
             raise ValueError(
                 f"Parameter {spec.name!r} selector matched no in-service components."
             )
+        if spec.is_harmonic:
+            n_eff = len(ids) if spec.per == "each" else 1
+            block = n_eff * len(spec.orders)
+            harm_layouts.append(_HarmLayout(spec, ids, dim, block, n_eff))
+            dim += block
+            continue
         if spec.correlation is not None and spec.correlation.factor not in declared:
             raise ValueError(
                 f"Parameter {spec.name!r} correlation references undeclared factor "
@@ -169,12 +199,12 @@ def _resolve(grid: Grid, config: ScenarioConfig):
                 "per phase count."
             )
         base_dim, phase_dim = _spec_dims(spec, len(ids), nph)
-        layouts.append(
+        op_layouts.append(
             _SpecLayout(spec, ids, nph, dim, base_dim, dim + base_dim, phase_dim)
         )
         dim += base_dim + phase_dim
 
-    return factor_index, layouts, dim
+    return factor_index, op_layouts, harm_layouts, dim
 
 
 def _component_base(
@@ -228,17 +258,77 @@ def _apply(
         entry["q_var"] = col * q_nom if spec.mode == "scale" else col
 
 
-def _write_per_phase(entry: dict, field: str, p_pp: list, q_pp: list) -> None:
+def _write_per_phase(entry: dict, field_: str, p_pp: list, q_pp: list) -> None:
     """Write per-phase override lists, only for the fields the spec varies."""
-    if field in ("p", "pq"):
+    if field_ in ("p", "pq"):
         entry["p_per_phase_w"] = p_pp
-    if field in ("q", "pq"):
+    if field_ in ("q", "pq"):
         entry["q_per_phase_var"] = q_pp
+
+
+def _stored_spectrum(appliance) -> dict:
+    """``{order: [mag_pu, phase_deg]}`` from a device's stored ``StaticSpectrum``."""
+    spec = getattr(appliance, "spectrum", None)
+    if isinstance(spec, StaticSpectrum):
+        return {
+            c.order: [c.magnitude_pu, c.phase_deg] for c in spec.spectrum.components
+        }
+    return {}
+
+
+def _harmonic_injections(
+    grid: Grid, harm_layouts: list, u: Tensor, samples: dict
+) -> dict:
+    """Build ``{id: {order: (mag[B], phase[B])}}`` from the harmonic specs.
+
+    Each device's injection is seeded from its stored ``StaticSpectrum`` (so orders the
+    config does not vary survive), then ``h_mag`` / ``h_phase`` specs overwrite their
+    orders. ``h_mag`` magnitude is the sampled value times the per-order EN 50160 limit
+    (``harmonic_reference="en50160"``), the stored magnitude (``mode="scale"``), or the
+    sampled value directly (absolute pu).
+    """
+    by_id = {a.id: a for a in grid.appliances if isinstance(a, (Load, Generator))}
+    # building store: {id: {order: [mag, phase]}}, seeded from stored spectra.
+    built: dict[int, dict] = {}
+
+    def _dev(cid: int) -> dict:
+        if cid not in built:
+            built[cid] = _stored_spectrum(by_id[cid])
+        return built[cid]
+
+    for lay in harm_layouts:
+        spec = lay.spec
+        n_orders = len(spec.orders)
+        block = u[:, lay.off : lay.off + lay.dim]  # [B, n_eff * n_orders]
+        vals = spec.distribution.icdf(block).reshape(-1, lay.n_eff, n_orders)
+        samples[spec.name] = vals  # [B, n_eff, n_orders]
+        for j, cid in enumerate(lay.ids):
+            comp = vals[:, j if spec.per == "each" else 0, :]  # [B, n_orders]
+            dev, stored = _dev(cid), _stored_spectrum(by_id[cid])
+            for o, order in enumerate(spec.orders):
+                v = comp[:, o]  # [B]
+                slot = dev.setdefault(order, [0.0, 0.0])
+                if spec.field == "h_phase":
+                    slot[1] = v
+                elif spec.harmonic_reference == "en50160":
+                    slot[0] = v * en50160_limit(order)
+                elif spec.mode == "scale":
+                    if order not in stored:
+                        raise ValueError(
+                            f"Parameter {spec.name!r} h_mag mode='scale' for order "
+                            f"{order} on device {cid}, which has no stored spectrum "
+                            "magnitude; use mode='absolute' or harmonic_reference."
+                        )
+                    slot[0] = v * stored[order][0]
+                else:
+                    slot[0] = v
+
+    return {cid: {o: tuple(mp) for o, mp in d.items()} for cid, d in built.items()}
 
 
 def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
     """Sample ``config.n_samples`` realized operating points from ``grid`` (reproducible)."""
-    factor_index, layouts, dim = _resolve(grid, config)
+    factor_index, op_layouts, harm_layouts, dim = _resolve(grid, config)
     b = config.n_samples
     u = _unit_samples(b, dim, config.method, config.seed)  # [B, D] in [0,1)
 
@@ -247,7 +337,7 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
     operating_point: dict = {}
     samples: dict = {}
 
-    for lay in layouts:
+    for lay in op_layouts:
         spec = lay.spec
         scale = spec.mode == "scale"
         base_u = u[:, lay.base_off : lay.base_off + lay.base_dim]
@@ -302,8 +392,15 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
                     operating_point.setdefault(cid, {}), spec.field, pp_p, pp_q
                 )
 
+    harmonic_injection = (
+        _harmonic_injections(grid, harm_layouts, u, samples) if harm_layouts else {}
+    )
     return SampledScenarios(
-        operating_point=operating_point, samples=samples, n_samples=b, config=config
+        operating_point=operating_point,
+        samples=samples,
+        n_samples=b,
+        config=config,
+        harmonic_injection=harmonic_injection,
     )
 
 

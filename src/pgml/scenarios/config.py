@@ -150,35 +150,50 @@ class Correlation(_Base):
 class ParameterSpec(_Base):
     """One varied quantity.
 
-    - ``field``: ``"p"`` / ``"q"`` (one) or ``"pq"`` (both, same factor — vary
-      apparent power at constant power factor; ``pq`` requires ``mode="scale"``).
-    - ``mode``: ``"scale"`` (multiply the nominal P/Q) or ``"absolute"`` (the sampled
-      value IS the W / var).
+    - ``field``: a POWER field — ``"p"`` / ``"q"`` (one) or ``"pq"`` (both, same
+      factor — vary apparent power at constant power factor; ``pq`` requires
+      ``mode="scale"``) — or a HARMONIC field — ``"h_mag"`` (per-order injection
+      magnitude relative to the fundamental) / ``"h_phase"`` (per-order phase in
+      degrees). Harmonic fields require ``orders`` and feed
+      ``solve_harmonic_flow(harmonic_injection=...)`` instead of an operating point.
+    - ``mode``: ``"scale"`` (multiply the nominal P/Q or the stored per-order spectrum
+      magnitude) or ``"absolute"`` (the sampled value IS the W / var / pu / degrees).
     - ``per``: ``"each"`` (every matched component varies independently — one sampling
       dimension per component) or ``"shared"`` (one sample applied to all matched).
       Ignored when ``correlation`` is set.
     - ``correlation``: optional :class:`Correlation` coupling matched components
-      through a shared :class:`LatentFactor` (the realistic middle ground between
-      ``each`` and ``shared``).
-    - ``symmetry`` (per-phase): ``"balanced"`` (one value per component applied to all
-      phases — writes a scalar total, equally split downstream), ``"independent"``
-      (each phase drawn independently), or ``"small_imbalance"`` (a balanced base plus
-      a small per-phase perturbation of fractional std ``imbalance``). The latter two
-      write per-phase ``p_per_phase_w`` / ``q_per_phase_var`` overrides, which promote
-      the solve to ASYMMETRIC automatically (``symmetry="auto"`` resolution).
+      through a shared :class:`LatentFactor` (power fields only).
+    - ``symmetry`` (per-phase, power fields only): ``"balanced"`` (one value per
+      component applied to all phases — writes a scalar total, equally split
+      downstream), ``"independent"`` (each phase drawn independently), or
+      ``"small_imbalance"`` (a balanced base plus a small per-phase perturbation of
+      fractional std ``imbalance``). The latter two write per-phase ``p_per_phase_w`` /
+      ``q_per_phase_var`` overrides, which promote the solve to ASYMMETRIC
+      automatically (``symmetry="auto"`` resolution).
     - ``imbalance``: fractional std of the per-phase perturbation; required (> 0) iff
       ``symmetry="small_imbalance"``.
+    - ``orders``: harmonic orders varied by a harmonic field (e.g. ``[3, 5, 7]``).
+    - ``harmonic_reference``: ``"en50160"`` makes an ``h_mag`` distribution a FRACTION
+      of the per-order DIN EN 50160 limit (so use a ``[0, 1]`` distribution); ``None``
+      treats the sampled value as an absolute pu magnitude (or a ``scale`` of the
+      stored spectrum).
     """
 
     name: str
     selector: Selector
     distribution: Distribution
-    field: Literal["p", "q", "pq"] = "pq"
+    field: Literal["p", "q", "pq", "h_mag", "h_phase"] = "pq"
     mode: Literal["scale", "absolute"] = "scale"
     per: Literal["each", "shared"] = "each"
     correlation: Optional[Correlation] = None
     symmetry: Literal["balanced", "independent", "small_imbalance"] = "balanced"
     imbalance: float = Field(default=0.0, ge=0.0)
+    orders: Optional[list[int]] = None
+    harmonic_reference: Optional[Literal["en50160"]] = None
+
+    @property
+    def is_harmonic(self) -> bool:
+        return self.field in ("h_mag", "h_phase")
 
     @model_validator(mode="after")
     def _check(self) -> "ParameterSpec":
@@ -195,6 +210,28 @@ class ParameterSpec(_Base):
             raise ValueError("symmetry='small_imbalance' requires imbalance > 0.")
         if self.symmetry != "small_imbalance" and self.imbalance != 0.0:
             raise ValueError("imbalance is only used with symmetry='small_imbalance'.")
+        if self.is_harmonic:
+            if not self.orders:
+                raise ValueError(f"field={self.field!r} requires a non-empty `orders`.")
+            if any(o < 2 for o in self.orders):
+                raise ValueError(
+                    "harmonic `orders` must all be >= 2 (1 = fundamental)."
+                )
+            if self.symmetry != "balanced" or self.correlation is not None:
+                raise ValueError(
+                    "harmonic fields support neither per-phase `symmetry` nor "
+                    "`correlation` (use the grid `spectrum_per_phase` for per-phase "
+                    "distortion)."
+                )
+            if self.field == "h_phase" and self.mode != "absolute":
+                raise ValueError("field='h_phase' requires mode='absolute'.")
+            if self.harmonic_reference is not None and self.field != "h_mag":
+                raise ValueError("harmonic_reference applies to field='h_mag' only.")
+        else:
+            if self.orders is not None or self.harmonic_reference is not None:
+                raise ValueError(
+                    "`orders` / `harmonic_reference` are only valid for harmonic fields."
+                )
         return self
 
 
@@ -238,6 +275,53 @@ class CartesianConfig(_Base):
     axes: list[CartesianAxis] = Field(min_length=1)
 
 
+# =============================================================================
+# Node-coherent harmonic "fingerprint" sampling (temporal sequences)
+# =============================================================================
+class CoherentSpectrumConfig(_Base):
+    """Node-coherent harmonic sampling: a stable per-device fingerprint over a sequence.
+
+    Each matched device draws a small set of base spectra (``n_modes`` "modes" — e.g.
+    appliance operating states like a washing machine heating vs spinning), drawn once
+    (or per scenario). Over ``n_steps`` consecutive steps it STICKS to a mode (Markov
+    dwell ``dwell``) and WANDERS around it (AR(1) jitter with stickiness ``ar1_rho``),
+    clamped to the DIN EN 50160 per-order limit. This yields a ``[B, T]`` batch of
+    harmonic injections in which each node keeps a recognisable signature that varies
+    realistically — so a state estimator can attribute the pattern to the node.
+
+    The result voltages are ``[B, T, H, N]`` (B = ``n_scenarios`` sequences, T = steps);
+    per-step timestamps are recorded as ``samples["time_s"]``. Fundamental P/Q stays
+    nominal (the fingerprint models the harmonic spectrum, not the fundamental load).
+    """
+
+    name: str = "harmonics"
+    selector: Selector
+    orders: list[int] = Field(min_length=1)
+    n_steps: int = Field(gt=0)  # T
+    n_scenarios: int = Field(default=1, gt=0)  # B
+    n_modes: int = Field(default=2, ge=1)
+    seed: int = 0
+    mag_distribution: Distribution = Field(
+        default_factory=lambda: Uniform(low=0.0, high=1.0)
+    )
+    harmonic_reference: Optional[Literal["en50160"]] = "en50160"
+    phase_distribution: Distribution = Field(
+        default_factory=lambda: Uniform(low=-180.0, high=180.0)
+    )
+    jitter_mag: float = Field(default=0.05, ge=0.0)  # AR(1) fractional std on magnitude
+    jitter_phase_deg: float = Field(default=5.0, ge=0.0)  # AR(1) std on phase (deg)
+    ar1_rho: float = Field(default=0.8, ge=0.0, le=1.0)  # temporal stickiness of jitter
+    dwell: float = Field(default=0.9, ge=0.0, le=1.0)  # P(stay in mode) per step
+    step_size_s: float = Field(default=1.0, gt=0.0)
+    resample_modes_per_scenario: bool = False
+
+    @model_validator(mode="after")
+    def _check(self) -> "CoherentSpectrumConfig":
+        if any(o < 2 for o in self.orders):
+            raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
+        return self
+
+
 __all__ = [
     "Uniform",
     "Normal",
@@ -252,4 +336,5 @@ __all__ = [
     "ScenarioConfig",
     "CartesianAxis",
     "CartesianConfig",
+    "CoherentSpectrumConfig",
 ]

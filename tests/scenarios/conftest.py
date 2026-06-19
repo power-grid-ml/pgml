@@ -6,7 +6,18 @@ import math
 
 import pytest
 
-from pgml.schemas.grid_schema import Grid, Line, Load, LoadModel, Node, Phase, Source
+from pgml.schemas.grid_schema import (
+    Grid,
+    HarmonicComponent,
+    Line,
+    Load,
+    LoadModel,
+    Node,
+    Phase,
+    Source,
+    SpectrumPoint,
+    StaticSpectrum,
+)
 
 W = 2.0 * math.pi * 50.0
 
@@ -130,6 +141,50 @@ def grid_3ph() -> Grid:
                 q_nom_var=1500.0,
                 load_model=LoadModel.CONST_POWER,
                 consumer_type="pv",
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def grid_spectrum() -> Grid:
+    """Single-phase 2-bus grid whose load (id 10) carries a stored StaticSpectrum."""
+    return Grid(
+        base_frequency_hz=50.0,
+        nodes=[
+            Node(id=1, u_rated_v=230.0, phases=(Phase.A,)),
+            Node(id=2, u_rated_v=230.0, phases=(Phase.A,)),
+        ],
+        branches=[_line(1, 1, 2)],
+        appliances=[
+            Source(
+                id=1,
+                node=1,
+                phases=(Phase.A,),
+                u_ref_v=(230.0,),
+                u_angle_deg=(0.0,),
+                resistance_ohm=[[0.1]],
+                inductance_h=[[0.1 / W]],
+            ),
+            Load(
+                id=10,
+                node=2,
+                phases=(Phase.A,),
+                p_nom_w=2000.0,
+                q_nom_var=500.0,
+                load_model=LoadModel.CONST_POWER,
+                spectrum=StaticSpectrum(
+                    spectrum=SpectrumPoint(
+                        components=[
+                            HarmonicComponent(
+                                order=5, magnitude_pu=0.1, phase_deg=10.0
+                            ),
+                            HarmonicComponent(
+                                order=7, magnitude_pu=0.05, phase_deg=-20.0
+                            ),
+                        ]
+                    )
+                ),
             ),
         ],
     )
