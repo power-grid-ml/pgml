@@ -26,7 +26,7 @@ from torch import Tensor
 
 from pgml.schemas.grid_schema import Grid
 
-from .config import CoherentSpectrumConfig
+from .config import CoherentSpectrumConfig, Selector, SpectrumSweepConfig
 from .en50160 import en50160_limit
 from .sampler import SampledScenarios
 
@@ -183,4 +183,71 @@ def sample_coherent_spectra(
     )
 
 
-__all__ = ["sample_coherent_spectra"]
+def spectrum_sweep(
+    grid: Grid,
+    selector: Selector | SpectrumSweepConfig,
+    spectrum: dict | None = None,
+    *,
+    name: str = "injection",
+) -> SampledScenarios:
+    """Per-target harmonic-injection sweep (diagonal one-hot over matched devices).
+
+    Scenario ``i`` injects the spectrum at target ``i`` ONLY (every other device
+    silent); ``B = #targets``. The harmonic analogue of
+    :func:`~pgml.scenarios.perturbation.perturbation_sweep` — for "inject one spectrum
+    at each node, measure how it spreads".
+
+    Parameters
+    ----------
+    grid:
+        The reference grid; the selector's matched Load/Generator devices are the
+        injection targets (injection is a Norton current at a device terminal).
+    selector:
+        A :class:`Selector` (then ``spectrum`` is required) or a fully-built
+        :class:`SpectrumSweepConfig`.
+    spectrum:
+        ``{order: (magnitude_pu, phase_deg)}`` relative to the fundamental (order 1 is
+        the implicit reference, dropped). Ignored when a config is passed.
+    name:
+        Label for the recorded target-id sample column (``"<name>_id"``).
+
+    Returns
+    -------
+    SampledScenarios
+        Empty ``operating_point`` (fundamental nominal); ``harmonic_injection`` is the
+        diagonal ``{device_id: {order: (mag[B], phase[B])}}`` (mag is the spectrum value
+        at the device's own scenario index, 0 elsewhere); ``samples["<name>_id"]`` is
+        the injected device id per scenario.
+    """
+    config = (
+        selector
+        if isinstance(selector, SpectrumSweepConfig)
+        else SpectrumSweepConfig.from_spectrum(selector, spectrum or {}, name=name)
+    )
+    ids = config.selector.resolve(grid)
+    if not ids:
+        raise ValueError("spectrum_sweep selector matched no in-service components.")
+    b = len(ids)
+
+    harmonic_injection: dict = {}
+    for j, tid in enumerate(ids):
+        inj: dict = {}
+        for order, mag, phase in zip(
+            config.orders, config.magnitudes_pu, config.phases_deg
+        ):
+            magvec = torch.zeros(b, dtype=_F64)
+            magvec[j] = mag  # one-hot: only scenario j injects at device tid
+            inj[order] = (magvec, torch.full((b,), phase, dtype=_F64))
+        harmonic_injection[tid] = inj
+
+    samples = {f"{config.name}_id": torch.tensor(ids, dtype=torch.long)}
+    return SampledScenarios(
+        operating_point={},
+        samples=samples,
+        n_samples=b,
+        config=config,
+        harmonic_injection=harmonic_injection,
+    )
+
+
+__all__ = ["sample_coherent_spectra", "spectrum_sweep"]

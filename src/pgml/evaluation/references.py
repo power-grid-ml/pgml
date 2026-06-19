@@ -10,6 +10,21 @@ Also provides an INDEPENDENT numpy harmonic oracle (single-phase, R-const/X∝h 
 matching ``references/opendss/harmonics.md``) for the harmonic-profile plots — the
 fundamental operating point is shared (validated separately against pandapower); the
 oracle independently propagates the harmonics.
+
+The full-network oracles extend this to the complete CIGRE LV grid including transformers
+(all three 20/0.4 kV units) and switches, supporting both single-phase and three-phase
+grids:
+
+- :func:`numpy_harmonic_voltages` — pure-numpy oracle using pgml's EXACT Y-bus formulas
+  (R const / X∝h for all elements).  Machine-precision parity (~1e-13 V absolute) vs
+  :func:`pgml.solver.solve_harmonic_flow`.  Kept as the regression oracle.
+
+- :func:`opendss_harmonic_voltages` — LIVE OpenDSS oracle.  For single-phase grids with
+  synthesized conductor geometry, OpenDSS builds the geometry lines (Carson/Deri) and the
+  resulting ``SystemY(h)`` is used directly for the line contributions, while source Norton,
+  transformer stamps, and switch stamps are stamped using pgml's exact formulas.  For
+  three-phase grids tagged with the ``sequence_aware`` harmonic model, a full OpenDSS
+  circuit is built with R1/X1/R0/X0 lines and native Transformer/Reactor elements.
 """
 
 from __future__ import annotations
@@ -28,6 +43,8 @@ from pgml.schemas.grid_schema import (
     Phase,
     Source,
     StaticSpectrum,
+    Switch,
+    Transformer,
 )
 
 from ._util import to_float
@@ -186,6 +203,66 @@ def ieee33_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     grid, id_map = to_grid(net)
     synthesize_grid_geometry(grid)
     _attach_spectrum_farthest(grid, n_harmonic_loads, spectrum or CONVERTER_SPECTRUM)
+    return grid, id_map
+
+
+def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
+    """The FULL CIGRE LV benchmark grid (all 3 feeders + MV source + 3 transformers).
+
+    Unlike :func:`cigre_lv_geometry_grid` (one residential feeder with synthesized
+    Carson geometry), this returns the WHOLE pandapower CIGRE LV network converted to a
+    pgml :class:`~pgml.schemas.grid_schema.Grid` with standard R/X lines and the three
+    20/0.4 kV transformers intact, fed by the single MV ext-grid source. The shared
+    entry point for the full-grid examples + the OpenDSS oracle.
+
+    The stock pandapower ext-grid converts to a near-ideal source (R~1e-6 Ohm) which
+    short-circuits the bus at harmonics; a FINITE series impedance is applied so the
+    source does not fully absorb injected harmonics (``source_impedance_ohm`` |Z| at the
+    source's rated voltage, ``source.rx_ratio`` for the X/R split — config defaults under
+    ``source.*``). Larger = weaker upstream grid = more cross-feeder coupling.
+
+    Parameters
+    ----------
+    phase_mode:
+        ``PhaseMode.SINGLE_PHASE_EQUIV`` (default) or ``PhaseMode.THREE_PHASE``.
+    source_impedance_ohm:
+        Source series-impedance magnitude [Ohm]; ``None`` -> config
+        ``source.series_impedance_ohm``. Pass ``0`` to keep the converted (stiff) source.
+
+    Returns
+    -------
+    (Grid, id_map)
+    """
+    _numpy_shim()
+    import math
+
+    import pandapower.networks as pn
+
+    from pgml import config as _config
+    from pgml.convert.pandapower import PhaseMode, to_grid
+    from pgml.schemas.grid_schema import Source
+
+    mode = phase_mode if phase_mode is not None else PhaseMode.SINGLE_PHASE_EQUIV
+    grid, id_map = to_grid(pn.create_cigre_network_lv(), phase_mode=mode)
+
+    z = (
+        _config.get("source.series_impedance_ohm")
+        if source_impedance_ohm is None
+        else float(source_impedance_ohm)
+    )
+    if z > 0.0:
+        rx = float(_config.get("source.rx_ratio"))
+        r = z / math.sqrt(1.0 + rx * rx)
+        ll = (rx * r) / (2.0 * math.pi * float(grid.base_frequency_hz))  # X = 2*pi*f0*L
+        for a in grid.appliances:
+            if isinstance(a, Source):
+                p = len(a.phases)
+                a.resistance_ohm = [
+                    [r if i == j else 0.0 for j in range(p)] for i in range(p)
+                ]
+                a.inductance_h = [
+                    [ll if i == j else 0.0 for j in range(p)] for i in range(p)
+                ]
     return grid, id_map
 
 
@@ -543,9 +620,1213 @@ def numpy_harmonic_profiles(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Full-network harmonic oracle: CIGRE LV with transformers and switches
+# ---------------------------------------------------------------------------
+def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
+    """Build the full per-harmonic Y-bus (numpy) mirroring pgml's assembly.
+
+    Stamps Lines (series + shunt, R const / X∝h), Switches (series RL),
+    Transformers (off-nominal complex-tap leakage-pi, magnetizing shunt on HV
+    diagonal), and Source Norton shunts — exactly the same formulas as
+    ``pgml.assembly.ybus._stamp_network`` + ``_stamp_sources``.
+
+    Works for single-phase (P=1) and three-phase (P=3) grids: phase matrices
+    are stamped into the compact ``NodePhaseIndex`` rows via ``index.rows()``.
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid`.
+    h:
+        Harmonic order (integer >= 1).
+    index:
+        :class:`~pgml.assembly.NodePhaseIndex` for this grid.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex ``[N, N]`` admittance matrix.
+    """
+    n = index.size
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+    y = np.zeros((n, n), dtype=complex)
+
+    # Lines: series pi + shunt capacitance
+    for b in grid.branches:
+        if not (isinstance(b, Line) and getattr(b, "in_service", True)):
+            continue
+        if getattr(b, "conductor_geometry", None) is not None:
+            # Carson geometry lines: not supported in this oracle (use
+            # opendss_geometry_systemy for Carson validation)
+            continue
+        length = to_float(b.length_m)
+        phases_b = b.from_phases
+        p = len(phases_b)
+        fr_rows = index.rows(b.from_node)
+        to_rows = index.rows(b.to_node)
+        r_mat = (
+            np.array(
+                [
+                    [to_float(b.series_resistance_ohm_per_m[i][j]) for j in range(p)]
+                    for i in range(p)
+                ]
+            )
+            * length
+        )
+        l_mat = (
+            np.array(
+                [
+                    [to_float(b.series_inductance_h_per_m[i][j]) for j in range(p)]
+                    for i in range(p)
+                ]
+            )
+            * length
+        )
+        c_mat = (
+            np.array(
+                [
+                    [to_float(b.shunt_capacitance_f_per_m[i][j]) for j in range(p)]
+                    for i in range(p)
+                ]
+            )
+            * length
+            if b.shunt_capacitance_f_per_m is not None
+            else np.zeros((p, p))
+        )
+        z_mat = r_mat + 1j * h * w0 * l_mat
+        ys = np.linalg.inv(z_mat)
+        ysh = 1j * h * w0 * c_mat
+        half_ysh = 0.5 * ysh
+        for i_ph, (fr, to) in enumerate(zip(fr_rows, to_rows)):
+            for j_ph in range(p):
+                fr2 = fr_rows[j_ph]
+                to2 = to_rows[j_ph]
+                y[fr_rows[i_ph], fr2] += ys[i_ph, j_ph] + (
+                    half_ysh[i_ph, j_ph] if i_ph == j_ph else 0.0
+                )
+                y[to_rows[i_ph], to2] += ys[i_ph, j_ph] + (
+                    half_ysh[i_ph, j_ph] if i_ph == j_ph else 0.0
+                )
+                y[fr_rows[i_ph], to2] -= ys[i_ph, j_ph]
+                y[to_rows[i_ph], fr2] -= ys[i_ph, j_ph]
+
+    # Switches: series RL only (no shunt)
+    for b in grid.branches:
+        if not (isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed):
+            continue
+        phases_b = b.from_phases
+        p = len(phases_b)
+        fr_rows = index.rows(b.from_node)
+        to_rows = index.rows(b.to_node)
+        r_sw = to_float(b.resistance_ohm)
+        l_sw = to_float(b.inductance_h)
+        z_sw = r_sw + 1j * h * w0 * l_sw
+        ys_sw = 1.0 / z_sw
+        # Diagonal per phase (pgml stamps each phase independently for switches)
+        for i_ph in range(p):
+            fr = fr_rows[i_ph]
+            to = to_rows[i_ph]
+            y[fr, fr] += ys_sw
+            y[to, to] += ys_sw
+            y[fr, to] -= ys_sw
+            y[to, fr] -= ys_sw
+
+    # Transformers: off-nominal complex-tap leakage-pi + magnetizing shunt (HV)
+    # Stamp: Y_ff = y_se/|t|^2 + y_m, Y_ft = -y_se/conj(t),
+    #        Y_tf = -y_se/t, Y_tt = y_se  (per phase, diagonal — M1)
+    for b in grid.branches:
+        if not (isinstance(b, Transformer) and getattr(b, "in_service", True)):
+            continue
+        phases_b = b.from_phases
+        p = len(phases_b)
+        fr_rows = index.rows(b.from_node)
+        to_rows = index.rows(b.to_node)
+        r_t = to_float(b.series_resistance_ohm)
+        l_t = to_float(b.series_inductance_h)
+        z_se = r_t + 1j * h * w0 * l_t
+        y_se = 1.0 / z_se
+        tap_mag = to_float(b.tap.ratio_magnitude)
+        tap_shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
+        t = tap_mag * cmath.exp(1j * tap_shift_rad)
+        abs_t2 = tap_mag**2
+        gm = to_float(b.magnetizing_conductance_s)
+        lm = b.magnetizing_inductance_h
+        bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
+        ym = complex(gm, bm)
+        y_ff = y_se / abs_t2 + ym
+        y_ft = -y_se / complex(t).conjugate()
+        y_tf = -y_se / t
+        y_tt = y_se
+        # Stamp per phase (M1 diagonal: each phase stamped independently)
+        for i_ph in range(p):
+            fr = fr_rows[i_ph]
+            to = to_rows[i_ph]
+            y[fr, fr] += y_ff
+            y[fr, to] += y_ft
+            y[to, fr] += y_tf
+            y[to, to] += y_tt
+
+    # Sources: Norton shunt Y_s = Z_s(h)^-1 (held at zero harmonic voltage)
+    for a in grid.appliances:
+        if not (isinstance(a, Source) and getattr(a, "in_service", True)):
+            continue
+        phases_a = a.phases
+        p = len(phases_a)
+        src_rows = index.rows(a.node)
+        r_mat = np.array(
+            [[to_float(a.resistance_ohm[i][j]) for j in range(p)] for i in range(p)]
+        )
+        l_mat = np.array(
+            [[to_float(a.inductance_h[i][j]) for j in range(p)] for i in range(p)]
+        )
+        z_mat = r_mat + 1j * h * w0 * l_mat
+        ys_mat = np.linalg.inv(z_mat)
+        for i_ph in range(p):
+            for j_ph in range(p):
+                y[src_rows[i_ph], src_rows[j_ph]] += ys_mat[i_ph, j_ph]
+
+    return y
+
+
+def numpy_harmonic_voltages(
+    grid: Grid,
+    harmonic_injection: Optional[dict],
+    orders: Sequence[int],
+    *,
+    slack: str = "norton",
+    v1: Optional[np.ndarray] = None,
+    operating_point: Optional[dict] = None,
+    node_sources: Optional[Sequence] = None,
+) -> np.ndarray:
+    """Pure-numpy harmonic voltage oracle — exact pgml parity (R const / X∝h).
+
+    Returns complex node voltages ``[len(orders), N]`` aligned to
+    :func:`pgml.assembly.node_phase_index` rows, solving the same linear harmonic
+    system as :func:`pgml.solver.solve_harmonic_flow`.
+
+    This is the **regression oracle**: it reimplements pgml's EXACT Y-bus formulas
+    (R const / X∝h for all elements including transformers and source Norton) in
+    pure numpy, giving machine-precision parity (~1e-13 V absolute) vs
+    ``solve_harmonic_flow``.  No live OpenDSS circuit is built; the
+    ``import opendssdirect`` dependency is not required.
+
+    **Model (exact pgml parity, R const / X∝h)**
+
+    - Lines: series pi (``R`` fixed, ``X(h) = h·X(f0)``), shunt capacitance
+      (``B(h) = h·B(f0)``).  Conductor-geometry lines are skipped (the Carson
+      path lives in :func:`opendss_harmonic_voltages`).
+    - Switches: series RL (identical scaling).
+    - Transformers: per-phase diagonal off-nominal-tap leakage-pi stamp —
+      ``Y_ff = y_se/|t|² + y_m``, ``Y_ft = −y_se/t*``, ``Y_tf = −y_se/t``,
+      ``Y_tt = y_se`` — where ``y_se = (R + j·h·2πf₀·L)⁻¹`` and
+      ``t = ratio_magnitude · exp(j·shift_deg)``.
+    - Sources (Norton mode): shunt ``Y_s(h) = Z_s(h)⁻¹`` on the source diagonal.
+    - Harmonic injection: OpenDSS convention (``references/opendss/harmonics.md``).
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid`.
+    harmonic_injection:
+        Per-device harmonic-current spec —
+        ``{appliance_id: {order: (magnitude_pu, phase_deg)}}``.
+    orders:
+        Harmonic orders to solve (e.g. ``[1, 5, 11]``).
+    slack:
+        Only ``"norton"`` is implemented.
+    v1:
+        Optional pre-computed fundamental voltage vector ``[N]``.  When ``None``,
+        a linear const-Z fundamental is solved internally.
+    operating_point:
+        Optional per-device operating-point override
+        ``{appliance_id: {order: value}}`` — passed through to the linear
+        fundamental solve when ``v1 is None``.  Currently unused when ``v1`` is
+        provided (the passed ``v1`` already encodes the operating point).
+    node_sources:
+        Optional sequence of :class:`~pgml.solver.NodeHarmonicSource` — per-node
+        harmonic disturbance sources applied ONLY at ``h > 1``.  Each source stamps
+        its Norton current ``I_N`` (and, for ``kind="voltage"``, the shunt ``Y_s``)
+        into the harmonic system using the same physics as
+        :func:`pgml.solver.solve_harmonic_flow`.  When ``None`` (default), the oracle
+        is byte-identical to the pre-node-source behaviour.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex ``[H, N]``.
+
+    See Also
+    --------
+    opendss_harmonic_voltages : Live OpenDSS oracle (Carson lines).
+    numpy_harmonic_profiles : Single-phase numpy oracle (lines + source only).
+    """
+    if slack != "norton":
+        raise ValueError(
+            f"numpy_harmonic_voltages supports only slack='norton'; got {slack!r}"
+        )
+    from pgml.assembly import node_phase_index
+    from pgml.schemas.grid_schema import Generator as PgmlGen, Load as PgmlLoad
+
+    orders_list = [int(h) for h in orders]
+    index = node_phase_index(grid)
+    n = index.size
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+
+    # --- Fundamental voltage (operating point for injection scaling) ---
+    if v1 is None:
+        # Linear fundamental: network Y + const-Z load shunts + source Norton current
+        y1 = _build_numpy_ybus(grid, 1, index)
+        node_map_v = {nd.id: nd for nd in grid.nodes}
+        for a in grid.appliances:
+            if not (
+                isinstance(a, (PgmlLoad, PgmlGen)) and getattr(a, "in_service", True)
+            ):
+                continue
+            node_v = node_map_v[a.node]
+            u_rated = to_float(node_v.u_rated_v)
+            phases_a = a.phases
+            n_ph = len(phases_a)
+            src_rows_v = index.rows(a.node)
+            sign = 1.0 if isinstance(a, PgmlLoad) else -1.0
+            p_total = to_float(a.p_nom_w)
+            q_total = to_float(a.q_nom_var)
+            p_ph = p_total / n_ph
+            q_ph = q_total / n_ph
+            v0 = u_rated / math.sqrt(3.0) if n_ph >= 3 else u_rated
+            y_elem = (sign * p_ph - 1j * sign * q_ph) / (v0**2)
+            for r in src_rows_v:
+                y1[r, r] += y_elem
+        i1 = np.zeros(n, dtype=complex)
+        for a in grid.appliances:
+            if not (isinstance(a, Source) and getattr(a, "in_service", True)):
+                continue
+            phases_a = a.phases
+            p = len(phases_a)
+            src_rows_v = index.rows(a.node)
+            r_mat = np.array(
+                [
+                    [to_float(a.resistance_ohm[i_][j_]) for j_ in range(p)]
+                    for i_ in range(p)
+                ]
+            )
+            l_mat = np.array(
+                [
+                    [to_float(a.inductance_h[i_][j_]) for j_ in range(p)]
+                    for i_ in range(p)
+                ]
+            )
+            z_mat = r_mat + 1j * w0 * l_mat
+            ys_mat = np.linalg.inv(z_mat)
+            u_ref = np.array([to_float(a.u_ref_v[k]) for k in range(p)])
+            u_ang = np.array(
+                [to_float(a.u_angle_deg[k]) * math.pi / 180.0 for k in range(p)]
+            )
+            v_th = u_ref * np.exp(1j * u_ang)
+            i_s = ys_mat @ v_th
+            for k in range(p):
+                i1[src_rows_v[k]] += i_s[k]
+        v1_eff = np.linalg.solve(y1, i1)
+    else:
+        v1_arr = np.asarray(v1).reshape(-1)
+        if v1_arr.shape[0] != n:
+            raise ValueError(
+                f"v1 has {v1_arr.shape[0]} entries but grid has N={n} rows"
+            )
+        v1_eff = v1_arr.astype(complex)
+
+    # --- Per-device fundamental current + spectrum (for h > 1 injection) ---
+    devs = []
+    for a in grid.appliances:
+        if not (isinstance(a, (PgmlLoad, PgmlGen)) and getattr(a, "in_service", True)):
+            continue
+        # Resolve spectrum from override or stored spectrum
+        if harmonic_injection is not None and a.id in harmonic_injection:
+            spec: dict = {
+                int(o): (float(mag), float(ang))
+                for o, (mag, ang) in harmonic_injection[a.id].items()
+            }
+        else:
+            s = getattr(a, "spectrum", None)
+            if not isinstance(s, StaticSpectrum):
+                continue
+            spec = {
+                c.order: (to_float(c.magnitude_pu), to_float(c.phase_deg))
+                for c in s.spectrum.components
+            }
+        if not spec:
+            continue
+        phases_a = a.phases
+        n_ph = len(phases_a)
+        src_rows = index.rows(a.node)
+        sign = 1.0 if isinstance(a, PgmlLoad) else -1.0
+        p_total = to_float(a.p_nom_w)
+        q_total = to_float(a.q_nom_var)
+        # Per-phase S0: honor an explicit per-phase nameplate (asymmetric loads), else
+        # split the total equally — mirroring pgml's resolve_operating_power so the
+        # per-phase fundamental current I1 (and thus the harmonic injection) matches.
+        p_pp = (
+            [to_float(x) for x in a.p_nom_per_phase_w]
+            if getattr(a, "p_nom_per_phase_w", None) is not None
+            else [p_total / n_ph] * n_ph
+        )
+        q_pp = (
+            [to_float(x) for x in a.q_nom_per_phase_var]
+            if getattr(a, "q_nom_per_phase_var", None) is not None
+            else [q_total / n_ph] * n_ph
+        )
+        # Fundamental current per phase: I1 = conj(S0_ph) / conj(V_term)
+        i1_list = []
+        for k_ph, row in enumerate(src_rows):
+            v_term = v1_eff[row]
+            s0_ph = complex(sign * p_pp[k_ph], sign * q_pp[k_ph])
+            if abs(v_term) < 1e-300:
+                i1_list.append(0.0 + 0j)
+            else:
+                i1_list.append(np.conj(s0_ph) / np.conj(v_term))
+        devs.append((spec, src_rows, i1_list))
+
+    # --- Per-order solve ---
+    result_slices: list[np.ndarray] = []
+    for h in orders_list:
+        if h == 1:
+            result_slices.append(v1_eff)
+            continue
+        y_h = _build_numpy_ybus(grid, h, index)
+        i_h = np.zeros(n, dtype=complex)
+        for spec, src_rows, i1_list in devs:
+            mag1, ang1 = spec.get(1, (1.0, 0.0))
+            mag_h, ang_h = spec.get(h, (0.0, 0.0))
+            if mag1 == 0.0:
+                continue
+            ratio = mag_h / mag1
+            for i1_val, row in zip(i1_list, src_rows):
+                i_drawn = (
+                    ratio
+                    * abs(i1_val)
+                    * cmath.exp(
+                        1j
+                        * (
+                            math.radians(ang_h)
+                            + h * (cmath.phase(i1_val) - math.radians(ang1))
+                        )
+                    )
+                )
+                i_h[row] += -i_drawn  # nodal injection (drawn = negative source)
+
+        # --- Per-node harmonic disturbance sources ---
+        if node_sources:
+            _apply_node_sources_numpy(grid, node_sources, v1_eff, index, h, y_h, i_h)
+
+        result_slices.append(np.linalg.solve(y_h, i_h))
+
+    return np.stack(result_slices, axis=0)  # [H, N]
+
+
+def _apply_node_sources_numpy(
+    grid: Grid,
+    node_sources: Sequence,
+    v1: np.ndarray,
+    index,
+    h: int,
+    y_h: np.ndarray,
+    i_h: np.ndarray,
+) -> None:
+    """Stamp per-node harmonic disturbance sources in-place for order ``h``.
+
+    Implements the physics from ``references/error_injection.md``:
+
+    - ``V_base`` = node ``u_rated_v`` (L-N for ≥3-phase, else L-L).
+    - ``Y_s = S_sc / V_base^2`` (real, frequency-flat).
+    - ``E_h = (mag_h/mag_1) * |V1_row| * exp(j*(ang_h + h*(arg(V1_row) - ang_1)))``.
+    - ``I_N = E_h * Y_s``.
+    - ``kind="voltage"``: add ``Y_s`` to ``y_h[row, row]``; add ``I_N`` to ``i_h[row]``.
+    - ``kind="current"``: add ``I_N`` to ``i_h[row]`` only.
+
+    Modifies ``y_h`` and ``i_h`` in-place (numpy arrays).
+    """
+    node_map = {int(nd.id): nd for nd in grid.nodes}
+    from pgml.assembly._params import phase_voltage_magnitude
+
+    for ns in node_sources:
+        nid = int(ns.node_id)
+        node = node_map[nid]
+        n_phases_node = len(node.phases)
+        v_base = phase_voltage_magnitude(float(node.u_rated_v), n_phases_node)
+        y_s = float(ns.source_power_va) / (v_base * v_base)  # real admittance S
+
+        spec = {
+            int(o): (float(mag), float(ang)) for o, (mag, ang) in ns.spectrum.items()
+        }
+        mag1, ang1 = spec.get(1, (1.0, 0.0))
+        ang1_rad = math.radians(ang1)
+        if mag1 == 0.0:
+            continue
+
+        mag_h, ang_h = spec.get(h, (0.0, 0.0))
+        if mag_h == 0.0:
+            continue
+        ang_h_rad = math.radians(ang_h)
+        ratio = mag_h / mag1
+
+        phases = ns.phases if ns.phases is not None else list(node.phases)
+        for phase in phases:
+            row = index.row(nid, phase)
+            v1_row = v1[row]
+            e_h = (
+                ratio
+                * abs(v1_row)
+                * cmath.exp(1j * (ang_h_rad + h * (cmath.phase(v1_row) - ang1_rad)))
+            )
+            i_n = e_h * y_s
+
+            i_h[row] += i_n
+            if ns.kind == "voltage":
+                y_h[row, row] += y_s
+
+
+# ---------------------------------------------------------------------------
+# Live OpenDSS harmonic oracle (Carson geometry lines + pgml-exact non-line stamps)
+# ---------------------------------------------------------------------------
+def _is_geometry_grid(grid: Grid) -> bool:
+    """True if ALL in-service lines carry a conductor_geometry (full Carson path)."""
+    lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
+    if not lines:
+        return False
+    return all(getattr(ln, "conductor_geometry", None) is not None for ln in lines)
+
+
+def _is_sequence_aware_grid(grid: Grid) -> bool:
+    """True if any in-service line is tagged ``harmonic_line_model=sequence_aware``."""
+    return any(
+        isinstance(b, Line)
+        and b.in_service
+        and (b.tags or {}).get("harmonic_line_model") == "sequence_aware"
+        for b in grid.branches
+    )
+
+
+def _build_geometry_circuit_stub(grid: Grid, busname: dict) -> None:
+    """Build an OpenDSS circuit with a stub Vsource + all conductor-geometry lines.
+
+    The stub Vsource has near-zero impedance (r1=1e-6, x1=1e-6) so its Carson-
+    corrected Norton shunt can be subtracted at each harmonic and replaced with
+    pgml's exact source Norton (see :func:`_get_stub_norton`).  Geometry lines are
+    built with the same WireData / LineGeometry commands as
+    :func:`build_opendss_geometry_circuit`.
+    """
+    import opendssdirect as dss
+
+    src = next(a for a in grid.appliances if isinstance(a, Source) and a.in_service)
+    slack_node = int(src.node)
+    node_by_id = {int(n.id): n for n in grid.nodes}
+    kv = float(node_by_id[slack_node].u_rated_v) / 1000.0
+    f0 = float(grid.base_frequency_hz)
+
+    dss.Text.Command("Clear")
+    dss.Text.Command(
+        f"New Circuit.pgml_live basekv={kv} phases=1 "
+        f"bus1={busname[slack_node]}.1 pu=1.0 angle=0 frequency={f0} "
+        "r1=1e-6 x1=1e-6"
+    )
+    dss.Text.Command("Set earthmodel=Deri")
+
+    for ln in grid.branches:
+        if not (
+            isinstance(ln, Line) and ln.in_service and ln.conductor_geometry is not None
+        ):
+            continue
+        c = ln.conductor_geometry.conductors[0]
+        rho = float(ln.conductor_geometry.earth_resistivity_ohm_m)
+        wd, gn = f"wd{ln.id}", f"geo{ln.id}"
+        dss.Text.Command(
+            f"New WireData.{wd} Rdc={to_float(c.r_dc_ohm_per_m)} "
+            f"GMRac={to_float(c.gmr_m)} radius={to_float(c.radius_m)} "
+            "Runits=m GMRunits=m radunits=m"
+        )
+        dss.Text.Command(
+            f"New LineGeometry.{gn} nconds=1 nphases=1 cond=1 wire={wd} "
+            f"x={to_float(c.x_m)} h={to_float(c.y_m)} units=m"
+        )
+        dss.Text.Command(
+            f"New Line.l{ln.id} phases=1 bus1={busname[ln.from_node]}.1 "
+            f"bus2={busname[ln.to_node]}.1 geometry={gn} "
+            f"length={to_float(ln.length_m)} units=m rho={rho}"
+        )
+
+    dss.Text.Command(f"Set voltagebases=[{kv}]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+
+
+def _get_stub_norton_from_dss() -> complex:
+    """Read the actual stub Vsource Norton admittance from the active DSS circuit.
+
+    Returns ``YPrim[0, 0]`` of ``Vsource.Source`` (the positive-terminal Norton
+    contribution at the current frequency, including Carson corrections).
+    """
+    import opendssdirect as dss
+
+    dss.Circuit.SetActiveElement("Vsource.Source")
+    yp = np.array(dss.CktElement.YPrim())
+    n = int(round((len(yp) / 2) ** 0.5))
+    yy = (yp[0::2] + 1j * yp[1::2]).reshape(n, n)
+    return complex(yy[0, 0])
+
+
+def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
+    """Build an OpenDSS stub circuit for the sequence-aware 3-phase path.
+
+    Contains ONLY:
+    - A near-zero-impedance stub Vsource (so its Carson-corrected Norton can be read
+      and subtracted later, exactly as in the geometry path).
+    - Lines defined via R1/X1/R0/X0 derived from the 3×3 phase matrices (the
+      ``sequence_aware`` lines).  OpenDSS applies its own Carson/Deri corrections at
+      harmonics, which is the expected discrepancy vs pgml's ``sequence_aware`` model.
+    - Switches modelled as pure-R ``Line`` elements (negligible Carson effect).
+
+    Transformers are intentionally omitted: OpenDSS ``Transformer`` elements create
+    neutral/delta neutral buses (``.0`` / ``.123`` in ``YNodeOrder``) that have no
+    pgml equivalent, making Y-bus alignment impossible.  Transformer contributions are
+    stamped with pgml-exact formulas after reading the OpenDSS ``SystemY``.
+
+    The Vsource bus phases connect to ``bus<n>.1.2.3`` so that OpenDSS sees a
+    three-phase source at the slack node; the resulting ``YNodeOrder`` contains only
+    ``.1``, ``.2``, ``.3`` suffixed entries that map cleanly to pgml rows.
+    """
+    import opendssdirect as dss
+
+    src = next(a for a in grid.appliances if isinstance(a, Source) and a.in_service)
+    slack_node = int(src.node)
+    node_by_id = {int(nd.id): nd for nd in grid.nodes}
+    kv_slack = float(node_by_id[slack_node].u_rated_v) / 1000.0
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+    p_src = len(src.phases)
+
+    dss.Text.Command("Clear")
+    ph_conn = ".".join(str(k + 1) for k in range(p_src))
+    dss.Text.Command(
+        f"New Circuit.pgml_live phases={p_src} basekv={kv_slack} "
+        f"bus1={busname[slack_node]}.{ph_conn} pu=1.0 angle=0.0 frequency={f0} "
+        "r1=1e-6 x1=1e-6 r0=1e-6 x0=1e-6"
+    )
+
+    # Lines: derive R1/X1/R0/X0 per metre from the 3x3 phase matrix
+    for ln in grid.branches:
+        if not (
+            isinstance(ln, Line) and ln.in_service and ln.conductor_geometry is None
+        ):
+            continue
+        ph = ln.from_phases
+        p = len(ph)
+        length = to_float(ln.length_m)
+        ph_suffix = ".".join(str(k + 1) for k in range(p))
+        bus1 = f"{busname[ln.from_node]}.{ph_suffix}"
+        bus2 = f"{busname[ln.to_node]}.{ph_suffix}"
+
+        if p == 1:
+            r1 = to_float(ln.series_resistance_ohm_per_m[0][0]) * length
+            l1 = to_float(ln.series_inductance_h_per_m[0][0]) * length
+            x1 = w0 * l1
+            c1 = (
+                to_float(ln.shunt_capacitance_f_per_m[0][0]) * length
+                if ln.shunt_capacitance_f_per_m is not None
+                else 0.0
+            )
+            dss.Text.Command(
+                f"New Line.l{ln.id} phases=1 bus1={bus1} bus2={bus2} "
+                f"r1={r1:.10g} x1={x1:.10g} c1={c1 * 1e9:.10g} "
+                f"r0={r1:.10g} x0={x1:.10g} c0={c1 * 1e9:.10g} "
+                "length=1 units=m"
+            )
+        elif p == 3:
+            # Extract Z1/Z0 from the phase matrix via the balanced symmetry approximation
+            r_mat = (
+                np.array(
+                    [
+                        [
+                            to_float(ln.series_resistance_ohm_per_m[i][j])
+                            for j in range(p)
+                        ]
+                        for i in range(p)
+                    ]
+                )
+                * length
+            )
+            l_mat = (
+                np.array(
+                    [
+                        [to_float(ln.series_inductance_h_per_m[i][j]) for j in range(p)]
+                        for i in range(p)
+                    ]
+                )
+                * length
+            )
+            c_mat = (
+                np.array(
+                    [
+                        [to_float(ln.shunt_capacitance_f_per_m[i][j]) for j in range(p)]
+                        for i in range(p)
+                    ]
+                )
+                * length
+                if ln.shunt_capacitance_f_per_m is not None
+                else np.zeros((3, 3))
+            )
+            # Z1 = zs - zm, Z0 = zs + 2*zm (symmetric matrix approximation)
+            z_f0 = r_mat + 1j * w0 * l_mat
+            diag = np.diag(z_f0)
+            zs = diag.mean()
+            zm = (z_f0.sum() - diag.sum()) / 6.0
+            z1 = zs - zm
+            z0 = zs + 2.0 * zm
+            r1 = z1.real
+            x1 = z1.imag
+            r0 = z0.real
+            x0 = z0.imag
+            c1 = np.diag(c_mat).mean()
+            c0 = c_mat.sum() / 3.0
+            dss.Text.Command(
+                f"New Line.l{ln.id} phases=3 bus1={bus1} bus2={bus2} "
+                f"r1={r1:.10g} x1={x1:.10g} c1={c1 * 1e9:.10g} "
+                f"r0={r0:.10g} x0={x0:.10g} c0={c0 * 1e9:.10g} "
+                "length=1 units=m"
+            )
+        else:
+            # For other phase counts fall back to Rmatrix/Xmatrix
+            r_mat = (
+                np.array(
+                    [
+                        [
+                            to_float(ln.series_resistance_ohm_per_m[i][j])
+                            for j in range(p)
+                        ]
+                        for i in range(p)
+                    ]
+                )
+                * length
+            )
+            l_mat = (
+                np.array(
+                    [
+                        [to_float(ln.series_inductance_h_per_m[i][j]) for j in range(p)]
+                        for i in range(p)
+                    ]
+                )
+                * length
+            )
+            r_str = " | ".join(
+                " ".join(f"{r_mat[i][j]:.10g}" for j in range(i + 1)) for i in range(p)
+            )
+            x_str = " | ".join(
+                " ".join(f"{w0 * l_mat[i][j]:.10g}" for j in range(i + 1))
+                for i in range(p)
+            )
+            dss.Text.Command(
+                f"New Line.l{ln.id} phases={p} bus1={bus1} bus2={bus2} "
+                f"Rmatrix=[{r_str}] Xmatrix=[{x_str}] Cmatrix=[{'0 | '.join(['0'] * p)}] "
+                "length=1 units=m"
+            )
+
+    # Switches: model as pure-R Lines (x1=0 => no Carson correction, safe to include)
+    for b in grid.branches:
+        if not (isinstance(b, Switch) and b.in_service and b.closed):
+            continue
+        p = len(b.from_phases)
+        ph_suffix = ".".join(str(k + 1) for k in range(p))
+        bus1 = f"{busname[b.from_node]}.{ph_suffix}"
+        bus2 = f"{busname[b.to_node]}.{ph_suffix}"
+        r_sw = to_float(b.resistance_ohm)
+        dss.Text.Command(
+            f"New Line.sw{b.id} phases={p} bus1={bus1} bus2={bus2} "
+            f"r1={r_sw:.10g} x1=0.0 c1=0.0 r0={r_sw:.10g} x0=0.0 c0=0.0 "
+            "length=1 units=m"
+        )
+
+    # Voltage bases: use only the slack node kV (LV nodes are isolated without transformers)
+    dss.Text.Command(f"Set voltagebases=[{kv_slack:.6g}]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+
+
+def opendss_harmonic_voltages(
+    grid: Grid,
+    harmonic_injection: Optional[dict],
+    orders: Sequence[int],
+    *,
+    slack: str = "norton",
+    v1: Optional[np.ndarray] = None,
+    operating_point: Optional[dict] = None,
+    node_sources: Optional[Sequence] = None,
+) -> np.ndarray:
+    """Live OpenDSS harmonic oracle for full multi-voltage-level grids.
+
+    Returns complex node voltages ``[len(orders), N]`` aligned to
+    :func:`pgml.assembly.node_phase_index` rows.
+
+    This is the **genuine live-OpenDSS comparison**: OpenDSS's own ``SystemY(h)``
+    is read at each harmonic order, harmonic injection is applied using pgml's
+    converged fundamental operating point, and the system is solved.
+
+    **Single-phase geometry path** (all lines carry ``conductor_geometry``):
+
+    A stub-source OpenDSS circuit is built with the same conductor-geometry data
+    used by pgml (``WireData`` / ``LineGeometry`` / ``Line`` commands).  At each
+    harmonic the stub Vsource Norton shunt (which carries OpenDSS's own Carson
+    correction) is read from ``Vsource.Source.YPrim``, subtracted from the
+    ``SystemY``, and replaced with pgml's exact ``Y_s = (R + j·h·2πf₀·L)⁻¹``.
+    Switch and Transformer stamps are then added using pgml's exact formulas
+    (``R const, X∝h, complex tap``).  The resulting Y-bus matches pgml's
+    assembled Y at Carson-line precision (~1e-14 relative for lines).
+
+    **Three-phase sequence-aware path** (lines tagged ``harmonic_line_model=sequence_aware``):
+
+    A full OpenDSS circuit is built with the source, Lines defined via
+    ``R1/X1/R0/X0`` derived from the 3×3 phase matrices, Switches as R-only
+    Lines, and Transformers with ``XRConst=No`` (OpenDSS default: R const, X∝h,
+    matching pgml's transformer model).  OpenDSS applies its own Carson/DERI
+    correction to all ``R1/X1``-defined lines at harmonics; this correction differs
+    from pgml's ``sequence_aware`` earth-return resistance term by the Carson model
+    difference (~5–15 % at harmonics 5–11).  The residual is documented by the
+    parity tests in ``tests/reference/test_cigre_lv_live_opendss.py``.
+
+    **Harmonic injection convention** (identical in both paths):
+
+    Per ``references/opendss/harmonics.md``:
+    ``|I_h| = (mag_h / mag_1) · |I₁|``,
+    ``arg(I_h) = ang_h + h · (arg(I₁) − ang_1)``
+    where ``I₁ = conj(S₀) / conj(V₁)`` at the device terminal.
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid`.  Must be one of:
+        (a) a single-phase grid with ``conductor_geometry`` on all lines, or
+        (b) a three-phase grid with ``harmonic_line_model=sequence_aware`` tags.
+        Grids with neither path raise ``ValueError``.
+    harmonic_injection:
+        Per-device harmonic-current spec
+        ``{appliance_id: {order: (magnitude_pu, phase_deg)}}``.
+        ``None`` means no injection.
+    orders:
+        Harmonic orders to solve (e.g. ``[1, 5, 11]``).  Order 1 returns ``v1``
+        directly when ``v1`` is given.
+    slack:
+        Only ``"norton"`` is implemented (source held at zero harmonic EMF).
+    v1:
+        Optional pre-computed fundamental voltage vector ``[N]`` (complex numpy).
+        Pass ``hres.pf.v.detach().cpu().numpy()`` to share pgml's converged
+        operating point.  When ``None``, a linear const-Z fundamental is solved
+        internally.
+    operating_point:
+        Optional per-device operating-point override.  Currently used only when
+        ``v1 is None`` (passed to the internal linear fundamental solve).
+        Accepted for API compatibility with the scenario example scripts.
+
+    node_sources:
+        Optional sequence of :class:`~pgml.solver.NodeHarmonicSource` — per-node
+        harmonic disturbance sources applied ONLY at ``h > 1``.  These are stamped
+        directly into the Y-bus / injection vector (after the OpenDSS SystemY stub-
+        subtract and pgml-exact element stamps) using the same physics as
+        :func:`numpy_harmonic_voltages`.  No OpenDSS ``ISource`` / ``VSource``
+        elements are added; the stamping is done in Python so that parity with pgml
+        is exact (same formulas, same ``V1``).  When ``None`` (default), the oracle
+        is backward-compatible with the existing signature.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex ``[H, N]`` — ``H = len(orders)``, ``N = index.size``.
+
+    Raises
+    ------
+    ValueError
+        If ``slack != "norton"`` or the grid type is not recognised.
+
+    See Also
+    --------
+    numpy_harmonic_voltages : Pure-numpy regression oracle (machine-precision parity).
+    opendss_geometry_harmonic_profiles : Carson-line profile oracle (passive feeder).
+    numpy_harmonic_profiles : Single-phase numpy oracle (lines + source only).
+    """
+    import opendssdirect as dss
+
+    if slack != "norton":
+        raise ValueError(
+            f"opendss_harmonic_voltages supports only slack='norton'; got {slack!r}"
+        )
+
+    from pgml.assembly import node_phase_index
+    from pgml.schemas.grid_schema import Generator as PgmlGen, Load as PgmlLoad
+
+    orders_list = [int(h) for h in orders]
+    index = node_phase_index(grid)
+    n = index.size
+    f0 = float(grid.base_frequency_hz)
+    busname = {int(nd.id): f"bus{int(nd.id)}" for nd in grid.nodes}
+
+    use_geometry = _is_geometry_grid(grid)
+    use_seq_aware = _is_sequence_aware_grid(grid)
+
+    if not use_geometry and not use_seq_aware:
+        raise ValueError(
+            "opendss_harmonic_voltages requires either (a) all lines to carry "
+            "conductor_geometry (single-phase Carson path) or (b) lines tagged "
+            "harmonic_line_model=sequence_aware (3-phase sequence-aware path). "
+            "For plain R/X grids without these tags, use numpy_harmonic_voltages."
+        )
+
+    # --- Build OpenDSS stub circuit (lines + stub source; NO transformers) ---
+    if use_geometry:
+        _build_geometry_circuit_stub(grid, busname)
+    else:
+        _build_seq_aware_circuit_stub(grid, busname)
+
+    node_order_dss = list(dss.Circuit.YNodeOrder())
+    n_dss = len(node_order_dss)
+
+    def _dss_node_id(entry: str) -> int:
+        """Extract node id from OpenDSS node name ``BUS<id>.<phase>``."""
+        return int(entry.upper().split(".")[0][3:])
+
+    def _dss_phase_index(entry: str) -> int:
+        """Extract 0-based phase index from DSS suffix (.1 -> 0, .2 -> 1, ...)."""
+        parts = entry.split(".")
+        if len(parts) < 2:
+            return 0
+        try:
+            return int(parts[1]) - 1
+        except ValueError:
+            return 0
+
+    # Build rowmap: DSS row -> pgml row
+    phases_list = [Phase.A, Phase.B, Phase.C, Phase.N]
+    rowmap_dss_to_pgml: dict[int, int] = {}
+    for di, entry in enumerate(node_order_dss):
+        nid = _dss_node_id(entry)
+        ph_idx = _dss_phase_index(entry)
+        phase = phases_list[ph_idx] if ph_idx < len(phases_list) else Phase.A
+        try:
+            pgml_row = index.row(nid, phase)
+        except (KeyError, ValueError):
+            pgml_row = index.row(nid, Phase.A)
+        rowmap_dss_to_pgml[di] = pgml_row
+
+    # Locate the stub source's DSS rows (one per phase) for the Norton subtraction
+    src = next(a for a in grid.appliances if isinstance(a, Source) and a.in_service)
+    slack_node = int(src.node)
+    slack_dss_rows = [
+        di for di, e in enumerate(node_order_dss) if _dss_node_id(e) == slack_node
+    ]
+
+    # --- Determine fundamental voltage ---
+    if v1 is None:
+        v1_eff = numpy_harmonic_voltages(
+            grid,
+            None,  # no injection at fundamental
+            [1],
+            slack="norton",
+            v1=None,
+            operating_point=operating_point,
+        )[0]
+    else:
+        v1_arr = np.asarray(v1).reshape(-1)
+        if v1_arr.shape[0] != n:
+            raise ValueError(
+                f"v1 has {v1_arr.shape[0]} entries but grid has N={n} rows"
+            )
+        v1_eff = v1_arr.astype(complex)
+
+    # --- Per-device injection setup ---
+    devs = []
+    for a in grid.appliances:
+        if not (isinstance(a, (PgmlLoad, PgmlGen)) and getattr(a, "in_service", True)):
+            continue
+        if harmonic_injection is not None and a.id in harmonic_injection:
+            spec: dict = {
+                int(o): (float(mag), float(ang))
+                for o, (mag, ang) in harmonic_injection[a.id].items()
+            }
+        else:
+            s = getattr(a, "spectrum", None)
+            if not isinstance(s, StaticSpectrum):
+                continue
+            spec = {
+                c.order: (to_float(c.magnitude_pu), to_float(c.phase_deg))
+                for c in s.spectrum.components
+            }
+        if not spec:
+            continue
+        n_ph = len(a.phases)
+        src_rows = index.rows(a.node)
+        sign = 1.0 if isinstance(a, PgmlLoad) else -1.0
+        # Per-phase S0: honor an explicit per-phase nameplate (asymmetric loads), else
+        # split the total equally — mirroring pgml's resolve_operating_power so the
+        # per-phase fundamental current I1 (hence the harmonic injection) matches.
+        p_total, q_total = to_float(a.p_nom_w), to_float(a.q_nom_var)
+        p_pp = (
+            [to_float(x) for x in a.p_nom_per_phase_w]
+            if getattr(a, "p_nom_per_phase_w", None) is not None
+            else [p_total / n_ph] * n_ph
+        )
+        q_pp = (
+            [to_float(x) for x in a.q_nom_per_phase_var]
+            if getattr(a, "q_nom_per_phase_var", None) is not None
+            else [q_total / n_ph] * n_ph
+        )
+        i1_list = []
+        for k_ph, row in enumerate(src_rows):
+            v_term = v1_eff[row]
+            s0_ph = complex(sign * p_pp[k_ph], sign * q_pp[k_ph])
+            if abs(v_term) < 1e-300:
+                i1_list.append(0.0 + 0j)
+            else:
+                i1_list.append(np.conj(s0_ph) / np.conj(v_term))
+        devs.append((spec, src_rows, i1_list))
+
+    def _build_injection(h: int) -> np.ndarray:
+        i_h = np.zeros(n, dtype=complex)
+        for spec, src_rows, i1_list in devs:
+            mag1, ang1 = spec.get(1, (1.0, 0.0))
+            mag_h, ang_h = spec.get(h, (0.0, 0.0))
+            if mag1 == 0.0:
+                continue
+            ratio = mag_h / mag1
+            for i1_val, row in zip(i1_list, src_rows):
+                i_drawn = (
+                    ratio
+                    * abs(i1_val)
+                    * cmath.exp(
+                        1j
+                        * (
+                            math.radians(ang_h)
+                            + h * (cmath.phase(i1_val) - math.radians(ang1))
+                        )
+                    )
+                )
+                i_h[row] += -i_drawn
+        return i_h
+
+    def _build_harmonic_ybus(h: int) -> np.ndarray:
+        """Build full harmonic Y-bus for order h using OpenDSS lines + pgml-exact stamps.
+
+        For both the geometry and sequence-aware paths:
+        1. Set OpenDSS frequency, rebuild Y, read ``SystemY`` (contains stub source
+           Norton + lines ± switches).
+        2. Read actual stub Norton from ``Vsource.Source.YPrim`` and subtract it from
+           the diagonal block at the slack node.
+        3. Stamp all non-line elements (switches, transformers, source Norton) with
+           pgml-exact formulas.
+
+        Since switches are already in the OpenDSS SystemY (as pure-R Line elements with
+        no Carson correction at x1=0) AND are also stamped by
+        ``_stamp_non_line_elements_no_source``, we must avoid double-counting.
+        The function uses the following invariant:
+        - For the geometry path: the stub circuit has NO switches and NO transformers,
+          so ``_stamp_non_line_elements_no_source`` + ``_stamp_source_nortons`` add
+          exactly the missing elements.
+        - For the sequence-aware path: the stub circuit includes switches, so we stamp
+          ONLY transformers and source Norton (not switches again).
+        """
+        dss.Text.Command(f"set frequency={h * f0}")
+        dss.Solution.BuildYMatrix(2, 1)
+
+        # Read stub Norton from YPrim (full p×p block)
+        dss.Circuit.SetActiveElement("Vsource.Source")
+        yp_flat = np.array(dss.CktElement.YPrim())
+        p_src = len(src.phases)
+        yp = (yp_flat[0::2] + 1j * yp_flat[1::2]).reshape(2 * p_src, 2 * p_src)
+        # top-left p×p block = Norton admittance stamped at from-bus
+        y_stub_block = yp[:p_src, :p_src]
+
+        y_flat = np.array(dss.Circuit.SystemY(), dtype=np.float64)
+        y_dss = (y_flat[0::2] + 1j * y_flat[1::2]).reshape(n_dss, n_dss)
+        y_out = np.zeros((n, n), dtype=complex)
+        for di in range(n_dss):
+            for dj in range(n_dss):
+                y_out[rowmap_dss_to_pgml[di], rowmap_dss_to_pgml[dj]] = y_dss[di, dj]
+
+        # Subtract stub Norton from the slack block
+        for pi in range(p_src):
+            for pj in range(p_src):
+                ri = rowmap_dss_to_pgml[slack_dss_rows[pi]]
+                rj = rowmap_dss_to_pgml[slack_dss_rows[pj]]
+                y_out[ri, rj] -= y_stub_block[pi, pj]
+
+        # Add pgml-exact non-line stamps:
+        # - geometry stub: no switches, no transformers -> stamp all
+        # - seq-aware stub: switches already in Y -> stamp transformers + source only
+        if use_geometry:
+            _stamp_non_line_elements_no_source(y_out, grid, h, index)
+        else:
+            _stamp_transformers_only(y_out, grid, h, index)
+        _stamp_source_nortons(y_out, grid, h, index)
+
+        return y_out
+
+    # --- Per-order solve ---
+    result_slices: list[np.ndarray] = []
+    for h in orders_list:
+        if h == 1:
+            result_slices.append(v1_eff)
+            continue
+
+        y_h = _build_harmonic_ybus(h)
+        i_h = _build_injection(h)
+
+        # Stamp per-node harmonic disturbance sources (same physics as pgml solver).
+        # These are added AFTER the OpenDSS SystemY stub-subtract and pgml-exact
+        # element stamps, so the only difference vs the numpy oracle is the line model.
+        if node_sources:
+            _apply_node_sources_numpy(grid, node_sources, v1_eff, index, h, y_h, i_h)
+
+        result_slices.append(np.linalg.solve(y_h, i_h))
+
+    return np.stack(result_slices, axis=0)  # [H, N]
+
+
+def _stamp_non_line_elements_no_source(
+    y: np.ndarray,
+    grid: Grid,
+    h: int,
+    index,
+) -> np.ndarray:
+    """Stamp Switch and Transformer elements only (no Source Norton)."""
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+
+    for b in grid.branches:
+        if isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed:
+            p = len(b.from_phases)
+            fr_rows = index.rows(b.from_node)
+            to_rows = index.rows(b.to_node)
+            r_sw = to_float(b.resistance_ohm)
+            l_sw = to_float(b.inductance_h)
+            z_sw = r_sw + 1j * h * w0 * l_sw
+            ys_sw = 1.0 / z_sw
+            for i_ph in range(p):
+                fr = fr_rows[i_ph]
+                to = to_rows[i_ph]
+                y[fr, fr] += ys_sw
+                y[to, to] += ys_sw
+                y[fr, to] -= ys_sw
+                y[to, fr] -= ys_sw
+
+        elif isinstance(b, Transformer) and getattr(b, "in_service", True):
+            p = len(b.from_phases)
+            fr_rows = index.rows(b.from_node)
+            to_rows = index.rows(b.to_node)
+            r_t = to_float(b.series_resistance_ohm)
+            l_t = to_float(b.series_inductance_h)
+            z_se = r_t + 1j * h * w0 * l_t
+            y_se = 1.0 / z_se
+            tap_mag = to_float(b.tap.ratio_magnitude)
+            tap_shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
+            t = tap_mag * cmath.exp(1j * tap_shift_rad)
+            abs_t2 = tap_mag**2
+            gm = to_float(b.magnetizing_conductance_s)
+            lm = b.magnetizing_inductance_h
+            bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
+            ym = complex(gm, bm)
+            y_ff = y_se / abs_t2 + ym
+            y_ft = -y_se / complex(t).conjugate()
+            y_tf = -y_se / t
+            y_tt = y_se
+            for i_ph in range(p):
+                fr = fr_rows[i_ph]
+                to = to_rows[i_ph]
+                y[fr, fr] += y_ff
+                y[fr, to] += y_ft
+                y[to, fr] += y_tf
+                y[to, to] += y_tt
+
+    return y
+
+
+def _stamp_transformers_only(
+    y: np.ndarray,
+    grid: Grid,
+    h: int,
+    index,
+) -> np.ndarray:
+    """Stamp Transformer admittances only (pgml-exact R-const/X∝h pi-form with complex tap).
+
+    Used by the sequence-aware path where switches are already in the OpenDSS SystemY.
+    """
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+
+    for b in grid.branches:
+        if not (isinstance(b, Transformer) and getattr(b, "in_service", True)):
+            continue
+        p = len(b.from_phases)
+        fr_rows = index.rows(b.from_node)
+        to_rows = index.rows(b.to_node)
+        r_t = to_float(b.series_resistance_ohm)
+        l_t = to_float(b.series_inductance_h)
+        z_se = r_t + 1j * h * w0 * l_t
+        y_se = 1.0 / z_se
+        tap_mag = to_float(b.tap.ratio_magnitude)
+        tap_shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
+        t = tap_mag * cmath.exp(1j * tap_shift_rad)
+        abs_t2 = tap_mag**2
+        gm = to_float(b.magnetizing_conductance_s)
+        lm = b.magnetizing_inductance_h
+        bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
+        ym = complex(gm, bm)
+        y_ff = y_se / abs_t2 + ym
+        y_ft = -y_se / complex(t).conjugate()
+        y_tf = -y_se / t
+        y_tt = y_se
+        for i_ph in range(p):
+            fr = fr_rows[i_ph]
+            to = to_rows[i_ph]
+            y[fr, fr] += y_ff
+            y[fr, to] += y_ft
+            y[to, fr] += y_tf
+            y[to, to] += y_tt
+
+    return y
+
+
+def _stamp_source_nortons(
+    y: np.ndarray,
+    grid: Grid,
+    h: int,
+    index,
+) -> np.ndarray:
+    """Stamp all Source Norton shunts (pgml-exact formulas)."""
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+
+    for a in grid.appliances:
+        if not (isinstance(a, Source) and getattr(a, "in_service", True)):
+            continue
+        phases_a = a.phases
+        p = len(phases_a)
+        src_rows = index.rows(a.node)
+        r_mat = np.array(
+            [[to_float(a.resistance_ohm[i][j]) for j in range(p)] for i in range(p)]
+        )
+        l_mat = np.array(
+            [[to_float(a.inductance_h[i][j]) for j in range(p)] for i in range(p)]
+        )
+        z_mat = r_mat + 1j * h * w0 * l_mat
+        ys_mat = np.linalg.inv(z_mat)
+        for i_ph in range(p):
+            for j_ph in range(p):
+                y[src_rows[i_ph], src_rows[j_ph]] += ys_mat[i_ph, j_ph]
+
+    return y
+
+
 __all__ = [
     "ieee33_geometry_grid",
     "cigre_lv_geometry_grid",
+    "cigre_lv_full_grid",
     "pandapower_ybus",
     "pandapower_voltage_profile",
     "dss_systemy",
@@ -555,4 +1836,6 @@ __all__ = [
     "opendss_geometry_systemy",
     "opendss_geometry_harmonic_profiles",
     "numpy_harmonic_profiles",
+    "numpy_harmonic_voltages",
+    "opendss_harmonic_voltages",
 ]

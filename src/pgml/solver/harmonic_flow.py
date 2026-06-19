@@ -3,8 +3,10 @@
 Public API
 ----------
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, operating_point,
-  harmonic_injection, include_load_shunt, tol, max_iter, dtype, device)
-  -> HarmonicFlowResult``
+  harmonic_injection, node_sources, include_load_shunt, tol, max_iter, dtype,
+  device, symmetry) -> HarmonicFlowResult``
+- ``NodeHarmonicSource`` — per-node harmonic "error" source (Thevenin / Norton),
+  injected only at orders ``h > 1`` (see ``references/error_injection.md``).
 
 Model (matches OpenDSS ``Solve mode=harmonics`` — see
 ``references/opendss/harmonics.md``):
@@ -38,15 +40,15 @@ scenario dims. No ``.item()/.detach()/.numpy()`` on the tape; honors device/dtyp
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Literal, Optional, Sequence
 
 import torch
 from torch import Tensor
 
 from pgml.assembly import NodePhaseIndex, assemble_network_ybus, node_phase_index
 from pgml.assembly._incidence import build_incidence, group_appliances, used_rows
-from pgml.assembly._params import resolve_operating_power
+from pgml.assembly._params import phase_voltage_magnitude, resolve_operating_power
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
@@ -54,6 +56,7 @@ from pgml.schemas.grid_schema import (
     Generator,
     Grid,
     Load,
+    Phase,
     StaticSpectrum,
 )
 
@@ -86,6 +89,47 @@ class HarmonicFlowResult:
     pf: PowerFlowResult
 
 
+@dataclass(frozen=True)
+class NodeHarmonicSource:
+    """A per-node harmonic disturbance ("error") source, injected at orders ``h > 1``.
+
+    Models a Thevenin (``kind="voltage"``) or Norton (``kind="current"``) harmonic
+    source at ANY node — independent of whether a load/generator sits there. The
+    physics + math are pinned in ``references/error_injection.md`` (authoritative).
+    Because pgml solves each harmonic as its own linear system, the source is added
+    ONLY at ``h > 1`` and the fundamental power flow is preserved EXACTLY (no damping
+    reactor needed).
+
+    Attributes
+    ----------
+    node_id:
+        Id of the node to inject at.
+    phases:
+        Phase set to inject on (phase-to-ground). ``None`` (default) injects on ALL
+        of the node's phases.
+    spectrum:
+        ``{order: (magnitude_pu, phase_deg)}``. Magnitudes are RELATIVE to the
+        fundamental (order 1 = reference). For ``kind="voltage"`` this is a VOLTAGE
+        spectrum. Order 1 may be omitted (``mag_1`` defaults to 1.0, ``ang_1`` to
+        0.0). Each ``magnitude_pu`` / ``phase_deg`` may be a python float or a 0-d /
+        ``[*batch]`` tensor (gradients flow; leading SCENARIO batch dims broadcast).
+    source_power_va:
+        Source STRENGTH ``S_sc`` (the short-circuit power, MVAsc in OpenDSS terms).
+        Larger => stiffer => more of the spectrum appears at the node. A python float
+        or a 0-d / ``[*batch]`` tensor (differentiable, scenario-batchable).
+    kind:
+        ``"voltage"`` (Thevenin: a finite-strength source — stamps the shunt ``Y_s``
+        on the diagonal AND the Norton current ``I_N``) or ``"current"`` (Norton: an
+        ideal current injection ``I_N`` independent of the network).
+    """
+
+    node_id: int
+    phases: Optional[tuple[Phase, ...]] = None
+    spectrum: dict[int, tuple] = field(default_factory=dict)
+    source_power_va: float = 0.0
+    kind: Literal["voltage", "current"] = "voltage"
+
+
 def solve_harmonic_flow(
     grid: Grid,
     harmonic_orders,
@@ -93,6 +137,7 @@ def solve_harmonic_flow(
     slack: str = "ideal",
     operating_point: Optional[dict] = None,
     harmonic_injection: Optional[dict] = None,
+    node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
     include_load_shunt: bool = False,
     tol: float = 1e-10,
     max_iter: int = 100,
@@ -125,6 +170,16 @@ def solve_harmonic_flow(
           identically to every element (the backward-compatible path).
 
         The override wins over the device's stored ``spectrum`` / ``spectrum_per_phase``.
+    node_sources:
+        Optional sequence of :class:`NodeHarmonicSource` — per-node harmonic "error"
+        sources injected ONLY at orders ``h > 1`` (the fundamental is preserved
+        exactly). Each is a Thevenin voltage source (stamps a resistive shunt ``Y_s``
+        on the node-phase diagonal + a Norton current ``I_N``) or a Norton current
+        source (``I_N`` only), per ``references/error_injection.md``. Multiple
+        simultaneous sources are allowed. When ``None`` (default), behavior is
+        byte-identical to today. ``source_power_va`` and the spectrum may carry
+        leading SCENARIO batch dims (differentiable; a batched voltage source's
+        ``Y_s`` makes ``Y(h)`` ``[*batch, H, N, N]``).
     include_load_shunt:
         ``False`` (default) = OpenDSS ``NeglectLoadY`` pure current-source model.
         ``True`` (load Norton shunt from ``HarmonicShuntModel``) is NOT yet
@@ -198,6 +253,10 @@ def solve_harmonic_flow(
             device,
             asymmetric,
         )  # [*batch, Hh, N]
+        if node_sources:
+            yh, ih = _apply_node_sources(
+                node_sources, grid, v1, index, harm, yh, ih, cdt, rdt, device
+            )
         vh = solve_harmonic(yh, ih)  # Norton mode -> [*batch, Hh, N]
         for k, h in enumerate(harm):
             v_by_order[h] = vh[..., k, :]
@@ -478,4 +537,162 @@ def _harmonic_injections(
     return torch.stack(cols, dim=-2)  # [*batch, Hh, N]
 
 
-__all__ = ["solve_harmonic_flow", "HarmonicFlowResult"]
+# ---------------------------------------------------------------------------
+# per-node harmonic "error" source (Thevenin / Norton) — references/error_injection.md
+# ---------------------------------------------------------------------------
+def _apply_node_sources(
+    node_sources,
+    grid,
+    v1,
+    index,
+    harm_orders,
+    yh,
+    ih,
+    cdt,
+    rdt,
+    device,
+):
+    """Stamp per-node harmonic disturbance sources into ``Y(h)`` and ``I(h)``.
+
+    For each :class:`NodeHarmonicSource` and each requested order ``h > 1``, at the
+    source node-phase rows (``index.rows_for_terminal``) — per
+    ``references/error_injection.md``:
+
+    - ``V_base`` = node line-to-neutral base
+      (:func:`pgml.assembly._params.phase_voltage_magnitude`).
+    - ``Y_s = source_power_va / V_base**2`` (REAL, frequency-flat / resistive).
+    - ``E_h = (mag_h/mag_1)*|V1| * exp(j*(rad(ang_h) + h*(angle(V1) - rad(ang_1))))``
+      using the SAME phase convention as :func:`_harmonic_injections`. ``V1`` is the
+      converged fundamental voltage at the row.
+    - ``I_N = E_h * Y_s``.
+    - ``kind="voltage"``: add ``Y_s`` to the diagonal ``Y(h)[..., row, row]`` AND
+      ``I_N`` to ``I(h)[..., row]``.
+    - ``kind="current"``: add ``I_N`` to ``I(h)[..., row]`` only.
+
+    All adds are out-of-place (``index_add`` on a flattened diagonal of a fresh zero
+    tensor for ``Y``; ``index_add`` on the current). ``source_power_va`` and the
+    spectrum may carry leading SCENARIO batch dims; a batched voltage-source ``Y_s``
+    promotes ``Y(h)`` to ``[*batch, Hh, N, N]`` (broadcast, then added).
+    Differentiable w.r.t. ``source_power_va``, the spectrum, and (via ``V1``) grid
+    params; GPU-safe. ``yh`` is ``[Hh, N, N]`` (or already batched); ``ih`` is
+    ``[*batch, Hh, N]``. Returns the updated ``(yh, ih)``.
+    """
+    n = index.size
+    node_map = {nd.id: nd for nd in grid.nodes}
+
+    # Accumulate per-order current and (voltage-source) diagonal Y_s contributions.
+    i_cols: list[Tensor] = []  # one [*batch, N] per order (current contribution)
+    y_diag_cols: list[Tensor] = []  # one [*batch, N] per order (diagonal Y_s add)
+    has_voltage = False
+    for h in harm_orders:
+        i_acc = torch.zeros((n,), dtype=cdt, device=device)
+        y_acc = torch.zeros((n,), dtype=cdt, device=device)
+        for src in node_sources:
+            if src.kind not in ("voltage", "current"):
+                raise ValueError(
+                    f"NodeHarmonicSource.kind must be 'voltage' or 'current', "
+                    f"got {src.kind!r}."
+                )
+            node = node_map[src.node_id]
+            phases = src.phases if src.phases is not None else node.phases
+            rows = index.rows_for_terminal(src.node_id, phases, device=device)  # [P]
+
+            v_base = phase_voltage_magnitude(node.u_rated_v, len(node.phases))
+            # Y_s = S_sc / V_base^2 (REAL, frequency-flat). Keeps grad to S_sc.
+            s_sc = _as_rt(src.source_power_va, rdt, device)  # 0-d or [*batch]
+            y_s = (s_sc / (v_base * v_base)).to(cdt)  # [*batch]
+
+            # Order-1 reference (mag_1, ang_1): default mag_1=1.0, ang_1=0.0.
+            mag1, ang1_deg = src.spectrum.get(1, (1.0, 0.0))
+            mag1 = _as_rt(mag1, rdt, device)
+            ang1 = _as_rt(ang1_deg, rdt, device) * (math.pi / 180.0)
+
+            mag_h_raw, ang_h_deg = src.spectrum.get(h, (0.0, 0.0))
+            mag_h = _as_rt(mag_h_raw, rdt, device)
+            ang_h = _as_rt(ang_h_deg, rdt, device) * (math.pi / 180.0)
+
+            # Guarded ratio mag_h / mag_1 (mag_1 == 0 -> contributes nothing).
+            safe1 = torch.where(mag1 == 0, torch.ones_like(mag1), mag1)
+            ratio = torch.where(mag1 == 0, torch.zeros_like(mag_h), mag_h / safe1)
+
+            # Fundamental voltage at the source rows: V1[..., rows] -> [*vbatch, P].
+            v1_rows = v1.index_select(-1, rows).to(cdt)
+            absv1 = torch.abs(v1_rows)  # [*vbatch, P]
+            argv1 = torch.angle(v1_rows)  # [*vbatch, P]
+
+            # E_h = ratio*|V1| * exp(j*(ang_h + h*(arg(V1) - ang_1))).
+            mag_e = ratio.unsqueeze(-1) * absv1  # broadcast -> [*batch, P]
+            phase_e = ang_h.unsqueeze(-1) + float(h) * (argv1 - ang1.unsqueeze(-1))
+            e_h = torch.polar(mag_e, phase_e).to(cdt)  # [*batch, P]
+
+            i_n = e_h * y_s.unsqueeze(-1)  # [*batch, P]
+            i_n = i_n.broadcast_to(*i_n.shape[:-1], rows.shape[0]).contiguous()
+            i_acc = _index_add_into(i_acc, rows, i_n, n, cdt, device)
+
+            if src.kind == "voltage":
+                has_voltage = True
+                y_row = (
+                    y_s.unsqueeze(-1)
+                    .broadcast_to(*y_s.shape, rows.shape[0])
+                    .contiguous()
+                )
+                y_acc = _index_add_into(y_acc, rows, y_row, n, cdt, device)
+        i_cols.append(i_acc)
+        y_diag_cols.append(y_acc)
+
+    # Stack the per-order current contribution -> [*batch, Hh, N] and add to ih.
+    ibshape = torch.broadcast_shapes(*[c.shape[:-1] for c in i_cols])
+    i_stack = torch.stack(
+        [c.broadcast_to(*ibshape, n) for c in i_cols], dim=-2
+    )  # [*batch, Hh, N]
+    ih = ih + i_stack
+
+    # Voltage sources add Y_s to the diagonal. Build the diagonal add [*batch, Hh, N]
+    # and add it onto Y's diagonal out-of-place (broadcasting Y if it gains a batch).
+    if has_voltage:
+        ybshape = torch.broadcast_shapes(*[c.shape[:-1] for c in y_diag_cols])
+        y_diag = torch.stack(
+            [c.broadcast_to(*ybshape, n) for c in y_diag_cols], dim=-2
+        )  # [*batch, Hh, N]
+        yh = _add_to_diagonal(yh, y_diag, cdt, device)
+
+    return yh, ih
+
+
+def _index_add_into(acc, rows, values, n, cdt, device):
+    """Out-of-place ``acc.index_add(-1, rows, values)`` with leading-batch broadcast.
+
+    ``acc`` may be a bare ``[N]`` (the running zero) — promote it to the broadcast
+    batch of ``values`` (a FRESH zero tensor, never an in-place mutation) before the
+    complex-safe out-of-place ``index_add``.
+    """
+    target_batch = values.shape[:-1]
+    base = torch.zeros((*target_batch, n), dtype=cdt, device=device)
+    base = base + acc  # broadcast the previous accumulation into the batch (fresh).
+    return base.index_add(-1, rows, values)
+
+
+def _add_to_diagonal(yh, y_diag, cdt, device):
+    """Add ``y_diag`` ``[*batch, Hh, N]`` onto the diagonal of ``yh`` out-of-place.
+
+    ``yh`` is ``[Hh, N, N]`` or ``[*batch, Hh, N, N]``; ``y_diag`` carries the per-row
+    diagonal additions (possibly with a leading SCENARIO batch). The result broadcasts
+    to ``[*batch, Hh, N, N]``. Builds a diagonal-only complex matrix via an
+    ``index_add`` on the flattened ``(N*N)`` last two dims of a FRESH zero tensor (no
+    in-place op on the tracked ``yh``; GPU-safe for complex).
+    """
+    n = yh.shape[-1]
+    # Common batch shape over the leading dims of yh[...,N,N] and y_diag[...,N].
+    bshape = torch.broadcast_shapes(yh.shape[:-2], y_diag.shape[:-1])
+    yh_b = yh.broadcast_to(*bshape, n, n)
+    y_diag_b = y_diag.broadcast_to(*bshape, n).contiguous()
+
+    # Build a diagonal matrix [*bshape, N, N] from y_diag_b via a flattened index_add.
+    diag_flat = torch.zeros((*bshape, n * n), dtype=cdt, device=device)
+    diag_rows = torch.arange(n, device=device) * (n + 1)  # diagonal positions in N*N
+    diag_flat = diag_flat.index_add(-1, diag_rows, y_diag_b)
+    diag_mat = diag_flat.reshape(*bshape, n, n)
+    return yh_b + diag_mat
+
+
+__all__ = ["solve_harmonic_flow", "HarmonicFlowResult", "NodeHarmonicSource"]

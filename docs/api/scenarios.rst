@@ -258,6 +258,128 @@ orders, N nodes)::
 ``{device_id: {order: (mag[B, T], phase[B, T])}}``; this is passed directly to
 ``solve_harmonic_flow`` by :func:`~pgml.scenarios.run_scenarios`.
 
+Per-node harmonic "error"-source sweep (``run_node_injection_sweep``)
+-----------------------------------------------------------------------
+
+:func:`~pgml.scenarios.run_node_injection_sweep` sweeps a per-node harmonic
+"error" source (see :doc:`solver` and :doc:`/error_injection`) over a set of
+nodes: **scenario** ``i`` places a :class:`~pgml.solver.NodeHarmonicSource` at
+node ``i`` ONLY.  This builds the harmonic-domain analogue of a network
+sensitivity map — "inject a disturbance source at each node, measure how the
+spectrum spreads."
+
+Unlike :func:`~pgml.scenarios.spectrum_sweep` (which scales a load's existing
+harmonic injection), this source is injected at **any** node (no load required),
+at a user-defined strength ``source_power_va``, and only at ``h > 1`` (the
+fundamental power flow is preserved exactly).
+
+**Config** (:class:`~pgml.scenarios.NodeInjectionSweepConfig`)
+
+.. code-block:: python
+
+    from pgml.scenarios import NodeInjectionSweepConfig, run_node_injection_sweep
+
+    cfg = NodeInjectionSweepConfig.from_spectrum(
+        spectrum={5: (0.04, 0.0), 7: (0.03, 0.0)},
+        source_power_va=1e6,          # 1 MVAsc Thévenin source
+        kind="voltage",
+        # node_ids=None  →  sweep ALL nodes in the grid
+    )
+    result = run_node_injection_sweep(grid, cfg, slack="norton")
+    # result.v  shape [B, H, N]  where B = number of swept nodes, H includes the
+    #           fundamental (order 1) + the harmonic orders from the config.
+    # result.sampled.samples["injection_node_id"]  shape [B]  (swept node per scenario)
+
+:meth:`~pgml.scenarios.NodeInjectionSweepConfig.from_spectrum` builds the
+config from a ``{order: (magnitude_pu, phase_deg)}`` dict (order 1 is the
+implicit reference and must **not** be listed).
+
+**Direct use** (without a config)
+
+For ad-hoc sweeps you can also call :func:`~pgml.scenarios.run_node_injection_sweep`
+with a manually constructed config::
+
+    cfg = NodeInjectionSweepConfig(
+        node_ids=[0, 1, 5],           # subset of nodes
+        orders=[5, 7],
+        magnitudes_pu=[0.04, 0.03],
+        phases_deg=[0.0, 0.0],
+        source_power_va=500e3,        # 500 kVAsc
+        kind="current",               # Norton (ideal current injection)
+    )
+
+**Key differences vs** :func:`~pgml.scenarios.spectrum_sweep`
+
+- **What is swept** — ``spectrum_sweep`` targets a load/generator device;
+  ``run_node_injection_sweep`` targets any node (no load required).
+- **Source physics** — ``spectrum_sweep`` uses a Norton current scaled by the
+  device's fundamental current; ``run_node_injection_sweep`` uses a
+  Thévenin/Norton source at a fixed ``source_power_va`` strength.
+- **Fundamental** — ``spectrum_sweep`` affects the harmonic model (the device's
+  ``I1`` term); ``run_node_injection_sweep`` preserves the fundamental exactly
+  (``h > 1`` only).
+- **Config class** — ``SpectrumSweepConfig`` vs ``NodeInjectionSweepConfig``.
+- **run_scenarios compatibility** — ``SpectrumSweepConfig`` is accepted directly
+  by :func:`~pgml.scenarios.run_scenarios` (auto-forces harmonic calculation);
+  ``NodeInjectionSweepConfig`` is NOT — call
+  :func:`~pgml.scenarios.run_node_injection_sweep` directly.
+
+.. note::
+
+   Because a voltage-kind source modifies ``Y(h)`` (adds a shunt to the diagonal),
+   the batched ``Y`` differs for each scenario.  The sweep therefore calls
+   :func:`~pgml.solver.solve_harmonic_flow` once per node and stacks the results.
+   For current-kind sources the cost is identical (``Y(h)`` is also built fresh per
+   call to avoid coupling).  For large grids with hundreds of nodes, profile first.
+
+Per-node injection sweep (spectrum_sweep)
+-----------------------------------------
+
+:func:`~pgml.scenarios.spectrum_sweep` is the harmonic analogue of
+:func:`~pgml.scenarios.perturbation_sweep`: it builds a *diagonal* batch of
+``B = #targets`` scenarios in which scenario ``i`` injects a given harmonic
+spectrum at target device ``i`` ONLY — every other device in the selector is
+silent.  Use this to measure how a single injected spectrum propagates through
+the network node by node::
+
+    from pgml.scenarios import (
+        Selector, SpectrumSweepConfig, spectrum_sweep, run_scenarios
+    )
+
+    # Build directly from a spectrum dict (order 1 = fundamental, excluded)
+    sweep = spectrum_sweep(
+        grid,
+        selector=Selector(component="load"),
+        spectrum={5: (0.06, 0.0), 7: (0.05, 0.0), 11: (0.035, 0.0)},
+    )
+    # sweep.n_samples == number of matched loads
+    result = run_scenarios(grid, sweep, calculation="harmonic",
+                           harmonic_orders=[1, 5, 7, 11])
+    # result.v  shape [B, 3, N] — one scenario per injection target
+
+The config form :class:`~pgml.scenarios.SpectrumSweepConfig` is serializable
+and can be passed directly to :func:`~pgml.scenarios.run_scenarios`::
+
+    cfg = SpectrumSweepConfig.from_spectrum(
+        selector=Selector(component="load"),
+        spectrum={5: (0.06, 0.0), 7: (0.05, 0.0)},
+        name="load_sweep",
+    )
+    result = run_scenarios(grid, cfg)
+    # run_scenarios auto-sets calculation="harmonic" and harmonic_orders=[1, 5, 7]
+
+The returned :class:`~pgml.scenarios.SampledScenarios` carries:
+
+- ``harmonic_injection`` — diagonal ``{device_id: {order: (mag[B], phase[B])}}``:
+  magnitude is the spectrum value at the device's own scenario index, zero elsewhere.
+- ``samples["<name>_id"]`` — shape ``[B]`` (``long``): the injected device id in
+  each scenario.
+
+.. note::
+
+   The sweep perturbs only the **harmonic injection** (Norton current at the device
+   terminal); fundamental P/Q stays at the nominal operating point for all scenarios.
+
 Perturbation sweep
 ------------------
 
@@ -330,7 +452,8 @@ Running scenarios
 
 :func:`~pgml.scenarios.run_scenarios` accepts a :class:`~pgml.scenarios.ScenarioConfig`,
 :class:`~pgml.scenarios.CartesianConfig`, :class:`~pgml.scenarios.CoherentSpectrumConfig`,
-or a pre-built :class:`~pgml.scenarios.SampledScenarios` and solves the batch::
+:class:`~pgml.scenarios.SpectrumSweepConfig`, or a pre-built
+:class:`~pgml.scenarios.SampledScenarios` and solves the batch::
 
     result = run_scenarios(
         grid,
@@ -351,12 +474,16 @@ The ``spec`` argument may also be a pre-built :class:`~pgml.scenarios.SampledSce
 so that sampling and solving can be separated (e.g. inspect the batch before
 solving it).
 
-When ``spec`` is a :class:`~pgml.scenarios.CoherentSpectrumConfig` the runner
-automatically forces ``calculation="harmonic"`` and sets ``harmonic_orders`` to
-``[1, *config.orders]`` if not provided, so the minimal invocation is::
+When ``spec`` is a :class:`~pgml.scenarios.CoherentSpectrumConfig` or a
+:class:`~pgml.scenarios.SpectrumSweepConfig` the runner automatically forces
+``calculation="harmonic"`` and sets ``harmonic_orders`` to ``[1, *config.orders]``
+if not provided, so the minimal invocations are::
 
     result = run_scenarios(grid, CoherentSpectrumConfig(...))
     # result.v  shape [B, T, H, N]
+
+    result = run_scenarios(grid, SpectrumSweepConfig(...))
+    # result.v  shape [B, H, N] (B = number of matched targets)
 
 Persistence (parquet training data)
 ------------------------------------
@@ -384,6 +511,9 @@ target directory:
   dtype-preserving; absent if there are no per-scenario samples).
 - ``meta.json`` — sidecar: serialized config + seed + ``frequencies_hz`` + node/phase
   index + shape dims + ``ParameterPerturbation`` ground-truth rows.
+- ``voltages.csv`` — (optional) tidy long-format CSV, written when ``also_csv=True``
+  is passed.  Convenience for manual inspection; not the primary format and not read
+  back by :func:`~pgml.scenarios.read_dataset`.
 
 Voltage layouts
 ~~~~~~~~~~~~~~~
@@ -413,7 +543,9 @@ Usage example::
                            harmonic_orders=[1, 3, 5, 7])
 
     # Persist (wide is the default; use layout="long" for analysis)
-    dataset_path = write_dataset(result, "data/ieee33_harmonic", layout="wide")
+    # also_csv=True writes voltages.csv for quick manual inspection
+    dataset_path = write_dataset(result, "data/ieee33_harmonic", layout="wide",
+                                 also_csv=True)
 
     # Reload — identical tensor, layout-agnostic
     ds = read_dataset(dataset_path)

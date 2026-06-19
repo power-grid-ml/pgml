@@ -32,9 +32,11 @@ from pgml.schemas.grid_schema import Generator, Grid, Load, StaticSpectrum
 from .config import (
     CartesianConfig,
     CoherentSpectrumConfig,
+    NodeInjectionSweepConfig,
     ParameterSpec,
     Perturbation,
     ScenarioConfig,
+    SpectrumSweepConfig,
 )
 from .en50160 import en50160_limit
 
@@ -82,7 +84,10 @@ class SampledScenarios:
     operating_point: dict
     samples: dict
     n_samples: int
-    config: "ScenarioConfig | CartesianConfig | CoherentSpectrumConfig | Perturbation"
+    config: (
+        "ScenarioConfig | CartesianConfig | CoherentSpectrumConfig | Perturbation | "
+        "SpectrumSweepConfig | NodeInjectionSweepConfig"
+    )
     harmonic_injection: dict = field(default_factory=dict)
     perturbations: list = field(default_factory=list)
 

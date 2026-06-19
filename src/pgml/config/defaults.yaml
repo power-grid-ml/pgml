@@ -154,3 +154,26 @@ line:
       units: "m"
       description: >
         Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.
+
+# Upstream-grid (slack Source) modeling.
+source:
+  # Finite series (short-circuit) impedance for a Source whose converter gave a
+  # near-ideal value (e.g. the stock pandapower CIGRE LV ext-grid -> R~1e-6 Ohm, which
+  # short-circuits the bus at harmonics). Builders like cigre_lv_full_grid apply this so
+  # harmonics are not fully absorbed at the source. Specified at the SOURCE node's rated
+  # voltage; the transformer ratio^2 divides it down on the LV side, so cross-feeder LV
+  # coupling stays modest unless this is made (unrealistically) large. Increase to
+  # exaggerate cross-feeder spread; user/grid value always wins.
+  series_impedance_ohm:
+    value: 5.0
+    units: "ohm"
+    description: >
+      |Z| of the upstream-grid Thevenin/Norton series impedance at the source's rated
+      voltage, used when the converted source is near-ideal. Larger = weaker grid = more
+      harmonic voltage at the source bus and more cross-feeder coupling.
+  rx_ratio:
+    value: 10.0
+    units: "ratio"
+    description: >
+      X/R ratio of the source series impedance (R = |Z|/sqrt(1+rx^2), X = rx*R). ~10 is
+      typical for a stiff MV grid.

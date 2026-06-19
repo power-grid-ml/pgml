@@ -103,8 +103,8 @@ per-frequency linear solve). The OpenDSS conventions are pinned in
 verified empirically). New orchestration:
 
 - `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", operating_point=None,
-     harmonic_injection=None, include_load_shunt=False, tol=1e-10, max_iter=100,
-     dtype=torch.complex128, device=None, symmetry=None) -> HarmonicFlowResult`
+     harmonic_injection=None, node_sources=None, include_load_shunt=False, tol=1e-10,
+     max_iter=100, dtype=torch.complex128, device=None, symmetry=None) -> HarmonicFlowResult`
   - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
     ONCE here; threaded into the fundamental `solve_power_flow` (which emits the single
     modeling-summary log) and into the harmonic-injection power resolution
@@ -172,6 +172,45 @@ The override wins over the stored `spectrum` / `spectrum_per_phase`. Analogous t
 order-1 coefficient (mag1==0) injects 0 (torch.where, gradient-finite on live
 elements); the per-element `conj(vt)` divide is likewise masked for a dead/zero
 terminal (vt==0 -> 0, gradient-safe) so a gradcheck perturbation cannot poison it.
+
+### `node_sources` — per-node harmonic "error" source (full physics: `references/error_injection.md`)
+`node_sources: Optional[Sequence[NodeHarmonicSource]] = None` — a disturbance at ANY
+node (NOT tied to a load), applied ONLY at orders `h>1` so the fundamental PF is
+preserved EXACTLY (no reactor needed; pgml solves each harmonic as its own linear
+system). `None` (default) is BYTE-IDENTICAL to today. A list of sources superposes.
+
+`NodeHarmonicSource` (frozen dataclass, exported from `pgml.solver`):
+`NodeHarmonicSource(node_id: int, phases: Optional[tuple[Phase,...]] = None,
+spectrum: dict[int, tuple[mag_pu, phase_deg]] = {}, source_power_va: float = 0.0,
+kind: Literal["voltage","current"] = "voltage")`. `phases=None` -> all of the node's
+phases. `spectrum` order 1 = reference (may be omitted -> `mag_1=1.0`, `ang_1=0.0`).
+`source_power_va` (S_sc / MVAsc) and every spectrum coefficient may be a python float
+OR a 0-d / `[*batch]` tensor (differentiable, scenario-batchable).
+
+Math, per order `h>1` per source at the node-phase rows (`index.rows_for_terminal`),
+in `_apply_node_sources`:
+- `V_base = phase_voltage_magnitude(node.u_rated_v, len(node.phases))` (L-N base).
+- `Y_s = source_power_va / V_base**2` (REAL, frequency-flat / resistive, x1r1≈0).
+- `E_h = (mag_h/mag_1)*|V1| * exp(j*(rad(ang_h) + h*(angle(V1) - rad(ang_1))))`, V1 =
+  converged fundamental at the row — SAME phase convention as `_harmonic_injections`.
+- `I_N = E_h * Y_s`. `kind="voltage"` (Thévenin): add `Y_s` to the diagonal
+  `Y(h)[...,row,row]` AND `I_N` to `I(h)[...,row]`. `kind="current"` (Norton): add
+  `I_N` to `I(h)[...,row]` only.
+
+DIFF + GPU + BATCHED: grads flow to `source_power_va`, the spectrum, and (via V1) grid
+params. Adds are OUT-OF-PLACE (complex `index_add` on the current; `index_add` on a
+flattened diagonal of a FRESH zero matrix for `Y`, then `Y + diag`). A batched
+voltage-source `Y_s` promotes `Y(h)` to `[*batch,H,N,N]` (broadcast then add) — built
+autograd/GPU-safely. Guarded `mag_1==0` (torch.where -> contributes nothing). Stiff
+voltage source (large S_sc) -> `V_node(h) -> E_h`; weak -> near-zero. OpenDSS oracle:
+`kind="current"` ↔ ISource, `kind="voltage"` ↔ VSource (MVAsc1=S_sc, x1r1≈0); the
+OpenDSS 50-Hz-cancellation reactor is NOT needed here (h>1-only injection).
+Tests: `tests/reference/test_node_harmonic_source.py` (byte-identical None, fundamental
+preserved, stiff->E_h, current independent of network, voltage-divider law, multiple
+sources, phase-subset), `tests/differentiability/test_node_source_gradcheck.py`
+(float64 gradcheck of V w.r.t. `source_power_va` voltage+current, spectrum mag, line
+R/L with source, BATCHED S_sc), `tests/gpu/test_node_source_parity.py` (CPU-vs-CUDA,
+scalar + batched-S_sc-promoted Y).
 
 ## Implementation notes (DONE)
 - `slack="norton"` matches OpenDSS Vsource (use for OpenDSS parity); `slack="ideal"`

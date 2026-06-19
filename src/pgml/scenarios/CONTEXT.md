@@ -68,15 +68,28 @@ verified `batched == loop-of-individual`).
   `sampled.samples["time_s"]`).
 - `SampledScenarios` also carries `harmonic_injection = {id: {order: (mag, phase)}}` (mag/phase
   `[B]` for random specs, `[B,T]` for coherent), passed to `solve_harmonic_flow`.
+- SPECTRUM-SWEEP (diagonal per-target harmonic-injection sweep): `SpectrumSweepConfig(name,
+  selector, orders, magnitudes_pu, phases_deg)` — serializable config; classmethod
+  `SpectrumSweepConfig.from_spectrum(selector, spectrum, *, name="injection")` builds it from
+  a `{order: (mag_pu, phase_deg)}` dict (order 1 dropped). `spectrum_sweep(grid,
+  selector_or_config, spectrum=None, *, name="injection") -> SampledScenarios` — scenario `i`
+  injects the spectrum at target `i` ONLY (every other device silent); `B = #targets`.
+  Harmonic analogue of `perturbation_sweep` — for "inject one spectrum at each node, measure
+  how it spreads". `harmonic_injection` is the diagonal `{device_id: {order: (mag[B], phase[B])}}`;
+  `samples["<name>_id"]` records the injected device id per scenario.
+  `run_scenarios` also accepts `SpectrumSweepConfig` as `spec` (forces `calculation="harmonic"`,
+  defaults `harmonic_orders=[1, *config.orders]`).
 - PERSISTENCE (parquet training data): `write_dataset(result, path, *, layout="wide"|"long",
-  compression="zstd") -> Path`, `read_dataset(path) -> LoadedDataset(v, samples,
+  compression="zstd", also_csv=False) -> Path`, `read_dataset(path) -> LoadedDataset(v, samples,
   frequencies_hz, node_ids, phase_codes, config, perturbations, meta)`. Writes a dataset DIR:
   `voltages.parquet` (long = tidy row per scenario×step×freq×node-phase; wide = compact
   array cols of `v_re`/`v_im` flattened over `[H*N]` per scenario×step), `samples.parquet`
   (B-leading sampled inputs as array cols, dtype-preserving), `meta.json` sidecar (config
   JSON + seed + frequencies + node/phase index + dims + ParameterPerturbation rows). Both
   layouts read back the IDENTICAL `v` (re-`torch.complex`-ed to the original shape/dtype);
-  wide is the fast tensor cache, long the analysis/interchange table. Result I/O (detached).
+  wide is the fast tensor cache, long the analysis/interchange table. `also_csv=True` writes
+  a tidy `voltages.csv` (long layout, regardless of `layout`) alongside the parquet for manual
+  inspection. Result I/O (detached).
 
 ## Conventions
 - Unit-cube layout `U[B,D]`: one column per declared factor, then per spec a BASE block

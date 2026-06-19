@@ -21,6 +21,8 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 
+from pgml.schemas.grid_schema import Phase
+
 _U_EPS = 1e-7  # clamp unit samples off {0,1} so Gaussian-tail icdf stays finite.
 
 
@@ -305,6 +307,107 @@ class Perturbation(_Base):
         return self
 
 
+class SpectrumSweepConfig(_Base):
+    """Per-target harmonic-injection sweep: scenario *i* injects ``spectrum`` at target
+    *i* only (all others silent). The harmonic analogue of :class:`Perturbation` /
+    ``perturbation_sweep`` — a diagonal one-hot enumeration over the selector's matched
+    devices (``B = #targets``), for mapping how a single injected spectrum spreads.
+
+    The spectrum is stored as parallel ``orders`` / ``magnitudes_pu`` / ``phases_deg``
+    lists (serializable). Magnitudes are RELATIVE to the device's fundamental injection
+    (the ``harmonic_injection`` convention); order 1 is the implicit reference and must
+    NOT be listed. Build one ergonomically from a ``{order: (mag_pu, phase_deg)}`` dict
+    via :meth:`from_spectrum`.
+    """
+
+    name: str = "injection"
+    selector: Selector
+    orders: list[int] = Field(min_length=1)
+    magnitudes_pu: list[float]
+    phases_deg: list[float]
+
+    @classmethod
+    def from_spectrum(
+        cls, selector: Selector, spectrum: dict, *, name: str = "injection"
+    ) -> "SpectrumSweepConfig":
+        """Build from a ``{order: (magnitude_pu, phase_deg)}`` dict (order 1 dropped)."""
+        orders = sorted(int(o) for o in spectrum if int(o) >= 2)
+        return cls(
+            name=name,
+            selector=selector,
+            orders=orders,
+            magnitudes_pu=[float(spectrum[o][0]) for o in orders],
+            phases_deg=[float(spectrum[o][1]) for o in orders],
+        )
+
+    @model_validator(mode="after")
+    def _check(self) -> "SpectrumSweepConfig":
+        if not (len(self.orders) == len(self.magnitudes_pu) == len(self.phases_deg)):
+            raise ValueError(
+                "orders / magnitudes_pu / phases_deg must have equal length."
+            )
+        if any(o < 2 for o in self.orders):
+            raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
+        return self
+
+
+class NodeInjectionSweepConfig(_Base):
+    """Per-node harmonic "error" SOURCE sweep: inject a transient harmonic source at one
+    node at a time (scenario ``i`` → node ``i``; ``B = #nodes``). Unlike
+    :class:`SpectrumSweepConfig` (a device Norton current scaled by a load's fundamental),
+    this is the per-node Thévenin/Norton source of ``references/error_injection.md`` —
+    injectable at ANY node, of a user-set STRENGTH ``source_power_va`` (S_sc), applied
+    only at h>1 (fundamental exact).
+
+    Spectrum stored as parallel ``orders``/``magnitudes_pu``/``phases_deg`` (order 1 is
+    the implicit reference); build from a ``{order: (mag_pu, phase_deg)}`` dict via
+    :meth:`from_spectrum`.
+    """
+
+    name: str = "injection"
+    node_ids: Optional[list[int]] = None  # None = every node in the grid
+    phases: Optional[list[Phase]] = None  # None = all phases of each node
+    orders: list[int] = Field(min_length=1)
+    magnitudes_pu: list[float]
+    phases_deg: list[float]
+    source_power_va: float = Field(gt=0.0)
+    kind: Literal["voltage", "current"] = "voltage"
+
+    @classmethod
+    def from_spectrum(
+        cls,
+        spectrum: dict,
+        *,
+        source_power_va: float,
+        kind: str = "voltage",
+        node_ids: Optional[list[int]] = None,
+        phases: Optional[list[Phase]] = None,
+        name: str = "injection",
+    ) -> "NodeInjectionSweepConfig":
+        """Build from a ``{order: (magnitude_pu, phase_deg)}`` dict (order 1 dropped)."""
+        orders = sorted(int(o) for o in spectrum if int(o) >= 2)
+        return cls(
+            name=name,
+            node_ids=node_ids,
+            phases=phases,
+            orders=orders,
+            magnitudes_pu=[float(spectrum[o][0]) for o in orders],
+            phases_deg=[float(spectrum[o][1]) for o in orders],
+            source_power_va=source_power_va,
+            kind=kind,
+        )
+
+    @model_validator(mode="after")
+    def _check(self) -> "NodeInjectionSweepConfig":
+        if not (len(self.orders) == len(self.magnitudes_pu) == len(self.phases_deg)):
+            raise ValueError(
+                "orders / magnitudes_pu / phases_deg must have equal length."
+            )
+        if any(o < 2 for o in self.orders):
+            raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
+        return self
+
+
 # =============================================================================
 # Node-coherent harmonic "fingerprint" sampling (temporal sequences)
 # =============================================================================
@@ -368,4 +471,6 @@ __all__ = [
     "CartesianConfig",
     "CoherentSpectrumConfig",
     "Perturbation",
+    "SpectrumSweepConfig",
+    "NodeInjectionSweepConfig",
 ]

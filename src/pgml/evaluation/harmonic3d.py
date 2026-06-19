@@ -57,6 +57,7 @@ def plot_harmonic_profile_3d(
     *,
     grid=None,
     reference_labels: Sequence[str] = (),
+    dash_map: Optional[dict] = None,
     title: str = "Harmonic voltage profiles (3D)",
     out_html: Optional[str] = None,
     x_title: str = "Distance from slack [km]",
@@ -77,7 +78,12 @@ def plot_harmonic_profile_3d(
         omitted); else the markers are joined in distance order.
     reference_labels:
         Labels (matching ``profile.label``) to render DASHED (the reference runs);
-        all others are solid.
+        all others are solid. Ignored when ``dash_map`` is given.
+    dash_map:
+        Optional ``{label: plotly_dash}`` (e.g. ``{"L1": "solid", "L2": "dash",
+        "L3": "dot"}``) — line DASH per label, so a third dimension such as PHASE can be
+        encoded by dash while COLOR stays the harmonic order. Overrides the binary
+        ``reference_labels`` dashing.
     out_html:
         If given, write a self-contained interactive HTML file there.
 
@@ -92,6 +98,14 @@ def plot_harmonic_profile_3d(
     fig = go.Figure()
     for p in profiles:
         is_ref = p.label in ref
+        dash = (
+            dash_map.get(p.label, "solid")
+            if dash_map is not None
+            else ("dash" if is_ref else "solid")
+        )
+        marker_symbol = (
+            "circle" if dash_map is not None else ("diamond" if is_ref else "circle")
+        )
         color = colors[p.order]
         group = f"h{p.order}"
         # Markers at each node (always in node order).
@@ -101,9 +115,7 @@ def plot_harmonic_profile_3d(
                 y=p.magnitude,
                 z=p.angle_deg,
                 mode="markers",
-                marker=dict(
-                    size=3, color=color, symbol="diamond" if is_ref else "circle"
-                ),
+                marker=dict(size=3, color=color, symbol=marker_symbol),
                 name=f"{group} · {p.label}",
                 legendgroup=group,
                 showlegend=False,
@@ -124,7 +136,7 @@ def plot_harmonic_profile_3d(
                 y=ly,
                 z=lz,
                 mode="lines",
-                line=dict(color=color, width=5, dash="dash" if is_ref else "solid"),
+                line=dict(color=color, width=5, dash=dash),
                 name=f"{group} · {p.label}",
                 legendgroup=group,
                 hoverinfo="skip",

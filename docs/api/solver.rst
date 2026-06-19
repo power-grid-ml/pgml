@@ -71,6 +71,58 @@ single appliance.  See the "Per-phase / connection-aware harmonic injection"
 section of the :doc:`/concepts` page for usage examples and the full override
 convention.
 
+Per-node harmonic source (``node_sources``)
+--------------------------------------------
+
+:class:`~pgml.solver.NodeHarmonicSource` models a harmonic disturbance at
+**any** node of the grid — independent of any attached load or generator.  It
+is injected **only at orders** ``h > 1``, so the nonlinear fundamental power
+flow is preserved exactly (no damping reactor is needed; pgml solves each
+harmonic as its own independent linear system).
+
+The full physics derivation and OpenDSS equivalence are in
+``references/error_injection.md`` (:doc:`/error_injection`).
+
+Two source kinds are supported:
+
+- ``kind="voltage"`` — **Thévenin** model: a finite-strength EMF ``E_h`` behind
+  a resistive source impedance ``Z_s = V_base² / S_sc``.  Both ``Y_s`` (added
+  to the diagonal of ``Y(h)``) and the Norton current ``I_N = E_h * Y_s`` are
+  stamped.  Large ``S_sc`` (stiff source) → the node voltage converges to ``E_h``.
+- ``kind="current"`` — **Norton** model: only ``I_N`` is added to ``I(h)``; no
+  shunt is added.  The injected current is independent of the network impedance.
+
+The EMF magnitude and phase follow the same convention used for device harmonic
+injection::
+
+    |E_h| = (mag_h / mag_1) * |V1|
+    arg(E_h) = ang_h + h * (arg(V1) - ang_1)
+
+where ``V1`` is the converged fundamental voltage at the injection row.
+
+**Usage example** — inject a stiff 5th-harmonic voltage source at node 12::
+
+    from pgml.solver import NodeHarmonicSource, solve_harmonic_flow
+
+    src = NodeHarmonicSource(
+        node_id=12,
+        spectrum={5: (0.04, 0.0), 7: (0.03, 0.0)},   # 4 % / 3 % of fundamental
+        source_power_va=1e6,                            # 1 MVAsc (stiff)
+        kind="voltage",
+    )
+    hres = solve_harmonic_flow(
+        grid, [1, 5, 7], node_sources=[src], slack="norton",
+    )
+    # hres.v  complex [H, N],  H = 3
+
+Multiple simultaneous sources are allowed (pass a list); they superpose.  Both
+``source_power_va`` and the spectrum coefficients may be 0-d / ``[*batch]``
+tensors — gradients flow to them and (via ``V1``) to grid parameters.
+
+**Per-node sweep.** To sweep the source over every node in the grid (one node
+per scenario) use :func:`~pgml.scenarios.run_node_injection_sweep` from
+:mod:`pgml.scenarios` (see :doc:`scenarios`).
+
 .. automodule:: pgml.solver
    :members:
    :show-inheritance:

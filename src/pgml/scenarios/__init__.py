@@ -5,7 +5,17 @@ realized operating points; `sample` draws them (independent / Sobol-QMC / LHS) a
 `run_scenarios` solves the whole batch at once via the batched solver. The goal is
 generating ML training data in controlled distributions, reproducibly.
 
-See `scenarios/CONTEXT.md` for the interface ledger and the deferred roadmap.
+Additional sweep helpers:
+
+- ``NodeInjectionSweepConfig(node_ids, phases, orders, magnitudes_pu, phases_deg,
+  source_power_va, kind="voltage")`` — serializable config for a per-node harmonic
+  "error"-source sweep (one node per scenario). Build from a spectrum dict via
+  :meth:`~NodeInjectionSweepConfig.from_spectrum`.
+- ``run_node_injection_sweep(grid, config, *, slack, dtype, device) ->
+  ScenarioResult`` — sweeps the per-node ``NodeHarmonicSource`` over
+  ``config.node_ids`` (all nodes if ``None``), returns ``v [B, H, N]``.
+
+See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
 """
 
 from __future__ import annotations
@@ -20,15 +30,18 @@ from .config import (
     LatentFactor,
     LogNormal,
     LogUniform,
+    NodeInjectionSweepConfig,
     Normal,
     ParameterSpec,
     Perturbation,
     ScenarioConfig,
     Selector,
+    SpectrumSweepConfig,
     Uniform,
 )
 from .en50160 import en50160_limit, en50160_limits
-from .harmonics import sample_coherent_spectra
+from .harmonics import sample_coherent_spectra, spectrum_sweep
+from .node_injection import run_node_injection_sweep
 from .persistence import LoadedDataset, read_dataset, write_dataset
 from .perturbation import perturbation_sweep
 from .run import ScenarioResult, run_scenarios
@@ -51,6 +64,8 @@ for _name in [
     "CartesianConfig",
     "CoherentSpectrumConfig",
     "Perturbation",
+    "SpectrumSweepConfig",
+    "NodeInjectionSweepConfig",
 ]:
     _obj = locals().get(_name)
     if _obj is not None and hasattr(_obj, "__module__"):
@@ -75,11 +90,15 @@ __all__ = [
     "CartesianConfig",
     "CoherentSpectrumConfig",
     "Perturbation",
+    "SpectrumSweepConfig",
+    "NodeInjectionSweepConfig",
     "SampledScenarios",
     "sample",
     "cartesian_sample",
     "sample_coherent_spectra",
+    "spectrum_sweep",
     "perturbation_sweep",
+    "run_node_injection_sweep",
     "en50160_limits",
     "en50160_limit",
     "write_dataset",

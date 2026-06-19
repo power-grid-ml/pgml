@@ -18,8 +18,13 @@ from pgml.assembly import NodePhaseIndex
 from pgml.schemas.grid_schema import Grid
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
-from .config import CartesianConfig, CoherentSpectrumConfig, ScenarioConfig
-from .harmonics import sample_coherent_spectra
+from .config import (
+    CartesianConfig,
+    CoherentSpectrumConfig,
+    ScenarioConfig,
+    SpectrumSweepConfig,
+)
+from .harmonics import sample_coherent_spectra, spectrum_sweep
 from .sampler import SampledScenarios, cartesian_sample, sample
 
 
@@ -82,6 +87,11 @@ def run_scenarios(
     """
     if isinstance(spec, CoherentSpectrumConfig):
         sampled = sample_coherent_spectra(grid, spec)
+        calculation = "harmonic"
+        if harmonic_orders is None:
+            harmonic_orders = [1, *spec.orders]
+    elif isinstance(spec, SpectrumSweepConfig):
+        sampled = spectrum_sweep(grid, spec)
         calculation = "harmonic"
         if harmonic_orders is None:
             harmonic_orders = [1, *spec.orders]

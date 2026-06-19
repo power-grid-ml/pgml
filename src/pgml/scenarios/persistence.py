@@ -43,6 +43,8 @@ _CONFIG_TYPES = {
     "CartesianConfig": _cfg.CartesianConfig,
     "CoherentSpectrumConfig": _cfg.CoherentSpectrumConfig,
     "Perturbation": _cfg.Perturbation,
+    "SpectrumSweepConfig": _cfg.SpectrumSweepConfig,
+    "NodeInjectionSweepConfig": _cfg.NodeInjectionSweepConfig,
 }
 
 
@@ -100,7 +102,8 @@ def _canonical(v: Tensor) -> tuple[Tensor, int, int, int, int]:
     raise ValueError(f"ScenarioResult.v must be 2-4 dims, got {v.ndim}.")
 
 
-def _write_long(path: Path, vre, vim, dims, node_ids, phase_codes, freqs, comp) -> None:
+def _long_dataframe(vre, vim, dims, node_ids, phase_codes, freqs) -> "pl.DataFrame":
+    """The tidy table: one row per (scenario, step, frequency, node-phase)."""
     b, t, h, n = dims
     n_rows = b * t * h * n
     scenario = np.repeat(np.arange(b), t * h * n)
@@ -108,7 +111,7 @@ def _write_long(path: Path, vre, vim, dims, node_ids, phase_codes, freqs, comp) 
     freq_idx = np.tile(np.repeat(np.arange(h), n), b * t)
     row = np.tile(np.arange(n), b * t * h)
     freq_hz = freqs[freq_idx] if freqs is not None else np.full(n_rows, np.nan)
-    pl.DataFrame(
+    return pl.DataFrame(
         {
             "scenario": scenario.astype(np.int64),
             "step": step.astype(np.int64),
@@ -120,7 +123,13 @@ def _write_long(path: Path, vre, vim, dims, node_ids, phase_codes, freqs, comp) 
             "v_re": vre.reshape(-1).astype(np.float64),
             "v_im": vim.reshape(-1).astype(np.float64),
         }
-    ).write_parquet(path / _VOLTAGES, compression=comp)
+    )
+
+
+def _write_long(path: Path, vre, vim, dims, node_ids, phase_codes, freqs, comp) -> None:
+    _long_dataframe(vre, vim, dims, node_ids, phase_codes, freqs).write_parquet(
+        path / _VOLTAGES, compression=comp
+    )
 
 
 def _write_wide(path: Path, vre, vim, dims, comp) -> None:
@@ -176,6 +185,7 @@ def write_dataset(
     *,
     layout: str = "wide",
     compression: str = "zstd",
+    also_csv: bool = False,
 ) -> Path:
     """Write a :class:`ScenarioResult` to a parquet dataset directory.
 
@@ -189,6 +199,9 @@ def write_dataset(
         ``"wide"`` (compact tensor cache, default) or ``"long"`` (tidy table).
     compression:
         Parquet codec (default ``"zstd"``).
+    also_csv:
+        Additionally write the tidy long voltages to ``voltages.csv`` (regardless of
+        ``layout``) for manual inspection — not the primary format, just a convenience.
 
     Returns
     -------
@@ -213,6 +226,10 @@ def write_dataset(
         )
     else:
         _write_wide(path, vre, vim, (b, t, h, n), compression)
+    if also_csv:
+        _long_dataframe(vre, vim, (b, t, h, n), node_ids, phase_codes, freqs).write_csv(
+            path / "voltages.csv"
+        )
 
     sampled = result.sampled
     sample_meta = _write_samples(sampled.samples, b, path, compression)
