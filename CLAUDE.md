@@ -16,6 +16,16 @@ flow is one differentiable output of it.
 
 A change that breaks gradcheck (float64) or the GPU device/dtype test is not done.
 
+## Code style (production-bound; we are research-stage but heading to production)
+- NO conversational / process references in code, comments, docstrings, CONTEXT
+  files, or docs — e.g. "Increment 1", "M1", "the fix above", "as requested", PR or
+  chat phrasing. These are lost outside the conversation and do not translate to the
+  published documentation. Describe the BEHAVIOUR and the WHY, not the development
+  history. Process/roadmap notes belong ONLY in `TODO.md` (and git history).
+- Write code as if it ships: clear names, self-explanatory comments, no dead
+  scaffolding. It is fine to leave a capability incomplete in research stage, but
+  what exists should read as production code.
+
 ## Repo map
 - `src/pgml/schemas/`  FROZEN contracts: grid_schema, result_schema, scenario_schema. READ `schemas/CONTEXT.md`.
 - `src/pgml/equations/` residual-form (0=a-b) SymPy registry + torch evaluators.
