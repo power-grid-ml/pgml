@@ -111,14 +111,17 @@ the zero sequence, so triplen harmonics no longer pass transparently from LV to 
 nominal ratio + 30° clock now come from `u_rated` + connections (`tap` is off-nominal
 only); default group is config `transformer.vector_group` (Dyn11). Decision record:
 `references/opendss/transformer.md`. Closes part (a) of the original gap.
-REMAINING (part b): the 3-phase line model still differs from OpenDSS's R0/X0 Carson
-earth-return — pgml's `sequence_aware` Z0 vs OpenDSS Carson — so non-triplen orders match
-~1% and any residual triplen gap is the LINE Z0, not the transformer. To fully close,
-add 3-phase Carson GEOMETRY synthesis (today `synthesize_grid_geometry` is single-phase
-only) so both engines share the identical line model. A true live-OpenDSS Dyn transformer
-oracle (real `Transformer` element, not the pgml-stamp shortcut) now validates the
-vector group directly. Supported vector groups so far: Dyn1/Dyn11, in-phase wye-wye /
-delta-delta; non-solid neutral grounding + zigzag + other clocks are still open.
+PART (b) DONE (2026-06-20): 3-phase Carson GEOMETRY synthesis
+(`geometry.synthesize_three_phase_geometry`; `synthesize_grid_geometry` now dispatches
+3-phase lines) builds an equilateral 3-conductor geometry reproducing each line's Z1 + X0
+at f0 (R0 follows from earth physics). Feeding the SAME geometry to pgml and OpenDSS makes
+the 3-phase harmonic comparison apples-to-apples Carson on every order incl. triplen
+(closes the `sequence_aware` Z0 vs OpenDSS Carson gap). Config seed
+`line.conductor.phase_spacing_m`. A true live-OpenDSS Dyn transformer oracle (real
+`Transformer` element) validates the vector group directly. Supported vector groups:
+Dyn1/Dyn11, in-phase wye-wye / delta-delta; non-solid neutral grounding + zigzag + other
+clocks are still open. Remaining geometry caveats: low-X lines still hit the GMR floor
+(non-physical flag, matches OpenDSS on the same geometry); 2-phase lines skipped.
 
 ---
 

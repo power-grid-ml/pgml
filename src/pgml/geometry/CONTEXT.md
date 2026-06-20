@@ -59,10 +59,21 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   single-conductor earth-return geometry reproducing `R1 + jX1` (Ω/m) at f0 (GMR sets
   reactance, Rdc the resistance via skin fixed-point); provenance records the synthesis.
   WARNS / flags `synth_unphysical` when X1 is below the earth floor (cables / low-X).
-- `synthesize_grid_geometry(grid, *, f0=None) -> grid` (in place) gives every
-  single-phase R/X line a `conductor_geometry`. For R/X feeders (IEEE-33, CIGRE LV)
-  that ship no geometry; the SAME geometry is fed to pgml and OpenDSS for the harmonic
-  comparison (apples-to-apples Carson). Validation vehicle; non-physical for low-X.
+- `synthesize_three_phase_geometry(r1, x1, x0, *, f0, phases, line_type, ...) ->
+  LineGeometry` — equilateral 3-conductor geometry reproducing the line's `Z1` (R1, X1)
+  AND zero-sequence reactance `X0` at f0. GMR + spacing are Newton-fitted on the Carson
+  forward (constant analytic Jacobian `coef·[[1,-1],[-2,-1]]`, `coef=f0·MU0`) to match
+  (X1, X0); Rdc fits R1. `R0` is NOT a free target — it follows from the Carson earth
+  return (`R0 ≈ R1 + 3·R_earth(f0)`), so a sequence dataset's assumed R0 is replaced by
+  the geometry's physical value (recorded in `provenance.extra.synth_r0_ohm_per_m`).
+  Reproduces X1/X0/R1 to ~1e-13 via pgml's own Carson. `synth_unphysical` flags
+  GMR ≥ radius (low-X). Spacing seed: config `line.conductor.phase_spacing_m`.
+- `synthesize_grid_geometry(grid, *, f0=None) -> grid` (in place) gives every R/X line a
+  `conductor_geometry`: single-phase -> single-conductor; 3-phase ->
+  `synthesize_three_phase_geometry` (2-phase skipped). For R/X feeders (IEEE-33,
+  CIGRE LV) that ship no geometry; the SAME geometry is fed to pgml and OpenDSS for the
+  harmonic comparison (apples-to-apples Carson, incl. the triplen / zero-sequence
+  orders). Validation vehicle; non-physical for low-X.
 - `apply_positive_sequence_harmonic_model(grid, *, f0=None, skin=True) -> grid` (in place,
   RECOMMENDED for R/X feeders): sets each R/X line's `resistance_frequency` to the
   `carson_skin_multiplier` law; the explicit R/L path then gives `X(h)=X1·h` + skin on R,

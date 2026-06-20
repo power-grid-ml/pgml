@@ -2,12 +2,15 @@
 
 The standard feeders (IEEE-33, CIGRE LV) are defined by R/X per km with NO conductor
 geometry (pandapower line types carry only R/X/C/type). To exercise the Carson/Deri
-geometry path on them, we synthesize a single-conductor earth-return geometry whose
-fundamental self-impedance equals the given ``R1 + jX1`` (closed form: GMR sets the
-reactance, Rdc the resistance, with a couple of skin-effect fixed-point steps), and
-TRACK it via the geometry's :class:`Provenance`. The same synthesized geometry is fed
-to both pgml and OpenDSS, so the harmonic comparison is an apples-to-apples Carson
-check on a realistic topology.
+geometry path on them, we synthesize a conductor geometry whose Carson impedance equals
+the line's sequence data at the fundamental: a SINGLE-conductor earth-return geometry
+reproducing ``R1 + jX1`` for 1-phase lines (closed form: GMR sets the reactance, Rdc the
+resistance), and an equilateral THREE-conductor geometry reproducing ``Z1`` and the
+zero-sequence reactance ``X0`` for 3-phase lines (GMR + spacing fitted by Newton on the
+Carson forward; ``R0`` follows from the earth return). Each is TRACKED via the geometry's
+:class:`Provenance`. The same synthesized geometry is fed to both pgml and OpenDSS, so the
+harmonic comparison is an apples-to-apples Carson check on a realistic topology — at every
+order, including the triplen / zero-sequence orders for 3-phase lines.
 
 Capacitance of the synthesized conductor is tiny (and identical on both sides), so it
 does not materially change the c=0 feeders. Heights follow the line ``type`` (overhead
@@ -129,11 +132,161 @@ def synthesize_line_geometry(
     )
 
 
-def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
-    """In place: give every single-phase R/X line a synthesized ``conductor_geometry``.
+def _seq_from_phase_matrix(mat, f0: float) -> tuple[float, float]:
+    """Symmetric (transposed) sequence values from a 3x3 R or L matrix.
 
-    Uses each line's diagonal ``R`` and ``X = 2*pi*f0*L`` (Ω/m). Multi-phase lines are
-    skipped (the single-conductor synthesis is positive-sequence). Returns ``grid``.
+    Returns ``(seq1, seq0)`` where ``seq1 = self - mutual`` and ``seq0 = self + 2*mutual``
+    using the mean diagonal (self) and mean off-diagonal (mutual). For an inductance
+    matrix the caller multiplies by ``2*pi*f0`` to get a reactance.
+    """
+    diag = [_float0(mat[i][i]) for i in range(3)]
+    off = [_float0(mat[i][j]) for i in range(3) for j in range(3) if i != j]
+    self_ = sum(diag) / 3.0
+    mutual = sum(off) / 6.0
+    return self_ - mutual, self_ + 2.0 * mutual
+
+
+def _equilateral_xy(spacing: float, height: float):
+    """Coordinates of an equilateral triangle of side ``spacing``, base at ``height``."""
+    apex = height + spacing * math.sqrt(3.0) / 2.0
+    xs = [-spacing / 2.0, spacing / 2.0, 0.0]
+    ys = [height, height, apex]
+    return xs, ys
+
+
+def _carson_sequence_z(xs, ys, gmr, rdc, radius, rho, f0):
+    """Carson (Z0, Z1) of an equilateral 3-conductor geometry at ``f0`` (complex Ω/m)."""
+    import torch
+
+    from .carson import line_constants
+    from .sequence import sequence_impedances
+
+    x = torch.tensor(xs, dtype=torch.float64)
+    y = torch.tensor(ys, dtype=torch.float64)
+    g = torch.full((3,), float(gmr), dtype=torch.float64)
+    r = torch.full((3,), float(rdc), dtype=torch.float64)
+    rad = torch.full((3,), float(radius), dtype=torch.float64)
+    z, _c = line_constants(
+        x, y, g, r, rad, float(rho), torch.tensor([f0], dtype=torch.float64), 3
+    )
+    z0, z1, _z2 = sequence_impedances(z[0])  # [3,3] at the single frequency
+    return complex(z0.item()), complex(z1.item())
+
+
+def synthesize_three_phase_geometry(
+    r1_ohm_per_m: float,
+    x1_ohm_per_m: float,
+    x0_ohm_per_m: float,
+    *,
+    f0: float,
+    phases=(Phase.A, Phase.B, Phase.C),
+    line_type: str = "ol",
+    earth_resistivity_ohm_m: float = _DEFAULT_EARTH_RHO,
+    height_m: Optional[float] = None,
+    radius_m: float = _DEFAULT_RADIUS,
+    notes: str = "",
+) -> LineGeometry:
+    """Three-conductor :class:`LineGeometry` reproducing ``Z1`` and ``X0`` at ``f0``.
+
+    An equilateral 3-conductor arrangement (identical conductors, pairwise spacing
+    ``D``, base height ``height_m``). The geometric mean radius ``GMR`` and spacing
+    ``D`` are fitted (Newton on the Carson forward) so the synthesized line's
+    positive-sequence reactance ``X1`` and zero-sequence reactance ``X0`` match the
+    targets; ``Rdc`` is fitted to ``R1``. The zero-sequence RESISTANCE ``R0`` then
+    follows from the Carson earth-return physics (``R0 ≈ R1 + 3·R_earth(f0)``) — it is
+    not a free target, so a sequence dataset's assumed ``R0`` is replaced by the
+    geometry's physical value, recorded in the provenance.
+
+    The SAME geometry can be fed to both pgml and OpenDSS, so the harmonic comparison
+    is an apples-to-apples Carson check (earth-return on both ``Z1`` and ``Z0`` at every
+    harmonic, including the triplen / zero-sequence orders). Defaults come from
+    ``pgml.config``.
+    """
+    h = height_m if height_m is not None else _DEFAULT_HEIGHT.get(line_type, 10.0)
+    rho = earth_resistivity_ohm_m
+    coef = f0 * MU0  # reactance per unit ln (MU0*f0)
+
+    # Rdc seed from the positive-sequence skin fit (earth-free); refined in the loop.
+    import torch
+
+    from .sequence import fit_equivalent_rdc
+
+    rdc = float(
+        fit_equivalent_rdc(r1_ohm_per_m, f0, torch.tensor([f0], dtype=torch.float64))
+    )
+
+    # Newton on (ln D, ln GMR) for (X1, X0); constant analytic Jacobian
+    # J = [[dX1/dlnD, dX1/dlnGMR],[dX0/dlnD, dX0/dlnGMR]] = coef*[[1,-1],[-2,-1]].
+    ln_gmr = math.log(_cfg("line.conductor.gmr_over_radius") * radius_m)
+    ln_d = math.log(_cfg("line.conductor.phase_spacing_m"))
+    inv_det = 1.0 / (-3.0 * coef * coef)
+    for _ in range(40):
+        xs, ys = _equilateral_xy(math.exp(ln_d), h)
+        z0, z1 = _carson_sequence_z(xs, ys, math.exp(ln_gmr), rdc, radius_m, rho, f0)
+        e1 = z1.imag - x1_ohm_per_m
+        e0 = z0.imag - x0_ohm_per_m
+        # [dlnD, dlnGMR] = -J^{-1} e ; J^{-1} = inv_det * coef*[[-1,1],[2,1]]
+        d_lnd = -inv_det * coef * (-1.0 * e1 + 1.0 * e0)
+        d_lngmr = -inv_det * coef * (2.0 * e1 + 1.0 * e0)
+        ln_d += d_lnd
+        ln_gmr += d_lngmr
+        # refine Rdc against the synthesized R1 (earth cancels in Z1.real)
+        rdc = max(rdc + (r1_ohm_per_m - z1.real), 1e-9)
+        if abs(e1) < 1e-12 and abs(e0) < 1e-12:
+            break
+
+    gmr = math.exp(ln_gmr)
+    spacing = math.exp(ln_d)
+    xs, ys = _equilateral_xy(spacing, h)
+    z0_fit, z1_fit = _carson_sequence_z(xs, ys, gmr, rdc, radius_m, rho, f0)
+
+    conductors = [
+        ConductorPlacement(
+            phase=phases[i],
+            x_m=xs[i],
+            y_m=ys[i],
+            gmr_m=gmr,
+            radius_m=radius_m,
+            r_dc_ohm_per_m=rdc,
+            is_neutral=False,
+        )
+        for i in range(3)
+    ]
+    return LineGeometry(
+        conductors=conductors,
+        earth_resistivity_ohm_m=rho,
+        provenance=Provenance(
+            source_convention=SourceConvention.GEOMETRY,
+            notes=(
+                notes
+                or "synthesized equilateral 3-conductor Carson geometry reproducing "
+                f"R1={r1_ohm_per_m:.6g}, X1={x1_ohm_per_m:.6g}, X0={x0_ohm_per_m:.6g} "
+                f"Ω/m @ {f0} Hz (R0 follows from earth return)"
+            ),
+            extra={
+                "synth_kind": "three_phase_equilateral",
+                "synth_height_m": f"{h:.6g}",
+                "synth_spacing_m": f"{spacing:.6g}",
+                "synth_gmr_m": f"{gmr:.6g}",
+                "synth_rdc_ohm_per_m": f"{rdc:.6g}",
+                "synth_r0_ohm_per_m": f"{z0_fit.real:.6g}",
+                # GMR >= radius means the target X1/X0 are below the geometric floor for
+                # this spacing (non-physical conductor; still matches OpenDSS on the SAME
+                # geometry). See geometry/CONTEXT.md.
+                "synth_unphysical": str(gmr >= radius_m),
+            },
+        ),
+    )
+
+
+def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
+    """In place: give every R/X line a synthesized ``conductor_geometry``.
+
+    Single-phase lines get a single-conductor earth-return geometry reproducing
+    ``R1 + jX1``; 3-phase lines get an equilateral 3-conductor geometry reproducing
+    ``Z1`` and ``X0`` (:func:`synthesize_three_phase_geometry`). The SAME geometry is
+    fed to both pgml and OpenDSS for an apples-to-apples Carson harmonic comparison.
+    Other phase counts (2-phase) are skipped. Returns ``grid``.
     """
     f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
     n_unphysical = 0
@@ -141,14 +294,28 @@ def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
     for ln in grid.branches:
         if not (isinstance(ln, Line) and ln.conductor_geometry is None):
             continue
-        if len(ln.from_phases) != 1:
-            continue
-        r1 = float(ln.series_resistance_ohm_per_m[0][0])
-        x1 = 2.0 * math.pi * f0 * float(ln.series_inductance_h_per_m[0][0])
+        p = len(ln.from_phases)
         ltype = (ln.tags or {}).get("pp_type", "ol")
-        ln.conductor_geometry = synthesize_line_geometry(
-            r1, x1, f0=f0, phase=ln.from_phases[0], line_type=ltype
-        )
+        if p == 1:
+            r1 = float(ln.series_resistance_ohm_per_m[0][0])
+            x1 = 2.0 * math.pi * f0 * float(ln.series_inductance_h_per_m[0][0])
+            ln.conductor_geometry = synthesize_line_geometry(
+                r1, x1, f0=f0, phase=ln.from_phases[0], line_type=ltype
+            )
+        elif p == 3:
+            r1, _r0 = _seq_from_phase_matrix(ln.series_resistance_ohm_per_m, f0)
+            l1, l0 = _seq_from_phase_matrix(ln.series_inductance_h_per_m, f0)
+            two_pi_f0 = 2.0 * math.pi * f0
+            ln.conductor_geometry = synthesize_three_phase_geometry(
+                r1,
+                two_pi_f0 * l1,
+                two_pi_f0 * l0,
+                f0=f0,
+                phases=ln.from_phases,
+                line_type=ltype,
+            )
+        else:
+            continue
         n_synth += 1
         if ln.conductor_geometry.provenance.extra.get("synth_unphysical") == "True":
             n_unphysical += 1
@@ -156,11 +323,11 @@ def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
         import warnings
 
         warnings.warn(
-            f"synthesize_grid_geometry: {n_unphysical}/{n_synth} lines have X1 below the "
-            "single-conductor earth-return reactance floor, yielding a non-physical "
-            "GMR (>= radius). The geometry still reproduces R1/X1 at f0 and matches "
+            f"synthesize_grid_geometry: {n_unphysical}/{n_synth} lines have a reactance "
+            "below the earth-return / spacing floor, yielding a non-physical GMR "
+            "(>= radius). The geometry still reproduces the target Z at f0 and matches "
             "OpenDSS on the same geometry, but is not a physical conductor (typical of "
-            "cables / low-X positive-sequence feeders). See geometry/CONTEXT.md.",
+            "cables / low-X feeders). See geometry/CONTEXT.md.",
             stacklevel=2,
         )
     return grid
@@ -342,6 +509,7 @@ def apply_default_harmonic_model(
 
 __all__ = [
     "synthesize_line_geometry",
+    "synthesize_three_phase_geometry",
     "synthesize_grid_geometry",
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",

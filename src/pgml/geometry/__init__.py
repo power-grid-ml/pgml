@@ -40,6 +40,7 @@ from .synthesis import (
     positive_sequence_resistance_model,
     synthesize_grid_geometry,
     synthesize_line_geometry,
+    synthesize_three_phase_geometry,
 )
 
 __all__ = [
@@ -65,6 +66,7 @@ __all__ = [
     "sequence_aware_phase_z",
     # synthesis (R/X -> geometry / harmonic model)
     "synthesize_line_geometry",
+    "synthesize_three_phase_geometry",
     "synthesize_grid_geometry",
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",

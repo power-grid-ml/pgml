@@ -584,3 +584,195 @@ class TestCigreLvDynTransformerOracle:
         grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
         with pytest.raises(ValueError, match="sequence_aware"):
             opendss_dyn_transformer_harmonic_voltages(grid, None, TRIPLEN_ORDERS)
+
+
+# ---------------------------------------------------------------------------
+# Three-phase Carson geometry oracle (apples-to-apples: same geometry in both engines)
+# ---------------------------------------------------------------------------
+
+# Tolerance for the geometry-oracle path (both non-triplen and triplen orders).
+# The identical synthesized 3-conductor geometry is fed to both pgml (via
+# conductor_geometry) and OpenDSS (via WireData / LineGeometry commands), so both
+# engines run Carson/Deri on the same positions — the only residual comes from
+# floating-point rounding in the respective implementations.
+ATOL_V_3PH_GEOMETRY = 1e-5  # V — achievable given exact Carson parity
+
+# Triplen/zero-sequence orders included to verify the h3/h9 gap collapses to
+# numerical noise once both engines share the same 3-conductor geometry.
+TRIPLEN_ORDERS_3PH = [1, 3, 5, 9, 11]
+TRIPLEN_SPECTRUM_3PH = {
+    o: (mag, 0.0) for o, mag in [(1, 1.0), (3, 0.30), (5, 0.20), (9, 0.10), (11, 0.09)]
+}
+
+
+class TestCigreLvThreePhaseCarsonGeometryOracle:
+    """Bit-exact parity: THREE_PHASE + synthesized 3-conductor Carson geometry.
+
+    Both pgml and the live OpenDSS oracle use the SAME synthesized equilateral
+    3-conductor ``conductor_geometry`` (via ``synthesize_grid_geometry``).  OpenDSS
+    receives the conductor positions as ``WireData`` / ``LineGeometry`` elements and
+    runs its own Carson/Deri calculation; pgml uses the same positions in
+    ``_stamp_geometry_lines``.  Because the Carson implementations are bit-exact
+    (validated in ``tests/reference/test_carson_opendss.py``), the resulting
+    harmonic voltages must agree to floating-point noise across ALL orders including
+    the triplen / zero-sequence orders (h=3, h=9) which previously showed a
+    ~60–180 % gap with the ``sequence_aware`` R1/X1 model.
+
+    Switches and transformers are stamped with pgml-exact formulas (the geometry
+    stub contains lines only; the stub-subtract technique removes the OpenDSS stub
+    source Norton and replaces it with the pgml-exact Norton).
+
+    Expected parity: < ``ATOL_V_3PH_GEOMETRY = 1e-5 V`` at all orders; the
+    empirical residual is dominated by floating-point accumulation in the
+    Carson computation and should be O(1e-8)–O(1e-6) V.
+    """
+
+    PHASE_MODE = PhaseMode.THREE_PHASE
+
+    def _solve_and_compare(self, orders=None):
+        """Build 3-phase geometry grid, solve pgml, run live oracle, return arrays."""
+        import warnings
+
+        if orders is None:
+            orders = TRIPLEN_ORDERS_3PH
+        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            synthesize_grid_geometry(grid)
+
+        loads = [a for a in grid.appliances if isinstance(a, Load)]
+        inj_loads = [ld for ld in loads if ld.node in INJECTION_NODES]
+        harmonic_injection = {ld.id: TRIPLEN_SPECTRUM_3PH for ld in inj_loads}
+        assert inj_loads, f"No loads found at injection nodes {INJECTION_NODES}"
+
+        hres = solve_harmonic_flow(
+            grid,
+            orders,
+            slack="norton",
+            harmonic_injection=harmonic_injection,
+            dtype=torch.complex128,
+        )
+        assert hres.pf.converged, (
+            f"THREE_PHASE geometry solve_harmonic_flow did not converge "
+            f"(residual={float(hres.pf.residual):.3e})"
+        )
+
+        v1_np = hres.pf.v.detach().cpu().numpy()
+        v_oracle = opendss_harmonic_voltages(
+            grid,
+            harmonic_injection,
+            orders,
+            slack="norton",
+            v1=v1_np,
+        )
+        v_pgml = hres.v.detach().cpu().numpy()
+        return v_pgml, v_oracle, orders, grid
+
+    def test_fundamental_exact_match(self) -> None:
+        """Order 1 returned verbatim from v1 — bit-for-bit identical."""
+        v_pgml, v_oracle, orders, _ = self._solve_and_compare()
+        h1_k = orders.index(1)
+        np.testing.assert_array_equal(
+            v_oracle[h1_k],
+            v_pgml[h1_k],
+            err_msg="3ph geometry oracle order 1: must be bit-for-bit identical",
+        )
+
+    def test_non_triplen_tight_parity(self) -> None:
+        """Non-triplen orders h=5, h=11: live oracle matches pgml to < 1e-5 V.
+
+        Both engines share the identical Carson geometry, so the discrepancy is
+        floating-point noise (empirically O(1e-8) V), not a model-difference gap.
+        """
+        v_pgml, v_oracle, orders, _ = self._solve_and_compare()
+        for h_ord in [5, 11]:
+            if h_ord not in orders:
+                continue
+            h_k = orders.index(h_ord)
+            err = float(np.abs(v_oracle[h_k] - v_pgml[h_k]).max())
+            assert err < ATOL_V_3PH_GEOMETRY, (
+                f"3ph geometry oracle h={h_ord}: max |DeltaV| = {err:.3e} V "
+                f"exceeds {ATOL_V_3PH_GEOMETRY:.0e} V (expected numerical-noise-level parity)"
+            )
+
+    def test_triplen_tight_parity(self) -> None:
+        """Triplen orders h=3, h=9: live oracle matches pgml to < 1e-5 V.
+
+        This is the key validation: the h3/h9 gap present with the sequence-aware
+        model (~60–180 %) collapses to numerical noise because both engines now share
+        the same 3-conductor geometry (zero-sequence current sees the same Carson
+        earth return in both pgml and OpenDSS).
+        """
+        v_pgml, v_oracle, orders, _ = self._solve_and_compare()
+        for h_ord in [3, 9]:
+            if h_ord not in orders:
+                continue
+            h_k = orders.index(h_ord)
+            err = float(np.abs(v_oracle[h_k] - v_pgml[h_k]).max())
+            assert err < ATOL_V_3PH_GEOMETRY, (
+                f"3ph geometry oracle h={h_ord}: max |DeltaV| = {err:.3e} V "
+                f"exceeds {ATOL_V_3PH_GEOMETRY:.0e} V — triplen gap should collapse "
+                f"to numerical noise with shared 3-conductor geometry"
+            )
+
+    def test_all_orders_allclose(self) -> None:
+        """All harmonic orders: max absolute deviation < 1e-5 V."""
+        v_pgml, v_oracle, orders, _ = self._solve_and_compare()
+        per_order_max = {}
+        for k, h in enumerate(orders):
+            per_order_max[h] = float(np.abs(v_oracle[k] - v_pgml[k]).max())
+        max_err = max(per_order_max.values())
+        assert max_err < ATOL_V_3PH_GEOMETRY, (
+            f"3ph geometry oracle max |DeltaV| = {max_err:.3e} V exceeds "
+            f"atol={ATOL_V_3PH_GEOMETRY:.0e} V\nPer-order: {per_order_max}"
+        )
+
+    def test_triplen_lv_voltages_nonzero(self) -> None:
+        """h=3 LV voltages at injected nodes are non-trivial (injection is active).
+
+        Confirms the triplen current is present on the LV side — the test is not
+        trivially passing because no injection occurred.
+        """
+        v_pgml, _, orders, grid = self._solve_and_compare()
+        index = node_phase_index(grid)
+        h3_k = orders.index(3)
+        for node_id in INJECTION_NODES:
+            r = index.row(node_id, Phase.A)
+            v_lv = abs(v_pgml[h3_k, r])
+            assert v_lv > 0.1, (
+                f"pgml 3ph geometry h=3 node {node_id}: |V| = {v_lv:.4e} V "
+                f"— triplen injection appears inactive"
+            )
+
+    def test_output_shape(self) -> None:
+        """Oracle returns [H, 132] complex array (44 nodes x 3 phases)."""
+        import warnings
+
+        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            synthesize_grid_geometry(grid)
+        loads = [a for a in grid.appliances if isinstance(a, Load)]
+        inj_loads = [ld for ld in loads if ld.node in INJECTION_NODES]
+        harmonic_injection = {ld.id: TRIPLEN_SPECTRUM_3PH for ld in inj_loads}
+        hres = solve_harmonic_flow(
+            grid,
+            TRIPLEN_ORDERS_3PH,
+            slack="norton",
+            harmonic_injection=harmonic_injection,
+            dtype=torch.complex128,
+        )
+        v1_np = hres.pf.v.detach().cpu().numpy()
+        index = node_phase_index(grid)
+        v_oracle = opendss_harmonic_voltages(
+            grid,
+            harmonic_injection,
+            TRIPLEN_ORDERS_3PH,
+            slack="norton",
+            v1=v1_np,
+        )
+        assert v_oracle.shape == (len(TRIPLEN_ORDERS_3PH), index.size), (
+            f"3ph geometry oracle shape {v_oracle.shape} != expected "
+            f"({len(TRIPLEN_ORDERS_3PH)}, {index.size})"
+        )
+        assert np.iscomplexobj(v_oracle)

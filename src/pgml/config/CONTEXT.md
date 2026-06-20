@@ -36,8 +36,9 @@ documented, never hidden implicit constants scattered in code.
   `positive_sequence`).
 - `line.earth_return.{resistivity_ohm_m, resistance_coeff_ohm_per_m_per_hz}` — Carson
   earth path (ρ; the `π²·1e-7` Ω/m/Hz earth-return resistance coefficient).
-- `line.conductor.{gmr_over_radius, radius_m, height_overhead_m, height_cable_m}` —
-  R/X→geometry synthesis defaults (`gmr_over_radius = e^{-1/4} = 0.7788`).
+- `line.conductor.{gmr_over_radius, radius_m, height_overhead_m, height_cable_m,
+  phase_spacing_m}` — R/X→geometry synthesis defaults (`gmr_over_radius = e^{-1/4} =
+  0.7788`; `phase_spacing_m` seeds the equilateral 3-phase synthesis fit).
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See

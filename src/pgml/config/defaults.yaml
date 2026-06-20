@@ -145,6 +145,15 @@ line:
       description: >
         Default conductor outer radius (~ACSR) for R/X→geometry synthesis when no
         conductor data is supplied. Affects only the (tiny) synthesized capacitance.
+    phase_spacing_m:
+      value: 1.0
+      units: "m"
+      description: >
+        Initial phase-conductor spacing for the equilateral 3-phase R/X→geometry
+        synthesis (the Newton fit then adjusts the spacing + GMR to reproduce X1 and
+        X0). ~1 m is a typical LV/MV phase separation; the value only seeds the solve
+        and trades off against the fitted GMR, so the reproduced Z1/X0 are independent
+        of it (within the physical range).
     height_overhead_m:
       value: 10.0
       units: "m"

@@ -1187,14 +1187,88 @@ def _is_sequence_aware_grid(grid: Grid) -> bool:
     )
 
 
+def _emit_geometry_line_to_dss(dss, ln: Line, busname: dict) -> None:
+    """Emit WireData + LineGeometry + Line commands for one conductor-geometry line.
+
+    Handles both single-conductor (1-phase) and multi-conductor (3-phase) geometries.
+    Each conductor gets its own ``WireData`` element (indexed by ``<line_id>_c<k>``);
+    the ``LineGeometry`` lists all conductors with their (x, h) positions.  The ``Line``
+    element references the geometry and uses bus-phase suffixes matching the line's
+    ``from_phases`` order (phase A → ``.1``, B → ``.2``, C → ``.3``).
+
+    OpenDSS conductor order for a ``LineGeometry`` with ``nconds=N nphases=N`` maps
+    ``cond=k`` to DSS phase ``.k`` — this matches pgml's ``_geom_conductor_arrays``
+    which orders conductors as ``from_phases[0], from_phases[1], …``.
+    """
+    geo = ln.conductor_geometry
+    n_cond = len(geo.conductors)
+    rho = float(geo.earth_resistivity_ohm_m)
+
+    # Order conductors to match pgml's _geom_conductor_arrays: phases first (by
+    # from_phases order), then neutrals.  For the synthesized equilateral 3-conductor
+    # geometry all conductors are non-neutral phases in (A, B, C) order.
+    phase_list = list(ln.from_phases)
+    _phase_to_dss_suffix = {Phase.A: 1, Phase.B: 2, Phase.C: 3, Phase.N: 4}
+    phase_conds = []
+    for ph in phase_list:
+        c = next(
+            (c for c in geo.conductors if not c.is_neutral and c.phase == ph), None
+        )
+        if c is not None:
+            phase_conds.append(c)
+    neutral_conds = [c for c in geo.conductors if c.is_neutral]
+    ordered_conds = phase_conds + neutral_conds
+
+    # Emit one WireData per conductor
+    for k, c in enumerate(ordered_conds):
+        wd = f"wd{ln.id}_c{k + 1}"
+        dss.Text.Command(
+            f"New WireData.{wd} Rdc={to_float(c.r_dc_ohm_per_m)} "
+            f"GMRac={to_float(c.gmr_m)} radius={to_float(c.radius_m)} "
+            "Runits=m GMRunits=m radunits=m"
+        )
+
+    # Build LineGeometry: each cond line provides wire name + (x, h) coordinates.
+    # OpenDSS requires specifying cond parameters in sequential cond= blocks; the
+    # first cond= block also sets nconds/nphases, subsequent blocks update the active
+    # conductor.  All cond blocks must be on separate commands or semicolon-separated.
+    n_phase = len(phase_list)  # number of non-neutral (phase) conductors
+    gn = f"geo{ln.id}"
+    geo_cmd = (
+        f"New LineGeometry.{gn} nconds={n_cond} nphases={n_phase} "
+        f"cond=1 wire=wd{ln.id}_c1 x={to_float(ordered_conds[0].x_m)} "
+        f"h={to_float(ordered_conds[0].y_m)} units=m"
+    )
+    dss.Text.Command(geo_cmd)
+    for k in range(1, n_cond):
+        c = ordered_conds[k]
+        dss.Text.Command(
+            f"~ cond={k + 1} wire=wd{ln.id}_c{k + 1} "
+            f"x={to_float(c.x_m)} h={to_float(c.y_m)} units=m"
+        )
+
+    # Emit Line element.  Bus suffixes follow the phase order in from_phases:
+    # cond=1 → from_phases[0], cond=2 → from_phases[1], etc.
+    ph_suffix = ".".join(str(_phase_to_dss_suffix.get(ph, 1)) for ph in phase_list)
+    dss.Text.Command(
+        f"New Line.l{ln.id} phases={n_phase} "
+        f"bus1={busname[ln.from_node]}.{ph_suffix} "
+        f"bus2={busname[ln.to_node]}.{ph_suffix} "
+        f"geometry={gn} length={to_float(ln.length_m)} units=m rho={rho}"
+    )
+
+
 def _build_geometry_circuit_stub(grid: Grid, busname: dict) -> None:
     """Build an OpenDSS circuit with a stub Vsource + all conductor-geometry lines.
 
-    The stub Vsource has near-zero impedance (r1=1e-6, x1=1e-6) so its Carson-
-    corrected Norton shunt can be subtracted at each harmonic and replaced with
-    pgml's exact source Norton (see :func:`_get_stub_norton`).  Geometry lines are
-    built with the same WireData / LineGeometry commands as
-    :func:`build_opendss_geometry_circuit`.
+    The stub Vsource has near-zero impedance so its Carson-corrected Norton shunt can
+    be subtracted at each harmonic and replaced with pgml's exact source Norton.
+    Supports both single-phase (1-conductor) and three-phase (3-conductor) geometry
+    lines via :func:`_emit_geometry_line_to_dss`.
+
+    For a single-phase grid the Vsource has ``phases=1``; for a three-phase geometry
+    grid (3-conductor lines) the Vsource has ``phases=3`` with balanced stub impedance
+    so that the resulting ``YNodeOrder`` aligns to pgml rows at all three phases.
     """
     import opendssdirect as dss
 
@@ -1203,13 +1277,22 @@ def _build_geometry_circuit_stub(grid: Grid, busname: dict) -> None:
     node_by_id = {int(n.id): n for n in grid.nodes}
     kv = float(node_by_id[slack_node].u_rated_v) / 1000.0
     f0 = float(grid.base_frequency_hz)
+    p_src = len(src.phases)
+    ph_conn = ".".join(str(k + 1) for k in range(p_src))
 
     dss.Text.Command("Clear")
-    dss.Text.Command(
-        f"New Circuit.pgml_live basekv={kv} phases=1 "
-        f"bus1={busname[slack_node]}.1 pu=1.0 angle=0 frequency={f0} "
-        "r1=1e-6 x1=1e-6"
-    )
+    if p_src == 1:
+        dss.Text.Command(
+            f"New Circuit.pgml_live basekv={kv} phases=1 "
+            f"bus1={busname[slack_node]}.1 pu=1.0 angle=0 frequency={f0} "
+            "r1=1e-6 x1=1e-6"
+        )
+    else:
+        dss.Text.Command(
+            f"New Circuit.pgml_live phases={p_src} basekv={kv} "
+            f"bus1={busname[slack_node]}.{ph_conn} pu=1.0 angle=0.0 frequency={f0} "
+            "r1=1e-6 x1=1e-6 r0=1e-6 x0=1e-6"
+        )
     dss.Text.Command("Set earthmodel=Deri")
 
     for ln in grid.branches:
@@ -1217,23 +1300,7 @@ def _build_geometry_circuit_stub(grid: Grid, busname: dict) -> None:
             isinstance(ln, Line) and ln.in_service and ln.conductor_geometry is not None
         ):
             continue
-        c = ln.conductor_geometry.conductors[0]
-        rho = float(ln.conductor_geometry.earth_resistivity_ohm_m)
-        wd, gn = f"wd{ln.id}", f"geo{ln.id}"
-        dss.Text.Command(
-            f"New WireData.{wd} Rdc={to_float(c.r_dc_ohm_per_m)} "
-            f"GMRac={to_float(c.gmr_m)} radius={to_float(c.radius_m)} "
-            "Runits=m GMRunits=m radunits=m"
-        )
-        dss.Text.Command(
-            f"New LineGeometry.{gn} nconds=1 nphases=1 cond=1 wire={wd} "
-            f"x={to_float(c.x_m)} h={to_float(c.y_m)} units=m"
-        )
-        dss.Text.Command(
-            f"New Line.l{ln.id} phases=1 bus1={busname[ln.from_node]}.1 "
-            f"bus2={busname[ln.to_node]}.1 geometry={gn} "
-            f"length={to_float(ln.length_m)} units=m rho={rho}"
-        )
+        _emit_geometry_line_to_dss(dss, ln, busname)
 
     dss.Text.Command(f"Set voltagebases=[{kv}]")
     dss.Text.Command("Calcvoltagebases")
