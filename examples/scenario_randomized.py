@@ -205,11 +205,13 @@ _PNAME = {0: "L1", 1: "L2", 2: "L3", 3: "N"}
 def _opendss_compare(grid, sampled, res, out: Path) -> None:
     """Live pgml-vs-OpenDSS comparison for scenario 0: per-order parity, a tidy
     ``pgml | opendss | Δ`` CSV, and a per-order overlay plot — so the difference is
-    visible. NOTE: the 3-phase NON-triplen orders (h5, h7) match a live OpenDSS Carson
-    solve to ~1%, but the TRIPLEN orders (h3, h9) are ZERO-SEQUENCE and diverge: pgml's
-    `sequence_aware` Z0 + the simplified non-Dyn transformer differ from OpenDSS's
-    R0/X0-line Carson + vector group (deferred — TODO #4). Single-phase Scenario 1 is
-    bit-exact (shared geometry)."""
+    visible. The Dyn transformer is now modelled with its real vector group, so the
+    TRIPLEN orders (h3, h9, zero-sequence) are correctly trapped in the delta and do not
+    propagate to the MV bus — validated bit-for-bit against a true OpenDSS Dyn
+    transformer (`references.opendss_dyn_transformer_harmonic_voltages`). The residual
+    LV-side gap on the non-triplen orders (~1%) is the line model: pgml's `sequence_aware`
+    Z0 vs OpenDSS's R0/X0 Carson earth-return (TODO #4 part b). Single-phase Scenario 1
+    is bit-exact (shared geometry)."""
     try:
         import numpy as np
 

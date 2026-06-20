@@ -206,31 +206,20 @@ def to_grid(
         )
 
     # ------------------------------------------------------------------ #
-    # 3. Transformers (two-winding, positive-sequence equivalent)          #
+    # 3. Transformers (two-winding, vector-group aware)                    #
     # ------------------------------------------------------------------ #
-    # Our assembly uses the MATPOWER off-nominal-tap PI model:             #
-    #   Y_ff = y_se/|t|^2,  Y_ft = -y_se/conj(t)                         #
-    #   Y_tf = -y_se/t,      Y_tt = y_se                                  #
-    # where t = tap.ratio_magnitude * exp(j*tap.shift_deg).  The model is  #
-    # correct in PER-UNIT where `y_se` is on the LV base and `t` is the    #
-    # off-nominal ratio (~1).  In SI we use the full turns ratio           #
-    # t = n = vn_hv/vn_lv as `tap.ratio_magnitude`, so `y_se` is referred  #
-    # to the LV side: Z_sc_LV = Z_sc_HV / n^2. Full vector-group / zero-   #
-    # sequence phase coupling is positive-sequence only here.              #
+    # The nominal turns ratio and the vector-group phase shift come from the   #
+    # rated voltages (`u_rated_from/to_v`) plus the winding connections, so    #
+    # `tap` carries the OFF-NOMINAL ratio only (1.0 here — pandapower tap-     #
+    # changer positions are not yet read). Assembly builds the winding-        #
+    # incidence primitive Y = N^T Y_winding N: a delta winding blocks the      #
+    # zero sequence (traps triplen harmonics) and supplies the √3 ratio + 30°  #
+    # clock shift. The single-phase-equivalent mode collapses this to the      #
+    # positive-sequence off-nominal-tap pi. Leakage is referred to the LV side #
+    # (Z_sc_LV = vk·Z_base_LV). pandapower's CIGRE LV trafos are Dyn1          #
+    # (shift_degree=30 -> clock 1).                                            #
     # ------------------------------------------------------------------ #
     if hasattr(net, "trafo") and len(net.trafo):
-        if phase_mode is PhaseMode.THREE_PHASE:
-            # The transformer is stamped from a fixed Dyn from/to connection
-            # (positive-sequence equivalent). Under THREE_PHASE this becomes a
-            # per-phase diagonal stamp with no vector-group phase coupling or
-            # zero-sequence path, so non-Dyn groups (e.g. Yyn/YNyn) are only
-            # approximate. Warn once.
-            _logger.warning(
-                "THREE_PHASE conversion: transformer vector-group phase coupling "
-                "and zero-sequence are not yet modeled; 3-phase transformers use a "
-                "per-phase diagonal stamp, so results are approximate for non-Dyn "
-                "vector groups."
-            )
         for pp_idx, row in net.trafo.iterrows():
             if not bool(row.get("in_service", True)):
                 continue
@@ -275,8 +264,6 @@ def to_grid(
                     if b_m > 0.0:
                         l_m = 1.0 / (two_pi_f0 * b_m)
 
-            tap_ratio = vn_hv_v / vn_lv_v
-
             tx_phases = phases_for(phase_mode)
             branches.append(
                 Transformer(
@@ -295,7 +282,9 @@ def to_grid(
                     series_inductance_h=l_sc_lv,
                     magnetizing_conductance_s=g_m,
                     magnetizing_inductance_h=l_m,
-                    tap=ComplexTap(ratio_magnitude=tap_ratio, shift_deg=shift_deg),
+                    # Nominal ratio comes from u_rated + connections; `tap` is the
+                    # off-nominal ratio (1.0) plus the vector-group clock angle.
+                    tap=ComplexTap(ratio_magnitude=1.0, shift_deg=shift_deg),
                     provenance=_PROVENANCE,
                 )
             )

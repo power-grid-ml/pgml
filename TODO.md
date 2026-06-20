@@ -104,6 +104,22 @@ machinery in `equations`/schema already supports curve/analytic forms).
 **Where.** `solver/harmonic_flow.py`, `schemas` (`HarmonicShuntModel`, transformer),
 `references/opendss/harmonics.md`, `tests/reference`.
 
+**Triplen / zero-sequence discrepancy — vector-group transformer DONE (2026-06-20).**
+The transformer now uses a phase-domain VECTOR-GROUP winding-incidence stamp
+(`assembly/_transformer.py`, `Y = Nᵀ Y_winding N`): a Dyn delta winding correctly BLOCKS
+the zero sequence, so triplen harmonics no longer pass transparently from LV to MV. The
+nominal ratio + 30° clock now come from `u_rated` + connections (`tap` is off-nominal
+only); default group is config `transformer.vector_group` (Dyn11). Decision record:
+`references/opendss/transformer.md`. Closes part (a) of the original gap.
+REMAINING (part b): the 3-phase line model still differs from OpenDSS's R0/X0 Carson
+earth-return — pgml's `sequence_aware` Z0 vs OpenDSS Carson — so non-triplen orders match
+~1% and any residual triplen gap is the LINE Z0, not the transformer. To fully close,
+add 3-phase Carson GEOMETRY synthesis (today `synthesize_grid_geometry` is single-phase
+only) so both engines share the identical line model. A true live-OpenDSS Dyn transformer
+oracle (real `Transformer` element, not the pgml-stamp shortcut) now validates the
+vector group directly. Supported vector groups so far: Dyn1/Dyn11, in-phase wye-wye /
+delta-delta; non-solid neutral grounding + zigzag + other clocks are still open.
+
 ---
 
 ## 5. Smaller follow-ups (no decision needed)

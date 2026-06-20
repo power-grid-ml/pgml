@@ -53,7 +53,8 @@ Module: `pgml.assembly`
     | "series_inductance_h_per_m" | "shunt_capacitance_f_per_m" |
     "shunt_conductance_s_per_m")`, `("source", id, "resistance_ohm" |
     "inductance_h")`, `("transformer", id, "series_resistance_ohm" |
-    "series_inductance_h" | "tap_magnitude" | "tap_shift_deg")`,
+    "series_inductance_h" | "tap_magnitude")` (tap.shift_deg selects the discrete
+    vector-group clock, not a gradient leaf),
     `("switch", id, "resistance_ohm" | "inductance_h")`,
     `("generic_branch", id, "series_resistance_ohm" | "series_inductance_h")`.
 - `build_injections(grid, frequencies_hz, index, *, dtype=torch.complex128,
@@ -75,16 +76,27 @@ per-phase `{"p_per_phase_w": [...], "q_per_phase_var": [...]}`; default = namepl
 - Source: Thévenin (`u_ref∠u_angle` behind per-phase `R + jX` matrix) -> Norton:
   `Y_s = Z_s(f)^-1` added to the source-node diagonal block; current handled by
   `build_injections`.
-- Transformer (`_stamp_transformers`): IMPLEMENTED in-phase ratio + uniform phase
-  shift leakage-pi with `ComplexTap` `t = ratio_magnitude * exp(j*shift_deg)`:
-      Y_ff = y_se/|t|^2 + y_m,  Y_ft = -y_se/conj(t),  Y_tf = -y_se/t,  Y_tt = y_se
-  with per-phase scalar leakage `y_se=(R+jX(f))^-1` and magnetizing shunt
-  `y_m=G_m + j*(-1/(2*pi*f*L_m))` on the HV diagonal. Differentiable w.r.t. R, L,
-  tap mag/shift. DEFERRED to M2 (marked in code): full vector-group phase coupling
-  (Dyn/Yd connection matrices that mix phases), zero-sequence path from winding
-  connection, neutral grounding impedance. M1 treats each phase as a diagonal
-  coupled two-port; `from_connection`/`to_connection`/`zero_sequence`/`*_grounding`
-  are NOT consumed yet.
+- Transformer (`_stamp_transformers` + `_transformer.py`): VECTOR-GROUP winding-incidence
+  primitive `Y_node = Nᵀ Y_winding N`. The winding-voltage primitive (leakage `y_se`
+  referred to the TO/LV coil, coil turns ratio `τ`) is
+  `Y_winding = [[(y/τ²)I, −(y/τ)I],[−(y/τ)I, y I]]`; the constant real incidence
+  `N = blockdiag(N_hv, N_lv)` maps coil voltages to bus phase rows — `wye_grounded → I3`,
+  `delta → M = [[1,-1,0],[0,1,-1],[-1,0,1]]` (or `Mᵀ`, clock-selected), ungrounded
+  `wye → I − 11ᵀ/3`. A delta winding BLOCKS the zero sequence (`M·[1,1,1]=0`, traps
+  triplen harmonics) and supplies the intrinsic √3 magnitude + ±30° clock shift, so the
+  NOMINAL ratio comes from `u_rated_from/to_v` + connections and `tap.ratio_magnitude`
+  is the OFF-NOMINAL tap only (`tap.shift_deg = clock·30`). Magnetizing
+  `y_m = G_m + j·(−1/(2π f L_m))` is added to the HV terminal diagonal directly.
+  - `from_connection`/`to_connection` resolve via `resolve_vector_group` (explicit, else
+    config `transformer.vector_group.*`, default Dyn11). Supported clocks: Dyn → 1/11,
+    wye-wye/delta-delta → 0/6 (others raise NotImplementedError); zigzag and non-solid
+    `*_grounding` not modelled yet. `P==1` (single-phase / positive-sequence equivalent)
+    folds the group into a complex scalar tap `t = (u_from/u_to)·tap_mag·e^{jθ}` and uses
+    the textbook off-nominal-tap pi — reducing EXACTLY to the 3-phase positive sequence.
+  - Differentiable w.r.t. R, L and the off-nominal tap magnitude; the discrete vector
+    group / clock selects the constant `N`. `param_overrides` keys unchanged
+    (`series_resistance_ohm`/`series_inductance_h`/`tap_magnitude`); `tap_shift_deg` is
+    no longer a continuous (gradient) leaf — it selects the clock.
 - Build by scatter-add of primitive blocks into Y via `_scatter.scatter_blocks_into`
   (clone + `index_add_` along a flattened N*N axis with linear index `row*N+col`;
   accumulates duplicates; the scattered VALUES are differentiable, the indices are

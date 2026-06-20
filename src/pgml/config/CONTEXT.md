@@ -38,6 +38,10 @@ documented, never hidden implicit constants scattered in code.
   earth path (ρ; the `π²·1e-7` Ω/m/Hz earth-return resistance coefficient).
 - `line.conductor.{gmr_over_radius, radius_m, height_overhead_m, height_cable_m}` —
   R/X→geometry synthesis defaults (`gmr_over_radius = e^{-1/4} = 0.7788`).
+- `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
+  for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
+  `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
+  `references/opendss/transformer.md`.
 
 ## Consumers (read these constants from the config — do not re-hard-code)
 - `geometry/sequence.py`: `_DEFAULT_GMR_OVER_RADIUS`, `CARSON_EARTH_R_PER_HZ`.

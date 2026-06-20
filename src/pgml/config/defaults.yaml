@@ -155,6 +155,38 @@ line:
       description: >
         Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.
 
+# Two-winding transformer vector group + grounding.
+transformer:
+  # Vector group assumed when a Transformer carries no explicit from_/to_connection
+  # (e.g. a positive-sequence dataset with no winding metadata). The phase-domain stamp
+  # builds the winding-incidence primitive Y = N^T Y_winding N from these connections;
+  # the delta winding blocks the zero sequence (traps triplen/residual harmonics) and
+  # supplies the nominal sqrt(3) ratio + clock phase shift. An explicit per-transformer
+  # connection always wins over these defaults (precedence: explicit > config).
+  vector_group:
+    from:
+      value: delta
+      units: "enum{wye, wye_grounded, delta}"
+      description: >
+        HV-side winding connection assumed when none is given. `delta` (the D of Dyn) is
+        the standard distribution-transformer HV winding: it blocks zero-sequence /
+        triplen harmonics from propagating to the MV network.
+    to:
+      value: wye_grounded
+      units: "enum{wye, wye_grounded, delta}"
+      description: >
+        LV-side winding connection assumed when none is given. `wye_grounded` (the yn of
+        Dyn) is the standard LV winding: the solidly grounded neutral provides the
+        zero-sequence return path on the LV side.
+    clock:
+      value: 11
+      units: "integer 0..11 (IEC clock; HV->LV shift = -30*clock degrees)"
+      description: >
+        IEC clock number assumed when no explicit tap.shift_deg is given. `11` (Dyn11,
+        LV leads HV by 30 deg) is the IEC / European distribution-transformer default.
+        For a transformer with explicit connections the clock is read from tap.shift_deg
+        (rounded to the nearest 30 deg) instead.
+
 # Upstream-grid (slack Source) modeling.
 source:
   # Finite series (short-circuit) impedance for a Source whose converter gave a

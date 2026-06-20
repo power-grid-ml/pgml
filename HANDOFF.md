@@ -83,6 +83,11 @@ Gate: float64 `gradcheck` + GPU device/dtype tests must pass.
   pandapower voltages on IEEE-33 and CIGRE LV.
 - **Harmonic flow** (`solve_harmonic_flow`): nonlinear fundamental + linear per-harmonic;
   OpenDSS-exact spectrum injection convention.
+- **Transformer vector groups** (`assembly/_transformer.py`): phase-domain winding-incidence
+  primitive `Y = Nᵀ Y_winding N`; a Dyn delta winding correctly traps the zero sequence
+  (fixes triplen-harmonic propagation). Nominal ratio + clock shift from `u_rated` +
+  connections (`tap` = off-nominal only); default group config `transformer.vector_group`
+  (Dyn11). Decision record: `references/opendss/transformer.md`.
 - **Geometry → impedance** (`pgml.geometry`): differentiable Carson/Deri (earth return +
   skin + Maxwell capacitance), **bit-exact vs OpenDSS** (relZ ~1e-13); R/X→geometry
   synthesis with provenance. OpenDSS-vs-pgml harmonic comparison on IEEE-33 + CIGRE LV

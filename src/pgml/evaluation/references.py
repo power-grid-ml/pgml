@@ -623,6 +623,110 @@ def numpy_harmonic_profiles(
 # ---------------------------------------------------------------------------
 # Full-network harmonic oracle: CIGRE LV with transformers and switches
 # ---------------------------------------------------------------------------
+
+
+def _stamp_transformer_numpy(
+    y: np.ndarray,
+    b: Transformer,
+    h: int,
+    w0: float,
+    fr_rows: list,
+    to_rows: list,
+    p: int,
+) -> None:
+    """Stamp a two-winding transformer into the numpy Y-bus (in-place).
+
+    Mirrors :mod:`pgml.assembly._transformer` exactly:
+
+    - **P == 1** (single-phase / positive-sequence equivalent): the vector group is
+      folded into a complex line-to-line ratio ``t = (u_from/u_to) · tap_mag ·
+      e^{j·shift_deg}`` and the textbook off-nominal-tap pi is applied::
+
+          Y_ff = y_se / |t|² + y_m,   Y_ft = −y_se / conj(t)
+          Y_tf = −y_se / t,            Y_tt = y_se
+
+    - **P == 3** (phase-domain): the nodal block is built as ``Nᵀ·Y_winding·N``
+      where ``N = blockdiag(N_hv, N_lv)`` (wye-grounded → ``I₃``, delta → ``M`` or
+      ``Mᵀ`` per clock), and the coil turns ratio is::
+
+          τ = (coil_from / coil_to) · tap_mag
+
+      with delta coils rated at the line-to-line voltage and wye coils at
+      ``u_rated / √3``.  The magnetizing shunt ``y_m = G_m + jB_m`` is added to the
+      HV terminal phase diagonal outside the incidence transform — identical to pgml.
+
+    ``y``, ``fr_rows``, ``to_rows``, and ``p`` are passed in to avoid re-computing
+    them; ``b`` supplies all other transformer parameters.
+    """
+    from pgml.assembly._transformer import block_incidence, resolve_vector_group
+
+    r_t = to_float(b.series_resistance_ohm)
+    l_t = to_float(b.series_inductance_h)
+    z_se = r_t + 1j * h * w0 * l_t
+    y_se = 1.0 / z_se
+    gm = to_float(b.magnetizing_conductance_s)
+    lm = b.magnetizing_inductance_h
+    bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
+    ym = complex(gm, bm)
+
+    u_from = to_float(b.u_rated_from_v)
+    u_to = to_float(b.u_rated_to_v)
+    tap_mag = to_float(b.tap.ratio_magnitude)
+
+    if p == 1:
+        # Single-phase equivalent: nominal ratio = u_from/u_to (LL/LL), folded
+        # together with the off-nominal tap and the clock phase shift.
+        shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
+        t = (u_from / u_to) * tap_mag * cmath.exp(1j * shift_rad)
+        abs_t2 = abs(t) ** 2
+        y_ff = y_se / abs_t2 + ym
+        y_ft = -y_se / complex(t).conjugate()
+        y_tf = -y_se / t
+        y_tt = y_se
+        fr = fr_rows[0]
+        to = to_rows[0]
+        y[fr, fr] += y_ff
+        y[fr, to] += y_ft
+        y[to, fr] += y_tf
+        y[to, to] += y_tt
+    else:
+        # Phase-domain: winding-incidence primitive Nᵀ Y_winding N.
+        import torch as _torch
+
+        vg = resolve_vector_group(b)
+        # Coil turns ratio: delta → LL voltage, wye → LN voltage = u/√3.
+        sqrt3 = math.sqrt(3.0)
+        coil_from = u_from if vg.from_side.kind == "delta" else u_from / sqrt3
+        coil_to = u_to if vg.to_side.kind == "delta" else u_to / sqrt3
+        tau = (coil_from / coil_to) * tap_mag
+
+        # Block incidence N [2P, 2P] (constant, real).
+        rdt = _torch.float64
+        n_blk = (
+            block_incidence(vg, p, rdt, _torch.device("cpu")).numpy().astype(complex)
+        )
+
+        # 6×6 winding primitive Y_winding.
+        eye_p = np.eye(p, dtype=complex)
+        y_w = np.block(
+            [
+                [(y_se / tau**2) * eye_p, -(y_se / tau) * eye_p],
+                [-(y_se / tau) * eye_p, y_se * eye_p],
+            ]
+        )
+        # Nodal block: Nᵀ Y_winding N  [2P, 2P].
+        y_node = n_blk.T @ y_w @ n_blk
+
+        # Magnetizing shunt on the HV terminal diagonal (outside incidence).
+        y_node[:p, :p] += ym * eye_p
+
+        # Scatter into global Y.
+        all_rows = list(fr_rows) + list(to_rows)
+        for i in range(2 * p):
+            for j in range(2 * p):
+                y[all_rows[i], all_rows[j]] += y_node[i, j]
+
+
 def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
     """Build the full per-harmonic Y-bus (numpy) mirroring pgml's assembly.
 
@@ -733,40 +837,15 @@ def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
             y[fr, to] -= ys_sw
             y[to, fr] -= ys_sw
 
-    # Transformers: off-nominal complex-tap leakage-pi + magnetizing shunt (HV)
-    # Stamp: Y_ff = y_se/|t|^2 + y_m, Y_ft = -y_se/conj(t),
-    #        Y_tf = -y_se/t, Y_tt = y_se  (per phase, diagonal — M1)
+    # Transformers: winding-incidence primitive (new vector-group model).
+    # See pgml.assembly._transformer for the full derivation.
     for b in grid.branches:
         if not (isinstance(b, Transformer) and getattr(b, "in_service", True)):
             continue
-        phases_b = b.from_phases
-        p = len(phases_b)
+        p = len(b.from_phases)
         fr_rows = index.rows(b.from_node)
         to_rows = index.rows(b.to_node)
-        r_t = to_float(b.series_resistance_ohm)
-        l_t = to_float(b.series_inductance_h)
-        z_se = r_t + 1j * h * w0 * l_t
-        y_se = 1.0 / z_se
-        tap_mag = to_float(b.tap.ratio_magnitude)
-        tap_shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
-        t = tap_mag * cmath.exp(1j * tap_shift_rad)
-        abs_t2 = tap_mag**2
-        gm = to_float(b.magnetizing_conductance_s)
-        lm = b.magnetizing_inductance_h
-        bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
-        ym = complex(gm, bm)
-        y_ff = y_se / abs_t2 + ym
-        y_ft = -y_se / complex(t).conjugate()
-        y_tf = -y_se / t
-        y_tt = y_se
-        # Stamp per phase (M1 diagonal: each phase stamped independently)
-        for i_ph in range(p):
-            fr = fr_rows[i_ph]
-            to = to_rows[i_ph]
-            y[fr, fr] += y_ff
-            y[fr, to] += y_ft
-            y[to, fr] += y_tf
-            y[to, to] += y_tt
+        _stamp_transformer_numpy(y, b, h, w0, fr_rows, to_rows, p)
 
     # Sources: Norton shunt Y_s = Z_s(h)^-1 (held at zero harmonic voltage)
     for a in grid.appliances:
@@ -1694,7 +1773,12 @@ def _stamp_non_line_elements_no_source(
     h: int,
     index,
 ) -> np.ndarray:
-    """Stamp Switch and Transformer elements only (no Source Norton)."""
+    """Stamp Switch and Transformer elements only (no Source Norton).
+
+    Transformer stamps use the winding-incidence model (see
+    :func:`_stamp_transformer_numpy`); Switch stamps are diagonal per-phase
+    series RL (pgml-exact, no Carson correction at ``x1=0``).
+    """
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
 
@@ -1719,29 +1803,7 @@ def _stamp_non_line_elements_no_source(
             p = len(b.from_phases)
             fr_rows = index.rows(b.from_node)
             to_rows = index.rows(b.to_node)
-            r_t = to_float(b.series_resistance_ohm)
-            l_t = to_float(b.series_inductance_h)
-            z_se = r_t + 1j * h * w0 * l_t
-            y_se = 1.0 / z_se
-            tap_mag = to_float(b.tap.ratio_magnitude)
-            tap_shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
-            t = tap_mag * cmath.exp(1j * tap_shift_rad)
-            abs_t2 = tap_mag**2
-            gm = to_float(b.magnetizing_conductance_s)
-            lm = b.magnetizing_inductance_h
-            bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
-            ym = complex(gm, bm)
-            y_ff = y_se / abs_t2 + ym
-            y_ft = -y_se / complex(t).conjugate()
-            y_tf = -y_se / t
-            y_tt = y_se
-            for i_ph in range(p):
-                fr = fr_rows[i_ph]
-                to = to_rows[i_ph]
-                y[fr, fr] += y_ff
-                y[fr, to] += y_ft
-                y[to, fr] += y_tf
-                y[to, to] += y_tt
+            _stamp_transformer_numpy(y, b, h, w0, fr_rows, to_rows, p)
 
     return y
 
@@ -1752,9 +1814,13 @@ def _stamp_transformers_only(
     h: int,
     index,
 ) -> np.ndarray:
-    """Stamp Transformer admittances only (pgml-exact R-const/X∝h pi-form with complex tap).
+    """Stamp Transformer admittances only (winding-incidence vector-group model).
 
     Used by the sequence-aware path where switches are already in the OpenDSS SystemY.
+    Uses :func:`_stamp_transformer_numpy` for the new winding-incidence primitive;
+    for P == 1 the result is the classical off-nominal-tap pi (with the full
+    nominal ratio from ``u_rated_from_v / u_rated_to_v``); for P == 3 it is the
+    ``Nᵀ·Y_winding·N`` block that correctly blocks zero-sequence in a delta winding.
     """
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
@@ -1765,29 +1831,7 @@ def _stamp_transformers_only(
         p = len(b.from_phases)
         fr_rows = index.rows(b.from_node)
         to_rows = index.rows(b.to_node)
-        r_t = to_float(b.series_resistance_ohm)
-        l_t = to_float(b.series_inductance_h)
-        z_se = r_t + 1j * h * w0 * l_t
-        y_se = 1.0 / z_se
-        tap_mag = to_float(b.tap.ratio_magnitude)
-        tap_shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
-        t = tap_mag * cmath.exp(1j * tap_shift_rad)
-        abs_t2 = tap_mag**2
-        gm = to_float(b.magnetizing_conductance_s)
-        lm = b.magnetizing_inductance_h
-        bm = -1.0 / (h * w0 * to_float(lm)) if lm is not None else 0.0
-        ym = complex(gm, bm)
-        y_ff = y_se / abs_t2 + ym
-        y_ft = -y_se / complex(t).conjugate()
-        y_tf = -y_se / t
-        y_tt = y_se
-        for i_ph in range(p):
-            fr = fr_rows[i_ph]
-            to = to_rows[i_ph]
-            y[fr, fr] += y_ff
-            y[fr, to] += y_ft
-            y[to, fr] += y_tf
-            y[to, to] += y_tt
+        _stamp_transformer_numpy(y, b, h, w0, fr_rows, to_rows, p)
 
     return y
 
@@ -1823,6 +1867,453 @@ def _stamp_source_nortons(
     return y
 
 
+# ---------------------------------------------------------------------------
+# True live-OpenDSS Dyn transformer oracle
+# ---------------------------------------------------------------------------
+
+
+def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
+    """Build a full OpenDSS circuit including REAL Transformer elements.
+
+    Unlike :func:`_build_seq_aware_circuit_stub`, this circuit contains a
+    genuine OpenDSS ``Transformer`` element for each :class:`~pgml.schemas.grid_schema.Transformer`
+    in the grid, using the ``delta``/``wye`` connections and ``LeadLag`` setting
+    derived from the schema.  OpenDSS's own transformer model is used; ``XRConst=No``
+    (the OpenDSS default) matches pgml's ``R const, X∝h`` harmonic model.
+
+    The LV winding is declared with ``Rneut=0 Xneut=0`` (solidly grounded neutral),
+    so OpenDSS does NOT add a ``.0`` row to ``YNodeOrder``.  The resulting
+    ``YNodeOrder`` contains only ``.1``, ``.2``, ``.3`` suffixed entries that map
+    cleanly to pgml (node, phase) rows.
+
+    The stub Vsource still has near-zero impedance (r1=1e-6, x1=1e-6) and is treated
+    identically to the seq-aware path: its Carson-corrected Norton is read from
+    ``Vsource.Source.YPrim`` and subtracted from ``SystemY`` before the pgml-exact
+    source Norton is added back.
+
+    Lines and switches are built the same way as in
+    :func:`_build_seq_aware_circuit_stub` (R1/X1/R0/X0 from the phase matrices,
+    pure-R for switches).
+
+    Transformer impedance parameters derive from the stored per-unit SI values:
+    ``kVA`` is set to 1000 kVA so that ``Z_base_LV = U_to² / kVA``; ``%R`` and
+    ``XHL`` are back-calculated from ``series_resistance_ohm`` and
+    ``series_inductance_h`` accordingly.  ``LeadLag=Lag`` maps to Dyn1 (LV lags HV
+    by 30°, matching ``tap.shift_deg = 30``); ``LeadLag=Lead`` maps to Dyn11.
+
+    Parameters
+    ----------
+    grid:
+        Materialised three-phase :class:`~pgml.schemas.grid_schema.Grid` whose
+        lines carry ``harmonic_line_model=sequence_aware`` tags.
+    busname:
+        ``{node_id: dss_bus_name}`` mapping built by the caller.
+    """
+    import opendssdirect as dss
+
+    src = next(a for a in grid.appliances if isinstance(a, Source) and a.in_service)
+    slack_node = int(src.node)
+    node_by_id = {int(nd.id): nd for nd in grid.nodes}
+    kv_slack = float(node_by_id[slack_node].u_rated_v) / 1000.0
+    f0 = float(grid.base_frequency_hz)
+    w0 = 2.0 * math.pi * f0
+    p_src = len(src.phases)
+
+    dss.Text.Command("Clear")
+    ph_conn = ".".join(str(k + 1) for k in range(p_src))
+    dss.Text.Command(
+        f"New Circuit.pgml_dyn phases={p_src} basekv={kv_slack} "
+        f"bus1={busname[slack_node]}.{ph_conn} pu=1.0 angle=0.0 frequency={f0} "
+        "r1=1e-6 x1=1e-6 r0=1e-6 x0=1e-6"
+    )
+
+    # Lines: R1/X1/R0/X0 from the 3×3 phase matrices (same as seq-aware path).
+    for ln in grid.branches:
+        if not (
+            isinstance(ln, Line) and ln.in_service and ln.conductor_geometry is None
+        ):
+            continue
+        p = len(ln.from_phases)
+        ph_suffix = ".".join(str(k + 1) for k in range(p))
+        bus1 = f"{busname[ln.from_node]}.{ph_suffix}"
+        bus2 = f"{busname[ln.to_node]}.{ph_suffix}"
+        length = to_float(ln.length_m)
+
+        if p == 3:
+            r_mat = (
+                np.array(
+                    [
+                        [
+                            to_float(ln.series_resistance_ohm_per_m[i][j])
+                            for j in range(p)
+                        ]
+                        for i in range(p)
+                    ]
+                )
+                * length
+            )
+            l_mat = (
+                np.array(
+                    [
+                        [to_float(ln.series_inductance_h_per_m[i][j]) for j in range(p)]
+                        for i in range(p)
+                    ]
+                )
+                * length
+            )
+            z_f0 = r_mat + 1j * w0 * l_mat
+            diag = np.diag(z_f0)
+            zs = diag.mean()
+            zm = (z_f0.sum() - diag.sum()) / 6.0
+            z1 = zs - zm
+            z0 = zs + 2.0 * zm
+            r1, x1 = z1.real, z1.imag
+            r0, x0 = z0.real, z0.imag
+            dss.Text.Command(
+                f"New Line.l{ln.id} phases=3 bus1={bus1} bus2={bus2} "
+                f"r1={r1:.10g} x1={x1:.10g} c1=0 "
+                f"r0={r0:.10g} x0={x0:.10g} c0=0 "
+                "length=1 units=m"
+            )
+        else:
+            r1 = to_float(ln.series_resistance_ohm_per_m[0][0]) * length
+            l1 = to_float(ln.series_inductance_h_per_m[0][0]) * length
+            x1 = w0 * l1
+            dss.Text.Command(
+                f"New Line.l{ln.id} phases=1 bus1={bus1} bus2={bus2} "
+                f"r1={r1:.10g} x1={x1:.10g} c1=0 "
+                f"r0={r1:.10g} x0={x1:.10g} c0=0 "
+                "length=1 units=m"
+            )
+
+    # Switches: pure-R Lines (no Carson correction at X=0).
+    for b in grid.branches:
+        if not (isinstance(b, Switch) and b.in_service and b.closed):
+            continue
+        p = len(b.from_phases)
+        ph_suffix = ".".join(str(k + 1) for k in range(p))
+        bus1 = f"{busname[b.from_node]}.{ph_suffix}"
+        bus2 = f"{busname[b.to_node]}.{ph_suffix}"
+        r_sw = to_float(b.resistance_ohm)
+        dss.Text.Command(
+            f"New Line.sw{b.id} phases={p} bus1={bus1} bus2={bus2} "
+            f"r1={r_sw:.10g} x1=0.0 c1=0.0 r0={r_sw:.10g} x0=0.0 c0=0.0 "
+            "length=1 units=m"
+        )
+
+    # Transformers: REAL OpenDSS Transformer elements.
+    # Back-calculate %R per winding and XHL from the stored LV-referred R (Ω) and L (H).
+    # Reference kVA = 1000 kVA chosen to keep %R and XHL in a numerically comfortable
+    # range; any consistent kVA works because the per-unit values are kVA-independent.
+    kva_ref = 1000.0
+    lv_voltage_bases_kv: set = set()
+    for t in grid.branches:
+        if not (isinstance(t, Transformer) and t.in_service):
+            continue
+        p = len(t.from_phases)
+        ph_str = ".".join(str(k + 1) for k in range(p))
+        u_from_kv = float(t.u_rated_from_v) / 1000.0
+        u_to_kv = float(t.u_rated_to_v) / 1000.0
+        lv_voltage_bases_kv.add(round(u_to_kv, 6))
+
+        r_t = to_float(t.series_resistance_ohm)
+        l_t = to_float(t.series_inductance_h)
+        x_t = w0 * l_t
+        # Z_base_LV = U_to² / kVA (LV LL voltage, single-phase reference base).
+        z_base_lv = (u_to_kv**2 * 1e6) / (kva_ref * 1e3)
+        # Total leakage in % of base; split equally between the two windings.
+        vkr_total = (r_t / z_base_lv) * 100.0
+        vk_total = (abs(r_t + 1j * x_t) / z_base_lv) * 100.0
+        xhl = math.sqrt(max(vk_total**2 - vkr_total**2, 0.0))
+        pct_r_per_winding = vkr_total / 2.0
+
+        # Connection strings and LeadLag from the schema.
+        from_conn_str = "delta" if str(t.from_connection).endswith("DELTA") else "wye"
+        to_conn_str = "delta" if str(t.to_connection).endswith("DELTA") else "wye"
+        # shift_deg > 0 → LV lags HV (Dyn1) → LeadLag=Lag.
+        # shift_deg < 0 or 330 → LV leads HV (Dyn11) → LeadLag=Lead.
+        shift = float(t.tap.shift_deg)
+        lead_lag = "Lag" if (0.0 < shift < 180.0) else "Lead"
+
+        bus_from = f"{busname[t.from_node]}.{ph_str}"
+        bus_to = f"{busname[t.to_node]}.{ph_str}"
+
+        dss.Text.Command(f"New Transformer.T{t.id} windings=2")
+        dss.Text.Command(
+            f"~ wdg=1 bus={bus_from} conn={from_conn_str} kV={u_from_kv:.8g} "
+            f"kVA={kva_ref:.6g} %R={pct_r_per_winding:.10g}"
+        )
+        dss.Text.Command(
+            f"~ wdg=2 bus={bus_to} conn={to_conn_str} kV={u_to_kv:.8g} "
+            f"kVA={kva_ref:.6g} %R={pct_r_per_winding:.10g} Rneut=0 Xneut=0"
+        )
+        # XRConst=No (default): R const, X∝h — matches pgml's harmonic model.
+        dss.Text.Command(f"~ XHL={xhl:.10g} XRConst=No LeadLag={lead_lag}")
+
+    # Voltage bases: slack (HV) + all LV buses.
+    vbases_str = ", ".join(
+        [f"{kv_slack:.6g}"] + [f"{kv:.6g}" for kv in sorted(lv_voltage_bases_kv)]
+    )
+    dss.Text.Command(f"Set voltagebases=[{vbases_str}]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+
+
+def opendss_dyn_transformer_harmonic_voltages(
+    grid: Grid,
+    harmonic_injection: Optional[dict],
+    orders: Sequence[int],
+    *,
+    slack: str = "norton",
+    v1: Optional[np.ndarray] = None,
+    operating_point: Optional[dict] = None,
+) -> np.ndarray:
+    """Live OpenDSS harmonic oracle using REAL OpenDSS Transformer elements.
+
+    This is the genuine vector-group validation oracle: OpenDSS's own
+    ``Transformer`` element (with ``conn=delta``/``conn=wye``, ``LeadLag=Lag``
+    for Dyn1, ``XRConst=No``) is included in the OpenDSS circuit alongside the
+    lines and switches.  OpenDSS applies its own transformer model (R const,
+    X∝h when ``XRConst=No``) plus the correct delta/wye incidence for zero-
+    sequence blocking.
+
+    Because OpenDSS's real transformer is in the circuit, the stub Norton
+    subtract-and-replace technique from :func:`opendss_harmonic_voltages` is
+    applied ONLY to the source Norton (no transformer formula correction is
+    needed — OpenDSS models the transformer natively).  The transformer
+    contribution is read directly from ``SystemY`` at each harmonic.
+
+    **Key validation property:** a delta winding in OpenDSS (and in pgml's new
+    assembly) blocks zero-sequence current, so triplen harmonic orders (h=3, 9,
+    …) injected on the LV wye side do NOT propagate through the HV delta
+    winding to the MV bus.  Both pgml and this oracle should agree tightly on
+    these orders.
+
+    **Residual discrepancy:** non-triplen orders (h=5, 11) will show the same
+    ~1e-8 V discrepancy as the existing seq-aware path (OpenDSS applies its own
+    Carson/Deri correction to the R1/X1 lines, which differs from pgml's
+    ``sequence_aware`` earth-return model).  This is the expected and documented
+    line-model gap.
+
+    Parameters
+    ----------
+    grid:
+        Materialised three-phase :class:`~pgml.schemas.grid_schema.Grid`.
+        Lines must carry ``harmonic_line_model=sequence_aware`` tags (the same
+        prerequisite as :func:`opendss_harmonic_voltages`).
+    harmonic_injection:
+        Per-device harmonic-current spec
+        ``{appliance_id: {order: (magnitude_pu, phase_deg)}}``.
+    orders:
+        Harmonic orders to solve (e.g. ``[1, 3, 5, 9, 11]``).  Order 1 returns
+        ``v1`` directly.
+    slack:
+        Only ``"norton"`` is implemented.
+    v1:
+        Optional pre-computed fundamental voltage vector ``[N]`` (complex numpy).
+    operating_point:
+        Optional per-device operating-point override; used only when ``v1 is None``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex ``[H, N]`` — ``H = len(orders)``, ``N = index.size``.
+
+    Raises
+    ------
+    ValueError
+        If ``slack != "norton"`` or the grid is not three-phase seq-aware.
+
+    See Also
+    --------
+    opendss_harmonic_voltages : Live oracle with pgml-stamped transformers.
+    numpy_harmonic_voltages : Pure-numpy regression oracle (machine-precision parity).
+    """
+    import opendssdirect as dss
+
+    if slack != "norton":
+        raise ValueError(
+            f"opendss_dyn_transformer_harmonic_voltages supports only slack='norton';"
+            f" got {slack!r}"
+        )
+    if not _is_sequence_aware_grid(grid):
+        raise ValueError(
+            "opendss_dyn_transformer_harmonic_voltages requires lines tagged "
+            "harmonic_line_model=sequence_aware (three-phase seq-aware path)."
+        )
+
+    from pgml.assembly import node_phase_index
+    from pgml.schemas.grid_schema import Generator as PgmlGen, Load as PgmlLoad
+
+    orders_list = [int(h) for h in orders]
+    index = node_phase_index(grid)
+    n = index.size
+    f0 = float(grid.base_frequency_hz)
+    busname = {int(nd.id): f"bus{int(nd.id)}" for nd in grid.nodes}
+
+    # --- Build OpenDSS circuit with real transformers ---
+    _build_circuit_with_real_transformer(grid, busname)
+
+    node_order_dss = list(dss.Circuit.YNodeOrder())
+    n_dss = len(node_order_dss)
+
+    def _dss_node_id(entry: str) -> int:
+        return int(entry.upper().split(".")[0][3:])
+
+    def _dss_phase_index(entry: str) -> int:
+        parts = entry.split(".")
+        if len(parts) < 2:
+            return 0
+        try:
+            return int(parts[1]) - 1
+        except ValueError:
+            return 0
+
+    phases_list = [Phase.A, Phase.B, Phase.C, Phase.N]
+    rowmap_dss_to_pgml: dict[int, int] = {}
+    for di, entry in enumerate(node_order_dss):
+        nid = _dss_node_id(entry)
+        ph_idx = _dss_phase_index(entry)
+        phase = phases_list[ph_idx] if ph_idx < len(phases_list) else Phase.A
+        try:
+            pgml_row = index.row(nid, phase)
+        except (KeyError, ValueError):
+            pgml_row = index.row(nid, Phase.A)
+        rowmap_dss_to_pgml[di] = pgml_row
+
+    src = next(a for a in grid.appliances if isinstance(a, Source) and a.in_service)
+    slack_node = int(src.node)
+    slack_dss_rows = [
+        di for di, e in enumerate(node_order_dss) if _dss_node_id(e) == slack_node
+    ]
+    p_src = len(src.phases)
+
+    # --- Fundamental voltage ---
+    if v1 is None:
+        v1_eff = numpy_harmonic_voltages(
+            grid,
+            None,
+            [1],
+            slack="norton",
+            v1=None,
+            operating_point=operating_point,
+        )[0]
+    else:
+        v1_arr = np.asarray(v1).reshape(-1)
+        if v1_arr.shape[0] != n:
+            raise ValueError(
+                f"v1 has {v1_arr.shape[0]} entries but grid has N={n} rows"
+            )
+        v1_eff = v1_arr.astype(complex)
+
+    # --- Per-device injection setup ---
+    devs = []
+    for a in grid.appliances:
+        if not (isinstance(a, (PgmlLoad, PgmlGen)) and getattr(a, "in_service", True)):
+            continue
+        if harmonic_injection is not None and a.id in harmonic_injection:
+            spec: dict = {
+                int(o): (float(mag), float(ang))
+                for o, (mag, ang) in harmonic_injection[a.id].items()
+            }
+        else:
+            s = getattr(a, "spectrum", None)
+            if not isinstance(s, StaticSpectrum):
+                continue
+            spec = {
+                c.order: (to_float(c.magnitude_pu), to_float(c.phase_deg))
+                for c in s.spectrum.components
+            }
+        if not spec:
+            continue
+        n_ph = len(a.phases)
+        src_rows = index.rows(a.node)
+        sign = 1.0 if isinstance(a, PgmlLoad) else -1.0
+        p_total, q_total = to_float(a.p_nom_w), to_float(a.q_nom_var)
+        p_pp = (
+            [to_float(x) for x in a.p_nom_per_phase_w]
+            if getattr(a, "p_nom_per_phase_w", None) is not None
+            else [p_total / n_ph] * n_ph
+        )
+        q_pp = (
+            [to_float(x) for x in a.q_nom_per_phase_var]
+            if getattr(a, "q_nom_per_phase_var", None) is not None
+            else [q_total / n_ph] * n_ph
+        )
+        i1_list = []
+        for k_ph, row in enumerate(src_rows):
+            v_term = v1_eff[row]
+            s0_ph = complex(sign * p_pp[k_ph], sign * q_pp[k_ph])
+            if abs(v_term) < 1e-300:
+                i1_list.append(0.0 + 0j)
+            else:
+                i1_list.append(np.conj(s0_ph) / np.conj(v_term))
+        devs.append((spec, src_rows, i1_list))
+
+    def _build_injection(h: int) -> np.ndarray:
+        i_h = np.zeros(n, dtype=complex)
+        for spec, src_rows, i1_list in devs:
+            mag1, ang1 = spec.get(1, (1.0, 0.0))
+            mag_h, ang_h = spec.get(h, (0.0, 0.0))
+            if mag1 == 0.0:
+                continue
+            ratio = mag_h / mag1
+            for i1_val, row in zip(i1_list, src_rows):
+                i_drawn = (
+                    ratio
+                    * abs(i1_val)
+                    * cmath.exp(
+                        1j
+                        * (
+                            math.radians(ang_h)
+                            + h * (cmath.phase(i1_val) - math.radians(ang1))
+                        )
+                    )
+                )
+                i_h[row] += -i_drawn
+        return i_h
+
+    def _build_harmonic_ybus_with_real_trafo(h: int) -> np.ndarray:
+        """Read OpenDSS SystemY (with real transformer) and replace stub Norton."""
+        dss.Text.Command(f"set frequency={h * f0}")
+        dss.Solution.BuildYMatrix(2, 1)
+
+        # Read stub Norton from YPrim.
+        dss.Circuit.SetActiveElement("Vsource.Source")
+        yp_flat = np.array(dss.CktElement.YPrim())
+        yp = (yp_flat[0::2] + 1j * yp_flat[1::2]).reshape(2 * p_src, 2 * p_src)
+        y_stub_block = yp[:p_src, :p_src]
+
+        y_flat = np.array(dss.Circuit.SystemY(), dtype=np.float64)
+        y_dss = (y_flat[0::2] + 1j * y_flat[1::2]).reshape(n_dss, n_dss)
+        y_out = np.zeros((n, n), dtype=complex)
+        for di in range(n_dss):
+            for dj in range(n_dss):
+                y_out[rowmap_dss_to_pgml[di], rowmap_dss_to_pgml[dj]] = y_dss[di, dj]
+
+        # Subtract stub Norton and add pgml-exact source Norton.
+        for pi in range(p_src):
+            for pj in range(p_src):
+                ri = rowmap_dss_to_pgml[slack_dss_rows[pi]]
+                rj = rowmap_dss_to_pgml[slack_dss_rows[pj]]
+                y_out[ri, rj] -= y_stub_block[pi, pj]
+        _stamp_source_nortons(y_out, grid, h, index)
+
+        return y_out
+
+    # --- Per-order solve ---
+    result_slices: list[np.ndarray] = []
+    for h in orders_list:
+        if h == 1:
+            result_slices.append(v1_eff)
+            continue
+        y_h = _build_harmonic_ybus_with_real_trafo(h)
+        i_h = _build_injection(h)
+        result_slices.append(np.linalg.solve(y_h, i_h))
+
+    return np.stack(result_slices, axis=0)  # [H, N]
+
+
 __all__ = [
     "ieee33_geometry_grid",
     "cigre_lv_geometry_grid",
@@ -1838,4 +2329,5 @@ __all__ = [
     "numpy_harmonic_profiles",
     "numpy_harmonic_voltages",
     "opendss_harmonic_voltages",
+    "opendss_dyn_transformer_harmonic_voltages",
 ]

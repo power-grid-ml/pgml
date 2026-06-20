@@ -45,6 +45,13 @@ from pgml.schemas.grid_schema import (
 )
 
 from ._incidence import build_incidence, group_appliances, used_rows
+from ._transformer import (
+    block_incidence,
+    group_key as _xfmr_group_key,
+    nominal_turns_ratio,
+    resolve_vector_group,
+    winding_leakage_block,
+)
 from ._params import (
     const_z_shunt_admittance,
     phase_voltage_magnitude,
@@ -913,121 +920,127 @@ def _stamp_const_z_loads(
     return y
 
 
-# ---- transformer (in-phase ratio + leakage pi; vector-group deferred) -----
+# ---- transformer (vector-group winding-incidence primitive) ---------------
 def _stamp_transformers(grid, f, y, index, cdt, rdt, device, param_overrides):
-    """Two-winding transformer stamp: in-phase complex-tap leakage pi.
+    """Two-winding transformer stamp: vector-group winding-incidence primitive.
 
-    Implemented (M1)
-    ----------------
-    - Per-phase series leakage admittance ``y_se = (R + jX(f))^-1`` (scalar per
-      phase, X(f)=2*pi*f*L) with the magnetizing shunt ``y_m = G_m + jB_m`` added
-      to the HV-side diagonal.
-    - Off-nominal complex tap ``t = ratio_magnitude * exp(j*shift_deg)`` applied as
-      the standard two-port leakage-pi primitive:
-          Y_ff = y_se / |t|^2,  Y_ft = -y_se / conj(t),
-          Y_tf = -y_se / t,     Y_tt = y_se
-      (the textbook off-nominal-tap pi; with ``shift_deg=0`` this is the real-ratio
-      transformer). This handles the in-phase ratio AND a uniform per-phase phase
-      shift differentiably w.r.t. R, L, and the tap.
+    The nodal block is built in the winding-voltage domain and mapped to the bus
+    phase rows by a constant real incidence ``N`` (``Y_node = Nᵀ Y_winding N``), so
+    the winding connections (wye / grounded-wye / delta) and the clock / vector
+    group are modelled explicitly. A delta winding blocks the zero sequence (traps
+    triplen / residual harmonics) and supplies the intrinsic ``√3`` magnitude and
+    ``±30°`` phase shift; the nominal turns ratio comes from the rated voltages +
+    connections, so ``tap.ratio_magnitude`` is the OFF-NOMINAL tap only. See
+    :mod:`pgml.assembly._transformer` for the full derivation.
 
-    Deferred to M2 (marked, not implemented)
-    ----------------------------------------
-    - Full vector-group phase-domain coupling (Dyn / Yd connection matrices that
-      mix phases), zero-sequence path from winding connection, and neutral
-      grounding impedance. These require the connection-dependent incidence
-      matrices; M1 treats the transformer as a per-phase (diagonal) coupled
-      two-port using ``tap.shift_deg`` as a uniform phase shift only.
+    - Leakage admittance ``y_se = (R + jX(f))^-1`` (scalar per phase, X(f)=2πfL),
+      referred to the TO-side (LV) coil, carried through the incidence transform.
+    - Magnetizing shunt ``y_m = G_m + jB_m`` added to the HV terminal phase
+      diagonal directly (referred to the HV line voltage).
+
+    Differentiable w.r.t. series R, L and the off-nominal tap magnitude; the
+    discrete vector-group connections / clock select the constant incidence ``N``.
     """
     xfmrs = [b for b in grid.branches if isinstance(b, Transformer) and b.in_service]
     if not xfmrs:
         return y
-    by_p: dict[int, list] = {}
+    # Group transformers sharing one incidence N (same connection pair, clock, P).
+    by_key: dict[tuple, list] = {}
+    vgs: dict[int, object] = {}
     for t in xfmrs:
-        by_p.setdefault(len(t.from_phases), []).append(t)
-    for p, group in by_p.items():
-        eye = torch.eye(p, dtype=rdt, device=device)
-        r_list, l_list, gm_list, lm_list, tap_mag_list, tap_shift_list = (
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
+        vg = resolve_vector_group(t)
+        vgs[id(t)] = vg
+        by_key.setdefault(_xfmr_group_key(vg, len(t.from_phases)), []).append(t)
+
+    two_pi_f = (2.0 * torch.pi) * f  # [H]
+    for (_fk, _tk, _ct, p), group in by_key.items():
+        vg0 = vgs[id(group[0])]
+        eye_p = torch.eye(p, dtype=cdt, device=device)
+
+        yse_list, ratio_list, ym_list = [], [], []
         for t in group:
-            r_list.append(
-                _override(
-                    param_overrides,
-                    ("transformer", t.id, "series_resistance_ohm"),
-                    torch.as_tensor(t.series_resistance_ohm, dtype=rdt, device=device),
+            vg = vgs[id(t)]
+            r = _override(
+                param_overrides,
+                ("transformer", t.id, "series_resistance_ohm"),
+                torch.as_tensor(t.series_resistance_ohm, dtype=rdt, device=device),
+            )
+            ell = _override(
+                param_overrides,
+                ("transformer", t.id, "series_inductance_h"),
+                torch.as_tensor(t.series_inductance_h, dtype=rdt, device=device),
+            )
+            x = two_pi_f * ell  # [H]
+            z = torch.complex(r.to(rdt).expand_as(x), x.to(rdt)).to(cdt)  # [H]
+            yse_list.append(1.0 / z)  # [H]
+
+            tap_mag = _override(
+                param_overrides,
+                ("transformer", t.id, "tap_magnitude"),
+                torch.as_tensor(t.tap.ratio_magnitude, dtype=rdt, device=device),
+            )
+            u_from = torch.as_tensor(t.u_rated_from_v, dtype=rdt, device=device)
+            u_to = torch.as_tensor(t.u_rated_to_v, dtype=rdt, device=device)
+            if p == 1:
+                # Single-phase / positive-sequence equivalent: the vector group is
+                # folded into a complex line-to-line ratio (magnitude n_LL, clock
+                # phase shift), the textbook off-nominal-tap pi.
+                theta = math.radians(vg.shift_deg)
+                rot = torch.complex(
+                    torch.as_tensor(math.cos(theta), dtype=rdt, device=device),
+                    torch.as_tensor(math.sin(theta), dtype=rdt, device=device),
                 )
-                * eye
-            )
-            l_list.append(
-                _override(
-                    param_overrides,
-                    ("transformer", t.id, "series_inductance_h"),
-                    torch.as_tensor(t.series_inductance_h, dtype=rdt, device=device),
+                ratio_list.append((u_from / u_to * tap_mag).to(cdt) * rot)  # scalar
+            else:
+                # Phase-domain coil turns ratio (real; √3 + clock come from N).
+                ratio_list.append(
+                    (nominal_turns_ratio(vg, u_from, u_to) * tap_mag).to(cdt)
                 )
-                * eye
-            )
-            gm_list.append(
-                torch.as_tensor(t.magnetizing_conductance_s, dtype=rdt, device=device)
-            )
-            # B_m(h) = -1/(2*pi*f*L_m); store L_m (or +inf -> 0 susceptance).
+
+            gm = torch.as_tensor(t.magnetizing_conductance_s, dtype=rdt, device=device)
             lm = t.magnetizing_inductance_h
-            lm_list.append(
-                torch.as_tensor(
-                    lm if lm is not None else math.inf, dtype=rdt, device=device
-                )
+            lm_t = torch.as_tensor(
+                lm if lm is not None else math.inf, dtype=rdt, device=device
             )
-            tap_mag_list.append(
-                _override(
-                    param_overrides,
-                    ("transformer", t.id, "tap_magnitude"),
-                    torch.as_tensor(t.tap.ratio_magnitude, dtype=rdt, device=device),
-                )
-            )
-            tap_shift_list.append(
-                _override(
-                    param_overrides,
-                    ("transformer", t.id, "tap_shift_deg"),
-                    torch.as_tensor(t.tap.shift_deg, dtype=rdt, device=device),
-                )
-            )
-        r = torch.stack(r_list, 0)  # [K,P,P]
-        ind = torch.stack(l_list, 0)
-        ys = series_admittance_matrix(r, ind, f, cdt)  # [H,K,P,P] leakage admittance
+            bm = -1.0 / (two_pi_f * lm_t)  # [H]; lm=inf -> 0
+            ym_list.append(torch.complex(gm.expand_as(bm), bm).to(cdt))  # [H]
 
-        # magnetizing shunt (scalar per transformer) on the HV diagonal.
-        gm = torch.stack(gm_list, 0)  # [K]
-        lm = torch.stack(lm_list, 0)  # [K]
-        two_pi_f = (2.0 * torch.pi) * f  # [H]
-        bm = -1.0 / (two_pi_f[:, None] * lm[None])  # [H,K]; lm=inf -> 0
-        ym_scalar = torch.complex(
-            gm[None].expand_as(bm).to(_rdtype(cdt)), bm.to(_rdtype(cdt))
-        ).to(cdt)  # [H,K]
-        ym = ym_scalar[:, :, None, None] * eye.to(cdt)  # [H,K,P,P]
+        y_se = torch.stack(yse_list, dim=1)  # [H,K]
+        ratio = torch.stack(ratio_list, dim=0)  # [K]
+        if p == 1:
+            block = _scalar_tap_blocks(y_se, ratio)  # [H,K,2,2]
+        else:
+            n_block = block_incidence(vg0, p, rdt, device)  # [2P,2P]
+            block = winding_leakage_block(y_se, ratio, n_block)  # [H,K,2P,2P]
 
-        # complex tap t = mag * exp(j*shift)
-        mag = torch.stack(tap_mag_list, 0)  # [K]
-        shift = torch.stack(tap_shift_list, 0) * (math.pi / 180.0)  # [K] radians
-        t = torch.polar(mag.to(_rdtype(cdt)), shift.to(_rdtype(cdt))).to(cdt)  # [K]
-        t = t[None, :, None, None]  # [1,K,1,1]
-        t_conj = torch.conj(t)
-        abs_t2 = (mag * mag).to(cdt)[None, :, None, None]
+        # Magnetizing shunt on the HV terminal diagonal (outside the incidence).
+        ym = torch.stack(ym_list, dim=1)  # [H,K]
+        ym_hv = ym[:, :, None, None] * eye_p  # [H,K,P,P]
+        ym_full = torch.nn.functional.pad(ym_hv, (0, p, 0, p))  # [H,K,2P,2P]
+        block = block + ym_full
 
-        y_ff = ys / abs_t2 + ym  # HV-HV
-        y_ft = -ys / t_conj  # HV-LV
-        y_tf = -ys / t  # LV-HV
-        y_tt = ys  # LV-LV
-        block = torch.cat(
-            [torch.cat([y_ff, y_ft], dim=-1), torch.cat([y_tf, y_tt], dim=-1)],
-            dim=-2,
-        )  # [H,K,2P,2P]
         rows, cols = _series_terminal_indices(group, index, device)
         y = scatter_blocks_into(y, block, rows, cols)
     return y
+
+
+def _scalar_tap_blocks(y_se: Tensor, t: Tensor) -> Tensor:
+    """Off-nominal complex-tap pi for a single-phase / positive-sequence unit.
+
+    ``y_se`` ``[H, K]`` leakage admittance (LV-referred), ``t`` ``[K]`` complex
+    ratio ``n·e^{jθ}``. Returns the ``[H, K, 2, 2]`` primitive::
+
+        [[ y/|t|² , −y/conj(t) ],
+         [ −y/t   ,     y      ]]
+    """
+    t_c = t[None, :]  # [1,K]
+    y_ff = y_se / (t_c * torch.conj(t_c))  # HV-HV
+    y_ft = -y_se / torch.conj(t_c)  # HV-LV
+    y_tf = -y_se / t_c  # LV-HV
+    y_tt = y_se  # LV-LV
+    top = torch.stack([y_ff, y_ft], dim=-1)  # [H,K,2]
+    bot = torch.stack([y_tf, y_tt], dim=-1)
+    return torch.stack([top, bot], dim=-2)  # [H,K,2,2]
 
 
 # ---------------------------------------------------------------------------

@@ -114,9 +114,11 @@ def test_pgm_single_phase_equiv_phases():
     assert src.phases == (Phase.A,)
 
 
-def test_pp_three_phase_transformer_warns_once(caplog):
-    """A transformer under THREE_PHASE warns that vector-group coupling and
-    zero-sequence are not modeled (per-phase diagonal stamp is approximate)."""
+def test_pp_three_phase_transformer_vector_group(caplog):
+    """A transformer under THREE_PHASE carries an explicit Dyn vector group and
+    emits no "not modeled" warning (the phase-domain stamp models it)."""
+    from pgml.schemas.grid_schema import Transformer, WindingConnection
+
     net = pp.create_empty_network(f_hz=50.0)
     b_hv = pp.create_bus(net, vn_kv=20.0, name="hv")
     b_lv = pp.create_bus(net, vn_kv=0.4, name="lv")
@@ -136,19 +138,15 @@ def test_pp_three_phase_transformer_warns_once(caplog):
     pp.create_load(net, bus=b_lv, p_mw=0.1, q_mvar=0.02)
 
     with caplog.at_level("WARNING", logger="pgml"):
-        pp_to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
-    warnings = [
-        r
-        for r in caplog.records
-        if r.levelname == "WARNING" and "vector-group" in r.message
-    ]
-    assert len(warnings) == 1
-
-    # SINGLE_PHASE_EQUIV must NOT emit the transformer warning.
-    caplog.clear()
-    with caplog.at_level("WARNING", logger="pgml"):
-        pp_to_grid(net, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+        grid, _ = pp_to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
     assert not any("vector-group" in r.message for r in caplog.records)
+
+    trafo = next(b for b in grid.branches if isinstance(b, Transformer))
+    assert trafo.from_connection == WindingConnection.DELTA
+    assert trafo.to_connection == WindingConnection.WYE_GROUNDED
+    # Nominal ratio lives in u_rated; tap is off-nominal only.
+    assert abs(float(trafo.tap.ratio_magnitude) - 1.0) < 1e-12
+    assert abs(float(trafo.u_rated_from_v) / float(trafo.u_rated_to_v) - 50.0) < 1e-9
 
 
 def test_pp_multi_ext_grid_first_slack_wins():

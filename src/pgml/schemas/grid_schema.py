@@ -653,11 +653,22 @@ class Line(BranchBase):
 
 class ComplexTap(GridModel):
     """Off-nominal tap as a complex ratio: magnitude + phase shift (clock/vector group).
-    Dimensionless; the one place a complex value is parameterised, as mag+angle."""
+    Dimensionless; the one place a complex value is parameterised, as mag+angle.
 
-    ratio_magnitude: PosNum = Field(description="Tap ratio magnitude (1.0 = nominal).")
+    The transformer's NOMINAL turns ratio is derived from the rated voltages
+    (``u_rated_from_v``/``u_rated_to_v``) and the winding connections, so
+    ``ratio_magnitude`` is the OFF-NOMINAL tap deviation (1.0 = nominal, on-tap) and
+    ``shift_deg`` carries the vector-group clock angle (``clock·30°``; e.g. 30 for
+    Dyn1, 330 for Dyn11)."""
+
+    ratio_magnitude: PosNum = Field(
+        description="Off-nominal tap ratio magnitude (1.0 = nominal / on-tap)."
+    )
     shift_deg: Num = si_field(
-        "Phase shift from tap/vector group.", short="deg", long="degree", default=0.0
+        "Phase shift from the vector-group clock (clock·30°) plus any phase-shifter tap.",
+        short="deg",
+        long="degree",
+        default=0.0,
     )
 
 
@@ -720,14 +731,14 @@ class Transformer(BranchBase):
         "Positive-sequence series (leakage) resistance, per-phase scalar.",
         short="Ohm",
         long="ohm",
-        reference="referred to HV side",
+        reference="referred to the to-side (LV) winding coil",
         default=None,
     )
     series_inductance_h: Optional[Num] = si_field(
         "Positive-sequence series (leakage) inductance. X(h)=2*pi*h*f0*L.",
         short="H",
         long="henry",
-        reference="referred to HV side",
+        reference="referred to the to-side (LV) winding coil",
         default=None,
     )
     magnetizing_conductance_s: Num = si_field(

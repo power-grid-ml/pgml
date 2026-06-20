@@ -171,16 +171,22 @@ linear system; the source is an ideal slack (`solve_harmonic(fixed_rows, v_fixed
 ## NONLINEAR power-flow oracle status (`solve_power_flow`, const-power)
 - IEEE33, DEFAULT const-power `pp.runpp`: `solve_power_flow(slack="ideal")` matches
   `res_bus` to ~3.2e-9 pu / 1.3e-7 deg. `tests/reference/test_ieee33_power_flow_pandapower.py`.
-- CIGRE LV (`create_cigre_network_lv`, 44 bus, 3 Dyn30 MV/LV trafos, bus-bus CBs):
+- CIGRE LV (`create_cigre_network_lv`, 44 bus, 3 Dyn1 20/0.4 kV MV/LV trafos, bus-bus CBs):
   matches to ~1.1e-7 pu / 2.1e-6 deg. `tests/reference/test_cigre_lv_pandapower.py`.
 
 ## pandapower converter — element coverage (extended)
 `to_grid` now handles `bus`, `line`, `load`, `ext_grid`, **`trafo`**, and **bus-bus
 `switch`** (`et='b'`, modelled as near-ideal `Switch`, R=1e-4 Ω). `id_map` adds
 `"trafo"` and `"switch"`. Transformer convention: leakage `y_se` referred to the LV
-side with `tap.ratio_magnitude = n = vn_hv/vn_lv` and `tap.shift_deg` = the Dyn clock
-shift (matches the assembly's off-nominal-tap pi stamp `Y_ff=y_se/|t|^2, Y_tt=y_se`).
-Full vector-group / zero-sequence phase coupling is M2 (positive-sequence only now).
+coil; the NOMINAL ratio + vector-group shift come from `u_rated_from/to_v` +
+`from_connection`/`to_connection`, so `tap = (ratio_magnitude=1.0, shift_deg=clock·30)`
+is the OFF-NOMINAL tap + clock only. The CIGRE LV trafos are Dyn1
+(`from_connection=DELTA`, `to_connection=WYE_GROUNDED`, `shift_degree=30`); assembly
+builds the full vector-group winding-incidence primitive (delta blocks zero-sequence
+/ triplen harmonics). See `references/opendss/transformer.md`. pandapower tap-changer
+positions (`tap_pos`/`tap_step`) are not read yet (off-nominal tap stays 1.0). The
+OpenDSS converter does NOT emit transformers yet (DSS `Transformer` parsing is a
+documented gap; CIGRE/IEEE feeders enter via pandapower).
 
 ## Cross-converter conventions (single-phase positive-sequence equivalent)
 - CANONICAL `u_rated_v` for any node is LINE-TO-LINE (`vn_kv*1000` / `u_rated*1`

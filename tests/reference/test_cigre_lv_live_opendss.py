@@ -54,10 +54,14 @@ from pgml.assembly import node_phase_index  # noqa: E402
 from pgml.convert.pandapower import PhaseMode  # noqa: E402
 from pgml.evaluation.references import (  # noqa: E402
     cigre_lv_full_grid,
+    opendss_dyn_transformer_harmonic_voltages,
     opendss_harmonic_voltages,
 )
-from pgml.geometry.synthesis import apply_default_harmonic_model, synthesize_grid_geometry  # noqa: E402
-from pgml.schemas.grid_schema import Load  # noqa: E402
+from pgml.geometry.synthesis import (  # noqa: E402
+    apply_default_harmonic_model,
+    synthesize_grid_geometry,
+)
+from pgml.schemas.grid_schema import Load, Phase  # noqa: E402
 from pgml.solver import solve_harmonic_flow  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -336,3 +340,247 @@ class TestCigreLvLiveOracleThreePhaseSeqAware:
         # No synthesize_grid_geometry or apply_default_harmonic_model called
         with pytest.raises(ValueError, match="conductor_geometry|sequence_aware"):
             opendss_harmonic_voltages(grid, None, ORDERS)
+
+
+# ---------------------------------------------------------------------------
+# True live-OpenDSS Dyn transformer oracle (vector-group validation)
+# ---------------------------------------------------------------------------
+
+# Tolerance for this oracle vs pgml at non-triplen orders: the dominant residual
+# is the Carson line-model gap (~16 % relative at h=3 on short LV lines, and
+# ~1e-8 V on LV lines at h=5/11).  For non-triplen we use 1 V as a generous
+# bound that catches transformer formula bugs while remaining robust to the
+# line gap.
+ATOL_V_DYN_NON_TRIPLEN = 1.0  # V — captures the seq-aware line Carson gap
+
+# For triplen orders (h=3, h=9) the test primarily validates that the delta
+# winding BLOCKS zero-sequence current at the MV bus.  The LV-side triplen
+# voltage is non-zero (from the injection), but the MV bus must remain at
+# effectively zero regardless of which model is used.
+TRIPLEN_MV_ATOL_V = 1e-6  # V — both pgml and OpenDSS should agree MV ≈ 0
+
+# Inclusion spectrum (with triplen orders for delta blocking validation)
+TRIPLEN_ORDERS = [1, 3, 5, 9, 11]
+TRIPLEN_SPECTRUM = {
+    o: (mag, 0.0) for o, mag in [(1, 1.0), (3, 0.30), (5, 0.20), (9, 0.10), (11, 0.09)]
+}
+
+
+class TestCigreLvDynTransformerOracle:
+    """Vector-group validation: true OpenDSS Dyn1 transformer vs pgml assembly.
+
+    Uses :func:`opendss_dyn_transformer_harmonic_voltages` which includes the REAL
+    OpenDSS ``Transformer`` element (``conn=delta``, ``conn=wye``, ``LeadLag=Lag``
+    for the CIGRE LV Dyn1 transformers), unlike :func:`opendss_harmonic_voltages`
+    which stamps transformers using pgml's formula.
+
+    The primary assertion is triplen zero-sequence blocking:
+
+    - At h=3 and h=9, injection at LV nodes 3 and 25 creates significant LV
+      harmonic voltages (~2 V).
+    - The delta HV winding traps these currents inside the delta loop; the MV bus
+      (slack node 1 and the three HV transformer nodes 2, 21, 24) should carry
+      essentially zero h=3 / h=9 voltage (< 1e-6 V), for BOTH pgml and OpenDSS.
+    - Both models must agree on this property: the triplen voltages at the MV bus
+      must be < ``TRIPLEN_MV_ATOL_V = 1e-6 V`` in BOTH pgml and the oracle.
+
+    Non-triplen parity:
+
+    - At h=5 and h=11 the residual is the Carson line-model gap (~16 % relative on
+      short LV feeders, ~1e-8 V on medium-length LV cables).  The tolerance
+      ``ATOL_V_DYN_NON_TRIPLEN = 1 V`` covers this physical gap while remaining
+      tight enough to catch transformer formula regressions.
+    """
+
+    PHASE_MODE = PhaseMode.THREE_PHASE
+
+    def _solve(self, orders=None):
+        """Build seq-aware 3-phase grid, solve pgml + true-Dyn oracle."""
+        if orders is None:
+            orders = TRIPLEN_ORDERS
+        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
+        apply_default_harmonic_model(grid)
+
+        loads = [a for a in grid.appliances if isinstance(a, Load)]
+        inj_loads = [ld for ld in loads if ld.node in INJECTION_NODES]
+        harmonic_injection = {ld.id: TRIPLEN_SPECTRUM for ld in inj_loads}
+
+        hres = solve_harmonic_flow(
+            grid,
+            orders,
+            slack="norton",
+            harmonic_injection=harmonic_injection,
+            dtype=torch.complex128,
+        )
+        assert hres.pf.converged, (
+            f"THREE_PHASE solve_harmonic_flow did not converge "
+            f"(residual={float(hres.pf.residual):.3e})"
+        )
+
+        v1_np = hres.pf.v.detach().cpu().numpy()
+        v_oracle = opendss_dyn_transformer_harmonic_voltages(
+            grid,
+            harmonic_injection,
+            orders,
+            slack="norton",
+            v1=v1_np,
+        )
+        v_pgml = hres.v.detach().cpu().numpy()
+        return v_pgml, v_oracle, orders, grid
+
+    def test_fundamental_exact_match(self) -> None:
+        """Order 1 returned verbatim from v1 — bit-for-bit identical."""
+        v_pgml, v_oracle, orders, _ = self._solve()
+        k1 = orders.index(1)
+        np.testing.assert_array_equal(
+            v_oracle[k1],
+            v_pgml[k1],
+            err_msg="Dyn oracle order 1: must be bit-for-bit identical",
+        )
+
+    def test_triplen_zero_sequence_blocked_at_mv_pgml(self) -> None:
+        """pgml: triplen orders h=3 and h=9 are blocked at the MV bus.
+
+        The delta HV winding traps zero-sequence currents; both injecting-feeder
+        HV nodes and the slack MV node must carry < 1e-6 V at triplen orders.
+        """
+        v_pgml, _, orders, grid = self._solve()
+        index = node_phase_index(grid)
+
+        from pgml.schemas.grid_schema import Transformer
+
+        # HV nodes of all three transformers + slack
+        mv_nodes: set[int] = {
+            int(src.node) for src in grid.appliances if hasattr(src, "u_ref_v")
+        }
+        for b in grid.branches:
+            if isinstance(b, Transformer):
+                mv_nodes.add(int(b.from_node))
+
+        for h_ord in [3, 9]:
+            if h_ord not in orders:
+                continue
+            h_k = orders.index(h_ord)
+            for nid in mv_nodes:
+                for phase in [Phase.A, Phase.B, Phase.C]:
+                    try:
+                        r = index.row(nid, phase)
+                    except (KeyError, ValueError):
+                        continue
+                    v_mv = abs(v_pgml[h_k, r])
+                    assert v_mv < TRIPLEN_MV_ATOL_V, (
+                        f"pgml h={h_ord} node {nid} {phase}: |V| = {v_mv:.3e} V "
+                        f"exceeds {TRIPLEN_MV_ATOL_V:.0e} V — delta should block triplen"
+                    )
+
+    def test_triplen_zero_sequence_blocked_at_mv_oracle(self) -> None:
+        """OpenDSS oracle: triplen h=3 and h=9 are blocked at the MV bus.
+
+        Identical assertion using the true OpenDSS Dyn1 transformer model,
+        confirming that OpenDSS's delta winding also blocks zero-sequence to
+        the MV side.
+        """
+        _, v_oracle, orders, grid = self._solve()
+        index = node_phase_index(grid)
+
+        from pgml.schemas.grid_schema import Transformer
+
+        mv_nodes: set[int] = {
+            int(src.node) for src in grid.appliances if hasattr(src, "u_ref_v")
+        }
+        for b in grid.branches:
+            if isinstance(b, Transformer):
+                mv_nodes.add(int(b.from_node))
+
+        for h_ord in [3, 9]:
+            if h_ord not in orders:
+                continue
+            h_k = orders.index(h_ord)
+            for nid in mv_nodes:
+                for phase in [Phase.A, Phase.B, Phase.C]:
+                    try:
+                        r = index.row(nid, phase)
+                    except (KeyError, ValueError):
+                        continue
+                    v_mv = abs(v_oracle[h_k, r])
+                    assert v_mv < TRIPLEN_MV_ATOL_V, (
+                        f"OpenDSS oracle h={h_ord} node {nid} {phase}: |V| = {v_mv:.3e} V "
+                        f"exceeds {TRIPLEN_MV_ATOL_V:.0e} V — DSS delta should block triplen"
+                    )
+
+    def test_triplen_lv_injection_nonzero(self) -> None:
+        """h=3 voltages at directly injected LV transformer busbars are non-trivial.
+
+        Confirms the triplen current is flowing on the LV side (the injection
+        is active), and that blocking is specifically at the transformer delta.
+        The LV busbars (nodes 3 and 25) should carry ~2 V at h=3.
+        """
+        v_pgml, _, orders, grid = self._solve()
+        index = node_phase_index(grid)
+        h3_k = orders.index(3)
+        for node_id in INJECTION_NODES:
+            r = index.row(node_id, Phase.A)
+            v_lv = abs(v_pgml[h3_k, r])
+            assert v_lv > 0.1, (
+                f"pgml h=3 node {node_id} (injected LV busbar): |V| = {v_lv:.4e} V "
+                f"too small — triplen injection may not be active"
+            )
+
+    def test_non_triplen_parity(self) -> None:
+        """Non-triplen orders h=5, h=11: oracle vs pgml within Carson-gap tolerance.
+
+        The residual (~16 % relative at h=3 on short LV lines) is the seq-aware
+        line-model Carson gap documented in the seq-aware parity tests.  The
+        tolerance ``ATOL_V_DYN_NON_TRIPLEN = 1 V`` is generous but ensures
+        that transformer formula regressions (which would cause ~kV errors as in
+        the pre-fix state) are caught.
+        """
+        v_pgml, v_oracle, orders, _ = self._solve()
+        for h_ord in [5, 11]:
+            if h_ord not in orders:
+                continue
+            h_k = orders.index(h_ord)
+            err = float(np.abs(v_oracle[h_k] - v_pgml[h_k]).max())
+            assert err < ATOL_V_DYN_NON_TRIPLEN, (
+                f"True Dyn oracle h={h_ord}: max |DeltaV| = {err:.3e} V "
+                f"exceeds {ATOL_V_DYN_NON_TRIPLEN:.0e} V (Carson-gap tolerance)"
+            )
+
+    def test_output_shape(self) -> None:
+        """True Dyn oracle returns [H, 132] complex array (44 nodes × 3 phases)."""
+        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
+        apply_default_harmonic_model(grid)
+        loads = [a for a in grid.appliances if isinstance(a, Load)]
+        inj_loads = [ld for ld in loads if ld.node in INJECTION_NODES]
+        harmonic_injection = {ld.id: TRIPLEN_SPECTRUM for ld in inj_loads}
+        hres = solve_harmonic_flow(
+            grid,
+            TRIPLEN_ORDERS,
+            slack="norton",
+            harmonic_injection=harmonic_injection,
+            dtype=torch.complex128,
+        )
+        v1_np = hres.pf.v.detach().cpu().numpy()
+        index = node_phase_index(grid)
+        v_oracle = opendss_dyn_transformer_harmonic_voltages(
+            grid, harmonic_injection, TRIPLEN_ORDERS, slack="norton", v1=v1_np
+        )
+        assert v_oracle.shape == (len(TRIPLEN_ORDERS), index.size), (
+            f"Dyn oracle shape {v_oracle.shape} != ({len(TRIPLEN_ORDERS)}, {index.size})"
+        )
+        assert np.iscomplexobj(v_oracle)
+
+    def test_invalid_slack_raises(self) -> None:
+        """Non-norton slack raises ValueError."""
+        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
+        apply_default_harmonic_model(grid)
+        with pytest.raises(ValueError, match="norton"):
+            opendss_dyn_transformer_harmonic_voltages(
+                grid, None, TRIPLEN_ORDERS, slack="ideal"
+            )
+
+    def test_plain_grid_raises(self) -> None:
+        """Plain R/X grid (no seq-aware tags) raises ValueError."""
+        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
+        with pytest.raises(ValueError, match="sequence_aware"):
+            opendss_dyn_transformer_harmonic_voltages(grid, None, TRIPLEN_ORDERS)

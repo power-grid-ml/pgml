@@ -446,7 +446,10 @@ class TestTransformerYbusStamps:
                 continue
             pp_idx = next(k for k, v in id_map["trafo"].items() if v == branch.id)
 
-            n = float(branch.tap.ratio_magnitude)
+            # Nominal line-to-line ratio comes from the rated voltages; `tap` is the
+            # off-nominal ratio (1.0) plus the vector-group clock angle.
+            n = float(branch.u_rated_from_v) / float(branch.u_rated_to_v)
+            n *= float(branch.tap.ratio_magnitude)
             shift_deg = float(branch.tap.shift_deg)
             t = n * math.cos(math.radians(shift_deg)) + 1j * n * math.sin(
                 math.radians(shift_deg)
@@ -687,7 +690,11 @@ class TestTransformerConverterParams:
         assert len(id_map["trafo"]) == 3
 
     def test_turns_ratio(self) -> None:
-        """tap.ratio_magnitude = vn_hv_kv / vn_lv_kv = 50 for all CIGRE trafos."""
+        """Nominal ratio is carried by u_rated (vn_hv/vn_lv = 50); tap is off-nominal (1.0).
+
+        The vector-group nominal ratio comes from the rated voltages + connections, so
+        ``tap.ratio_magnitude`` is the off-nominal deviation (1.0 with no tap changer).
+        """
         net = pn.create_cigre_network_lv()
         grid, id_map = to_grid(net)
         for branch in grid.branches:
@@ -696,8 +703,12 @@ class TestTransformerConverterParams:
             pp_idx = next(k for k, v in id_map["trafo"].items() if v == branch.id)
             row = net.trafo.loc[pp_idx]
             expected_n = float(row["vn_hv_kv"]) / float(row["vn_lv_kv"])
-            assert abs(branch.tap.ratio_magnitude - expected_n) < 1e-9, (
-                f"Trafo {pp_idx}: expected n={expected_n:.4f}, "
+            ratio = float(branch.u_rated_from_v) / float(branch.u_rated_to_v)
+            assert abs(ratio - expected_n) < 1e-9, (
+                f"Trafo {pp_idx}: expected u_rated ratio={expected_n:.4f}, got {ratio:.4f}"
+            )
+            assert abs(branch.tap.ratio_magnitude - 1.0) < 1e-9, (
+                f"Trafo {pp_idx}: expected off-nominal tap 1.0, "
                 f"got {branch.tap.ratio_magnitude:.4f}"
             )
 
