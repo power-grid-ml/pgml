@@ -103,7 +103,7 @@ def test_symmetric_ignores_per_phase_and_equals_equal_split():
     base = solve_power_flow(
         _balanced_grid(sum(p), sum(q)), symmetry="asymmetric", dtype=CDT
     )
-    assert torch.allclose(res_sym.v, base.v, atol=1e-9)
+    assert torch.allclose(res_sym.v, base.v, atol=1e-12)
 
 
 def test_auto_promotes_to_asymmetric_when_per_phase_present():

@@ -242,14 +242,25 @@ def test_spectrum_sweep_from_spectrum_drops_fundamental():
 
 
 def test_spectrum_sweep_h_voltage_localized(grid3):
-    # injecting at one node produces a nonzero h11 field; the spread is recoverable.
+    # The diagonal sweep injects h11 at a single load per scenario; the resulting
+    # harmonic voltage must peak at that load's own node (localization).
     cfg = SpectrumSweepConfig.from_spectrum(
         Selector(component="load"), {11: (0.1, 0.0)}
     )
     res = run_scenarios(grid3, cfg, harmonic_orders=[1, 11])
     assert res.v.shape == (2, 2, 3)  # [B=2 injections, H=(1,11), N=3]
-    h11 = res.v[:, 1, :]  # [B, N] complex h11 field
-    assert h11.abs().max() > 0  # injection produced harmonic voltage
+    h11 = res.v[:, 1, :].abs()  # [B, N] h11 magnitude field
+
+    node_ids = res.index.node_ids.tolist()  # voltage node axis, e.g. [1, 2, 3]
+    inj_ids = res.sampled.samples["injection_id"].tolist()  # injected load per scenario
+    # load 10 sits at node 2, load 11 at node 3 (the grid3 radial chain).
+    load_node = {10: 2, 11: 3}
+    for b, load_id in enumerate(inj_ids):
+        injected_col = node_ids.index(load_node[load_id])
+        # the injected node carries the maximum h11 voltage of any node this scenario.
+        assert int(h11[b].argmax()) == injected_col, (
+            f"scenario {b}: h11 peak not at injected node {load_node[load_id]}"
+        )
 
 
 def test_spectrum_sweep_selector_subset(grid3):

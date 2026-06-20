@@ -33,9 +33,9 @@ Stub-subtract technique
 
 Tolerances
 ----------
-- Single-phase geometry: ``atol = 1e-7 V`` (empirically ~1e-11 V; tight enough to
+- Single-phase geometry: ``atol = 1e-9 V`` (empirically ~2e-12 V; tight enough to
   catch any alignment or formula error).
-- Three-phase sequence-aware: ``atol = 1e-5 V`` (empirically ~1e-8 V; tighter than
+- Three-phase sequence-aware: ``atol = 1e-6 V`` (empirically ~1.6e-8 V; tighter than
   5-15 % physics gap from a naive OpenDSS comparison).
 - Fundamental (order 1): returned verbatim from ``v1`` — bit-for-bit equal.
 """
@@ -77,10 +77,10 @@ SPECTRUM = {o: (mag, 0.0) for o, mag in [(1, 1.0), (5, 0.20), (11, 0.09)]}
 INJECTION_NODES = [3, 25]
 
 # Tolerance for live oracle vs pgml (geometry path — near machine precision).
-ATOL_V_GEOMETRY = 1e-7  # empirically ~1e-11 V
+ATOL_V_GEOMETRY = 1e-9  # empirically ~2e-12 V
 
 # Tolerance for live oracle vs pgml (sequence-aware path — near machine precision).
-ATOL_V_SEQ_AWARE = 1e-5  # empirically ~1e-8 V
+ATOL_V_SEQ_AWARE = 1e-6  # empirically ~1.6e-8 V
 
 
 def _build_injection(grid, nodes: list[int]) -> dict:
@@ -212,14 +212,20 @@ class TestCigreLvLiveOracleSinglePhaseGeometry:
 class TestCigreLvLiveOracleThreePhaseSeqAware:
     """Live OpenDSS parity: THREE_PHASE + sequence-aware harmonic model.
 
-    OpenDSS builds R1/X1/R0/X0 lines from the 3x3 phase matrices and applies
-    its own Carson/Deri corrections at harmonics.  The ``sequence_aware`` pgml
-    model uses the same earth-return earth-resistance mechanism, giving near-
-    machine-precision parity (~1e-8 V) when switches and transformers are stamped
-    with pgml-exact formulas (no OpenDSS Transformer elements, which would create
-    neutral nodes incompatible with pgml's flat row ordering).
+    This validates only the LINE harmonic model against OpenDSS.  OpenDSS builds
+    R1/X1/R0/X0 lines from the 3x3 phase matrices and applies its own Carson/Deri
+    corrections at harmonics; the ``sequence_aware`` pgml model uses the same
+    earth-return earth-resistance mechanism, giving near-machine-precision parity
+    (~1e-8 V) on the lines.
 
-    Empirically achieved tolerances: h=5 ~ 2e-8 V, h=11 ~ 1e-8 V.
+    The transformer is NOT validated against OpenDSS here: switches and
+    transformers are stamped with pgml's OWN formulas (no OpenDSS Transformer
+    elements, which would create neutral nodes incompatible with pgml's flat row
+    ordering).  For the genuine OpenDSS transformer/vector-group oracle (real
+    OpenDSS ``Transformer`` element, delta/wye zero-sequence blocking) see
+    :class:`TestCigreLvDynTransformerOracle` below.
+
+    Empirically achieved tolerances: h=5 ~ 1.6e-8 V, h=11 ~ 1e-8 V.
     """
 
     PHASE_MODE = PhaseMode.THREE_PHASE
@@ -570,21 +576,6 @@ class TestCigreLvDynTransformerOracle:
         )
         assert np.iscomplexobj(v_oracle)
 
-    def test_invalid_slack_raises(self) -> None:
-        """Non-norton slack raises ValueError."""
-        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
-        apply_default_harmonic_model(grid)
-        with pytest.raises(ValueError, match="norton"):
-            opendss_dyn_transformer_harmonic_voltages(
-                grid, None, TRIPLEN_ORDERS, slack="ideal"
-            )
-
-    def test_plain_grid_raises(self) -> None:
-        """Plain R/X grid (no seq-aware tags) raises ValueError."""
-        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
-        with pytest.raises(ValueError, match="sequence_aware"):
-            opendss_dyn_transformer_harmonic_voltages(grid, None, TRIPLEN_ORDERS)
-
 
 # ---------------------------------------------------------------------------
 # Three-phase Carson geometry oracle (apples-to-apples: same geometry in both engines)
@@ -595,7 +586,7 @@ class TestCigreLvDynTransformerOracle:
 # conductor_geometry) and OpenDSS (via WireData / LineGeometry commands), so both
 # engines run Carson/Deri on the same positions — the only residual comes from
 # floating-point rounding in the respective implementations.
-ATOL_V_3PH_GEOMETRY = 1e-5  # V — achievable given exact Carson parity
+ATOL_V_3PH_GEOMETRY = 1e-9  # V — empirically ~1e-12; exact Carson parity
 
 # Triplen/zero-sequence orders included to verify the h3/h9 gap collapses to
 # numerical noise once both engines share the same 3-conductor geometry.

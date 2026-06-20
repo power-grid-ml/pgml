@@ -1336,7 +1336,10 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
     Transformers are intentionally omitted: OpenDSS ``Transformer`` elements create
     neutral/delta neutral buses (``.0`` / ``.123`` in ``YNodeOrder``) that have no
     pgml equivalent, making Y-bus alignment impossible.  Transformer contributions are
-    stamped with pgml-exact formulas after reading the OpenDSS ``SystemY``.
+    stamped with pgml-exact formulas after reading the OpenDSS ``SystemY`` — so on this
+    path the transformer is NOT validated against OpenDSS (only the lines are).  The
+    genuine OpenDSS transformer oracle is
+    :func:`opendss_dyn_transformer_harmonic_voltages`.
 
     The Vsource bus phases connect to ``bus<n>.1.2.3`` so that OpenDSS sees a
     three-phase source at the slack node; the resulting ``YNodeOrder`` contains only
@@ -1530,14 +1533,22 @@ def opendss_harmonic_voltages(
 
     **Three-phase sequence-aware path** (lines tagged ``harmonic_line_model=sequence_aware``):
 
-    A full OpenDSS circuit is built with the source, Lines defined via
-    ``R1/X1/R0/X0`` derived from the 3×3 phase matrices, Switches as R-only
-    Lines, and Transformers with ``XRConst=No`` (OpenDSS default: R const, X∝h,
-    matching pgml's transformer model).  OpenDSS applies its own Carson/DERI
-    correction to all ``R1/X1``-defined lines at harmonics; this correction differs
-    from pgml's ``sequence_aware`` earth-return resistance term by the Carson model
-    difference (~5–15 % at harmonics 5–11).  The residual is documented by the
-    parity tests in ``tests/reference/test_cigre_lv_live_opendss.py``.
+    In this path OpenDSS supplies ONLY the LINE admittance.  A full OpenDSS
+    circuit is built whose Lines are defined via ``R1/X1/R0/X0`` derived from the
+    3×3 phase matrices; OpenDSS applies its own Carson/DERI correction to these
+    ``R1/X1``-defined lines at harmonics.  The source Norton is read from
+    ``SystemY`` and the transformer and switch stamps are then OVERWRITTEN with
+    pgml's OWN formulas (``R const, X∝h, complex tap`` for the transformer;
+    ``R const`` for the switch).  The transformer is therefore NOT validated
+    against OpenDSS on this path — only the lines are.  For a genuine OpenDSS
+    transformer oracle (real OpenDSS ``Transformer`` element with the correct
+    delta/wye vector group and zero-sequence blocking), use
+    :func:`opendss_dyn_transformer_harmonic_voltages`.
+
+    The line-model residual — OpenDSS's Carson correction differs from pgml's
+    ``sequence_aware`` earth-return resistance term by the Carson model difference
+    (~5–15 % at harmonics 5–11) — is documented by the parity tests in
+    ``tests/reference/test_cigre_lv_live_opendss.py``.
 
     **Harmonic injection convention** (identical in both paths):
 
@@ -1594,6 +1605,10 @@ def opendss_harmonic_voltages(
 
     See Also
     --------
+    opendss_dyn_transformer_harmonic_voltages : Genuine OpenDSS transformer oracle
+        (real OpenDSS ``Transformer`` element / vector group).  Use this when the
+        transformer itself must be validated against OpenDSS — the seq-aware path
+        here stamps the transformer with pgml's own formula instead.
     numpy_harmonic_voltages : Pure-numpy regression oracle (machine-precision parity).
     opendss_geometry_harmonic_profiles : Carson-line profile oracle (passive feeder).
     numpy_harmonic_profiles : Single-phase numpy oracle (lines + source only).

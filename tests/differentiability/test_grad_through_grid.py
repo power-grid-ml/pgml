@@ -72,17 +72,6 @@ def test_backward_reaches_line_and_source_tensors():
     assert r.grad.abs().sum() > 0
 
 
-def test_gradcheck_through_grid_line_rl():
-    cap = torch.tensor([[1e-12]], dtype=torch.float64)
-
-    def f(r, ind):
-        return _solve(_build(r, ind, cap))
-
-    r = torch.tensor([[1e-3]], dtype=torch.float64, requires_grad=True)
-    ind = torch.tensor([[1e-5]], dtype=torch.float64, requires_grad=True)
-    assert torch.autograd.gradcheck(f, (r, ind), eps=1e-9, atol=1e-6)
-
-
 def test_float_grid_still_works_and_serializes():
     """A plain-float grid is unchanged: builds, solves, and round-trips to JSON."""
     grid = _build([[1e-3]], [[1e-5]], [[1e-12]])

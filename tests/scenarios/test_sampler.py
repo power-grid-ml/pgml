@@ -112,4 +112,4 @@ def test_all_methods_produce_valid_batches(grid3):
 def test_sobol_uniform_mean_near_midpoint(grid3):
     # QMC low-discrepancy: empirical mean of a uniform(0.5,1.5) ~ 1.0 for large B.
     s = sample(grid3, _cfg(method="sobol", n=1024))
-    assert abs(float(s.samples["load_pq"].mean()) - 1.0) < 0.02
+    assert abs(float(s.samples["load_pq"].mean()) - 1.0) < 1e-6

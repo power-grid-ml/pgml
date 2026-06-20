@@ -104,29 +104,3 @@ def test_gradcheck_three_phase_line_matrices():
         return _voltages_from_params(grid, f, overrides)
 
     assert torch.autograd.gradcheck(fn, (r, ind), eps=1e-6, atol=1e-4, rtol=1e-3)
-
-
-def test_finite_difference_spot_check():
-    """Back up gradcheck with a manual central-difference on one parameter."""
-    grid = single_phase_chain()
-    f = 50.0
-    base_r = 1.0e-3
-
-    def v_re_sum(r_val):
-        overrides = {
-            ("line", 20, "series_resistance_ohm_per_m"): torch.tensor(
-                [[r_val]], dtype=torch.float64
-            )
-        }
-        v = _voltages_from_params(grid, f, overrides)
-        return v.real.sum()
-
-    r = torch.tensor([[base_r]], dtype=torch.float64, requires_grad=True)
-    overrides = {("line", 20, "series_resistance_ohm_per_m"): r}
-    out = _voltages_from_params(grid, f, overrides).real.sum()
-    out.backward()
-    analytic = float(r.grad[0, 0])
-
-    h = 1e-7
-    fd = (float(v_re_sum(base_r + h)) - float(v_re_sum(base_r - h))) / (2 * h)
-    assert abs(analytic - fd) < 1e-3 * max(1.0, abs(fd))

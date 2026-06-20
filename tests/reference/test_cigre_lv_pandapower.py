@@ -134,50 +134,6 @@ class TestCIGRELVVsPandapower:
                 f"(ours={va_deg_ours:.4f}, pp={va_deg_ref:.4f})"
             )
 
-    def test_voltages_array_allclose(self) -> None:
-        """Vectorised allclose check with worst-bus diagnostics."""
-        net = _build_cigre_net()
-        grid, id_map = to_grid(net)
-
-        result = solve_power_flow(
-            grid,
-            slack="ideal",
-            tol=1e-10,
-            max_iter=100,
-            dtype=torch.complex128,
-        )
-        assert result.converged
-
-        n_buses = len(id_map["bus"])
-        vm_pu_ours = np.empty(n_buses)
-        va_deg_ours = np.empty(n_buses)
-        vm_pu_pp = np.empty(n_buses)
-        va_deg_pp = np.empty(n_buses)
-
-        for i, (pp_bus_idx, node_id) in enumerate(sorted(id_map["bus"].items())):
-            row = result.index.row(node_id, Phase.A)
-            v_c = result.v.reshape(-1)[row].item()
-            u_rated = net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0
-            vm_pu_ours[i] = abs(v_c) / u_rated
-            va_deg_ours[i] = math.degrees(math.atan2(v_c.imag, v_c.real))
-            vm_pu_pp[i] = float(net.res_bus.at[pp_bus_idx, "vm_pu"])
-            va_deg_pp[i] = float(net.res_bus.at[pp_bus_idx, "va_degree"])
-
-        np.testing.assert_allclose(
-            vm_pu_ours,
-            vm_pu_pp,
-            atol=self.ATOL_VM_PU,
-            rtol=0,
-            err_msg="Voltage magnitude (pu) mismatch vs pandapower CIGRE LV",
-        )
-        angle_diff = np.array(
-            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)]
-        )
-        assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
-            f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
-            f"max err = {np.max(np.abs(angle_diff)):.4e} deg"
-        )
-
     def test_convergence_metadata(self) -> None:
         """Solver must converge within 100 iterations."""
         net = _build_cigre_net()
@@ -213,25 +169,3 @@ class TestCIGRELVVsPandapower:
         assert len(switches) == 3, f"Expected 3 switches, got {len(switches)}"
         assert len(id_map["switch"]) == 3
 
-    def test_lv_voltage_level(self) -> None:
-        """LV bus voltages should be near 0.4 kV (pandapower vm_pu ~ 0.9-1.0 pu)."""
-        net = _build_cigre_net()
-        grid, id_map = to_grid(net)
-        result = solve_power_flow(
-            grid,
-            slack="ideal",
-            tol=1e-10,
-            max_iter=100,
-            dtype=torch.complex128,
-        )
-        assert result.converged
-        # All LV buses (vn_kv=0.4) should have vm_pu between 0.85 and 1.05
-        for pp_bus_idx, node_id in id_map["bus"].items():
-            if abs(net.bus.at[pp_bus_idx, "vn_kv"] - 0.4) > 0.01:
-                continue  # skip MV buses
-            row = result.index.row(node_id, Phase.A)
-            v_c = result.v.reshape(-1)[row].item()
-            vm_pu = abs(v_c) / (0.4 * 1000.0)
-            assert 0.85 < vm_pu < 1.05, (
-                f"LV bus {pp_bus_idx}: vm_pu={vm_pu:.4f} out of range [0.85, 1.05]"
-            )

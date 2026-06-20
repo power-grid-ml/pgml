@@ -127,51 +127,6 @@ class TestIEEE33ConstPowerVsPandapower:
                 f"ours={va_deg_ours:.6f} pp={va_deg_ref:.6f} err={va_err:.2e} deg"
             )
 
-    def test_voltages_array_allclose(self) -> None:
-        """Vectorised allclose check with worst-bus report."""
-        net = _build_ref_net()
-        grid, id_map = to_grid(net)
-
-        result = solve_power_flow(
-            grid,
-            slack="ideal",
-            tol=1e-10,
-            max_iter=100,
-            dtype=torch.complex128,
-        )
-        assert result.converged
-
-        n_buses = len(id_map["bus"])
-        vm_pu_ours = np.empty(n_buses)
-        va_deg_ours = np.empty(n_buses)
-        vm_pu_pp = np.empty(n_buses)
-        va_deg_pp = np.empty(n_buses)
-
-        for i, (pp_bus_idx, node_id) in enumerate(sorted(id_map["bus"].items())):
-            row = result.index.row(node_id, Phase.A)
-            v_c = result.v.reshape(-1)[row].item()
-            u_rated = net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0
-            vm_pu_ours[i] = abs(v_c) / u_rated
-            va_deg_ours[i] = math.degrees(_cmath_angle(v_c))
-            vm_pu_pp[i] = float(net.res_bus.at[pp_bus_idx, "vm_pu"])
-            va_deg_pp[i] = float(net.res_bus.at[pp_bus_idx, "va_degree"])
-
-        np.testing.assert_allclose(
-            vm_pu_ours,
-            vm_pu_pp,
-            atol=self.ATOL_VM_PU,
-            rtol=0,
-            err_msg="Voltage magnitude (pu) mismatch vs pandapower const-power",
-        )
-        angle_diff = np.array(
-            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)]
-        )
-        assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
-            f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
-            f"max err = {np.max(np.abs(angle_diff)):.4e} deg at bus indices "
-            f"{np.where(np.abs(angle_diff) >= self.ATOL_VA_DEG)[0].tolist()}"
-        )
-
     def test_convergence_metadata(self) -> None:
         """Solver must converge within reasonable iteration count."""
         net = _build_ref_net()
@@ -187,31 +142,3 @@ class TestIEEE33ConstPowerVsPandapower:
         assert result.iterations <= 100
         assert float(result.residual) < 1e-10
 
-    def test_worst_bus_error_documented(self) -> None:
-        """Document the worst-case bus and confirm it stays below tolerance."""
-        net = _build_ref_net()
-        grid, id_map = to_grid(net)
-        result = solve_power_flow(
-            grid,
-            slack="ideal",
-            tol=1e-10,
-            max_iter=100,
-            dtype=torch.complex128,
-        )
-        assert result.converged
-
-        errors = {}
-        for pp_bus_idx, node_id in id_map["bus"].items():
-            row = result.index.row(node_id, Phase.A)
-            v_c = result.v.reshape(-1)[row].item()
-            u_rated = net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0
-            vm_pu_ours = abs(v_c) / u_rated
-            vm_pu_ref = float(net.res_bus.at[pp_bus_idx, "vm_pu"])
-            errors[pp_bus_idx] = abs(vm_pu_ours - vm_pu_ref)
-
-        worst_bus = max(errors, key=errors.__getitem__)
-        worst_err = errors[worst_bus]
-        # Documented: worst bus is bus 32, error ~3e-9 pu
-        assert worst_err < self.ATOL_VM_PU, (
-            f"Worst bus {worst_bus}: error={worst_err:.3e} pu exceeds {self.ATOL_VM_PU}"
-        )

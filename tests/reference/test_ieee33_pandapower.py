@@ -40,8 +40,8 @@ compare the in-service bus submatrix.
 
 Tolerance targets
 -----------------
-- Node voltage magnitude: atol = 1e-4 pu.
-- Node voltage angle:      atol = 1e-4 deg.
+- Node voltage magnitude: atol = 1e-6 pu (measured ~4.7e-9).
+- Node voltage angle:      atol = 1e-5 deg (measured ~3.2e-8).
 - Y-bus:                   rtol = 1e-4, atol = 1e-4 (looser; different
   formulation of const-Z shunt placement vs MATPOWER sparse structure).
 """
@@ -93,9 +93,10 @@ def _build_ref_net() -> pp.pandapowerNet:
 class TestIEEE33VsReference:
     """Compare our solved node voltages to pandapower on IEEE 33-bus."""
 
-    # Tolerance targets (documented in module docstring)
-    ATOL_VM_PU: float = 1e-4  # magnitude tolerance in per-unit
-    ATOL_VA_DEG: float = 1e-4  # angle tolerance in degrees
+    # Tolerance targets (documented in module docstring). Measured const-Z error
+    # is ~4.7e-9 pu / ~3.2e-8 deg; tolerances set with safe headroom.
+    ATOL_VM_PU: float = 1e-6  # magnitude tolerance in per-unit
+    ATOL_VA_DEG: float = 1e-5  # angle tolerance in degrees
 
     def test_node_voltages_match_pandapower(self) -> None:
         """End-to-end: convert -> assemble -> ideal-slack solve -> compare."""
@@ -155,59 +156,6 @@ class TestIEEE33VsReference:
                 f"Bus {pp_bus_idx}: angle mismatch "
                 f"ours={va_deg_ours:.4f} pp={va_deg_ref:.4f} err={va_err:.2e} deg"
             )
-
-    def test_voltages_array_allclose(self) -> None:
-        """Vectorised allclose check (friendlier failure message)."""
-        net = _build_ref_net()
-        grid, id_map = to_grid(net)
-
-        f0 = grid.base_frequency_hz
-        index = node_phase_index(grid)
-        ybus = assemble_ybus(grid, [f0], dtype=torch.complex128)
-        i_inj = build_injections(grid, [f0], index, dtype=torch.complex128)
-
-        from pgml.schemas.grid_schema import Phase
-
-        slack_pp_bus = int(net.ext_grid.at[0, "bus"])
-        slack_node_id = id_map["bus"][slack_pp_bus]
-        slack_row = index.row(slack_node_id, Phase.A)
-        fixed_rows = torch.tensor([slack_row], dtype=torch.int64)
-        v_fixed = torch.tensor([id_map["slack_v_complex"]], dtype=torch.complex128)
-
-        v_all = solve_harmonic(ybus.Y, i_inj, fixed_rows=fixed_rows, v_fixed=v_fixed)
-
-        # Build aligned arrays: ours and pandapower, both in pu
-        n_buses = len(id_map["bus"])
-        vm_pu_ours = np.empty(n_buses)
-        va_deg_ours = np.empty(n_buses)
-        vm_pu_pp = np.empty(n_buses)
-        va_deg_pp = np.empty(n_buses)
-
-        for i, (pp_bus_idx, node_id) in enumerate(sorted(id_map["bus"].items())):
-            row = index.row(node_id, Phase.A)
-            v_c = v_all[0, row].item()
-            u_rated = net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0
-            vm_pu_ours[i] = abs(v_c) / u_rated
-            va_deg_ours[i] = math.degrees(cmath_angle(v_c))
-            vm_pu_pp[i] = float(net.res_bus.at[pp_bus_idx, "vm_pu"])
-            va_deg_pp[i] = float(net.res_bus.at[pp_bus_idx, "va_degree"])
-
-        np.testing.assert_allclose(
-            vm_pu_ours,
-            vm_pu_pp,
-            atol=self.ATOL_VM_PU,
-            rtol=0,
-            err_msg="Voltage magnitude (pu) mismatch vs pandapower const-Z reference",
-        )
-        # Angle comparison (handle 360-degree wrap)
-        angle_diff = np.array(
-            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pp)]
-        )
-        assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
-            f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
-            f"max err = {np.max(np.abs(angle_diff)):.4e} deg at buses "
-            f"{np.where(np.abs(angle_diff) >= self.ATOL_VA_DEG)[0].tolist()}"
-        )
 
 
 # ---------------------------------------------------------------------------

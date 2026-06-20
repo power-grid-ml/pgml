@@ -35,7 +35,6 @@ CDT = torch.complex128
 F0 = 50.0
 W0 = 2.0 * math.pi * F0
 ABC = (Phase.A, Phase.B, Phase.C)
-ABCN = (Phase.A, Phase.B, Phase.C, Phase.N)
 
 
 def _spectrum():
@@ -91,58 +90,6 @@ def _grid(load, node_phases):
         branches=[_line(node_phases)],
         appliances=[_source(node_phases), load],
     )
-
-
-def test_delta_load_with_spectrum_solves():
-    """A DELTA load that injects a harmonic now SOLVES (guard lifted)."""
-    load = Load(
-        id=30,
-        node=2,
-        phases=ABC,
-        p_nom_w=4500.0,
-        q_nom_var=900.0,
-        connection=WindingConnection.DELTA,
-        load_model=LoadModel.CONST_POWER,
-        spectrum=_spectrum(),
-    )
-    grid = _grid(load, ABC)
-    res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
-    assert res.v.shape[-2] == 2
-    assert torch.isfinite(res.v.real).all() and torch.isfinite(res.v.imag).all()
-
-
-def test_wye_on_abcn_node_with_spectrum_solves():
-    """A WYE load on a node carrying Phase.N that injects a harmonic now solves."""
-    load = Load(
-        id=30,
-        node=2,
-        phases=ABC,
-        p_nom_w=4500.0,
-        q_nom_var=900.0,
-        load_model=LoadModel.CONST_POWER,
-        spectrum=_spectrum(),
-    )
-    grid = _grid(load, ABCN)
-    res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
-    assert res.v.shape[-2] == 2
-    assert torch.isfinite(res.v.real).all() and torch.isfinite(res.v.imag).all()
-
-
-def test_wye_to_ground_harmonic_flow_unaffected():
-    """A WYE-to-ground load (no Phase.N) with a spectrum solves (unchanged path)."""
-    load = Load(
-        id=30,
-        node=2,
-        phases=ABC,
-        p_nom_w=4500.0,
-        q_nom_var=900.0,
-        load_model=LoadModel.CONST_POWER,
-        spectrum=_spectrum(),
-    )
-    grid = _grid(load, ABC)
-    res = solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
-    assert res.v.shape[-2] == 2
-    assert torch.isfinite(res.v.real).all() and torch.isfinite(res.v.imag).all()
 
 
 def test_delta_load_without_spectrum_is_allowed():

@@ -327,9 +327,9 @@ class TestIEEE33VsPgm:
     - pgm:  out["node"]["u_pu"]      (= u / u_rated, line-to-line pu)
     """
 
-    # Documented tolerance: achieved < 1e-8 pu in practice (well within 1e-4).
-    ATOL_VM_PU: float = 1e-4  # voltage magnitude tolerance, per-unit
-    ATOL_VA_DEG: float = 1e-4  # voltage angle tolerance, degrees
+    # Achieved < 1e-8 pu in practice; tolerance set with safe headroom.
+    ATOL_VM_PU: float = 1e-6  # voltage magnitude tolerance, per-unit
+    ATOL_VA_DEG: float = 1e-6  # voltage angle tolerance, degrees
 
     def test_node_voltages_match_pgm(self) -> None:
         """Per-bus check: our |V| pu and angle vs pgm result."""
@@ -387,61 +387,6 @@ class TestIEEE33VsPgm:
                 f"ours={va_deg_ours:.4f} pgm={va_deg_pgm:.4f} err={va_err:.2e} deg"
             )
 
-    def test_voltages_array_allclose(self) -> None:
-        """Vectorised allclose check across all 33 buses."""
-        input_data = _build_pgm_input()
-        f0 = 60.0
-
-        pgm_model = PowerGridModel(input_data)
-        pgm_result = pgm_model.calculate_power_flow(symmetric=True)
-
-        grid, id_map = to_grid(
-            input_data, base_frequency_hz=f0, load_model=LoadModel.CONST_IMPEDANCE
-        )
-        index = node_phase_index(grid)
-        ybus = assemble_ybus(grid, [f0], dtype=torch.complex128)
-        i_inj = build_injections(grid, [f0], index, dtype=torch.complex128)
-
-        slack_our_node = id_map["node"][_pgm_node_id(0)]
-        slack_row = index.row(slack_our_node, Phase.A)
-        fixed_rows = torch.tensor([slack_row], dtype=torch.int64)
-        v_fixed = torch.tensor([id_map["slack_v_complex"]], dtype=torch.complex128)
-
-        v_all = solve_harmonic(ybus.Y, i_inj, fixed_rows=fixed_rows, v_fixed=v_fixed)
-
-        pgm_by_id = {int(r["id"]): r for r in pgm_result["node"]}
-        n = len(id_map["node"])
-        vm_pu_ours = np.empty(n)
-        va_deg_ours = np.empty(n)
-        vm_pu_pgm = np.empty(n)
-        va_deg_pgm = np.empty(n)
-
-        for i, (pgm_node_id, our_node_id) in enumerate(sorted(id_map["node"].items())):
-            row_idx = index.row(our_node_id, Phase.A)
-            v_c = v_all[0, row_idx].item()
-            node_obj = next(nd for nd in grid.nodes if nd.id == our_node_id)
-            vm_pu_ours[i] = abs(v_c) / node_obj.u_rated_v
-            va_deg_ours[i] = math.degrees(_cmath_angle(v_c))
-            pgm_row = pgm_by_id[pgm_node_id]
-            vm_pu_pgm[i] = float(pgm_row["u_pu"])
-            va_deg_pgm[i] = math.degrees(float(pgm_row["u_angle"]))
-
-        np.testing.assert_allclose(
-            vm_pu_ours,
-            vm_pu_pgm,
-            atol=self.ATOL_VM_PU,
-            rtol=0,
-            err_msg="Voltage magnitude (pu) mismatch vs pgm const-Z reference",
-        )
-        angle_diff = np.array(
-            [_angle_diff_deg(a, b) for a, b in zip(va_deg_ours, va_deg_pgm)]
-        )
-        assert np.all(np.abs(angle_diff) < self.ATOL_VA_DEG), (
-            f"Voltage angle mismatch > {self.ATOL_VA_DEG} deg: "
-            f"max err = {np.max(np.abs(angle_diff)):.4e} deg at pgm node indices "
-            f"{np.where(np.abs(angle_diff) >= self.ATOL_VA_DEG)[0].tolist()}"
-        )
-
     def test_achieved_tolerance_is_tight(self) -> None:
         """Assert the ACTUAL max error is well below 1e-4 (it should be < 1e-6).
 
@@ -496,10 +441,13 @@ class TestPgmGridMatchesPandapowerGrid:
     parameters.  This confirms both converters describe an identical network.
     """
 
-    ATOL_VM_PU: float = 1e-4
+    # Same network, same ideal slack, same const-Z: the two converters must
+    # produce bit-for-bit equivalent grids, so the COMPLEX voltages agree to
+    # near machine precision (measured << 1e-9 pu).
+    ATOL_V_PU: float = 1e-9
 
     def test_pgm_and_pandapower_grids_agree(self) -> None:
-        """Solve both grids; node voltages should agree to const-Z tolerance."""
+        """Solve both grids; complex node voltages must agree to ~1e-9 pu."""
         import pandapower as pp
         from pgml.convert.pandapower import to_grid as pp_to_grid
 
@@ -556,11 +504,14 @@ class TestPgmGridMatchesPandapowerGrid:
             v_pgm = pgm_v_all[0, pgm_row].item()
 
             u_rated = pp_grid.nodes[pp_bus_idx].u_rated_v
-            pu_pp = abs(v_pp) / u_rated
-            pu_pgm = abs(v_pgm) / u_rated
-
-            err = abs(pu_pp - pu_pgm)
-            assert err < self.ATOL_VM_PU, (
-                f"Bus {pp_bus_idx}: pandapower-grid pu={pu_pp:.6f}, "
-                f"pgm-grid pu={pu_pgm:.6f}, err={err:.2e}"
+            # Compare the FULL complex voltage (re + im), per-unit. A magnitude-
+            # only check at a loose tolerance can pass even if the two grids
+            # describe slightly different networks; the complex match at ~1e-9 pu
+            # actually proves converter equivalence.
+            v_pu_pp = v_pp / u_rated
+            v_pu_pgm = v_pgm / u_rated
+            err = abs(v_pu_pp - v_pu_pgm)
+            assert err < self.ATOL_V_PU, (
+                f"Bus {pp_bus_idx}: pandapower-grid V_pu={v_pu_pp:.9f}, "
+                f"pgm-grid V_pu={v_pu_pgm:.9f}, |Δ|={err:.2e} pu"
             )

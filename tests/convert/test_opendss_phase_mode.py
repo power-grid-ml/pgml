@@ -188,11 +188,28 @@ class TestThreePhase:
         r = line.series_resistance_ohm_per_m
         assert len(r) == 3 and all(len(row) == 3 for row in r)
 
-    def test_line_r_diagonal_dominates(self) -> None:
-        """Diagonal entries of R are larger than off-diagonal (self > mutual)."""
+    def test_line_r_self_and_mutual_match_sequence_expansion(self) -> None:
+        """Self/mutual R match the symmetric-component expansion of the DSS line.
+
+        OpenDSS builds the phase ``RMatrix`` from the sequence impedances
+        (``R1``/``R0``) via ``R_self = (R0 + 2*R1)/3`` and
+        ``R_mut = (R0 - R1)/3``.  The converter divides the per-unit-length DSS
+        matrix by ``length_m`` (here 1 km = 1000 m), so the pgml per-metre matrix
+        is the same expansion scaled by ``1/length_m``.
+        """
+        dss.Lines.Name("l1")
+        r1 = dss.Lines.R1()
+        r0 = dss.Lines.R0()
+        length_m = dss.Lines.Length() * 1_000.0  # units=km -> metres
+        r_self = (r0 + 2.0 * r1) / 3.0 / length_m
+        r_mut = (r0 - r1) / 3.0 / length_m
+
         line = next(b for b in self._grid.branches if isinstance(b, Line))
         r = line.series_resistance_ohm_per_m
-        assert r[0][0] > abs(r[0][1])
+        assert r[0][0] == pytest.approx(r_self, rel=1e-9)
+        assert r[0][1] == pytest.approx(r_mut, rel=1e-9)
+        assert r[1][0] == pytest.approx(r_mut, rel=1e-9)
+        assert r[0][0] > abs(r[0][1])  # self dominates mutual
 
     def test_source_is_three_phase(self) -> None:
         """Source has 3 phases and balanced 120-degree-apart angles."""
@@ -284,12 +301,6 @@ class TestConverterSolvability:
         """The 2-bus circuit yields 2 nodes in THREE_PHASE mode."""
         grid, _ = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
         assert len(grid.nodes) == 2
-
-    def test_single_phase_equiv_shape_matches_three_phase_node_count(self) -> None:
-        """SINGLE_PHASE_EQUIV and THREE_PHASE yield the same number of nodes."""
-        grid_1ph, _ = to_grid(dss, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
-        grid_3ph, _ = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
-        assert len(grid_1ph.nodes) == len(grid_3ph.nodes)
 
 
 # ---------------------------------------------------------------------------

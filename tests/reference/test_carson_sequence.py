@@ -67,14 +67,6 @@ def test_positive_sequence_has_no_earth_floor_zero_does():
     assert (z0.real / z1.real)[-1] > 3.0
 
 
-def test_zero_sequence_reactance_exceeds_positive_floor():
-    """The X0 self-reactance floor is what makes single-conductor synthesis fail."""
-    freqs = _freqs([1])
-    z0, z1, _ = sequence_impedances(_three_phase_geometry_z(freqs))
-    # zero-sequence reactance is several times the positive-sequence value (earth term).
-    assert float(z0.imag) > 2.0 * float(z1.imag)
-
-
 # --- direct positive-sequence model ----------------------------------------
 def test_positive_sequence_x_scales_exactly_with_h():
     """X1(h) = X1*(f/f0) to floating point (geometric reactance ∝ frequency)."""

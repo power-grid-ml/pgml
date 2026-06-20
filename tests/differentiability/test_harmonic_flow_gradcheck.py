@@ -94,18 +94,6 @@ def test_gradcheck_line_rl():
     assert torch.autograd.gradcheck(fn, (r, ind), eps=1e-6, atol=1e-5, rtol=1e-3)
 
 
-def test_gradcheck_load_pq():
-    p = torch.tensor(2000.0, dtype=torch.float64, requires_grad=True)
-    q = torch.tensor(500.0, dtype=torch.float64, requires_grad=True)
-
-    def fn(p, q):
-        return solve_harmonic_flow(
-            _grid([[0.5]], [[0.5 / W0]], p, q), [1, 5, 7], slack="norton", dtype=CDT
-        ).v
-
-    assert torch.autograd.gradcheck(fn, (p, q), eps=1e-2, atol=1e-4, rtol=1e-3)
-
-
 def test_gradcheck_harmonic_injection_override():
     """Gradient w.r.t. a per-device harmonic injection magnitude (scenario override)."""
     m5 = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)

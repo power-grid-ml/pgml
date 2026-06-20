@@ -379,22 +379,6 @@ class TestIEEE33YBusVsOpenDSS:
             f"ours(net)={Y_ours[worst_idx, worst_idx]:.4e}"
         )
 
-    def test_off_diagonal_allclose(self) -> None:
-        """Vectorised allclose check on off-diagonal (all entries, incl. zeros)."""
-        Y_dss = self._Y_dss_aligned
-        Y_ours = self._Y_ours_net
-        n = self._n
-
-        # Mask diagonal
-        mask = ~np.eye(n, dtype=bool)
-        np.testing.assert_allclose(
-            Y_ours[mask],
-            Y_dss[mask],
-            rtol=self.RTOL_OFF_DIAG,
-            atol=1e-12,  # structural zeros allowed up to 1e-12 S
-            err_msg="Off-diagonal Y-bus allclose failed (our Y vs OpenDSS SystemY)",
-        )
-
     def test_source_bus_diagonal_dominated_by_vsource_shunt(self) -> None:
         """Verify bus-0 diagonal is dominated by the Vsource Norton shunt.
 

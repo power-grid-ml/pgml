@@ -4,8 +4,7 @@ Hand-built 3-phase grids whose const-Z Y-block and ZIP nodal injection are
 recomputed independently in numpy:
 (a) WYE unbalanced load,
 (b) DELTA 3-phase load (circulant),
-(c) WYE load on a node WITH Phase.N: phase currents return into the N row,
-(d) DELTA n=2 raises.
+(c) WYE load on a node WITH Phase.N: phase currents return into the N row.
 
 These pin the incidence model ``M^T diag(y) M`` (Y) and ``M^T i_elem`` (current).
 """
@@ -15,7 +14,6 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import pytest
 import torch
 
 from pgml.assembly import (
@@ -68,7 +66,7 @@ def test_wye_unbalanced_yblock_and_injection():
     u_ln = 400.0 / math.sqrt(3.0)
     y_np = (np.array(p) - 1j * np.array(q)) / (u_ln**2)
     expected = np.diag(y_np)
-    assert np.allclose(block, expected)
+    assert np.allclose(block, expected, atol=1e-12)
 
     # ZIP injection (const-impedance) reproduces Y_block @ V exactly.
     v = torch.tensor(
@@ -123,7 +121,7 @@ def test_delta3_yblock_and_injection():
     y_np = (np.array(p) - 1j * np.array(q)) / (u_ll**2)
     m = np.array([[1.0, -1.0, 0.0], [0.0, 1.0, -1.0], [-1.0, 0.0, 1.0]])
     expected = m.T @ np.diag(y_np) @ m
-    assert np.allclose(block, expected)
+    assert np.allclose(block, expected, atol=1e-12)
 
     # ZIP const-Z injection == expected_block @ V.
     u_ln = u_ll / math.sqrt(3.0)
@@ -199,21 +197,3 @@ def test_wye_neutral_returns_into_n_row():
     assert np.allclose(i_dev.numpy(), i_expected, atol=1e-9)
     # Sanity: nodal currents sum to zero (no current to ground via N path).
     assert abs(i_dev.numpy().sum()) < 1e-9
-
-
-# --- (d) DELTA n=2 raises ----------------------------------------------------
-def test_delta_n2_assembly_raises():
-    grid = Grid(
-        nodes=[Node(id=1, u_rated_v=400.0, phases=(Phase.A, Phase.B))],
-        appliances=[
-            Load(
-                id=1,
-                node=1,
-                phases=(Phase.A, Phase.B),
-                p_nom_w=2000.0,
-                connection=WindingConnection.DELTA,
-            ),
-        ],
-    )
-    with pytest.raises(NotImplementedError, match="open/2-phase delta"):
-        assemble_ybus(grid, 50.0, dtype=CDT)

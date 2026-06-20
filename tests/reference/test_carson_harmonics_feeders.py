@@ -55,7 +55,8 @@ def test_offdiagonal_Yh_matches_opendss(builder):
         yd = dssY[h]
         denom = np.abs(yd[mask]).max()
         err = np.abs(yp[mask] - yd[mask]).max() / denom
-        assert err < 1e-6, f"h={h}: off-diagonal Y(h) rel error {err:.2e}"
+        # Measured ~1.5e-11 rel; tolerance set with safe headroom.
+        assert err < 1e-9, f"h={h}: off-diagonal Y(h) rel error {err:.2e}"
 
 
 @pytest.mark.parametrize(
@@ -78,7 +79,8 @@ def test_harmonic_voltages_match_opendss(builder):
         i_inj = _pgml_harmonic_y(grid, index, h) @ vp
         vd = np.linalg.solve(dssY[h], i_inj)
         rel = np.abs(vd - vp).max() / (np.abs(vp).max() + 1e-15)
-        assert rel < 1e-6, f"h={h}: |V_dss - V_pgml| rel {rel:.2e}"
+        # Measured ~3.4e-9 rel (cigre); tolerance set with safe headroom.
+        assert rel < 1e-7, f"h={h}: |V_dss - V_pgml| rel {rel:.2e}"
 
 
 def test_synthesized_geometry_is_tracked():

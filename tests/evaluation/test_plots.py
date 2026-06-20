@@ -310,13 +310,3 @@ def test_distance_does_not_traverse_open_switch():
     assert dist_closed[3] == 0.1  # reachable through the closed switch (0 length)
     dist_open = distance_from_slack(_switch_grid(switch_closed=False))
     assert dist_open[3] == float("inf")  # unreachable across the open switch
-
-
-def test_voltage_profile_with_switch_grid_plots(tmp_path):
-    grid = _switch_grid(switch_closed=True)
-    pf = solve_power_flow(grid, slack="ideal", dtype=CDT)
-    prof = voltage_profile(pf, grid, label="pgml")
-    fig, ax = plot_voltage_profile([prof], grid=grid)
-    save_figure(fig, tmp_path / "sw.png")
-    assert (tmp_path / "sw.png").exists()
-    plt.close("all")

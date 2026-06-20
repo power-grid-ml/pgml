@@ -129,7 +129,7 @@ def test_zero_sequence_defaulting_from_config():
     r1, x1, c1 = 0.1, 0.2, 2e-9
     R, L, C, _ = sequence_to_phase_matrices(r1, x1, c1, two_pi_f0=TWO_PI_F0)
 
-    r0, c0 = r1 * rr, c1 * cr
+    r0, x0, c0 = r1 * rr, x1 * xr, c1 * cr
 
     def self_mut(q0, q1):
         return (q0 + 2 * q1) / 3.0, (q0 - q1) / 3.0
@@ -137,6 +137,10 @@ def test_zero_sequence_defaulting_from_config():
     assert R[0][0] == pytest.approx(self_mut(r0, r1)[0])
     assert R[0][1] == pytest.approx(self_mut(r0, r1)[1])
     assert C[0][0] == pytest.approx(self_mut(c0, c1)[0])
+    # Inductance defaults via x0 = x1 * ratio; L = X / (2*pi*f0).
+    l1, l0 = x1 / TWO_PI_F0, x0 / TWO_PI_F0
+    assert L[0][0] == pytest.approx(self_mut(l0, l1)[0])
+    assert L[0][1] == pytest.approx(self_mut(l0, l1)[1])
 
 
 # ----------------------------------------------------------------------- #

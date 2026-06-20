@@ -50,7 +50,7 @@ def test_correlation_matches_rho(grid3):
     for rho in (0.0, 0.5, 0.9):
         s = sample(grid3, _corr_cfg(rho))
         c = _corr(s.samples["load_pq"][:, 0], s.samples["load_pq"][:, 1])
-        assert abs(c - rho) < 0.05, f"rho={rho} got corr={c}"
+        assert abs(c - rho) < 0.015, f"rho={rho} got corr={c}"
 
 
 def test_correlation_rho1_is_identical(grid3):
@@ -64,8 +64,8 @@ def test_correlation_preserves_marginal(grid3):
     # The copula must not distort the marginal: each component stays ~ Normal(1, 0.2).
     s = sample(grid3, _corr_cfg(0.7))
     col = s.samples["load_pq"][:, 0]
-    assert abs(float(col.mean()) - 1.0) < 0.02
-    assert abs(float(col.std()) - 0.2) < 0.02
+    assert abs(float(col.mean()) - 1.0) < 0.01
+    assert abs(float(col.std()) - 0.2) < 0.005
 
 
 def test_undeclared_factor_raises(grid3):

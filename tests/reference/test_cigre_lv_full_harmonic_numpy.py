@@ -1,4 +1,11 @@
-"""Regression tests: CIGRE LV full-grid harmonic flow vs :func:`numpy_harmonic_voltages`.
+"""pgml-vs-numpy machine-precision REGRESSION: CIGRE LV full-grid harmonic flow.
+
+This file runs ZERO OpenDSS.  The oracle is the pure-numpy mirror
+:func:`numpy_harmonic_voltages`, which reimplements pgml's exact stamping formulas
+in numpy; the comparison is therefore a machine-precision REGRESSION guard on
+:func:`pgml.solver.solve_harmonic_flow` (it detects accidental changes to pgml's
+own formulas), NOT a live-OpenDSS oracle validation.  For genuine OpenDSS-oracle
+harmonic comparison see ``tests/reference/test_cigre_lv_live_opendss.py``.
 
 Validates :func:`pgml.solver.solve_harmonic_flow` on the FULL CIGRE LV benchmark
 (44 nodes, 43 branches including 3 Dyn30 20/0.4 kV transformers, 15 loads, 1 MV
@@ -172,15 +179,6 @@ class TestCigreLvHarmonicOracleSinglePhase:
             atol=ATOL_V,
             rtol=RTOL_V,
             err_msg="11th harmonic: oracle vs pgml voltage mismatch",
-        )
-
-    def test_all_orders_allclose(self) -> None:
-        """All requested orders: max absolute deviation < 1e-10 V."""
-        v_pgml, v_oracle, orders = self._solve_and_compare()
-        max_err = float(np.abs(v_oracle - v_pgml).max())
-        assert max_err < ATOL_V, (
-            f"Oracle-vs-pgml max |ΔV| = {max_err:.3e} V exceeds atol={ATOL_V:.0e} V "
-            f"(orders={orders})"
         )
 
     def test_transformer_nodes_carry_harmonics(self) -> None:
@@ -370,15 +368,6 @@ class TestCigreLvHarmonicOracleThreePhase:
             atol=ATOL_V,
             rtol=RTOL_V,
             err_msg="THREE_PHASE 11th harmonic: oracle vs pgml voltage mismatch",
-        )
-
-    def test_all_orders_allclose(self) -> None:
-        """All orders (3-phase): max absolute deviation < 1e-10 V."""
-        v_pgml, v_oracle, orders = self._solve_and_compare()
-        max_err = float(np.abs(v_oracle - v_pgml).max())
-        assert max_err < ATOL_V, (
-            f"THREE_PHASE oracle-vs-pgml max |ΔV| = {max_err:.3e} V "
-            f"exceeds atol={ATOL_V:.0e} V (orders={orders})"
         )
 
     def test_output_shape_three_phase(self) -> None:

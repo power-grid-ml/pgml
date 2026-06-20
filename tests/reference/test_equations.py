@@ -74,10 +74,16 @@ def test_evaluate_broadcasts_and_normalizes():
     x = torch.tensor([0.3, 0.6], dtype=torch.float64)
     res = registry.evaluate("reactance_from_inductance", {"X": x, "f": f, "L": ind})
     assert res.shape == (2,)
+    # Residual is the closed form X - 2*pi*f*L, evaluated per broadcast element.
+    expected = x - 2 * math.pi * f * ind
+    torch.testing.assert_close(res, expected, rtol=0, atol=1e-12)
+
     rel = registry.evaluate(
         "reactance_from_inductance", {"X": x, "f": f, "L": ind}, normalize_by="X"
     )
     assert rel.shape == (2,)
+    # Normalization divides the residual by the named field (here X).
+    torch.testing.assert_close(rel, expected / x, rtol=0, atol=1e-12)
 
 
 def test_latex_is_string():
