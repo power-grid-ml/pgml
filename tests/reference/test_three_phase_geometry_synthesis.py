@@ -75,10 +75,6 @@ def test_r0_follows_earth_physics():
 
 def test_grid_synthesis_dispatches_by_phase_count():
     """synthesize_grid_geometry builds 3-conductor geometries for 3-phase lines."""
-    import numpy as np
-
-    np.Inf = np.inf  # type: ignore[attr-defined]
-    np.in1d = np.isin  # type: ignore[attr-defined]
     import warnings
 
     from pgml.convert.pandapower import PhaseMode

@@ -46,23 +46,22 @@ import numpy as np
 import pytest
 import torch
 
-# numpy 2.x compat for pandapower 2.14
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-from pgml.assembly import node_phase_index  # noqa: E402
-from pgml.convert.pandapower import PhaseMode  # noqa: E402
-from pgml.evaluation.references import (  # noqa: E402
+from pgml.assembly import node_phase_index
+from pgml.convert.pandapower import PhaseMode
+from pgml.evaluation.references import (
     cigre_lv_full_grid,
     opendss_dyn_transformer_harmonic_voltages,
     opendss_harmonic_voltages,
 )
-from pgml.geometry.synthesis import (  # noqa: E402
+from pgml.geometry.synthesis import (
     apply_default_harmonic_model,
     synthesize_grid_geometry,
 )
-from pgml.schemas.grid_schema import Load, Phase  # noqa: E402
-from pgml.solver import solve_harmonic_flow  # noqa: E402
+from pgml.schemas.grid_schema import Load, Phase
+from pgml.solver import solve_harmonic_flow
+
+# Every test in this module drives a live OpenDSS process.
+pytestmark = pytest.mark.opendss
 
 # ---------------------------------------------------------------------------
 # Shared test parameters

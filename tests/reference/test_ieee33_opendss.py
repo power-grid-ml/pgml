@@ -59,21 +59,15 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import opendssdirect as dss
+import pandapower.networks as pn
 import pytest
 import torch
 
-# numpy 2.x compatibility shim for pandapower 2.14
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-import pandapower.networks as pn  # noqa: E402
-
-import opendssdirect as dss  # noqa: E402
-
-from pgml.assembly import assemble_ybus, node_phase_index  # noqa: E402
-from pgml.convert.pandapower import to_grid as pp_to_grid  # noqa: E402
-from pgml.convert.opendss import to_grid as dss_to_grid  # noqa: E402
-from pgml.schemas.grid_schema import (  # noqa: E402
+from pgml.assembly import assemble_ybus, node_phase_index
+from pgml.convert.pandapower import to_grid as pp_to_grid
+from pgml.convert.opendss import to_grid as dss_to_grid
+from pgml.schemas.grid_schema import (
     Line as GridLine,
     Load as GridLoad,
     Phase,

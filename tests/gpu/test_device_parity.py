@@ -30,9 +30,10 @@ from pgml.solver import solve_harmonic, solve_power_flow
 
 from tests.fixtures.tiny_grids import single_phase_chain, three_phase_two_bus
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA not available"
-)
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available"),
+]
 
 GRIDS = [single_phase_chain, three_phase_two_bus]
 

@@ -55,18 +55,14 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-# numpy 2.x compat for pandapower 2.14
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-from pgml.assembly import node_phase_index  # noqa: E402
-from pgml.convert.pandapower import PhaseMode  # noqa: E402
-from pgml.evaluation.references import (  # noqa: E402
+from pgml.assembly import node_phase_index
+from pgml.convert.pandapower import PhaseMode
+from pgml.evaluation.references import (
     cigre_lv_full_grid,
     numpy_harmonic_voltages,
 )
-from pgml.schemas.grid_schema import Load  # noqa: E402
-from pgml.solver import solve_harmonic_flow  # noqa: E402
+from pgml.schemas.grid_schema import Load
+from pgml.solver import solve_harmonic_flow
 
 # ---------------------------------------------------------------------------
 # Shared test parameters

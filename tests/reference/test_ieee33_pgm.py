@@ -60,11 +60,6 @@ Tolerance targets
 - Node voltage angle:     atol = 1e-4 deg.
 
 Achieved on IEEE 33-bus: max |V| error < 1e-8 pu (well within tolerance).
-
-numpy 2.x compatibility shim
------------------------------
-pandapower 2.14 uses removed numpy aliases; must be applied before the first
-pandapower import.
 """
 
 from __future__ import annotations
@@ -72,24 +67,16 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandapower.networks as pn
+import power_grid_model as pgm
 import pytest
 import torch
+from power_grid_model import LoadGenType, PowerGridModel
 
-# ---------------------------------------------------------------------------
-# numpy 2.x compatibility shim (pandapower 2.14 uses removed aliases)
-# ---------------------------------------------------------------------------
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-import pandapower.networks as pn  # noqa: E402
-
-import power_grid_model as pgm  # noqa: E402
-from power_grid_model import LoadGenType, PowerGridModel  # noqa: E402
-
-from pgml.assembly import assemble_ybus, build_injections, node_phase_index  # noqa: E402
-from pgml.convert.pgm import to_grid  # noqa: E402
-from pgml.schemas.grid_schema import LoadModel, Phase  # noqa: E402
-from pgml.solver import solve_harmonic  # noqa: E402
+from pgml.assembly import assemble_ybus, build_injections, node_phase_index
+from pgml.convert.pgm import to_grid
+from pgml.schemas.grid_schema import LoadModel, Phase
+from pgml.solver import solve_harmonic
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,75 @@
+# Standard PEP 621 packaging metadata, so pgml is a buildable / installable Python
+# package (`pip install .`, wheels, type information). The pixi development workflow
+# is configured separately in `pixi.toml`; this file intentionally has no `[tool.pixi]`
+# table, so pixi continues to use `pixi.toml` and the dev env is unaffected.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pgml"
+description = "Differentiable, GPU-ready harmonic power-flow + ML for power grids"
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+
+# Core runtime: the differentiable physics engine (schema + equations + assembly +
+# solver + geometry). Everything else — reference-library converters, scenario data
+# I/O, plotting, the ML layer, the OpenDSS oracle — is an optional extra so a minimal
+# install stays lean. Version ranges mirror the pinned pixi development environment.
+dependencies = [
+    "torch>=2.10,<3",
+    "pydantic>=2.12,<3",
+    "numpy>=2,<3",
+    "scipy>=1.11",
+    "sympy>=1.14,<2",
+    "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+convert = ["pandapower>=2.14,<3", "power-grid-model>=1.13,<2"]
+scenarios = ["polars>=1.39,<2", "pyarrow>=20", "duckdb>=1.5,<2"]
+ml = ["lightning>=2.6,<3", "torch-geometric", "mlflow>=3.10,<4"]
+viz = ["matplotlib>=3.11,<4", "plotly>=5,<7", "networkx>=3.6,<4"]
+opendss = ["opendssdirect-py>=0.9.4,<0.10"]
+docs = [
+    "sphinx>=9.1,<10",
+    "furo>=2025.1.0",
+    "myst-parser>=4",
+    "sphinx-autodoc-typehints>=2",
+]
+dev = ["pytest>=9,<10", "ruff>=0.15,<0.16"]
+all = [
+    "pgml[convert,scenarios,ml,viz,opendss]",
+]
+
+[tool.hatch.version]
+path = "src/pgml/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pgml"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a CUDA device (skipped on CPU-only hosts)",
+    "opendss: runs a live OpenDSS solve via opendssdirect (slower, oracle tests)",
+    "slow: long-running test",
+]
+# pandapower 2.x imports the deprecated `numpy.core` namespace on NumPy 2; silence the
+# resulting DeprecationWarning noise (it is third-party and not actionable here).
+filterwarnings = [
+    "ignore:numpy.core.umath is deprecated:DeprecationWarning",
+    "ignore:numpy.core.multiarray is deprecated:DeprecationWarning",
+]

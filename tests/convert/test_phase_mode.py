@@ -16,18 +16,13 @@ Covers:
 
 from __future__ import annotations
 
-import numpy as np
+import pandapower as pp
 import pytest
 
-np.Inf = np.inf  # numpy 2.x compat shim (pandapower 2.14 uses removed alias)
-np.in1d = np.isin
-
-import pandapower as pp  # noqa: E402
-
-from pgml.convert._common import PhaseMode  # noqa: E402
-from pgml.convert.pandapower import to_grid as pp_to_grid  # noqa: E402
-from pgml.convert.pgm import to_grid as pgm_to_grid  # noqa: E402
-from pgml.schemas.grid_schema import (  # noqa: E402
+from pgml.convert._common import PhaseMode
+from pgml.convert.pandapower import to_grid as pp_to_grid
+from pgml.convert.pgm import to_grid as pgm_to_grid
+from pgml.schemas.grid_schema import (
     HarmonicComponent,
     Line,
     Load,
@@ -37,7 +32,7 @@ from pgml.schemas.grid_schema import (  # noqa: E402
     StaticSpectrum,
     WindingConnection,
 )
-from pgml.solver import solve_harmonic_flow, solve_power_flow  # noqa: E402
+from pgml.solver import solve_harmonic_flow, solve_power_flow
 
 ABC = (Phase.A, Phase.B, Phase.C)
 

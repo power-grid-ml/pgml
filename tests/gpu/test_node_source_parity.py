@@ -24,9 +24,10 @@ from pgml.schemas.grid_schema import (
 )
 from pgml.solver import NodeHarmonicSource, solve_harmonic_flow
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA not available"
-)
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available"),
+]
 
 F0 = 50.0
 W0 = 2.0 * math.pi * F0

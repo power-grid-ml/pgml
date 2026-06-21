@@ -13,17 +13,13 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandapower as pp
+import pandapower.networks as pn
 import torch
 
-np.Inf = np.inf  # type: ignore[attr-defined]  # pandapower 2.14 / numpy 2.x shim
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-import pandapower as pp  # noqa: E402
-import pandapower.networks as pn  # noqa: E402
-
-from pgml.assembly import assemble_network_ybus, assemble_ybus, node_phase_index  # noqa: E402
-from pgml.convert.pandapower import to_grid  # noqa: E402
-from pgml.evaluation import (  # noqa: E402
+from pgml.assembly import assemble_network_ybus, assemble_ybus, node_phase_index
+from pgml.convert.pandapower import to_grid
+from pgml.evaluation import (
     labeled_matrix,
     plot_voltage_profile,
     plot_ybus_difference,
@@ -31,8 +27,8 @@ from pgml.evaluation import (  # noqa: E402
     save_figure,
     voltage_profile,
 )
-from pgml.evaluation import references as ref  # noqa: E402
-from pgml.solver import solve_power_flow  # noqa: E402
+from pgml.evaluation import references as ref
+from pgml.solver import solve_power_flow
 
 CDT = torch.complex128
 

@@ -73,19 +73,14 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandapower as pp
+import pandapower.networks as pn
 import torch
 
-# --- numpy 2.x compatibility shim for pandapower 2.14 ----------------------
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-import pandapower as pp  # noqa: E402
-import pandapower.networks as pn  # noqa: E402
-
-from pgml.assembly import assemble_network_ybus  # noqa: E402
-from pgml.convert.pandapower import PhaseMode, to_grid  # noqa: E402
-from pgml.schemas.grid_schema import Phase, Transformer  # noqa: E402
-from pgml.solver import solve_power_flow  # noqa: E402
+from pgml.assembly import assemble_network_ybus
+from pgml.convert.pandapower import PhaseMode, to_grid
+from pgml.schemas.grid_schema import Phase, Transformer
+from pgml.solver import solve_power_flow
 
 
 # ---------------------------------------------------------------------------

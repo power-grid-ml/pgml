@@ -44,19 +44,13 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
+import pandapower as pp
+import pandapower.networks as pn
 import torch
 
-# --- numpy 2.x compatibility shim for pandapower 2.14 ----------------------
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
-
-import pandapower as pp  # noqa: E402
-import pandapower.networks as pn  # noqa: E402
-
-from pgml.convert.pandapower import to_grid  # noqa: E402
-from pgml.schemas.grid_schema import Phase  # noqa: E402
-from pgml.solver import solve_power_flow  # noqa: E402
+from pgml.convert.pandapower import to_grid
+from pgml.schemas.grid_schema import Phase
+from pgml.solver import solve_power_flow
 
 
 # ---------------------------------------------------------------------------
@@ -168,4 +162,3 @@ class TestCIGRELVVsPandapower:
         switches = [b for b in grid.branches if isinstance(b, Switch)]
         assert len(switches) == 3, f"Expected 3 switches, got {len(switches)}"
         assert len(id_map["switch"]) == 3
-

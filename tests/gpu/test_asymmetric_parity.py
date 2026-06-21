@@ -27,9 +27,10 @@ from pgml.schemas.grid_schema import (
 )
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA not available"
-)
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available"),
+]
 
 ABC = (Phase.A, Phase.B, Phase.C)
 ABCN = (Phase.A, Phase.B, Phase.C, Phase.N)
