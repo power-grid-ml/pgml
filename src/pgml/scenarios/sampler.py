@@ -27,6 +27,7 @@ from typing import NamedTuple
 import torch
 from torch import Tensor
 
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import Generator, Grid, Load, StaticSpectrum
 
 from .config import (
@@ -119,7 +120,7 @@ def _unit_samples(b: int, d: int, method: str, seed: int) -> Tensor:
             jitter = torch.rand(b, generator=gen, dtype=torch.float64)
             u[:, j] = (strata[perm] + jitter) / b
         return u
-    raise ValueError(f"Unknown sampling method {method!r}.")
+    raise InputError(f"Unknown sampling method {method!r}.")
 
 
 def _norm_icdf(u: Tensor) -> Tensor:
@@ -172,7 +173,7 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     QMC cube (better space-filling across power and spectrum together).
     """
     if not config.parameters:
-        raise ValueError("ScenarioConfig has no parameters / sampling dimensions.")
+        raise InputError("ScenarioConfig has no parameters / sampling dimensions.")
 
     by_id = {a.id: a for a in grid.appliances if isinstance(a, (Load, Generator))}
     declared = {f.name for f in config.factors}
@@ -188,7 +189,7 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     for spec in config.parameters:
         ids = spec.selector.resolve(grid)
         if not ids:
-            raise ValueError(
+            raise InputError(
                 f"Parameter {spec.name!r} selector matched no in-service components."
             )
         if spec.is_harmonic:
@@ -198,13 +199,13 @@ def _resolve(grid: Grid, config: ScenarioConfig):
             dim += block
             continue
         if spec.correlation is not None and spec.correlation.factor not in declared:
-            raise ValueError(
+            raise InputError(
                 f"Parameter {spec.name!r} correlation references undeclared factor "
                 f"{spec.correlation.factor!r}; add it to ScenarioConfig.factors."
             )
         nph = [len(by_id[i].phases) for i in ids]
         if spec.symmetry == "independent" and len(set(nph)) > 1:
-            raise ValueError(
+            raise InputError(
                 f"Parameter {spec.name!r} symmetry='independent' matches components "
                 f"with differing phase counts {sorted(set(nph))}; split into one spec "
                 "per phase count."
@@ -325,7 +326,7 @@ def _harmonic_injections(
                     slot[0] = v * en50160_limit(order)
                 elif spec.mode == "scale":
                     if order not in stored:
-                        raise ValueError(
+                        raise InputError(
                             f"Parameter {spec.name!r} h_mag mode='scale' for order "
                             f"{order} on device {cid}, which has no stored spectrum "
                             "magnitude; use mode='absolute' or harmonic_reference."
@@ -424,7 +425,7 @@ def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:
     resolved = [(ax, ax.selector.resolve(grid)) for ax in config.axes]
     for ax, ids in resolved:
         if not ids:
-            raise ValueError(
+            raise InputError(
                 f"Cartesian axis {ax.name!r} matched no in-service components."
             )
     levels = [torch.tensor(ax.values, dtype=torch.float64) for ax, _ in resolved]

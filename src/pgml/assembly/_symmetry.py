@@ -27,6 +27,7 @@ import logging
 from typing import Optional
 
 from pgml import config
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     Generator,
     Grid,
@@ -88,7 +89,7 @@ def resolve_asymmetric(
         mode = config.get("calculation.symmetry")
     m = str(mode).lower()
     if m not in _VALID_MODES:
-        raise ValueError(
+        raise InputError(
             f"calculation symmetry must be one of {_VALID_MODES}; got {mode!r}."
         )
 

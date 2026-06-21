@@ -42,8 +42,15 @@ class PgmError(Exception):
 # --------------------------------------------------------------------------- #
 # Input errors (the caller's fault) -> 422
 # --------------------------------------------------------------------------- #
-class InputError(PgmError):
-    """Invalid input: configuration, conversion, or an unsupported modeling choice."""
+class InputError(PgmError, ValueError):
+    """Invalid input: configuration, conversion, or an unsupported modeling choice.
+
+    Also subclasses the builtin :class:`ValueError` so that migrating a runtime
+    ``raise ValueError(...)`` to ``raise InputError(...)`` stays backward-compatible
+    with callers (and tests) that catch ``ValueError``, while being catchable as
+    :class:`PgmError` and carrying ``http_status = 422``. (Schema validation is
+    separate — it raises pydantic ``ValidationError``, not this.)
+    """
 
     http_status: int = 422
 

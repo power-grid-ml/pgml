@@ -29,6 +29,8 @@ from typing import Optional
 import torch
 from torch import Tensor
 
+from pgml.errors import InputError
+
 
 def solve_harmonic(
     y_bus: Tensor,
@@ -72,7 +74,7 @@ def solve_harmonic(
         v = _solve_norton(y, i)
     else:
         if v_fixed is None:
-            raise ValueError(
+            raise InputError(
                 "Ideal-slack mode requires `v_fixed` when `fixed_rows` is given."
             )
         v = _solve_ideal_slack(y, i, fixed_rows, v_fixed)

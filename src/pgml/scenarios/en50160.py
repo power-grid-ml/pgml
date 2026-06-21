@@ -22,6 +22,8 @@ from typing import Optional
 
 import yaml
 
+from pgml.errors import InputError
+
 _ENV = "PGML_EN50160"
 _FILENAME = "max_harmonic_values_din-en50160.yaml"
 
@@ -46,7 +48,7 @@ def _load(path_str: str) -> dict:
     data = yaml.safe_load(Path(path_str).read_text(encoding="utf-8"))
     table = data.get("max_harmonic_values") if isinstance(data, dict) else None
     if not isinstance(table, dict):
-        raise ValueError(
+        raise InputError(
             f"{path_str!r} must contain a 'max_harmonic_values' mapping of order -> limit."
         )
     return {int(k): float(v) for k, v in table.items()}

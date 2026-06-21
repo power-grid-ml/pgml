@@ -39,6 +39,7 @@ import torch
 from torch import Tensor
 
 from pgml.config import get as _cfg
+from pgml.errors import InputError
 
 from .carson import MU0, _cdtype, internal_impedance, series_impedance
 
@@ -198,7 +199,7 @@ def phase_to_sequence(z_phase: Tensor) -> Tensor:
     for just the diagonal.
     """
     if z_phase.shape[-1] != 3 or z_phase.shape[-2] != 3:
-        raise ValueError(
+        raise InputError(
             f"phase_to_sequence expects a 3x3 phase matrix, got {z_phase.shape}"
         )
     a = fortescue_matrix(z_phase.dtype, z_phase.device)

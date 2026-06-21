@@ -27,6 +27,8 @@ from typing import Any, Optional
 
 import yaml
 
+from pgml.errors import ConfigurationError
+
 _PACKAGED = Path(__file__).with_name("defaults.yaml")
 _RAISE = object()  # sentinel: get() with no default raises on a missing key
 
@@ -42,7 +44,7 @@ def _load(path_str: str) -> dict:
     with open(path_str, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict):
-        raise ValueError(
+        raise ConfigurationError(
             f"pgml config {path_str!r} must be a mapping at the top level."
         )
     return data

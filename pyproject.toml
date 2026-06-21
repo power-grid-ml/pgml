@@ -40,6 +40,7 @@ scenarios = ["polars>=1.39,<2", "pyarrow>=20", "duckdb>=1.5,<2"]
 ml = ["lightning>=2.6,<3", "torch-geometric", "mlflow>=3.10,<4"]
 viz = ["matplotlib>=3.11,<4", "plotly>=5,<7", "networkx>=3.6,<4"]
 opendss = ["opendssdirect-py>=0.9.4,<0.10"]
+oracles = ["pandapower>=2.14,<3", "power-grid-model>=1.13,<2", "opendssdirect-py>=0.9.4,<0.10"]
 docs = [
     "sphinx>=9.1,<10",
     "furo>=2025.1.0",
@@ -48,7 +49,7 @@ docs = [
 ]
 dev = ["pytest>=9,<10", "ruff>=0.15,<0.16"]
 all = [
-    "pgml[convert,scenarios,ml,viz,opendss]",
+    "pgml[convert,scenarios,ml,viz,opendss,oracles]",
 ]
 
 [tool.hatch.version]

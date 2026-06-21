@@ -30,6 +30,7 @@ import polars as pl
 import torch
 from torch import Tensor
 
+from ..errors import InputError
 from . import config as _cfg
 from .run import ScenarioResult
 
@@ -99,7 +100,7 @@ def _canonical(v: Tensor) -> tuple[Tensor, int, int, int, int]:
     if v.ndim == 4:  # [B, T, H, N] coherent
         b, t, h, n = v.shape
         return v, b, t, h
-    raise ValueError(f"ScenarioResult.v must be 2-4 dims, got {v.ndim}.")
+    raise InputError(f"ScenarioResult.v must be 2-4 dims, got {v.ndim}.")
 
 
 def _long_dataframe(vre, vim, dims, node_ids, phase_codes, freqs) -> "pl.DataFrame":
@@ -209,7 +210,7 @@ def write_dataset(
         The dataset directory.
     """
     if layout not in ("wide", "long"):
-        raise ValueError(f"layout must be 'wide' or 'long', got {layout!r}.")
+        raise InputError(f"layout must be 'wide' or 'long', got {layout!r}.")
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
 

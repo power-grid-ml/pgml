@@ -15,6 +15,7 @@ import torch
 from torch import Tensor
 
 from pgml.assembly import NodePhaseIndex
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
@@ -113,7 +114,7 @@ def run_scenarios(
         return ScenarioResult(v=res.v, index=res.index, sampled=sampled)
     if calculation == "harmonic":
         if not harmonic_orders:
-            raise ValueError("calculation='harmonic' requires harmonic_orders.")
+            raise InputError("calculation='harmonic' requires harmonic_orders.")
         res = solve_harmonic_flow(
             grid,
             harmonic_orders,
@@ -127,7 +128,7 @@ def run_scenarios(
         return ScenarioResult(
             v=res.v, index=res.index, sampled=sampled, frequencies_hz=res.frequencies_hz
         )
-    raise ValueError(
+    raise InputError(
         f"Unknown calculation {calculation!r} (use 'power_flow'/'harmonic')."
     )
 

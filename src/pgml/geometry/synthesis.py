@@ -25,6 +25,7 @@ import math
 from typing import Optional
 
 from pgml.config import get as _cfg
+from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import (
     AnalyticParam,
     ConductorPlacement,
@@ -488,7 +489,7 @@ def apply_default_harmonic_model(
         model = model_3ph if len(ln.from_phases) == 3 else model_other
         if model == "sequence_aware":
             if len(ln.from_phases) != 3:
-                raise ValueError(
+                raise ModelingError(
                     f"Line {ln.id}: sequence_aware needs 3 phases "
                     f"(config single_phase={model_other!r} should not be sequence_aware)."
                 )
@@ -500,7 +501,7 @@ def apply_default_harmonic_model(
         elif model == "none":
             continue
         else:
-            raise ValueError(
+            raise InputError(
                 f"Unknown harmonic line model {model!r} in config "
                 "(expected sequence_aware | positive_sequence | naive | none)."
             )

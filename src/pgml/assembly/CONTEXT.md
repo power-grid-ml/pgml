@@ -82,13 +82,46 @@ Module: `pgml.assembly`
   equals `assemble_network_ybus(grid, freqs).Y @ V` at every row. `param_overrides` keys
   identical to the stamps (line/switch/generic-branch/transformer R/L/C/tap). Differentiable
   (grad flows grid params -> `i_from`/`i_to`), GPU/dtype-honoring, vectorized per KIND/group
-  (no python loop over branches on the tape). SHARED block builders `_*_block_groups` yield
+  (no python loop over branches on the tape). Iterates the SAME branch-stamp registry
+  (`_BRANCH_STAMPS`, see below) the assembly does: each `_*_block_groups` builder yields
   `(group, block, rows, cols)` consumed by BOTH the stamp (scatters) and `branch_currents`
   (matmuls) — assembly behaviour is BIT-IDENTICAL (oracle suite unchanged).
 - `node_phase_index(grid) -> NodePhaseIndex` (above).
 
 `operating_point` format (M1): `{appliance_id: {"p_w": float, "q_var": float}}` or
 per-phase `{"p_per_phase_w": [...], "q_per_phase_var": [...]}`; default = nameplate.
+
+## Branch-stamp registry (THE extension point for new branch / device models)
+The branch KINDS the assembler knows live in ONE light registry, `_BRANCH_STAMPS`
+(in `ybus.py`): an ordered list of `(kind, builder, single_terminal)` entries. Each
+builder is a generator `_<kind>_block_groups(grid, f, index, cdt, rdt, device,
+param_overrides)` that YIELDS `(group, block, rows, cols)` — `group` the source
+branches, `block` the primitive admittance `[H,K,M,M]` (`M=2P` two-terminal series,
+`M=P` single-terminal shunt), `rows==cols` the global node-row indices `[K,M]` the
+block scatters into / gathers voltage from. Builders are registered in place with the
+`@_branch_stamp(kind, *, single_terminal=False)` decorator at their definition.
+
+BOTH consumers iterate the registry, so the two paths can never drift:
+- `_stamp_network` (passive assembly, shared by `assemble_ybus` /
+  `assemble_network_ybus`) scatters every yielded block (`scatter_blocks_into`).
+  Scatter-add is order-independent, so the assembled Y is BIT-IDENTICAL regardless of
+  registration order.
+- `branch_currents` multiplies each block with the gathered terminal voltage. A
+  `single_terminal` builder is emitted as `to_node=None` / empty `i_to` (no TO half);
+  a two-terminal block is split `i_from = I_term[..., :P]`, `i_to = I_term[..., P:]`.
+
+Registered kinds (BRANCH-scoped only): `line`, `switch`, `generic_branch`,
+`shunt_reactor` (single-terminal), `transformer`. The registry is deliberately NOT a
+plugin framework — it does not include the non-branch stamps (source Norton, const-Z
+device shunts, ShuntAppliance, current injections), which stay as their own calls in
+`assemble_ybus` / `assemble_network_ybus`.
+
+To add a NEW branch kind: write a `_<kind>_block_groups` generator following the
+shared signature/yield contract (group its branches, build the primitive `[H,K,M,M]`
+block batched over branches+phases — no python loop over individual branches on the
+tape — and emit `_series_terminal_indices` / `_shunt_node_indices` for `rows`), then
+decorate it with `@_branch_stamp("<kind>", single_terminal=...)`. Both Y-bus assembly
+and `branch_currents` pick it up automatically — no edit to either dispatch.
 
 ## Stamps (differentiable, vectorized — no Python loop over branches)
 - Per harmonic, per phase. Frequency scaling: `X = 2*pi*f*L`, `B = 2*pi*f*C`
@@ -99,7 +132,7 @@ per-phase `{"p_per_phase_w": [...], "q_per_phase_var": [...]}`; default = namepl
 - Source: Thévenin (`u_ref∠u_angle` behind per-phase `R + jX` matrix) -> Norton:
   `Y_s = Z_s(f)^-1` added to the source-node diagonal block; current handled by
   `build_injections`.
-- Transformer (`_stamp_transformers` + `_transformer.py`): VECTOR-GROUP winding-incidence
+- Transformer (`_transformer_block_groups` + `_transformer.py`): VECTOR-GROUP winding-incidence
   primitive `Y_node = Nᵀ Y_winding N`. The winding-voltage primitive (leakage `y_se`
   referred to the TO/LV coil, coil turns ratio `τ`) is
   `Y_winding = [[(y/τ²)I, −(y/τ)I],[−(y/τ)I, y I]]`; the constant real incidence

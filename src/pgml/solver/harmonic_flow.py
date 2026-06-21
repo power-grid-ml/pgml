@@ -52,6 +52,7 @@ from pgml.assembly._params import phase_voltage_magnitude, resolve_operating_pow
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
+from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import (
     Generator,
     Grid,
@@ -196,7 +197,7 @@ def solve_harmonic_flow(
         ``v`` complex ``[*batch, H, N]`` per requested order, frequencies, index, pf.
     """
     if include_load_shunt:
-        raise NotImplementedError(
+        raise ModelingError(
             "include_load_shunt=True (harmonic load Norton shunt) is not yet "
             "implemented; the exact OpenDSS shunt split is unpinned. Use False "
             "(pure current-source / NeglectLoadY model)."
@@ -204,7 +205,7 @@ def solve_harmonic_flow(
 
     orders = [int(h) for h in harmonic_orders]
     if not orders:
-        raise ValueError("harmonic_orders must be non-empty.")
+        raise InputError("harmonic_orders must be non-empty.")
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
@@ -309,7 +310,7 @@ def _element_coeff(value, n_elem: int, rdt, device) -> Tensor:
     """
     if isinstance(value, (list, tuple)):
         if len(value) != n_elem:
-            raise ValueError(
+            raise InputError(
                 f"per-element harmonic coefficient (list/tuple) has length "
                 f"{len(value)} != n_elem {n_elem}. A list/tuple is ALWAYS per-element; "
                 f"use a scalar / bare tensor to broadcast across elements."
@@ -589,7 +590,7 @@ def _apply_node_sources(
         y_acc = torch.zeros((n,), dtype=cdt, device=device)
         for src in node_sources:
             if src.kind not in ("voltage", "current"):
-                raise ValueError(
+                raise InputError(
                     f"NodeHarmonicSource.kind must be 'voltage' or 'current', "
                     f"got {src.kind!r}."
                 )

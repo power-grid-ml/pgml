@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import torch
 
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 from pgml.schemas.scenario_schema import ParameterPerturbation
 
@@ -73,7 +74,7 @@ def perturbation_sweep(
     """
     ids = selector.resolve(grid)
     if not ids:
-        raise ValueError(
+        raise InputError(
             "perturbation_sweep selector matched no in-service components."
         )
     b = len(ids)

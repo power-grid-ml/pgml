@@ -34,7 +34,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 
-from .errors import ConvergenceError
+from .errors import ConvergenceError, InputError
 from .schemas.grid_schema import Grid, Phase
 from .schemas.result_schema import (
     BranchResult,
@@ -94,7 +94,7 @@ def _resolve_dtype(dtype) -> torch.dtype:
     try:
         return _DTYPES[str(dtype)]
     except KeyError:
-        raise ValueError(
+        raise InputError(
             f"dtype must be one of {sorted(_DTYPES)} or a torch complex dtype, got {dtype!r}"
         ) from None
 
@@ -160,7 +160,7 @@ class SolvedState:
         try:
             i1 = orders.index(1.0)
         except ValueError:
-            raise ValueError(
+            raise InputError(
                 "thd requires order 1 (the fundamental) to be solved"
             ) from None
         vh = self.voltage(node_id, phase)  # [*batch, H]
@@ -224,7 +224,7 @@ class SolvedState:
         solve only; for batched scenarios use ``pgml.scenarios`` persistence.
         """
         if self.v.dim() != 2:
-            raise ValueError(
+            raise InputError(
                 "to_result_set serializes a single (unbatched) solve [H, N]; for batched "
                 "scenarios use pgml.scenarios.run_scenarios + write_dataset."
             )

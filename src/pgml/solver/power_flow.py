@@ -67,6 +67,7 @@ from pgml.assembly import (
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
+from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, Source
 
 from .harmonic import solve_harmonic
@@ -258,9 +259,11 @@ def solve_power_flow(
         iteration count, the final update-norm residual, and convergence flag.
     """
     if method not in ("current_injection",):
-        raise ValueError(f"Unsupported method {method!r} (only 'current_injection').")
+        raise ModelingError(
+            f"Unsupported method {method!r} (only 'current_injection')."
+        )
     if slack not in ("ideal", "norton"):
-        raise ValueError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+        raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)

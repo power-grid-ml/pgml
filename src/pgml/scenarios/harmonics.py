@@ -24,6 +24,7 @@ import math
 import torch
 from torch import Tensor
 
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 
 from .config import CoherentSpectrumConfig, Selector, SpectrumSweepConfig
@@ -113,7 +114,7 @@ def sample_coherent_spectra(
     """
     ids = config.selector.resolve(grid)
     if not ids:
-        raise ValueError(
+        raise InputError(
             "CoherentSpectrumConfig selector matched no in-service components."
         )
     nm = config.name
@@ -226,7 +227,7 @@ def spectrum_sweep(
     )
     ids = config.selector.resolve(grid)
     if not ids:
-        raise ValueError("spectrum_sweep selector matched no in-service components.")
+        raise InputError("spectrum_sweep selector matched no in-service components.")
     b = len(ids)
 
     harmonic_injection: dict = {}

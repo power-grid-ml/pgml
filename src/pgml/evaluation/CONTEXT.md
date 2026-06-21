@@ -4,7 +4,19 @@ Reference-vs-ours and diagnostic plots. Paper-ready raster (>=300 DPI) or vector
 (svg/pdf) via `save_figure`; the 3D harmonic plot is interactive plotly HTML.
 Design: plot functions consume framework-agnostic DATA containers (plain numpy), so
 "ours vs reference" is just a list of containers; builders adapt our solver outputs,
-and `references` adapts the reference libraries to the SAME containers.
+and `oracles` adapts the reference libraries to the SAME containers.
+
+## Optional-import boundary
+`import pgml.evaluation` pulls in ONLY matplotlib / plotly / networkx; it does NOT
+import the oracle subpackage and does not require pandapower or opendssdirect.
+Oracle modules are isolated under `pgml.evaluation.oracles`; pandapower and
+opendssdirect are imported lazily INSIDE functions, so even
+`import pgml.evaluation.oracles` succeeds without them installed.  Install
+`pgml[oracles]` (pyproject.toml) to pull in all oracle dependencies.
+
+The old `pgml.evaluation.references` module remains as a thin compatibility shim
+that re-exports everything from `pgml.evaluation.oracles`; new code should import
+from the canonical `pgml.evaluation.oracles` path.
 
 ## Data containers (`pgml.evaluation.data`)
 - `VoltageProfile(distances_km, v_pu, label, node_ids)` — sorted by distance.
@@ -57,53 +69,55 @@ and `references` adapts the reference libraries to the SAME containers.
 - `plot_grid_graph(grid, *, node_values=None, layout="spring"|"kamada", ...) -> (fig,
   ax)` — topology colored by a per-node value; slack outlined.
 
-## Reference adapters (`pgml.evaluation.references`, lazy heavy imports)
+## Oracle subpackage (`pgml.evaluation.oracles`)
+Canonical home for all reference-library adapters and grid builders.
+**Optional import** — requires `pgml[oracles]` extras.
+
+### Grid builders (`oracles.grids`)
+- `ieee33_geometry_grid(*, n_harmonic_loads, spectrum) -> (grid, id_map)` — IEEE-33
+  converted from pandapower + synthesized Carson geometry + converter spectra.
+- `cigre_lv_full_grid(*, phase_mode, source_impedance_ohm) -> (grid, id_map)` — full
+  CIGRE LV benchmark (all 3 feeders + 3 Dyn1 transformers + MV source).
+- `cigre_lv_geometry_grid(*, n_harmonic_loads, spectrum) -> (grid, id_map)` — single
+  CIGRE LV residential feeder with synthesized geometry, MV side abstracted to a
+  Thévenin source.
+- `CONVERTER_SPECTRUM` — default 6-pulse converter spectrum constant.
+
+### numpy oracle (`oracles.numpy_oracle`)
+Pure-numpy harmonic oracle, no live OpenDSS required.
+- `numpy_harmonic_profiles(grid, v1, index, orders, ...) -> [HarmonicProfile]` —
+  single-phase, R-const/X∝h, shared fundamental v1.
+- `numpy_harmonic_voltages(grid, harmonic_injection, orders, *, slack="norton",
+  v1=None, operating_point=None, node_sources=None) -> np.ndarray` — full multi-element
+  oracle returning complex `[H, N]`; machine-precision parity (~1e-13 V) vs
+  `solve_harmonic_flow`; supports single-phase and three-phase, plain R/X lines.
+
+### pandapower oracle (`oracles.pandapower_oracle`)
 - `pandapower_ybus(net, grid, id_map, index, *, label)` -> LabeledMatrix (pu->SI,
   pure NETWORK admittance; compare to `assemble_network_ybus`).
 - `pandapower_voltage_profile(net, grid, id_map, *, label, slack)` -> VoltageProfile.
-- `dss_systemy() -> (Y, node_order)`, `opendss_ybus(Y, node_order, id_map, index, *,
-  label)` -> LabeledMatrix (aligns single-phase `BUS<n>.1` SystemY to our rows).
-- `numpy_harmonic_profiles(grid, v1, index, orders, *, ...)` -> [HarmonicProfile] —
-  INDEPENDENT single-phase numpy harmonic solve (R-const/X∝h), shared fundamental v1.
-- Carson feeder builders (pandapower -> pgml grid + synthesized geometry + spectra):
-  `ieee33_geometry_grid()`, `cigre_lv_geometry_grid()` -> `(grid, id_map)`.
-- OpenDSS-from-geometry (Carson harmonic comparison): `build_opendss_geometry_circuit(grid)`,
-  `opendss_geometry_systemy(grid, index, orders) -> {order: aligned SystemY(order·f0)}`,
-  `opendss_geometry_harmonic_profiles(grid, hres, orders) -> [HarmonicProfile]` (OpenDSS
-  line model solved with pgml's converged injection — true OpenDSS-vs-pgml harmonic check).
-  Demo: `examples/evaluate_harmonics_carson.py` (IEEE-33 + CIGRE LV).
-- **`numpy_harmonic_voltages(grid, harmonic_injection, orders, *, slack="norton",
-  v1=None, operating_point=None, node_sources=None) -> np.ndarray`** — Pure-numpy regression oracle returning
-  complex `[H, N]` aligned to `node_phase_index(grid)`. Supports the FULL CIGRE LV grid
-  for both `SINGLE_PHASE_EQUIV` and `THREE_PHASE` phase modes with **plain R/X lines** (no
-  conductor_geometry). Reimplements pgml's EXACT Y-bus formulas (R const, X∝h — no Carson
-  correction) in numpy, giving machine-precision parity (~1e-13 V absolute error) vs
-  `solve_harmonic_flow`. Pass `v1 = hres.pf.v.detach().cpu().numpy()` to share the nonlinear
-  fundamental operating point. `node_sources`: optional list of `NodeHarmonicSource` (from
-  `pgml.solver`) — per-node harmonic disturbance sources stamped at h>1 with same physics
-  as pgml; parity ~1e-12 V. Validation: `tests/reference/test_cigre_lv_full_harmonic_opendss.py`,
-  `tests/reference/test_node_harmonic_source_oracle.py`.
-- **`opendss_harmonic_voltages(grid, harmonic_injection, orders, *, slack="norton",
-  v1=None, operating_point=None, node_sources=None) -> np.ndarray`** — LIVE OpenDSS harmonic oracle for grids
-  using the Carson/Deri earth-return line model. Returns complex `[H, N]` aligned to
-  `node_phase_index(grid)`. Requires one of:
-  (a) **Single-phase geometry path**: all lines carry `conductor_geometry` (set by
-  `synthesize_grid_geometry`). OpenDSS builds a stub Vsource + WireData/LineGeometry circuit;
-  the stub Norton (which carries OpenDSS's Carson correction) is subtracted from SystemY and
-  replaced with pgml's exact source Norton; switches and transformers are stamped with
-  pgml-exact formulas (R const, X∝h, complex tap). Parity: ~1e-11 V (near machine precision).
-  (b) **Three-phase sequence-aware path**: lines tagged `harmonic_line_model=sequence_aware`
-  (set by `apply_default_harmonic_model`). OpenDSS builds a stub circuit with R1/X1/R0/X0
-  lines (no native Transformer — avoids neutral bus incompatibility); the same stub-subtract
-  technique is used; transformers are stamped with pgml-exact formulas. Parity: ~1e-8 V
-  (near machine precision). Plain R/X grids with neither tag raise `ValueError`.
-  `node_sources`: optional list of `NodeHarmonicSource` — stamped after the OpenDSS stub-subtract
-  and pgml-exact element stamps using identical physics (same formulas, same V1). Single-phase
-  geometry parity vs pgml with node sources: ~1e-11 V (tight). Three-phase seq-aware parity
-  with node sources: ~3.7 V at MV-bus phases B/C (diagonal transformer gap, TODO #4); LV-bus
-  parity < 1e-5 V.
-  Validation: `tests/reference/test_cigre_lv_live_opendss.py`,
-  `tests/reference/test_node_harmonic_source_oracle.py`.
+
+### OpenDSS oracle (`oracles.opendss_oracle`)
+Requires `opendssdirect` (imported lazily inside functions).
+- `dss_systemy() -> (Y, node_order)` — extract SystemY from the active DSS circuit.
+- `align_dss_systemy(y_dss, node_order, id_map, index)` — reorder single-phase SystemY
+  to our rows (IEEE-feeder positive-sequence circuits).
+- `opendss_ybus(y_dss, node_order, id_map, index, *, label)` -> LabeledMatrix.
+- `build_opendss_geometry_circuit(grid, *, slack_node) -> busname` — passive Carson
+  circuit (Vsource + WireData/LineGeometry lines); returns `{node_id: dss_bus_name}`.
+- `opendss_geometry_systemy(grid, index, orders, ...) -> {order: aligned SystemY}`.
+- `opendss_geometry_harmonic_profiles(grid, hres, orders, ...) -> [HarmonicProfile]` —
+  OpenDSS line-model profiles for the SAME geometry as pgml.
+- `opendss_harmonic_voltages(grid, harmonic_injection, orders, *, slack="norton",
+  v1=None, operating_point=None, node_sources=None) -> np.ndarray` — LIVE OpenDSS
+  harmonic oracle; returns complex `[H, N]`; supports single-phase geometry path
+  (parity ~1e-11 V) and three-phase sequence-aware path (parity ~1e-8 V).
+- `opendss_dyn_transformer_harmonic_voltages(grid, harmonic_injection, orders, ...) ->
+  np.ndarray` — genuine vector-group validation using real OpenDSS Transformer elements.
+
+## Compatibility shim (`pgml.evaluation.references`)
+Re-exports all of `pgml.evaluation.oracles`; kept for backward compatibility with
+existing importers.  New code should import from `pgml.evaluation.oracles` directly.
 
 ## IO + style (`pgml.evaluation.style`)
 - `save_figure(fig, path, *, dpi=300)` — format from extension; raster >=300 DPI.
