@@ -67,6 +67,7 @@ import torch
 from torch import Tensor
 
 from pgml import config
+from pgml.errors import ModelingError
 from pgml.schemas.grid_schema import WindingConnection
 
 # The delta circulant difference matrix (Kersting's [D]); element k spans phase k
@@ -128,7 +129,7 @@ def _classify(conn: WindingConnection) -> SideConn:
         return SideConn("wye", grounded=False)
     if conn == WindingConnection.DELTA:
         return SideConn("delta", grounded=False)
-    raise NotImplementedError(
+    raise ModelingError(
         f"transformer winding connection {conn!r} is not modelled "
         "(zigzag windings are not supported yet)."
     )
@@ -154,12 +155,12 @@ def resolve_vector_group(t) -> VectorGroup:
     # delta-wye pairing and the in-phase (clock 0) groups; other clocks need a
     # cyclic phase permutation of the winding pairing (not yet modelled).
     if vg.is_delta_wye and clock not in (1, 11):
-        raise NotImplementedError(
+        raise ModelingError(
             f"delta-wye transformer clock {clock} is not modelled (only Dyn1 / "
             "Dyn11, i.e. clock 1 or 11, are supported in the phase-domain stamp)."
         )
     if not vg.is_delta_wye and clock % 6 != 0:
-        raise NotImplementedError(
+        raise ModelingError(
             f"transformer clock {clock} for a non-phase-shifting group is not "
             "modelled (only clock 0 / 6 are supported for wye-wye / delta-delta)."
         )
@@ -184,15 +185,13 @@ def side_incidence(
         return eye
     if side.kind == "wye":
         if p != 3:
-            raise NotImplementedError(
+            raise ModelingError(
                 "ungrounded-wye transformer winding is only modelled for 3 phases."
             )
         ones = torch.ones((p, p), dtype=rdt, device=device)
         return eye - ones / p
     if p != 3:
-        raise NotImplementedError(
-            "delta transformer winding is only modelled for 3 phases."
-        )
+        raise ModelingError("delta transformer winding is only modelled for 3 phases.")
     m = torch.as_tensor(_DELTA_M, dtype=rdt, device=device)
     return m.t().contiguous() if clock_transpose else m
 

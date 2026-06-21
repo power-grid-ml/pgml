@@ -22,9 +22,11 @@ from __future__ import annotations
 
 from .index import NodePhaseIndex, node_phase_index
 from .ybus import (
+    BranchCurrent,
     YBus,
     assemble_network_ybus,
     assemble_ybus,
+    branch_currents,
     build_injections,
     device_current_injections,
 )
@@ -34,13 +36,16 @@ from .ybus import (
 # description" warnings when viewcode and autodoc both traverse the codebase.
 NodePhaseIndex.__module__ = __name__
 YBus.__module__ = __name__
+BranchCurrent.__module__ = __name__
 
 __all__ = [
     "NodePhaseIndex",
     "node_phase_index",
     "YBus",
+    "BranchCurrent",
     "assemble_ybus",
     "assemble_network_ybus",
+    "branch_currents",
     "build_injections",
     "device_current_injections",
 ]

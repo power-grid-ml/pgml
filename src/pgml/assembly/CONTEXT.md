@@ -27,7 +27,7 @@ materialisation concern, defined later in the result/ML adapter, NOT here.)
 
 ## Public API (IMPLEMENTED — final signatures)
 Module: `pgml.assembly`
-(`from pgml.assembly import assemble_ybus, build_injections, node_phase_index, NodePhaseIndex, YBus`).
+(`from pgml.assembly import assemble_ybus, build_injections, node_phase_index, NodePhaseIndex, YBus, branch_currents, BranchCurrent`).
 
 - `assemble_ybus(grid, frequencies_hz, *, dtype=torch.complex128, device=None,
      operating_point=None, param_overrides=None, symmetry=None) -> YBus`
@@ -62,6 +62,29 @@ Module: `pgml.assembly`
   - Source Norton current `i_s = Y_s @ V_th` (V_th = `u_ref∠u_angle`) at the source
     rows; harmonic current sources from spectra are a later milestone. Pure passive
     grids -> 0. Same scalar-frequency squeeze (`[N]`) rule as `assemble_ybus`.
+- `branch_currents(grid, v, frequencies_hz, index, *, dtype=torch.complex128,
+     device=None, param_overrides=None) -> list[BranchCurrent]` — IMPLEMENTED (`ybus.py`).
+  Per-branch TERMINAL currents from solved node voltages. For every in-service
+  `BranchBase` branch (Line — explicit/geometry/sequence-aware —, Transformer,
+  Switch, GenericBranch, ShuntReactor) the currents come from the SAME primitive
+  block `Yprim` the Y-bus STAMP scatters: `V_term = concat(V[from_rows], V[to_rows])`,
+  `I_term = Yprim @ V_term`, `i_from = I_term[..., :Pf]`, `i_to = I_term[..., Pf:]`.
+  Sign = positive INTO the branch terminal (matches `result_schema.BranchResult`). A
+  single-terminal `ShuntReactor` -> `to_node=None`, `to_phases=()`, `i_from = Yprim @
+  V[from_rows]`, `i_to` = empty `[*batch,H,0]`. `v` is `[*batch, H, N]` (`N==index.size`,
+  `H==len(frequencies_hz)`); a missing batch dim is allowed and a missing H axis
+  (`[*batch, N]`/`[N]`) is broadcast over H. Returns one `BranchCurrent` per branch in
+  `grid.branches` order (open switches carry no admittance and are skipped). The
+  `BranchCurrent` frozen dataclass: `branch_id:int, from_node:int, to_node:int|None,
+  from_phases:tuple[Phase,...], to_phases:tuple[Phase,...], i_from:Tensor` complex
+  `[*batch,H,Pf]`, `i_to:Tensor` complex `[*batch,H,Pt]`. KCL invariant (oracle-free,
+  machine precision): scattering every `(i_from,i_to)` back to its node rows and summing
+  equals `assemble_network_ybus(grid, freqs).Y @ V` at every row. `param_overrides` keys
+  identical to the stamps (line/switch/generic-branch/transformer R/L/C/tap). Differentiable
+  (grad flows grid params -> `i_from`/`i_to`), GPU/dtype-honoring, vectorized per KIND/group
+  (no python loop over branches on the tape). SHARED block builders `_*_block_groups` yield
+  `(group, block, rows, cols)` consumed by BOTH the stamp (scatters) and `branch_currents`
+  (matmuls) — assembly behaviour is BIT-IDENTICAL (oracle suite unchanged).
 - `node_phase_index(grid) -> NodePhaseIndex` (above).
 
 `operating_point` format (M1): `{appliance_id: {"p_w": float, "q_var": float}}` or

@@ -50,17 +50,40 @@ pip install ".[convert,viz]"       # + reference-library converters and plotting
 ## Quickstart
 
 ```python
-import torch
+import pgml
 from pgml.convert.pandapower import to_grid
+from pgml.schemas import Phase
 from pgml.geometry import apply_default_harmonic_model
-from pgml.solver import solve_harmonic_flow
 import pandapower.networks as pn
 
 grid, _ = to_grid(pn.create_cigre_network_lv())   # reference net -> pgml Grid
 apply_default_harmonic_model(grid)                 # frequency-dependent line model
-result = solve_harmonic_flow(grid, harmonic_orders=[1, 3, 5, 7], dtype=torch.complex128)
-# result.v : complex node voltages [orders, nodes]; gradients flow back to grid params.
+
+config = pgml.SimulationConfig(calculation="harmonic", harmonic_orders=[1, 3, 5, 7])
+state = pgml.simulate(grid, config)                # -> a differentiable SolvedState
+
+v = state.node_voltages()              # complex [orders, nodes]; gradients flow to params
+currents = state.branch_currents()     # per-branch terminal currents (lazy, differentiable)
+thd = state.thd(node_id=1, phase=Phase.A)
+
+bundle = state.to_result_set()         # JSON-serializable ResultBundle (REST / dashboard)
+bundle.model_dump_json()
 ```
+
+### Entry points (which one to use)
+
+| You want… | Use |
+|---|---|
+| One front door: full, differentiable **solved grid state** | `pgml.simulate(grid, config) -> SolvedState` |
+| The same, but **JSON** out (REST / dashboard / persist) | `pgml.simulate_serializable(...) -> ResultBundle` |
+| Raw differentiable **tensors** at minimal overhead (ML) | `pgml.solver.solve_power_flow` / `solve_harmonic_flow` |
+| **Batched** training-data generation → filesystem | `pgml.scenarios.run_scenarios(...)` + `write_dataset` |
+
+`SimulationConfig` is the serializable *definition* of what to simulate; `device`/`dtype`
+are execution kwargs on `simulate`. Errors form a small hierarchy
+(`pgml.PgmError` → `InputError` / `ComputationError`, e.g. `ConvergenceError`), each with
+an `http_status` hint for a REST layer; schema-validation errors stay as pydantic
+`ValidationError`.
 
 ## Architecture
 

@@ -45,6 +45,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from pgml.errors import ModelingError
 from pgml.schemas.grid_schema import Phase, WindingConnection
 
 from .index import NodePhaseIndex
@@ -106,7 +107,7 @@ def group_appliances(appliances, node_map) -> list[IncidenceGroup]:
     groups: list[IncidenceGroup] = []
     for (conn, n, has_neutral), group in by_key.items():
         if conn == WindingConnection.DELTA and n != 3:
-            raise NotImplementedError(
+            raise ModelingError(
                 "open/2-phase delta load not supported yet; use WYE or a 3-phase "
                 f"DELTA (got a DELTA appliance with {n} phase(s))."
             )

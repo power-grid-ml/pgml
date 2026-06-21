@@ -6,6 +6,8 @@ Public API
   param_overrides=None) -> YBus``
 - ``build_injections`` — ``(grid, frequencies_hz, index, *, dtype, device,
   operating_point, param_overrides=None) -> Tensor``
+- ``branch_currents`` — ``(grid, v, frequencies_hz, index, *, dtype, device,
+  param_overrides=None) -> list[BranchCurrent]`` (per-branch terminal currents).
 - ``node_phase_index`` / ``NodePhaseIndex`` (re-exported from ``.index``).
 
 See ``assembly/CONTEXT.md`` for the frozen layout and stamp definitions.
@@ -36,6 +38,7 @@ from pgml.schemas.grid_schema import (
     Line,
     Load,
     LoadModel,
+    Phase,
     ShuntAppliance,
     ShuntReactor,
     Source,
@@ -339,12 +342,20 @@ def _is_sequence_aware(line) -> bool:
     return (line.tags or {}).get("harmonic_line_model") == "sequence_aware"
 
 
-def _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
-    # Explicit-R/L/C lines go through the matrix path; lines carrying a
-    # `conductor_geometry` go through the Carson/Deri geometry path; lines tagged
-    # `harmonic_line_model=sequence_aware` go through the Z1/Z0 sequence-aware path
-    # (frequency-correct each sequence: earth return only in Z0). See
-    # `geometry/sequence.py` / `apply_sequence_aware_harmonic_model`.
+def _line_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+    """Yield ``(group, block, rows, cols)`` for every line group (all three paths).
+
+    Explicit-R/L/C lines go through the matrix path; lines carrying a
+    ``conductor_geometry`` go through the Carson/Deri geometry path; lines tagged
+    ``harmonic_line_model=sequence_aware`` go through the Z1/Z0 sequence-aware path
+    (frequency-correct each sequence: earth return only in Z0). See
+    ``geometry/sequence.py`` / ``apply_sequence_aware_harmonic_model``.
+
+    This is the SHARED primitive builder: :func:`_stamp_lines` scatters each block
+    into the Y-bus, while :func:`branch_currents` multiplies it with the terminal
+    voltage. Yielding (rather than scattering inline) keeps the two consumers in
+    lockstep with no duplicated physics.
+    """
     flow_lines = [
         b
         for b in grid.branches
@@ -353,19 +364,28 @@ def _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
     rx_lines = [b for b in flow_lines if not _is_sequence_aware(b)]
     seq_lines = [b for b in flow_lines if _is_sequence_aware(b)]
     if rx_lines:
-        y = _stamp_line_groups(rx_lines, f, y, index, cdt, rdt, device, param_overrides)
-    if seq_lines:
-        y = _stamp_sequence_aware_lines(
-            seq_lines, grid, f, y, index, cdt, rdt, device, param_overrides
+        yield from _line_rx_block_groups(
+            rx_lines, f, index, cdt, rdt, device, param_overrides
         )
-    y = _stamp_geometry_lines(grid, f, y, index, cdt, rdt, device, param_overrides)
+    if seq_lines:
+        yield from _sequence_aware_block_groups(
+            seq_lines, grid, f, index, cdt, rdt, device, param_overrides
+        )
+    yield from _geometry_block_groups(grid, f, index, cdt, rdt, device, param_overrides)
+
+
+def _stamp_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
+    for _group, block, rows, cols in _line_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides
+    ):
+        y = scatter_blocks_into(y, block, rows, cols)
     return y
 
 
-def _stamp_sequence_aware_lines(
-    lines, grid, f, y, index, cdt, rdt, device, param_overrides
+def _sequence_aware_block_groups(
+    lines, grid, f, index, cdt, rdt, device, param_overrides
 ):
-    """Stamp 3-phase lines with the sequence-aware harmonic model (Z1 + earth-damped Z0).
+    """Yield ``(group, block, rows, cols)`` for sequence-aware 3-phase lines.
 
     Each line's reference-frequency phase matrix ``Z_abc(f0) = R + j·2πf0·L`` is
     decomposed into ``Z1(f0)``/``Z0(f0)`` (balanced/transposed), each sequence is
@@ -452,8 +472,7 @@ def _stamp_sequence_aware_lines(
         )
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
-        y = scatter_blocks_into(y, block, rows, cols)
-    return y
+        yield group, block, rows, cols
 
 
 def _geom_scalar(v, rdt: torch.dtype, device) -> Tensor:
@@ -486,15 +505,15 @@ def _geom_conductor_arrays(ln, rdt, device):
     return x, y, gmr, rdc, rad
 
 
-def _stamp_geometry_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
-    """Stamp lines whose impedance comes from conductor geometry (Carson/Deri)."""
+def _geometry_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+    """Yield ``(group, block, rows, cols)`` for geometry (Carson/Deri) lines."""
     glines = [
         b
         for b in grid.branches
         if isinstance(b, Line) and b.in_service and b.conductor_geometry is not None
     ]
     if not glines:
-        return y
+        return
     from pgml.geometry.carson import line_constants
 
     by_key: dict[tuple[int, int], list] = {}
@@ -537,11 +556,10 @@ def _stamp_geometry_lines(grid, f, y, index, cdt, rdt, device, param_overrides):
 
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
-        y = scatter_blocks_into(y, block, rows, cols)
-    return y
+        yield group, block, rows, cols
 
 
-def _stamp_line_groups(lines, f, y, index, cdt, rdt, device, param_overrides):
+def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
     by_p: dict[int, list] = {}
     for ln in lines:
         by_p.setdefault(len(ln.from_phases), []).append(ln)
@@ -610,8 +628,7 @@ def _stamp_line_groups(lines, f, y, index, cdt, rdt, device, param_overrides):
 
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
-        y = scatter_blocks_into(y, block, rows, cols)
-    return y
+        yield group, block, rows, cols
 
 
 def _resistance_multiplier(line, f, rdt, device) -> Tensor:
@@ -667,12 +684,12 @@ def _interp1d_constant_edges(xq: Tensor, xp: Tensor, fp: Tensor) -> Tensor:
     return y0 + t * (y1 - y0)
 
 
-def _stamp_switches(grid, f, y, index, cdt, rdt, device, param_overrides):
+def _switch_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
     switches = [
         b for b in grid.branches if isinstance(b, Switch) and b.in_service and b.closed
     ]
     if not switches:
-        return y
+        return
     by_p: dict[int, list] = {}
     for sw in switches:
         by_p.setdefault(len(sw.from_phases), []).append(sw)
@@ -716,16 +733,23 @@ def _stamp_switches(grid, f, y, index, cdt, rdt, device, param_overrides):
         )
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
+        yield group, block, rows, cols
+
+
+def _stamp_switches(grid, f, y, index, cdt, rdt, device, param_overrides):
+    for _group, block, rows, cols in _switch_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides
+    ):
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 
 
-def _stamp_generic_branches(grid, f, y, index, cdt, rdt, device, param_overrides):
+def _generic_branch_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
     branches = [
         b for b in grid.branches if isinstance(b, GenericBranch) and b.in_service
     ]
     if not branches:
-        return y
+        return
     by_p: dict[int, list] = {}
     for gb in branches:
         by_p.setdefault(len(gb.from_phases), []).append(gb)
@@ -773,6 +797,13 @@ def _stamp_generic_branches(grid, f, y, index, cdt, rdt, device, param_overrides
         )
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
+        yield group, block, rows, cols
+
+
+def _stamp_generic_branches(grid, f, y, index, cdt, rdt, device, param_overrides):
+    for _group, block, rows, cols in _generic_branch_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides
+    ):
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 
@@ -793,12 +824,12 @@ def _shunt_node_indices(elements, index, device, *, terminal: str = "from"):
     return rows, rows
 
 
-def _stamp_shunt_reactors(grid, f, y, index, cdt, rdt, device, param_overrides):
+def _shunt_reactor_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
     reactors = [
         b for b in grid.branches if isinstance(b, ShuntReactor) and b.in_service
     ]
     if not reactors:
-        return y
+        return
     by_p: dict[int, list] = {}
     for sr in reactors:
         by_p.setdefault(len(sr.from_phases), []).append(sr)
@@ -811,6 +842,13 @@ def _stamp_shunt_reactors(grid, f, y, index, cdt, rdt, device, param_overrides):
         c = torch.stack(c_list, 0)
         block = shunt_admittance_matrix(g, c, f, cdt)  # [H,K,P,P]
         rows, cols = _shunt_node_indices(group, index, device, terminal="from")
+        yield group, block, rows, cols
+
+
+def _stamp_shunt_reactors(grid, f, y, index, cdt, rdt, device, param_overrides):
+    for _group, block, rows, cols in _shunt_reactor_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides
+    ):
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 
@@ -941,9 +979,24 @@ def _stamp_transformers(grid, f, y, index, cdt, rdt, device, param_overrides):
     Differentiable w.r.t. series R, L and the off-nominal tap magnitude; the
     discrete vector-group connections / clock select the constant incidence ``N``.
     """
+    for _group, block, rows, cols in _transformer_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides
+    ):
+        y = scatter_blocks_into(y, block, rows, cols)
+    return y
+
+
+def _transformer_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+    """Yield ``(group, block, rows, cols)`` for every transformer group.
+
+    Shared primitive builder for :func:`_stamp_transformers` (which scatters) and
+    :func:`branch_currents` (which multiplies with the terminal voltage). The block
+    is the full ``[H, K, 2P, 2P]`` vector-group winding-incidence primitive plus the
+    magnetizing shunt on the HV diagonal — exactly the matrix the stamp scatters.
+    """
     xfmrs = [b for b in grid.branches if isinstance(b, Transformer) and b.in_service]
     if not xfmrs:
-        return y
+        return
     # Group transformers sharing one incidence N (same connection pair, clock, P).
     by_key: dict[tuple, list] = {}
     vgs: dict[int, object] = {}
@@ -1020,8 +1073,7 @@ def _stamp_transformers(grid, f, y, index, cdt, rdt, device, param_overrides):
         block = block + ym_full
 
         rows, cols = _series_terminal_indices(group, index, device)
-        y = scatter_blocks_into(y, block, rows, cols)
-    return y
+        yield group, block, rows, cols
 
 
 def _scalar_tap_blocks(y_se: Tensor, t: Tensor) -> Tensor:
@@ -1041,6 +1093,198 @@ def _scalar_tap_blocks(y_se: Tensor, t: Tensor) -> Tensor:
     top = torch.stack([y_ff, y_ft], dim=-1)  # [H,K,2]
     bot = torch.stack([y_tf, y_tt], dim=-1)
     return torch.stack([top, bot], dim=-2)  # [H,K,2,2]
+
+
+# ---------------------------------------------------------------------------
+# branch terminal currents
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class BranchCurrent:
+    """Per-branch terminal currents derived from solved node voltages.
+
+    The currents are computed from the SAME primitive admittance block ``Yprim``
+    that the Y-bus stamp scatters into the global ``Y``: ``I_term = Yprim @ V_term``
+    with ``V_term = concat(V[from_rows], V[to_rows])``. Sign convention matches
+    :class:`~pgml.schemas.result_schema.BranchResult`: positive is current flowing
+    INTO the branch at each terminal.
+
+    Attributes
+    ----------
+    branch_id:
+        Id of the source :class:`~pgml.schemas.grid_schema.BranchBase` branch.
+    from_node, to_node:
+        Terminal node ids. ``to_node`` is ``None`` for a single-terminal shunt
+        (:class:`~pgml.schemas.grid_schema.ShuntReactor`).
+    from_phases, to_phases:
+        The branch's terminal phase tuples (``to_phases`` empty for a shunt).
+    i_from:
+        Complex ``[*batch, H, Pf]`` — current into the FROM terminal.
+    i_to:
+        Complex ``[*batch, H, Pt]`` — current into the TO terminal (all zeros for a
+        single-terminal shunt).
+    """
+
+    branch_id: int
+    from_node: int
+    to_node: Optional[int]
+    from_phases: tuple[Phase, ...]
+    to_phases: tuple[Phase, ...]
+    i_from: Tensor
+    i_to: Tensor
+
+
+def _terminal_currents_from_block(v: Tensor, block: Tensor, rows: Tensor) -> Tensor:
+    """Per-branch terminal currents ``I_term = Yprim @ V_term`` for a group.
+
+    Parameters
+    ----------
+    v:
+        Complex node voltages ``[*batch, H, N]`` (H axis already present).
+    block:
+        Complex primitive blocks ``[H, K, M, M]`` (the matrix the stamp scatters).
+    rows:
+        int64 ``[K, M]`` global row indices of each branch's terminal slots
+        (from-rows then to-rows for a series branch; from-rows only for a shunt).
+
+    Returns
+    -------
+    Tensor
+        Complex ``[*batch, H, K, M]`` terminal currents per branch.
+    """
+    k, m = rows.shape
+    flat_rows = rows.reshape(-1)  # [K*M]
+    v_term = v.index_select(-1, flat_rows)  # [*batch, H, K*M]
+    v_term = v_term.reshape(*v.shape[:-1], k, m)  # [*batch, H, K, M]
+    # I_term[..., k, i] = sum_j block[H, k, i, j] V_term[..., H, k, j].
+    return torch.einsum("hkij,...hkj->...hki", block, v_term)
+
+
+def branch_currents(
+    grid: Grid,
+    v: Tensor,
+    frequencies_hz,
+    index: NodePhaseIndex,
+    *,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+) -> list[BranchCurrent]:
+    """Per-branch terminal currents from solved node voltages.
+
+    For every in-service :class:`~pgml.schemas.grid_schema.BranchBase` branch
+    (Line — explicit / geometry / sequence-aware —, Transformer, Switch,
+    GenericBranch, ShuntReactor), the terminal currents are computed from the SAME
+    primitive admittance block ``Yprim`` that the Y-bus stamp scatters into the
+    global ``Y``::
+
+        V_term = concat(V[from_rows], V[to_rows])      ( = V[from_rows] for a shunt)
+        I_term = Yprim @ V_term
+        i_from = I_term[..., :Pf]    i_to = I_term[..., Pf:]
+
+    Sign convention: positive current flows INTO the branch at each terminal
+    (matching :class:`~pgml.schemas.result_schema.BranchResult`). Because the block
+    is the exact stamp primitive, scattering ``(i_from, i_to)`` back to the node
+    rows and summing over branches reproduces ``Y @ V`` at every row (this is the
+    KCL consistency check).
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid` (all ``type_ref``
+        already expanded).
+    v:
+        Solved complex node voltages ``[*batch, H, N]`` (``N == index.size``,
+        ``H == len(frequencies_hz)``). A missing batch dim is allowed; a missing H
+        axis (``[*batch, N]`` / ``[N]``) is broadcast over H.
+    frequencies_hz:
+        1-D real tensor / sequence of ``H`` absolute frequencies (Hz), the same
+        frequencies the voltages were solved at.
+    index:
+        The compact :class:`NodePhaseIndex` describing ``v``'s row layout.
+    dtype:
+        Complex working dtype (``complex128`` for gradcheck; ``complex64`` ok).
+    device:
+        Target device; defaults to ``v``'s device. No device is hard-coded.
+    param_overrides:
+        Optional differentiability hook (see :func:`assemble_ybus`): the same
+        ``(kind, id, field) -> leaf tensor`` keys the stamps use, so gradients can
+        flow to physical params without mutating the schema.
+
+    Returns
+    -------
+    list[BranchCurrent]
+        One :class:`BranchCurrent` per in-service branch, in ``grid.branches``
+        order. ``i_from`` / ``i_to`` are complex ``[*batch, H, P]`` (the leading
+        ``*batch`` matching ``v``'s broadcast; a scalar/length-1 frequency keeps a
+        singleton H axis).
+    """
+    if device is None:
+        device = v.device
+    f = _as_freq_tensor(frequencies_hz, dtype, device)
+    h = f.shape[0]
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    n = index.size
+
+    v = v.to(dtype=cdt, device=device)
+    if v.shape[-1] != n:
+        raise ValueError(f"branch_currents: v last dim {v.shape[-1]} != N={n}")
+    # Normalise to [*batch, H, N]: insert / broadcast a singleton H axis if absent.
+    has_h = v.ndim >= 2 and v.shape[-2] == h
+    if not has_h:
+        v = v.unsqueeze(-2)  # [..., 1, N]
+    if v.shape[-2] != h:
+        v = v.expand(*v.shape[:-2], h, n)
+
+    # Each generator yields (group, block, rows, cols) where rows == cols for the
+    # series branches and shunts: the SAME primitive blocks the stamps scatter.
+    series_groups = [
+        _line_block_groups,
+        _switch_block_groups,
+        _generic_branch_block_groups,
+        _transformer_block_groups,
+    ]
+
+    results: dict[int, BranchCurrent] = {}
+
+    for builder in series_groups:
+        for group, block, rows, _cols in builder(
+            grid, f, index, cdt, rdt, device, param_overrides
+        ):
+            p = len(group[0].from_phases)
+            i_term = _terminal_currents_from_block(v, block, rows)  # [*b,H,K,2P]
+            i_from = i_term[..., :, :p]  # [*b,H,K,Pf]
+            i_to = i_term[..., :, p:]  # [*b,H,K,Pt]
+            for k, b in enumerate(group):
+                results[b.id] = BranchCurrent(
+                    branch_id=b.id,
+                    from_node=b.from_node,
+                    to_node=b.to_node,
+                    from_phases=tuple(b.from_phases),
+                    to_phases=tuple(b.to_phases),
+                    i_from=i_from[..., k, :],
+                    i_to=i_to[..., k, :],
+                )
+
+    # Single-terminal shunts: i_from = Yprim @ V[from_rows], i_to = zeros.
+    for group, block, rows, _cols in _shunt_reactor_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides
+    ):
+        i_term = _terminal_currents_from_block(v, block, rows)  # [*b,H,K,P]
+        zero_to = torch.zeros_like(i_term[..., 0, 0:0])  # [*b,H,0]
+        for k, b in enumerate(group):
+            results[b.id] = BranchCurrent(
+                branch_id=b.id,
+                from_node=b.from_node,
+                to_node=None,
+                from_phases=tuple(b.from_phases),
+                to_phases=(),
+                i_from=i_term[..., k, :],
+                i_to=zero_to,
+            )
+
+    # Emit in grid.branches order over the in-service BranchBase branches.
+    return [results[b.id] for b in grid.branches if b.in_service and b.id in results]
 
 
 # ---------------------------------------------------------------------------
@@ -1421,8 +1665,10 @@ def _tensor_sum(per_phase, rdt: torch.dtype, device):
 
 __all__ = [
     "YBus",
+    "BranchCurrent",
     "assemble_ybus",
     "assemble_network_ybus",
+    "branch_currents",
     "build_injections",
     "device_current_injections",
     "node_phase_index",
