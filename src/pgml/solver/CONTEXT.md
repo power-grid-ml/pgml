@@ -69,8 +69,16 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     Entire warm start under `no_grad`; never changes the converged fixed point.
   - Solves the const-P / ZIP fundamental power flow at f0 = `grid.base_frequency_hz`.
   - `PowerFlowResult` (frozen dataclass): `v` complex `[*batch, N]` (DIFFERENTIABLE),
-    `index: NodePhaseIndex`, `iterations: int`, `residual: Tensor`, `converged: bool`,
-    `diagnostics: ConvergenceDiagnostics`.
+    `index: NodePhaseIndex`, `iterations: int`, `residual: Tensor`, `converged: bool`
+    (ALL scenarios), `diagnostics: ConvergenceDiagnostics`, `converged_mask: Tensor|None`
+    (`[*batch]` bool, `None` unbatched), `failed_states: tuple[int,...]` (flat indices of
+    non-converged scenarios). A BATCHED solve NEVER raises on a failed element — every
+    element's best-effort `V` is returned, the failures are listed here AND logged as an
+    error (count, indices, worst residual, likely cause).
+  - CONVERGENCE is PER element on `||ΔV|| < max(tol, floor·||V||)` where `floor` is the
+    dtype's resolvable relative precision (`0` for float64 → unchanged `||ΔV|| < tol`;
+    `~1e-6` for float32, since `tol` below the rounding floor is unreachable). A `tol`
+    below the float32 floor logs a one-time WARNING and the floor governs.
   - `ConvergenceDiagnostics` (autograd-free, computed at `V*`): `converged`, `iterations`,
     `update_norm` (final `||ΔV||`), `power_mismatch_max` (max `|F_c|` over free rows [A]),
     `residual_history`, `worst_nodes`, `out_of_band_nodes` (pu on each node's L-N base),
@@ -85,7 +93,8 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     voltage-collapse MARGIN: σ_min shrinks toward the nose). Rigorous AT a solution; at a
     DIVERGED iterate it is only a local linearization (flagged `evaluated_at`, never
     claims `near_singular`) — a definitive loadability limit needs the (future)
-    homotopy/continuation. Dense; skipped above `2N=4000`.
+    homotopy/continuation. Dense; skipped above `2N=4000`. SINGLE-GRID only: SKIPPED for a
+    batched solve (`b>1`, logged) — re-run one scenario, or use `loadability_limit`.
   - `method="current_injection"` (default) forward = FIXED POINT: with
     `Y_net = assemble_network_ybus` (+ source Norton if `slack="norton"`), iterate
     `V_{k+1} = solve_harmonic(Y_eff, I_slack − device_current_injections(grid,V_k),
@@ -100,6 +109,11 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     IFT gradients (gradcheck-verified). `linear_solver="dense"` (per-element `[2N,2N]`
     Jacobian + direct solve; no `[B,2N,B,2N]` blowup) or `"matrix_free"` (Jacobian-free
     Newton-Krylov: GMRES on finite-difference `J·v`, `O(N)` memory for large grids).
+    A BATCHED `operating_point` is solved SEQUENTIALLY per scenario (Newton's const-Z
+    warm start + per-element Jacobian are single-grid, and the residual closes over the
+    batched op) and the per-scenario `V*` are stacked; the SHARED IFT backward (full op,
+    batch-aligned) then attaches batched gradients — so differentiability is unchanged.
+    Newton is the hard-grid / near-nose solver; for bulk batches use current-injection.
   - `loadability_limit(grid, *, slack, lambda_max, lambda_step, ...) -> LoadabilityResult`:
     CONTINUATION power flow. Ramps the load by `λ` (`R(V,λ)=Y_eff·V+λ·I_dev(V)−I_slack`)
     from a feasible base, Newton-correcting + bisecting onto the breaking `λ*` (the P-V
@@ -163,7 +177,8 @@ verified empirically). New orchestration:
   - `HarmonicFlowResult` (frozen dataclass): `v` complex `[*batch, H, N]` (V per
     order; **order 1 = the nonlinear `solve_power_flow` solution**, other orders =
     the linear per-harmonic solve), `frequencies_hz [H]`, `index`, `pf`
-    (the fundamental `PowerFlowResult`).
+    (the fundamental `PowerFlowResult`). Convergence properties `converged` /
+    `converged_mask` / `failed_states` re-expose `pf`'s (the harmonics are direct solves).
   - DIFFERENTIABLE end to end (network params, load P/Q, AND harmonic injections)
     and BATCHED over scenario dims, same conventions as `solve_power_flow`.
 

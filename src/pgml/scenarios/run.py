@@ -46,12 +46,20 @@ class ScenarioResult:
         — the reproducible input record paired with ``v``.
     frequencies_hz:
         ``[H]`` orders×f0 for harmonic runs, else ``None``.
+    converged:
+        ``True`` iff EVERY scenario converged. A batched run never raises on a failed
+        scenario — its best-effort voltages are still returned in ``v``.
+    failed_states:
+        Flat indices of the scenarios that did not converge (empty when all did). The
+        solver also logs an error naming them with the residual + likely cause.
     """
 
     v: Tensor
     index: NodePhaseIndex
     sampled: SampledScenarios
     frequencies_hz: Optional[Tensor] = None
+    converged: bool = True
+    failed_states: tuple[int, ...] = ()
 
 
 def run_scenarios(
@@ -111,7 +119,13 @@ def run_scenarios(
             dtype=dtype,
             device=device,
         )
-        return ScenarioResult(v=res.v, index=res.index, sampled=sampled)
+        return ScenarioResult(
+            v=res.v,
+            index=res.index,
+            sampled=sampled,
+            converged=res.converged,
+            failed_states=res.failed_states,
+        )
     if calculation == "harmonic":
         if not harmonic_orders:
             raise InputError("calculation='harmonic' requires harmonic_orders.")
@@ -126,7 +140,12 @@ def run_scenarios(
             device=device,
         )
         return ScenarioResult(
-            v=res.v, index=res.index, sampled=sampled, frequencies_hz=res.frequencies_hz
+            v=res.v,
+            index=res.index,
+            sampled=sampled,
+            frequencies_hz=res.frequencies_hz,
+            converged=res.pf.converged,
+            failed_states=res.pf.failed_states,
         )
     raise InputError(
         f"Unknown calculation {calculation!r} (use 'power_flow'/'harmonic')."

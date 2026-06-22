@@ -81,13 +81,31 @@ class HarmonicFlowResult:
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``v``.
     pf:
-        The fundamental :class:`PowerFlowResult` (convergence info + order-1 V).
+        The fundamental :class:`PowerFlowResult` (convergence info + order-1 V). The
+        harmonic orders are direct linear solves, so all convergence telemetry —
+        :attr:`converged`, :attr:`converged_mask`, :attr:`failed_states` — comes from
+        the fundamental and is re-exposed here for convenience.
     """
 
     v: Tensor
     frequencies_hz: Tensor
     index: NodePhaseIndex
     pf: PowerFlowResult
+
+    @property
+    def converged(self) -> bool:
+        """``True`` iff every scenario's fundamental solve converged."""
+        return self.pf.converged
+
+    @property
+    def converged_mask(self):
+        """Per-scenario convergence flags (``None`` if unbatched); see PowerFlowResult."""
+        return self.pf.converged_mask
+
+    @property
+    def failed_states(self) -> tuple[int, ...]:
+        """Flat indices of scenarios whose fundamental solve did not converge."""
+        return self.pf.failed_states
 
 
 @dataclass(frozen=True)

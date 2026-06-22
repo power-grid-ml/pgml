@@ -1618,10 +1618,18 @@ def device_current_injections(
             zipq_list.append(zq)
 
         k = len(p_list)
-        # Stack with K at dim -2 so any per-load batch dims stay leading and
-        # broadcast against the [*b, H, K, n_elem] voltage tensor.
-        p_pp = torch.stack(p_list, -2)  # [*pbatch, K, n_elem]
-        q_pp = torch.stack(q_list, -2)
+        # Stack with K at dim -2 so any per-load batch dims stay leading and broadcast
+        # against the [*b, H, K, n_elem] voltage tensor. A scenario sweep may vary only
+        # SOME devices (e.g. loads but not generators), so the per-device entries can
+        # carry different leading batch shapes; broadcast them to a common batch before
+        # stacking (a device with no batched override broadcasts its nominal across the
+        # batch) instead of failing the stack.
+        p_lead = torch.broadcast_shapes(*[t.shape[:-1] for t in p_list])
+        q_lead = torch.broadcast_shapes(*[t.shape[:-1] for t in q_list])
+        p_pp = torch.stack(
+            [t.broadcast_to(*p_lead, t.shape[-1]) for t in p_list], -2
+        )  # [*pbatch, K, n_elem]
+        q_pp = torch.stack([t.broadcast_to(*q_lead, t.shape[-1]) for t in q_list], -2)
         v0 = torch.stack(v0_list, -2)  # [K, n_elem]
         zip_p = torch.stack(zipp_list, 0)  # [K, 3]
         zip_q = torch.stack(zipq_list, 0)

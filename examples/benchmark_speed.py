@@ -24,12 +24,13 @@ and harmonic injections) and timing every solve path:
    linear const-Z warm start does not take a batched operating point), so the large-batch
    throughput sweep below uses the current-injection path.
 
-4. **Load flow vs harmonic flow throughput** over a sweep of batch sizes on every
-   available device. Reported per configuration: wall time, time per scenario, throughput
-   (scenarios/s), fundamental iterations, and — on CUDA — peak device memory. The solve
-   runs in ``complex128``: the fixed-point convergence tolerance lies below the ``float32``
-   rounding floor (~1e-5 V on a 230 V base), so ``complex64`` does not reliably converge a
-   large scenario batch — a known limitation of the current iterative solver.
+4. **Load flow vs harmonic flow throughput** over a sweep of batch sizes, in both
+   ``complex64`` (data-generation precision) and ``complex128`` (gradcheck precision), on
+   every available device. Reported per configuration: wall time, time per scenario,
+   throughput (scenarios/s), fundamental iterations, and — on CUDA — peak device memory.
+   The iterative solver converges at each dtype's resolvable precision (a relative floor),
+   so ``complex64`` settles instead of spinning to ``max_iter``. The figures headline
+   ``complex64`` (the GPU data-generation path); the CSV/JSON keep both precisions.
 
 5. **CPU vs GPU.** The script benchmarks every device present (CPU always; CUDA when
    available) and writes one ``results_<device>.json`` per device. The plots merge every
@@ -90,10 +91,11 @@ from pgml.solver import solve_harmonic_flow, solve_power_flow
 ORDERS = [1, 3, 5, 7, 9, 11, 13]
 HARM_ORDERS = [o for o in ORDERS if o > 1]
 PV_HARM_ORDERS = [5, 7, 11, 13]  # PV-inverter dominant orders
-# complex128 throughout: the fixed-point tol is below the float32 rounding floor, so
-# complex64 does not reliably converge a large batch (see the module docstring).
-CDT = torch.complex128
-DTYPE_NAME = "complex128"
+# Both precisions: complex64 = data-generation precision (the solver converges at the
+# dtype's resolvable floor), complex128 = gradcheck precision. The plots headline
+# complex64 (the GPU data-gen path); the CSV/JSON keep both.
+DTYPES = {"complex64": torch.complex64, "complex128": torch.complex128}
+PLOT_DTYPE = "complex64"
 SEED = 0
 
 
@@ -278,57 +280,58 @@ def bench_solver_comparison(grid, grid_label, device, repeats) -> list[dict]:
 
 
 def bench_throughput(grid, grid_label, device, batch_sizes, repeats) -> list[dict]:
-    """Load-flow and harmonic-flow throughput over a batch-size sweep (complex128)."""
+    """Load-flow and harmonic-flow throughput over a batch-size sweep, both dtypes."""
     rows = []
     dev = torch.device(device)
-    for batch in batch_sizes:
-        sampled = sample(grid, build_scenario(grid, batch))
-        op = sampled.operating_point
-        inj = sampled.harmonic_injection or None
+    for dtype_name, dtype in DTYPES.items():
+        for batch in batch_sizes:
+            sampled = sample(grid, build_scenario(grid, batch))
+            op = sampled.operating_point
+            inj = sampled.harmonic_injection or None
 
-        for calc in ("power_flow", "harmonic"):
-            if device == "cuda":
-                torch.cuda.reset_peak_memory_stats()
+            for calc in ("power_flow", "harmonic"):
+                if device == "cuda":
+                    torch.cuda.reset_peak_memory_stats()
 
-            def run_power_flow():
-                return solve_power_flow(
-                    grid,
-                    operating_point=op,
-                    method="current_injection",
-                    dtype=CDT,
-                    device=dev,
-                    criticality="never",
+                def run_power_flow():
+                    return solve_power_flow(
+                        grid,
+                        operating_point=op,
+                        method="current_injection",
+                        dtype=dtype,
+                        device=dev,
+                        criticality="never",
+                    )
+
+                def run_harmonic():
+                    return solve_harmonic_flow(
+                        grid,
+                        ORDERS,
+                        operating_point=op,
+                        harmonic_injection=inj,
+                        dtype=dtype,
+                        device=dev,
+                    )
+
+                fn = run_power_flow if calc == "power_flow" else run_harmonic
+                dt, res = timed(fn, device, repeats)
+                pf = res if calc == "power_flow" else res.pf
+                rows.append(
+                    {
+                        "kind": "throughput",
+                        "grid": grid_label,
+                        "device": device,
+                        "calculation": calc,
+                        "dtype": dtype_name,
+                        "batch": int(batch),
+                        "time_s": dt,
+                        "ms_per_scenario": dt * 1e3 / batch,
+                        "scenarios_per_s": batch / dt,
+                        "iterations": int(pf.iterations),
+                        "converged": bool(pf.converged),
+                        "peak_vram_mb": _peak_vram_mb(device),
+                    }
                 )
-
-            def run_harmonic():
-                return solve_harmonic_flow(
-                    grid,
-                    ORDERS,
-                    operating_point=op,
-                    harmonic_injection=inj,
-                    dtype=CDT,
-                    device=dev,
-                )
-
-            fn = run_power_flow if calc == "power_flow" else run_harmonic
-            dt, res = timed(fn, device, repeats)
-            pf = res if calc == "power_flow" else res.pf
-            rows.append(
-                {
-                    "kind": "throughput",
-                    "grid": grid_label,
-                    "device": device,
-                    "calculation": calc,
-                    "dtype": DTYPE_NAME,
-                    "batch": int(batch),
-                    "time_s": dt,
-                    "ms_per_scenario": dt * 1e3 / batch,
-                    "scenarios_per_s": batch / dt,
-                    "iterations": int(pf.iterations),
-                    "converged": bool(pf.converged),
-                    "peak_vram_mb": _peak_vram_mb(device),
-                }
-            )
     return rows
 
 
@@ -449,8 +452,10 @@ def make_plots(out: Path, rows: list[dict], dims: dict) -> None:
         fig.savefig(out / "solver_comparison.svg", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # 2. Load flow vs harmonic flow: per-scenario cost at the largest batch.
-    tp = [r for r in rows if r["kind"] == "throughput"]
+    # 2. Load flow vs harmonic flow: per-scenario cost at the largest batch. The
+    # throughput plots headline PLOT_DTYPE (the data-generation precision); both dtypes
+    # remain in the CSV/JSON for the precision comparison.
+    tp = [r for r in rows if r["kind"] == "throughput" and r["dtype"] == PLOT_DTYPE]
     if tp:
         bmax = max(r["batch"] for r in tp)
         big = [r for r in tp if r["batch"] == bmax]
@@ -492,12 +497,12 @@ def make_plots(out: Path, rows: list[dict], dims: dict) -> None:
         ax.set_xticks(list(x))
         ax.set_xticklabels(grids)
         ax.set_ylabel("time per scenario [ms]")
-        ax.set_title(f"Load flow vs harmonic flow (complex128, batch={bmax})")
+        ax.set_title(f"Load flow vs harmonic flow ({PLOT_DTYPE}, batch={bmax})")
         ax.legend(fontsize=8)
         fig.savefig(out / "loadflow_vs_harmonic.svg", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # 3. Throughput vs batch size (the scaling curves), complex64, per grid subplot.
+    # 3. Throughput vs batch size (the scaling curves), per grid subplot.
     if tp:
         fig, axes = plt.subplots(
             1,
@@ -536,7 +541,7 @@ def make_plots(out: Path, rows: list[dict], dims: dict) -> None:
             ax.set_title(g)
             ax.grid(True, which="both", alpha=0.3)
             ax.legend(fontsize=8)
-        fig.suptitle("Throughput vs batch size (complex128)")
+        fig.suptitle(f"Throughput vs batch size ({PLOT_DTYPE})")
         fig.savefig(out / "throughput_vs_batch.svg", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
@@ -577,7 +582,7 @@ def make_plots(out: Path, rows: list[dict], dims: dict) -> None:
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, fontsize=8)
         ax.set_ylabel("CPU time / GPU time")
-        ax.set_title(f"GPU speedup over CPU (complex128, batch={bmax})")
+        ax.set_title(f"GPU speedup over CPU ({PLOT_DTYPE}, batch={bmax})")
         for i, s in enumerate(speedups):
             ax.text(i, s, f"{s:.1f}x", ha="center", va="bottom", fontsize=8)
         fig.savefig(out / "device_speedup.svg", dpi=300, bbox_inches="tight")

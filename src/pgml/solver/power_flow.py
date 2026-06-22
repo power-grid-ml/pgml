@@ -50,6 +50,7 @@ norm under ``no_grad``). Honors input device/dtype; runs unchanged on CPU/CUDA.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import asdict, dataclass, field
 from typing import Optional
@@ -73,6 +74,64 @@ from pgml.schemas.grid_schema import Grid, Source
 
 from .harmonic import solve_harmonic
 
+_log = logging.getLogger("pgml")
+
+
+def _rel_convergence_floor(rdt: torch.dtype) -> float:
+    """Smallest relative update ``||ΔV|| / ||V||`` the dtype can resolve.
+
+    The fixed-point / Newton update stops shrinking once it reaches the rounding
+    noise of the working precision. ``float64`` has ample headroom (eps ~2e-16), so
+    its floor is ``0.0`` and the absolute ``tol`` governs unchanged. ``float32``
+    (eps ~1.2e-7) cannot resolve an update below ~1e-6 of the voltage scale, so a
+    tighter absolute ``tol`` is physically unreachable; the floor caps the
+    achievable tolerance and is reported via a one-time warning.
+    """
+    return 0.0 if rdt == torch.float64 else 1.0e-6
+
+
+def _operating_point_batch_size(operating_point: Optional[dict]) -> int:
+    """Leading scenario-batch length carried by a batched ``operating_point`` (else 1).
+
+    Scans every override value (totals and per-phase lists); a value with a leading
+    dim > 1 marks a batched scenario sweep.
+    """
+    if not operating_point:
+        return 1
+    b = 1
+    for entry in operating_point.values():
+        for val in entry.values():
+            items = val if isinstance(val, (list, tuple)) else (val,)
+            for x in items:
+                if isinstance(x, Tensor) and x.ndim >= 1 and x.shape[0] > 1:
+                    b = max(b, int(x.shape[0]))
+    return b
+
+
+def _slice_operating_point(operating_point: dict, i: int) -> dict:
+    """The single-scenario ``operating_point`` at batch index ``i`` (grad-preserving)."""
+
+    def slc(x):
+        if isinstance(x, (list, tuple)):
+            return type(x)(slc(e) for e in x)
+        if isinstance(x, Tensor) and x.ndim >= 1 and x.shape[0] > 1:
+            return x[i]
+        return x
+
+    return {
+        cid: {k: slc(v) for k, v in entry.items()}
+        for cid, entry in operating_point.items()
+    }
+
+
+def _resolve_failed_states(mask: Optional[Tensor]) -> tuple[Optional[Tensor], tuple]:
+    """``(converged_mask, failed_indices)`` for a result; unbatched -> ``(None, ())``."""
+    if mask is None or mask.ndim == 0:
+        return None, ()
+    flat = mask.reshape(-1)
+    failed = tuple(i for i, ok in enumerate(flat.tolist()) if not ok)
+    return mask, failed
+
 
 @dataclass(frozen=True)
 class PowerFlowResult:
@@ -89,11 +148,20 @@ class PowerFlowResult:
     residual:
         Real scalar tensor: the final ``||V_{k+1} - V_k||`` (max over batch).
     converged:
-        ``True`` if the residual fell below ``tol`` within ``max_iter``.
+        ``True`` if EVERY batch element's residual fell below ``tol`` (or the
+        dtype floor) within ``max_iter``.
     diagnostics:
         Non-fatal :class:`ConvergenceDiagnostics` (per-node physical mismatch,
         voltage-band offenders, residual history, worst offenders, likely cause, and
         — when the solve did not converge — an IFT-Jacobian criticality analysis).
+    converged_mask:
+        Per-scenario convergence flags ``[*batch]`` (bool), or ``None`` for an
+        unbatched solve. A batched solve does NOT raise on a failed element — every
+        element's best-effort ``V`` is returned and the failures are listed here and
+        in :attr:`failed_states`.
+    failed_states:
+        Flat indices of the batch elements that did NOT converge (empty when all
+        converged or unbatched). The companion log record names them with details.
     """
 
     v: Tensor
@@ -102,6 +170,8 @@ class PowerFlowResult:
     residual: Tensor
     converged: bool
     diagnostics: Optional[ConvergenceDiagnostics] = None
+    converged_mask: Optional[Tensor] = None
+    failed_states: tuple[int, ...] = ()
 
 
 @dataclass
@@ -144,13 +214,19 @@ class LoadabilityResult:
 
     breaking_lambda: float  # λ* at the nose (load multiplier of the nameplate load)
     feasible: bool  # λ* >= 1 -> the nameplate load is solvable
-    margin: float  # λ* − 1 (headroom above nameplate; negative = infeasible at nameplate)
+    margin: (
+        float  # λ* − 1 (headroom above nameplate; negative = infeasible at nameplate)
+    )
     nose_voltage_min_pu: float  # lowest |V|/V_LN at the nose
     critical_nodes: list[dict] = field(default_factory=list)  # voltage-collapse mode
-    limiting_loads: list[dict] = field(default_factory=list)  # margin-limiting injections
+    limiting_loads: list[dict] = field(
+        default_factory=list
+    )  # margin-limiting injections
     min_singular_value: float = 0.0
     condition_number: float = 0.0
-    converged_lambdas: list[float] = field(default_factory=list)  # the λ trace (plotting)
+    converged_lambdas: list[float] = field(
+        default_factory=list
+    )  # the λ trace (plotting)
     corrector_iterations: int = 0  # total Newton iterations across the ramp
 
     def as_dict(self) -> dict:
@@ -391,50 +467,155 @@ def solve_power_flow(
     def build_system():
         return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
 
-    def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
-        """F_c(V) = Y_eff @ V + I_device(V) - I_slack  (all rows, complex)."""
-        i_dev = device_current_injections(
-            grid,
-            v_cmplx,
-            index,
-            [f0],
-            dtype=dtype,
-            device=device,
-            operating_point=operating_point,
-            param_overrides=param_overrides,
-            symmetry=sym_resolved,
-        ).squeeze(-2)  # [*b, N]
-        yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
-        return yv + i_dev - i_slack
+    def make_residual_complex(op):
+        """Build ``F_c(V) = Y_eff @ V + I_device(V) - I_slack`` for an operating point.
 
+        A factory (not a single closure) so the batched-Newton path can build a
+        per-scenario residual from a sliced ``op`` while the full-batch ``op`` residual
+        drives the diagnostics and the IFT backward.
+        """
+
+        def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
+            i_dev = device_current_injections(
+                grid,
+                v_cmplx,
+                index,
+                [f0],
+                dtype=dtype,
+                device=device,
+                operating_point=op,
+                param_overrides=param_overrides,
+                symmetry=sym_resolved,
+            ).squeeze(-2)  # [*b, N]
+            yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
+            return yv + i_dev - i_slack
+
+        return residual_complex
+
+    residual_complex = make_residual_complex(operating_point)
     real_res = _make_real_residual(
         build_system, residual_complex, fixed_rows, v_fixed_fn, n, cdt
     )
 
+    # One-time warning when the absolute `tol` is below what the working precision can
+    # resolve at this voltage scale (complex64); the dtype floor governs convergence.
+    floor = _rel_convergence_floor(rdt)
+    if floor > 0.0:
+        _, _sl_vref = _slack_rows_and_vref(grid, index, rdt, cdt, device)
+        v_ref = float(_sl_vref.detach().abs().max()) if _sl_vref is not None else 1.0
+        if v_ref > 0.0 and tol < floor * v_ref:
+            _log.warning(
+                "solve_power_flow: tol=%.1e is below the %s precision floor (~%.1e V, "
+                "%.0e relative at the ~%.0f V scale); the dtype floor governs "
+                "convergence. Use complex128 for a tighter tolerance.",
+                tol,
+                dtype,
+                floor * v_ref,
+                floor,
+                v_ref,
+            )
+
     # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
     if method == "newton":
-        # OpenDSS-style warm start: solve the LINEAR const-Z system once, then run
-        # Newton on the full const-P / ZIP residual. Newton's quadratic convergence and
-        # far larger convergence region reach solutions the current-injection fixed
-        # point cannot (e.g. near the loadability nose — see
+        # OpenDSS-style warm start: the LINEAR const-Z solution, then Newton on the
+        # full const-P / ZIP residual. Newton's quadratic convergence and far larger
+        # convergence region reach solutions the current-injection fixed point cannot
+        # (e.g. near the loadability nose — see
         # ``examples/current_injection_convergence.py``).
-        v_init = _linear_const_z_init(
-            grid, f0, index, dtype, device, slack, operating_point,
-            param_overrides, fixed_rows, v_fixed,
-        )
-        (
-            v_star, iterations, residual_norm, converged, residual_history,
-            y_eff0, i_slack0,
-        ) = _newton_forward(
-            real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver
-        )
+        bsize = _operating_point_batch_size(operating_point)
+        if bsize > 1:
+            # Newton's per-element Jacobian AND its const-Z warm start are single-grid
+            # (the residual closes over the batched op, so a per-element Jacobian would
+            # be batch-polluted). Solve each scenario with the proven single-grid Newton
+            # and stack; the SHARED IFT backward below (full op, batch-aligned) supplies
+            # batched gradients. Newton is the hard-grid / near-nose solver — for bulk
+            # batches prefer the vectorized current-injection method.
+            (
+                v_star,
+                iterations,
+                residual_norm,
+                converged,
+                residual_history,
+                y_eff0,
+                i_slack0,
+                converged_mask,
+                residual_vec,
+            ) = _newton_forward_sequential(
+                grid,
+                f0,
+                index,
+                dtype,
+                device,
+                slack,
+                operating_point,
+                param_overrides,
+                fixed_rows,
+                v_fixed,
+                v_fixed_fn,
+                build_system,
+                make_residual_complex,
+                bsize,
+                n,
+                rdt,
+                cdt,
+                tol,
+                max_iter,
+                linear_solver,
+            )
+        else:
+            v_init = _linear_const_z_init(
+                grid,
+                f0,
+                index,
+                dtype,
+                device,
+                slack,
+                operating_point,
+                param_overrides,
+                fixed_rows,
+                v_fixed,
+            )
+            (
+                v_star,
+                iterations,
+                residual_norm,
+                converged,
+                residual_history,
+                y_eff0,
+                i_slack0,
+                converged_mask,
+                residual_vec,
+            ) = _newton_forward(
+                real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver
+            )
     else:
         (
-            v_star, iterations, residual_norm, converged, residual_history,
-            y_eff0, i_slack0,
+            v_star,
+            iterations,
+            residual_norm,
+            converged,
+            residual_history,
+            y_eff0,
+            i_slack0,
+            converged_mask,
+            residual_vec,
         ) = _current_injection_forward(
-            grid, f0, index, build_system, fixed_rows, v_fixed, operating_point,
-            param_overrides, sym_resolved, dtype, n, rdt, cdt, device, tol, max_iter,
+            grid,
+            f0,
+            index,
+            build_system,
+            fixed_rows,
+            v_fixed,
+            operating_point,
+            param_overrides,
+            sym_resolved,
+            dtype,
+            n,
+            rdt,
+            cdt,
+            device,
+            tol,
+            max_iter,
         )
 
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
@@ -462,6 +643,28 @@ def solve_power_flow(
     else:
         v_out = v_star
 
+    # Per-scenario reporting: a batched solve NEVER raises on a failed element — every
+    # element's best-effort V is returned, the failures are listed, and an error record
+    # names them with detail (so a large sweep yields data + diagnosable failures).
+    cmask_out, failed_states = _resolve_failed_states(converged_mask)
+    if failed_states:
+        total = int(cmask_out.numel())
+        shown = ", ".join(str(i) for i in failed_states[:20])
+        more = "" if len(failed_states) <= 20 else f", … (+{len(failed_states) - 20})"
+        cause = diagnostics.likely_cause if diagnostics is not None else ""
+        _log.error(
+            "solve_power_flow: %d/%d scenarios did not converge in %d iterations "
+            "(worst residual %.3e); returning best-effort voltages. Failed indices: "
+            "[%s%s]%s",
+            len(failed_states),
+            total,
+            iterations,
+            float(residual_norm),
+            shown,
+            more,
+            f" — {cause}" if cause else "",
+        )
+
     return PowerFlowResult(
         v=v_out,
         index=index,
@@ -469,6 +672,8 @@ def solve_power_flow(
         residual=residual_norm.reshape(()),
         converged=bool(converged),
         diagnostics=diagnostics,
+        converged_mask=cmask_out,
+        failed_states=failed_states,
     )
 
 
@@ -476,13 +681,30 @@ def solve_power_flow(
 # forward solvers (detached V*; gradients are attached by the IFT below)
 # ---------------------------------------------------------------------------
 def _current_injection_forward(
-    grid, f0, index, build_system, fixed_rows, v_fixed, operating_point,
-    param_overrides, sym_resolved, dtype, n, rdt, cdt, device, tol, max_iter,
+    grid,
+    f0,
+    index,
+    build_system,
+    fixed_rows,
+    v_fixed,
+    operating_point,
+    param_overrides,
+    sym_resolved,
+    dtype,
+    n,
+    rdt,
+    cdt,
+    device,
+    tol,
+    max_iter,
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
     Returns ``(v_star, iterations, residual_norm, converged, residual_history, y_eff0,
-    i_slack0)``; ``residual_norm`` is the final ``||ΔV||`` (max over batch).
+    i_slack0, converged_mask, residual_vec)``; ``residual_norm`` is the final ``||ΔV||``
+    (max over batch), while ``converged_mask`` / ``residual_vec`` are PER scenario.
+    Convergence is per element on ``||ΔV|| < max(tol, floor·||V||)`` where ``floor`` is
+    the dtype's resolvable relative precision (0 for float64; ~1e-6 for float32).
     """
     with torch.no_grad():
         y_eff0, i_slack0 = build_system()
@@ -542,7 +764,10 @@ def _current_injection_forward(
         v_row = torch.polar(row_mag, row_ang).to(cdt)
         v = v_row.expand(*lead, n).clone()
 
+        floor = _rel_convergence_floor(rdt)
         residual_norm = torch.zeros((), dtype=rdt, device=device)
+        residual_vec = torch.zeros((), dtype=rdt, device=device)
+        converged_mask = torch.zeros((), dtype=torch.bool, device=device)
         iterations = 0
         converged = False
         residual_history: list[float] = []
@@ -563,21 +788,46 @@ def _current_injection_forward(
             # solve_harmonic returns [*b, H=1, N]; drop the singleton H axis.
             if v_new.ndim >= 2 and v_new.shape[-2] == 1 and v_new.shape[-1] == n:
                 v_new = v_new.squeeze(-2)
-            delta = torch.linalg.vector_norm(v_new - v, dim=-1)
+            # Per-element update + dtype-aware threshold max(tol, floor*||V||). For
+            # float64 floor=0 so this is exactly ||ΔV|| < tol (unchanged); for float32
+            # the floor caps tol at the achievable relative precision.
+            delta = torch.linalg.vector_norm(v_new - v, dim=-1)  # [*b]
+            v_scale = torch.linalg.vector_norm(v_new, dim=-1)  # [*b]
+            thresh = torch.clamp(floor * v_scale, min=tol)  # [*b]
+            converged_mask = delta < thresh
+            residual_vec = delta
             residual_norm = delta.max()
             residual_history.append(float(residual_norm))
             v = v_new
             iterations += 1
-            if bool(residual_norm < tol):
+            if bool(converged_mask.all()):
                 converged = True
                 break
 
-    return v, iterations, residual_norm, converged, residual_history, y_eff0, i_slack0
+    return (
+        v,
+        iterations,
+        residual_norm,
+        converged,
+        residual_history,
+        y_eff0,
+        i_slack0,
+        converged_mask,
+        residual_vec,
+    )
 
 
 def _linear_const_z_init(
-    grid, f0, index, dtype, device, slack, operating_point, param_overrides,
-    fixed_rows, v_fixed,
+    grid,
+    f0,
+    index,
+    dtype,
+    device,
+    slack,
+    operating_point,
+    param_overrides,
+    fixed_rows,
+    v_fixed,
 ):
     """OpenDSS-style warm start: the LINEAR const-Z solution (one linear solve).
 
@@ -595,15 +845,23 @@ def _linear_const_z_init(
     pgml_log.setLevel(max(prev, logging.WARNING))
     try:
         yb = assemble_ybus(
-            grid, [f0], dtype=dtype, device=device,
-            operating_point=operating_point, param_overrides=param_overrides,
+            grid,
+            [f0],
+            dtype=dtype,
+            device=device,
+            operating_point=operating_point,
+            param_overrides=param_overrides,
         )
     finally:
         pgml_log.setLevel(prev)
     y_lin = yb.Y if yb.Y.ndim == 3 else yb.Y.unsqueeze(0)  # [1, N, N]
     if slack == "norton":
         i_init = build_injections(
-            grid, [f0], index, dtype=dtype, device=device,
+            grid,
+            [f0],
+            index,
+            dtype=dtype,
+            device=device,
             param_overrides=param_overrides,
         )  # [1, N] source Norton current
     else:
@@ -621,7 +879,9 @@ _GMRES_MAX_RESTARTS = 20  # restart cycles before giving up the inner solve
 _GMRES_RTOL = 1.0e-8  # inner-solve relative tolerance (matrix-free path)
 
 
-def _gmres(matvec, b: Tensor, *, rtol: float, restart: int, max_restarts: int) -> Tensor:
+def _gmres(
+    matvec, b: Tensor, *, rtol: float, restart: int, max_restarts: int
+) -> Tensor:
     """Restarted GMRES(``restart``) for ``A x = b``, matrix-free (real 1-D tensors).
 
     ``matvec(v)`` returns ``A·v``. Solves to ``‖b − A x‖ ≤ rtol·‖b‖`` or after
@@ -692,11 +952,12 @@ def _newton_forward(
       ``J·v ≈ (R(x+εv) − R(x))/ε``. ``O(N)`` memory, for large grids where the dense
       Jacobian is prohibitive (accuracy is the ``√eps`` FD floor, ample for a PF solve).
 
-    Returns the same 7-tuple as :func:`_current_injection_forward`.
+    Returns the same 9-tuple as :func:`_current_injection_forward`.
     """
     state_residual = real_res.state_residual
     build_system = real_res.build_system
     twon = 2 * n
+    floor = _rel_convergence_floor(rdt)
     fd_eps = math.sqrt(torch.finfo(rdt).eps)
     with torch.no_grad():
         y_eff0, i_slack0 = build_system()
@@ -717,14 +978,19 @@ def _newton_forward(
 
         def res_one(xb_1d: Tensor, bi: int) -> Tensor:
             return state_residual(
-                xb_1d, y_flat[bi].real, y_flat[bi].imag,
-                is_flat[bi].real, is_flat[bi].imag,
+                xb_1d,
+                y_flat[bi].real,
+                y_flat[bi].imag,
+                is_flat[bi].real,
+                is_flat[bi].imag,
             )
 
         residual_history: list[float] = []
         converged = False
         iterations = 0
         dx_norm = torch.zeros((), dtype=rdt, device=device)
+        converged_mask = torch.zeros(b, dtype=torch.bool, device=device)
+        residual_vec = torch.zeros(b, dtype=rdt, device=device)
         for _ in range(max_iter):
             r = res_all(x)  # [b, 2N]
             if linear_solver == "matrix_free":
@@ -739,14 +1005,108 @@ def _newton_forward(
                     break
                 step *= 0.5
             x = x + step * dx
-            dx_norm = (step * dx).norm(dim=-1).max()
+            # Per-element step norm + dtype-aware threshold max(tol, floor*||x||).
+            dxn = (step * dx).norm(dim=-1)  # [b]
+            x_scale = x.norm(dim=-1)  # [b]
+            converged_mask = dxn < torch.clamp(floor * x_scale, min=tol)
+            residual_vec = dxn
+            dx_norm = dxn.max()
             residual_history.append(float(dx_norm))
             iterations += 1
-            if bool(dx_norm < tol):
+            if bool(converged_mask.all()):
                 converged = True
                 break
         v_star = torch.complex(x[..., :n], x[..., n:]).reshape(*lead, n)
-    return v_star, iterations, dx_norm, converged, residual_history, y_eff0, i_slack0
+        cmask = converged_mask.reshape(lead) if lead else converged_mask.reshape(())
+        rvec = residual_vec.reshape(lead) if lead else residual_vec.reshape(())
+    return (
+        v_star,
+        iterations,
+        dx_norm,
+        converged,
+        residual_history,
+        y_eff0,
+        i_slack0,
+        cmask,
+        rvec,
+    )
+
+
+def _newton_forward_sequential(
+    grid,
+    f0,
+    index,
+    dtype,
+    device,
+    slack,
+    operating_point,
+    param_overrides,
+    fixed_rows,
+    v_fixed,
+    v_fixed_fn,
+    build_system,
+    make_residual_complex,
+    bsize,
+    n,
+    rdt,
+    cdt,
+    tol,
+    max_iter,
+    linear_solver,
+):
+    """Batched Newton by solving each scenario with the single-grid Newton forward.
+
+    Newton's const-Z warm start and per-element Jacobian are single-grid (the residual
+    closes over the operating point), so a batched operating point is handled by slicing
+    it per scenario, running the proven single-grid forward, and stacking the detached
+    ``V*`` ``[B, N]``. The IFT backward (full op, batch-aligned, block-diagonal) attaches
+    batched gradients to the stacked result, so this is forward-only sequencing — the
+    differentiability is unchanged. Returns the same 9-tuple as :func:`_newton_forward`.
+    """
+    v_list, conv_list, res_list = [], [], []
+    iterations = 0
+    y_eff0 = i_slack0 = None
+    for i in range(bsize):
+        op_i = _slice_operating_point(operating_point, i)
+        rc_i = make_residual_complex(op_i)
+        rr_i = _make_real_residual(build_system, rc_i, fixed_rows, v_fixed_fn, n, cdt)
+        v_init_i = _linear_const_z_init(
+            grid,
+            f0,
+            index,
+            dtype,
+            device,
+            slack,
+            op_i,
+            param_overrides,
+            fixed_rows,
+            v_fixed,
+        )
+        v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_forward(
+            rr_i, v_init_i, n, rdt, cdt, device, tol, max_iter, linear_solver
+        )
+        v_list.append(v_i)  # [N]
+        conv_list.append(bool(cv_i))
+        res_list.append(rn_i.reshape(()))
+        iterations = max(iterations, it_i)
+    v_star = torch.stack(v_list, 0)  # [B, N]
+    converged_mask = torch.tensor(conv_list, dtype=torch.bool, device=device)  # [B]
+    residual_vec = torch.stack(res_list, 0)  # [B]
+    residual_norm = residual_vec.max()
+    converged = bool(converged_mask.all())
+    # Per-scenario residual histories are not aggregated (their lengths differ); the
+    # cheap state diagnostics + the per-element residual_vec carry the per-batch detail.
+    return (
+        v_star,
+        iterations,
+        residual_norm,
+        converged,
+        [],
+        y_eff0,
+        i_slack0,
+        converged_mask,
+        residual_vec,
+    )
 
 
 def _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b) -> Tensor:
@@ -783,8 +1143,11 @@ def _newton_dir_matrix_free(res_one, x, r, b, fd_eps) -> Tensor:
 
         dx_rows.append(
             _gmres(
-                matvec, -r0, rtol=_GMRES_RTOL,
-                restart=_GMRES_RESTART, max_restarts=_GMRES_MAX_RESTARTS,
+                matvec,
+                -r0,
+                rtol=_GMRES_RTOL,
+                restart=_GMRES_RESTART,
+                max_restarts=_GMRES_MAX_RESTARTS,
             )
         )
     return torch.stack(dx_rows, 0)  # [b, 2N]
@@ -972,16 +1335,29 @@ def _node_voltage_bases(grid: Grid, index, rdt, device) -> Tensor:
 
     node_by_id = {int(nd.id): nd for nd in grid.nodes}
     bases = [
-        phase_voltage_magnitude(float(node_by_id[int(nid)].u_rated_v),
-                                len(node_by_id[int(nid)].phases))
+        phase_voltage_magnitude(
+            float(node_by_id[int(nid)].u_rated_v), len(node_by_id[int(nid)].phases)
+        )
         for nid in index.node_ids.tolist()
     ]
     return torch.tensor(bases, dtype=rdt, device=device)
 
 
 def _build_diagnostics(
-    grid, index, v_star, y_eff0, i_slack0, residual_complex, real_res, fixed_rows,
-    residual_history, converged, iterations, update_norm, rdt, device,
+    grid,
+    index,
+    v_star,
+    y_eff0,
+    i_slack0,
+    residual_complex,
+    real_res,
+    fixed_rows,
+    residual_history,
+    converged,
+    iterations,
+    update_norm,
+    rdt,
+    device,
     criticality: str = "auto",
 ) -> "ConvergenceDiagnostics":
     """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence)."""
@@ -1007,13 +1383,15 @@ def _build_diagnostics(
             vals, idxs = torch.topk(fc_abs.reshape(-1), k)
             for val, fi in zip(vals.tolist(), idxs.tolist()):
                 bi, r = divmod(int(fi), n)
-                worst_nodes.append({
-                    "node_id": int(node_ids[r]),
-                    "phase": _phase_name(int(phase_codes[r])),
-                    "mismatch_a": float(val),
-                    "v_pu": float(vpu[bi, r]),
-                    **({"batch": bi} if b > 1 else {}),
-                })
+                worst_nodes.append(
+                    {
+                        "node_id": int(node_ids[r]),
+                        "phase": _phase_name(int(phase_codes[r])),
+                        "mismatch_a": float(val),
+                        "v_pu": float(vpu[bi, r]),
+                        **({"batch": bi} if b > 1 else {}),
+                    }
+                )
 
         pc = torch.tensor(phase_codes, device=device)
         nonneutral = (pc != 3)[None, :]
@@ -1028,12 +1406,14 @@ def _build_diagnostics(
                 if val <= 0.0:
                     continue
                 bi, r = divmod(int(fi), n)
-                out_of_band.append({
-                    "node_id": int(node_ids[r]),
-                    "phase": _phase_name(int(phase_codes[r])),
-                    "v_pu": float(vpu[bi, r]),
-                    **({"batch": bi} if b > 1 else {}),
-                })
+                out_of_band.append(
+                    {
+                        "node_id": int(node_ids[r]),
+                        "phase": _phase_name(int(phase_codes[r])),
+                        "v_pu": float(vpu[bi, r]),
+                        **({"batch": bi} if b > 1 else {}),
+                    }
+                )
 
         # Divergence guard: the current-injection fixed point does not stop at the
         # loadability nose — past it (or for a non-contractive map) the iterate blows
@@ -1047,7 +1427,9 @@ def _build_diagnostics(
         # Relative final update: a large ||ΔV|| vs the voltage scale means the iterate
         # never settled (oscillating), so any band violation on it is an artifact.
         v_scale = float(vflat.abs().max()) if finite else float("inf")
-        rel_update = update_norm / v_scale if (finite and v_scale > 0.0) else float("inf")
+        rel_update = (
+            update_norm / v_scale if (finite and v_scale > 0.0) else float("inf")
+        )
 
     diag = ConvergenceDiagnostics(
         converged=converged,
@@ -1060,9 +1442,18 @@ def _build_diagnostics(
         out_of_band_nodes=out_of_band,
     )
     do_crit = criticality == "always" or (criticality == "auto" and not converged)
-    if do_crit and finite:
+    if do_crit and finite and b == 1:
         diag.criticality = _jacobian_criticality(
             real_res, v_star, n, rdt, device, index, fc_abs, diverged
+        )
+    elif do_crit and b > 1:
+        # The IFT-Jacobian criticality is a single-grid loadability diagnostic; on a
+        # scenario BATCH the operating point reduces the residual per element, so it is
+        # skipped (run a single grid, or use ``loadability_limit``, for the analysis).
+        _log.info(
+            "criticality analysis skipped for a batched solve (b=%d); it is a "
+            "single-grid diagnostic. Re-run one scenario for the Jacobian/SVD.",
+            b,
         )
     diag.likely_cause = _likely_cause(diag, n_viol, diverged, max_vpu, rel_update)
     return diag
@@ -1080,7 +1471,8 @@ def _likely_cause(
         return "converged"
     if diverged:
         reached = (
-            f"voltage reached {max_vpu:.1f} pu" if math.isfinite(max_vpu)
+            f"voltage reached {max_vpu:.1f} pu"
+            if math.isfinite(max_vpu)
             else "voltages became non-finite"
         )
         return (
@@ -1122,7 +1514,8 @@ def _likely_cause(
     wn = diag.worst_nodes[0] if diag.worst_nodes else None
     tail = (
         f"; max mismatch {wn['mismatch_a']:.2e} A at node {wn['node_id']}.{wn['phase']}"
-        if wn else ""
+        if wn
+        else ""
     )
     return (
         f"did not reach tol in {diag.iterations} iterations "
@@ -1287,8 +1680,14 @@ def loadability_limit(
     def make_real_res(lam: float):
         def rc(v: Tensor, y: Tensor, islack: Tensor) -> Tensor:
             i_dev = device_current_injections(
-                grid, v, index, [f0], dtype=dtype, device=device,
-                operating_point=operating_point, param_overrides=param_overrides,
+                grid,
+                v,
+                index,
+                [f0],
+                dtype=dtype,
+                device=device,
+                operating_point=operating_point,
+                param_overrides=param_overrides,
                 symmetry=sym_resolved,
             ).squeeze(-2)
             yv = torch.matmul(y, v.unsqueeze(-1)).squeeze(-1)
@@ -1310,7 +1709,7 @@ def loadability_limit(
         lam_good, trace, total_iters = 0.0, [0.0], 0
         lam = lambda_step
         while lam <= lambda_max + 1e-12:
-            vk, it, _, conv, _, _, _ = _newton_forward(
+            vk, it, _, conv, _, _, _, _, _ = _newton_forward(
                 make_real_res(lam), v_good, n, rdt, cdt, device, tol, max_iter
             )
             total_iters += it
@@ -1322,7 +1721,7 @@ def loadability_limit(
             lo, hi = lam_good, lam  # bisect the feasibility boundary
             while hi - lo > bisect_tol:
                 mid = 0.5 * (lo + hi)
-                vm, itm, _, cm, _, _, _ = _newton_forward(
+                vm, itm, _, cm, _, _, _, _, _ = _newton_forward(
                     make_real_res(mid), v_good, n, rdt, cdt, device, tol, max_iter
                 )
                 total_iters += itm
@@ -1332,8 +1731,20 @@ def loadability_limit(
                     hi = mid
             break
         crit = _nose_criticality(
-            make_real_res(lam_good), build_system, v_good, grid, index, n, rdt, device,
-            operating_point, param_overrides, sym_resolved, f0, dtype, top_k,
+            make_real_res(lam_good),
+            build_system,
+            v_good,
+            grid,
+            index,
+            n,
+            rdt,
+            device,
+            operating_point,
+            param_overrides,
+            sym_resolved,
+            f0,
+            dtype,
+            top_k,
         )
     finally:
         pgml_log.setLevel(prev)
@@ -1353,8 +1764,20 @@ def loadability_limit(
 
 
 def _nose_criticality(
-    real_res, build_system, v_good, grid, index, n, rdt, device,
-    operating_point, param_overrides, sym_resolved, f0, dtype, top_k,
+    real_res,
+    build_system,
+    v_good,
+    grid,
+    index,
+    n,
+    rdt,
+    device,
+    operating_point,
+    param_overrides,
+    sym_resolved,
+    f0,
+    dtype,
+    top_k,
 ) -> dict:
     """At the nose: SVD of ``J = dR/dV`` -> collapse mode + margin-limiting loads."""
     from pgml.schemas.grid_schema import Generator as _Gen, Load as _Load
@@ -1368,7 +1791,8 @@ def _nose_criticality(
         isb = islack0.detach().reshape(-1, n)[0]
         j = torch.autograd.functional.jacobian(
             lambda xx: state_residual(xx, yb.real, yb.imag, isb.real, isb.imag),
-            x, vectorize=True,
+            x,
+            vectorize=True,
         )  # [2N, 2N]
         u, s, vh = torch.linalg.svd(j)
         sigma_min, sigma_max = float(s[-1]), float(s[0])
@@ -1380,10 +1804,18 @@ def _nose_criticality(
         bases = _node_voltage_bases(grid, index, rdt, device)
         vpu = vg.abs() / bases.clamp_min(1e-12)
         nonneutral = torch.as_tensor(index.phase_codes, device=device) != 3
-        nose_vmin = float(vpu[nonneutral].min()) if bool(nonneutral.any()) else float(vpu.min())
+        nose_vmin = (
+            float(vpu[nonneutral].min()) if bool(nonneutral.any()) else float(vpu.min())
+        )
         idev = device_current_injections(
-            grid, vg, index, [f0], dtype=dtype, device=device,
-            operating_point=operating_point, param_overrides=param_overrides,
+            grid,
+            vg,
+            index,
+            [f0],
+            dtype=dtype,
+            device=device,
+            operating_point=operating_point,
+            param_overrides=param_overrides,
             symmetry=sym_resolved,
         ).squeeze(-2)
         idev_real = torch.cat([idev.real, idev.imag])
@@ -1412,18 +1844,25 @@ def _nose_criticality(
             resp += float(left[r + n]) * float(idev_real[r + n])
         p = float(getattr(a, "p_nom_w", 0.0) or 0.0)
         q = float(getattr(a, "q_nom_var", 0.0) or 0.0)
-        loads.append({
-            "appliance_id": int(a.id), "node_id": int(a.node),
-            "s_nominal_va": math.hypot(p, q), "responsibility": abs(resp),
-        })
+        loads.append(
+            {
+                "appliance_id": int(a.id),
+                "node_id": int(a.node),
+                "s_nominal_va": math.hypot(p, q),
+                "responsibility": abs(resp),
+            }
+        )
     max_resp = max((d["responsibility"] for d in loads), default=0.0)
     if max_resp > 0.0:
         for d in loads:
             d["responsibility"] /= max_resp  # normalize to [0, 1]
     loads.sort(key=lambda d: d["responsibility"], reverse=True)
     return {
-        "sigma_min": sigma_min, "cond": cond, "critical_nodes": critical_nodes,
-        "limiting_loads": loads[:top_k], "nose_vmin_pu": nose_vmin,
+        "sigma_min": sigma_min,
+        "cond": cond,
+        "critical_nodes": critical_nodes,
+        "limiting_loads": loads[:top_k],
+        "nose_vmin_pu": nose_vmin,
     }
 
 

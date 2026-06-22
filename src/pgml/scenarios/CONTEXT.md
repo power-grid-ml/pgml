@@ -60,7 +60,11 @@ verified `batched == loop-of-individual`).
   Scope = P/Q injection errors; network-parameter (line/transformer) perturbation is deferred
   to the inverse/parameter-recovery phase (needs a branch selector + matrix-valued ground truth).
 - `run_scenarios(grid, spec, *, calculation="power_flow"|"harmonic", harmonic_orders=None,
-  slack="ideal", symmetry=None, dtype, device) -> ScenarioResult(v, index, sampled, frequencies_hz)`.
+  slack="ideal", symmetry=None, dtype, device) -> ScenarioResult(v, index, sampled,
+  frequencies_hz, converged, failed_states)`. `converged` is True iff EVERY scenario
+  converged; `failed_states` lists the non-converged scenario indices. A batch NEVER
+  raises on a failed scenario — its best-effort `v` is returned and the solver logs the
+  failures (so a large sweep yields data + diagnosable failures).
   `symmetry` forwards to the solver (None/"auto" lets per-phase samples promote to asymmetric).
   `spec` = `ScenarioConfig` | `CartesianConfig` | `CoherentSpectrumConfig` (forces harmonic,
   defaults `harmonic_orders=[1, *orders]`) | a pre-built `SampledScenarios`.
