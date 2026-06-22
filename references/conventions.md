@@ -250,7 +250,7 @@ identically on both sides (validated bit-for-bit by
 
 **Transformer frequency scaling.** OpenDSS `XRConst=No` (default): R fixed, leakage X∝h;
 pgml mirrors this (`X(h)=2π·h·f₀·L`, constant R) — a frequency-correction curve is not yet
-modelled (see `TODO.md`).
+modelled (see `HANDOFF.md`, "frequency-dependent device models").
 
 ---
 

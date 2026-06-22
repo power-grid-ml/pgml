@@ -14,7 +14,7 @@ Compares :func:`pgml.solver.solve_harmonic_flow` (with ``node_sources``) against
    oracle on the CIGRE LV grid with the three-phase sequence-aware harmonic model.
    Matches the existing sequence-aware tolerance (~1e-5 V); the Carson-model
    discrepancy is the same as in :mod:`test_cigre_lv_live_opendss` and is expected
-   (documented TODO #4 in the architecture notes).
+   (the 3-phase ``sequence_aware`` line model; see ``references/conventions.md``).
 
 Physics (``references/error_injection.md``)
 -------------------------------------------
@@ -73,13 +73,12 @@ ATOL_NUMPY = 1e-10  # pure-numpy oracle vs pgml (empirically ~1e-12 V)
 ATOL_OPENDSS_GEOM = 1e-7  # geometry-path live OpenDSS (empirically ~1e-11 V;
 #                            reuse existing geometry-path tolerance)
 ATOL_OPENDSS_SEQ = 5.0  # sequence-aware 3-phase path: ~3.7 V at MV-bus phases B/C.
-# The LV-injection at node 3 (Phase A) creates cross-phase coupling through the
-# sequence-aware 3x3 phase matrix (which has zero-sequence off-diagonal terms).
-# The oracle correctly propagates this coupling, but pgml's per-phase DIAGONAL
-# transformer stamp does not mix phases, so MV-bus phases B and C differ by ~3.7 V
-# at h=11 (vs ~600 V magnitude at h=1).  This is the expected TODO #4 gap (triplen /
-# zero-sequence coupling not modeled by the diagonal transformer).  The LV-bus
-# discrepancy (same Carson gap as existing seq-aware tests) remains < 1e-5 V.
+# The LV-injection at node 3 (Phase A) excites cross-phase coupling through the
+# sequence-aware 3x3 phase matrix (zero-sequence off-diagonal terms). pgml and the
+# oracle differ by ~3.7 V on MV-bus phases B/C at h=11 (vs ~600 V at h=1, i.e. < 1%):
+# the residual of the 3-phase `sequence_aware` harmonic line model (the vector-group
+# transformer is stamped identically on both sides, so it cancels). The LV-bus
+# discrepancy (same Carson gap as the existing seq-aware tests) remains < 1e-5 V.
 
 
 def _make_current_source() -> NodeHarmonicSource:
@@ -293,23 +292,21 @@ class TestNodeSourceOpenDSSGeometryOracle:
 class TestNodeSourceOpenDSSThreePhaseOracle:
     """Live OpenDSS oracle (sequence-aware, 3-phase) vs pgml.
 
-    The dominant discrepancy when node sources are present is NOT the Carson
-    earth-return model difference (that is < 1e-5 V as in the existing seq-aware
-    tests) but the **diagonal transformer model gap (TODO #4)**:
+    The dominant discrepancy when node sources are present is the 3-phase harmonic
+    LINE model, not the transformer:
 
-    - A current injection at node 3 (LV Phase A) creates cross-phase coupling
-      through the sequence-aware 3x3 phase matrix (which has zero-sequence
-      off-diagonal terms from the Z0 component).
-    - The oracle correctly propagates this coupling through the OpenDSS
-      sequence-aware lines and pgml-exact transformer stamps.
-    - pgml's per-phase DIAGONAL transformer stamp does NOT mix phases, so the
-      MV-bus phases B and C receive ~3.7 V at h=11 from the oracle but ~0 V from
-      pgml.
+    - A current injection creates cross-phase coupling through the sequence-aware
+      3x3 phase matrix (zero-sequence off-diagonal terms from the Z0 component).
+    - pgml uses its analytic ``sequence_aware`` Z0 (earth-return resistance + linear
+      X0) while the OpenDSS oracle applies its internal Carson Z0 to the same
+      R0/X0 line; the two diverge most on the zero sequence.
+    - The vector-group transformer is stamped identically on both sides, so it
+      cancels — the residual is the Z0 line-model difference, which the MV-bus
+      phases pick up as ~3.7 V at h=11 (0.02 % of the 20 kV base, < 5 V absolute).
 
-    This ~3.7 V error (0.02 % of 20 kV base, < 5 V absolute) is the expected
-    ceiling for this combination.  The LV-bus discrepancy remains at the Carson-
-    model level (< 1e-5 V).  The tolerance ``ATOL_OPENDSS_SEQ = 5 V`` bounds
-    the MV-bus crosstalk.
+    The LV-bus positive-sequence discrepancy stays at the Carson-model level
+    (< 1e-5 V). ``ATOL_OPENDSS_SEQ = 5 V`` bounds the MV-bus residual. (Feeding the
+    same geometry to both engines, as in the geometry path, removes it entirely.)
     """
 
     def _solve(self, ns: NodeHarmonicSource):

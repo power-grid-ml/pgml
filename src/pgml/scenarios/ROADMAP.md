@@ -11,8 +11,8 @@ generating ML training data in controlled, reproducible distributions
 per-phase-symmetry sampling; **§4** EN50160 harmonic-spectrum sampling; **§5** parquet
 persistence (`write_dataset`); **§6** per-node perturbation / injection sweeps. STILL OPEN:
 **§1** topology / switch-state batching and **§2** multi-grid batching — the two batching
-forks below — plus the SPARSE / chunked batched solve for scale (TODO #1, architecture-review
-item E). See `CONTEXT.md`.
+forks below — plus the SPARSE / chunked batched solve for scale (HANDOFF.md open work,
+"Batching / scale"). See `CONTEXT.md`.
 
 ---
 

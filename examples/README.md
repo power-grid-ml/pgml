@@ -88,5 +88,10 @@ See `src/pgml/scenarios/CONTEXT.md` for the full interface ledger.
   the loadability nose. A 2-bus radial with a closed-form P-V nose; plots `||ΔV||` and the
   load-bus `|V|/E` per iteration at several load levels (smooth convergence → slowdown →
   sustained oscillation past the nose) and the P-V curve showing the method's convergence
-  region sitting inside the feasible region. Motivates the Newton/continuation work
-  (`TODO.md` item 3) and the `ConvergenceDiagnostics` "did not settle" verdict.
+  region sitting inside the feasible region. Motivates the Newton/continuation tools and
+  the `ConvergenceDiagnostics` "did not settle" verdict.
+- `loadability_continuation.py` — `pgml.solver.loadability_limit` on CIGRE LV: how much load
+  until voltage collapse (the breaking λ\*/margin), **which bus** collapses (the
+  voltage-collapse mode), and **which load** most limits the margin. Plots the P-V nose
+  curve at the critical bus, the voltage profile at the nose with the critical bus(es)
+  highlighted, and a bar chart ranking the limiting loads.

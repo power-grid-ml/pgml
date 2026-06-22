@@ -27,6 +27,11 @@ and native PyTorch-Geometric integration for the ML layer.
   **bit-exact vs OpenDSS**, with R/X → geometry synthesis for sequence-defined feeders.
 - **Validated against oracles.** Y-bus and voltages compared to pandapower /
   power-grid-model (load flow) and OpenDSS (harmonics) on IEEE-33 and CIGRE LV.
+- **Two power-flow solvers + diagnostics.** Current-injection fixed point and Newton
+  (linear const-Z warm start; converges near the loadability nose), both with IFT
+  gradients. Non-convergence is actionable: `ConvergenceDiagnostics` and a
+  `loadability_limit` continuation that reports the margin, the critical bus, and the
+  limiting load.
 - **Reproducible batched scenarios.** QMC / cartesian sampling → operating points →
   batched solves, for ML training-data generation.
 
@@ -107,8 +112,7 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 - **`config/`** — documented modeling defaults (single source of truth; `defaults.yaml`).
 
 Each package has a `CONTEXT.md` interface ledger. Big-picture rationale lives in
-`references/ARCHITECTURE.md`; an orientation guide in `HANDOFF.md`; open work in
-`TODO.md`.
+`references/ARCHITECTURE.md`; orientation and open work in `HANDOFF.md`.
 
 ## Documentation
 

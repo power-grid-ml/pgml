@@ -1,4 +1,4 @@
-"""Power-flow convergence diagnostics + IFT-Jacobian criticality (TODO #3).
+"""Power-flow convergence diagnostics + IFT-Jacobian criticality.
 
 Asserts the non-fatal :class:`~pgml.solver.power_flow.ConvergenceDiagnostics` carried on
 ``PowerFlowResult`` (and surfaced on :class:`~pgml.errors.ConvergenceError`):

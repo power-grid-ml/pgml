@@ -13,8 +13,9 @@ contracting: the voltage iterates OSCILLATE and never settle; past the limit no 
 exists at all. Crucially the iteration stops converging BEFORE the true nose — its
 convergence region is SMALLER than the feasible region. This is the well-known weakness of
 Gauss / current-injection iterations versus Newton, and is exactly why the convergence
-diagnostics report "did not settle" and point to a Newton / continuation method
-(see ``ConvergenceDiagnostics`` and ``TODO.md`` item 3).
+diagnostics report "did not settle" and point to the Newton solver
+(``solve_power_flow(method="newton")``) and the ``loadability_limit`` continuation —
+see ``ConvergenceDiagnostics`` and ``examples/loadability_continuation.py``.
 
 The grid is a textbook 2-bus radial — a stiff source ``E`` behind a series line ``R+jX``
 feeding a const-P load — for which the P-V nose is known in CLOSED FORM, so the solver's
