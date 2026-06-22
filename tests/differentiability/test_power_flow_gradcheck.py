@@ -149,6 +149,30 @@ def test_gradcheck_batched_scenarios():
     assert torch.autograd.gradcheck(fn, (p, q), eps=1e-2, atol=1e-4, rtol=1e-3)
 
 
+def test_backward_jvp_fallback_matches_dense(monkeypatch):
+    """The O(B) column-by-column JVP state Jacobian (used past the memory threshold)
+    yields the SAME gradient as the dense [B,2N,B,2N] path — incl. batched device
+    params, the batch source that off-diagonal-free per-element blocks get wrong."""
+    import pgml.solver.power_flow as pf_mod
+
+    p = torch.tensor([1500.0, 2500.0, 3500.0], dtype=torch.float64, requires_grad=True)
+    q = torch.tensor([300.0, 600.0, 900.0], dtype=torch.float64, requires_grad=True)
+
+    def grad_pq():
+        p.grad = q.grad = None
+        solve_power_flow(
+            _two_bus([[1e-3]], [[1e-6]], p, q), slack="ideal", dtype=CDT
+        ).v.abs().sum().backward()
+        return p.grad.clone(), q.grad.clone()
+
+    monkeypatch.setattr(pf_mod, "_IFT_DENSE_JAC_MAX_ELEMS", 10**9)  # dense path
+    dp_dense, dq_dense = grad_pq()
+    monkeypatch.setattr(pf_mod, "_IFT_DENSE_JAC_MAX_ELEMS", 1)  # force JVP path
+    dp_jvp, dq_jvp = grad_pq()
+    assert torch.allclose(dp_dense, dp_jvp, rtol=1e-10, atol=1e-12)
+    assert torch.allclose(dq_dense, dq_jvp, rtol=1e-10, atol=1e-12)
+
+
 def test_finite_difference_spot_check_load_p():
     """Back up the IFT gradient with a central difference on the load active power."""
 

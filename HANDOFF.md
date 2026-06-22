@@ -46,7 +46,7 @@ Phases 0–3 done. The per-package `CONTEXT.md` and `README.md` hold the detail.
   transformer TO/LV referral vs OpenDSS, earth return) — read before touching converters,
   the slack, or transformers.
 - **Infra** — `pyproject.toml` (PEP 621, `py.typed`), GitHub Actions (ruff + tests + strict
-  docs), root `conftest` + markers (`gpu`/`opendss`/`slow`). ~475 tests pass, 29
+  docs), root `conftest` + markers (`gpu`/`opendss`/`slow`). ~482 tests pass, 29
   gpu/opendss-skipped; `ruff` + strict docs build clean.
 
 ## How to run
@@ -84,10 +84,29 @@ cost on CIGRE is the GPU-amortization motivation). **Resolved batched-solve robu
 accepts a batched `operating_point` (solved sequentially per scenario, shared IFT backward);
 a batch with infeasible scenarios returns best-effort data + `failed_states` (no raise),
 and the single-grid criticality SVD is skipped for batches.
-**Still open (the real scale gap):** the dense `[B,H,N,N]` forward solve and the
-`[B,2N,B,2N]` IFT backward Jacobian both blow up for large `N × B` — needs the sparse /
-block-diagonal batched solve + VRAM chunk-tiling below. Batched Newton is O(B) sequential
-(fine for the hard-grid / near-nose case; current injection is the vectorized bulk path).
+**Dense scale wins — DONE (GPUs are best at dense batched LU, so these come before any
+sparse work):**
+1. ✅ **IFT backward block-diagonal**: the backward no longer always materializes the
+   `[B,2N,B,2N]` Jacobian — past `_IFT_DENSE_JAC_MAX_ELEMS` it builds the `[B,2N,2N]` blocks
+   column-by-column with `2N` batched JVPs (O(B), correct for every batch source; small B
+   keeps the fast vectorized path). Removes the gradient-path memory ceiling.
+2. ✅ **Factor-once-solve-many** (`solver/harmonic.py` `lu_factor_system`/`solve_factored`):
+   `Y_eff` is network-only and constant across the fixed-point iterations (const-P/ZIP loads
+   live on the RHS as `I_device(V)`, never in `Y`), and `Y(h)` is scenario-independent — so
+   one `lu_factor` is reused across iterations and the batch. ~5–7× faster on CIGRE B=64.
+   (Newton's `J` IS op-dependent → no reuse; it stays the per-scenario path.)
+3. ✅ **Scenario CHUNK tiling** (`run_scenarios(chunk_size=...)`): streams `B` in
+   VRAM-sized slices and concatenates (grad-preserving; == whole within tol). So any batch
+   fits regardless of the dense `[B,H,N,N]` footprint.
+Batched Newton is O(B) sequential (fine for the hard-grid / near-nose case; current injection
+is the vectorized bulk path).
+**Deferred — sparse solve (only past ~thousands of buses).** A power-flow `Y` is ~O(N) nnz
+and distribution feeders are radial, so a sparse direct factorization (KLU/SuiteSparse, as in
+pandapower / power-grid-model / OpenDSS; GPU: cuSPARSE/cuDSS) is ~O(N) vs dense O(N³). But at
+the small N this library validates on (hundreds of rows), dense-on-GPU is faster (sparse is
+irregular + hard to batch) and the VRAM wall is hit on `B`, not `N`. So sparse is premature
+here — revisit ONLY if target grids exceed a few thousand buses. The dense wins 1–3 cover the
+distribution-feeder-ML use case.
 
 ### B. PyG harmonic state estimation (the ML layer) — new `src/pgml/ml/`, physics-guided
 **What.** Harmonic state estimation from few measurements, trained on the generated data,

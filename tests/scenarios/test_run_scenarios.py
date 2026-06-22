@@ -71,6 +71,57 @@ def test_reproducible_results(grid3):
     torch.testing.assert_close(v1, v2, rtol=0, atol=0)
 
 
+def test_chunked_equals_whole_power_flow(grid3):
+    """chunk_size streams the batch and concatenates -> the same solution (within the
+    solver tolerance) as the whole solve, incl. an uneven last chunk (12 / 5 -> 5,5,2).
+    The tiny sub-tol difference is the max-over-batch iteration coupling: an easy
+    scenario takes fewer iterations in a small chunk than alongside a hard one."""
+    cfg = _cfg(n=12)
+    whole = run_scenarios(grid3, cfg, calculation="power_flow", dtype=CDT)
+    chunked = run_scenarios(
+        grid3, cfg, calculation="power_flow", dtype=CDT, chunk_size=5
+    )
+    assert chunked.v.shape == whole.v.shape
+    torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
+
+
+def test_chunked_equals_whole_harmonic_with_size1_tail(grid3):
+    """Harmonic chunking with a size-1 tail (10 / 3 -> 3,3,3,1) re-adds the batch axis."""
+    cfg = _cfg(n=10)
+    whole = run_scenarios(
+        grid3, cfg, calculation="harmonic", harmonic_orders=[1, 5, 7], dtype=CDT
+    )
+    chunked = run_scenarios(
+        grid3,
+        cfg,
+        calculation="harmonic",
+        harmonic_orders=[1, 5, 7],
+        dtype=CDT,
+        chunk_size=3,
+    )
+    assert chunked.v.shape == whole.v.shape == (10, 3, grid3_n(grid3))
+    torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
+
+
+def test_chunked_is_differentiable(grid3):
+    """A scalar loss over a chunked batch backprops to a grid line-R tensor."""
+    r = torch.tensor([[0.5]], dtype=torch.float64, requires_grad=True)
+    grid3.branches[0].series_resistance_ohm_per_m = r
+    res = run_scenarios(
+        grid3, _cfg(n=8), calculation="power_flow", dtype=CDT, chunk_size=3
+    )
+    res.v.abs().sum().backward()
+    assert (
+        r.grad is not None and torch.isfinite(r.grad).all() and r.grad.abs().sum() > 0
+    )
+
+
+def grid3_n(grid3) -> int:
+    from pgml.assembly import node_phase_index
+
+    return node_phase_index(grid3).size
+
+
 def test_cartesian_product_batch(grid3):
     """Cartesian sweep: 3 levels (load 10) x 2 levels (load 11) -> B=6."""
     cfg = CartesianConfig(

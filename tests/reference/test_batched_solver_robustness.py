@@ -20,6 +20,7 @@ import logging
 import torch
 
 from pgml.schemas.grid_schema import Generator, Load
+from pgml.solver.harmonic import lu_factor_system, solve_factored, solve_harmonic
 from pgml.solver.power_flow import solve_power_flow
 from tests.fixtures.tiny_grids import single_phase_chain
 
@@ -142,6 +143,43 @@ class TestPartialFailure:
         assert r.converged_mask is None  # no batch dim
         assert r.failed_states == ()
         assert r.v.ndim == 1
+
+
+class TestFactoredSolve:
+    """factor-once-solve-many (lu_factor_system + solve_factored) == solve_harmonic."""
+
+    @staticmethod
+    def _spd_like(h, n):
+        torch.manual_seed(0)
+        return torch.randn(h, n, n, dtype=CDT) + torch.eye(n, dtype=CDT) * (n + 5)
+
+    def test_norton_matches_and_reuses(self) -> None:
+        y = self._spd_like(3, 5)  # [H, N, N], one matrix per harmonic
+        i = torch.randn(7, 3, 5, dtype=CDT)  # [B, H, N] — batch shares Y
+        ref = solve_harmonic(y, i)
+        fac = solve_factored(lu_factor_system(y), i)
+        assert torch.max(torch.abs(ref - fac)).item() < 1e-12
+
+    def test_ideal_slack_matches(self) -> None:
+        y = self._spd_like(3, 6)
+        i = torch.randn(4, 3, 6, dtype=CDT)
+        fixed = torch.tensor([0, 3], dtype=torch.int64)
+        vfix = torch.tensor([1.0 + 0j, 0.5 + 0j], dtype=CDT)
+        ref = solve_harmonic(y, i, fixed_rows=fixed, v_fixed=vfix)
+        fac = solve_factored(lu_factor_system(y, fixed_rows=fixed), i, v_fixed=vfix)
+        assert torch.max(torch.abs(ref - fac)).item() < 1e-12
+        assert torch.max(torch.abs(fac[..., fixed] - vfix)).item() < 1e-12
+
+    def test_factored_gradients_match(self) -> None:
+        y = self._spd_like(1, 5).requires_grad_(True)
+        i = torch.randn(6, 1, 5, dtype=CDT)
+        g_ref = torch.autograd.grad(
+            solve_harmonic(y, i).abs().sum(), y, retain_graph=True
+        )[0]
+        g_fac = torch.autograd.grad(
+            solve_factored(lu_factor_system(y), i).abs().sum(), y
+        )[0]
+        assert torch.max(torch.abs(g_ref - g_fac)).item() < 1e-10
 
 
 class TestMixedBatchedDevices:

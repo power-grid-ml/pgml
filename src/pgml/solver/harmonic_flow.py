@@ -61,7 +61,7 @@ from pgml.schemas.grid_schema import (
     StaticSpectrum,
 )
 
-from .harmonic import solve_harmonic
+from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 from .power_flow import PowerFlowResult, solve_power_flow
 
 
@@ -276,7 +276,15 @@ def solve_harmonic_flow(
             yh, ih = _apply_node_sources(
                 node_sources, grid, v1, index, harm, yh, ih, cdt, rdt, device
             )
-        vh = solve_harmonic(yh, ih)  # Norton mode -> [*batch, Hh, N]
+        # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
+        # case — the batch varies injections, not the network), factor each order ONCE
+        # and back-substitute the whole batch instead of re-factoring per scenario. A
+        # batched voltage node_source promotes Y(h) to [*batch, Hh, N, N]; that path keeps
+        # the per-element solve.
+        if yh.ndim == 3:
+            vh = solve_factored(lu_factor_system(yh), ih)
+        else:
+            vh = solve_harmonic(yh, ih)
         for k, h in enumerate(harm):
             v_by_order[h] = vh[..., k, :]
 

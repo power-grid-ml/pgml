@@ -72,7 +72,7 @@ from pgml.assembly.ybus import _stamp_sources
 from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, Source
 
-from .harmonic import solve_harmonic
+from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 
 _log = logging.getLogger("pgml")
 
@@ -771,6 +771,10 @@ def _current_injection_forward(
         iterations = 0
         converged = False
         residual_history: list[float] = []
+        # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
+        # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
+        # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
+        fac = lu_factor_system(y_eff0, fixed_rows=fixed_rows)
         for _ in range(max_iter):
             i_dev = device_current_injections(
                 grid,
@@ -784,8 +788,8 @@ def _current_injection_forward(
                 symmetry=sym_resolved,
             ).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
-            v_new = solve_harmonic(y_eff0, rhs, fixed_rows=fixed_rows, v_fixed=v_fixed)
-            # solve_harmonic returns [*b, H=1, N]; drop the singleton H axis.
+            v_new = solve_factored(fac, rhs, v_fixed=v_fixed)
+            # solve_factored carries Y's leading H=1; drop the singleton axis.
             if v_new.ndim >= 2 and v_new.shape[-2] == 1 and v_new.shape[-1] == n:
                 v_new = v_new.squeeze(-2)
             # Per-element update + dtype-aware threshold max(tol, floor*||V||). For
@@ -1109,20 +1113,31 @@ def _newton_forward_sequential(
     )
 
 
-def _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b) -> Tensor:
-    """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element."""
-    jac_blocks = []
+def _state_jacobian_blocks(state_residual, x_flat, y_flat, is_flat, b) -> Tensor:
+    """Per-element real state Jacobian ``[B, 2N, 2N]`` — the block diagonal of ``dR/dx``.
+
+    The batched residual ``R[k]`` depends only on ``x[k]``, so the full Jacobian is block
+    diagonal; build each ``[2N, 2N]`` block from its own ``(x, Y, I_slack)`` in a loop.
+    This is ``O(B·(2N)²)`` memory, NOT the ``O(B²·(2N)²)`` of differentiating the batched
+    map and slicing its diagonal — the difference between fitting and OOMing at large ``B``.
+    """
+    blocks = []
     for bi in range(b):
         yr, yi = y_flat[bi].real, y_flat[bi].imag
         ir, ii = is_flat[bi].real, is_flat[bi].imag
-        jac_blocks.append(
+        blocks.append(
             torch.autograd.functional.jacobian(
                 lambda xb, a=yr, c=yi, d=ir, e=ii: state_residual(xb, a, c, d, e),
-                x[bi],
+                x_flat[bi],
                 vectorize=True,
             )
         )  # [2N, 2N]
-    j = torch.stack(jac_blocks, 0)  # [b, 2N, 2N]
+    return torch.stack(blocks, 0)  # [B, 2N, 2N]
+
+
+def _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b) -> Tensor:
+    """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element."""
+    j = _state_jacobian_blocks(state_residual, x, y_flat, is_flat, b)  # [b, 2N, 2N]
     return torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
 
 
@@ -1266,25 +1281,37 @@ class _IFTPowerFlow(torch.autograd.Function):
             islack_flat.expand(b, n) if islack_flat.shape[0] == 1 else islack_flat
         )
 
-        # Real state Jacobian J = dR/dx at x*, per batch system. The batched
-        # residual R[b] depends only on x[b], so the full jacobian is block
-        # diagonal; differentiate the batched map and take the per-batch diagonal
-        # blocks. (Avoids vmap, which does not compose with the assembly's
-        # in-place index_add_ scatter.)
+        # Real state Jacobian J = dR/dx at x*, per batch system. The batched residual
+        # R[k] depends only on x[k], so the Jacobian is block diagonal. Two ways to get
+        # the [B, 2N, 2N] blocks (the off-diagonal cross terms are zero):
+        #   - small B: differentiate the batched map (vectorized) and slice the diagonal
+        #     — fast, but the intermediate is [B, 2N, B, 2N] (O(B²) memory);
+        #   - large B: build the diagonal column-by-column with 2N batched JVPs — O(B)
+        #     memory, and uses the SAME batch-aligned residual (so it stays correct for
+        #     EVERY batch source, incl. batched device params / operating points).
+        # Both avoid vmap, which does not compose with the assembly's index_add_ scatter.
+
         def batched_state_res(xb):
             return state_residual(
-                xb,
-                y_flat.real,
-                y_flat.imag,
-                islack_flat.real,
-                islack_flat.imag,
+                xb, y_flat.real, y_flat.imag, islack_flat.real, islack_flat.imag
             )  # [B, 2N]
 
-        jac_full = torch.autograd.functional.jacobian(
-            batched_state_res, x_flat, create_graph=False, vectorize=True
-        )  # [B, 2N, B, 2N]
-        idx_b = torch.arange(b, device=x_flat.device)
-        j_batched = jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
+        if b * b * twon * twon <= _IFT_DENSE_JAC_MAX_ELEMS:
+            jac_full = torch.autograd.functional.jacobian(
+                batched_state_res, x_flat, create_graph=False, vectorize=True
+            )  # [B, 2N, B, 2N]
+            idx_b = torch.arange(b, device=x_flat.device)
+            j_batched = jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
+        else:
+            cols = []
+            for j in range(twon):
+                tangent = torch.zeros_like(x_flat)
+                tangent[:, j] = 1.0
+                _, col = torch.autograd.functional.jvp(
+                    batched_state_res, x_flat, v=tangent
+                )  # [B, 2N] = J[..., j]
+                cols.append(col)
+            j_batched = torch.stack(cols, dim=-1)  # [B, 2N, 2N]
         # Adjoint: J^T λ = grad_x  ->  λ = J^{-T} grad_x  (batched solve).
         lam_flat = torch.linalg.solve(
             j_batched.transpose(-1, -2), gx_flat.unsqueeze(-1)
@@ -1319,6 +1346,11 @@ class _IFTPowerFlow(torch.autograd.Function):
 # Diagnostic thresholds — flagging only, NOT modelling decisions.
 _DIAG_VBAND_PU = (0.8, 1.2)  # |V|/V_LN outside this band is flagged
 _DIAG_VBLOWUP = 5.0  # |V|/V_LN above this (or non-finite) = diverged iterate
+# Above this many elements, the IFT backward's dense [B,2N,B,2N] state Jacobian is
+# replaced by an O(B) column-by-column JVP build (avoids the B² memory blow-up at the
+# cost of 2N batched JVPs). ~2e8 real elems = ~1.6 GB at float64.
+_IFT_DENSE_JAC_MAX_ELEMS = 2 * 10**8
+
 _DIAG_TOP_K = 5  # worst offenders / critical nodes reported
 _DIAG_COND_SINGULAR = 1.0e8  # Jacobian condition number above this ~ near-singular
 _DIAG_MAX_2N = 4000  # skip the dense criticality SVD above this real-state size
