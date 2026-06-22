@@ -51,7 +51,7 @@ norm under ``no_grad``). Honors input device/dtype; runs unchanged on CPU/CUDA.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 import torch
@@ -89,6 +89,10 @@ class PowerFlowResult:
         Real scalar tensor: the final ``||V_{k+1} - V_k||`` (max over batch).
     converged:
         ``True`` if the residual fell below ``tol`` within ``max_iter``.
+    diagnostics:
+        Non-fatal :class:`ConvergenceDiagnostics` (per-node physical mismatch,
+        voltage-band offenders, residual history, worst offenders, likely cause, and
+        — when the solve did not converge — an IFT-Jacobian criticality analysis).
     """
 
     v: Tensor
@@ -96,6 +100,33 @@ class PowerFlowResult:
     iterations: int
     residual: Tensor
     converged: bool
+    diagnostics: Optional["ConvergenceDiagnostics"] = None
+
+
+@dataclass
+class ConvergenceDiagnostics:
+    """Structured power-flow convergence telemetry (autograd-free, computed at ``V*``).
+
+    Cheap state diagnostics are always populated; ``criticality`` is filled only when
+    the solve did not converge (it costs a dense Jacobian + SVD). All voltages are
+    per-unit on each node's line-to-neutral base; ``mismatch_a`` is the nodal current
+    mismatch ``|F_c|`` [A] of the power-balance residual at the (free) row.
+    """
+
+    converged: bool
+    iterations: int
+    update_norm: float  # final ||ΔV|| (the fixed-point convergence measure)
+    power_mismatch_max: float  # max |F_c| over free (non-slack) rows [A]
+    voltage_band_pu: tuple[float, float]
+    residual_history: list[float] = field(default_factory=list)  # ||ΔV|| per iteration
+    worst_nodes: list[dict] = field(default_factory=list)  # top-k by current mismatch
+    out_of_band_nodes: list[dict] = field(default_factory=list)  # |V| outside the band
+    likely_cause: str = ""
+    criticality: Optional[dict] = None  # IFT-Jacobian analysis (non-convergence only)
+
+    def as_dict(self) -> dict:
+        """Plain-dict view (e.g. for :attr:`ConvergenceError.diagnostics`)."""
+        return asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +250,7 @@ def solve_power_flow(
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
+    criticality: str = "auto",
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -252,11 +284,18 @@ def solve_power_flow(
         :func:`device_current_injections` call of the iteration (which resolves
         silently — no per-iteration logging).
 
+    criticality:
+        When to run the IFT-Jacobian criticality analysis (a dense ``[2N, 2N]``
+        Jacobian + SVD): ``"auto"`` (default) only on non-convergence; ``"always"``
+        also on a converged solve (a voltage-collapse MARGIN naming the weakest bus);
+        ``"never"`` to skip it.
+
     Returns
     -------
     PowerFlowResult
         ``v`` complex ``[*batch, N]`` (DIFFERENTIABLE via the IFT), the index, the
-        iteration count, the final update-norm residual, and convergence flag.
+        iteration count, the final update-norm residual, the convergence flag, and a
+        :class:`ConvergenceDiagnostics`.
     """
     if method not in ("current_injection",):
         raise ModelingError(
@@ -264,6 +303,10 @@ def solve_power_flow(
         )
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    if criticality not in ("auto", "always", "never"):
+        raise InputError(
+            f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
+        )
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
@@ -389,6 +432,7 @@ def solve_power_flow(
         residual_norm = torch.zeros((), dtype=rdt, device=device)
         iterations = 0
         converged = False
+        residual_history: list[float] = []
         for _ in range(max_iter):
             i_dev = device_current_injections(
                 grid,
@@ -408,6 +452,7 @@ def solve_power_flow(
                 v_new = v_new.squeeze(-2)
             delta = torch.linalg.vector_norm(v_new - v, dim=-1)
             residual_norm = delta.max()
+            residual_history.append(float(residual_norm))
             v = v_new
             iterations += 1
             if bool(residual_norm < tol):
@@ -415,6 +460,26 @@ def solve_power_flow(
                 break
 
     v_star = v  # detached (built under no_grad)
+
+    # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
+    # IFT real Jacobian only when the solve did not converge).
+    diagnostics = _build_diagnostics(
+        grid,
+        index,
+        v_star,
+        y_eff0,
+        i_slack0,
+        residual_complex,
+        real_res,
+        fixed_rows,
+        residual_history,
+        bool(converged),
+        iterations,
+        float(residual_norm),
+        rdt,
+        device,
+        criticality,
+    )
 
     if leaves:
         v_out = _IFTPowerFlow.apply(v_star, real_res, n, rdt, cdt, *leaves)
@@ -427,6 +492,7 @@ def solve_power_flow(
         iterations=iterations,
         residual=residual_norm.reshape(()),
         converged=bool(converged),
+        diagnostics=diagnostics,
     )
 
 
@@ -590,4 +656,273 @@ class _IFTPowerFlow(torch.autograd.Function):
         return (None, None, None, None, None, *grad_leaves)
 
 
-__all__ = ["solve_power_flow", "PowerFlowResult"]
+# ---------------------------------------------------------------------------
+# convergence diagnostics (autograd-free) + IFT-Jacobian criticality
+# ---------------------------------------------------------------------------
+# Diagnostic thresholds — flagging only, NOT modelling decisions.
+_DIAG_VBAND_PU = (0.8, 1.2)  # |V|/V_LN outside this band is flagged
+_DIAG_VBLOWUP = 5.0  # |V|/V_LN above this (or non-finite) = diverged iterate
+_DIAG_TOP_K = 5  # worst offenders / critical nodes reported
+_DIAG_COND_SINGULAR = 1.0e8  # Jacobian condition number above this ~ near-singular
+_DIAG_MAX_2N = 4000  # skip the dense criticality SVD above this real-state size
+_PHASE_NAMES = ("A", "B", "C", "N")
+
+
+def _phase_name(code: int) -> str:
+    return _PHASE_NAMES[code] if 0 <= code < len(_PHASE_NAMES) else "?"
+
+
+def _node_voltage_bases(grid: Grid, index, rdt, device) -> Tensor:
+    """Per-row line-to-neutral voltage base ``[N]`` (the per-unit denominator)."""
+    from pgml.assembly._params import phase_voltage_magnitude
+
+    node_by_id = {int(nd.id): nd for nd in grid.nodes}
+    bases = [
+        phase_voltage_magnitude(float(node_by_id[int(nid)].u_rated_v),
+                                len(node_by_id[int(nid)].phases))
+        for nid in index.node_ids.tolist()
+    ]
+    return torch.tensor(bases, dtype=rdt, device=device)
+
+
+def _build_diagnostics(
+    grid, index, v_star, y_eff0, i_slack0, residual_complex, real_res, fixed_rows,
+    residual_history, converged, iterations, update_norm, rdt, device,
+    criticality: str = "auto",
+) -> "ConvergenceDiagnostics":
+    """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence)."""
+    n = index.size
+    vmin, vmax = _DIAG_VBAND_PU
+    node_ids = index.node_ids.tolist()
+    phase_codes = index.phase_codes.tolist()
+    with torch.no_grad():
+        fc = residual_complex(v_star, y_eff0, i_slack0)  # [*B, N] complex (all rows)
+        lead = v_star.shape[:-1]
+        b = int(torch.tensor(lead).prod().item()) if lead else 1
+        vflat = v_star.reshape(b, n)
+        fc_abs = fc.reshape(b, n).abs().clone()
+        if fixed_rows is not None and fixed_rows.numel() > 0:
+            fc_abs[:, fixed_rows] = 0.0  # slack rows absorb mismatch by construction
+        bases = _node_voltage_bases(grid, index, rdt, device)
+        vpu = vflat.abs() / bases.clamp_min(1e-12)[None, :]  # [B, N]
+        power_mismatch_max = float(fc_abs.max()) if fc_abs.numel() else 0.0
+
+        worst_nodes: list[dict] = []
+        k = min(_DIAG_TOP_K, b * n)
+        if k > 0 and power_mismatch_max > 0.0:
+            vals, idxs = torch.topk(fc_abs.reshape(-1), k)
+            for val, fi in zip(vals.tolist(), idxs.tolist()):
+                bi, r = divmod(int(fi), n)
+                worst_nodes.append({
+                    "node_id": int(node_ids[r]),
+                    "phase": _phase_name(int(phase_codes[r])),
+                    "mismatch_a": float(val),
+                    "v_pu": float(vpu[bi, r]),
+                    **({"batch": bi} if b > 1 else {}),
+                })
+
+        pc = torch.tensor(phase_codes, device=device)
+        nonneutral = (pc != 3)[None, :]
+        below, above = (vpu < vmin) & nonneutral, (vpu > vmax) & nonneutral
+        dev = torch.where(below, vmin - vpu, torch.zeros_like(vpu))
+        dev = torch.where(above, vpu - vmax, dev)  # >0 where violated
+        n_viol = int((dev > 0).sum())
+        out_of_band: list[dict] = []
+        if n_viol > 0:
+            vals, idxs = torch.topk(dev.reshape(-1), min(_DIAG_TOP_K, n_viol))
+            for val, fi in zip(vals.tolist(), idxs.tolist()):
+                if val <= 0.0:
+                    continue
+                bi, r = divmod(int(fi), n)
+                out_of_band.append({
+                    "node_id": int(node_ids[r]),
+                    "phase": _phase_name(int(phase_codes[r])),
+                    "v_pu": float(vpu[bi, r]),
+                    **({"batch": bi} if b > 1 else {}),
+                })
+
+        # Divergence guard: the current-injection fixed point does not stop at the
+        # loadability nose — past it (or for a non-contractive map) the iterate blows
+        # up. At such an unphysical / non-finite V the Jacobian is not a meaningful
+        # loadability test, so we detect it and skip / caveat the criticality analysis.
+        finite = bool(torch.isfinite(vflat).all())
+        max_vpu = (
+            float((vpu * nonneutral.to(vpu.dtype)).max()) if finite else float("inf")
+        )
+        diverged = (not finite) or (max_vpu > _DIAG_VBLOWUP)
+        # Relative final update: a large ||ΔV|| vs the voltage scale means the iterate
+        # never settled (oscillating), so any band violation on it is an artifact.
+        v_scale = float(vflat.abs().max()) if finite else float("inf")
+        rel_update = update_norm / v_scale if (finite and v_scale > 0.0) else float("inf")
+
+    diag = ConvergenceDiagnostics(
+        converged=converged,
+        iterations=iterations,
+        update_norm=update_norm,
+        power_mismatch_max=power_mismatch_max,
+        voltage_band_pu=(vmin, vmax),
+        residual_history=residual_history,
+        worst_nodes=worst_nodes,
+        out_of_band_nodes=out_of_band,
+    )
+    do_crit = criticality == "always" or (criticality == "auto" and not converged)
+    if do_crit and finite:
+        diag.criticality = _jacobian_criticality(
+            real_res, v_star, n, rdt, device, index, fc_abs, diverged
+        )
+    diag.likely_cause = _likely_cause(diag, n_viol, diverged, max_vpu, rel_update)
+    return diag
+
+
+def _likely_cause(
+    diag: "ConvergenceDiagnostics",
+    n_viol: int,
+    diverged: bool,
+    max_vpu: float,
+    rel_update: float,
+) -> str:
+    """One-line heuristic explanation of the convergence outcome."""
+    if diag.converged:
+        return "converged"
+    if diverged:
+        reached = (
+            f"voltage reached {max_vpu:.1f} pu" if math.isfinite(max_vpu)
+            else "voltages became non-finite"
+        )
+        return (
+            f"fixed-point iteration diverged ({reached} — unphysical); the operating "
+            "point is likely past the loadability limit, or the current-injection map "
+            "is non-contractive here — locate the limit with continuation from a "
+            "feasible base"
+        )
+    crit = diag.criticality or {}
+    if crit.get("near_singular"):
+        names = ", ".join(
+            f"{c['node_id']}.{c['phase']}" for c in crit.get("critical_nodes", [])[:3]
+        )
+        return (
+            f"voltage collapse / loadability limit — Jacobian near-singular "
+            f"(cond={crit.get('condition_number', float('nan')):.1e}); "
+            f"critical node(s): {names}"
+        )
+    if rel_update > 0.01:  # iterate never settled (oscillating ||ΔV|| vs voltage scale)
+        return (
+            f"fixed-point iteration did not settle (oscillating; final ||ΔV|| = "
+            f"{diag.update_norm:.2e} V, ~{rel_update * 100:.0f}% of the voltage scale) "
+            "— the current-injection map is not contracting here; try Newton or a "
+            "homotopy continuation from a feasible base"
+        )
+    if n_viol > 0 and diag.out_of_band_nodes:
+        worst = min(diag.out_of_band_nodes, key=lambda d: d["v_pu"])
+        lo, hi = diag.voltage_band_pu
+        return (
+            f"{n_viol} node(s) outside [{lo}, {hi}] pu (likely overload / weak source); "
+            f"worst {worst['node_id']}.{worst['phase']} at {worst['v_pu']:.3f} pu"
+        )
+    hist = diag.residual_history
+    if len(hist) >= 3 and hist[-1] >= hist[-3]:  # not contracting
+        return (
+            f"fixed-point iteration not contracting (||ΔV|| plateaued at {hist[-1]:.2e}); "
+            "a solution may exist — try Newton / a better start / more iterations"
+        )
+    wn = diag.worst_nodes[0] if diag.worst_nodes else None
+    tail = (
+        f"; max mismatch {wn['mismatch_a']:.2e} A at node {wn['node_id']}.{wn['phase']}"
+        if wn else ""
+    )
+    return (
+        f"did not reach tol in {diag.iterations} iterations "
+        f"(||ΔV||={diag.update_norm:.2e}){tail}"
+    )
+
+
+def _jacobian_criticality(
+    real_res, v_star, n, rdt, device, index, fc_abs, diverged: bool = False
+) -> dict:
+    """IFT real Jacobian ``J = dR/dx`` at ``V*`` -> proximity to voltage collapse.
+
+    Builds the same ``[2N, 2N]`` real residual Jacobian the IFT backward uses (for the
+    worst batch element), takes its singular values, and reads the critical-bus
+    participation from the right singular vector of the SMALLEST singular value (the
+    collapse mode). A near-singular ``J`` means a genuine loadability limit and names
+    the weakest bus; a well-conditioned ``J`` means the fixed-point map merely failed
+    to contract though a solution likely exists.
+
+    The verdict is rigorous AT (or near) a solution. When ``diverged`` the iterate is
+    unphysical, so ``J`` there is only a local linearization — the result is annotated
+    and the loadability verdict must come from a continuation from a feasible base.
+    """
+    twon = 2 * n
+    if twon > _DIAG_MAX_2N:
+        return {
+            "skipped": f"state size 2N={twon} exceeds {_DIAG_MAX_2N}; "
+            "use a sparse / matrix-free criticality method"
+        }
+    state_residual = real_res.state_residual
+    build_system = real_res.build_system
+    lead = v_star.shape[:-1]
+    b = int(torch.tensor(lead).prod().item()) if lead else 1
+    vflat = v_star.reshape(b, n)
+    b_star = int(fc_abs.max(dim=1).values.argmax()) if b > 1 else 0
+    v_b = vflat[b_star]
+    x = torch.cat([v_b.real, v_b.imag]).to(rdt)  # [2N]
+    with torch.no_grad():
+        y_eff, i_slack = build_system()
+    y_eff = y_eff.detach().reshape(-1, n, n)
+    i_slack = i_slack.detach().reshape(-1, n)
+    y_b = y_eff[b_star] if y_eff.shape[0] > b_star else y_eff[0]
+    is_b = i_slack[b_star] if i_slack.shape[0] > b_star else i_slack[0]
+
+    def f(xb: Tensor) -> Tensor:
+        return state_residual(xb, y_b.real, y_b.imag, is_b.real, is_b.imag)
+
+    j = torch.autograd.functional.jacobian(f, x, vectorize=True)  # [2N, 2N]
+    with torch.no_grad():
+        svals = torch.linalg.svdvals(j)
+        sigma_min, sigma_max = float(svals.min()), float(svals.max())
+        cond = sigma_max / max(sigma_min, 1e-300)
+        _, _, vh = torch.linalg.svd(j)
+        mode = vh[-1]  # right singular vector of the smallest singular value
+        part = torch.sqrt(mode[:n] ** 2 + mode[n:] ** 2)  # [N] per-node participation
+        part = part / part.max().clamp_min(1e-30)
+        vals, idxs = torch.topk(part, min(_DIAG_TOP_K, n))
+    node_ids, phase_codes = index.node_ids.tolist(), index.phase_codes.tolist()
+    critical = [
+        {
+            "node_id": int(node_ids[int(r)]),
+            "phase": _phase_name(int(phase_codes[int(r)])),
+            "participation": float(v),
+        }
+        for v, r in zip(vals.tolist(), idxs.tolist())
+    ]
+    near_singular = (cond > _DIAG_COND_SINGULAR) and not diverged
+    if diverged:
+        interp = (
+            "evaluated at a DIVERGED (unphysical) iterate — J here is only a local "
+            "linearization, not a loadability test; use continuation from a feasible "
+            "base to locate the limit. Critical nodes are indicative only."
+        )
+    elif near_singular:
+        interp = (
+            "Jacobian near-singular — voltage collapse / loadability limit; a solution "
+            "at this loading likely does not exist."
+        )
+    else:
+        interp = (
+            "Jacobian well-conditioned — the fixed-point iteration failed to contract "
+            "though a solution likely exists (try Newton, a better start, or more "
+            "iterations)."
+        )
+    return {
+        "min_singular_value": sigma_min,
+        "max_singular_value": sigma_max,
+        "condition_number": cond,
+        "near_singular": bool(near_singular),
+        "evaluated_at": "diverged_iterate" if diverged else "final_iterate",
+        "critical_nodes": critical,
+        "interpretation": interp,
+        **({"batch": b_star} if b > 1 else {}),
+    }
+
+
+__all__ = ["solve_power_flow", "PowerFlowResult", "ConvergenceDiagnostics"]

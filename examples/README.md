@@ -84,3 +84,9 @@ See `src/pgml/scenarios/CONTEXT.md` for the full interface ledger.
 - `evaluate_ieee33.py` — load-flow evaluation vs pandapower (IEEE-33).
 - `evaluate_harmonics_carson.py` — OpenDSS-vs-pgml harmonic comparison (Carson geometry).
 - `evaluate_line_sequence_harmonics.py` — positive-sequence vs naive vs OpenDSS line models.
+- `current_injection_convergence.py` — why the current-injection power flow oscillates near
+  the loadability nose. A 2-bus radial with a closed-form P-V nose; plots `||ΔV||` and the
+  load-bus `|V|/E` per iteration at several load levels (smooth convergence → slowdown →
+  sustained oscillation past the nose) and the P-V curve showing the method's convergence
+  region sitting inside the feasible region. Motivates the Newton/continuation work
+  (`TODO.md` item 3) and the `ConvergenceDiagnostics` "did not settle" verdict.

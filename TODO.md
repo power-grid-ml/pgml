@@ -64,18 +64,27 @@ will brief the dedicated agent on the SE method; this is the handoff to the EXIS
 
 ---
 
-## 3. Load convergence — rich diagnostics, no silent fallback  — later agent
+## 3. Load convergence — rich diagnostics + continuation  — partly done
 **What.** OpenDSS const-P loads silently switch to constant impedance outside
 `[Vminpu, Vmaxpu]` to "nearly always converge". We do NOT want a silent model swap.
-`pgml.simulate` now RAISES `ConvergenceError` (carrying `iterations`/`residual`) by default
-when the nonlinear fixed point does not converge (`strict=False` to opt out) — the basic
-"don't hide it" behaviour exists. STILL TODO: the RICH diagnostics — which nodes/phases are
-out of a sane voltage band, per-node residual, iteration history, worst offenders, likely
-cause — and a gradient/continuation HOMOTOPY (ramp load S by λ∈[0,1] from a converged
-const-Z point) to locate the divergence point differentiably and report the breaking λ.
-**Where.** `solver/power_flow.py` (extend `PowerFlowResult` with a structured diagnostics
-object; populate `ConvergenceError.diagnostics`). Add a deliberately non-convergent heavy
-const-P grid test asserting the diagnostics.
+`pgml.simulate` RAISES `ConvergenceError` (`strict=False` to opt out) when the nonlinear
+fixed point does not converge.
+**DONE.** Rich diagnostics: `PowerFlowResult.diagnostics` (`ConvergenceDiagnostics`) carries
+per-node physical mismatch, voltage-band offenders (pu on the L-N base), residual history,
+worst offenders, and a `likely_cause` heuristic; `simulate(strict=True)` passes them into
+`ConvergenceError`. The IFT-Jacobian CRITICALITY analysis reuses the backward's real
+`[2N,2N]` `J = dR/dV` (`svdvals` + smallest-σ singular vector → critical-bus participation):
+`criticality="auto"/"always"/"never"` — `"always"` gives a collapse MARGIN at a converged
+solution (σ_min shrinks toward the nose). Tests: `tests/reference/test_convergence_diagnostics.py`.
+**STILL TODO — the continuation/homotopy.** The current-injection fixed point does NOT stop
+at the loadability nose — past it the iterate oscillates / blows up, so the Jacobian there is
+only a local linearization (the diagnostics flag this and point here). To locate the breaking
+λ rigorously: ramp load S by λ∈[0,1] from a converged const-Z base with a tangent predictor
+`dV/dλ = −J⁻¹ ∂R/∂λ` (one IFT solve) + a Newton corrector that CAN converge near the nose,
+and report the breaking λ + the critical bus (the left null-vector of J at the saddle-node).
+This needs the Newton method (item 6) and is the natural home of the `near_singular` verdict.
+For large N, replace the dense `[2N,2N]` Jacobian/SVD with a matrix-free (JVP) smallest-σ
+estimate. **Where.** `solver/power_flow.py`.
 
 ---
 
@@ -117,3 +126,45 @@ solver signatures, config). Lower priority; do incrementally.
 - Convert: `convert/pandapower/` lacks a `CONTEXT.md` (others have one); the OpenDSS converter
   does not yet emit `Transformer` elements (DSS→pgml transformer parsing).
 - Newton-Raphson power-flow method (currently current-injection fixed point only).
+
+---
+
+## 7. DER / PV inverter control behaviour  ⚠️ schema + solver, decision needed
+**What.** A PV system is at most a fixed P (or P/Q) injection today (a `Generator` with an
+optional static spectrum). There is NO inverter control: no Volt-VAr `Q(V)`, Volt-Watt
+`P(V)` curtailment, constant-power-factor, constant-Q, or irradiance/MPPT-driven P. The
+voltage-dependent response of DER — the dominant effect in LV hosting-capacity and harmonic
+studies — is absent.
+**Why.** The control law sets the operating point, so it changes the fundamental voltages,
+the harmonic injection currents derived from them, AND the loadability limit (it couples
+directly to the #3 convergence work — droop curves add nonlinearity that can prevent or
+trigger divergence). Volt-VAr / Volt-Watt are the standard IEEE 1547 / EN 50549 grid-support
+functions; realistic ML training data and hosting-capacity results need them.
+**Where.** Schema: a control model on `Generator` (or a dedicated DER appliance) — the
+`FrequencyParam`/`CurveParam` curve machinery can express the `Q(V)`/`P(V)` droop curves, or
+a dedicated `InverterControl` model. Solver: `solver/power_flow.py` — the V-dependent
+injection becomes part of `I_device(V)`; the IFT still applies (the control curve enters the
+residual and its Jacobian). **Where.** `schemas` (orchestrator-only — ask first),
+`solver/power_flow.py`, `scenarios/` (sweep setpoints).
+**How.** Decision needed on the control set to model first (Volt-VAr is the LV priority) and
+the schema shape. Make the droop differentiable (reuse the curve interpolation). Validate
+against pandapower's controller framework / OpenDSS `InvControl`.
+
+---
+
+## 8. Storage elements + dispatch/control model  ⚠️ schema + solver, decision needed
+**What.** There is NO storage component in the schema, and therefore no charge/discharge
+control. A battery/storage system is a bidirectional P (and Q) injection with a
+state-of-charge (SoC) constraint and a dispatch law (peak shaving, self-consumption,
+frequency response, constant-power).
+**Why.** Storage is central to modern LV/MV studies and to time-series scenario generation
+(the `scenarios` layer is the training-data engine); without it the generated data cannot
+represent storage-rich grids. As with PV control, the dispatch law sets the operating point
+that drives both the fundamental solve and the harmonic injection.
+**Where.** Schema: a new `Storage` appliance (P/Q, SoC, power/energy ratings, efficiency) —
+orchestrator-only, ask first. Solver: `solver/power_flow.py` treats it as a controllable
+injection; `scenarios/` sweeps SoC / dispatch over a time sequence (the coherent/time-batched
+path).
+**How.** Start with static-dispatch storage (a signed injection with ratings + a fixed P,Q
+setpoint), then add SoC-aware time-series dispatch in `scenarios`. Decision needed: schema
+shape (extend `Generator` vs a new `Storage` component).

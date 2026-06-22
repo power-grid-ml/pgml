@@ -374,6 +374,7 @@ def simulate(
             pf.iterations,
             float(pf.residual),
         )
+        pf_diag = pf.diagnostics
     else:
         hf = solve_harmonic_flow(
             grid,
@@ -395,17 +396,20 @@ def simulate(
             hf.pf.iterations,
             float(hf.pf.residual),
         )
+        pf_diag = hf.pf.diagnostics
 
     if strict and not converged:
+        diag: dict = {"calculation": config.calculation, "max_iter": config.max_iter}
+        cause = ""
+        if pf_diag is not None:
+            diag.update(pf_diag.as_dict())
+            cause = f" — {pf_diag.likely_cause}" if pf_diag.likely_cause else ""
         raise ConvergenceError(
             f"{config.calculation} did not converge in {iterations} iterations "
-            f"(residual {residual:.3e})",
+            f"(residual {residual:.3e}){cause}",
             iterations=iterations,
             residual=residual,
-            diagnostics={
-                "calculation": config.calculation,
-                "max_iter": config.max_iter,
-            },
+            diagnostics=diag,
         )
 
     return SolvedState(

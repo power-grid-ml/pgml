@@ -53,7 +53,8 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
 
 - `solve_power_flow(grid, *, slack="ideal", method="current_injection",
      tol=1e-8, max_iter=100, dtype=torch.complex128, device=None,
-     operating_point=None, param_overrides=None, symmetry=None) -> PowerFlowResult`
+     operating_point=None, param_overrides=None, symmetry=None,
+     criticality="auto") -> PowerFlowResult`
   - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
     -> config `calculation.symmetry`). Resolved ONCE here (`resolve_asymmetric`),
     logged ONCE (`log_modeling_summary`), and threaded as the resolved string into
@@ -68,7 +69,23 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     Entire warm start under `no_grad`; never changes the converged fixed point.
   - Solves the const-P / ZIP fundamental power flow at f0 = `grid.base_frequency_hz`.
   - `PowerFlowResult` (frozen dataclass): `v` complex `[*batch, N]` (DIFFERENTIABLE),
-    `index: NodePhaseIndex`, `iterations: int`, `residual: Tensor`, `converged: bool`.
+    `index: NodePhaseIndex`, `iterations: int`, `residual: Tensor`, `converged: bool`,
+    `diagnostics: ConvergenceDiagnostics`.
+  - `ConvergenceDiagnostics` (autograd-free, computed at `V*`): `converged`, `iterations`,
+    `update_norm` (final `||ΔV||`), `power_mismatch_max` (max `|F_c|` over free rows [A]),
+    `residual_history`, `worst_nodes`, `out_of_band_nodes` (pu on each node's L-N base),
+    `voltage_band_pu`, `likely_cause` (heuristic: converged / diverged / oscillating /
+    overload / near-singular), and `criticality`. The cheap state diagnostics are ALWAYS
+    populated; `simulate(strict=True)` passes `diagnostics.as_dict()` into the raised
+    `ConvergenceError`.
+  - `criticality` kwarg (`"auto"`/`"always"`/`"never"`): runs the IFT-Jacobian analysis
+    — the SAME real `[2N,2N]` `J = dR/dV` the IFT backward builds, then `svdvals(J)` +
+    the right singular vector of the smallest σ for the critical-bus participation.
+    `"auto"` = only on non-convergence; `"always"` = also on a converged solve (a
+    voltage-collapse MARGIN: σ_min shrinks toward the nose). Rigorous AT a solution; at a
+    DIVERGED iterate it is only a local linearization (flagged `evaluated_at`, never
+    claims `near_singular`) — a definitive loadability limit needs the (future)
+    homotopy/continuation. Dense; skipped above `2N=4000`.
   - Forward = current-injection FIXED POINT: with `Y_net = assemble_network_ybus`
     (+ folded constant-admittance device part + source Norton if `slack="norton"`),
     iterate `V_{k+1} = solve_harmonic(Y_eff, device_current_injections(grid,V_k)+I_slack,
