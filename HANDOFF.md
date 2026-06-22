@@ -73,6 +73,16 @@ scenarios — the main fitness-for-purpose gap for the training-data goal.
 fit VRAM, streaming, mixed precision (complex64 data-gen / complex128 gradcheck). Tests:
 GPU parity on a realistic feeder, `batched == loop` at scale, determinism, memory ceiling.
 **Where.** `src/pgml/scenarios/`, `tests/gpu/`, `tests/scenarios/`; read `scenarios/ROADMAP.md`.
+**Benchmark + limits surfaced.** `examples/benchmark_speed.py` times load/harmonic flow and
+both PF solvers over a batch sweep on IEEE-33 vs CIGRE LV +PV, CPU and CUDA (writes
+`results_<device>.json` per device + merges them; the dense `[B,H,N,N]` per-scenario cost on
+CIGRE is the GPU-amortization motivation). Two blockers it confirmed: (1) **mixed precision
+is not yet viable** — the fixed-point tol sits below the float32 rounding floor (~1e-5 V on a
+230 V base), so `complex64` does not converge a large batch; the data-gen path needs either a
+relative/dtype-aware convergence test or a non-iterative harmonic solve. (2) **Newton does
+not batch** — `solve_power_flow(method="newton")` with a batched `operating_point` fails (its
+const-Z warm start `_linear_const_z_init` can't stack per-device batched P/Q); current
+injection is the only batchable PF path.
 
 ### B. PyG harmonic state estimation (the ML layer) — new `src/pgml/ml/`, physics-guided
 **What.** Harmonic state estimation from few measurements, trained on the generated data,
@@ -121,6 +131,13 @@ injection with ratings + a fixed P,Q setpoint), then SoC-aware time-series dispa
   solver signatures, config). Don't fight the deliberate `Any` of the float/tensor duality.
 - **Harmonic flow**: batch-dim mismatch guard (operating_point vs harmonic_injection);
   vectorize the device×order python loop in `harmonic_flow._harmonic_injections`.
+- **Criticality on batched non-convergence (bug)**: when a batched fundamental solve does not
+  converge, `criticality="auto"` runs `_jacobian_criticality`, which then crashes on the
+  batched 2-D participation vector (`int(r)` where `r` is a list). Because `solve_harmonic_flow`
+  exposes no `criticality` kwarg, a batch with ANY non-converging scenario crashes instead of
+  reporting non-convergence — a robustness hole for large-batch data-gen. Fix the batched
+  indexing in `_jacobian_criticality` (reduce to the worst element) and/or thread a
+  `criticality` knob through `solve_harmonic_flow`. **Where.** `solver/power_flow.py`.
 - **Convert**: `convert/pandapower/` lacks a `CONTEXT.md` (others have one); the OpenDSS
   converter does not yet emit `Transformer` elements (DSS→pgml transformer parsing).
 - **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`), zigzag

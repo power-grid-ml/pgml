@@ -81,6 +81,18 @@ batch; one batched solve produces aligned results; persist reproducibly.
 See `src/pgml/scenarios/CONTEXT.md` for the full interface ledger.
 
 ## Other examples
+- `benchmark_speed.py` — execution-speed study (CPU and GPU). Generates a large batch of
+  randomized operating points (varying loads, added PV systems, and harmonic injections)
+  on two grids of contrasting size — the smaller IEEE-33 vs the full 3-phase CIGRE LV +PV
+  — and times every solve path: the two power-flow solvers (`current_injection` vs
+  `newton`, with iteration counts), load flow vs harmonic flow, over a batch-size sweep,
+  on every device present. Auto-detects CUDA; writes one `results_<device>.json` per
+  device and merges them, so a single run on a GPU host (whose default environment also
+  runs on CPU) yields the CPU-vs-GPU figures. Plots: `solver_comparison.svg`,
+  `loadflow_vs_harmonic.svg`, `throughput_vs_batch.svg`, `device_speedup.svg` (when a CUDA
+  series is present), plus `benchmark_summary.csv`. CPU host:
+  `pixi run -e cpu python examples/benchmark_speed.py`; GPU host:
+  `pixi run python examples/benchmark_speed.py` (default environment ships `pytorch-gpu`).
 - `evaluate_ieee33.py` — load-flow evaluation vs pandapower (IEEE-33).
 - `evaluate_harmonics_carson.py` — OpenDSS-vs-pgml harmonic comparison (Carson geometry).
 - `evaluate_line_sequence_harmonics.py` — positive-sequence vs naive vs OpenDSS line models.
