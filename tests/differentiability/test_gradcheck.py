@@ -127,8 +127,13 @@ def test_gradcheck_newton_power_flow():
             ("source", 10, "resistance_ohm"): rs,
         }
         return solve_power_flow(
-            grid, slack="ideal", method="newton", tol=1e-12, max_iter=100,
-            dtype=torch.complex128, param_overrides=overrides,
+            grid,
+            slack="ideal",
+            method="newton",
+            tol=1e-12,
+            max_iter=100,
+            dtype=torch.complex128,
+            param_overrides=overrides,
         ).v.reshape(-1)
 
     assert torch.autograd.gradcheck(fn, (r1, l1, rs), eps=1e-6, atol=1e-5, rtol=1e-3)
