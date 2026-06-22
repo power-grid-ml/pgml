@@ -77,12 +77,19 @@ pandapower/OpenDSS.
 2. **GPU-ready** — CPU/CUDA unchanged, honor device/dtype, complex dtypes, batched.
 Gate: float64 `gradcheck` + GPU device/dtype tests must pass.
 
-## Current status (2026-06-18) — what's done & validated
+## Current status (2026-06-22) — what's done & validated
+- **Public API** (the front door — `pgml.simulate`): `simulate(grid, config) -> SolvedState`
+  (differentiable; eager voltages + lazy branch currents/flows/spectra/THD),
+  `simulate_serializable(...) -> ResultBundle` (JSON for REST/dashboard/persistence),
+  `SimulationConfig` (serializable "what"; device/dtype are execution kwargs). Exception
+  hierarchy `pgml.errors` (`PgmError`→`InputError`/`ComputationError`, REST `http_status`),
+  raised consistently. See `docs/public-api.md`.
 - **Load flow**: linear (const-Z) + nonlinear (const-P / full ZIP) via current-injection
   fixed point with IFT gradients. Validated vs pandapower & OpenDSS Y-bus and vs
   pandapower voltages on IEEE-33 and CIGRE LV.
 - **Harmonic flow** (`solve_harmonic_flow`): nonlinear fundamental + linear per-harmonic;
-  OpenDSS-exact spectrum injection convention.
+  OpenDSS-exact spectrum injection convention. `assembly.branch_currents` derives per-branch
+  terminal currents (KCL-exact) from the solved voltages.
 - **Transformer vector groups** (`assembly/_transformer.py`): phase-domain winding-incidence
   primitive `Y = Nᵀ Y_winding N`; a Dyn delta winding correctly traps the zero sequence
   (fixes triplen-harmonic propagation). Nominal ratio + clock shift from `u_rated` +
@@ -90,18 +97,28 @@ Gate: float64 `gradcheck` + GPU device/dtype tests must pass.
   (Dyn11). Decision record: `references/opendss/transformer.md`.
 - **Geometry → impedance** (`pgml.geometry`): differentiable Carson/Deri (earth return +
   skin + Maxwell capacitance), **bit-exact vs OpenDSS** (relZ ~1e-13); R/X→geometry
-  synthesis with provenance. OpenDSS-vs-pgml harmonic comparison on IEEE-33 + CIGRE LV
-  (Y(h) and voltages match <1e-6 on the same geometry).
+  synthesis with provenance — single-conductor (1-phase) AND equilateral 3-conductor
+  (3-phase, reproduces Z1+X0). Feeding the same geometry to both engines makes the 3-phase
+  harmonic comparison bit-exact on every order incl. triplen (vs a live OpenDSS Dyn
+  transformer).
 - **Positive-sequence harmonic line model** (`pgml.geometry.sequence`): for R/X-defined
   feeders, `X(h)=X1·h` + skin-effect on `R1` with **no earth floor** (the earth term
   cancels in the positive sequence; it lives only in `Z0`, validated via a Fortescue
   decomposition of a 3-phase geometry). Fixes the non-physical-GMR caveat below; applied
   with `apply_positive_sequence_harmonic_model(grid)`. Decision record:
   `references/positive_sequence_harmonic_line_model.md`.
-- **Scenarios** (`pgml.scenarios`): reproducible QMC/cartesian batched sampling
-  (increment 1); `batched == loop-of-individual`, differentiable through the batch.
-- **Evaluation** (`pgml.evaluation`): paper-ready + interactive comparison plots.
-- Tests: **165 passing, 9 GPU-skipped**; `ruff` clean. Demos in `examples/`.
+- **Scenarios** (`pgml.scenarios`): reproducible QMC/cartesian batched sampling, correlated /
+  per-phase-symmetry sampling, EN50160 harmonic-spectrum sampling, per-node
+  perturbation/injection sweeps, and parquet persistence; `batched == loop`, differentiable.
+- **Evaluation** (`pgml.evaluation`): paper-ready + interactive comparison plots. The
+  reference oracles (numpy / pandapower / live-OpenDSS) live in the OPTIONAL subpackage
+  `pgml.evaluation.oracles` (`oracles` extra); importing `pgml.evaluation` needs no
+  pandapower/opendssdirect.
+- **Packaging / CI / infra**: `pyproject.toml` (PEP 621, `py.typed`, optional extras),
+  GitHub Actions (`ruff` + tests + strict docs), root `conftest` + pytest markers
+  (`gpu`/`opendss`/`slow`).
+- Tests: **447 passing, 29 GPU/opendss-skipped**; `ruff` + strict docs build clean.
+  Demos in `examples/`.
 
 **Resolved (was TODO #1):** the single-conductor R/X→geometry synthesis is non-physical
 for low-X / cable feeders (GMR floor) — it remains a Carson-code validation vehicle (and
@@ -111,6 +128,9 @@ model** (`apply_positive_sequence_harmonic_model`): no earth floor, GMR never en
 `references/positive_sequence_harmonic_line_model.md`.
 
 ## How to run
+- **Use the library**: `import pgml; pgml.simulate(grid, pgml.SimulationConfig(...))` — see
+  the README quickstart and `docs/public-api.md` (entry-point table: `simulate` vs
+  `solver.*` vs `scenarios.run_scenarios`).
 - `pixi run -e cpu pytest -q` — full suite. `pixi run -e cpu ruff check src tests`.
 - `pixi run -e cpu python examples/evaluate_ieee33.py` — load-flow eval figures.
 - `pixi run -e cpu python examples/evaluate_harmonics_carson.py` — Carson harmonic eval
@@ -119,17 +139,18 @@ model** (`apply_positive_sequence_harmonic_model`): no earth floor, GMR never en
   harmonic line model: seq R/X vs h, the GMR floor, corrected-vs-naive-vs-OpenDSS feeder.
 
 ## Where to start for the open work (full detail in TODO.md)
-- **Production batching / GPU data gen (TODO #1)** → `scenarios/` (+ read
-  `scenarios/ROADMAP.md` for the deferred design forks), new persistence module,
-  `tests/gpu`, `tests/scenarios`.
-- **PyG harmonic state estimation (TODO #2)** → new `src/pgml/ml/`; build on
-  `equations` (physics loss), `assembly`+`solver` (differentiable forward model),
-  `scenarios` (training data), `result_schema` (measurement model),
+- **Scale / batching to production GPU data-gen (TODO #1)** → `scenarios/` is feature-complete
+  for sampling/persistence; the open forks are topology/switch-state batching, multi-grid
+  batching, and the SPARSE/chunked batched solve for large N × many scenarios (the main
+  scale gap). Read `scenarios/ROADMAP.md`.
+- **PyG harmonic state estimation (TODO #2)** → new `src/pgml/ml/`; build on `equations`
+  (physics loss), `pgml.simulate`/`assembly`+`solver` (differentiable forward model + the
+  `SolvedState` accessors), `scenarios` (training data), `result_schema` (measurement model),
   `evaluation/topology` (graph). Maintainer will brief the SE method.
-- **Load-convergence diagnostics (TODO #3)** → `solver/power_flow.py` (no silent
-  fallback; rich diagnostics; gradient/homotopy continuation).
-- **Harmonic load/transformer frequency models (TODO #4)** → `solver/harmonic_flow.py`,
-  schema `HarmonicShuntModel`; document the chosen current-source model + why.
+- **Load-convergence diagnostics (TODO #3)** → `solver/power_flow.py`: `simulate` already
+  RAISES `ConvergenceError`; add the rich per-node diagnostics + homotopy continuation.
+- **Harmonic load shunt + transformer frequency curves (TODO #4)** → `solver/harmonic_flow.py`,
+  schema `HarmonicShuntModel` (the vector-group transformer is already done).
 
 ## Conventions a new agent must respect
 - `schemas/` is FROZEN (orchestrator-only); everything imports and conforms to it.

@@ -6,13 +6,17 @@ Tracked as DEFERRED tasks in the session task list. The goal throughout is
 generating ML training data in controlled, reproducible distributions
 (config + seed reproduces the dataset).
 
-Already implemented (increment 1): distribution-based per-component QMC sampling
-(`ScenarioConfig`) and cartesian sweeps (`CartesianConfig`), both feeding the
-already-batched solver in one vectorized call. See `CONTEXT.md`.
+**Status (2026-06-22).** Implemented: distribution-based per-component QMC sampling
+(`ScenarioConfig`) + cartesian sweeps (`CartesianConfig`); **§3** correlated /
+per-phase-symmetry sampling; **§4** EN50160 harmonic-spectrum sampling; **§5** parquet
+persistence (`write_dataset`); **§6** per-node perturbation / injection sweeps. STILL OPEN:
+**§1** topology / switch-state batching and **§2** multi-grid batching — the two batching
+forks below — plus the SPARSE / chunked batched solve for scale (TODO #1, architecture-review
+item E). See `CONTEXT.md`.
 
 ---
 
-## 1. Topology / switch-state batching
+## 1. Topology / switch-state batching  — OPEN (decision needed)
 
 **Problem.** Vary which branches/switches are in service (and, more generally,
 slightly different topologies) across the batch — use case 3. Today a batch shares
@@ -41,7 +45,7 @@ only, or branch add/remove)? That picks (b) vs (a).
 
 ---
 
-## 2. Multi-grid batching
+## 2. Multi-grid batching  — OPEN (decision needed)
 
 **Problem.** Solve several *distinct* grids (different node counts) in one batched
 call — for training across many feeders.
@@ -65,7 +69,10 @@ batched solve may need a different backend.
 
 ---
 
-## 3. Correlated / shared-by-physics sampling + per-phase symmetry
+## 3. Correlated / shared-by-physics sampling + per-phase symmetry  ✅ DONE
+Shipped: latent-factor correlation (option (a), per-spec `correlation`/`rho`) + per-phase
+`symmetry` (`balanced`/`independent`/`small_imbalance`). See `sampler.py`,
+`tests/scenarios/test_correlation_symmetry.py`. Original design notes kept below.
 
 **Problem.** `per="each"` (independent) and `per="shared"` (identical) are the two
 extremes. Real fleets are *correlated* (all PV rise/fall together but not
@@ -91,7 +98,10 @@ field, covers the realistic middle ground, QMC-friendly. Confirm the API shape
 
 ---
 
-## 4. Harmonic-spectrum distribution sampling
+## 4. Harmonic-spectrum distribution sampling  ✅ DONE
+Shipped: option (a) — `ParameterSpec` gained `field="h_mag"`/`"h_phase"` + `orders` and writes
+a batched `harmonic_injection`; EN50160 preset bounds (`en50160.py`); plus a node-coherent
+harmonic sampler. See `harmonics.py`, `tests/scenarios/test_harmonic_sampling.py`.
 
 **Problem.** Vary per-device harmonic injection magnitude/phase across the batch
 (use case 2 for spectra), EN50160-bounded. The solver hook already exists:
@@ -116,7 +126,11 @@ in separate configs.
 
 ---
 
-## 5. Parquet persistence
+## 5. Parquet persistence  ✅ DONE
+Shipped: `write_dataset(result, dir, layout="wide"|"long", also_csv=...)` (both the tidy
+`result_schema` layout and a compact wide layout) with the serialized `ScenarioConfig`+seed
+written alongside for reproducibility. See `persistence.py`,
+`tests/scenarios/test_persistence.py`.
 
 **Problem.** Persist a `ScenarioResult` (`v` `[B, (H), N]` + sampled inputs) to disk
 as ML training data, reproducibly, in the columnar `result_schema` layout.
@@ -136,7 +150,11 @@ analysis → (a); direct tensor reload in the training loop → (b)).
 
 ---
 
-## 6. Per-node structured perturbation sweep (use case 1)
+## 6. Per-node structured perturbation sweep (use case 1)  ✅ DONE
+Shipped: option (a) — `perturbation_sweep(grid, selector, perturbation)` and
+`spectrum_sweep` / node-injection sweeps (one perturbed/injected node per scenario, all else
+nominal), with `ParameterPerturbation` ground-truth records. See `perturbation.py`,
+`tests/scenarios/test_perturbation.py`.
 
 **Problem.** "Inject a specific error once at each node, measure the spread." This is
 an *enumeration over which node is perturbed*, not a cartesian of levels: batch of
