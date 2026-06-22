@@ -60,6 +60,7 @@ from torch import Tensor
 from pgml.assembly import (
     NodePhaseIndex,
     assemble_network_ybus,
+    assemble_ybus,
     build_injections,
     device_current_injections,
     node_phase_index,
@@ -100,7 +101,7 @@ class PowerFlowResult:
     iterations: int
     residual: Tensor
     converged: bool
-    diagnostics: Optional["ConvergenceDiagnostics"] = None
+    diagnostics: Optional[ConvergenceDiagnostics] = None
 
 
 @dataclass
@@ -263,8 +264,11 @@ def solve_power_flow(
         the Schur path in :func:`solve_harmonic` (matches pandapower / pgm).
         ``"norton"`` folds the source as a Norton shunt (matches OpenDSS Vsource).
     method:
-        ``"current_injection"`` (implemented). ``"newton"`` is a later add with the
-        same interface.
+        ``"current_injection"`` (default) — the fixed-point iteration (fast, batches in
+        one solve, but its convergence region is smaller than the feasible region). Or
+        ``"newton"`` — Newton on the real residual from a LINEAR const-Z warm start
+        (OpenDSS-style); quadratic, and converges near the loadability nose where the
+        fixed point oscillates. Both share the IFT gradient path.
     tol:
         Fixed-point convergence tolerance on ``||ΔV||`` (max over batch).
     max_iter:
@@ -297,9 +301,9 @@ def solve_power_flow(
         iteration count, the final update-norm residual, the convergence flag, and a
         :class:`ConvergenceDiagnostics`.
     """
-    if method not in ("current_injection",):
+    if method not in ("current_injection", "newton"):
         raise ModelingError(
-            f"Unsupported method {method!r} (only 'current_injection')."
+            f"Unsupported method {method!r} (use 'current_injection' or 'newton')."
         )
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
@@ -370,7 +374,77 @@ def solve_power_flow(
         build_system, residual_complex, fixed_rows, v_fixed_fn, n, cdt
     )
 
-    # ----- forward: fixed point under no_grad -------------------------------
+    # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
+    if method == "newton":
+        # OpenDSS-style warm start: solve the LINEAR const-Z system once, then run
+        # Newton on the full const-P / ZIP residual. Newton's quadratic convergence and
+        # far larger convergence region reach solutions the current-injection fixed
+        # point cannot (e.g. near the loadability nose — see
+        # ``examples/current_injection_convergence.py``).
+        v_init = _linear_const_z_init(
+            grid, f0, index, dtype, device, slack, operating_point,
+            param_overrides, fixed_rows, v_fixed,
+        )
+        (
+            v_star, iterations, residual_norm, converged, residual_history,
+            y_eff0, i_slack0,
+        ) = _newton_forward(real_res, v_init, n, rdt, cdt, device, tol, max_iter)
+    else:
+        (
+            v_star, iterations, residual_norm, converged, residual_history,
+            y_eff0, i_slack0,
+        ) = _current_injection_forward(
+            grid, f0, index, build_system, fixed_rows, v_fixed, operating_point,
+            param_overrides, sym_resolved, dtype, n, rdt, cdt, device, tol, max_iter,
+        )
+
+    # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
+    # IFT real Jacobian only when the solve did not converge).
+    diagnostics = _build_diagnostics(
+        grid,
+        index,
+        v_star,
+        y_eff0,
+        i_slack0,
+        residual_complex,
+        real_res,
+        fixed_rows,
+        residual_history,
+        bool(converged),
+        iterations,
+        float(residual_norm),
+        rdt,
+        device,
+        criticality,
+    )
+
+    if leaves:
+        v_out = _IFTPowerFlow.apply(v_star, real_res, n, rdt, cdt, *leaves)
+    else:
+        v_out = v_star
+
+    return PowerFlowResult(
+        v=v_out,
+        index=index,
+        iterations=iterations,
+        residual=residual_norm.reshape(()),
+        converged=bool(converged),
+        diagnostics=diagnostics,
+    )
+
+
+# ---------------------------------------------------------------------------
+# forward solvers (detached V*; gradients are attached by the IFT below)
+# ---------------------------------------------------------------------------
+def _current_injection_forward(
+    grid, f0, index, build_system, fixed_rows, v_fixed, operating_point,
+    param_overrides, sym_resolved, dtype, n, rdt, cdt, device, tol, max_iter,
+):
+    """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
+
+    Returns ``(v_star, iterations, residual_norm, converged, residual_history, y_eff0,
+    i_slack0)``; ``residual_norm`` is the final ``||ΔV||`` (max over batch).
+    """
     with torch.no_grad():
         y_eff0, i_slack0 = build_system()
         lead = torch.broadcast_shapes(i_slack0.shape[:-1], y_eff0.shape[:-2])
@@ -459,41 +533,117 @@ def solve_power_flow(
                 converged = True
                 break
 
-    v_star = v  # detached (built under no_grad)
+    return v, iterations, residual_norm, converged, residual_history, y_eff0, i_slack0
 
-    # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
-    # IFT real Jacobian only when the solve did not converge).
-    diagnostics = _build_diagnostics(
-        grid,
-        index,
-        v_star,
-        y_eff0,
-        i_slack0,
-        residual_complex,
-        real_res,
-        fixed_rows,
-        residual_history,
-        bool(converged),
-        iterations,
-        float(residual_norm),
-        rdt,
-        device,
-        criticality,
-    )
 
-    if leaves:
-        v_out = _IFTPowerFlow.apply(v_star, real_res, n, rdt, cdt, *leaves)
+def _linear_const_z_init(
+    grid, f0, index, dtype, device, slack, operating_point, param_overrides,
+    fixed_rows, v_fixed,
+):
+    """OpenDSS-style warm start: the LINEAR const-Z solution (one linear solve).
+
+    Folds every load / generator as a constant-impedance shunt at nominal voltage
+    (:func:`pgml.assembly.assemble_ybus`, the linear-model assembler) and solves once.
+    A far better Newton seed than a flat / nominal start, especially near the
+    loadability limit. Detached (a warm start never enters the gradient).
+    """
+    import logging
+
+    pgml_log = logging.getLogger("pgml")
+    prev = pgml_log.level
+    # Suppress the duplicate modeling-summary INFO from assemble_ybus (solve_power_flow
+    # already logged it for this call).
+    pgml_log.setLevel(max(prev, logging.WARNING))
+    try:
+        yb = assemble_ybus(
+            grid, [f0], dtype=dtype, device=device,
+            operating_point=operating_point, param_overrides=param_overrides,
+        )
+    finally:
+        pgml_log.setLevel(prev)
+    y_lin = yb.Y if yb.Y.ndim == 3 else yb.Y.unsqueeze(0)  # [1, N, N]
+    if slack == "norton":
+        i_init = build_injections(
+            grid, [f0], index, dtype=dtype, device=device,
+            param_overrides=param_overrides,
+        )  # [1, N] source Norton current
     else:
-        v_out = v_star
+        i_init = torch.zeros(y_lin.shape[-1], dtype=y_lin.dtype, device=device)  # [N]
+    with torch.no_grad():
+        v0 = solve_harmonic(y_lin, i_init, fixed_rows=fixed_rows, v_fixed=v_fixed)
+    if v0.ndim >= 2 and v0.shape[-2] == 1:
+        v0 = v0.squeeze(-2)  # drop the singleton H axis -> [*b, N]
+    return v0
 
-    return PowerFlowResult(
-        v=v_out,
-        index=index,
-        iterations=iterations,
-        residual=residual_norm.reshape(()),
-        converged=bool(converged),
-        diagnostics=diagnostics,
-    )
+
+_NEWTON_MAX_BACKTRACK = 20  # line-search step halvings before accepting the Newton step
+
+
+def _newton_forward(real_res, v_init, n, rdt, cdt, device, tol, max_iter):
+    """Newton on the real residual ``R(x) = 0`` from the warm start ``v_init``.
+
+    Each step solves ``J·Δx = −R`` with ``J = dR/dx`` (the SAME real ``[2N, 2N]``
+    Jacobian the IFT backward builds), with a backtracking line search on ``‖R‖∞`` for
+    global robustness. Converges on ``‖Δx‖ < tol`` (the same measure the fixed point
+    uses). The per-element Jacobian loop avoids the ``[B, 2N, B, 2N]`` memory of a
+    batched autograd Jacobian (Newton's main use is a single hard grid). Returns the
+    same 7-tuple as :func:`_current_injection_forward`.
+    """
+    state_residual = real_res.state_residual
+    build_system = real_res.build_system
+    twon = 2 * n
+    with torch.no_grad():
+        y_eff0, i_slack0 = build_system()
+        y_eff0 = y_eff0.detach()
+        i_slack0 = i_slack0.detach()
+        lead = v_init.shape[:-1]
+        b = int(torch.tensor(lead).prod().item()) if lead else 1
+        x = torch.cat([v_init.real, v_init.imag], dim=-1).reshape(b, twon).to(rdt)
+        y_flat = y_eff0.reshape(-1, n, n)
+        y_flat = y_flat.expand(b, n, n) if y_flat.shape[0] == 1 else y_flat
+        is_flat = i_slack0.reshape(-1, n)
+        is_flat = is_flat.expand(b, n) if is_flat.shape[0] == 1 else is_flat
+
+        def res_all(xx: Tensor) -> Tensor:
+            return state_residual(
+                xx, y_flat.real, y_flat.imag, is_flat.real, is_flat.imag
+            )
+
+        residual_history: list[float] = []
+        converged = False
+        iterations = 0
+        dx_norm = torch.zeros((), dtype=rdt, device=device)
+        for _ in range(max_iter):
+            r = res_all(x)  # [b, 2N]
+            jac_blocks = []
+            for bi in range(b):
+                yr, yi = y_flat[bi].real, y_flat[bi].imag
+                ir, ii = is_flat[bi].real, is_flat[bi].imag
+                jac_blocks.append(
+                    torch.autograd.functional.jacobian(
+                        lambda xb, a=yr, c=yi, d=ir, e=ii: state_residual(xb, a, c, d, e),
+                        x[bi],
+                        vectorize=True,
+                    )
+                )  # [2N, 2N]
+            j = torch.stack(jac_blocks, 0)  # [b, 2N, 2N]
+            dx = torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
+            # Backtracking on the worst-case residual infinity-norm (global robustness).
+            r0 = r.abs().amax()
+            step = 1.0
+            for _bt in range(_NEWTON_MAX_BACKTRACK):
+                if bool(res_all(x + step * dx).abs().amax() <= r0):
+                    break
+                step *= 0.5
+            x = x + step * dx
+            dx_norm = (step * dx).norm(dim=-1).max()
+            residual_history.append(float(dx_norm))
+            iterations += 1
+            if bool(dx_norm < tol):
+                converged = True
+                break
+        v_star = torch.complex(x[..., :n], x[..., n:]).reshape(*lead, n)
+    return v_star, iterations, dx_norm, converged, residual_history, y_eff0, i_slack0
 
 
 # ---------------------------------------------------------------------------

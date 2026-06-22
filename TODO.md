@@ -82,7 +82,9 @@ only a local linearization (the diagnostics flag this and point here). To locate
 λ rigorously: ramp load S by λ∈[0,1] from a converged const-Z base with a tangent predictor
 `dV/dλ = −J⁻¹ ∂R/∂λ` (one IFT solve) + a Newton corrector that CAN converge near the nose,
 and report the breaking λ + the critical bus (the left null-vector of J at the saddle-node).
-This needs the Newton method (item 6) and is the natural home of the `near_singular` verdict.
+The Newton corrector now EXISTS (`solve_power_flow(method="newton")`, linear const-Z warm
+start + IFT gradients) — so the remaining work is the λ-ramp continuation loop on top of it,
+and it is the natural home of the `near_singular` verdict.
 For large N, replace the dense `[2N,2N]` Jacobian/SVD with a matrix-free (JVP) smallest-σ
 estimate. **Where.** `solver/power_flow.py`.
 
@@ -125,7 +127,10 @@ solver signatures, config). Lower priority; do incrementally.
   matches OpenDSS on the same geometry); 2-phase lines are skipped by `synthesize_grid_geometry`.
 - Convert: `convert/pandapower/` lacks a `CONTEXT.md` (others have one); the OpenDSS converter
   does not yet emit `Transformer` elements (DSS→pgml transformer parsing).
-- Newton-Raphson power-flow method (currently current-injection fixed point only).
+- Newton power-flow method: DONE (`solve_power_flow(method="newton")` — linear const-Z warm
+  start, backtracking line search, IFT gradients; converges near the nose where the fixed
+  point oscillates). Scale follow-up: a matrix-free Newton-Krylov (JVP + GMRES) to replace
+  the dense per-element Jacobian for large N / large batches.
 
 ---
 

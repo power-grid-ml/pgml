@@ -86,11 +86,19 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     DIVERGED iterate it is only a local linearization (flagged `evaluated_at`, never
     claims `near_singular`) — a definitive loadability limit needs the (future)
     homotopy/continuation. Dense; skipped above `2N=4000`.
-  - Forward = current-injection FIXED POINT: with `Y_net = assemble_network_ybus`
-    (+ folded constant-admittance device part + source Norton if `slack="norton"`),
-    iterate `V_{k+1} = solve_harmonic(Y_eff, device_current_injections(grid,V_k)+I_slack,
-    slack...)` until `||V_{k+1}-V_k|| < tol` or `max_iter`. Run the iterations under
-    `torch.no_grad()`.
+  - `method="current_injection"` (default) forward = FIXED POINT: with
+    `Y_net = assemble_network_ybus` (+ source Norton if `slack="norton"`), iterate
+    `V_{k+1} = solve_harmonic(Y_eff, I_slack − device_current_injections(grid,V_k),
+    slack...)` until `||V_{k+1}-V_k|| < tol` or `max_iter`, under `torch.no_grad()`.
+  - `method="newton"` forward = NEWTON on the real residual `R(x)=0` (`x=[Re V; Im V]`):
+    per step solve `J·Δx = −R` with `J = dR/dx` (the SAME real `[2N,2N]` Jacobian the IFT
+    backward builds, via `torch.autograd.functional.jacobian`), backtracking line search
+    on `‖R‖∞`, converge on `‖Δx‖ < tol`. WARM START = the LINEAR const-Z solution
+    (`_linear_const_z_init` → one `assemble_ybus` solve; OpenDSS-style). Quadratic, and
+    converges where the fixed point oscillates (near the loadability nose — see
+    `examples/current_injection_convergence.py`). Same `PowerFlowResult` + diagnostics +
+    IFT gradients (gradcheck-verified). Per-element Jacobian loop (no `[B,2N,B,2N]`
+    blowup); a matrix-free Newton-Krylov is the scale path (`TODO.md` #3).
   - Backward = IMPLICIT FUNCTION THEOREM at the converged `V*` (do NOT unroll
     iterations): one adjoint linear solve with the transposed power-flow Jacobian.
     Implement as a `torch.autograd.Function` whose backward solves `J^T λ = grad_V`
@@ -100,8 +108,9 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     for the residual/Jacobian/adjoint (the power flow is non-holomorphic in V).
   - `slack`: `"ideal"` (fix source-node V = `u_ref∠u_angle` via the Schur path in
     `solve_harmonic`; matches pandapower/pgm) or `"norton"` (source folded; OpenDSS).
-  - Batched over leading/scenario dims; `method="newton"` is a later add (autograd
-    Jacobian via `torch.func.jacrev`), interface unchanged.
+  - Batched over leading/scenario dims (the fixed point solves the batch in one
+    `solve_harmonic`; Newton loops the per-element Jacobian, so it is best for a single
+    hard grid rather than a large batch).
 
 ## Required validation links
 - A const-impedance ZIP run of `solve_power_flow` must reproduce the linear

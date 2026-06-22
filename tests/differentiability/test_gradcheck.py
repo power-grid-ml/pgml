@@ -13,6 +13,7 @@ import torch
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index
 from pgml.solver import solve_harmonic
+from pgml.solver.power_flow import solve_power_flow
 
 from tests.fixtures.tiny_grids import single_phase_chain, three_phase_two_bus
 
@@ -104,3 +105,30 @@ def test_gradcheck_three_phase_line_matrices():
         return _voltages_from_params(grid, f, overrides)
 
     assert torch.autograd.gradcheck(fn, (r, ind), eps=1e-6, atol=1e-4, rtol=1e-3)
+
+
+def test_gradcheck_newton_power_flow():
+    """The NONLINEAR const-P solve is differentiable via the IFT for method='newton'.
+
+    Newton finds V* by a different forward iteration than the current-injection fixed
+    point, but the gradient is attached by the SAME implicit-function-theorem backward
+    (the converged V* is differentiable regardless of how it was found).
+    """
+    grid = single_phase_chain()
+
+    r1 = torch.tensor([[1.0e-3]], dtype=torch.float64, requires_grad=True)
+    l1 = torch.tensor([[1.0e-6]], dtype=torch.float64, requires_grad=True)
+    rs = torch.tensor([[0.1]], dtype=torch.float64, requires_grad=True)
+
+    def fn(r1, l1, rs):
+        overrides = {
+            ("line", 20, "series_resistance_ohm_per_m"): r1,
+            ("line", 20, "series_inductance_h_per_m"): l1,
+            ("source", 10, "resistance_ohm"): rs,
+        }
+        return solve_power_flow(
+            grid, slack="ideal", method="newton", tol=1e-12, max_iter=100,
+            dtype=torch.complex128, param_overrides=overrides,
+        ).v.reshape(-1)
+
+    assert torch.autograd.gradcheck(fn, (r1, l1, rs), eps=1e-6, atol=1e-5, rtol=1e-3)
