@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 
 from pgml.convert.pandapower import PhaseMode
 from pgml.evaluation.oracles.grids import cigre_lv_full_grid
 from pgml.schemas.grid_schema import Grid, Line, Load, Node, Phase, Source
-from pgml.solver.power_flow import solve_power_flow
+from pgml.solver.power_flow import loadability_limit, solve_power_flow
 
 CDT = torch.complex128
 _E, _R, _X = 230.0, 0.5, 0.5  # 2-bus radial: source EMF [V], line R/X [Ohm]
@@ -109,3 +110,61 @@ class TestNewtonPowerFlow:
             grid, slack="ideal", method="newton", tol=1e-10, max_iter=50, dtype=CDT,
         )
         assert nt.converged and nt.iterations <= 8  # quadratic from the const-Z init
+
+    def test_matrix_free_matches_dense(self) -> None:
+        """Jacobian-free Newton-Krylov reaches the same solution as the dense Jacobian."""
+        grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+        de = solve_power_flow(
+            grid, slack="ideal", method="newton", linear_solver="dense",
+            tol=1e-10, max_iter=50, dtype=CDT,
+        )
+        mf = solve_power_flow(
+            grid, slack="ideal", method="newton", linear_solver="matrix_free",
+            tol=1e-8, max_iter=50, dtype=CDT,
+        )
+        assert de.converged and mf.converged
+        assert (de.v - mf.v).abs().max().item() < 1e-6
+
+    def test_invalid_linear_solver_raises(self) -> None:
+        import pgml
+
+        grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+        with pytest.raises(pgml.errors.InputError):
+            solve_power_flow(grid, method="newton", linear_solver="krylov")
+
+
+class TestLoadabilityContinuation:
+    def test_feasible_margin_matches_nose(self) -> None:
+        # load = 0.8 * nose  ->  it breaks at λ* = nose / load = 1.25 (margin 0.25).
+        res = loadability_limit(
+            _two_bus(0.8 * _nose_power()), slack="ideal",
+            lambda_max=3.0, lambda_step=0.1, dtype=CDT,
+        )
+        assert res.feasible
+        assert res.breaking_lambda == pytest.approx(1.25, abs=0.05)
+        assert res.margin == pytest.approx(0.25, abs=0.05)
+        # the load bus is the collapse point AND the limiting injection
+        assert res.critical_nodes[0]["node_id"] == 2
+        assert res.limiting_loads[0]["appliance_id"] == 30
+        assert res.limiting_loads[0]["responsibility"] == pytest.approx(1.0)
+
+    def test_infeasible_load_past_nose(self) -> None:
+        # load = 1.2 * nose  ->  infeasible: it breaks at λ* = 1/1.2 ≈ 0.833 < 1.
+        res = loadability_limit(
+            _two_bus(1.2 * _nose_power()), slack="ideal",
+            lambda_max=3.0, lambda_step=0.1, dtype=CDT,
+        )
+        assert not res.feasible
+        assert res.breaking_lambda == pytest.approx(0.833, abs=0.05)
+        assert res.margin < 0.0
+
+    @pytest.mark.slow
+    def test_cigre_has_positive_margin_and_localizes(self) -> None:
+        grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+        res = loadability_limit(
+            grid, slack="ideal", lambda_max=5.0, lambda_step=1.0, dtype=CDT,
+        )
+        assert res.feasible and res.margin > 0.0
+        assert res.critical_nodes and res.limiting_loads
+        assert 0.0 <= res.limiting_loads[0]["responsibility"] <= 1.0
+        assert res.converged_lambdas[0] == 0.0  # ramp starts at the feasible base

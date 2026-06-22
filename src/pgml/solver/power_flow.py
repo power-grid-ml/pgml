@@ -130,6 +130,33 @@ class ConvergenceDiagnostics:
         return asdict(self)
 
 
+@dataclass
+class LoadabilityResult:
+    """Continuation (λ-ramp) loadability analysis — where/what limits solvability.
+
+    Ramps the load by ``λ`` (``λ=1`` = the grid's nameplate load) from a feasible base,
+    Newton-correcting at each step, until the power-flow Jacobian goes singular (the P-V
+    nose). At the nose the singular Jacobian's vectors localize the collapse: the RIGHT
+    singular vector is the voltage-collapse mode (the weakest buses), and the LEFT
+    singular vector gives the margin's sensitivity to each load (which apparent-power
+    injection most reduces the margin).
+    """
+
+    breaking_lambda: float  # λ* at the nose (load multiplier of the nameplate load)
+    feasible: bool  # λ* >= 1 -> the nameplate load is solvable
+    margin: float  # λ* − 1 (headroom above nameplate; negative = infeasible at nameplate)
+    nose_voltage_min_pu: float  # lowest |V|/V_LN at the nose
+    critical_nodes: list[dict] = field(default_factory=list)  # voltage-collapse mode
+    limiting_loads: list[dict] = field(default_factory=list)  # margin-limiting injections
+    min_singular_value: float = 0.0
+    condition_number: float = 0.0
+    converged_lambdas: list[float] = field(default_factory=list)  # the λ trace (plotting)
+    corrector_iterations: int = 0  # total Newton iterations across the ramp
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
 # ---------------------------------------------------------------------------
 # leaf discovery (tensor-duality + overrides + slack voltage)
 # ---------------------------------------------------------------------------
@@ -252,6 +279,7 @@ def solve_power_flow(
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
     criticality: str = "auto",
+    linear_solver: str = "dense",
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -293,6 +321,11 @@ def solve_power_flow(
         Jacobian + SVD): ``"auto"`` (default) only on non-convergence; ``"always"``
         also on a converged solve (a voltage-collapse MARGIN naming the weakest bus);
         ``"never"`` to skip it.
+    linear_solver:
+        Inner linear solve for ``method="newton"``: ``"dense"`` (default, the explicit
+        ``[2N, 2N]`` Jacobian + direct solve) or ``"matrix_free"`` (Jacobian-free
+        Newton-Krylov — GMRES on finite-difference Jacobian-vector products, ``O(N)``
+        memory for large grids). Ignored by ``method="current_injection"``.
 
     Returns
     -------
@@ -310,6 +343,10 @@ def solve_power_flow(
     if criticality not in ("auto", "always", "never"):
         raise InputError(
             f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
+        )
+    if linear_solver not in ("dense", "matrix_free"):
+        raise InputError(
+            f"Unsupported linear_solver {linear_solver!r} (use 'dense'/'matrix_free')."
         )
 
     cdt = _cdtype(dtype)
@@ -388,7 +425,9 @@ def solve_power_flow(
         (
             v_star, iterations, residual_norm, converged, residual_history,
             y_eff0, i_slack0,
-        ) = _newton_forward(real_res, v_init, n, rdt, cdt, device, tol, max_iter)
+        ) = _newton_forward(
+            real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver
+        )
     else:
         (
             v_star, iterations, residual_norm, converged, residual_history,
@@ -577,21 +616,88 @@ def _linear_const_z_init(
 
 
 _NEWTON_MAX_BACKTRACK = 20  # line-search step halvings before accepting the Newton step
+_GMRES_RESTART = 100  # Krylov subspace dimension before a restart
+_GMRES_MAX_RESTARTS = 20  # restart cycles before giving up the inner solve
+_GMRES_RTOL = 1.0e-8  # inner-solve relative tolerance (matrix-free path)
 
 
-def _newton_forward(real_res, v_init, n, rdt, cdt, device, tol, max_iter):
+def _gmres(matvec, b: Tensor, *, rtol: float, restart: int, max_restarts: int) -> Tensor:
+    """Restarted GMRES(``restart``) for ``A x = b``, matrix-free (real 1-D tensors).
+
+    ``matvec(v)`` returns ``A·v``. Solves to ``‖b − A x‖ ≤ rtol·‖b‖`` or after
+    ``max_restarts`` cycles. Classic Arnoldi + Givens rotations; autograd-free (the
+    Newton forward runs under ``no_grad``).
+    """
+    nrows = b.shape[0]
+    x = torch.zeros_like(b)
+    b_norm = torch.linalg.vector_norm(b)
+    if float(b_norm) == 0.0:
+        return x
+    m = min(restart, nrows)
+    for _ in range(max_restarts):
+        r = b - matvec(x)
+        beta = torch.linalg.vector_norm(r)
+        if float(beta) <= rtol * float(b_norm):
+            return x
+        q = torch.zeros((nrows, m + 1), dtype=b.dtype, device=b.device)
+        h = torch.zeros((m + 1, m), dtype=b.dtype, device=b.device)
+        cs = torch.zeros(m, dtype=b.dtype, device=b.device)
+        sn = torch.zeros(m, dtype=b.dtype, device=b.device)
+        g = torch.zeros(m + 1, dtype=b.dtype, device=b.device)
+        q[:, 0] = r / beta
+        g[0] = beta
+        k_used = 0
+        for k in range(m):
+            w = matvec(q[:, k])
+            for j in range(k + 1):  # modified Gram-Schmidt
+                h[j, k] = torch.dot(q[:, j], w)
+                w = w - h[j, k] * q[:, j]
+            h[k + 1, k] = torch.linalg.vector_norm(w)
+            if float(h[k + 1, k]) > 1e-300:
+                q[:, k + 1] = w / h[k + 1, k]
+            for j in range(k):  # apply prior Givens rotations to column k
+                t = cs[j] * h[j, k] + sn[j] * h[j + 1, k]
+                h[j + 1, k] = -sn[j] * h[j, k] + cs[j] * h[j + 1, k]
+                h[j, k] = t
+            denom = torch.sqrt(h[k, k] ** 2 + h[k + 1, k] ** 2)
+            cs[k] = h[k, k] / denom
+            sn[k] = h[k + 1, k] / denom
+            h[k, k] = cs[k] * h[k, k] + sn[k] * h[k + 1, k]
+            h[k + 1, k] = 0.0
+            g[k + 1] = -sn[k] * g[k]
+            g[k] = cs[k] * g[k]
+            k_used = k + 1
+            if float(torch.abs(g[k + 1])) <= rtol * float(b_norm):
+                break
+        y = torch.linalg.solve_triangular(
+            h[:k_used, :k_used], g[:k_used].unsqueeze(-1), upper=True
+        ).squeeze(-1)
+        x = x + q[:, :k_used] @ y
+    return x
+
+
+def _newton_forward(
+    real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver="dense"
+):
     """Newton on the real residual ``R(x) = 0`` from the warm start ``v_init``.
 
-    Each step solves ``J·Δx = −R`` with ``J = dR/dx`` (the SAME real ``[2N, 2N]``
-    Jacobian the IFT backward builds), with a backtracking line search on ``‖R‖∞`` for
-    global robustness. Converges on ``‖Δx‖ < tol`` (the same measure the fixed point
-    uses). The per-element Jacobian loop avoids the ``[B, 2N, B, 2N]`` memory of a
-    batched autograd Jacobian (Newton's main use is a single hard grid). Returns the
-    same 7-tuple as :func:`_current_injection_forward`.
+    Each step solves ``J·Δx = −R`` with ``J = dR/dx`` and a backtracking line search on
+    ``‖R‖∞`` for global robustness, converging on ``‖Δx‖ < tol`` (the same measure the
+    fixed point uses). ``linear_solver``:
+
+    - ``"dense"`` (default): the explicit real ``[2N, 2N]`` Jacobian (autograd) + a direct
+      solve. Per-element loop avoids the ``[B, 2N, B, 2N]`` memory of a batched Jacobian.
+    - ``"matrix_free"``: Jacobian-free Newton-Krylov — never forms ``J``; solves with
+      GMRES using a finite-difference Jacobian-vector product
+      ``J·v ≈ (R(x+εv) − R(x))/ε``. ``O(N)`` memory, for large grids where the dense
+      Jacobian is prohibitive (accuracy is the ``√eps`` FD floor, ample for a PF solve).
+
+    Returns the same 7-tuple as :func:`_current_injection_forward`.
     """
     state_residual = real_res.state_residual
     build_system = real_res.build_system
     twon = 2 * n
+    fd_eps = math.sqrt(torch.finfo(rdt).eps)
     with torch.no_grad():
         y_eff0, i_slack0 = build_system()
         y_eff0 = y_eff0.detach()
@@ -609,25 +715,22 @@ def _newton_forward(real_res, v_init, n, rdt, cdt, device, tol, max_iter):
                 xx, y_flat.real, y_flat.imag, is_flat.real, is_flat.imag
             )
 
+        def res_one(xb_1d: Tensor, bi: int) -> Tensor:
+            return state_residual(
+                xb_1d, y_flat[bi].real, y_flat[bi].imag,
+                is_flat[bi].real, is_flat[bi].imag,
+            )
+
         residual_history: list[float] = []
         converged = False
         iterations = 0
         dx_norm = torch.zeros((), dtype=rdt, device=device)
         for _ in range(max_iter):
             r = res_all(x)  # [b, 2N]
-            jac_blocks = []
-            for bi in range(b):
-                yr, yi = y_flat[bi].real, y_flat[bi].imag
-                ir, ii = is_flat[bi].real, is_flat[bi].imag
-                jac_blocks.append(
-                    torch.autograd.functional.jacobian(
-                        lambda xb, a=yr, c=yi, d=ir, e=ii: state_residual(xb, a, c, d, e),
-                        x[bi],
-                        vectorize=True,
-                    )
-                )  # [2N, 2N]
-            j = torch.stack(jac_blocks, 0)  # [b, 2N, 2N]
-            dx = torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
+            if linear_solver == "matrix_free":
+                dx = _newton_dir_matrix_free(res_one, x, r, b, fd_eps)
+            else:
+                dx = _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b)
             # Backtracking on the worst-case residual infinity-norm (global robustness).
             r0 = r.abs().amax()
             step = 1.0
@@ -644,6 +747,47 @@ def _newton_forward(real_res, v_init, n, rdt, cdt, device, tol, max_iter):
                 break
         v_star = torch.complex(x[..., :n], x[..., n:]).reshape(*lead, n)
     return v_star, iterations, dx_norm, converged, residual_history, y_eff0, i_slack0
+
+
+def _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b) -> Tensor:
+    """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element."""
+    jac_blocks = []
+    for bi in range(b):
+        yr, yi = y_flat[bi].real, y_flat[bi].imag
+        ir, ii = is_flat[bi].real, is_flat[bi].imag
+        jac_blocks.append(
+            torch.autograd.functional.jacobian(
+                lambda xb, a=yr, c=yi, d=ir, e=ii: state_residual(xb, a, c, d, e),
+                x[bi],
+                vectorize=True,
+            )
+        )  # [2N, 2N]
+    j = torch.stack(jac_blocks, 0)  # [b, 2N, 2N]
+    return torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
+
+
+def _newton_dir_matrix_free(res_one, x, r, b, fd_eps) -> Tensor:
+    """Jacobian-free Newton direction: GMRES with a finite-difference ``J·v``."""
+    dx_rows = []
+    for bi in range(b):
+        xb = x[bi]
+        r0 = r[bi]
+        x_norm = torch.linalg.vector_norm(xb)
+
+        def matvec(v, xb=xb, r0=r0, x_norm=x_norm, bi=bi):
+            nv = torch.linalg.vector_norm(v)
+            if float(nv) == 0.0:
+                return torch.zeros_like(v)
+            eps = fd_eps * (1.0 + float(x_norm)) / float(nv)
+            return (res_one(xb + eps * v, bi) - r0) / eps
+
+        dx_rows.append(
+            _gmres(
+                matvec, -r0, rtol=_GMRES_RTOL,
+                restart=_GMRES_RESTART, max_restarts=_GMRES_MAX_RESTARTS,
+            )
+        )
+    return torch.stack(dx_rows, 0)  # [b, 2N]
 
 
 # ---------------------------------------------------------------------------
@@ -1075,4 +1219,218 @@ def _jacobian_criticality(
     }
 
 
-__all__ = ["solve_power_flow", "PowerFlowResult", "ConvergenceDiagnostics"]
+# ---------------------------------------------------------------------------
+# continuation (λ-ramp) loadability analysis
+# ---------------------------------------------------------------------------
+def loadability_limit(
+    grid: Grid,
+    *,
+    slack: str = "ideal",
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    operating_point: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
+    symmetry: Optional[str] = None,
+    lambda_max: float = 2.0,
+    lambda_step: float = 0.1,
+    bisect_tol: float = 1.0e-3,
+    tol: float = 1.0e-8,
+    max_iter: int = 50,
+    top_k: int = 5,
+) -> LoadabilityResult:
+    """Continuation power flow: find the loadability nose and WHAT/WHERE limits it.
+
+    Ramps every load/generator by a scalar ``λ`` (the residual is
+    ``R(V,λ) = Y_eff·V + λ·I_device(V) − I_slack``; ``λ=1`` is the nameplate load) from a
+    feasible base (``λ=0``, the trivial no-load solve), Newton-correcting at each step and
+    bisecting onto the breaking ``λ*`` where the corrector fails — the P-V nose. At ``λ*``
+    the power-flow Jacobian is (near) singular; its SVD localizes the collapse:
+
+    - ``critical_nodes`` (RIGHT singular vector of the smallest σ): the voltage-collapse
+      mode — the buses whose voltage gives way (where it breaks).
+    - ``limiting_loads`` (LEFT singular vector · each load's current): the loads whose
+      apparent power most reduces the margin (which input, at which node, causes the
+      non-convergence). ``responsibility`` is normalized to ``[0, 1]``.
+
+    ``breaking_lambda < 1`` means the nameplate load itself is infeasible (the fixed point
+    / Newton cannot converge); ``margin = λ* − 1`` is the headroom above nameplate.
+
+    Single grid only (no scenario batch). Detached (a diagnostic, not on the autograd tape).
+    """
+    if slack not in ("ideal", "norton"):
+        raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    cdt, rdt = _cdtype(dtype), _rdtype(dtype)
+    index = node_phase_index(grid)
+    n = index.size
+    f0 = float(grid.base_frequency_hz)
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+    sym_resolved = "asymmetric" if asymmetric else "symmetric"
+    leaves = _grid_param_leaves(grid, param_overrides, None)
+    if device is None:
+        device = leaves[0].device if leaves else torch.device("cpu")
+
+    def v_fixed_fn():
+        if slack != "ideal":
+            return None
+        return _slack_rows_and_vref(grid, index, rdt, cdt, device)[1]
+
+    fixed_rows = (
+        _slack_rows_and_vref(grid, index, rdt, cdt, device)[0]
+        if slack == "ideal"
+        else None
+    )
+    v_fixed = v_fixed_fn()
+
+    def build_system():
+        return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
+
+    def make_real_res(lam: float):
+        def rc(v: Tensor, y: Tensor, islack: Tensor) -> Tensor:
+            i_dev = device_current_injections(
+                grid, v, index, [f0], dtype=dtype, device=device,
+                operating_point=operating_point, param_overrides=param_overrides,
+                symmetry=sym_resolved,
+            ).squeeze(-2)
+            yv = torch.matmul(y, v.unsqueeze(-1)).squeeze(-1)
+            return yv + lam * i_dev - islack
+
+        return _make_real_residual(build_system, rc, fixed_rows, v_fixed_fn, n, cdt)
+
+    import logging
+
+    pgml_log = logging.getLogger("pgml")
+    prev = pgml_log.level
+    pgml_log.setLevel(max(prev, logging.WARNING))  # quiet the per-step modeling logs
+    try:
+        with torch.no_grad():
+            y0, islack0 = build_system()
+            v_good = solve_harmonic(y0, islack0, fixed_rows=fixed_rows, v_fixed=v_fixed)
+            if v_good.ndim >= 2 and v_good.shape[-2] == 1:
+                v_good = v_good.squeeze(-2)
+        lam_good, trace, total_iters = 0.0, [0.0], 0
+        lam = lambda_step
+        while lam <= lambda_max + 1e-12:
+            vk, it, _, conv, _, _, _ = _newton_forward(
+                make_real_res(lam), v_good, n, rdt, cdt, device, tol, max_iter
+            )
+            total_iters += it
+            if conv:
+                lam_good, v_good = lam, vk
+                trace.append(round(lam, 6))
+                lam += lambda_step
+                continue
+            lo, hi = lam_good, lam  # bisect the feasibility boundary
+            while hi - lo > bisect_tol:
+                mid = 0.5 * (lo + hi)
+                vm, itm, _, cm, _, _, _ = _newton_forward(
+                    make_real_res(mid), v_good, n, rdt, cdt, device, tol, max_iter
+                )
+                total_iters += itm
+                if cm:
+                    lo, lam_good, v_good = mid, mid, vm
+                else:
+                    hi = mid
+            break
+        crit = _nose_criticality(
+            make_real_res(lam_good), build_system, v_good, grid, index, n, rdt, device,
+            operating_point, param_overrides, sym_resolved, f0, dtype, top_k,
+        )
+    finally:
+        pgml_log.setLevel(prev)
+
+    return LoadabilityResult(
+        breaking_lambda=lam_good,
+        feasible=lam_good >= 1.0,
+        margin=lam_good - 1.0,
+        nose_voltage_min_pu=crit["nose_vmin_pu"],
+        critical_nodes=crit["critical_nodes"],
+        limiting_loads=crit["limiting_loads"],
+        min_singular_value=crit["sigma_min"],
+        condition_number=crit["cond"],
+        converged_lambdas=trace,
+        corrector_iterations=total_iters,
+    )
+
+
+def _nose_criticality(
+    real_res, build_system, v_good, grid, index, n, rdt, device,
+    operating_point, param_overrides, sym_resolved, f0, dtype, top_k,
+) -> dict:
+    """At the nose: SVD of ``J = dR/dV`` -> collapse mode + margin-limiting loads."""
+    from pgml.schemas.grid_schema import Generator as _Gen, Load as _Load
+
+    state_residual = real_res.state_residual
+    vg = v_good.reshape(-1)[:n]
+    x = torch.cat([vg.real, vg.imag]).to(rdt)
+    with torch.no_grad():
+        y0, islack0 = build_system()
+        yb = y0.detach().reshape(-1, n, n)[0]
+        isb = islack0.detach().reshape(-1, n)[0]
+        j = torch.autograd.functional.jacobian(
+            lambda xx: state_residual(xx, yb.real, yb.imag, isb.real, isb.imag),
+            x, vectorize=True,
+        )  # [2N, 2N]
+        u, s, vh = torch.linalg.svd(j)
+        sigma_min, sigma_max = float(s[-1]), float(s[0])
+        cond = sigma_max / max(sigma_min, 1e-300)
+        right = vh[-1]  # collapse mode in V-space
+        left = u[:, -1]  # left null vector
+        part = torch.sqrt(right[:n] ** 2 + right[n:] ** 2)
+        part = part / part.max().clamp_min(1e-30)
+        bases = _node_voltage_bases(grid, index, rdt, device)
+        vpu = vg.abs() / bases.clamp_min(1e-12)
+        nonneutral = torch.as_tensor(index.phase_codes, device=device) != 3
+        nose_vmin = float(vpu[nonneutral].min()) if bool(nonneutral.any()) else float(vpu.min())
+        idev = device_current_injections(
+            grid, vg, index, [f0], dtype=dtype, device=device,
+            operating_point=operating_point, param_overrides=param_overrides,
+            symmetry=sym_resolved,
+        ).squeeze(-2)
+        idev_real = torch.cat([idev.real, idev.imag])
+
+    node_ids, phase_codes = index.node_ids.tolist(), index.phase_codes.tolist()
+    vals, idxs = torch.topk(part, min(top_k, n))
+    critical_nodes = [
+        {
+            "node_id": int(node_ids[int(r)]),
+            "phase": _phase_name(int(phase_codes[int(r)])),
+            "participation": float(v),
+        }
+        for v, r in zip(vals.tolist(), idxs.tolist())
+    ]
+    loads = []
+    for a in grid.appliances:
+        if not (isinstance(a, (_Load, _Gen)) and getattr(a, "in_service", True)):
+            continue
+        resp = 0.0
+        for ph in a.phases:
+            try:
+                r = index.row(int(a.node), ph)
+            except (KeyError, ValueError):
+                continue
+            resp += float(left[r]) * float(idev_real[r])
+            resp += float(left[r + n]) * float(idev_real[r + n])
+        p = float(getattr(a, "p_nom_w", 0.0) or 0.0)
+        q = float(getattr(a, "q_nom_var", 0.0) or 0.0)
+        loads.append({
+            "appliance_id": int(a.id), "node_id": int(a.node),
+            "s_nominal_va": math.hypot(p, q), "responsibility": abs(resp),
+        })
+    max_resp = max((d["responsibility"] for d in loads), default=0.0)
+    if max_resp > 0.0:
+        for d in loads:
+            d["responsibility"] /= max_resp  # normalize to [0, 1]
+    loads.sort(key=lambda d: d["responsibility"], reverse=True)
+    return {
+        "sigma_min": sigma_min, "cond": cond, "critical_nodes": critical_nodes,
+        "limiting_loads": loads[:top_k], "nose_vmin_pu": nose_vmin,
+    }
+
+
+__all__ = [
+    "solve_power_flow",
+    "PowerFlowResult",
+    "ConvergenceDiagnostics",
+    "loadability_limit",
+    "LoadabilityResult",
+]

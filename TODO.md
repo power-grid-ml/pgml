@@ -64,29 +64,30 @@ will brief the dedicated agent on the SE method; this is the handoff to the EXIS
 
 ---
 
-## 3. Load convergence — rich diagnostics + continuation  — partly done
+## 3. Load convergence — rich diagnostics + continuation  — DONE
 **What.** OpenDSS const-P loads silently switch to constant impedance outside
 `[Vminpu, Vmaxpu]` to "nearly always converge". We do NOT want a silent model swap.
 `pgml.simulate` RAISES `ConvergenceError` (`strict=False` to opt out) when the nonlinear
-fixed point does not converge.
-**DONE.** Rich diagnostics: `PowerFlowResult.diagnostics` (`ConvergenceDiagnostics`) carries
+solve does not converge.
+**DONE — rich diagnostics.** `PowerFlowResult.diagnostics` (`ConvergenceDiagnostics`) carries
 per-node physical mismatch, voltage-band offenders (pu on the L-N base), residual history,
 worst offenders, and a `likely_cause` heuristic; `simulate(strict=True)` passes them into
 `ConvergenceError`. The IFT-Jacobian CRITICALITY analysis reuses the backward's real
 `[2N,2N]` `J = dR/dV` (`svdvals` + smallest-σ singular vector → critical-bus participation):
-`criticality="auto"/"always"/"never"` — `"always"` gives a collapse MARGIN at a converged
-solution (σ_min shrinks toward the nose). Tests: `tests/reference/test_convergence_diagnostics.py`.
-**STILL TODO — the continuation/homotopy.** The current-injection fixed point does NOT stop
-at the loadability nose — past it the iterate oscillates / blows up, so the Jacobian there is
-only a local linearization (the diagnostics flag this and point here). To locate the breaking
-λ rigorously: ramp load S by λ∈[0,1] from a converged const-Z base with a tangent predictor
-`dV/dλ = −J⁻¹ ∂R/∂λ` (one IFT solve) + a Newton corrector that CAN converge near the nose,
-and report the breaking λ + the critical bus (the left null-vector of J at the saddle-node).
-The Newton corrector now EXISTS (`solve_power_flow(method="newton")`, linear const-Z warm
-start + IFT gradients) — so the remaining work is the λ-ramp continuation loop on top of it,
-and it is the natural home of the `near_singular` verdict.
-For large N, replace the dense `[2N,2N]` Jacobian/SVD with a matrix-free (JVP) smallest-σ
-estimate. **Where.** `solver/power_flow.py`.
+`criticality="auto"/"always"/"never"`.
+**DONE — Newton + continuation.** `solve_power_flow(method="newton")` (linear const-Z warm
+start, IFT gradients) converges near the nose where the fixed point oscillates.
+`loadability_limit(grid, ...)` ramps the load by λ from a feasible base, Newton-correcting +
+bisecting onto the breaking `λ*` (the P-V nose), and at `λ*` reports the voltage-collapse mode
+(`critical_nodes`, RIGHT singular vector) and the margin-limiting loads (`limiting_loads`, LEFT
+singular vector · each load's current) — i.e. WHICH injection at WHICH node limits solvability.
+`solve_power_flow(method="newton", linear_solver="matrix_free")` is the `O(N)`-memory
+Jacobian-free Newton-Krylov (GMRES on FD `J·v`) for large grids. Tests:
+`tests/reference/test_newton_power_flow.py`, `test_convergence_diagnostics.py`.
+**Possible follow-ups (no priority).** A true arc-length predictor-corrector (the current
+ramp+bisect locates `λ*` but does not traverse PAST the nose to the lower branch); a
+preconditioner for the matrix-free GMRES near the nose; batched continuation (currently
+single-grid). **Where.** `solver/power_flow.py`.
 
 ---
 

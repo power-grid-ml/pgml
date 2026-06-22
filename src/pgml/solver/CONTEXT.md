@@ -97,8 +97,16 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     (`_linear_const_z_init` → one `assemble_ybus` solve; OpenDSS-style). Quadratic, and
     converges where the fixed point oscillates (near the loadability nose — see
     `examples/current_injection_convergence.py`). Same `PowerFlowResult` + diagnostics +
-    IFT gradients (gradcheck-verified). Per-element Jacobian loop (no `[B,2N,B,2N]`
-    blowup); a matrix-free Newton-Krylov is the scale path (`TODO.md` #3).
+    IFT gradients (gradcheck-verified). `linear_solver="dense"` (per-element `[2N,2N]`
+    Jacobian + direct solve; no `[B,2N,B,2N]` blowup) or `"matrix_free"` (Jacobian-free
+    Newton-Krylov: GMRES on finite-difference `J·v`, `O(N)` memory for large grids).
+  - `loadability_limit(grid, *, slack, lambda_max, lambda_step, ...) -> LoadabilityResult`:
+    CONTINUATION power flow. Ramps the load by `λ` (`R(V,λ)=Y_eff·V+λ·I_dev(V)−I_slack`)
+    from a feasible base, Newton-correcting + bisecting onto the breaking `λ*` (the P-V
+    nose). At `λ*` the singular Jacobian's RIGHT singular vector = the voltage-collapse
+    mode (`critical_nodes`, where it breaks) and the LEFT singular vector projected on each
+    load's current = `limiting_loads` (which injection most reduces the margin).
+    `breaking_lambda<1` ⇒ the nameplate load is infeasible. Single grid; detached.
   - Backward = IMPLICIT FUNCTION THEOREM at the converged `V*` (do NOT unroll
     iterations): one adjoint linear solve with the transposed power-flow Jacobian.
     Implement as a `torch.autograd.Function` whose backward solves `J^T λ = grad_V`
