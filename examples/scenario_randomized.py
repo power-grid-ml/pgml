@@ -42,7 +42,7 @@ from pgml import evaluation as ev
 from pgml.convert.pandapower import PhaseMode
 from pgml.evaluation.data import VoltageProfile, harmonic_profile
 from pgml.evaluation.references import cigre_lv_full_grid
-from pgml.geometry.synthesis import apply_default_harmonic_model
+from pgml.geometry.synthesis import synthesize_grid_geometry
 from pgml.scenarios import (
     ParameterSpec,
     ScenarioConfig,
@@ -96,7 +96,15 @@ def main(out_dir: str = "evaluation_output/scenario2") -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.THREE_PHASE)
-    apply_default_harmonic_model(grid)  # 3-phase sequence-aware (Carson earth return in Z0)
+    # Synthesize a 3-conductor Carson geometry per R/X line (reproduces Z1 + X0 at f0).
+    # Feeding the SAME geometry to pgml and OpenDSS makes the harmonic comparison
+    # apples-to-apples Carson on every order, INCLUDING the triplen / zero-sequence
+    # orders (the delta winding traps zero sequence identically on both sides) — instead
+    # of pgml's analytic sequence_aware Z0 vs OpenDSS's internal Carson earth return,
+    # whose mismatch otherwise inflates the triplen gap. (CIGRE LV lines are low-X
+    # cables, so the synthesized GMR is non-physical — flagged by a warning — but the
+    # geometry still reproduces the target impedance and matches OpenDSS bit-for-bit.)
+    synthesize_grid_geometry(grid)
     sampled = sample(grid, build_config())  # ONE batch, reused for both symmetry modes
 
     timings = {}
@@ -204,14 +212,19 @@ _PNAME = {0: "L1", 1: "L2", 2: "L3", 3: "N"}
 
 def _opendss_compare(grid, sampled, res, out: Path) -> None:
     """Live pgml-vs-OpenDSS comparison for scenario 0: per-order parity, a tidy
-    ``pgml | opendss | Δ`` CSV, and a per-order overlay plot — so the difference is
-    visible. The Dyn transformer is now modelled with its real vector group, so the
-    TRIPLEN orders (h3, h9, zero-sequence) are correctly trapped in the delta and do not
-    propagate to the MV bus — validated bit-for-bit against a true OpenDSS Dyn
-    transformer (`references.opendss_dyn_transformer_harmonic_voltages`). The residual
-    LV-side gap on the non-triplen orders (~1%) is the line model: pgml's `sequence_aware`
-    Z0 vs OpenDSS's R0/X0 Carson earth-return (TODO #4 part b). Single-phase Scenario 1
-    is bit-exact (shared geometry)."""
+    ``pgml | opendss | Δ`` CSV, and a per-order overlay plot.
+
+    Because the grid carries a synthesized 3-conductor Carson geometry on every line
+    (``synthesize_grid_geometry`` in :func:`main`), the SAME geometry feeds both engines:
+    ``opendss_harmonic_voltages`` builds the lines from that geometry (OpenDSS applies its
+    own Carson), and the Dyn transformer is stamped with the identical winding-incidence
+    vector group on both sides (its delta traps the zero sequence, so it cancels from the
+    comparison). The parity is therefore at Carson precision (~1e-11 relative) on EVERY
+    order, INCLUDING the triplen / zero-sequence orders (h3, h9) — the earlier triplen gap
+    was the analytic ``sequence_aware`` Z0 vs OpenDSS's internal Carson earth return, which
+    the shared geometry removes. The transformer vector group is independently validated
+    bit-for-bit against a real OpenDSS ``Transformer`` element by
+    ``references.opendss_dyn_transformer_harmonic_voltages``."""
     try:
         import numpy as np
 
@@ -233,8 +246,7 @@ def _opendss_compare(grid, sampled, res, out: Path) -> None:
         print("OpenDSS parity (scenario 0), max rel err per order:")
         for k, o in enumerate(ORDERS[1:], start=1):
             rel = np.max(np.abs(pgml[k] - dss[k])) / (np.max(np.abs(pgml[k])) + 1e-30)
-            tag = " (triplen/zero-seq — approximate)" if o % 3 == 0 else ""
-            print(f"    h{o}: {rel:.2e}{tag}")
+            print(f"    h{o}: {rel:.2e}")
 
         with open(out / "compare_harmonics.csv", "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)

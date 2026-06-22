@@ -765,11 +765,14 @@ def opendss_harmonic_voltages(
     3×3 phase matrices; OpenDSS applies its own Carson/DERI correction to these
     ``R1/X1``-defined lines at harmonics.  The source Norton is read from
     ``SystemY`` and the transformer and switch stamps are then OVERWRITTEN with
-    pgml's OWN formulas (``R const, X∝h, complex tap`` for the transformer;
-    ``R const`` for the switch).  The transformer is therefore NOT validated
-    against OpenDSS on this path — only the lines are.  For a genuine OpenDSS
-    transformer oracle (real OpenDSS ``Transformer`` element with the correct
-    delta/wye vector group and zero-sequence blocking), use
+    pgml's OWN formulas — the transformer with the SAME winding-incidence
+    vector-group primitive the solver uses (``_stamp_transformer_numpy``:
+    ``Nᵀ·Y_winding·N``, so a delta winding blocks the zero sequence), the switch
+    with ``R const``.  Because the transformer is stamped identically on both
+    sides, it cancels from the pgml-vs-OpenDSS comparison and is therefore NOT
+    independently validated against OpenDSS on this path — only the lines are.
+    For a genuine OpenDSS transformer oracle (real OpenDSS ``Transformer`` element
+    with the correct delta/wye vector group and zero-sequence blocking), use
     :func:`opendss_dyn_transformer_harmonic_voltages`.
 
     The line-model residual — OpenDSS's Carson correction differs from pgml's

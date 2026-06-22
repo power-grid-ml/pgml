@@ -400,8 +400,12 @@ def build_source(
     Parameters
     ----------
     u_ref_v, u_angle_deg:
-        Reference voltage magnitude [V] and angle [deg] (the positive-sequence
-        phasor; phase A under three-phase).
+        Reference voltage magnitude [V] and angle [deg], given as the LINE-TO-LINE
+        magnitude (matching ``Node.u_rated_v``). Under :data:`PhaseMode.THREE_PHASE`
+        it is converted to the per-phase line-to-neutral phase-to-ground EMF
+        (``u_ref_v / sqrt(3)``) for the balanced wye source; under
+        :data:`PhaseMode.SINGLE_PHASE_EQUIV` it is used directly (positive-sequence
+        equivalent).
     r_ohm, l_h:
         Per-phase Thevenin resistance [Ohm] and inductance [H] (placed on the
         diagonal under three-phase).
@@ -422,6 +426,12 @@ def build_source(
 
     phases = phases_for(mode, native=native_phases)
     n = len(phases)
+    # The ideal-slack solve pins each phase-to-GROUND row to this phasor, so a balanced
+    # wye-grounded 3-phase source must carry the line-to-NEUTRAL magnitude. Converters
+    # supply ``u_ref_v`` as the line-to-line magnitude (like ``Node.u_rated_v``), so
+    # divide by sqrt(3) for a 3-/4-wire node — the same WYE convention the const-Z/ZIP
+    # load model and the per-unit reporting use (see ``phase_voltage_magnitude``).
+    u_ln = u_ref_v / math.sqrt(3.0) if n >= 3 else u_ref_v
     angles = tuple(u_angle_deg - 120.0 * i for i in range(n))
     r_mat = [[r_ohm if i == j else 0.0 for j in range(n)] for i in range(n)]
     l_mat = [[l_h if i == j else 0.0 for j in range(n)] for i in range(n)]
@@ -430,7 +440,7 @@ def build_source(
         name=name,
         node=node,
         phases=phases,
-        u_ref_v=tuple(u_ref_v for _ in range(n)),
+        u_ref_v=tuple(u_ln for _ in range(n)),
         u_angle_deg=angles,
         resistance_ohm=r_mat,
         inductance_h=l_mat,

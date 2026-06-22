@@ -75,6 +75,7 @@ import math
 import numpy as np
 import pandapower as pp
 import pandapower.networks as pn
+import pytest
 import torch
 
 from pgml.assembly import assemble_network_ybus
@@ -607,10 +608,13 @@ class TestTransformerThreePhaseConsistency:
             ]:
                 bus = int(row[bus_col])
                 node_id = id_map3["bus"][bus]
-                u_rated = float(net.bus.at[bus, "vn_kv"]) * 1_000.0
+                # Per-unit on the line-to-NEUTRAL base (u_rated is line-to-line); the
+                # solved phase-to-ground voltage is L-N, so a √3 slack regression would
+                # push these out of range.
+                u_base = float(net.bus.at[bus, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
                 for ph in [Phase.A, Phase.B, Phase.C]:
                     r = result.index.row(node_id, ph)
-                    vm_pu = float(v[r].abs()) / u_rated
+                    vm_pu = float(v[r].abs()) / u_base
                     assert vm_min < vm_pu < vm_max, (
                         f"Trafo {pp_idx} ({row['name']}) {side} bus {bus} "
                         f"phase {ph.name}: vm_pu={vm_pu:.4f} out of [{vm_min}, {vm_max}]"
@@ -652,16 +656,44 @@ class TestTransformerThreePhaseConsistency:
             ]:
                 bus = int(row[bus_col])
                 node_id = id_map3["bus"][bus]
-                u_rated = float(net.bus.at[bus, "vn_kv"]) * 1_000.0
+                # Per-unit on the line-to-NEUTRAL base (u_rated is line-to-line).
+                u_base = float(net.bus.at[bus, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
 
                 for ph in [Phase.A, Phase.B, Phase.C]:
                     r = result3.index.row(node_id, ph)
-                    vm_pu = float(v3[r].abs()) / u_rated
+                    vm_pu = float(v3[r].abs()) / u_base
                     assert vm_min < vm_pu < vm_max, (
                         f"Trafo {pp_idx} ({row['name']}) {side} bus {bus} "
                         f"phase {ph.name}: vm_pu={vm_pu:.4f} out of "
                         f"[{vm_min}, {vm_max}] in THREE_PHASE mode"
                     )
+
+    def test_three_phase_slack_voltage_is_line_to_neutral(self) -> None:
+        """The 3-phase slack EMF is the line-to-NEUTRAL phase-to-ground voltage.
+
+        Regression guard: a wye-grounded source at a 20 kV (line-to-line) bus must
+        solve to ``20000/√3 = 11547 V`` phase-to-ground, NOT the line-to-line value.
+        Pinning the line-to-line magnitude on each phase makes every 3-phase voltage
+        √3 too high (a ``vm_pu`` of ~1.73 on the line-to-neutral base).
+        """
+        net = pn.create_cigre_network_lv()
+        grid3, id_map3 = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
+        result = solve_power_flow(
+            grid3, slack="ideal", tol=1e-10, max_iter=100, dtype=torch.complex128
+        )
+        assert result.converged
+        v = result.v.reshape(-1)
+
+        eg_bus = int(net.ext_grid.at[0, "bus"])
+        node_id = id_map3["bus"][eg_bus]
+        u_ll = float(net.bus.at[eg_bus, "vn_kv"]) * 1_000.0
+        expected_ln = u_ll / math.sqrt(3.0)
+        for ph in [Phase.A, Phase.B, Phase.C]:
+            mag = float(v[result.index.row(node_id, ph)].abs())
+            assert mag == pytest.approx(expected_ln, rel=1e-9), (
+                f"slack phase {ph.name}: |V|={mag:.2f} V, expected line-to-neutral "
+                f"{expected_ln:.2f} V (got line-to-line {u_ll:.0f}? → √3 bug)"
+            )
 
 
 # ---------------------------------------------------------------------------

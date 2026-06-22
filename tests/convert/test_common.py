@@ -301,17 +301,20 @@ def test_build_source_single_phase():
 
 
 def test_build_source_three_phase_balanced_angles():
+    # ``u_ref_v`` is the LINE-TO-LINE magnitude; under THREE_PHASE it is converted to
+    # the per-phase line-to-neutral phase-to-ground EMF (÷sqrt(3)) for the wye source.
     s = build_source(
         id=1,
         node=2,
         mode=PhaseMode.THREE_PHASE,
-        u_ref_v=231.0,
+        u_ref_v=400.0,
         u_angle_deg=0.0,
         r_ohm=0.01,
         l_h=1e-5,
     )
+    u_ln = 400.0 / math.sqrt(3.0)
     assert s.phases == ABC
-    assert s.u_ref_v == (231.0, 231.0, 231.0)
+    assert s.u_ref_v == pytest.approx((u_ln, u_ln, u_ln))
     assert s.u_angle_deg == (0.0, -120.0, -240.0)
     # diagonal Thevenin
     assert s.resistance_ohm == [[0.01, 0, 0], [0, 0.01, 0], [0, 0, 0.01]]

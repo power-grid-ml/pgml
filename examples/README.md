@@ -23,25 +23,37 @@ voltage spectrum from `spectra/VoltageSag40ms.csv`, of strength `SOURCE_POWER_VA
 (short-circuit power) — applied only at h>1 so the fundamental is exact (the model in
 `references/error_injection.md`). Sweeps every node with
 `pgml.scenarios.run_node_injection_sweep`, records the **h=11 voltage at every node for
-every injection node** minus a no-injection reference → an `m × i` **spread matrix**
-(`spread_h11.csv`/`.npz`/heatmap). Then **pgml vs live OpenDSS**: parity print
-(**bit-exact ~1e-13**, Carson on both) + `compare_h11.csv` (pgml | opendss | Δ) +
-`compare_h11.svg` (overlay) for the most-affected injection node.
+every injection node** minus a no-injection reference, **normalised per node by the local
+fundamental `|V1|`** → an `m × i` **per-unit spread matrix** `|V_h11|/|V1|`
+(`spread_h11.csv`/`.npz`/heatmap). The per-unit basis matters: in raw volts the 20 kV MV
+nodes dwarf the 0.4 kV LV nodes from the transformer ratio alone and hide the disturbance
+origin; in per-unit the response peaks at the injecting node. Then **pgml vs live
+OpenDSS**: parity print (**bit-exact ~1e-13**, Carson on both) + `compare_h11.csv`
+(pgml | opendss | Δ, per-unit) + `compare_h11.svg` (overlay) for the most-affected
+injection node.
 
 Control knobs (top of file): `RECORD_ORDER`, `SOURCE_POWER_VA` (source strength),
 `KIND` ("voltage"/"current"); plus `source_impedance_ohm` on `cigre_lv_full_grid`.
 
 ### `scenario_randomized.py` — randomized symmetric vs asymmetric study (Scenario 2)
-Three-phase. Per load, an **independent-per-phase** `U(0,1)` power scale + a random
-EN 50160-bounded harmonic spectrum (h=3,5,7,9). Solves the SAME sampled batch **symmetric
-and asymmetric**, times both (CPU), writes both to parquet + CSV, and plots the asymmetric
-run: a fundamental all-phase profile and a 3D harmonic plot (**color = order, line style =
-phase** L1 solid / L2 dashed / L3 dotted).
+Three-phase, **Carson geometry** line model (`synthesize_grid_geometry` gives every R/X
+line a 3-conductor geometry reproducing `Z1 + X0` at f0; the same geometry feeds OpenDSS).
+Per load, an **independent-per-phase** `U(0,1)` power scale + a random EN 50160-bounded
+harmonic spectrum (h=3,5,7,9). Solves the SAME sampled batch **symmetric and asymmetric**,
+times both (CPU), writes both to parquet + CSV, and plots the asymmetric run: a fundamental
+all-phase profile (now correctly ~1.0 pu on the line-to-neutral base) and a 3D harmonic plot
+(**color = order, line style = phase** L1 solid / L2 dashed / L3 dotted).
 
-OpenDSS parity (per-order, printed): non-triplen **h5/h7 ~1%**, triplen **h3/h9 diverge**
-(zero-sequence — pgml's `sequence_aware` Z0 + simplified non-Dyn transformer vs OpenDSS's
-Carson Z0 + vector group; deferred — see `TODO.md` item 4). Single-phase Scenario 1 is the
-bit-exact comparison; the 3-phase zero-sequence model is approximate.
+OpenDSS parity (per-order, printed): **bit-exact ~1e-11 on every order, including the
+triplen h3/h9**. Because the same Carson geometry feeds both engines, the line zero-sequence
+model is identical, and the Dyn vector group (stamped identically on both sides) traps the
+zero sequence — so the earlier triplen gap (pgml's analytic `sequence_aware` Z0 vs OpenDSS's
+internal Carson earth return) is gone. The transformer vector group is independently
+validated bit-for-bit against a real OpenDSS `Transformer` element via
+`opendss_dyn_transformer_harmonic_voltages`. (CIGRE LV lines are low-X cables, so the
+synthesized GMR is non-physical — flagged by a warning — but still reproduces the target
+impedance and matches OpenDSS exactly; for physically-representative magnitudes on R/X
+feeders use `apply_positive_sequence_harmonic_model` / `sequence_aware` instead.)
 
 Control knobs: `N_SAMPLES`, `SEED`, `ORDERS`, the two `ParameterSpec`s in `build_config`
 (distributions, `symmetry`), `source_impedance_ohm`.

@@ -188,7 +188,13 @@ positions (`tap_pos`/`tap_step`) are not read yet (off-nominal tap stays 1.0). T
 OpenDSS converter does NOT emit transformers yet (DSS `Transformer` parsing is a
 documented gap; CIGRE/IEEE feeders enter via pandapower).
 
-## Cross-converter conventions (single-phase positive-sequence equivalent)
+## Cross-converter conventions (voltage base, slack, frequency)
+
+> The authoritative cross-tool convention record (base voltage L-L/L-N, transformer
+> reference side, vector-group/clock, power signs, SI/phase-domain, harmonic earth-return)
+> for pgml vs pandapower / OpenDSS / power-grid-model is `references/conventions.md`. Keep
+> it in sync when a converter's convention handling changes.
+
 - CANONICAL `u_rated_v` for any node is LINE-TO-LINE (`vn_kv*1000` / `u_rated*1`
   for nodes that are already L-L), validated against pandapower's const-Z reference
   (`y = conj(P+jQ)/V_LL^2`). All three converters follow this convention.
@@ -197,6 +203,15 @@ documented gap; CIGRE/IEEE feeders enter via pandapower).
   (L-N), which was a factor-of-sqrt(3) error in the const-Z shunt on the load-flow
   path. The Y-bus oracle test (passive, load-free) was unaffected; the fix was applied
   together with the phase_mode scaffold migration.
+- VOLTAGE BASE vs WORKING VOLTAGE: `u_rated_v` is stored L-L, but every per-phase voltage
+  the solver touches is LINE-TO-NEUTRAL. `assembly._params.phase_voltage_magnitude(u_rated_v,
+  n)` is the single base helper — `u_rated_v/sqrt(3)` for a WYE element on a >=3-phase node,
+  `u_rated_v` for DELTA / 1-phase — and feeds the const-Z/ZIP load, the harmonic source
+  admittance, and the per-unit reporting in `pgml.evaluation`. Accordingly the slack/source
+  EMF is L-N: under `THREE_PHASE` `build_source` divides the L-L `u_ref_v` by sqrt(3) for the
+  balanced wye expansion (1-phase keeps it). `id_map["slack_v_complex"]` stays the L-L phasor
+  (a single-phase ideal-slack `v_fixed` convenience). Pinning the L-L magnitude on each phase
+  makes every 3-phase voltage sqrt(3) too high (~1.73 pu on the L-N base).
 - `base_frequency_hz` is read from the source (`net.f_hz`,
   `dss.Solution.Frequency()`); pgm has no f0 field so the caller passes it. For
   IEEE33 (no line charging) the absolute f0 cancels in `X=2πf·L`; it matters once
