@@ -150,9 +150,15 @@ per-frequency linear solve). The OpenDSS conventions are pinned in
 `references/opendss/harmonics.md` (READ IT — esp. the spectrum phase convention,
 verified empirically). New orchestration:
 
-- `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", operating_point=None,
-     harmonic_injection=None, node_sources=None, include_load_shunt=False, tol=1e-10,
-     max_iter=100, dtype=torch.complex128, device=None, symmetry=None) -> HarmonicFlowResult`
+- `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", method="current_injection",
+     operating_point=None, harmonic_injection=None, node_sources=None,
+     include_load_shunt=False, tol=1e-10, max_iter=100, dtype=torch.complex128,
+     device=None, symmetry=None) -> HarmonicFlowResult`
+  - `method` is forwarded to the fundamental `solve_power_flow`; use `"newton"` for a
+    controlled DER (Volt-VAr/Volt-Watt loops oscillate under the current-injection fixed
+    point). A controlled Generator/Storage's harmonic injection scales from its
+    CONTROL-RESOLVED fundamental current (consistent with the control-aware fundamental
+    solve), not the nominal — see `assembly/_control.py` + `references/der_pv_storage_modeling.md`.
   - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
     ONCE here; threaded into the fundamental `solve_power_flow` (which emits the single
     modeling-summary log) and into the harmonic-injection power resolution

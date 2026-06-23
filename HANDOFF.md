@@ -34,6 +34,16 @@ Phases 0–3 done. The per-package `CONTEXT.md` and `README.md` hold the detail.
 - **Harmonic flow** — `solve_harmonic_flow`: nonlinear fundamental + linear per-harmonic,
   OpenDSS-exact spectrum injection; phase-domain **vector-group transformer** (Dyn traps
   triplen). `assembly.branch_currents` derives KCL-exact terminal currents.
+- **DER inverter control + storage** — `Generator`/`Storage` carry an optional
+  `InverterControl` (constant PF, `cosphi(P)`, Volt-VAr `Q(V)`, Volt-Watt `P(V)`, combined),
+  bounded by the `s_rated_va` capability circle, curves via the tensor-capable
+  `Characteristic`. The voltage-dependent `(P,Q)` enters `device_current_injections` and is
+  differentiated by the same IFT backward (gradcheck of `V*` w.r.t. the curve/rating passes);
+  a `smoothing` soft-clamp keeps it C¹. Validated vs pandapower `CharacteristicControl` Q(V)
+  (same equilibrium to ~1e-10 pu) and OpenDSS `InvControl` VOLTVAR/VOLTWATT. `Storage` is a
+  signed bidirectional injection (>0 discharge); SoC integration + dispatch are resolved
+  off-tape in `scenarios.storage` (`integrate_soc`/`dispatch_storage`). Stiff control loops
+  use `method="newton"`. Design: `references/der_pv_storage_modeling.md`.
 - **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C),
   **bit-exact vs OpenDSS** (incl. triplen, via feeding the same geometry to both engines);
   plus analytic `positive_sequence` / `sequence_aware` harmonic line models for R/X feeders.
@@ -46,7 +56,7 @@ Phases 0–3 done. The per-package `CONTEXT.md` and `README.md` hold the detail.
   transformer TO/LV referral vs OpenDSS, earth return) — read before touching converters,
   the slack, or transformers.
 - **Infra** — `pyproject.toml` (PEP 621, `py.typed`), GitHub Actions (ruff + tests + strict
-  docs), root `conftest` + markers (`gpu`/`opendss`/`slow`). ~482 tests pass, 29
+  docs), root `conftest` + markers (`gpu`/`opendss`/`slow`). ~531 tests pass, 32
   gpu/opendss-skipped; `ruff` + strict docs build clean.
 
 ## How to run
@@ -131,25 +141,13 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
 `solver/harmonic_flow.py`, `assembly/ybus._transformer_block_groups`, `schemas` (ask first),
 `references/opendss/harmonics.md`, `tests/reference`.
 
-### D. DER / PV inverter control  ⚠️ decision (schema + solver)
-**What.** A PV system is at most a fixed P (or P/Q) injection — no inverter control (Volt-VAr
-`Q(V)`, Volt-Watt `P(V)`, constant-PF, MPPT). **Why.** The control law sets the operating
-point → it changes the fundamental voltages, the harmonic injection derived from them, AND
-the loadability limit. **How.** A control model on `Generator` (or a dedicated DER appliance);
-the `Q(V)`/`P(V)` droop can reuse the `CurveParam` machinery. The V-dependent injection enters
-`I_device(V)` — the IFT still applies (the curve enters the residual + its Jacobian). Validate
-vs pandapower controllers / OpenDSS `InvControl`. **Where.** `schemas` (ask first),
-`solver/power_flow.py`, `scenarios/`.
-
-### E. Storage element + dispatch/control  ⚠️ decision (schema + solver)
-**What.** No storage component exists. A battery is a bidirectional P (and Q) injection with
-a state-of-charge constraint and a dispatch law. **Why.** Central to modern LV/MV studies and
-to time-series scenario generation. **How.** Start with static-dispatch storage (a signed
-injection with ratings + a fixed P,Q setpoint), then SoC-aware time-series dispatch in
-`scenarios`. **Decision:** extend `Generator` vs a new `Storage` component. **Where.**
-`schemas` (ask first), `solver/power_flow.py`, `scenarios/`.
-
-### F. Smaller follow-ups (no decision needed)
+### D. Smaller follow-ups (no decision needed)
+- **DER control (optional extensions)**: a true voltage-regulating PV bus (replace a
+  terminal's power-balance row with `|V| − V_set`, free Q, smooth Q-limit —
+  `references/der_pv_storage_modeling.md` §4.5); the harmonic Norton load shunt that lets a
+  grid-following inverter present its output impedance at harmonics is item C above.
+- **Storage dispatch (optional extensions)**: higher-level dispatch policies and a scenarios
+  `Selector(component="storage")` to sample storage setpoints across a batch.
 - **Typing / mypy gate** (incremental): `py.typed` ships, but no mypy gate. Add targeted
   annotations on the public API + a gate on the non-duck-typed modules (errors, simulation,
   solver signatures, config). Don't fight the deliberate `Any` of the float/tensor duality.

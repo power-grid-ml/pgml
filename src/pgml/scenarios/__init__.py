@@ -46,6 +46,12 @@ from .persistence import LoadedDataset, read_dataset, write_dataset
 from .perturbation import perturbation_sweep
 from .run import ScenarioResult, run_scenarios
 from .sampler import SampledScenarios, cartesian_sample, sample
+from .storage import (
+    StorageDispatchResult,
+    dispatch_storage,
+    integrate_soc,
+    storage_operating_point,
+)
 
 # Canonical __module__ for public re-exports (avoids autodoc duplicate warnings).
 for _name in [
@@ -73,6 +79,7 @@ for _name in [
 SampledScenarios.__module__ = __name__
 ScenarioResult.__module__ = __name__
 LoadedDataset.__module__ = __name__
+StorageDispatchResult.__module__ = __name__
 
 __all__ = [
     "Uniform",
@@ -106,4 +113,8 @@ __all__ = [
     "LoadedDataset",
     "ScenarioResult",
     "run_scenarios",
+    "StorageDispatchResult",
+    "integrate_soc",
+    "dispatch_storage",
+    "storage_operating_point",
 ]

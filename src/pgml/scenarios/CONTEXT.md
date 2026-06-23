@@ -98,6 +98,20 @@ verified `batched == loop-of-individual`).
   a tidy `voltages.csv` (long layout, regardless of `layout`) alongside the parquet for manual
   inspection. Result I/O (detached).
 
+## Storage dispatch / state of charge (`storage.py`)
+- `integrate_soc(requested_power_w[*,T], dt_s, *, energy_capacity_wh, soc0, soc_min,
+  soc_max, efficiency_charge, efficiency_discharge, p_rated_w, dtype, device) ->
+  StorageDispatchResult(realized_power_w[*,T], soc[*,T+1], energy_wh[*,T+1])`. Realizes a
+  requested signed power sequence (>0 discharge) under the SoC reserve/cap + power rating;
+  OpenDSS energy equations (`E[t+1]=E[t]−P·dt/η_dis` discharge / `+|P|·η_chg·dt` charge).
+  The dispatch RULE is the caller's (off-tape Python); the realized power + SoC recurrence
+  are torch (gradient w.r.t. the setpoint VALUE, not the rule). No capacity => only the
+  rating clamps (`soc`/`energy_wh` None). Batched over a leading scenario dim; loops over T.
+- `dispatch_storage(storage, requested_power_w, dt_s, *, soc0=None)` — reads the
+  `Storage` element's own state params. `storage_operating_point(power_by_id, q_by_id=None)`
+  -> a solver `operating_point` dict for one step (feeds `solve_power_flow`/`solve_harmonic_flow`).
+  See `references/der_pv_storage_modeling.md` §4.4.
+
 ## Conventions
 - Unit-cube layout `U[B,D]`: one column per declared factor, then per spec a BASE block
   (component-level draws: #matched comps for `each`/correlated, 1 for `shared`, 0 for

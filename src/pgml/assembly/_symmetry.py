@@ -29,9 +29,8 @@ from typing import Optional
 from pgml import config
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
-    Generator,
     Grid,
-    Load,
+    InjectionAppliance,
     Phase,
     WindingConnection,
 )
@@ -42,9 +41,9 @@ _VALID_MODES = ("auto", "symmetric", "asymmetric")
 
 
 def _has_per_phase_appliance(grid: Grid) -> bool:
-    """True if any Load/Generator carries an explicit per-phase nameplate split."""
+    """True if any injecting appliance carries an explicit per-phase nameplate split."""
     return any(
-        isinstance(a, (Load, Generator))
+        isinstance(a, InjectionAppliance)
         and (a.p_nom_per_phase_w is not None or a.q_nom_per_phase_var is not None)
         for a in grid.appliances
     )
@@ -143,7 +142,7 @@ def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:
             "(3-wire / solidly-grounded model)."
         )
 
-    appliances = [a for a in grid.appliances if isinstance(a, (Load, Generator))]
+    appliances = [a for a in grid.appliances if isinstance(a, InjectionAppliance)]
     if appliances:
         counts: dict[str, int] = {}
         for a in appliances:

@@ -270,6 +270,23 @@ NOT baked into Y; split as implemented below.
   The nodal balance used by the solver is `Y_eff @ V = I_slack - I_device(V)`.
   `param_overrides` keys: `("load"|"generator", id, "p_nom_per_phase_w"
   |"q_nom_per_phase_var")` inject leaf per-phase P/Q.
+  - INJECTION APPLIANCES: `device_current_injections` / `_stamp_const_z_loads` iterate
+    every `InjectionAppliance` (Load, Generator, Storage), so `Storage` is a signed PQ
+    injection identical to a Generator (sign −1; its `p_nom_w` is the signed setpoint,
+    >0 = discharge/inject).
+  - INVERTER CONTROL (`_control.py`, differentiable, GPU): a Generator/Storage with a
+    `control` block follows a voltage-dependent (P, Q) law instead of the constant ZIP
+    base. Controlled appliances take a SEPARATE per-element pass in
+    `device_current_injections` (the control-free majority keeps the bit-exact stacked
+    ZIP path). `resolve_injection_power(control, p_avail, v_pu)` returns (P, Q) from the
+    control mode (constant-PF / cosφ(P) / Volt-VAr / Volt-Watt / combined), bounded by the
+    `s_rated_va` capability circle via `smooth_clamp` (`smoothing`>0 = C¹ backward,
+    `smoothing`=0 = hard). `evaluate_characteristic` is the differentiable piecewise
+    (linear/cubic) curve lookup. Because the control enters `I_device(V)` and the IFT
+    backward differentiates one residual eval at V*, gradients flow to the curve / rating
+    with no new adjoint (gradcheck-verified). Control is honored at the FUNDAMENTAL solve;
+    the linear const-Z `assemble_ybus` uses the base P/Q (control ignored). A stiff
+    Volt-VAr/Volt-Watt loop needs `method="newton"` (the fixed point oscillates).
 
 Verification (CPU): const-Z consistency (norton + ideal, 1ph + 3ph) exact to
 1e-9..1e-10; gradcheck (float64) of the downstream power-flow V w.r.t. line R/L and

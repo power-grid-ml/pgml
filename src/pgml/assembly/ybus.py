@@ -33,9 +33,9 @@ from torch import Tensor
 from pgml.equations import registry
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
-    Generator,
     GenericBranch,
     Grid,
+    InjectionAppliance,
     Line,
     Load,
     LoadModel,
@@ -48,6 +48,7 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
 )
 
+from ._control import resolve_injection_power
 from ._incidence import build_incidence, group_appliances, used_rows
 from ._transformer import (
     block_incidence,
@@ -955,7 +956,7 @@ def _stamp_const_z_loads(
     and L-L for DELTA (:func:`phase_voltage_magnitude`).
     """
     loads = [
-        a for a in grid.appliances if isinstance(a, (Load, Generator)) and a.in_service
+        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
     ]
     if not loads:
         return y
@@ -1550,7 +1551,7 @@ def device_current_injections(
     out = torch.zeros((*batch_lead, h, n), dtype=cdt, device=device)
 
     loads = [
-        a for a in grid.appliances if isinstance(a, (Load, Generator)) and a.in_service
+        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
     ]
     if not loads:
         return out
@@ -1559,7 +1560,13 @@ def device_current_injections(
 
     node_map = {nd.id: nd for nd in grid.nodes}
 
-    for grp in group_appliances(loads, node_map):
+    # Appliances with an inverter `control` follow a voltage-dependent (P, Q) law and
+    # are handled per-element below; the control-free majority keeps the bit-exact
+    # stacked ZIP path (so every existing grid stays byte-identical).
+    uncontrolled = [a for a in loads if getattr(a, "control", None) is None]
+    controlled = [a for a in loads if getattr(a, "control", None) is not None]
+
+    for grp in group_appliances(uncontrolled, node_map):
         n_elem = grp.n_elem
         is_delta = grp.connection == WindingConnection.DELTA
         m = build_incidence(grp, rdt, device)  # [n_elem, n_used] real
@@ -1668,7 +1675,61 @@ def device_current_injections(
 
         out = _scatter_injection(out, i_used, rows)
 
+    # --- inverter-controlled injections (voltage-dependent (P, Q) law) --------
+    for grp in group_appliances(controlled, node_map):
+        is_delta = grp.connection == WindingConnection.DELTA
+        m_c = build_incidence(grp, rdt, device).to(cdt)  # [n_elem, n_used]
+        rows = used_rows(grp, index, device)  # [K, n_used]
+        for ki, a in enumerate(grp.appliances):
+            sign = 1.0 if isinstance(a, Load) else -1.0
+            node = node_map[a.node]
+            v0 = phase_voltage_magnitude(
+                node.u_rated_v, len(node.phases), line_to_line=is_delta
+            )
+            p_list, _q_list = resolve_operating_power(
+                a, operating_point, asymmetric=asymmetric
+            )
+            p_avail = _stack_elements(
+                p_list, rdt, device
+            )  # [*pb, n_elem] (native sign)
+
+            arow = rows[ki]  # [n_used]
+            v_used = v.index_select(-1, arow).reshape(*batch_lead, h, grp.n_used)
+            vt = torch.einsum("eu,...u->...e", m_c, v_used)  # [*b, H, n_elem]
+            v_pu = torch.abs(vt) / v0  # [*b, H, n_elem]
+
+            p_eff, q_eff = resolve_injection_power(
+                a.control, p_avail, v_pu, rdt=rdt, device=device
+            )  # [*b, H, n_elem] native
+            s_eff = torch.complex(sign * p_eff, sign * q_eff).to(cdt)
+            # Guard the conj(vt) divide for a transiently/perturbed-to-zero terminal
+            # (the iteration / a gradcheck step can reach 0 V) — mask the denominator,
+            # then mask the result, keeping the gradient finite on live terminals.
+            vtc = torch.conj(vt)
+            safe = torch.where(vtc.abs() < 1e-300, torch.ones_like(vtc), vtc)
+            i_elem = torch.where(
+                vtc.abs() < 1e-300, torch.zeros_like(s_eff), torch.conj(s_eff) / safe
+            )  # [*b, H, n_elem]
+            i_used = torch.einsum("eu,...e->...u", m_c, i_elem)  # [*b, H, n_used]
+            out = _scatter_injection(out, i_used.unsqueeze(-2), arow.unsqueeze(0))
+
     return out
+
+
+def _stack_elements(vals, rdt: torch.dtype, device) -> Tensor:
+    """Stack a per-element power list (mixed floats / batched tensors) -> ``[*b, n_elem]``.
+
+    Broadcasts every entry to a common leading shape before stacking so a per-element
+    list of scalars yields ``[n_elem]`` and a list of ``[*batch]`` tensors yields
+    ``[*batch, n_elem]`` (graph-preserving for tensor leaves)."""
+    ts = [
+        v.to(dtype=rdt, device=device)
+        if isinstance(v, Tensor)
+        else torch.as_tensor(v, dtype=rdt, device=device)
+        for v in vals
+    ]
+    lead = torch.broadcast_shapes(*[t.shape for t in ts])
+    return torch.stack([t.broadcast_to(lead) for t in ts], dim=-1)
 
 
 def _tensor_sum(per_phase, rdt: torch.dtype, device):

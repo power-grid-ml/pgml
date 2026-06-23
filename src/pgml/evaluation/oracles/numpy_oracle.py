@@ -27,8 +27,8 @@ from typing import Optional, Sequence
 import numpy as np
 
 from pgml.schemas.grid_schema import (
-    Generator,
     Grid,
+    InjectionAppliance,
     Line,
     Load,
     Phase,
@@ -426,7 +426,7 @@ def numpy_harmonic_profiles(
     # Per-device fundamental current I1 (load convention) for the injection scaling.
     devs = []
     for a in grid.appliances:
-        if not (isinstance(a, (Load, Generator)) and getattr(a, "in_service", True)):
+        if not (isinstance(a, InjectionAppliance) and getattr(a, "in_service", True)):
             continue
         spec = _resolve_spectrum(a, harmonic_injection)
         if spec is None:

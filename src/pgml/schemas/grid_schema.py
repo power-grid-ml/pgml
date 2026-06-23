@@ -260,6 +260,32 @@ class SourceConvention(str, Enum):
     MEASURED = "measured"
 
 
+class ConsumerType(str, Enum):
+    """Closed device taxonomy for loads / generators / storage (an ML categorical).
+
+    This classifies the asset's character; it does NOT drive the physics by itself
+    (the electrical behaviour comes from ``load_model``, ``control`` and the harmonic
+    model). ``OTHER`` is the escape hatch for an unlisted character; ``None`` on the
+    appliance means unspecified. Being a string enum, a value compares equal to its
+    string (``ConsumerType.PV == "pv"``), so existing string-valued grids and
+    selectors keep working.
+    """
+
+    HOUSEHOLD = "household"
+    EV_CHARGING = "ev_charging"
+    HEAT_PUMP = "heat_pump"
+    RESTAURANT = "restaurant"
+    OFFICE = "office"
+    WORKSHOP = "workshop"
+    INDUSTRIAL_DRIVE = "industrial_drive"
+    PV = "pv"
+    WIND = "wind"
+    CHP = "chp"
+    DIESEL_GENSET = "diesel_genset"
+    BATTERY = "battery"
+    OTHER = "other"
+
+
 # =============================================================================
 # 2. Geometry (GeoJSON-shaped fragments; CRS is grid-wide)
 # =============================================================================
@@ -856,6 +882,18 @@ class ApplianceBase(GridModel):
     tags: dict[str, str] = Field(default_factory=dict)
 
 
+class InjectionAppliance(ApplianceBase):
+    """Marker base for single-terminal power-injecting appliances.
+
+    :class:`Load`, :class:`Generator` and :class:`Storage` all resolve to a per-phase
+    (P, Q) injection that the assembler folds into the const-Z shunt and the solver
+    absorbs through the voltage-dependent ``I_device(V)`` term. Consumers test
+    ``isinstance(a, InjectionAppliance)`` to treat the three uniformly; the
+    consume/inject sign is positive for a :class:`Load` and negative (injecting) for a
+    :class:`Generator` / :class:`Storage`.
+    """
+
+
 class Source(ApplianceBase):
     """Slack / external network equivalent: per-phase Thevenin voltage behind a
     per-phase impedance stored as R and L MATRICES (asymmetric, frequency-correct:
@@ -936,6 +974,183 @@ class ZipCoefficients(GridModel):
         return self
 
 
+# =============================================================================
+# 8b. Inverter / DER control laws (operating-point characteristics)
+# =============================================================================
+class Characteristic(GridModel):
+    """Generic monotone-``x`` piecewise lookup ``y = f(x)`` for a control law.
+
+    Used as the curve of an inverter control mode: ``Q(V)`` (Volt-VAr), ``P(V)``
+    (Volt-Watt), or ``cosphi(P)``. ``x_values`` is strictly increasing; the value is
+    interpolated between samples and (by default) held constant outside the range.
+    ``x_values``/``y_values`` are tensor-capable (the float/tensor duality), so a
+    curve breakpoint or level is a differentiable leaf — gradients flow to the curve
+    shape through the solve. ``linear`` interpolation matches the OpenDSS XYcurve /
+    pandapower ``Characteristic``; ``cubic`` gives a smooth (C\\ :sup:`1`) curve for a
+    well-behaved gradient at the breakpoints (see ``smoothing`` on the control mode).
+    """
+
+    x_values: Vec = Field(description="Strictly increasing breakpoints (x axis).")
+    y_values: Vec = Field(description="Curve value at each breakpoint (y axis).")
+    interpolation: InterpolationMethod = Field(default=InterpolationMethod.LINEAR)
+    extrapolation: ExtrapolationMethod = Field(default=ExtrapolationMethod.CONSTANT)
+
+    @model_validator(mode="after")
+    def _check(self) -> "Characteristic":
+        x, y = self.x_values, self.y_values
+        if _is_arraylike(x) or _is_arraylike(y):
+            return self  # tensor curve: caller owns length / monotonicity
+        if len(x) != len(y):
+            raise ValueError("`x_values` and `y_values` must have equal length.")
+        if len(x) < 2:
+            raise ValueError("A characteristic needs at least 2 points.")
+        if any(b <= a for a, b in zip(x, x[1:])):
+            raise ValueError("`x_values` must be strictly increasing.")
+        return self
+
+
+class QReference(str, Enum):
+    """Reactive-power base a Volt-VAr ``y`` (pu) scales (OpenDSS ``RefReactivePower``)."""
+
+    RATED = "rated"  # fraction of the inverter apparent-power rating (VARMAX)
+    AVAILABLE = "available"  # fraction of the vars available at the present P (VARAVAL)
+
+
+class InverterControlBase(GridModel):
+    """Shared fields of every inverter control mode.
+
+    ``s_rated_va`` is the inverter apparent-power rating that bounds the (P, Q)
+    operating point to the capability circle ``P**2 + Q**2 <= s_rated_va**2``; ``None``
+    disables the clamp. ``smoothing`` (>= 0) sets the half-width, in the same units as
+    the clamped/curve quantity, of a soft saturation / soft breakpoint used so the
+    control stays C\\ :sup:`1` for gradient-based use (0 = the exact hard clamp /
+    piecewise curve, which matches the reference tools at the operating point but has
+    sub-gradients at the kinks). See ``references/der_pv_storage_modeling.md`` section 4.3.
+    """
+
+    s_rated_va: Optional[PosNum] = si_field(
+        "Inverter apparent-power rating bounding the (P, Q) capability circle.",
+        short="VA",
+        long="volt-ampere",
+        default=None,
+    )
+    smoothing: float = si_field(
+        "Soft-saturation / soft-breakpoint half-width for differentiable gradients "
+        "(0 = exact hard clamp / piecewise curve).",
+        short="pu",
+        long="fraction",
+        default=0.0,
+        ge=0.0,
+    )
+
+
+class ConstantPowerFactorControl(InverterControlBase):
+    """Fixed power factor: ``Q = +/- |P| * tan(acos(power_factor))``."""
+
+    kind: Literal["constant_power_factor"] = "constant_power_factor"
+    power_factor: float = Field(
+        description="Displacement power factor magnitude |cos(phi)| in (0, 1].",
+        gt=0.0,
+        le=1.0,
+    )
+    overexcited: bool = Field(
+        default=True,
+        description="True = inject reactive power (capacitive / overexcited); "
+        "False = absorb (inductive / underexcited).",
+    )
+
+
+class ConstantReactivePowerControl(InverterControlBase):
+    """Fixed reactive-power setpoint, independent of the active power and voltage."""
+
+    kind: Literal["constant_reactive_power"] = "constant_reactive_power"
+    q_var: Num = si_field(
+        "Reactive-power setpoint (sign per the appliance injection convention).",
+        short="var",
+        long="var",
+    )
+
+
+class PowerFactorWattControl(InverterControlBase):
+    """Power-factor-vs-active-power characteristic ``cosphi(P)`` (VDE-AR-N 4105)."""
+
+    kind: Literal["power_factor_watt"] = "power_factor_watt"
+    characteristic: Characteristic = Field(
+        description="x = P / p_ref (pu of available active power), y = SIGNED power "
+        "factor (y > 0 = overexcited/inject Q, y < 0 = underexcited/absorb)."
+    )
+    p_ref_w: Optional[PosNum] = si_field(
+        "Active-power reference normalising the curve x axis; None = |p_nom_w|.",
+        short="W",
+        long="watt",
+        default=None,
+    )
+
+
+class VoltVarControl(InverterControlBase):
+    """Volt-VAr ``Q(V)``: reactive power as a function of the terminal voltage."""
+
+    kind: Literal["volt_var"] = "volt_var"
+    characteristic: Characteristic = Field(
+        description="x = |V| (pu of the element nominal voltage), y = Q / q_reference "
+        "(pu; y > 0 = inject, y < 0 = absorb)."
+    )
+    q_reference: QReference = Field(default=QReference.RATED)
+
+
+class VoltWattControl(InverterControlBase):
+    """Volt-Watt ``P(V)``: active-power limit as a function of the terminal voltage."""
+
+    kind: Literal["volt_watt"] = "volt_watt"
+    characteristic: Characteristic = Field(
+        description="x = |V| (pu of the element nominal voltage), y = active-power "
+        "limit as a fraction of the available active power (in [0, 1])."
+    )
+
+
+class VoltVarVoltWattControl(InverterControlBase):
+    """Combined Volt-VAr + Volt-Watt (OpenDSS ``InvControl CombiMode=VV_VW``)."""
+
+    kind: Literal["volt_var_volt_watt"] = "volt_var_volt_watt"
+    volt_var: Characteristic = Field(description="Q(V) curve (see VoltVarControl).")
+    volt_watt: Characteristic = Field(description="P(V) curve (see VoltWattControl).")
+    q_reference: QReference = Field(default=QReference.RATED)
+
+
+InverterControl = Annotated[
+    Union[
+        ConstantPowerFactorControl,
+        ConstantReactivePowerControl,
+        PowerFactorWattControl,
+        VoltVarControl,
+        VoltWattControl,
+        VoltVarVoltWattControl,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+def _check_control(obj) -> None:
+    """Validate an appliance's optional inverter ``control`` block.
+
+    A rated-reference Volt-VAr curve scales the inverter VAr rating, so it needs
+    ``s_rated_va``; the available-reference variant derives the base from the present
+    active power and does not.
+    """
+    c = getattr(obj, "control", None)
+    if c is None:
+        return
+    needs_rating = (
+        isinstance(c, (VoltVarControl, VoltVarVoltWattControl))
+        and c.q_reference == QReference.RATED
+    )
+    if needs_rating and c.s_rated_va is None:
+        raise ValueError(
+            "A Volt-VAr control with q_reference='rated' requires `s_rated_va` "
+            "(the VAr base it scales)."
+        )
+
+
 def _check_load_connection(obj) -> None:
     """Validate a Load/Generator ``connection`` (``None`` = resolve from config).
 
@@ -999,7 +1214,7 @@ def _check_per_phase_power(obj) -> None:
                 )
 
 
-class Load(ApplianceBase):
+class Load(InjectionAppliance):
     """Consumer. Fundamental behaviour set by ``load_model``; harmonic behaviour by the
     Norton ``harmonic_model``.
 
@@ -1056,10 +1271,11 @@ class Load(ApplianceBase):
     zip_coefficients: Optional[ZipCoefficients] = Field(
         default=None, description="Required iff load_model==ZIP."
     )
-    consumer_type: Optional[str] = Field(
+    consumer_type: Optional[ConsumerType] = Field(
         default=None,
-        description="Open vocabulary (snake_case). Recommended: household, ev_charging, heat_pump, "
-        "restaurant, office, workshop, pv, battery, industrial_drive. ML categorical.",
+        description="Closed device taxonomy (ML categorical; does not drive physics). "
+        "Typical loads: household, ev_charging, heat_pump, restaurant, office, "
+        "workshop, industrial_drive. None = unspecified.",
     )
     profile_ref: Optional[str] = Field(
         default=None, description="External operating-point profile."
@@ -1087,10 +1303,20 @@ class Load(ApplianceBase):
         return self
 
 
-class Generator(ApplianceBase):
-    """Generation unit. Same rated-vs-operating-point, per-phase asymmetry and
-    connection semantics as :class:`Load` (see its docstring and
-    ``references/asymmetric_modeling.md``); injected-power sign handled at assembly."""
+class Generator(InjectionAppliance):
+    """Generation unit (synchronous machine, wind, CHP, or — most commonly on a
+    distribution feeder — a grid-following PV/DER inverter). Same rated-vs-operating-point,
+    per-phase asymmetry and connection semantics as :class:`Load` (see its docstring and
+    ``references/asymmetric_modeling.md``); injected-power sign handled at assembly.
+
+    *Inverter control.* The optional ``control`` block makes the operating point a
+    function of the local voltage and the available power — constant power factor,
+    ``cosphi(P)``, Volt-VAr ``Q(V)``, Volt-Watt ``P(V)``, or a combination, bounded by the
+    inverter capability circle. ``p_nom_w`` / the operating point is then the AVAILABLE
+    active power (e.g. the PV MPP set by irradiance); the control derives the reactive
+    power and any active-power curtailment. The voltage-dependent injection enters the
+    nonlinear power-flow residual ``I_device(V)`` and is differentiated by the same IFT
+    backward as the const-P/ZIP load (``references/der_pv_storage_modeling.md`` section 4)."""
 
     component: Literal["generator"] = "generator"
     connection: Optional[WindingConnection] = Field(
@@ -1118,10 +1344,17 @@ class Generator(ApplianceBase):
         default=None,
     )
     zip_coefficients: Optional[ZipCoefficients] = Field(default=None)
-    consumer_type: Optional[str] = Field(
+    control: Optional[InverterControl] = Field(
         default=None,
-        description="Open vocabulary (snake_case). Recommended: pv, wind, chp, battery, "
-        "diesel_genset. ML categorical.",
+        description="Optional inverter control law (constant power factor, cosphi(P), "
+        "Volt-VAr Q(V), Volt-Watt P(V), or combined). None = a plain const-P/ZIP "
+        "injection. Honored by the nonlinear power flow (`solve_power_flow` / "
+        "`solve_harmonic_flow`); the linear const-Z assembler uses the base P/Q.",
+    )
+    consumer_type: Optional[ConsumerType] = Field(
+        default=None,
+        description="Closed device taxonomy (ML categorical; does not drive physics). "
+        "Typical generators: pv, wind, chp, diesel_genset. None = unspecified.",
     )
     profile_ref: Optional[str] = Field(default=None)
     spectrum: Optional[Spectrum] = Field(
@@ -1143,6 +1376,150 @@ class Generator(ApplianceBase):
         _check_per_phase_power(self)
         _check_load_connection(self)
         _check_spectrum_per_phase(self)
+        _check_control(self)
+        return self
+
+
+class Storage(InjectionAppliance):
+    """Battery / energy storage as a bidirectional inverter injection.
+
+    *Sign convention* (generator-consistent, so storage shares the injection path with
+    :class:`Generator`): ``p_nom_w`` is the SIGNED active-power setpoint — ``> 0`` =
+    DISCHARGING (injecting into the grid), ``< 0`` = CHARGING (drawing from it). The
+    reactive setpoint / inverter ``control`` follow the same convention as a generator.
+
+    *Snapshot vs. state.* At a power-flow snapshot the storage is a signed (P, Q)
+    injection identical to a :class:`Generator` (same ``load_model`` / connection /
+    per-phase / control / harmonic semantics). The energy-state fields
+    (``energy_capacity_wh``, ``soc``, ``soc_min``/``soc_max``, the charge/discharge
+    efficiencies, ``p_rated_w``) are INERT in the solve — they are not read by the
+    assembler or the solver, matching pandapower ``storage.soc_percent`` and the OpenDSS
+    ``Storage`` element. State-of-charge integration and the dispatch rule live in the
+    time-series / scenario layer (``pgml.scenarios``), which resolves them into the
+    per-step ``p_nom_w`` / operating point the solver consumes. See
+    ``references/der_pv_storage_modeling.md`` section 4.4.
+    """
+
+    component: Literal["storage"] = "storage"
+    connection: Optional[WindingConnection] = Field(
+        default=None,
+        description="WYE (phase-to-neutral/ground) or DELTA (phase-to-phase). None "
+        "resolves from config (appliance.load.{single_phase_,}default_connection).",
+    )
+    load_model: LoadModel = Field(default=LoadModel.CONST_POWER)
+    p_nom_w: Num = si_field(
+        "Signed active-power setpoint: > 0 discharging (inject), < 0 charging (draw).",
+        short="W",
+        long="watt",
+    )
+    q_nom_var: Num = si_field(
+        "Reactive-power setpoint (injection convention).",
+        short="var",
+        long="var",
+        default=0.0,
+    )
+    p_nom_per_phase_w: Optional[Vec] = si_field(
+        "Optional asymmetric per-phase active setpoint; must sum to p_nom_w.",
+        short="W",
+        long="watt",
+        default=None,
+    )
+    q_nom_per_phase_var: Optional[Vec] = si_field(
+        "Optional asymmetric per-phase reactive setpoint; must sum to q_nom_var.",
+        short="var",
+        long="var",
+        default=None,
+    )
+    zip_coefficients: Optional[ZipCoefficients] = Field(default=None)
+    control: Optional[InverterControl] = Field(
+        default=None,
+        description="Optional inverter control law (same union as Generator.control).",
+    )
+    energy_capacity_wh: Optional[PosNum] = si_field(
+        "Usable energy capacity (nameplate). Inert in the solve; used by dispatch.",
+        short="Wh",
+        long="watt-hour",
+        default=None,
+    )
+    soc: Optional[float] = si_field(
+        "State of charge as a fraction in [0, 1]. Inert in the solve.",
+        short="pu",
+        long="fraction",
+        default=None,
+        ge=0.0,
+        le=1.0,
+    )
+    soc_min: float = si_field(
+        "Minimum allowed state of charge (dispatch reserve).",
+        short="pu",
+        long="fraction",
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    )
+    soc_max: float = si_field(
+        "Maximum allowed state of charge.",
+        short="pu",
+        long="fraction",
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+    )
+    efficiency_charge: float = si_field(
+        "One-way charging efficiency.",
+        short="pu",
+        long="fraction",
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+    )
+    efficiency_discharge: float = si_field(
+        "One-way discharging efficiency.",
+        short="pu",
+        long="fraction",
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+    )
+    p_rated_w: Optional[PosNum] = si_field(
+        "Inverter active-power rating bounding |p_nom_w|. Inert in the solve.",
+        short="W",
+        long="watt",
+        default=None,
+    )
+    consumer_type: Optional[ConsumerType] = Field(
+        default=None,
+        description="Closed device taxonomy (ML categorical). Typically battery.",
+    )
+    profile_ref: Optional[str] = Field(
+        default=None, description="External operating-point / setpoint profile."
+    )
+    dispatch_ref: Optional[str] = Field(
+        default=None,
+        description="External dispatch rule/policy id resolved by the time-series layer.",
+    )
+    spectrum: Optional[Spectrum] = Field(
+        default=None,
+        description="Inverter harmonic spectrum, applied to ALL phases. Mutually "
+        "exclusive with spectrum_per_phase.",
+    )
+    spectrum_per_phase: Optional[dict[Phase, Spectrum]] = Field(
+        default=None,
+        description="Asymmetric per-phase harmonic current sources. Mutually "
+        "exclusive with spectrum.",
+    )
+    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+
+    @model_validator(mode="after")
+    def _check(self) -> "Storage":
+        if self.load_model == LoadModel.ZIP and self.zip_coefficients is None:
+            raise ValueError("load_model=ZIP requires zip_coefficients.")
+        if self.soc_min > self.soc_max:
+            raise ValueError("`soc_min` must not exceed `soc_max`.")
+        _check_per_phase_power(self)
+        _check_load_connection(self)
+        _check_spectrum_per_phase(self)
+        _check_control(self)
         return self
 
 
@@ -1157,7 +1534,7 @@ class ShuntAppliance(ApplianceBase):
 
 
 Appliance = Annotated[
-    Union[Source, Load, Generator, ShuntAppliance],
+    Union[Source, Load, Generator, Storage, ShuntAppliance],
     Field(discriminator="component"),
 ]
 
@@ -1405,6 +1782,7 @@ __all__ = [
     "InterpolationMethod",
     "ExtrapolationMethod",
     "SourceConvention",
+    "ConsumerType",
     "GeoPoint",
     "GeoLineString",
     "ConstantParam",
@@ -1437,8 +1815,20 @@ __all__ = [
     "Source",
     "HarmonicShuntModel",
     "ZipCoefficients",
+    "Characteristic",
+    "QReference",
+    "InverterControlBase",
+    "ConstantPowerFactorControl",
+    "ConstantReactivePowerControl",
+    "PowerFactorWattControl",
+    "VoltVarControl",
+    "VoltWattControl",
+    "VoltVarVoltWattControl",
+    "InverterControl",
+    "InjectionAppliance",
     "Load",
     "Generator",
+    "Storage",
     "ShuntAppliance",
     "Appliance",
     "LineType",

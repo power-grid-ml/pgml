@@ -12,8 +12,9 @@ The solver package provides three entry points:
   power flow using a current-injection fixed-point forward pass and an
   implicit-function-theorem (IFT) backward pass (real-coordinate adjoint).
 - :func:`~pgml.solver.solve_harmonic_flow` — full harmonic flow orchestration:
-  runs the fundamental power flow to convergence, then solves each harmonic
-  in one batched pass.
+  runs the fundamental power flow to convergence (``method=`` selects the
+  fundamental solver: ``"current_injection"`` or ``"newton"`` for stiff
+  inverter control loops), then solves each harmonic in one batched pass.
 
 .. rubric:: Differentiability
 

@@ -53,12 +53,14 @@ from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
 from pgml.errors import InputError, ModelingError
+from pgml.assembly._control import resolve_injection_power
 from pgml.schemas.grid_schema import (
-    Generator,
     Grid,
+    InjectionAppliance,
     Load,
     Phase,
     StaticSpectrum,
+    WindingConnection,
 )
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
@@ -154,6 +156,7 @@ def solve_harmonic_flow(
     harmonic_orders,
     *,
     slack: str = "ideal",
+    method: str = "current_injection",
     operating_point: Optional[dict] = None,
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
@@ -172,8 +175,10 @@ def solve_harmonic_flow(
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.
     harmonic_orders:
         Iterable of integer orders to solve (e.g. ``[1, 5, 7]``; 1 = fundamental).
-    slack, operating_point, tol, max_iter, dtype, device:
-        Passed to the fundamental :func:`solve_power_flow`.
+    slack, method, operating_point, tol, max_iter, dtype, device:
+        Passed to the fundamental :func:`solve_power_flow`. Use ``method="newton"``
+        for a stiff inverter control loop (Volt-VAr / Volt-Watt), where the
+        current-injection fixed point can oscillate.
     harmonic_injection:
         Optional SCENARIO override of per-device spectra, tensor-friendly so
         scenarios can vary harmonic injections differentiably. Format:
@@ -239,6 +244,7 @@ def solve_harmonic_flow(
     pf = solve_power_flow(
         grid,
         slack=slack,
+        method=method,
         operating_point=operating_point,
         tol=tol,
         max_iter=max_iter,
@@ -455,7 +461,7 @@ def _harmonic_injections(
     node_map = {nd.id: nd for nd in grid.nodes}
 
     loads = [
-        a for a in grid.appliances if isinstance(a, (Load, Generator)) and a.in_service
+        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
     ]
 
     # Per device that injects: (group, rows[n_used], i1_mag[*b,n_elem],
@@ -482,12 +488,32 @@ def _harmonic_injections(
                 [_as_rt(x, rdt, device) for x in p_list], dim=-1
             )  # [*b,n_elem]
             q_t = torch.stack([_as_rt(x, rdt, device) for x in q_list], dim=-1)
-            s0 = torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
 
             rows = rows_grp[ki]  # [n_used]
             v_used = v1.index_select(-1, rows).to(cdt)  # [*vbatch, n_used]
             # V_term[..., e] = sum_u M[e,u] V_used[..., u].
             vt = torch.einsum("eu,...u->...e", m_c, v_used)  # [*vbatch, n_elem]
+
+            # The harmonic current scales from the FUNDAMENTAL current the device
+            # actually draws. For a controlled inverter that is the control-resolved
+            # (P, Q) at the converged fundamental voltage (consistent with the
+            # control-aware fundamental solve); otherwise it is the base operating point.
+            if getattr(a, "control", None) is not None:
+                is_delta = grp.connection == WindingConnection.DELTA
+                v0 = phase_voltage_magnitude(
+                    node_map[a.node].u_rated_v,
+                    len(node_map[a.node].phases),
+                    line_to_line=is_delta,
+                )
+                v_pu = (torch.abs(vt) / v0).unsqueeze(-2)  # [*vbatch, 1, n_elem]
+                p_eff, q_eff = resolve_injection_power(
+                    a.control, p_t, v_pu, rdt=rdt, device=device
+                )
+                s0 = torch.complex(
+                    sign * p_eff.squeeze(-2), sign * q_eff.squeeze(-2)
+                ).to(cdt)  # [*b, n_elem]
+            else:
+                s0 = torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
             # Guard the conj(vt) divide for a dead/disconnected terminal (vt == 0)
             # or a gradcheck perturbation toward zero: mask the DENOMINATOR before
             # dividing (so conj(s0)/0 never enters the graph), then mask the RESULT

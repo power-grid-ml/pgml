@@ -557,6 +557,53 @@ Usage example::
     # ds.perturbations   list of ground-truth dicts (perturbation_sweep only)
     # ds.meta      full sidecar dict
 
+Storage dispatch and SoC integration
+--------------------------------------
+
+:class:`~pgml.schemas.grid_schema.Storage` elements appear in the power-flow
+snapshot as a signed ``(P, Q)`` injection (``p_nom_w > 0`` = discharging /
+injecting).  What couples timesteps is the state of charge (SoC) and the
+dispatch decision; these are resolved outside the per-snapshot solve into a
+realized per-step active-power sequence the solver consumes.
+
+:func:`~pgml.scenarios.integrate_soc`
+    Realizes a requested power sequence ``[*batch, T]`` under SoC limits and
+    an optional power rating.  Returns a
+    :class:`~pgml.scenarios.StorageDispatchResult` with the realized power and
+    (when a capacity is given) the SoC and energy trajectories.  Uses torch
+    arithmetic so gradients flow through the realized setpoint value; no
+    gradient flows through the dispatch decision itself.
+
+:func:`~pgml.scenarios.dispatch_storage`
+    Convenience wrapper: reads ``energy_capacity_wh``, ``soc``, ``soc_min`` /
+    ``soc_max``, efficiencies, and ``p_rated_w`` from a
+    :class:`~pgml.schemas.grid_schema.Storage` element and delegates to
+    :func:`~pgml.scenarios.integrate_soc`.
+
+:func:`~pgml.scenarios.storage_operating_point`
+    Converts a ``{storage_id: realized_power_w}`` dict from a dispatch step
+    into the ``operating_point`` format consumed by
+    :func:`~pgml.solver.solve_power_flow` /
+    :func:`~pgml.solver.solve_harmonic_flow`.
+
+Example — one-day dispatch cycle::
+
+    from pgml.scenarios import dispatch_storage, storage_operating_point
+
+    # storage is a Storage element with a 10 kWh capacity, 50 % initial SoC
+    result = dispatch_storage(
+        storage,
+        requested_power_w=[5000.0] * 4 + [-3000.0] * 4,   # charge/discharge
+        dt_s=3600.0,
+    )
+    # result.realized_power_w  [8]  — clamped by SoC/rating
+    # result.soc               [9]  — SoC at each step boundary (soc[0] = initial)
+
+    # Build solver operating_point for step 2:
+    op = storage_operating_point(
+        {storage.id: float(result.realized_power_w[2])}
+    )
+
 .. automodule:: pgml.scenarios
    :members:
    :show-inheritance:

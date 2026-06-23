@@ -3,12 +3,26 @@
 These three files are the single source of truth. Import them; never edit them.
 
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
-  ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/ShuntAppliance),
+  ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),
   FrequencyParam, Spectrum, TypeLibrary, plus input-convention DTOs and converters'
   target types. Phase-domain, SI, L/C storage, pi-form + ComplexTap, no complex in
   the schema (real pairs), structured unit metadata via `si_field`. Conductor geometry:
   `ConductorPlacement` (x/y/GMR/radius/Rdc, tensor-capable) + `LineGeometry`; a
   `Line.conductor_geometry` makes assembly use the Carson/Deri path (`pgml.geometry`).
+  - DER / inverter control + storage (`references/der_pv_storage_modeling.md`):
+    `Load`/`Generator`/`Storage` share the `InjectionAppliance` base (consumers test
+    `isinstance(a, InjectionAppliance)`; sign = +1 Load, −1 Generator/Storage). `Generator`
+    and `Storage` carry an optional `control: InverterControl` — a discriminated union
+    (`kind`) of `ConstantPowerFactorControl`, `ConstantReactivePowerControl`,
+    `PowerFactorWattControl`, `VoltVarControl`, `VoltWattControl`, `VoltVarVoltWattControl`,
+    each over `InverterControlBase` (`s_rated_va` capability circle, `smoothing` half-width).
+    Curves use the generic tensor-capable `Characteristic` (x_values/y_values, linear/cubic).
+    `Storage`: signed `p_nom_w` (>0 discharge/inject), plus inert energy-state fields
+    (`energy_capacity_wh`, `soc`, `soc_min/max`, `efficiency_charge/discharge`, `p_rated_w`)
+    consumed only by `pgml.scenarios` dispatch. `consumer_type` is now the closed
+    `ConsumerType` enum (str-enum; `"pv"` etc. still validate; ML categorical, no physics).
+    Control is honored by the NONLINEAR solve (`device_current_injections`); the linear
+    const-Z assembler uses the base P/Q.
 - `result_schema.py` — output: ResultSet, SolverDiagnostics, NodeResult (v_re/v_im),
   BranchResult (i_from_*, i_to_*), InjectionResult; optional per-phase P/Q/S;
   indexed by frequency_hz; phasors as (real, imag).
