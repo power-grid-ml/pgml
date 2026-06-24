@@ -128,3 +128,9 @@ verified `batched == loop-of-individual`).
   recovery) — extends `perturbation_sweep` with a branch-aware selector + matrix ground truth.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
 - Beta / scipy-backed distributions (no closed-form icdf).
+- **Long-term temporal-pattern simulation mode** — `CoherentSpectrumConfig` models only
+  short/medium-term dynamics (Markov mode dwell + AR(1) jitter over `T` steps). A long-horizon
+  generator with DIURNAL / WEEKLY / SEASONAL device recurrence (e.g. an EV charger active daily,
+  appliances on occupancy schedules) would let temporal state-estimation models (pgl) learn
+  long-range patterns. Needs a device on/off schedule / occupancy process layered on the
+  fingerprint, and longer sequences. Couples to the pgl temporal model's context length.
