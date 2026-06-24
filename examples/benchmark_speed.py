@@ -593,9 +593,19 @@ def make_plots(out: Path, rows: list[dict], dims: dict) -> None:
 # driver
 # ---------------------------------------------------------------------------
 def batch_sizes_for(max_batch: int, quick: bool) -> list[int]:
+    """Batch-size sweep up to ``max_batch``.
+
+    Uses the predefined base points, then EXTENDS the geometric progression (x4) up to
+    ``max_batch`` so a large ``--max-batch`` is actually exercised instead of being
+    silently capped at the base's last point. ``max_batch`` itself is always included.
+    """
     base = [1, 16, 64] if quick else [1, 8, 32, 128, 512]
-    sizes = sorted({b for b in base if b <= max_batch} | {min(max_batch, base[-1])})
-    return sizes
+    sizes = {b for b in base if b <= max_batch} | {max_batch}
+    b = base[-1]
+    while b < max_batch:
+        b *= 4
+        sizes.add(min(b, max_batch))
+    return sorted(s for s in sizes if s >= 1)
 
 
 def print_summary(rows: list[dict], dims: dict) -> None:

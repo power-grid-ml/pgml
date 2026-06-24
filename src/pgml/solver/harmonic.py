@@ -201,20 +201,72 @@ def lu_factor_system(
     return FactoredSystem("ideal", lu, piv, n, free_rows, fixed_rows, y_fs)
 
 
+def _lu_solve_shared(lu: Tensor, piv: Tensor, rhs: Tensor) -> Tensor:
+    """Solve ``LU x = rhs`` reusing ONE factorization across a whole scenario batch.
+
+    ``lu`` / ``piv`` carry the factorization's own batch ``*fb`` (``lu`` is
+    ``[*fb, m, m]``, ``piv`` is ``[*fb, m]``); ``rhs`` is ``[*scenario, *fb, m]`` where
+    the leading ``*scenario`` dims index independent right-hand sides that SHARE the
+    factorization (the network is constant across the batch — only the injections vary).
+    Those scenario dims are folded into the trailing multiple-RHS axis of
+    :func:`torch.linalg.lu_solve`, so the factorization is solved against all
+    ``prod(scenario)`` columns at once and is NEVER broadcast/replicated across the batch.
+    Memory is ``O(prod(fb)*m^2 + prod(batch)*m)`` instead of the ``O(prod(batch)*m^2)`` a
+    per-scenario LU broadcast would cost — the difference between fitting and OOMing for a
+    large batch (a ``[B, H, N, N]`` LU tile dwarfs the ``[B, H, N]`` solution). Fully
+    differentiable; returns ``[*scenario, *fb, m]`` (same shape ``solve`` would give).
+    """
+    m = lu.shape[-1]
+    fb = tuple(lu.shape[:-2])
+    nfb = len(fb)
+    fb_numel = 1
+    for sz in fb:
+        fb_numel *= sz
+    batch = torch.broadcast_shapes(fb, rhs.shape[:-1])  # full leading batch
+    rhs_b = rhs.broadcast_to(*batch, m)  # [*batch, m]
+
+    if fb_numel == 1:
+        # Exactly one factorization (no per-harmonic axis, or a singleton one): EVERY
+        # leading dim is just another right-hand side. Collapse them into the columns.
+        k = 1
+        for sz in batch:
+            k *= sz
+        lu_k = lu.reshape(m, m)
+        piv_k = piv.reshape(m)
+        cols = rhs_b.reshape(k, m).transpose(0, 1).contiguous()  # [m, k]
+        sol = torch.linalg.lu_solve(lu_k, piv_k, cols)  # [m, k]
+        return sol.transpose(0, 1).reshape(*batch, m)
+
+    # Distinct factorizations along the trailing ``nfb`` dims of ``batch`` (== ``fb``);
+    # the leading dims are the scenario batch -> fold them into the column axis.
+    nb = len(batch)
+    n_sb = nb - nfb
+    sb = batch[:n_sb]
+    k = 1
+    for sz in sb:
+        k *= sz
+    perm = list(range(n_sb, nb)) + [nb] + list(range(n_sb))  # [*fb, m, *sb]
+    cols = rhs_b.permute(*perm).reshape(
+        *fb, m, k
+    )  # [*fb, m, K] (contiguous after reshape)
+    sol = torch.linalg.lu_solve(lu, piv, cols)  # [*fb, m, K]
+    sol = sol.reshape(*fb, m, *sb)
+    inv = list(range(nfb + 1, nfb + 1 + n_sb)) + list(range(nfb)) + [nfb]
+    return sol.permute(*inv)  # [*scenario, *fb, m]
+
+
 def solve_factored(
     fac: FactoredSystem, i_inj: Tensor, *, v_fixed: Optional[Tensor] = None
 ) -> Tensor:
     """Solve ``Y V = I`` for a new RHS against a cached factorization (see
     :func:`lu_factor_system`). Identical result to :func:`solve_harmonic` with the same
     ``Y`` / slack mode; only the factorization is reused. Returns ``[*batch, N]`` (the
-    leading dims broadcast ``i_inj`` against the factorization)."""
+    leading dims broadcast ``i_inj`` against the factorization). The scenario batch is
+    solved as MULTIPLE right-hand sides of the one shared factorization
+    (:func:`_lu_solve_shared`), so the dense ``Y`` is never tiled across the batch."""
     n = fac.n
     if fac.mode == "norton":
-        batch = torch.broadcast_shapes(fac.lu.shape[:-2], i_inj.shape[:-1])
-        lu = fac.lu.broadcast_to(*batch, n, n)
-        piv = fac.piv.broadcast_to(*batch, n)
-        i_b = i_inj.broadcast_to(*batch, n)
-        return torch.linalg.lu_solve(lu, piv, i_b.unsqueeze(-1)).squeeze(-1)
+        return _lu_solve_shared(fac.lu, fac.piv, i_inj)
 
     if v_fixed is None:
         raise InputError("Ideal-slack factored solve requires `v_fixed`.")
@@ -222,6 +274,8 @@ def solve_factored(
     f, s = free_rows.shape[0], fixed_rows.shape[0]
     vf = v_fixed.to(dtype=fac.lu.dtype, device=fac.lu.device)
     i_free = i_inj.index_select(-1, free_rows)  # [*ib, F]
+    # Build the corrected RHS ``I_free - Y_fs v_fixed`` (cheap: ``S`` slack rows), then
+    # back-substitute it against the shared free-block factorization as multiple RHS.
     batch = torch.broadcast_shapes(
         fac.lu.shape[:-2], i_free.shape[:-1], y_fs.shape[:-2], vf.shape[:-1]
     )
@@ -230,9 +284,7 @@ def solve_factored(
     rhs = i_free.broadcast_to(*batch, f) - torch.matmul(
         y_fs_b, vf_b.unsqueeze(-1)
     ).squeeze(-1)  # [*batch, F]
-    lu = fac.lu.broadcast_to(*batch, f, f)
-    piv = fac.piv.broadcast_to(*batch, f)
-    v_free = torch.linalg.lu_solve(lu, piv, rhs.unsqueeze(-1)).squeeze(-1)
+    v_free = _lu_solve_shared(fac.lu, fac.piv, rhs)  # [*batch, F]
     v_full = torch.zeros(*batch, n, dtype=fac.lu.dtype, device=fac.lu.device)
     v_full = v_full.scatter(-1, free_rows.expand(*batch, f), v_free)
     v_full = v_full.scatter(-1, fixed_rows.expand(*batch, s), vf_b)
