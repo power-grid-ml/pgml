@@ -188,6 +188,34 @@ verified empirically). New orchestration:
   - DIFFERENTIABLE end to end (network params, load P/Q, AND harmonic injections)
     and BATCHED over scenario dims, same conventions as `solve_power_flow`.
 
+- `assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point=None,
+     harmonic_injection=None, node_sources=None, symmetry=None,
+     dtype=torch.complex128, device=None) -> (Y, I, index)`
+  - Exposes the per-harmonic LINEAR system `Y(h) V(h) = I(h)` for orders `h > 1` —
+    EXACTLY the `(yh, ih)` `solve_harmonic_flow` builds (`assemble_network_ybus` +
+    source Norton stamp for `Y`; `_harmonic_injections` + `node_sources` for `I`), so
+    `solve_harmonic(Y, I)` reproduces the harmonic slices. The harmonic network is
+    LINEAR, hence `r(V) = einsum('...hij,...hj->...hi', Y, V) − I` is the
+    physics-consistency residual (`≈ 0` at the true `V`); the downstream consistency
+    package (pgl) forms it without re-deriving the assembly. `solve_harmonic_flow`
+    CALLS this (single source of the harmonic assembly — no duplication).
+  - `harmonic_orders`: orders `h > 1` only (order 1 is the nonlinear fundamental —
+    passing 1 raises `InputError`). `v1`: converged fundamental node voltage
+    `[*batch, N]` complex (typically `solve_power_flow(grid, ...).v`), aligned to
+    `index`. `operating_point` / `harmonic_injection` / `node_sources` / `symmetry`:
+    same meaning/format as `solve_harmonic_flow` (resolve `symmetry` upstream and pass
+    the canonical string to reproduce a `solve_harmonic_flow` run exactly).
+  - Returns `Y` complex `[Hh, N, N]` (or `[*batch, Hh, N, N]` if a BATCHED voltage
+    `node_source` promotes it), `I` complex `[*batch, Hh, N]`, and the
+    `NodePhaseIndex`. `device=None` -> `v1.device`; honours `dtype`/`device`.
+  - DIFFERENTIABLE (grad to grid params, `v1`, and the injections; no
+    `.item()/.detach()/.numpy()`, no in-place on tracked tensors) + GPU + batched.
+    `v1` enters `I(h)` via each device's fundamental terminal current
+    `I1_elem = sign·conj(S0_elem)/conj(V_term)` (and `E_h` for voltage `node_sources`).
+  - Self-check: `tests/differentiability/test_harmonic_system_residual_gradcheck.py`
+    (float64 gradcheck of `r = Y·V − I` w.r.t. `V` and a line `R`; `r ≈ 0` at the true
+    `V = solve_harmonic(Y, I)`).
+
 ### Steps (per the OpenDSS model)
 1. Fundamental: `pf = solve_power_flow(grid, slack=slack, operating_point=...)`.
    Compute each device's FUNDAMENTAL current phasor `I1` (per phase) from the

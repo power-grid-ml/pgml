@@ -5,6 +5,11 @@ Public API
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, operating_point,
   harmonic_injection, node_sources, include_load_shunt, tol, max_iter, dtype,
   device, symmetry) -> HarmonicFlowResult``
+- ``assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point,
+  harmonic_injection, node_sources, symmetry, dtype, device) -> (Y, I, index)`` —
+  the assembled per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders
+  ``h > 1`` (the building block of :func:`solve_harmonic_flow`'s harmonic slices),
+  so ``r(V) = Y(h)·V − I(h)`` is the physics-consistency residual.
 - ``NodeHarmonicSource`` — per-node harmonic "error" source (Thevenin / Norton),
   injected only at orders ``h > 1`` (see ``references/error_injection.md``).
 
@@ -230,7 +235,6 @@ def solve_harmonic_flow(
     if not orders:
         raise InputError("harmonic_orders must be non-empty.")
 
-    cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
     index = node_phase_index(grid)
@@ -260,28 +264,17 @@ def solve_harmonic_flow(
     harm = [h for h in orders if h != 1]
     v_by_order: dict[int, Tensor] = {1: v1}
     if harm:
-        freqs = [h * f0 for h in harm]
-        fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
-        yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
-        if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
-            yh = yh.unsqueeze(0)
-        yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
-        ih = _harmonic_injections(
+        yh, ih, _ = assemble_harmonic_system(
             grid,
-            v1,
-            index,
             harm,
-            operating_point,
-            harmonic_injection,
-            cdt,
-            rdt,
-            device,
-            asymmetric,
-        )  # [*batch, Hh, N]
-        if node_sources:
-            yh, ih = _apply_node_sources(
-                node_sources, grid, v1, index, harm, yh, ih, cdt, rdt, device
-            )
+            v1,
+            operating_point=operating_point,
+            harmonic_injection=harmonic_injection,
+            node_sources=node_sources,
+            symmetry=sym_resolved,
+            dtype=dtype,
+            device=device,
+        )
         # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
         # case — the batch varies injections, not the network), factor each order ONCE
         # and back-substitute the whole batch instead of re-factoring per scenario. A
@@ -301,6 +294,119 @@ def solve_harmonic_flow(
     v = torch.stack(cols, dim=-2)  # [*batch, H, N]
     frequencies_hz = torch.as_tensor([h * f0 for h in orders], dtype=rdt, device=device)
     return HarmonicFlowResult(v=v, frequencies_hz=frequencies_hz, index=index, pf=pf)
+
+
+def assemble_harmonic_system(
+    grid: Grid,
+    harmonic_orders,
+    v1: Tensor,
+    *,
+    operating_point: Optional[dict] = None,
+    harmonic_injection: Optional[dict] = None,
+    node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
+    symmetry: Optional[str] = None,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+) -> tuple[Tensor, Tensor, NodePhaseIndex]:
+    """Assemble the per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders ``h > 1``.
+
+    Returns EXACTLY the ``(Y, I)`` that :func:`solve_harmonic_flow` builds for the
+    requested harmonic orders, so ``solve_harmonic(Y, I)`` reproduces the harmonic
+    slices of :func:`solve_harmonic_flow`. The harmonic network is LINEAR, so
+    ``V(h) = solve_harmonic(Y, I)`` and ``r(V) = Y(h)·V − I(h)`` is the
+    physics-consistency residual (``≈ 0`` at the true ``V``). This is the hook a
+    downstream package uses to form that residual without re-deriving the assembly.
+
+    ``Y(h)`` is the passive network admittance at ``h·f0``
+    (:func:`pgml.assembly.assemble_network_ybus`) plus the source Norton shunt — the
+    source is held at zero harmonic voltage (no ideal slack at harmonics) unless a
+    ``node_sources`` voltage source stamps a shunt. ``I(h)`` is the sum of each
+    device's harmonic current injection (:func:`_harmonic_injections`) plus any
+    ``node_sources`` Norton/Thevenin current. The fundamental voltage ``v1`` enters
+    ``I(h)`` through each device's fundamental terminal current
+    ``I1_elem = sign·conj(S0_elem)/conj(V_term)`` (and, for voltage ``node_sources``,
+    through ``E_h``), so gradients flow to ``v1``, to grid parameters (via ``Y(h)``
+    and ``I1_elem``), and to the harmonic injection / node-source spectra.
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid`.
+    harmonic_orders:
+        Iterable of integer orders ``h > 1`` to assemble (order 1 is the fundamental
+        and is solved nonlinearly by :func:`solve_power_flow`; passing 1 here raises).
+    v1:
+        Converged fundamental node voltage ``[*batch, N]`` complex (typically
+        ``solve_power_flow(grid, ...).v``). Aligned to the returned ``index`` layout.
+    operating_point:
+        Optional scenario P/Q override, forwarded to the harmonic-injection power
+        resolution (same meaning as in :func:`solve_harmonic_flow`).
+    harmonic_injection:
+        Optional per-device spectrum override (same format/convention as in
+        :func:`solve_harmonic_flow`).
+    node_sources:
+        Optional per-node Thevenin/Norton harmonic disturbance sources (see
+        :class:`NodeHarmonicSource`), applied at the requested orders.
+    symmetry:
+        Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
+        ``"asymmetric"`` (``None`` -> config), governing per-phase vs balanced load
+        modeling in the harmonic injection. Resolve it ONCE upstream and pass the
+        canonical string when reproducing :func:`solve_harmonic_flow` exactly.
+    dtype, device:
+        Complex dtype and device for the assembled system (``device=None`` ->
+        ``v1.device``). Honoured throughout; gradients flow on the live tape.
+
+    Returns
+    -------
+    Y:
+        Complex ``[Hh, N, N]`` (one slice per requested order) — or ``[*batch, Hh,
+        N, N]`` if a BATCHED voltage ``node_source`` promotes it.
+    I:
+        Complex ``[*batch, Hh, N]`` harmonic nodal current injection.
+    index:
+        The compact :class:`NodePhaseIndex` describing the row layout of ``v1`` /
+        ``Y`` / ``I``.
+    """
+    orders = [int(h) for h in harmonic_orders]
+    if not orders:
+        raise InputError("harmonic_orders must be non-empty.")
+    if any(h == 1 for h in orders):
+        raise InputError(
+            "assemble_harmonic_system assembles the LINEAR harmonic orders h > 1; "
+            "order 1 is the nonlinear fundamental solved by solve_power_flow."
+        )
+
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    f0 = float(grid.base_frequency_hz)
+    index = node_phase_index(grid)
+    if device is None:
+        device = v1.device
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+
+    freqs = [h * f0 for h in orders]
+    fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
+    yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
+    if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
+        yh = yh.unsqueeze(0)
+    yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
+    ih = _harmonic_injections(
+        grid,
+        v1,
+        index,
+        orders,
+        operating_point,
+        harmonic_injection,
+        cdt,
+        rdt,
+        device,
+        asymmetric,
+    )  # [*batch, Hh, N]
+    if node_sources:
+        yh, ih = _apply_node_sources(
+            node_sources, grid, v1, index, orders, yh, ih, cdt, rdt, device
+        )
+    return yh, ih, index
 
 
 # ---------------------------------------------------------------------------
@@ -748,4 +854,9 @@ def _add_to_diagonal(yh, y_diag, cdt, device):
     return yh_b + diag_mat
 
 
-__all__ = ["solve_harmonic_flow", "HarmonicFlowResult", "NodeHarmonicSource"]
+__all__ = [
+    "solve_harmonic_flow",
+    "assemble_harmonic_system",
+    "HarmonicFlowResult",
+    "NodeHarmonicSource",
+]

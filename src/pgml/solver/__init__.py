@@ -23,6 +23,13 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   Frozen dataclass describing a per-node harmonic "error" source
   (Thévenin voltage or Norton current) injected at orders ``h > 1``.
   Physics: ``references/error_injection.md``.
+- ``assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point,
+  harmonic_injection, node_sources, symmetry, dtype, device) -> (Y, I, index)``
+  The assembled per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders
+  ``h > 1`` — exactly the ``(Y, I)`` :func:`solve_harmonic_flow` solves, so
+  ``r(V) = Y(h)·V − I(h)`` is the physics-consistency residual (``≈ 0`` at the
+  true ``V``). The fundamental ``v1`` enters ``I(h)`` via each device's
+  fundamental terminal current.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from .harmonic import solve_harmonic
 from .harmonic_flow import (
     HarmonicFlowResult,
     NodeHarmonicSource,
+    assemble_harmonic_system,
     solve_harmonic_flow,
 )
 from .power_flow import (
@@ -56,6 +64,7 @@ __all__ = [
     "loadability_limit",
     "LoadabilityResult",
     "solve_harmonic_flow",
+    "assemble_harmonic_system",
     "HarmonicFlowResult",
     "NodeHarmonicSource",
 ]
