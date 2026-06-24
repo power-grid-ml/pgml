@@ -20,7 +20,7 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
 
 from __future__ import annotations
 
-from .index import NodePhaseIndex, node_phase_index
+from .index import NodePhaseIndex, base_voltage_per_row, node_phase_index
 from .ybus import (
     BranchCurrent,
     YBus,
@@ -41,6 +41,7 @@ BranchCurrent.__module__ = __name__
 __all__ = [
     "NodePhaseIndex",
     "node_phase_index",
+    "base_voltage_per_row",
     "YBus",
     "BranchCurrent",
     "assemble_ybus",

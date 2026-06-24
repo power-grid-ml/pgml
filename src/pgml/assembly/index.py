@@ -115,4 +115,35 @@ def node_phase_index(grid: Grid) -> NodePhaseIndex:
     )
 
 
-__all__ = ["NodePhaseIndex", "node_phase_index"]
+def base_voltage_per_row(
+    grid: Grid,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float64,
+) -> Tensor:
+    """Per-row line-to-neutral base voltage ``[N]``, aligned to :func:`node_phase_index`.
+
+    The per-unit voltage reference for each node-phase row: dividing a state or residual
+    ``[..., N]`` by this puts it in per-unit. Uses the same connection-aware convention as
+    the solver (:func:`pgml.assembly._params.phase_voltage_magnitude`): ``Node.u_rated_v`` is
+    line-to-line for nodes with >= 3 phases (so the L-N base is ``u_rated / sqrt(3)``) and
+    already line-to-neutral for 1-phase nodes.
+
+    This is a fixed reference constant for normalization / per-unit reporting, NOT a value on
+    the differentiable path; if ``u_rated_v`` is a tracked tensor its scalar value is read
+    out. Row order matches :func:`node_phase_index`.
+    """
+    from ._params import phase_voltage_magnitude
+
+    idx = node_phase_index(grid)
+    base = torch.empty(idx.size, dtype=dtype)
+    for node in grid.nodes:
+        u = node.u_rated_v
+        u = float(u.detach().reshape(-1)[0]) if hasattr(u, "detach") else float(u)
+        b = phase_voltage_magnitude(u, len(node.phases))
+        for row in idx.rows(node.id):
+            base[row] = b
+    return base.to(device) if device is not None else base
+
+
+__all__ = ["NodePhaseIndex", "node_phase_index", "base_voltage_per_row"]

@@ -24,6 +24,11 @@ materialisation concern, defined later in the result/ML adapter, NOT here.)
   - `node_id_of(row: int) -> int`, `phase_of(row: int) -> Phase`
   - tensors `node_ids: Tensor[int64][N]`, `phase_codes: Tensor[int64][N]` (a=0,b=1,c=2,n=3)
   - `rows_for_terminal(node_id, phases, *, device=None) -> Tensor[int64]` (vectorized scatter)
+- `base_voltage_per_row(grid, *, device=None, dtype=torch.float64) -> Tensor[N]` — IMPLEMENTED
+  (`index.py`): per-row line-to-neutral base voltage aligned to `node_phase_index` (the
+  per-unit reference; `u_rated/sqrt(3)` for >=3-phase nodes, else `u_rated`, via the
+  connection-aware `_params.phase_voltage_magnitude` convention). A fixed reference constant
+  for per-unit reporting/normalization (NOT on the differentiable path); used by `pgl` metrics.
 
 ## Public API (IMPLEMENTED — final signatures)
 Module: `pgml.assembly`

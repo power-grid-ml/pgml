@@ -18,6 +18,23 @@ inverse/parameter-recovery tool. (Why all-PyTorch: harmonic flow decouples per h
 into a LINEAR complex solve `Y(h)·V(h)=I(h)` whose adjoint is cheap, so gradients flow
 without differentiating iterations.)
 
+## The suite (multi-package monorepo)
+`pgml` is the **base** package; the project is now a monorepo of one-way-dependent packages
+(one distribution, `pip install -e ".[learn]"`). `pgml` imports none of the others.
+
+| package | role | status |
+|---|---|---|
+| **pgml** | power-grid-machine-learning — differentiable, GPU-ready harmonic power flow (the gradient engine) | active (this doc) |
+| **pgl** | power-grid-learn — harmonic state-estimation models + training (DNN/GNN/Graphormer, masking curriculum) | scaffolded — `src/pgl/HANDOFF.md`, `references/pgl/README.md` |
+| **pgg** | power-grid-generation — differentiable synthetic grid generation | scaffold only — `references/pgg/README.md` |
+| **pgd** *(future)* | dashboard: visualize grids, simulation, training/ML process | idea — not started |
+| **pghub** *(future)* | hub: overview of existing grids (load from sources, backing database) | idea — not started |
+
+`pgl`/`pgg` import `pgml`'s PUBLIC API only (`references/pgml/README.md` lists it); they
+never touch `pgml` internals or edit `pgml/schemas/`. Deployment: the clusters have conda
+only (no pixi) and run CUDA 13.0 / 13.2 — torch comes from conda, the packages pip-install on
+top (`deploy/environment.yml`); dev/quick-test on an RTX A2000, large-batch on the cluster.
+
 ## Status — what works (validated)
 Phases 0–3 done. The per-package `CONTEXT.md` and `README.md` hold the detail.
 - **Public API** — `pgml.simulate(grid, config) -> SolvedState` (eager voltages + lazy
@@ -118,15 +135,19 @@ irregular + hard to batch) and the VRAM wall is hit on `B`, not `N`. So sparse i
 here — revisit ONLY if target grids exceed a few thousand buses. The dense wins 1–3 cover the
 distribution-feeder-ML use case.
 
-### B. PyG harmonic state estimation (the ML layer) — new `src/pgml/ml/`, physics-guided
-**What.** Harmonic state estimation from few measurements, trained on the generated data,
-using the equations as physics guidance (the maintainer will brief the SE method).
-**Where the existing pieces are.** Topology: `schemas/grid_schema.py`, layout
-`assembly.node_phase_index`, graph helpers `evaluation/topology.py` → PyG `Data`/`Batch`.
-Physics loss: the `equations/` residual registry (`Y(h)V−I`). Forward model: `pgml.simulate`
-/ `solver.*` / `assembly` (gradients flow params→V; `SolvedState` exposes V / branch currents
-/ spectra). Training data: `scenarios.run_scenarios -> ScenarioResult`; measurement model =
-masked subset of `result_schema`. Deps present: `torch-geometric`, `lightning`, `mlflow`.
+### B. Harmonic state estimation — now its OWN package `pgl` (power-grid-learn)
+**Moved out of pgml.** The ML layer is the `pgl` package (clean API border, separate deps,
+own agents). Design + decisions: `references/pgl/README.md`; open work: `src/pgl/HANDOFF.md`;
+interface ledger: `src/pgl/CONTEXT.md`. Implemented foundations: `pgl.config`/`encoding`/
+`masking`; stubs to build: `pgl.{data,normalization,loss,models,train,metrics}`. Agent:
+**`pgl-ml-engineer`**.
+**pgml pieces pgl consumes** (the public API it builds on): topology
+`assembly.node_phase_index` + `evaluation.topology`; the physics residual `equations/`
+(`Y(h)V−I`); the forward `pgml.simulate`/`solver.*` (gradients flow params→V); training data
+`scenarios.run_scenarios`/`read_dataset`/`write_dataset`; measurement model = masked subset
+of the state. The PyG `Data`/`Batch` builder is a `pgl` concern (`pgl.data.build_graph`),
+built on `node_phase_index` + `evaluation.topology` (which provide networkx topology, not
+PyG). Deps present via the `learn` extra: `torch-geometric`, `lightning`, `mlflow`.
 
 ### C. Frequency-dependent device models (harmonic load shunt + transformer curves) — extend
 **What.** `solve_harmonic_flow` uses the pure current-source injection model
