@@ -30,7 +30,6 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 
-from pgml.equations import registry
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     GenericBranch,
@@ -72,11 +71,6 @@ from ._stamps import (
     shunt_admittance_matrix,
 )
 from .index import NodePhaseIndex, node_phase_index
-
-# ``equations`` is imported so its laws are registered; the assembly uses the
-# same closed-form expressions inline (X=2*pi*f*L, B=2*pi*f*C) for vectorized
-# matrix math, which the registry cannot express (matrix inverse lives here).
-_ = registry  # keep the import meaningful / ensure laws are registered.
 
 
 @dataclass(frozen=True)

@@ -317,7 +317,7 @@ class ConstantParam(GridModel):
 
 class AnalyticParam(GridModel):
     kind: Literal["analytic"] = "analytic"
-    law: str = Field(description="Equation-registry id of the law f -> value.")
+    law: str = Field(description="Identifier of the analytic frequency law f -> value.")
     base_value: float = Field(
         description="Reference-frequency (f0) value the law scales."
     )
@@ -351,7 +351,7 @@ class CurveParam(GridModel):
 
 class EquationParam(GridModel):
     kind: Literal["equation"] = "equation"
-    equation_id: str = Field(description="Equation-registry id.")
+    equation_id: str = Field(description="Identifier of the frequency equation.")
     bindings: dict[str, float] = Field(
         default_factory=dict, description="Symbol->value (SI)."
     )

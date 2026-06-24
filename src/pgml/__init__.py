@@ -14,7 +14,7 @@ High-level entry points (the stable, public surface):
 Lower-level / optional surfaces are reached via their subpackages (so a minimal core
 install need not import the extras): :mod:`pgml.solver` (raw differentiable tensors),
 :mod:`pgml.scenarios` (batched data generation), :mod:`pgml.convert`,
-:mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.config`, :mod:`pgml.equations`,
+:mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.config`,
 :mod:`pgml.assembly`, :mod:`pgml.geometry`.
 """
 

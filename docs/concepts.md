@@ -36,18 +36,6 @@ $$
 This keeps frequency scaling physical and gradients attached to physical
 parameters.
 
-## Residual-form equation registry
-
-The physics equations live in `pgml.equations` as a residual-form registry:
-
-$$
-0 = a - b
-$$
-
-Equations are stored as SymPy expressions and compiled to both torch and numpy
-evaluators.  This separation keeps the physics symbolic and the compute layer
-replaceable.
-
 ## Pi-form branch model
 
 Every branch (line or transformer) contributes a **pi-form primitive admittance

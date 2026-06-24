@@ -130,7 +130,7 @@ and `branch_currents` pick it up automatically — no edit to either dispatch.
 
 ## Stamps (differentiable, vectorized — no Python loop over branches)
 - Per harmonic, per phase. Frequency scaling: `X = 2*pi*f*L`, `B = 2*pi*f*C`
-  (compose from the `equations` registry laws).
+  (closed-form, inline vectorized torch).
 - Series branch (Line/Switch/GenericBranch): primitive
   `[[Ys, -Ys], [-Ys, Ys]]` where `Ys = (R(f) + jX(f))^-1` (n×n matrix inverse via
   `torch.linalg.inv`); shunt `Y_sh = G + jB` split half to each terminal diagonal.

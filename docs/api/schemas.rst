@@ -7,7 +7,7 @@ scenario (``Scenario``) representation.  Import canonical types from
 here — do **not** modify these files.
 
 See also: :doc:`/concepts` for the modelling conventions (phase-domain,
-SI units, float/tensor duality, residual-form equations).
+SI units, float/tensor duality).
 
 Appliance types
 ---------------

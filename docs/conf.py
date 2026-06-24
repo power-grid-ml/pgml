@@ -28,7 +28,6 @@ def _patch_module(pkg_path: str, names: list) -> None:
 
 _patch_module("pgml.assembly", ["NodePhaseIndex", "YBus"])
 _patch_module("pgml.solver", ["PowerFlowResult", "HarmonicFlowResult"])
-_patch_module("pgml.equations", ["Equation", "SymbolMeta"])
 _patch_module("pgml.scenarios", ["SampledScenarios", "ScenarioResult"])
 _patch_module("pgml.geometry", [
     "series_impedance", "internal_impedance", "potential_coefficients",

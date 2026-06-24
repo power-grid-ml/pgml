@@ -15,7 +15,6 @@ geometry
 scenarios
 evaluation
 convert
-equations
 config
 ```
 
@@ -39,5 +38,4 @@ config
 | {mod}`pgml.scenarios` | Reproducible config-driven batched scenario sampling |
 | {mod}`pgml.evaluation` | Comparison plots (references vs our solve) |
 | {mod}`pgml.convert` | Converters from pandapower / power-grid-model / OpenDSS |
-| {mod}`pgml.equations` | Residual-form physical-law registry |
 | {mod}`pgml.config` | Documented modelling defaults |

@@ -55,7 +55,6 @@ docs/
     scenarios.rst   pgml.scenarios
     evaluation.rst  pgml.evaluation
     convert.rst     pgml.convert
-    equations.rst   pgml.equations
     config.rst      pgml.config
   requirements.txt  RTD pip requirements
   README.md         This file
