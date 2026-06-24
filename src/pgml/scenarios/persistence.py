@@ -21,6 +21,7 @@ This is result I/O, not the differentiable core: tensors are detached and moved 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -31,8 +32,40 @@ import torch
 from torch import Tensor
 
 from ..errors import InputError
+from ..schemas import SCHEMA_VERSION
 from . import config as _cfg
 from .run import ScenarioResult
+
+_log = logging.getLogger("pgml")
+
+
+def _check_schema_version(stored: Optional[str]) -> None:
+    """Validate a dataset's stored ``schema_version`` against the current contract.
+
+    A MAJOR-version mismatch is incompatible (raises); a minor/patch drift or a missing
+    version (written before versioning) is read best-effort with a warning. The schema major
+    tracks the library major during pre-1.0 development (see ``pgml.schemas.SCHEMA_VERSION``).
+    """
+    if stored is None:
+        _log.warning(
+            "dataset has no schema_version (written before versioning); current is %s — "
+            "fields may have drifted.",
+            SCHEMA_VERSION,
+        )
+        return
+    if stored == SCHEMA_VERSION:
+        return
+    if stored.split(".")[0] != SCHEMA_VERSION.split(".")[0]:
+        raise InputError(
+            f"dataset schema_version {stored!r} is incompatible with the current schema "
+            f"{SCHEMA_VERSION!r} (major-version mismatch)."
+        )
+    _log.warning(
+        "dataset schema_version %s differs from the current %s (minor/patch drift; reading "
+        "best-effort).",
+        stored,
+        SCHEMA_VERSION,
+    )
 
 _VOLTAGES = "voltages.parquet"
 _SAMPLES = "samples.parquet"
@@ -236,7 +269,20 @@ def write_dataset(
     sample_meta = _write_samples(sampled.samples, b, path, compression)
 
     cfg = sampled.config
+    # Reproducibility provenance: the schema contract version + the environment that
+    # produced the float results (config+seed fixes the INPUTS; these tie the stored
+    # voltages to the code/precision that computed them — they can differ across versions).
+    try:
+        import pgml
+
+        _pgml_version = pgml.__version__
+    except Exception:  # pragma: no cover - defensive
+        _pgml_version = None
     meta = {
+        "schema_version": SCHEMA_VERSION,
+        "pgml_version": _pgml_version,
+        "torch_version": torch.__version__,
+        "numpy_version": np.__version__,
         "layout": layout,
         "calculation": "harmonic"
         if result.frequencies_hz is not None
@@ -280,6 +326,7 @@ def read_dataset(path) -> LoadedDataset:
     """
     path = Path(path)
     meta = json.loads((path / _META).read_text(encoding="utf-8"))
+    _check_schema_version(meta.get("schema_version"))
     b, t, h, n = (meta["dims"][k] for k in ("B", "T", "H", "N"))
 
     df = pl.read_parquet(path / _VOLTAGES)

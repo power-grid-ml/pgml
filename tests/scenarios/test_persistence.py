@@ -135,3 +135,30 @@ def test_invalid_layout_raises(grid3, tmp_path):
     res = run_scenarios(grid3, _cfg(n=2))
     with pytest.raises(ValueError, match="layout"):
         write_dataset(res, tmp_path, layout="tall")
+
+
+def test_schema_version_and_provenance(grid3, tmp_path):
+    """meta stamps the schema version + environment fingerprint; read validates it."""
+    import json
+
+    from pgml.errors import InputError
+    from pgml.schemas import SCHEMA_VERSION
+
+    write_dataset(run_scenarios(grid3, _cfg(n=2)), tmp_path)
+    meta = json.loads((tmp_path / "meta.json").read_text())
+    assert meta["schema_version"] == SCHEMA_VERSION
+    assert meta["torch_version"] == torch.__version__ and meta["numpy_version"]
+    read_dataset(tmp_path)  # matching version: clean read
+
+    def _rewrite(version):
+        m = json.loads((tmp_path / "meta.json").read_text())
+        m["schema_version"] = version
+        (tmp_path / "meta.json").write_text(json.dumps(m))
+
+    # a MAJOR-version mismatch is incompatible -> raises
+    _rewrite("9.0.0")
+    with pytest.raises(InputError, match="schema_version"):
+        read_dataset(tmp_path)
+    # a minor/patch drift is read best-effort (no raise)
+    _rewrite("0.0.999")
+    read_dataset(tmp_path)

@@ -2,6 +2,11 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.1"`) stamps the contract version
+into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
+minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
+while the library is < 1.0.0); bump the patch/minor on any contract change.
+
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),
   FrequencyParam, Spectrum, TypeLibrary, plus input-convention DTOs and converters'
