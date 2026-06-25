@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Keep staged Python in sync with the project's ruff rules before it reaches CI.
+#
+# Auto-applies `ruff check --fix` and `ruff format` to the STAGED Python files,
+# re-stages whatever ruff changed, and aborts the commit only if a lint error
+# remains that ruff cannot fix automatically. Formatting and auto-fixable lint
+# never block a commit -- they are simply applied.
+#
+# ruff comes from the pixi-pinned environment (`pixi run -e cpu ruff`) so the hook
+# and CI agree on the exact ruff version. Enable in a fresh clone with:
+#     git config core.hooksPath .githooks
+#
+# Caveat: a partially staged file (`git add -p`) is re-staged in full if ruff
+# changes it, because ruff rewrites the working-tree file. Stage the whole file or
+# commit it separately when that matters.
+
+set -uo pipefail
+
+# Locate pixi even when git runs the hook from an IDE with a trimmed PATH.
+PIXI="$(command -v pixi || true)"
+if [ -z "$PIXI" ] && [ -x "$HOME/.pixi/bin/pixi" ]; then
+  PIXI="$HOME/.pixi/bin/pixi"
+fi
+if [ -z "$PIXI" ]; then
+  echo "pre-commit: pixi not found on PATH; skipping the ruff check." >&2
+  echo "            run 'pixi run -e cpu ruff format src tests && ruff check --fix src tests' manually." >&2
+  exit 0
+fi
+
+# Staged Python files (added / copied / modified / renamed; not deletions).
+mapfile -t -d '' files < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.py' '*.pyi')
+if [ "${#files[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+# Auto-fix: resolve what ruff can (lint first, then format), capturing whether any
+# unfixable lint error remains.
+"$PIXI" run -e cpu ruff check --fix "${files[@]}"
+check_rc=$?
+"$PIXI" run -e cpu ruff format "${files[@]}"
+
+# Re-stage only the files ruff actually rewrote, to avoid pulling in unrelated
+# working-tree changes for files it left untouched.
+for f in "${files[@]}"; do
+  if ! git diff --quiet -- "$f"; then
+    git add -- "$f"
+  fi
+done
+
+if [ "$check_rc" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit: ruff found lint errors it cannot auto-fix (see above). Commit aborted." >&2
+  echo "            fix them and commit again." >&2
+  exit 1
+fi
+exit 0
