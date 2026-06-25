@@ -67,6 +67,7 @@ def _check_schema_version(stored: Optional[str]) -> None:
         SCHEMA_VERSION,
     )
 
+
 _VOLTAGES = "voltages.parquet"
 _SAMPLES = "samples.parquet"
 _META = "meta.json"
