@@ -3,7 +3,7 @@
 The unit tests pin the control math (``resolve_injection_power`` /
 ``evaluate_characteristic`` / ``smooth_clamp``) against hand-computed values; the
 integration tests confirm a controlled :class:`Generator` solves and moves the voltage
-in the physically correct direction. See ``references/der_pv_storage_modeling.md`` §4.2-4.3.
+in the physically correct direction. See ``docs/pgml/modeling/der-pv-storage.md`` §4.2-4.3.
 """
 
 from __future__ import annotations

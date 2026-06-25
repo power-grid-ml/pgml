@@ -3,7 +3,7 @@
 Conductor geometry -> per-frequency line impedance/admittance, the Phase-2
 "geometry -> impedance" path. Closes the harmonic line-impedance gap (OpenDSS applies
 an earth-return + skin correction at every harmonic; naive `X∝h` is wrong). Model =
-OpenDSS **DERI**, verified **bit-exact** vs OpenDSS (`references/opendss/carson.md`).
+OpenDSS **DERI**, verified **bit-exact** vs OpenDSS (`docs/pgml/modeling/references/opendss/carson.md`).
 Fully torch / autograd-safe / GPU-ready / batched over lines and H frequencies;
 gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 
@@ -112,4 +112,4 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   `Z0`. gradcheck w.r.t. R1/X1/R0/X0 and through both assembly paths; CPU/CUDA parity.
   Tests: `tests/reference/test_carson_sequence.py`,
   `tests/differentiability/test_sequence_gradcheck.py`, `tests/gpu/test_device_parity.py`.
-  Decision record: `references/positive_sequence_harmonic_line_model.md`.
+  Decision record: `docs/pgml/modeling/harmonic-line-model.md`.

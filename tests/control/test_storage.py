@@ -4,7 +4,7 @@ The snapshot tests confirm a :class:`Storage` injects with the generator-consist
 (``p_nom_w > 0`` = discharge/inject) and is honoured by the solver exactly like a
 :class:`Generator`. The dispatch tests pin the off-tape SoC integrator
 (:func:`pgml.scenarios.integrate_soc`): energy balance, reserve / capacity curtailment,
-efficiency, rating clamp. See ``references/der_pv_storage_modeling.md`` §4.4.
+efficiency, rating clamp. See ``docs/pgml/modeling/der-pv-storage.md`` §4.4.
 """
 
 from __future__ import annotations

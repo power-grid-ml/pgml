@@ -1,9 +1,10 @@
-# Positive-sequence-aware harmonic line model — decision record
+# Harmonic line model (positive-sequence-aware)
 
-**Status:** implemented. Module:
-`src/pgml/geometry/sequence.py`; wired into assembly via
-`Line.resistance_frequency` (`carson_skin_multiplier` law) and
-`geometry.synthesis.apply_positive_sequence_harmonic_model`.
+How pgml scales a line's impedance with frequency for harmonic studies when only its
+sequence (`R1/X1/R0/X0`) data is known — and why the earth-return term belongs to the
+zero sequence, not the positive sequence. Implemented in `pgml.geometry.sequence` and wired
+into assembly via `Line.resistance_frequency` (the `carson_skin_multiplier` law) and
+`apply_positive_sequence_harmonic_model` / `apply_sequence_aware_harmonic_model`.
 
 ## The problem
 The R/X→geometry synthesis (`geometry/synthesis.synthesize_line_geometry`) reproduces a
@@ -52,7 +53,16 @@ sub-linear) and `R0/R1 ≈ 5` at h = 25. (2) Drive a running OpenDSS with a nati
 `R1/X1/R0/X0` line: its positive sequence comes back as `Z1(h) = R1 + j·X1·(f/f0)`
 exactly (R1 constant, ratio 1.0000 at every harmonic), with the earth correction only in
 `Z0(h)`; the same R/X as a 1-phase line instead carries the earth floor. Both are in
-`tests/reference/test_carson_sequence.py`; the figure is `seq_xr_vs_harmonic.svg`.
+`tests/reference/test_carson_sequence.py`.
+
+```{figure} ../../_static/figures/seq_xr_vs_harmonic.svg
+:alt: R and X versus harmonic order, positive vs zero sequence
+:width: 95%
+
+R/X versus harmonic order on a 3-phase geometry, decomposed into sequences. The
+positive-sequence reactance scales linearly (`X1(h) ∝ h`, no floor); the zero sequence
+carries the sub-linear Carson earth-return reactance and a strongly rising resistance.
+```
 
 ## How different simulation tools model this
 Earth return is, by construction, a **zero-sequence / ground-loop** quantity. Every tool
@@ -67,7 +77,7 @@ Three line-impedance paths, each with its own frequency behaviour:
    ([Line docs](https://opendss.epri.com/Line.html)). The earth model is selectable
    (`earthmodel = Carson | Deri | FullCarson`,
    [Cable modeling](https://opendss.epri.com/CableModelinginOpenDSS.html)). This is the
-   path `pgml.geometry` matches **bit-exact** (`references/opendss/carson.md`).
+   path `pgml.geometry` matches **bit-exact** (see [Carson line constants](references/opendss/carson.md)).
 2. **`LineCode` / impedance-defined** (`R1 X1 R0 X0`, or `Rmatrix Xmatrix`): carries the
    explicit Carson earth-return terms `Rg`, `Xg`
    ([LineCode docs](https://opendss.epri.com/LineCode1.html), default
@@ -252,10 +262,21 @@ enter a balanced feeder), pgml's default **agrees** (`Z1(h) = R1 + j·X1·(f/f0)
 divergence is a property of the *reference setup*, not of the pgml model.
 
 ## Comparison to OpenDSS (honest scope)
-`examples/evaluate_line_sequence_harmonics.py` (figure `feeder_h13.svg`) overlays, on
+`examples/evaluate_line_sequence_harmonics.py` overlays, on
 IEEE-33: the corrected positive-sequence model, the naive model, the single-conductor
 Carson model (== OpenDSS **1-phase** `LineGeometry`, which we still match bit-exact on the
-SAME geometry), and the live OpenDSS profile from that geometry. The single-conductor
+SAME geometry), and the live OpenDSS profile from that geometry.
+
+```{figure} ../../_static/figures/feeder_h13.svg
+:alt: IEEE-33 h=13 voltage profile across line models
+:width: 95%
+
+IEEE-33 voltage profile at the 13th harmonic under four line models. The
+single-conductor earth correction (== OpenDSS 1-phase `LineGeometry`) shifts the profile
+materially; the corrected positive-sequence model removes that earth-floor artifact while
+keeping the (smaller) skin-effect resistance rise.
+```
+ The single-conductor
 earth correction shifts the h = 13 voltage profile materially (≈ 0.0081 vs 0.0095 pu at
 the feeder end); the corrected model removes that earth-floor artifact while keeping the
 skin-effect resistance rise (a smaller, second-order effect on `|V|`). Note this overlay

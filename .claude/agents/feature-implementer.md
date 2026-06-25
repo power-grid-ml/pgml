@@ -10,7 +10,7 @@ orchestrator's conversation — your context is only this prompt and the files y
 read.
 
 FIRST, ALWAYS READ (in order):
-1. `references/ARCHITECTURE.md`
+1. `CONTEXT.md`
 2. `CLAUDE.md` (the two hard constraints)
 3. `src/pgml/schemas/CONTEXT.md` and the schema files you depend on
 4. The `CONTEXT.md` of the module you are assigned (equations/ assembly/ solver/)

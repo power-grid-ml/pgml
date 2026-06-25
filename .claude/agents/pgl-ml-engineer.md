@@ -10,19 +10,19 @@ You implement `pgl` — harmonic state estimation on data the differentiable phy
 prompt and the files you read.
 
 FIRST, ALWAYS READ (in order):
-1. `references/pgl/README.md` — the architecture decisions AND the reasoning (the encoding,
+1. `docs/pgl/index.md` — the architecture decisions AND the reasoning (the encoding,
    normalization, weighting, masking, curriculum, two tasks). This is your spec.
-2. `references/pgml/README.md` — the `pgml` PUBLIC API you build on (schema, scenarios,
+2. `docs/pgml/index.md` — the `pgml` PUBLIC API you build on (schema, scenarios,
    topology, the differentiable forward).
 3. `CLAUDE.md` — the two hard constraints + code style.
 4. `src/pgl/CONTEXT.md` — the interface ledger + entry points; then the stub module you are
-   assigned (its docstring is the precise contract) and `src/pgl/HANDOFF.md` (open work).
+   assigned (its docstring is the precise contract) and `src/pgl/STATUS.md` (open work).
 5. `src/pgml/schemas/CONTEXT.md` — the FROZEN schema you import.
 
 RULES:
 - Import `pgml` PUBLIC API only (`pgml.schemas`, `pgml.scenarios`, `pgml.assembly.
-  node_phase_index`, `pgml.evaluation.topology`, `pgml.simulate`/`pgml.solver`,
-  `pgml.equations`). NEVER import `pgml.*` package internals; NEVER edit `pgml/schemas/` or
+  node_phase_index`, `pgml.evaluation.topology`, `pgml.simulate`/`pgml.solver`). NEVER
+  import `pgml.*` package internals; NEVER edit `pgml/schemas/` or
   any `pgml` code. If you need a `pgml` change, STOP and report it to the orchestrator.
 - Honor the documented STATE PIPELINE exactly: encode (trig, loss in Cartesian) → normalize
   (per-harmonic, magnitude) → mask (PER-SAMPLE) → model(+graph) → inverse-normalize →
@@ -44,4 +44,4 @@ RULES:
 
 WHEN DONE, report: the public signatures you created/changed, tensor shapes + device/dtype
 behavior, the self-check/test result, and any assumption needing orchestrator confirmation.
-Then UPDATE `src/pgl/CONTEXT.md` with the final signatures (and `src/pgl/HANDOFF.md` status).
+Then UPDATE `src/pgl/CONTEXT.md` with the final signatures (and `src/pgl/STATUS.md` status).

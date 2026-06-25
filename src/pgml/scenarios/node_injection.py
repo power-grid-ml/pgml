@@ -1,7 +1,7 @@
 """Per-node harmonic "error"-source sweep (the transient-injection study).
 
 Sweeps a per-node harmonic source (the Thévenin/Norton source of
-``references/error_injection.md``) over a set of nodes — one node per scenario — and
+``docs/pgml/modeling/error-injection.md``) over a set of nodes — one node per scenario — and
 returns the batched node voltages, so you can map how a harmonic injected at each node
 spreads through the grid. Unlike :func:`~pgml.scenarios.spectrum_sweep` (a device Norton
 current tied to a load's fundamental), this injects at ANY node of a user-set strength

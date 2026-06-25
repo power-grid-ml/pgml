@@ -134,9 +134,6 @@ terminal voltage appears in the normalisation:
 - **DELTA-3**: `M` is the circulant difference matrix — the terminal voltage
   is the relevant line-to-line voltage.
 
-Both connections were guarded by `NotImplementedError` in Increment 1; that
-guard is removed as of Increment 2.
-
 ### Symmetric vs per-phase spectra
 
 | Field | Behaviour |

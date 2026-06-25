@@ -1,6 +1,7 @@
 # OpenDSS harmonic model — exact conventions (empirically verified)
 
-Ground-truth reference for implementing pgml's differentiable harmonic power flow.
+The OpenDSS harmonic conventions that pgml's differentiable harmonic power flow reproduces and
+validates against.
 The spectrum phase convention below was derived EMPIRICALLY by running OpenDSS
 (opendssdirect 0.9.4) on a 1-phase test circuit and reading the injected currents
 and per-order bus voltages off monitors — not from docs, so it is trustworthy.

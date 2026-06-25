@@ -21,7 +21,7 @@ Single-phase, **Carson** line model. Injects a harmonic **error source at each n
 (a Thévenin voltage source, or `KIND="current"` for a Norton source) carrying the
 voltage spectrum from `spectra/VoltageSag40ms.csv`, of strength `SOURCE_POWER_VA`
 (short-circuit power) — applied only at h>1 so the fundamental is exact (the model in
-`references/error_injection.md`). Sweeps every node with
+`docs/pgml/modeling/error-injection.md`). Sweeps every node with
 `pgml.scenarios.run_node_injection_sweep`, records the **h=11 voltage at every node for
 every injection node** minus a no-injection reference, **normalised per node by the local
 fundamental `|V1|`** → an `m × i` **per-unit spread matrix** `|V_h11|/|V1|`
@@ -69,7 +69,7 @@ batch; one batched solve produces aligned results; persist reproducibly.
 | Random per-device harmonic spectra (EN 50160-bounded) | `ParameterSpec(field="h_mag"|"h_phase", orders=..., harmonic_reference="en50160")` |
 | Node-coherent harmonic "fingerprints" over a time sequence | `CoherentSpectrumConfig` → `sample_coherent_spectra` |
 | Inject a device (load) harmonic current at each node, one at a time | `SpectrumSweepConfig.from_spectrum(...)` → `spectrum_sweep` |
-| Inject a per-NODE harmonic error SOURCE (Thévenin/Norton, any node) at each node | `NodeInjectionSweepConfig.from_spectrum(spectrum, source_power_va=…, kind=…)` → `run_node_injection_sweep`; single source: `solve_harmonic_flow(node_sources=[NodeHarmonicSource(...)])` (see `references/error_injection.md`) |
+| Inject a per-NODE harmonic error SOURCE (Thévenin/Norton, any node) at each node | `NodeInjectionSweepConfig.from_spectrum(spectrum, source_power_va=…, kind=…)` → `run_node_injection_sweep`; single source: `solve_harmonic_flow(node_sources=[NodeHarmonicSource(...)])` (see `docs/pgml/modeling/error-injection.md`) |
 | Inject one P/Q error at each node, one at a time | `Perturbation` → `perturbation_sweep` |
 | Deterministic grid-sweep (cartesian product) | `CartesianConfig` / `CartesianAxis` |
 | Solve a batch | `run_scenarios(grid, spec, calculation=..., harmonic_orders=..., symmetry=...)` |

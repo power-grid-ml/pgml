@@ -63,14 +63,10 @@ voltage ``V_0`` is the line-to-line rated voltage.
 
 .. note::
 
-   **Current limitations (Increment 1):**
-
-   - DELTA loads with ``n != 3`` phases raise ``NotImplementedError`` (open /
-     two-phase delta is not yet modeled).
-   - Connection-aware **harmonic injection** (DELTA or WYE on a node carrying
-     ``Phase.N``) in :func:`~pgml.solver.solve_harmonic_flow` raises
-     ``NotImplementedError``.  Use WYE-to-ground loads for harmonic studies
-     until the per-phase-harmonics increment is complete.
+   DELTA, 4-wire WYE (a node carrying ``Phase.N``), and the corresponding
+   connection-aware **harmonic injection** are fully modelled, both in the Y-bus
+   assembly and in :func:`~pgml.solver.solve_harmonic_flow`. A DELTA connection
+   requires at least two phases (a single-phase DELTA raises ``ModelingError``).
 
 .. automodule:: pgml.assembly
    :members:

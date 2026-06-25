@@ -11,7 +11,7 @@ sensitivity maps). Distinct from the device spectra in `solve_harmonic_flow`
 The disturbance is a **Thévenin harmonic source** at the node: an internal EMF `E(h)`
 behind a series impedance `Z_s` (a `VSource` in OpenDSS terms), OR a **Norton current
 source** `I(h)` (an `ISource`). The error magnitude per order comes from a user
-**spectrum** (the maintainer's errors are VOLTAGE spectra); the **source strength** is a
+**spectrum** (the disturbance is typically a VOLTAGE spectrum); the **source strength** is a
 short-circuit power `S_sc` (MVAsc).
 
 ### Why no damping reactor is needed in pgml
@@ -40,7 +40,7 @@ line-to-neutral base, `mag_h/ang_h` the spectrum entry, `mag_1/ang_1` its order-
 - **EMF (reference = node fundamental voltage):**
   `|E_h| = (mag_h/mag_1)·|V1|`,
   `arg(E_h) = ang_h + h·(arg(V1) − ang_1)`  (same phase convention as the device
-  injection in `references/opendss/harmonics.md`).
+  injection in [OpenDSS harmonics](references/opendss/harmonics.md)).
 - **Norton current:** `I_N(h) = E_h · Y_s`.
 
 ### Stamping into the linear system `Y(h)·V(h)=I(h)`

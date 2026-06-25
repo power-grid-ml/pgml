@@ -15,7 +15,7 @@ so a user can see exactly what was built:
 
 ``log_modeling_summary`` emits an INFO summary: the resolved calculation symmetry,
 whether a NEUTRAL is being modeled (a node carries ``Phase.N``), and the WYE/DELTA
-load mix. Citations + rationale: ``references/asymmetric_modeling.md``.
+load mix. Citations + rationale: ``docs/pgml/modeling/asymmetric.md``.
 
 Runs once per assemble/solve call on the python schema objects — no tensors, no
 autograd, no per-node loops on the tape.

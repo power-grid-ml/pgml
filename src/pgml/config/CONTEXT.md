@@ -29,7 +29,7 @@ documented, never hidden implicit constants scattered in code.
 - `appliance.load.{default_connection, single_phase_connection}` — WYE/DELTA used for a
   Load/Generator with no explicit `connection` (multi- vs single-phase; both WYE by
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
-  `references/asymmetric_modeling.md`.
+  `docs/pgml/modeling/asymmetric.md`.
 - `line.harmonic_model.{three_phase, single_phase, skin_effect}` — which
   frequency-dependent line model `apply_default_harmonic_model(grid)` applies to an R/X
   line (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =
@@ -42,7 +42,7 @@ documented, never hidden implicit constants scattered in code.
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
-  `references/opendss/transformer.md`.
+  `docs/pgml/modeling/transformer.md`.
 
 ## Consumers (read these constants from the config — do not re-hard-code)
 - `geometry/sequence.py`: `_DEFAULT_GMR_OVER_RADIUS`, `CARSON_EARTH_R_PER_HZ`.

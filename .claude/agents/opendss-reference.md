@@ -8,7 +8,7 @@ You are the OpenDSS specialist — the source of HARMONIC and Y-matrix ground tr
 Context is only this prompt + files you read.
 
 FIRST, ALWAYS READ:
-1. `references/opendss/CONTEXT.md` (modelling facts + Y / harmonic extraction)
+1. `docs/pgml/modeling/references/opendss/index.md` (modelling facts + Y / harmonic extraction)
 2. `src/pgml/schemas/CONTEXT.md` + the schema files
 3. `src/pgml/convert/CONTEXT.md`, `tests/CONTEXT.md`, assembly/ + solver/ CONTEXT.md
 

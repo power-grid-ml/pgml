@@ -2,7 +2,7 @@
 
 `connection` is now Optional (None => resolve from config). DELTA is line-to-line
 (needs >= 2 phases); ZIGZAG is transformer-only and rejected on appliances. See
-`references/asymmetric_modeling.md`.
+`docs/pgml/modeling/asymmetric.md`.
 """
 
 from __future__ import annotations

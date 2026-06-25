@@ -14,7 +14,7 @@ while the library is < 1.0.0); bump the patch/minor on any contract change.
   the schema (real pairs), structured unit metadata via `si_field`. Conductor geometry:
   `ConductorPlacement` (x/y/GMR/radius/Rdc, tensor-capable) + `LineGeometry`; a
   `Line.conductor_geometry` makes assembly use the Carson/Deri path (`pgml.geometry`).
-  - DER / inverter control + storage (`references/der_pv_storage_modeling.md`):
+  - DER / inverter control + storage (`docs/pgml/modeling/der-pv-storage.md`):
     `Load`/`Generator`/`Storage` share the `InjectionAppliance` base (consumers test
     `isinstance(a, InjectionAppliance)`; sign = +1 Load, −1 Generator/Storage). `Generator`
     and `Storage` carry an optional `control: InverterControl` — a discriminated union
@@ -60,7 +60,7 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   `appliance.load.{single_phase_,}default_connection`); DELTA needs >=2 phases, zigzag
   rejected on appliances. Whether a run honors per-phase vs splits totals equally is the
   config `calculation.symmetry` decision (`auto`/`symmetric`/`asymmetric`), resolved by
-  `pgml.assembly._symmetry`. Cross-tool basis: `references/asymmetric_modeling.md`.
+  `pgml.assembly._symmetry`. Cross-tool basis: `docs/pgml/modeling/asymmetric.md`.
 - Per-phase harmonics (rev: Increment 2): `Load`/`Generator` gain
   `spectrum_per_phase: Optional[dict[Phase, Spectrum]]` (asymmetric distortion), mutually
   exclusive with the all-phases `spectrum`; keys must be a subset of `phases`. Consumed

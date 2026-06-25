@@ -96,12 +96,11 @@ an `http_status` hint for a REST layer; schema-validation errors stay as pydanti
 grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀── evaluation (plots vs refs)
       │              ▲   │         ▲                       ◀── scenarios (batched inputs)
       │              │   └─ geometry (Carson Z(h)/Yc(h))   ◀── convert (pandapower/OpenDSS/pgm)
-      └─ equations (residual laws, the source of physics) ─┘
+      └─ config (documented modeling defaults) ────────────┘
 ```
 
 - **`schemas/`** — frozen, framework-free contracts (`Grid`, `Node`, `Branch`,
   `Appliance`, `Result`, `Scenario`). Physical fields accept plain floats *or* tensors.
-- **`equations/`** — residual-form (`0 = a − b`) SymPy registry + torch evaluators.
 - **`assembly/`** — per-phase, per-harmonic, batched, differentiable Y-bus + injections.
 - **`solver/`** — complex batched linear solve; nonlinear const-P/ZIP via the
   implicit-function theorem; harmonic flow.
@@ -111,12 +110,14 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 - **`evaluation/`** — comparison plots and reference oracles.
 - **`config/`** — documented modeling defaults (single source of truth; `defaults.yaml`).
 
-Each package has a `CONTEXT.md` interface ledger. Big-picture rationale lives in
-`references/ARCHITECTURE.md`; orientation and open work in `HANDOFF.md`.
+Each subpackage has a `CONTEXT.md` interface ledger. The suite map is the root `CONTEXT.md`;
+per-package status and open work live in each package's `STATUS.md`.
 
 ## Documentation
 
-API reference and narrative docs are built with Sphinx (`docs/`):
+The full, human-facing documentation — concepts, modeling decisions, examples, and the API
+reference — is published with Sphinx / Read-the-Docs. Start at `docs/index.md`, or build it
+locally:
 
 ```bash
 pixi run -e docs docs            # build HTML into docs/_build/html

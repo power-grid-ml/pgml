@@ -1,6 +1,6 @@
 """Increment 0: calculation-symmetry / connection resolution + modeling logging.
 
-Pins the power-grid-model-style resolution rule (`references/asymmetric_modeling.md`
+Pins the power-grid-model-style resolution rule (`docs/pgml/modeling/asymmetric.md`
 §1) and the INFO modeling summary (neutral modeled iff a node carries Phase.N).
 """
 

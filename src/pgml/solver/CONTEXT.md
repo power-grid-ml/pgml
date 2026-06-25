@@ -147,7 +147,7 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
 # =====================================================================
 Reuses `assemble_network_ybus` (builds Y at any `h·f0`) + `solve_harmonic` (batched
 per-frequency linear solve). The OpenDSS conventions are pinned in
-`references/opendss/harmonics.md` (READ IT — esp. the spectrum phase convention,
+`docs/pgml/modeling/references/opendss/harmonics.md` (READ IT — esp. the spectrum phase convention,
 verified empirically). New orchestration:
 
 - `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", method="current_injection",
@@ -158,7 +158,7 @@ verified empirically). New orchestration:
     controlled DER (Volt-VAr/Volt-Watt loops oscillate under the current-injection fixed
     point). A controlled Generator/Storage's harmonic injection scales from its
     CONTROL-RESOLVED fundamental current (consistent with the control-aware fundamental
-    solve), not the nominal — see `assembly/_control.py` + `references/der_pv_storage_modeling.md`.
+    solve), not the nominal — see `assembly/_control.py` + `docs/pgml/modeling/der-pv-storage.md`.
   - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
     ONCE here; threaded into the fundamental `solve_power_flow` (which emits the single
     modeling-summary log) and into the harmonic-injection power resolution
@@ -256,7 +256,7 @@ order-1 coefficient (mag1==0) injects 0 (torch.where, gradient-finite on live
 elements); the per-element `conj(vt)` divide is likewise masked for a dead/zero
 terminal (vt==0 -> 0, gradient-safe) so a gradcheck perturbation cannot poison it.
 
-### `node_sources` — per-node harmonic "error" source (full physics: `references/error_injection.md`)
+### `node_sources` — per-node harmonic "error" source (full physics: `docs/pgml/modeling/error-injection.md`)
 `node_sources: Optional[Sequence[NodeHarmonicSource]] = None` — a disturbance at ANY
 node (NOT tied to a load), applied ONLY at orders `h>1` so the fundamental PF is
 preserved EXACTLY (no reactor needed; pgml solves each harmonic as its own linear
@@ -307,7 +307,7 @@ scalar + batched-S_sc-promoted Y).
 - DEFERRED: `include_load_shunt=True` (load Norton shunt at harmonics) raises
   `NotImplementedError` — the OpenDSS shunt split is unpinned. EXACT OpenDSS
   per-order VOLTAGE parity also needs the Carson earth-return line model (the
-  harmonic line impedance differs ~2.5%/h; see `references/opendss/harmonics.md`),
+  harmonic line impedance differs ~2.5%/h; see `docs/pgml/modeling/references/opendss/harmonics.md`),
   which is the POSTPONED geometry path. The INJECTION convention IS OpenDSS-exact.
 
 ### Validation (DONE)

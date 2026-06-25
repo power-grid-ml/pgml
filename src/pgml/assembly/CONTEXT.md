@@ -213,7 +213,7 @@ split totals equally). Its symmetric branch returns n INDEPENDENT entries
 and totals via the autograd-safe `_tensor_sum` (graph-preserving for tensor leaves).
 Vectorized per group (one `M`, blocks `[K, n_used, n_used]` scattered via `_scatter`);
 differentiable (autograd flows through `y_elem`/`i_elem`, not the constant `M`); GPU/
-dtype-honoring. Basis: `references/asymmetric_modeling.md`.
+dtype-honoring. Basis: `docs/pgml/modeling/asymmetric.md`.
 
 NOTE (PF warm start): `solve_power_flow` uses a PHASE-AWARE balanced warm start (source
 magnitude rotated by the row's positive-sequence phase angle; neutral rows start at

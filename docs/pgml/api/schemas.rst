@@ -6,7 +6,7 @@ They define the complete input (``Grid``), output (``ResultSet``), and
 scenario (``Scenario``) representation.  Import canonical types from
 here — do **not** modify these files.
 
-See also: :doc:`/concepts` for the modelling conventions (phase-domain,
+See also: :doc:`/pgml/concepts` for the modelling conventions (phase-domain,
 SI units, float/tensor duality).
 
 Appliance types

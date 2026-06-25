@@ -44,12 +44,11 @@ section on the :doc:`assembly` page.
 Per-phase / connection-aware harmonic injection
 -----------------------------------------------
 
-As of Increment 2 the harmonic solver is **connection-aware**: it uses the
+The harmonic solver is **connection-aware**: it uses the
 same terminal incidence matrix ``M`` that the fundamental power flow uses, so
 DELTA (line-to-line) and 4-wire WYE (phase minus neutral) terminal voltages
 are correctly applied when normalising each device's per-element harmonic
-current.  The ``NotImplementedError`` guard for DELTA and 4-wire WYE harmonic
-injection that existed in Increment 1 is removed.
+current.
 
 The solver sources per-element spectra from three places, in priority order:
 
@@ -69,7 +68,7 @@ The solver sources per-element spectra from three places, in priority order:
 
 ``spectrum`` and ``spectrum_per_phase`` are **mutually exclusive** on any
 single appliance.  See the "Per-phase / connection-aware harmonic injection"
-section of the :doc:`/concepts` page for usage examples and the full override
+section of the :doc:`/pgml/concepts` page for usage examples and the full override
 convention.
 
 Per-node harmonic source (``node_sources``)
@@ -82,7 +81,7 @@ flow is preserved exactly (no damping reactor is needed; pgml solves each
 harmonic as its own independent linear system).
 
 The full physics derivation and OpenDSS equivalence are in
-``references/error_injection.md`` (:doc:`/error_injection`).
+the per-node harmonic disturbance source (:doc:`/pgml/modeling/error-injection`).
 
 Two source kinds are supported:
 

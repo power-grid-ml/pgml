@@ -22,7 +22,7 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   kind="voltage") -> NodeHarmonicSource``
   Frozen dataclass describing a per-node harmonic "error" source
   (Thévenin voltage or Norton current) injected at orders ``h > 1``.
-  Physics: ``references/error_injection.md``.
+  Physics: ``docs/pgml/modeling/error-injection.md``.
 - ``assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point,
   harmonic_injection, node_sources, symmetry, dtype, device) -> (Y, I, index)``
   The assembled per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders

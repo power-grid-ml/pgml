@@ -6,7 +6,7 @@ inverter actually injects, bounded by the apparent-power capability circle. It i
 evaluated inside :func:`pgml.assembly.ybus.device_current_injections`, so the voltage
 dependence enters the nonlinear power-flow residual ``I_device(V)`` and is differentiated
 by the same implicit-function-theorem backward as a const-P/ZIP load — no separate
-adjoint. See ``references/der_pv_storage_modeling.md`` sections 4.2-4.3.
+adjoint. See ``docs/pgml/modeling/der-pv-storage.md`` sections 4.2-4.3.
 
 All quantities are in the appliance's NATIVE authoring convention (positive active power
 = the device's nominal direction, e.g. generation for a :class:`Generator`; positive

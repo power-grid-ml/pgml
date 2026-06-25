@@ -5,7 +5,7 @@ through ``I_device``, so the implicit-function-theorem backward (which autograd-
 differentiates one residual evaluation at ``V*``) must produce correct gradients of the
 solved voltage w.r.t. the control curve, the inverter rating, and a storage setpoint —
 with no new adjoint. float64 gradcheck (Newton forward, smoothed clamp so the map is
-C\\ :sup:`1`). See ``references/der_pv_storage_modeling.md`` §4.2-4.3.
+C\\ :sup:`1`). See ``docs/pgml/modeling/der-pv-storage.md`` §4.2-4.3.
 """
 
 from __future__ import annotations

@@ -110,7 +110,7 @@ verified `batched == loop-of-individual`).
 - `dispatch_storage(storage, requested_power_w, dt_s, *, soc0=None)` — reads the
   `Storage` element's own state params. `storage_operating_point(power_by_id, q_by_id=None)`
   -> a solver `operating_point` dict for one step (feeds `solve_power_flow`/`solve_harmonic_flow`).
-  See `references/der_pv_storage_modeling.md` §4.4.
+  See `docs/pgml/modeling/der-pv-storage.md` §4.4.
 
 ## Conventions
 - Unit-cube layout `U[B,D]`: one column per declared factor, then per spec a BASE block

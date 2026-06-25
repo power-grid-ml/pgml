@@ -6,7 +6,7 @@ WHAT THIS DEMONSTRATES
 whole grid." The error is a per-node **Thévenin voltage source** carrying a voltage
 spectrum (read from ``examples/spectra/VoltageSag40ms.csv``), of a user-set strength
 ``SOURCE_POWER_VA`` (short-circuit power), applied only at harmonics so the fundamental
-power flow is untouched — the model documented in ``references/error_injection.md``.
+power flow is untouched — the model documented in ``docs/pgml/modeling/error-injection.md``.
 (Set ``KIND="current"`` for a Norton current source instead.)
 
 For harmonic order **h=11**:

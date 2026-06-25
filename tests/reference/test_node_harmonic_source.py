@@ -1,6 +1,6 @@
 """Behavioral / physics checks for the per-node harmonic "error" source.
 
-Pins the model in ``references/error_injection.md``:
+Pins the model in ``docs/pgml/modeling/error-injection.md``:
 
 - A single VOLTAGE source (Thevenin) and a single CURRENT source (Norton) solve.
 - The FUNDAMENTAL power flow is preserved EXACTLY (source applied only at h>1).

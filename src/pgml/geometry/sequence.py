@@ -28,7 +28,7 @@ only in ``Z0``.
 
 Everything is torch / autograd-safe / GPU-ready / batched over a leading set of lines
 ``*B`` and over ``H`` frequencies, so gradients flow ``R1, X1 -> Z1(h) -> Y-bus``.
-See ``references/positive_sequence_harmonic_line_model.md`` for the decision record.
+See ``docs/pgml/modeling/harmonic-line-model.md`` for the decision record.
 """
 
 from __future__ import annotations

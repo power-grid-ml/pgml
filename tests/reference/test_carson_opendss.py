@@ -4,7 +4,7 @@ OpenDSS (default DERI earth model) is the ground truth for frequency-dependent l
 impedance. We build geometry lines in OpenDSS, extract the series Z from the element
 Yprim at several frequencies, and compare to ``pgml.geometry.carson`` — single
 conductor and 3-phase+neutral (Kron-reduced). The match is to floating point
-(``references/opendss/carson.md``), the whole point being that this closes the
+(``docs/pgml/modeling/references/opendss/carson.md``), the whole point being that this closes the
 harmonic line-impedance gap.
 """
 

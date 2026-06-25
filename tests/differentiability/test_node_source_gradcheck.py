@@ -3,7 +3,7 @@
 Gradients must flow to ``source_power_va`` (and to the spectrum / grid params)
 through the per-node harmonic disturbance source, for BOTH a Thevenin voltage
 source (which also stamps ``Y_s`` on the diagonal of ``Y(h)``) and a Norton current
-source. Physics: ``references/error_injection.md``.
+source. Physics: ``docs/pgml/modeling/error-injection.md``.
 """
 
 from __future__ import annotations

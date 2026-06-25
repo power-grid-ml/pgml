@@ -782,7 +782,7 @@ def opendss_harmonic_voltages(
 
     **Harmonic injection convention** (identical in both paths):
 
-    Per ``references/opendss/harmonics.md``:
+    Per ``docs/pgml/modeling/references/opendss/harmonics.md``:
     ``|I_h| = (mag_h / mag_1) · |I₁|``,
     ``arg(I_h) = ang_h + h · (arg(I₁) − ang_1)``
     where ``I₁ = conj(S₀) / conj(V₁)`` at the device terminal.

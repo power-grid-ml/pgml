@@ -11,7 +11,7 @@ trace) is ordinary Python control flow and carries no gradient: the caller suppl
 REQUESTED power sequence. :func:`integrate_soc` then realizes it under the energy-state
 constraints with torch, so a gradient w.r.t. the realized setpoint value (and, where the
 power is not clamped by a SoC/rating limit, through the SoC recurrence) is available — but
-never through the decision logic. See ``references/der_pv_storage_modeling.md`` section 4.4.
+never through the decision logic. See ``docs/pgml/modeling/der-pv-storage.md`` section 4.4.
 
 State-of-charge energy update per step (discharge-positive convention, OpenDSS
 ``Storage`` semantics): discharging draws ``P*dt / eff_discharge`` from the store;

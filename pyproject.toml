@@ -21,8 +21,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Core runtime: the differentiable physics engine (schema + equations + assembly +
-# solver + geometry). Everything else — reference-library converters, scenario data
+# Core runtime: the differentiable physics engine (schema + assembly + solver +
+# geometry). Everything else — reference-library converters, scenario data
 # I/O, plotting, the ML layer, the OpenDSS oracle — is an optional extra so a minimal
 # install stays lean. Version ranges mirror the pinned pixi development environment.
 dependencies = [

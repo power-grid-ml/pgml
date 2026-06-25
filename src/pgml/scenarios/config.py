@@ -355,7 +355,7 @@ class NodeInjectionSweepConfig(_Base):
     """Per-node harmonic "error" SOURCE sweep: inject a transient harmonic source at one
     node at a time (scenario ``i`` → node ``i``; ``B = #nodes``). Unlike
     :class:`SpectrumSweepConfig` (a device Norton current scaled by a load's fundamental),
-    this is the per-node Thévenin/Norton source of ``references/error_injection.md`` —
+    this is the per-node Thévenin/Norton source of ``docs/pgml/modeling/error-injection.md`` —
     injectable at ANY node, of a user-set STRENGTH ``source_power_va`` (S_sc), applied
     only at h>1 (fundamental exact).
 

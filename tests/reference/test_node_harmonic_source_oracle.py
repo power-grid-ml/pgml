@@ -14,9 +14,9 @@ Compares :func:`pgml.solver.solve_harmonic_flow` (with ``node_sources``) against
    oracle on the CIGRE LV grid with the three-phase sequence-aware harmonic model.
    Matches the existing sequence-aware tolerance (~1e-5 V); the Carson-model
    discrepancy is the same as in :mod:`test_cigre_lv_live_opendss` and is expected
-   (the 3-phase ``sequence_aware`` line model; see ``references/conventions.md``).
+   (the 3-phase ``sequence_aware`` line model; see ``docs/pgml/modeling/conventions.md``).
 
-Physics (``references/error_injection.md``)
+Physics (``docs/pgml/modeling/error-injection.md``)
 -------------------------------------------
 - ``Z_s = V_base² / S_sc`` (real, frequency-flat); ``Y_s = 1 / Z_s``.
 - ``|E_h| = (mag_h / mag_1) · |V1_row|``.

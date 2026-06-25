@@ -310,7 +310,7 @@ def _apply_node_sources_numpy(
 ) -> None:
     """Stamp per-node harmonic disturbance sources in-place for order ``h``.
 
-    Implements the physics from ``references/error_injection.md``:
+    Implements the physics from ``docs/pgml/modeling/error-injection.md``:
 
     - ``V_base`` = node ``u_rated_v`` (L-N for ≥3-phase, else L-L).
     - ``Y_s = S_sc / V_base^2`` (real, frequency-flat).
@@ -526,7 +526,7 @@ def numpy_harmonic_voltages(
       ``Y_tt = y_se`` — where ``y_se = (R + j·h·2πf₀·L)⁻¹`` and
       ``t = ratio_magnitude · exp(j·shift_deg)``.
     - Sources (Norton mode): shunt ``Y_s(h) = Z_s(h)⁻¹`` on the source diagonal.
-    - Harmonic injection: OpenDSS convention (``references/opendss/harmonics.md``).
+    - Harmonic injection: OpenDSS convention (``docs/pgml/modeling/references/opendss/harmonics.md``).
 
     Parameters
     ----------

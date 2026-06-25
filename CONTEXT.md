@@ -1,13 +1,17 @@
-# pgml — agent navigation index (read this first)
+# Suite navigation index (read this first)
 
-Differentiable, GPU-ready, vectorized **harmonic power-flow + ML for power grids**.
-This file is the architecture map: what each package does, where the contracts live, and
-which `CONTEXT.md` to open next. New agents: read this, then the `CONTEXT.md` of the
-package you're touching, then the code. How to *work* here (constraints, style, commands,
-delegation): `CLAUDE.md`. Orientation + open work: `HANDOFF.md`. Big-picture rationale:
-`references/ARCHITECTURE.md`.
+Differentiable, GPU-ready, vectorized **harmonic power-flow + ML for power grids**. This is
+the top-level map for contributors and agents: what each package does, where the contracts
+live, and which file to open next.
+
+**Read order.** This file (the suite map) → the `CONTEXT.md` of the package you're touching
+→ the code. How to *work* here (the hard constraints, code style, commands, delegation):
+`CLAUDE.md`. Current status + open work: each package's `STATUS.md`. The published,
+human-facing documentation (concepts, modeling decisions, API reference): `docs/` (built
+with Sphinx / Read-the-Docs; start at `docs/index.md`).
 
 ## Two hard constraints (every line of core code)
+
 1. **DIFFERENTIABLE** — gradients flow `grid params → Y-bus → solve → outputs`. No
    `.item()/.detach()/.numpy()`, no in-place on tracked tensors, no Python control flow on
    tensor values in the differentiable path. (The only sanctioned `.detach()` is the IFT
@@ -18,39 +22,69 @@ delegation): `CLAUDE.md`. Orientation + open work: `HANDOFF.md`. Big-picture rat
 
 A change that breaks float64 `gradcheck` or the GPU device/dtype test is not done.
 
-## The pipeline (data flow, left → right; gradients flow end-to-end)
+## The suite (multi-package monorepo, one distribution)
+
+`pgml` is the **base** package; the others are one-way dependents that import only `pgml`'s
+public API and never its internals. `pgml` imports none of them. `pgl` and `pgg` are
+independent of each other.
+
+| package | role | status | open in |
+|---|---|---|---|
+| **pgml** | differentiable, GPU-ready harmonic power flow (the gradient engine) | active — base | `src/pgml/CONTEXT.md`, `src/pgml/STATUS.md` |
+| **pgl** | power-grid-learn — harmonic state-estimation models + training | in development | `src/pgl/CONTEXT.md`, `src/pgl/STATUS.md` |
+| **pgg** | power-grid-generation — differentiable synthetic grid generation | scaffolded | `src/pgg/CONTEXT.md`, `src/pgg/STATUS.md` |
+| **pgd** *(future)* | dashboard: visualize grids, simulation, training | planned | — |
+| **pghub** *(future)* | hub/DB of grids (load from sources, persist) | planned | — |
+
+**Deployment.** The training clusters provide conda only (no pixi) and a recent CUDA
+toolkit; torch comes from conda and the packages pip-install on top (`deploy/environment.yml`).
+Quick iteration on a local dev GPU; large-batch runs on the cluster.
+
+## Why all-PyTorch
+
+Harmonic power flow decouples per harmonic into a LINEAR complex solve `Y(h)·V(h)=I(h)`. A
+linear solve has a clean, cheap adjoint, so end-to-end gradients flow without differentiating
+Newton iterations. PyTorch gives complex tensors and autograd, batched `torch.linalg.solve`,
+GPU, and native PyTorch-Geometric integration for the ML layer — one autograd tape end to
+end. (JAX is a fallback only if PyTorch complex/sparse autograd proves insufficient. Do not
+start there.)
+
+## The pgml pipeline (data flow, left → right; gradients flow end-to-end)
+
 1. **schemas** define the `Grid` (physical params, possibly tensors) + the result / scenario
    contracts.
 2. **assembly** builds the per-frequency complex nodal admittance `Y(f)` — lines via explicit
-   R/L/C or the **geometry** (Carson/Deri) path; **equations** supply the physics laws.
+   R/L/C or the **geometry** (Carson/Deri) path.
 3. **solver** solves `Y(f)·V(f)=I(f)` (linear) or the nonlinear const-P/ZIP problem
    (current-injection fixed point or Newton, IFT gradients) → phasor **result**.
 4. **convert** turns pandapower / OpenDSS / power-grid-model nets into a `Grid`; **scenarios**
    batches the inputs (ML training data); **evaluation** compares results to those reference
    libraries.
 
-## Where things live (open the package CONTEXT.md for the interface ledger)
-| Need… | Package | CONTEXT |
-|---|---|---|
-| Input/output **contracts** (Grid, Node, Branch, Appliance, Result, Scenario) — FROZEN | `src/pgml/schemas/` | `schemas/CONTEXT.md` |
-| **Modeling defaults** (documented values + model choices; explicit > config > converter) | `src/pgml/config/` | `config/CONTEXT.md` |
-| The **physics equations** (residual `0=a-b` registry + torch evaluators; skin/seq laws) | `src/pgml/equations/` | `equations/CONTEXT.md` |
-| **Y-bus assembly** (per-phase/per-harmonic/batched stamps; linear + network + injections) | `src/pgml/assembly/` | `assembly/CONTEXT.md` |
-| **Solve** (complex batched linear; nonlinear const-P/ZIP via IFT; Newton; harmonic flow; diagnostics + loadability) | `src/pgml/solver/` | `solver/CONTEXT.md` |
-| **Geometry → impedance** (differentiable Carson/Deri + skin; R/X→geometry synthesis) | `src/pgml/geometry/` | `geometry/CONTEXT.md` |
-| **Converters** from pandapower / power-grid-model / OpenDSS → our `Grid` | `src/pgml/convert/` | `convert/CONTEXT.md` |
-| **Batched scenario sampling** (QMC/cartesian, reproducible; ML training data) | `src/pgml/scenarios/` | `scenarios/CONTEXT.md` + `scenarios/ROADMAP.md` |
-| **Evaluation plots** (Y-bus heatmaps, voltage/harmonic profiles, 3D, refs-vs-ours) | `src/pgml/evaluation/` | `evaluation/CONTEXT.md` |
-| The **public API** (`simulate`, `SolvedState`, errors) | `src/pgml/` | `docs/public-api.md` |
-| Cross-tool **conventions** + reference-library briefs (base voltage, transformer referral, earth return, gotchas) | `references/` | `references/conventions.md`, `references/*/CONTEXT.md`, `references/opendss/{harmonics,carson}.md` |
-| Tests (oracle comparisons, differentiability, GPU) | `tests/` | `tests/CONTEXT.md` |
+The pgml package map (subpackage-by-subpackage, with each interface ledger) is in
+`src/pgml/CONTEXT.md`.
+
+## Where things live
+
+| Need… | Open |
+|---|---|
+| How to *work* here (constraints, style, commands, the frozen-schema rule) | `CLAUDE.md` |
+| The **pgml** package map (subpackages + interface ledgers) | `src/pgml/CONTEXT.md` |
+| **pgml** status + open work | `src/pgml/STATUS.md` |
+| The **pgl** learning framework | `src/pgl/CONTEXT.md`, `src/pgl/STATUS.md` |
+| The **pgg** generation package | `src/pgg/CONTEXT.md`, `src/pgg/STATUS.md` |
+| Published human docs (concepts, modeling decisions, API reference) | `docs/` (`docs/index.md`) |
+| Modeling decisions (conventions, transformer, line model, DER, asymmetric) | `docs/pgml/modeling/` |
+| Cross-tool conventions + reference-library briefs | `docs/pgml/modeling/conventions.md`, `docs/pgml/modeling/references/` |
 
 ## Frozen-contract rule
+
 `src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Import it; do NOT
 edit it as a subagent (orchestrator-only, and only after asking the user). Everything else
-conforms to it.
+conforms to it. The full behavioral rule is in `CLAUDE.md`.
 
 ## Key conventions (defined in the schemas; do not reinvent)
+
 - Phase-domain, SI base units; reactive elements store **L and C** (`X(h)=2πhf0·L`,
   `B(h)=2πhf0·C`); reactances/susceptances are NEVER stored.
 - Every branch → pi-form primitive admittance stamp; transformers add a complex tap / use
@@ -62,10 +96,24 @@ conforms to it.
   (`assembly.node_phase_index`), NOT a padded A/B/C/N grid.
 - Voltage base: `Node.u_rated_v` is line-to-line (≥3φ); the per-phase voltages the solver
   uses are line-to-neutral via `assembly._params.phase_voltage_magnitude`. See
-  `references/conventions.md`.
+  `docs/pgml/modeling/conventions.md`.
+
+## Roadmap (suite-level)
+
+0. Schemas frozen (grid / result / scenario). **Done.**
+1. Differentiable load flow: Y-bus assembly + complex solve; validate vs OpenDSS &
+   pandapower; gradcheck + GPU. **Done** (linear + nonlinear const-P/ZIP).
+2. Geometry → impedance differentiable path (Carson/Deri, skin effect). **Done** — bit-exact
+   vs OpenDSS.
+3. Full harmonic range; validate harmonic results vs OpenDSS (IEEE-33 + CIGRE LV). **Done.**
+4. Batching/scale (`pgml.scenarios`): reproducible QMC/cartesian + correlated + EN 50160 +
+   parquet. **Done** — topology/multi-grid batching and the large-scale solve remain open
+   (`src/pgml/STATUS.md`).
+5. PyG state estimation (`pgl`) + the inverse (parameter recovery) path. **In development.**
 
 ## Commands
+
 - Run / install: `pixi run -e cpu python ...` / `pixi add <pkg>`.
-- Tests: `pixi run -e cpu pytest -q` (count in `HANDOFF.md`). Differentiability gate:
-  `tests/differentiability`; GPU gate: `tests/gpu`.
+- Tests: `pixi run -e cpu pytest -q`. Differentiability gate: `tests/differentiability`;
+  GPU gate: `tests/gpu`.
 - Lint/format: `ruff check src tests && ruff format src tests`. Docs: see `CLAUDE.md`.

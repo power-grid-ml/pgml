@@ -262,7 +262,7 @@ Per-node harmonic "error"-source sweep (``run_node_injection_sweep``)
 -----------------------------------------------------------------------
 
 :func:`~pgml.scenarios.run_node_injection_sweep` sweeps a per-node harmonic
-"error" source (see :doc:`solver` and :doc:`/error_injection`) over a set of
+"error" source (see :doc:`solver` and :doc:`/pgml/modeling/error-injection`) over a set of
 nodes: **scenario** ``i`` places a :class:`~pgml.solver.NodeHarmonicSource` at
 node ``i`` ONLY.  This builds the harmonic-domain analogue of a network
 sensitivity map — "inject a disturbance source at each node, measure how the

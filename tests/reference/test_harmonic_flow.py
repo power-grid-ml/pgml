@@ -1,7 +1,7 @@
 """Forward-correctness of the harmonic power flow (`solve_harmonic_flow`).
 
 The harmonic INJECTION convention is OpenDSS-exact (verified in
-``references/opendss/harmonics.md``). The network harmonic IMPEDANCE uses the
+``docs/pgml/modeling/references/opendss/harmonics.md``). The network harmonic IMPEDANCE uses the
 standard ``R const, X∝h`` model (OpenDSS adds a Carson earth-return correction we
 postpone), so the rigorous correctness check is an INDEPENDENT numpy reimplementation
 of that same model; the OpenDSS bus-voltage match is asserted only to ballpark.

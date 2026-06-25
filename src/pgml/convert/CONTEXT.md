@@ -183,7 +183,7 @@ coil; the NOMINAL ratio + vector-group shift come from `u_rated_from/to_v` +
 is the OFF-NOMINAL tap + clock only. The CIGRE LV trafos are Dyn1
 (`from_connection=DELTA`, `to_connection=WYE_GROUNDED`, `shift_degree=30`); assembly
 builds the full vector-group winding-incidence primitive (delta blocks zero-sequence
-/ triplen harmonics). See `references/opendss/transformer.md`. pandapower tap-changer
+/ triplen harmonics). See `docs/pgml/modeling/transformer.md`. pandapower tap-changer
 positions (`tap_pos`/`tap_step`) are not read yet (off-nominal tap stays 1.0). The
 OpenDSS converter does NOT emit transformers yet (DSS `Transformer` parsing is a
 documented gap; CIGRE/IEEE feeders enter via pandapower).
@@ -192,7 +192,7 @@ documented gap; CIGRE/IEEE feeders enter via pandapower).
 
 > The authoritative cross-tool convention record (base voltage L-L/L-N, transformer
 > reference side, vector-group/clock, power signs, SI/phase-domain, harmonic earth-return)
-> for pgml vs pandapower / OpenDSS / power-grid-model is `references/conventions.md`. Keep
+> for pgml vs pandapower / OpenDSS / power-grid-model is `docs/pgml/modeling/conventions.md`. Keep
 > it in sync when a converter's convention handling changes.
 
 - CANONICAL `u_rated_v` for any node is LINE-TO-LINE (`vn_kv*1000` / `u_rated*1`

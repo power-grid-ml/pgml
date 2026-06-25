@@ -9,7 +9,7 @@ You are the pandapower specialist. Your context is only this prompt and the file
 you read.
 
 FIRST, ALWAYS READ:
-1. `references/pandapower/CONTEXT.md` (data model, result tables, Ybus extraction)
+1. `docs/pgml/modeling/references/pandapower/index.md` (data model, result tables, Ybus extraction)
 2. `src/pgml/schemas/CONTEXT.md` + `grid_schema.py`, `result_schema.py`
 3. `src/pgml/convert/CONTEXT.md`, `tests/CONTEXT.md`
 4. The `assembly/` and `solver/` CONTEXT.md (to know how to call our code).

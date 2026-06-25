@@ -3,9 +3,9 @@
 How power-grid-model (PGM), pandapower, and OpenDSS model (a) symmetric vs
 asymmetric calculation, (b) wye/delta load connection, (c) single-phase loads,
 (d) the neutral / earth return, and (e) per-phase harmonic injection — with
-primary-source citations. This is the design basis for the pgml fully-asymmetric
-refactor (see `CLAUDE.md`, the `asymmetric-refactor-scope` memory). Companion
-converter briefs: `references/{power-grid-model,pandapower,opendss}/CONTEXT.md`.
+primary-source citations. This is the modeling basis for pgml's fully-asymmetric, per-phase representation. Companion
+converter briefs: the [reference-library notes](references/index.md) for OpenDSS,
+pandapower, and power-grid-model.
 
 Verified against installed packages (`power_grid_model 1.13.94`, pandapower source
 under the cpu pixi env) and the EPRI OpenDSS source/manual; citations inline.
@@ -53,7 +53,7 @@ mode over each appliance's phases — it does not change the network solve:
   whole calculation to asymmetric even on a symmetrically-defined grid.
 (Going asymmetric only manifests imbalance on genuinely multi-phase nodes; the
 positive-sequence single-phase-equivalent grids from the pandapower/pgm converters
-must first be expanded to abc nodes — out of scope for increment 0/1.)
+must first be expanded to abc nodes.)
 
 ## 2. Load connection: wye vs delta
 
@@ -143,9 +143,9 @@ different per-phase spectra require **three separate 1-phase loads, each with it
 own `Spectrum`** (R. Dugan, OpenDSS forum). Refs:
 <https://opendss.epri.com/HarmonicsLoadModeling.html>,
 <https://sourceforge.net/p/electricdss/discussion/beginners/thread/81f0a80d/>.
-This confirms and extends the convention in `references/opendss/harmonics.md`.
+This confirms and extends the convention in [OpenDSS harmonics](references/opendss/harmonics.md).
 
-**pgml adopted model (increment 2).** Add a per-phase spectrum option to the schema
+**pgml adopted model.** A per-phase spectrum option in the schema
 and a phase axis to the `harmonic_injection` override; build `I(h)` per phase using
 each phase's own fundamental phasor (already per-phase in `harmonic_flow.py`). A
 device-level spectrum stays the "same on all phases" shorthand (OpenDSS multi-phase

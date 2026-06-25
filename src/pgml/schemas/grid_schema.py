@@ -58,7 +58,7 @@ either a symmetric or an asymmetric calculation may run on the same grid:
     per-phase data, else symmetric (the power-grid-model rule).
 
 - Whether a run is symmetric/asymmetric is SOLVER CONFIG, not grid data. See
-  ``references/asymmetric_modeling.md`` for the cross-tool basis and citations.
+  ``docs/pgml/modeling/asymmetric.md`` for the cross-tool basis and citations.
 
 *Rated vs operating point.* Every ``*_rated`` / ``*_nom`` field is a NAMEPLATE
 RATING, not an operating point. Actual loading/generation comes from profiles
@@ -520,7 +520,7 @@ class LineGeometry(GridModel):
     When a :class:`Line` carries a ``conductor_geometry``, assembly computes its
     per-frequency ``Z(h)`` (Deri earth return + skin effect) and shunt ``Yc(h)``
     from this geometry instead of the explicit R/L/C matrices (see
-    ``references/opendss/carson.md``). Phase conductors must cover the line's
+    ``docs/pgml/modeling/references/opendss/carson.md``). Phase conductors must cover the line's
     ``from_phases``; extra ``is_neutral`` conductors are reduced out.
     """
 
@@ -1025,7 +1025,7 @@ class InverterControlBase(GridModel):
     the clamped/curve quantity, of a soft saturation / soft breakpoint used so the
     control stays C\\ :sup:`1` for gradient-based use (0 = the exact hard clamp /
     piecewise curve, which matches the reference tools at the operating point but has
-    sub-gradients at the kinks). See ``references/der_pv_storage_modeling.md`` section 4.3.
+    sub-gradients at the kinks). See ``docs/pgml/modeling/der-pv-storage.md`` section 4.3.
     """
 
     s_rated_va: Optional[PosNum] = si_field(
@@ -1155,7 +1155,7 @@ def _check_load_connection(obj) -> None:
     """Validate a Load/Generator ``connection`` (``None`` = resolve from config).
 
     DELTA (line-to-line) needs at least two phases; ZIGZAG is a transformer-only
-    winding and is rejected on appliances. See ``references/asymmetric_modeling.md``.
+    winding and is rejected on appliances. See ``docs/pgml/modeling/asymmetric.md``.
     """
     c = obj.connection
     if c is None:
@@ -1177,7 +1177,7 @@ def _check_spectrum_per_phase(obj) -> None:
     ``spectrum_per_phase`` (asymmetric distortion) is mutually exclusive with the
     all-phases ``spectrum`` shorthand; its keys must be a subset of the appliance's
     ``phases`` (a phase with no entry injects no harmonics). See
-    ``references/asymmetric_modeling.md`` §5.
+    ``docs/pgml/modeling/asymmetric.md`` §5.
     """
     spp = obj.spectrum_per_phase
     if spp is None:
@@ -1224,7 +1224,7 @@ class Load(InjectionAppliance):
     per-phase ``operating_point`` overrides either at assembly time. Whether the totals
     are split equally (balanced) or the per-phase values are honored is the CALCULATION
     SYMMETRY decision (config ``calculation.symmetry``; see
-    ``references/asymmetric_modeling.md`` §1) — it is solver config, not grid data.
+    ``docs/pgml/modeling/asymmetric.md`` §1) — it is solver config, not grid data.
 
     *Connection.* ``connection`` is WYE (each phase to neutral/ground) or DELTA
     (phase-to-phase, line-to-line). ``None`` (default) means "resolve from config" at
@@ -1233,14 +1233,14 @@ class Load(InjectionAppliance):
     For a WYE load the return path is the node's ``Phase.N`` row when that node carries a
     neutral (the 4-wire case), else ground (3-wire / solidly grounded). DELTA needs
     ``len(phases) >= 2``; ZIGZAG is transformer-only. See
-    ``references/asymmetric_modeling.md`` §2-4.
+    ``docs/pgml/modeling/asymmetric.md`` §2-4.
 
     *Harmonics.* ``spectrum`` is one harmonic current source applied to every phase
     (OpenDSS multi-phase Load semantics). ``spectrum_per_phase`` instead gives an
     ASYMMETRIC spectrum per phase (e.g. a single-phase EV charger distorting only phase
     A); the two are mutually exclusive. For a DELTA load a per-phase spectrum key
     identifies the delta branch starting at that phase. See
-    ``references/asymmetric_modeling.md`` §5.
+    ``docs/pgml/modeling/asymmetric.md`` §5.
     """
 
     component: Literal["load"] = "load"
@@ -1307,7 +1307,7 @@ class Generator(InjectionAppliance):
     """Generation unit (synchronous machine, wind, CHP, or — most commonly on a
     distribution feeder — a grid-following PV/DER inverter). Same rated-vs-operating-point,
     per-phase asymmetry and connection semantics as :class:`Load` (see its docstring and
-    ``references/asymmetric_modeling.md``); injected-power sign handled at assembly.
+    ``docs/pgml/modeling/asymmetric.md``); injected-power sign handled at assembly.
 
     *Inverter control.* The optional ``control`` block makes the operating point a
     function of the local voltage and the available power — constant power factor,
@@ -1316,7 +1316,7 @@ class Generator(InjectionAppliance):
     active power (e.g. the PV MPP set by irradiance); the control derives the reactive
     power and any active-power curtailment. The voltage-dependent injection enters the
     nonlinear power-flow residual ``I_device(V)`` and is differentiated by the same IFT
-    backward as the const-P/ZIP load (``references/der_pv_storage_modeling.md`` section 4)."""
+    backward as the const-P/ZIP load (``docs/pgml/modeling/der-pv-storage.md`` section 4)."""
 
     component: Literal["generator"] = "generator"
     connection: Optional[WindingConnection] = Field(
@@ -1397,7 +1397,7 @@ class Storage(InjectionAppliance):
     ``Storage`` element. State-of-charge integration and the dispatch rule live in the
     time-series / scenario layer (``pgml.scenarios``), which resolves them into the
     per-step ``p_nom_w`` / operating point the solver consumes. See
-    ``references/der_pv_storage_modeling.md`` section 4.4.
+    ``docs/pgml/modeling/der-pv-storage.md`` section 4.4.
     """
 
     component: Literal["storage"] = "storage"

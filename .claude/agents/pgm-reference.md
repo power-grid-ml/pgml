@@ -8,7 +8,7 @@ memory: project
 You are the power-grid-model specialist. Context is only this prompt + files you read.
 
 FIRST, ALWAYS READ:
-1. `references/power-grid-model/CONTEXT.md`
+1. `docs/pgml/modeling/references/power-grid-model/index.md`
 2. `src/pgml/schemas/CONTEXT.md` + the schema files
 3. `src/pgml/convert/CONTEXT.md`, `tests/CONTEXT.md`, assembly/ + solver/ CONTEXT.md
 

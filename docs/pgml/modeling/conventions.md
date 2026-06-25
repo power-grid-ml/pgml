@@ -8,10 +8,12 @@ a silent factor-of-√3 or referred-to-the-wrong-side error is introduced. The r
 **every converter translates the source convention into pgml's canonical form below;
 the core never sees a foreign convention.**
 
-Companion decision records (deeper derivations): `opendss/transformer.md` (vector-group
-two-winding model), `opendss/carson.md` (bit-exact earth-return), `opendss/harmonics.md`
-(injection + frequency scaling), `positive_sequence_harmonic_line_model.md`,
-`asymmetric_modeling.md`. Schema source of truth: `src/pgml/schemas/CONTEXT.md`.
+Companion decision records (deeper derivations): the [transformer model](transformer.md)
+(vector-group two-winding model), [Carson line constants](references/opendss/carson.md)
+(bit-exact earth-return), [OpenDSS harmonics](references/opendss/harmonics.md)
+(injection + frequency scaling), the [harmonic line model](harmonic-line-model.md), and
+[asymmetric modeling](asymmetric.md). The frozen schema is the data source of truth — see
+the [Schemas API reference](../api/schemas.rst).
 
 ---
 
@@ -63,7 +65,7 @@ admittance `y=conj(S)/V²` agree with pandapower's positive-sequence reference i
 - pandapower / pgm: `u_rated_v = vn_kv·1000` / `u_rated` directly (both already L-L).
 - OpenDSS: `Bus.kVBase()` is L-N, so the converter recovers L-L as `kVBase·√3·1000`. (An
   earlier converter stored `kVBase·1000` — an L-N value — which was a √3 error in the
-  const-Z shunt; corrected with the phase-mode migration. See `convert/opendss/CONTEXT.md`.)
+  const-Z shunt; the converter now recovers L-L correctly.)
 
 **Gotchas.**
 - OpenDSS `Bus.kVBase()` is L-N regardless of phase count — `×√3` is mandatory.
@@ -91,7 +93,7 @@ same side as pandapower and pgm (the two load-flow oracles), so their `vk/vkr/uk
 convert with a single LV base and no extra referral. It is also the natural side for the
 phase-domain winding-incidence primitive `Y = Nᵀ·Y_winding·N`, where the leakage `y` sits
 on the LV coil block and the HV self-block picks up the `1/τ²` from the turns ratio (see
-`opendss/transformer.md`). OpenDSS instead references `XHL` to winding 1 (HV); the live
+the [transformer model](transformer.md)). OpenDSS instead references `XHL` to winding 1 (HV); the live
 OpenDSS Dyn oracle (`opendss_oracle._build_circuit_with_real_transformer`) back-calculates
 `%R`/`XHL` from pgml's LV-referred R/L — self-consistent because the total per-unit
 leakage is preserved.
@@ -117,7 +119,7 @@ the turns ratio, but the raw numbers differ, so do not compare them without re-r
 voltages + winding connections (OpenDSS-faithful), so `tap.ratio_magnitude` carries
 **only the off-nominal deviation** (≈1.0) and `tap.shift_deg` carries the clock. The √3 of
 a delta winding cancels against the delta incidence `M`, so the positive-sequence block
-reduces exactly to the classical off-nominal-tap pi (`opendss/transformer.md`).
+reduces exactly to the classical off-nominal-tap pi (see the [transformer model](transformer.md)).
 
 **Gotchas / current converter limits.**
 - pandapower converter **hard-codes** `from_connection=DELTA`, `to_connection=WYE_GROUNDED`
@@ -225,10 +227,10 @@ earth-return log term shrinks as penetration depth drops). Default earth model i
 - **Geometry Carson/Deri** (`conductor_geometry`, `geometry.carson`): the full
   complex-penetration formula — **bit-exact vs OpenDSS** (relZ ~1e-13) on every order,
   including triplen, because feeding the *same* geometry to both engines removes any
-  earth-model ambiguity. Use this for OpenDSS parity. (`opendss/carson.md`)
+  earth-model ambiguity. Use this for OpenDSS parity. (See [Carson line constants](references/opendss/carson.md).)
 - **Positive-sequence** (`apply_positive_sequence_harmonic_model`): `X1(h)=X1·h` + skin on
   `R1`, **no earth term** (it cancels in the positive sequence). Physically representative
-  for balanced R/X feeders. (`positive_sequence_harmonic_line_model.md`)
+  for balanced R/X feeders. (See the [harmonic line model](harmonic-line-model.md).)
 - **Sequence-aware** (`apply_sequence_aware_harmonic_model`, the 3-phase config default for
   R/X lines): earth-free `Z1` + a zero-sequence `Z0` carrying the Carson earth
   **resistance** `3·(Re(f)−Re(f₀))`. Analytic and never non-physical, but `X0∝h` is
@@ -246,11 +248,11 @@ compounding causes: the units-calibrated earth resistance and the linear-vs-sub-
 `X0`. Both vanish on the **geometry** path (identical geometry, identical Carson). The
 transformer vector group is independent of this: a Dyn delta traps the zero sequence
 identically on both sides (validated bit-for-bit by
-`opendss_dyn_transformer_harmonic_voltages`). (`opendss/harmonics.md`)
+`opendss_dyn_transformer_harmonic_voltages`). (See [OpenDSS harmonics](references/opendss/harmonics.md).)
 
 **Transformer frequency scaling.** OpenDSS `XRConst=No` (default): R fixed, leakage X∝h;
 pgml mirrors this (`X(h)=2π·h·f₀·L`, constant R) — a frequency-correction curve is not yet
-modelled (see `HANDOFF.md`, "frequency-dependent device models").
+modelled yet (tracked as open work in `src/pgml/STATUS.md`, "frequency-dependent device models").
 
 ---
 

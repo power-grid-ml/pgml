@@ -11,10 +11,10 @@ Public API
   ``h > 1`` (the building block of :func:`solve_harmonic_flow`'s harmonic slices),
   so ``r(V) = Y(h)·V − I(h)`` is the physics-consistency residual.
 - ``NodeHarmonicSource`` — per-node harmonic "error" source (Thevenin / Norton),
-  injected only at orders ``h > 1`` (see ``references/error_injection.md``).
+  injected only at orders ``h > 1`` (see ``docs/pgml/modeling/error-injection.md``).
 
 Model (matches OpenDSS ``Solve mode=harmonics`` — see
-``references/opendss/harmonics.md``):
+``docs/pgml/modeling/references/opendss/harmonics.md``):
 
 1. Solve the nonlinear fundamental power flow (:func:`solve_power_flow`). Order 1 of
    the result is this solution.
@@ -121,7 +121,7 @@ class NodeHarmonicSource:
 
     Models a Thevenin (``kind="voltage"``) or Norton (``kind="current"``) harmonic
     source at ANY node — independent of whether a load/generator sits there. The
-    physics + math are pinned in ``references/error_injection.md`` (authoritative).
+    physics + math are pinned in ``docs/pgml/modeling/error-injection.md`` (authoritative).
     Because pgml solves each harmonic as its own linear system, the source is added
     ONLY at ``h > 1`` and the fundamental power flow is preserved EXACTLY (no damping
     reactor needed).
@@ -204,7 +204,7 @@ def solve_harmonic_flow(
         sources injected ONLY at orders ``h > 1`` (the fundamental is preserved
         exactly). Each is a Thevenin voltage source (stamps a resistive shunt ``Y_s``
         on the node-phase diagonal + a Norton current ``I_N``) or a Norton current
-        source (``I_N`` only), per ``references/error_injection.md``. Multiple
+        source (``I_N`` only), per ``docs/pgml/modeling/error-injection.md``. Multiple
         simultaneous sources are allowed. When ``None`` (default), behavior is
         byte-identical to today. ``source_power_va`` and the spectrum may carry
         leading SCENARIO batch dims (differentiable; a batched voltage source's
@@ -697,7 +697,7 @@ def _harmonic_injections(
 
 
 # ---------------------------------------------------------------------------
-# per-node harmonic "error" source (Thevenin / Norton) — references/error_injection.md
+# per-node harmonic "error" source (Thevenin / Norton) — docs/pgml/modeling/error-injection.md
 # ---------------------------------------------------------------------------
 def _apply_node_sources(
     node_sources,
@@ -715,7 +715,7 @@ def _apply_node_sources(
 
     For each :class:`NodeHarmonicSource` and each requested order ``h > 1``, at the
     source node-phase rows (``index.rows_for_terminal``) — per
-    ``references/error_injection.md``:
+    ``docs/pgml/modeling/error-injection.md``:
 
     - ``V_base`` = node line-to-neutral base
       (:func:`pgml.assembly._params.phase_voltage_magnitude`).

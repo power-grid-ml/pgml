@@ -17,8 +17,7 @@ differentiable control law lives in `assembly/_control.py` (folded into
 `device_current_injections`, rides the IFT); storage SoC/dispatch is `scenarios/storage.py`.
 Validated vs pandapower `CharacteristicControl` Q(V) (same equilibrium to ~1e-10 pu) and
 OpenDSS `InvControl` VOLTVAR/VOLTWATT. Still open (optional): the voltage-regulating PV bus
-(§4.5) and the harmonic load Norton shunt (§4.6, tracked as `HANDOFF.md` §C). Remaining
-schema changes, if any, stay orchestrator-only (`schemas/CONTEXT.md` frozen-contract rule).
+(§4.5) and the harmonic load Norton shunt (§4.6, tracked as open work in `src/pgml/STATUS.md`).
 
 ---
 
@@ -281,8 +280,7 @@ control law, (b) a harmonic source/impedance, and (c) optionally state. So:
   time-series layer. A separate type is clearer for ML stratification and for the SoC/dispatch
   service than a sign-flipped generator.
 
-These are **schema changes → orchestrator-only, require maintainer approval** before editing
-`schemas/`. Reuse existing machinery: `CurveParam` for characteristics, `FrequencyParam`
+These require **schema changes**. Reuse existing machinery: `CurveParam` for characteristics, `FrequencyParam`
 for any frequency dependence, the float/tensor duality so every new numeric field is
 gradient-capable.
 
@@ -344,7 +342,7 @@ SoC and dispatch live in the time-series layer.**
 - **Snapshot.** `Storage` contributes `S0 = ±(P + jQ)` to `I_device(V)` like a generator —
   fully differentiable w.r.t. the (possibly tensor) setpoint value.
 - **SoC / dispatch.** Implement in `scenarios` (the natural home for time-series and the
-  batching layer; `HANDOFF.md` §A). A dispatch resolver maps `(profile | rule | price |
+  batching layer). A dispatch resolver maps `(profile | rule | price |
   human-behaviour sample, SoC[t])` → `P[t]`, then advances `SoC[t+1] = SoC[t] + η·P[t]·Δt`
   with the charge/discharge efficiency split (OpenDSS's equations). The **rule** is ordinary
   Python control flow (no autograd); the **resulting `P[t]` tensor** is what the solver
@@ -372,7 +370,7 @@ pgml's harmonic model derives each device's injection from its **fundamental** c
 A control law changes the fundamental operating point → changes `I₁` → automatically rescales
 the harmonic current sources (`|I_h| = (mag_h/mag_1)|I₁|`). So once §4.2 lands, the harmonic
 spectrum tracks the control state with no extra work — and it stays differentiable through
-`I₁`. Two refinements (both in `HANDOFF.md` §C):
+`I₁`. Two refinements (both tracked as open work in `src/pgml/STATUS.md`):
 
 - The PV inverter "internal impedance" the user notes is the harmonic **Norton shunt**
   (`HarmonicShuntModel`, OpenDSS `%X`); finishing `include_load_shunt=True` lets a
@@ -456,14 +454,12 @@ Interconnection standards defining the control characteristics (Volt-VAr, Volt-W
 `cosφ(P)`, reactive capability): IEEE 1547-2018; EN 50549-1/-2; VDE-AR-N 4105.
 
 This repository
-- [repo-harmonics] `references/opendss/harmonics.md` (empirically verified spectrum/phase
-  convention and Norton shunt), `references/opendss/CONTEXT.md`.
+- [repo-harmonics] [OpenDSS harmonics](references/opendss/harmonics.md) (empirically verified
+  spectrum/phase convention and Norton shunt) and the [OpenDSS brief](references/opendss/index.md).
 - pgml model: `src/pgml/schemas/grid_schema.py` (`Generator`, `Storage`, `InverterControl`,
   `Characteristic`, `Load`, `HarmonicShuntModel`, `LoadModel`);
   `src/pgml/assembly/_control.py` (control laws); `src/pgml/assembly/ybus.py::device_current_injections`;
   `src/pgml/solver/power_flow.py` (IFT residual); `src/pgml/solver/harmonic_flow.py`;
   `src/pgml/scenarios/storage.py` (SoC / dispatch).
-- Open work: `HANDOFF.md` §C (frequency-dependent device models — incl. the harmonic load
-  Norton shunt) and the optional DER/storage extensions under "Smaller follow-ups".
-</content>
-</invoke>
+- Open work: `src/pgml/STATUS.md` (frequency-dependent device models — incl. the harmonic
+  load Norton shunt — and the optional DER/storage extensions).

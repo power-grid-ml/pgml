@@ -47,7 +47,7 @@ def phase_voltage_magnitude(
     - ``line_to_line=True`` (DELTA): the element sees the full line-to-LINE voltage,
       so return ``u_rated_v`` directly for a 3-phase node (no sqrt(3) division).
 
-    Connection-aware per ``references/asymmetric_modeling.md`` section 2 (OpenDSS
+    Connection-aware per ``docs/pgml/modeling/asymmetric.md`` section 2 (OpenDSS
     ``VBase``: wye 3-phase uses ``kVLL/sqrt(3)``; delta uses the supplied kV).
     """
     if line_to_line:
@@ -127,7 +127,7 @@ def resolve_operating_power(
     When ``asymmetric=False`` (a SYMMETRIC calculation), every per-phase value is
     IGNORED and the total is split equally over the phases (the power-grid-model
     rule: a symmetric calculation averages an asymmetric load —
-    ``references/asymmetric_modeling.md`` section 1). The total is taken from a
+    ``docs/pgml/modeling/asymmetric.md`` section 1). The total is taken from a
     total operating-point override if given, else from the per-phase override / the
     per-phase nameplate (summed), else from the total nameplate.
     """

@@ -11,8 +11,8 @@ The package is currently a SCAFFOLD; confirm the concrete generation approach wi
 orchestrator before building (it is chosen with the maintainer).
 
 FIRST, ALWAYS READ (in order):
-1. `references/pgg/README.md` — the differentiable-generation contract + intended scope.
-2. `references/pgml/README.md` — the `pgml` PUBLIC API (schema + the differentiable forward).
+1. `docs/pgg/index.md` — the differentiable-generation contract + intended scope.
+2. `docs/pgml/index.md` — the `pgml` PUBLIC API (schema + the differentiable forward).
 3. `CLAUDE.md` — the two hard constraints + style. `src/pgml/schemas/CONTEXT.md` (FROZEN).
 4. `src/pgg/CONTEXT.md` — the package ledger (record signatures here as you build).
 
