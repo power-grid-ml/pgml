@@ -44,7 +44,7 @@ oracles = ["pandapower>=2.14,<3", "power-grid-model>=1.13,<2", "opendssdirect-py
 # `pgl` (power-grid-learn): the learning framework — training (lightning) + graph models
 # (torch-geometric) + tracking (mlflow), plus the data path (scenarios) and the CIGRE LV
 # grid (convert). torch is intentionally inherited (conda-provided on the CUDA clusters).
-learn = ["pgml[ml,scenarios,convert]"]
+learn = ["pgml[ml,scenarios,convert,viz]"]
 docs = [
     "sphinx>=9.1,<10",
     "furo>=2025.1.0",

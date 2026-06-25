@@ -51,7 +51,7 @@ Upstream-grid (slack Source) modelling
 
 ``source.rx_ratio`` (default 10.0)
     X/R ratio of the source series impedance
-    (R = |Z| / sqrt(1 + rx\ :sup:`2`), X = rx · R).  A value of 10 is typical for a
+    (R = ``|Z|`` / sqrt(1 + rx\ :sup:`2`), X = rx · R).  A value of 10 is typical for a
     stiff MV grid.
 
 .. automodule:: pgml.defaults
