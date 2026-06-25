@@ -38,15 +38,15 @@ import math
 import torch
 from torch import Tensor
 
-from pgml.config import get as _cfg
+from pgml.defaults import get as _cfg
 from pgml.errors import InputError
 
 from .carson import MU0, _cdtype, internal_impedance, series_impedance
 
 # Spacing-reactance coefficient: Im(Lfactor·ln(1/G)) = (f·mu0)·ln(1/G), so
 # X_geom = (f·mu0)·ln(D/GMR).  k(f0) = f0·mu0 is the per-conductor coefficient.
-# Defaults are sourced from the top-level config (`pgml.config` / defaults.yaml) so every
-# modeling constant is documented in one place; these module names are the config values.
+# Defaults are sourced from the modeling defaults (`pgml.defaults` / data/defaults.yaml) so
+# every modeling constant is documented in one place; these module names are the default values.
 _DEFAULT_GMR_OVER_RADIUS = _cfg("line.conductor.gmr_over_radius")  # e^{-1/4}
 
 
@@ -222,7 +222,7 @@ def sequence_impedances(z_phase: Tensor) -> tuple[Tensor, Tensor, Tensor]:
 # NOT appear in the positive sequence. (OpenDSS exposes the same physics through its
 # per-LineCode Rg/Xg parameters; its defaults are calibrated for imperial length units,
 # so on a metric line they are ~3.28x smaller than this physical per-metre value — hence
-# the coefficient is configurable here and in `pgml.config`.)
+# the coefficient is configurable here and in `pgml.defaults`.)
 CARSON_EARTH_R_PER_HZ = _cfg(
     "line.earth_return.resistance_coeff_ohm_per_m_per_hz"
 )  # Ohm/m per Hz (= pi^2 * 1e-7)

@@ -32,7 +32,7 @@ API:
 - `phases_for(mode, *, native=None) -> tuple[Phase, ...]` — the one place the phase
   tuple is decided: `SINGLE_PHASE_EQUIV -> (A,)`; `THREE_PHASE -> native` if given
   (OpenDSS passes real phases incl. `Phase.N`) else `(A, B, C)`.
-- `zero_sequence_ratios() -> (r0/r1, x0/x1, c0/c1)` — read from `pgml.config`
+- `zero_sequence_ratios() -> (r0/r1, x0/x1, c0/c1)` — read from `pgml.defaults`
   (`line.zero_sequence.*`).
 - `sequence_to_phase_matrices(r1, x1, c1, *, r0=None, x0=None, c0=None, two_pi_f0,
   g0=0, g1=0) -> (R, L, C, G)` — sequence -> 3x3 phase matrices via

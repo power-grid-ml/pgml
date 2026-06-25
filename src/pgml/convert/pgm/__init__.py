@@ -27,7 +27,7 @@ calculation: one positive-sequence equivalent per node, ``phases=(Phase.A,)``,
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches
 become ``(A, B, C)``; lines are expanded from sequence quantities via the
 symmetric-component identity (zero-sequence from line ``r0/x0/c0`` fields when
-present, else from ``pgml.config`` defaults); sources become balanced 3-phase
+present, else from ``pgml.defaults``); sources become balanced 3-phase
 Thevenins (angles offset by 0 / −120 / +120 deg); ``asym_load`` entries are
 captured with per-phase P/Q and connection ``WYE`` (power-grid-model models
 all loads wye; no connection field is available).

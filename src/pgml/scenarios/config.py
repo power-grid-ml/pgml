@@ -474,3 +474,58 @@ __all__ = [
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
 ]
+
+
+def _example() -> "ScenarioConfig":
+    """A representative, valid batch: load P/Q scaling + EN 50160-referenced harmonics."""
+    return ScenarioConfig(
+        n_samples=256,
+        seed=0,
+        method="sobol",
+        parameters=[
+            ParameterSpec(
+                name="load_pq",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.5, high=1.5),
+                field="pq",
+                mode="scale",
+            ),
+            ParameterSpec(
+                name="harmonic_injection",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.0, high=1.0),
+                field="h_mag",
+                mode="absolute",
+                orders=[3, 5, 7],
+                harmonic_reference="en50160",
+            ),
+        ],
+    )
+
+
+if (
+    __name__ == "__main__"
+):  # `python -m pgml.scenarios.config --json-schema | --example`
+    import argparse
+    import json
+    import sys
+
+    import yaml
+
+    ap = argparse.ArgumentParser(
+        prog="python -m pgml.scenarios.config",
+        description="Inspect the pgml ScenarioConfig: its JSON Schema or an example YAML.",
+    )
+    grp = ap.add_mutually_exclusive_group(required=True)
+    grp.add_argument(
+        "--json-schema", action="store_true", help="Print the config JSON Schema."
+    )
+    grp.add_argument(
+        "--example", action="store_true", help="Print a valid example config as YAML."
+    )
+    ns = ap.parse_args()
+    if ns.json_schema:
+        json.dump(ScenarioConfig.model_json_schema(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(yaml.safe_dump(_example().model_dump(), sort_keys=False))

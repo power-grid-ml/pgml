@@ -7,7 +7,7 @@ only contains the source-specific field reading. It provides:
 - :class:`IdCounter` — the single monotonic id allocator.
 - :class:`PhaseMode` — single-phase positive-sequence equivalent vs genuine abc.
 - :func:`phases_for` — the one place the node/branch phase tuple is decided.
-- :func:`zero_sequence_ratios` — the config-driven R0/R1, X0/X1, C0/C1 defaults.
+- :func:`zero_sequence_ratios` — the defaults-driven R0/R1, X0/X1, C0/C1 ratios.
 - :func:`sequence_to_phase_matrices` — sequence (1/0) quantities -> 3x3 phase
   matrices via the symmetric-component identity ``self=(Z0+2*Z1)/3``,
   ``mutual=(Z0-Z1)/3`` (and likewise for the shunt C).
@@ -25,7 +25,7 @@ Zero-sequence assumption
 When a positive-sequence (``r1``/``x1``/``c1``) line is expanded to a genuine
 3-phase phase-domain matrix (:data:`PhaseMode.THREE_PHASE`) and the source dataset
 carries no native zero-sequence data, the zero-sequence quantities default to
-``r1 * (R0/R1)`` etc. using the ratios in ``pgml.config`` (``line.zero_sequence.*``).
+``r1 * (R0/R1)`` etc. using the ratios in ``pgml.defaults`` (``line.zero_sequence.*``).
 An explicit per-line ``r0``/``x0``/``c0`` always wins over these defaults.
 """
 
@@ -35,7 +35,7 @@ import math
 from enum import Enum
 from typing import Any, Optional
 
-from pgml import config
+from pgml import defaults
 from pgml.schemas.grid_schema import (
     ConstantParam,
     GridMetadata,
@@ -120,16 +120,16 @@ def phases_for(
 # Zero-sequence defaults and the sequence -> phase identity
 # =============================================================================
 def zero_sequence_ratios() -> tuple[float, float, float]:
-    """Return ``(r0_over_r1, x0_over_x1, c0_over_c1)`` from ``pgml.config``.
+    """Return ``(r0_over_r1, x0_over_x1, c0_over_c1)`` from ``pgml.defaults``.
 
     These are the assumed zero/positive-sequence ratios used to synthesize a
     zero-sequence quantity when a positive-sequence line is expanded to abc and
     the dataset has no native zero-sequence data (``line.zero_sequence.*``).
     """
     return (
-        float(config.get("line.zero_sequence.r0_over_r1")),
-        float(config.get("line.zero_sequence.x0_over_x1")),
-        float(config.get("line.zero_sequence.c0_over_c1")),
+        float(defaults.get("line.zero_sequence.r0_over_r1")),
+        float(defaults.get("line.zero_sequence.x0_over_x1")),
+        float(defaults.get("line.zero_sequence.c0_over_c1")),
     )
 
 

@@ -24,7 +24,7 @@ import cmath
 import math
 from typing import Optional
 
-from pgml.config import get as _cfg
+from pgml.defaults import get as _cfg
 from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import (
     AnalyticParam,
@@ -40,7 +40,7 @@ from pgml.schemas.grid_schema import (
 
 from .carson import MU0
 
-# Defaults sourced from the top-level config (`pgml.config` / defaults.yaml).
+# Defaults sourced from the modeling defaults (`pgml.defaults` / data/defaults.yaml).
 _DEFAULT_HEIGHT = {  # m: overhead vs cable (Deri needs y>0)
     "ol": _cfg("line.conductor.height_overhead_m"),
     "cs": _cfg("line.conductor.height_cable_m"),
@@ -86,7 +86,7 @@ def synthesize_line_geometry(
     GMR is set in closed form from the reactance; Rdc from the resistance with a few
     skin-effect fixed-point refinements (clamped to a small positive value if the
     target resistance is below the earth-return floor). Provenance records the origin.
-    Defaults (radius, heights, earth resistivity) come from ``pgml.config``.
+    Defaults (radius, heights, earth resistivity) come from ``pgml.defaults``.
     """
     h = height_m if height_m is not None else _DEFAULT_HEIGHT.get(line_type, 10.0)
     ze = _self_ze(h, earth_resistivity_ohm_m, f0)
@@ -201,7 +201,7 @@ def synthesize_three_phase_geometry(
     The SAME geometry can be fed to both pgml and OpenDSS, so the harmonic comparison
     is an apples-to-apples Carson check (earth-return on both ``Z1`` and ``Z0`` at every
     harmonic, including the triplen / zero-sequence orders). Defaults come from
-    ``pgml.config``.
+    ``pgml.defaults``.
     """
     h = height_m if height_m is not None else _DEFAULT_HEIGHT.get(line_type, 10.0)
     rho = earth_resistivity_ohm_m
@@ -466,8 +466,8 @@ def apply_default_harmonic_model(
     """In place: apply the CONFIG-DEFAULT harmonic line model to each R/X line.
 
     The single deliberate entry point that turns the documented defaults in
-    ``pgml.config`` (``line.harmonic_model.three_phase`` / ``.single_phase``) into actual
-    per-line models — so the choice is explicit and config-sourced, never silently
+    ``pgml.defaults`` (``line.harmonic_model.three_phase`` / ``.single_phase``) into actual
+    per-line models — so the choice is explicit and defaults-sourced, never silently
     implicit at solve time. Per the precedence contract, a line that ALREADY carries an
     explicit harmonic model (a ``harmonic_line_model`` tag or a non-default
     ``resistance_frequency``) or a ``conductor_geometry`` is left untouched; only the

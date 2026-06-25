@@ -76,6 +76,23 @@ The pgml package map (subpackage-by-subpackage, with each interface ledger) is i
 | Published human docs (concepts, modeling decisions, API reference) | `docs/` (`docs/index.md`) |
 | Modeling decisions (conventions, transformer, line model, DER, asymmetric) | `docs/pgml/modeling/` |
 | Cross-tool conventions + reference-library briefs | `docs/pgml/modeling/conventions.md`, `docs/pgml/modeling/references/` |
+| **Configuration** (three buckets, see below) | `src/pgml/data/CONTEXT.md`, `examples/configs/`, `experiments/README.md` |
+
+## Configuration: three buckets (divided per package)
+
+Don't conflate "config". There are three kinds, each owned per package:
+
+1. **Shipped library data** — modeling defaults + standards tables (physical constants),
+   read-only, versioned with the code, loaded via `importlib.resources` so they ship in the
+   wheel. `pgml`: `pgml.defaults` over `src/pgml/data/` (`defaults.yaml` + `standards/`).
+   *Not* user run-config.
+2. **Run-config schemas** — serializable pydantic contracts; one config + `seed` reproduces a
+   run. Per package: `pgml.scenarios.config` (data generation), `pgl.config` (training),
+   `pgg.config` (generation, future). Inspect with `python -m <module> --json-schema|--example`;
+   templates in `examples/configs/`.
+3. **Run-config instances + outputs** — the user's own YAML + datasets/checkpoints/tracking.
+   Never tracked here; live under the **experiments root** (`PGML_EXPERIMENTS`, default
+   `./experiments`; `pgml.experiments_root()`).
 
 ## Frozen-contract rule
 

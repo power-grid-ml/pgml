@@ -33,7 +33,7 @@ verified `batched == loop-of-individual`).
     unspecified orders survive. Harmonic fields reject `correlation`/per-phase `symmetry`.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
 - EN 50160 per-order limits: `en50160_limits() -> {order: max_pu}`, `en50160_limit(order)`
-  (loads `config/max_harmonic_values_din-en50160.yaml`; `PGML_EN50160` env override).
+  (loads the packaged `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env override).
 - NODE-COHERENT harmonic "fingerprints" (temporal sequences):
   `CoherentSpectrumConfig(selector, orders, n_steps T, n_scenarios B, n_modes=2, seed,
   mag_distribution, harmonic_reference="en50160", phase_distribution, jitter_mag, ar1_rho,

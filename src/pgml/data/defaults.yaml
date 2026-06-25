@@ -7,9 +7,9 @@
 # explain). All default constants and default model selections live here, each with a
 # short precise description and units.
 #
-# Resolution precedence (highest first) — see `pgml.config.resolve`:
+# Resolution precedence (highest first) — see `pgml.defaults.resolve`:
 #   1. explicit  — a value the user set on the component / grid (ALWAYS wins).
-#   2. config    — the default in this file.
+#   2. defaults  — the value in this file.
 #   3. converter — inferred from a source library during conversion (e.g. an OpenDSS
 #                  `LineGeometry`); the last-resort fallback when 1 and 2 do not apply.
 #

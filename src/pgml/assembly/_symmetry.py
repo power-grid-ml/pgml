@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from pgml import config
+from pgml import defaults
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     Grid,
@@ -85,7 +85,7 @@ def resolve_asymmetric(
     summary is emitted by :func:`log_modeling_summary`.
     """
     if mode is None:
-        mode = config.get("calculation.symmetry")
+        mode = defaults.get("calculation.symmetry")
     m = str(mode).lower()
     if m not in _VALID_MODES:
         raise InputError(
@@ -103,7 +103,7 @@ def resolve_asymmetric(
 
 
 def resolve_connection(appliance) -> WindingConnection:
-    """Effective connection of a Load/Generator: explicit if set, else config default.
+    """Effective connection of a Load/Generator: explicit if set, else modeling default.
 
     A 1-phase appliance defaults to ``appliance.load.single_phase_connection``; a
     multi-phase appliance to ``appliance.load.default_connection`` (both WYE by
@@ -118,7 +118,7 @@ def resolve_connection(appliance) -> WindingConnection:
         if len(appliance.phases) == 1
         else "appliance.load.default_connection"
     )
-    return WindingConnection(config.get(key))
+    return WindingConnection(defaults.get(key))
 
 
 def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:

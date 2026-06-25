@@ -12,7 +12,7 @@ for status + open work see `STATUS.md`; for the published human docs see `docs/p
 grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀── evaluation (plots vs refs)
       │              ▲   │         ▲                       ◀── scenarios (batched inputs)
       │              │   └─ geometry (Carson Z(h)/Yc(h))   ◀── convert (pandapower/OpenDSS/pgm)
-      └─ config (documented modeling defaults) ────────────┘
+      └─ defaults (modeling defaults; shipped `data/` tables) ┘
 ```
 
 ## Where things live (open the subpackage CONTEXT.md for the interface ledger)
@@ -20,7 +20,9 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | Need… | Subpackage | CONTEXT |
 |---|---|---|
 | Input/output **contracts** (Grid, Node, Branch, Appliance, Result, Scenario) — FROZEN | `schemas/` | `schemas/CONTEXT.md` |
-| **Modeling defaults** (documented values + model choices; explicit > config > converter) | `config/` | `config/CONTEXT.md` |
+| **Modeling defaults** (documented values + model choices; explicit > defaults > converter) — internal, not user run-config | `defaults.py` (loader) + shipped `data/` | `data/CONTEXT.md` |
+| **Run-config schemas** (serializable; one config + seed reproduces a run) — user-facing | `scenarios/config.py` (data gen) | `scenarios/CONTEXT.md` |
+| **Experiments root** (where run outputs + config instances live; `PGML_EXPERIMENTS`, default `./experiments`) | `paths.py` | `experiments/README.md` |
 | **Y-bus assembly** (per-phase/per-harmonic/batched stamps; network + device injections; node-phase index; branch currents; vector-group transformer; control laws) | `assembly/` | `assembly/CONTEXT.md` |
 | **Solve** (complex batched linear; nonlinear const-P/ZIP via IFT; Newton; harmonic flow; diagnostics + loadability) | `solver/` | `solver/CONTEXT.md` |
 | **Geometry → impedance** (differentiable Carson/Deri + skin; R/X → geometry synthesis; sequence-aware harmonic line models) | `geometry/` | `geometry/CONTEXT.md` |

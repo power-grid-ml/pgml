@@ -1,8 +1,9 @@
-"""The modeling-defaults config (`pgml.config`) — loading, precedence, and values.
+"""The modeling defaults (`pgml.defaults`) — loading, precedence, and values.
 
-The config is the single source of truth for default VALUES and default MODEL choices;
-these tests pin the documented constants, the precedence contract (explicit > config >
-converter), and the dispatcher that turns the config into per-line models.
+The modeling defaults are the single source of truth for default VALUES and default MODEL
+choices; these tests pin the documented constants, the precedence contract
+(explicit > defaults > converter), and the dispatcher that turns the defaults into
+per-line models.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import math
 
 import pytest
 
-from pgml import config
+from pgml import defaults as config
 
 
 # --- loading + documentation -----------------------------------------------
@@ -94,7 +95,7 @@ def test_resolve_precedence():
 
 
 def test_reload_with_override(tmp_path, monkeypatch):
-    """A PGML_CONFIG override is honored and can be reverted."""
+    """A PGML_DEFAULTS override is honored and can be reverted."""
     custom = tmp_path / "custom.yaml"
     custom.write_text(
         "line:\n"
@@ -104,12 +105,12 @@ def test_reload_with_override(tmp_path, monkeypatch):
         "      units: ratio\n"
         "      description: custom override\n"
     )
-    monkeypatch.setenv("PGML_CONFIG", str(custom))
+    monkeypatch.setenv("PGML_DEFAULTS", str(custom))
     try:
         config.reload(str(custom))
         assert config.get("line.conductor.gmr_over_radius") == 0.5
     finally:
-        monkeypatch.delenv("PGML_CONFIG", raising=False)
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
         config.reload()  # back to the packaged defaults
     assert config.get("line.conductor.gmr_over_radius") == 0.7788
 

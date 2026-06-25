@@ -207,8 +207,9 @@ The **sequence-aware** model is opt-in via a `Line.tags` marker (also schema-fre
 ## Defaults are explicit and config-tracked (no hidden implicit model)
 Modeling decisions are **deliberate, documented choices**, not silent implicit defaults —
 the opacity that makes OpenDSS discrepancies hard to explain. Every default value and
-default model choice lives in `src/pgml/config/defaults.yaml` (one ordered, self-describing
-file), resolved with precedence **explicit > config > converter** (`pgml.config`). The
+default model choice lives in `pgml/data/defaults.yaml` inside the installed package (one
+ordered, self-describing file), resolved with precedence **explicit > defaults > converter**
+(`pgml.defaults`). The
 constants that used to be hard-coded (`gmr_over_radius = 0.7788`, the earth-return
 coefficient `π²·1e-7`, conductor radius/heights, soil resistivity) now live there.
 

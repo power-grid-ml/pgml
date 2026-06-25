@@ -14,7 +14,7 @@ High-level entry points (the stable, public surface):
 Lower-level / optional surfaces are reached via their subpackages (so a minimal core
 install need not import the extras): :mod:`pgml.solver` (raw differentiable tensors),
 :mod:`pgml.scenarios` (batched data generation), :mod:`pgml.convert`,
-:mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.config`,
+:mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.defaults` (modeling defaults),
 :mod:`pgml.assembly`, :mod:`pgml.geometry`.
 """
 
@@ -40,6 +40,7 @@ from .errors import (  # noqa: E402
     ModelingError,
     PgmError,
 )
+from .paths import experiments_root  # noqa: E402
 from .schemas.grid_schema import Grid  # noqa: E402
 from .simulation import (  # noqa: E402
     ResultBundle,
@@ -58,6 +59,8 @@ __all__ = [
     "SolvedState",
     "ResultBundle",
     "Grid",
+    # filesystem conventions
+    "experiments_root",
     # exceptions
     "PgmError",
     "InputError",

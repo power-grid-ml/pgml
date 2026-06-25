@@ -25,7 +25,7 @@ historical output exactly.
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches
 become ``(A, B, C)``; lines are expanded from sequence quantities via the
 symmetric-component identity (zero-sequence from ``line`` ``r0/x0/c0`` fields when
-present, else ``pgml.config`` defaults); sources become balanced 3-phase Thevenins
+present, else ``pgml.defaults``); sources become balanced 3-phase Thevenins
 (angles ``u_ref_angle / -120 / +120``); ``asym_load`` entries are captured with
 per-phase P/Q. pgm has NO load connection field, so every converted load is WYE
 (power-grid-model models all loads wye, injecting at the node).

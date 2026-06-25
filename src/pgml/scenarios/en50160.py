@@ -6,17 +6,19 @@ harmonic-spectrum sampling: a :class:`~pgml.scenarios.config.ParameterSpec` with
 ``field="h_mag"`` and ``harmonic_reference="en50160"`` samples a fraction (its
 ``distribution``, in ``[0, 1]``) of the per-order limit returned here.
 
-The table is data, not code: it lives in ``config/max_harmonic_values_din-en50160.yaml``
-(repo root). The active file is resolved as: an explicit ``path`` argument, else the
-``PGML_EN50160`` environment variable, else the first ``config/<filename>`` found by
-walking up from this package. The values are a fixed standard, so a dataset stays
-reproducible as long as the file is unchanged.
+The table is data, not code: it ships INSIDE the package at
+``pgml/data/standards/en50160.yaml`` and is read via :mod:`importlib.resources`, so it
+resolves identically from a source checkout and from an installed wheel. The active file
+is the packaged table unless overridden by an explicit ``path`` argument or the
+``PGML_EN50160`` environment variable (e.g. to ship a revised standard). The values are a
+fixed standard, so a dataset stays reproducible as long as the file is unchanged.
 """
 
 from __future__ import annotations
 
 import os
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Optional
 
@@ -24,32 +26,35 @@ import yaml
 
 from pgml.errors import InputError
 
+#: Environment variable pointing at a replacement limits file (optional override).
 _ENV = "PGML_EN50160"
-_FILENAME = "max_harmonic_values_din-en50160.yaml"
+#: The packaged limits file, relative to the ``pgml`` package root.
+_PACKAGE_DATA = "data/standards/en50160.yaml"
+#: Cache key standing in for "the file packaged with pgml" (vs. a filesystem override).
+_PACKAGED = "<packaged>"
 
 
-def _resolve_path() -> Path:
-    """Active limits file: ``PGML_EN50160`` env, else a walk-up ``config/<file>``."""
+def _source(path: Optional[str]) -> str:
+    """Active limits source: explicit ``path`` > ``PGML_EN50160`` > the packaged file."""
+    if path is not None:
+        return str(path)
     env = os.environ.get(_ENV)
-    if env:
-        return Path(env)
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "config" / _FILENAME
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(
-        f"Could not locate {_FILENAME!r}; set the {_ENV} environment variable to its "
-        "path or pass an explicit path to en50160_limits()."
-    )
+    return str(env) if env else _PACKAGED
 
 
 @lru_cache(maxsize=None)
-def _load(path_str: str) -> dict:
-    data = yaml.safe_load(Path(path_str).read_text(encoding="utf-8"))
+def _load(source: str) -> dict:
+    if source == _PACKAGED:
+        text = (files("pgml") / _PACKAGE_DATA).read_text(encoding="utf-8")
+        origin = _PACKAGE_DATA
+    else:
+        text = Path(source).read_text(encoding="utf-8")
+        origin = source
+    data = yaml.safe_load(text)
     table = data.get("max_harmonic_values") if isinstance(data, dict) else None
     if not isinstance(table, dict):
         raise InputError(
-            f"{path_str!r} must contain a 'max_harmonic_values' mapping of order -> limit."
+            f"{origin!r} must contain a 'max_harmonic_values' mapping of order -> limit."
         )
     return {int(k): float(v) for k, v in table.items()}
 
@@ -65,9 +70,8 @@ def en50160_limits(path: Optional[str] = None) -> dict:
     ----------
     path : str, optional
         Explicit path to the limits YAML file.  When ``None`` the file is resolved
-        in priority order: ``PGML_EN50160`` environment variable, then the first
-        ``config/max_harmonic_values_din-en50160.yaml`` found by walking up from
-        the package root.
+        in priority order: the ``PGML_EN50160`` environment variable, else the table
+        packaged with pgml (``pgml/data/standards/en50160.yaml``).
 
     Returns
     -------
@@ -83,7 +87,7 @@ def en50160_limits(path: Optional[str] = None) -> dict:
         limits = en50160_limits()
         # {1: 1.0, 2: 0.02, 3: 0.05, 5: 0.06, 7: 0.05, ...}
     """
-    return dict(_load(str(path) if path is not None else str(_resolve_path())))
+    return dict(_load(_source(path)))
 
 
 def en50160_limit(order: int, path: Optional[str] = None) -> float:
@@ -114,7 +118,7 @@ def en50160_limit(order: int, path: Optional[str] = None) -> float:
         cap_h5 = en50160_limit(5)   # 0.06
         cap_h7 = en50160_limit(7)   # 0.05
     """
-    table = _load(str(path) if path is not None else str(_resolve_path()))
+    table = _load(_source(path))
     if order not in table:
         raise KeyError(
             f"order {order} has no DIN EN 50160 limit in the table "

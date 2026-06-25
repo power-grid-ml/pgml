@@ -66,7 +66,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from pgml import config
+from pgml import defaults
 from pgml.errors import ModelingError
 from pgml.schemas.grid_schema import WindingConnection
 
@@ -136,10 +136,10 @@ def _classify(conn: WindingConnection) -> SideConn:
 
 
 def resolve_vector_group(t) -> VectorGroup:
-    """Resolve a transformer's vector group: explicit connections + clock, else config.
+    """Resolve a transformer's vector group: explicit connections + clock, else defaults.
 
     ``from_connection`` / ``to_connection`` come from the schema when set, else the
-    config defaults ``transformer.vector_group.{from,to}`` (Dyn11). The clock is read
+    modeling defaults ``transformer.vector_group.{from,to}`` (Dyn11). The clock is read
     from ``tap.shift_deg`` (rounded to the nearest 30°) when the connections are
     explicit, else ``transformer.vector_group.clock``.
     """
@@ -147,9 +147,9 @@ def resolve_vector_group(t) -> VectorGroup:
         from_conn, to_conn = t.from_connection, t.to_connection
         clock = int(round(float(t.tap.shift_deg) / 30.0)) % 12
     else:
-        from_conn = WindingConnection(config.get("transformer.vector_group.from"))
-        to_conn = WindingConnection(config.get("transformer.vector_group.to"))
-        clock = int(config.get("transformer.vector_group.clock"))
+        from_conn = WindingConnection(defaults.get("transformer.vector_group.from"))
+        to_conn = WindingConnection(defaults.get("transformer.vector_group.to"))
+        clock = int(defaults.get("transformer.vector_group.clock"))
     vg = VectorGroup(_classify(from_conn), _classify(to_conn), clock)
     # The phase-domain delta incidence here realises only the ±30° (clock 1 / 11)
     # delta-wye pairing and the in-phase (clock 0) groups; other clocks need a

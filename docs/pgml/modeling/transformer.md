@@ -92,7 +92,7 @@ complex scalar tap directly, so the two modes agree to machine precision.
 - Magnetizing branch is a simple shunt on the HV terminal (referred to the HV line
   voltage), unchanged.
 - Default vector group when a source carries no winding metadata:
-  `transformer.vector_group` in `config/defaults.yaml` (Dyn11, the IEC / European LV
+  `transformer.vector_group` in `pgml/data/defaults.yaml` (Dyn11, the IEC / European LV
   default).
 
 ## OpenDSS mapping (oracle)

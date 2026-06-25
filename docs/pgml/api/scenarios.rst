@@ -181,17 +181,17 @@ DIN EN 50160 compatibility limits
 ----------------------------------
 
 Two helpers load the per-order harmonic voltage limits defined by DIN EN 50160.  The
-data lives in ``config/max_harmonic_values_din-en50160.yaml`` at the repo root:
+data ships inside the package at ``pgml/data/standards/en50160.yaml`` and is read via
+:mod:`importlib.resources`, resolving identically from a source checkout and an installed
+wheel:
 
 - :func:`~pgml.scenarios.en50160_limits` — returns ``{order: max_pu}`` for all
   tabulated orders (cached).
 - :func:`~pgml.scenarios.en50160_limit` — returns the limit for a single order;
   raises ``KeyError`` if the order is absent.
 
-The active file is resolved in priority order: an explicit ``path`` argument, then
-the ``PGML_EN50160`` environment variable, then the first
-``config/max_harmonic_values_din-en50160.yaml`` found by walking up from the package
-root.  Example::
+The active file is resolved in priority order: an explicit ``path`` argument, then the
+``PGML_EN50160`` environment variable, then the packaged table.  Example::
 
     from pgml.scenarios import en50160_limits, en50160_limit
 

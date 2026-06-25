@@ -56,7 +56,7 @@ class InputError(PgmError, ValueError):
 
 
 class ConfigurationError(InputError):
-    """An invalid configuration value, or a malformed ``PGML_CONFIG`` override."""
+    """An invalid configuration value, or a malformed ``PGML_DEFAULTS`` override."""
 
 
 class ConversionError(InputError):

@@ -99,7 +99,7 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
 
     import pandapower.networks as pn
 
-    from pgml import config as _config
+    from pgml import defaults as _defaults
     from pgml.convert.pandapower import PhaseMode, to_grid
     from pgml.schemas.grid_schema import Source
 
@@ -107,12 +107,12 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     grid, id_map = to_grid(pn.create_cigre_network_lv(), phase_mode=mode)
 
     z = (
-        _config.get("source.series_impedance_ohm")
+        _defaults.get("source.series_impedance_ohm")
         if source_impedance_ohm is None
         else float(source_impedance_ohm)
     )
     if z > 0.0:
-        rx = float(_config.get("source.rx_ratio"))
+        rx = float(_defaults.get("source.rx_ratio"))
         r = z / math.sqrt(1.0 + rx * rx)
         ll = (rx * r) / (2.0 * math.pi * float(grid.base_frequency_hz))  # X = 2*pi*f0*L
         for a in grid.appliances:

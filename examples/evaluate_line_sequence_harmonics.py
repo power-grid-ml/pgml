@@ -22,8 +22,8 @@ sequence feeders and what the corrected model does instead:
    pairwise SVG isolates the Z0 earth-return damping. This is the config DEFAULT for a
    4-wire unbalanced harmonic study.
 
-All model choices go through the config-driven entry points (`apply_default_harmonic_model`
-etc.), so defaults are explicit and documented (`pgml.config`), never hidden.
+All model choices go through the defaults-driven entry points (`apply_default_harmonic_model`
+etc.), so defaults are explicit and documented (`pgml.defaults`), never hidden.
 
 Run::
 
@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from pgml import config
+from pgml import defaults as config
 from pgml import evaluation as ev
 from pgml.evaluation import references as ref
 from pgml.geometry.carson import kron_reduce, series_impedance

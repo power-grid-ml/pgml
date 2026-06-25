@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from pgml import config
+from pgml import defaults as config
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,

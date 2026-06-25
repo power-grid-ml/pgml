@@ -15,7 +15,8 @@ geometry
 scenarios
 evaluation
 convert
-config
+defaults
+paths
 ```
 
 ---
@@ -38,4 +39,5 @@ config
 | {mod}`pgml.scenarios` | Reproducible config-driven batched scenario sampling |
 | {mod}`pgml.evaluation` | Comparison plots (references vs our solve) |
 | {mod}`pgml.convert` | Converters from pandapower / power-grid-model / OpenDSS |
-| {mod}`pgml.config` | Documented modelling defaults |
+| {mod}`pgml.defaults` | Documented modelling defaults (shipped in the package, importlib.resources) |
+| {mod}`pgml.paths` | Experiments-root convention (`PGML_EXPERIMENTS`) |

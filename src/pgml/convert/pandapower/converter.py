@@ -24,7 +24,7 @@ for nodes with fewer than 3 phases); this matches pandapower's const-Z reference
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches become
 ``(A, B, C)``; lines are expanded from sequence quantities via the symmetric-component
 identity (zero-sequence from ``net.line`` ``r0/x0/c0`` columns when present, else from
-``pgml.config`` defaults); the slack becomes a balanced 3-phase Thevenin (angles
+``pgml.defaults``); the slack becomes a balanced 3-phase Thevenin (angles
 ``0 / -120 / +120``); a non-empty ``net.asymmetric_load`` table is captured with its
 WYE/DELTA connection and per-phase P/Q. The shared scaffold in
 :mod:`pgml.convert._common` is the single place the phase decision lives.
