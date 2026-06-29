@@ -102,6 +102,7 @@ def run_scenarios(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     chunk_size: Optional[int] = None,
+    output_device: Optional[torch.device] = None,
 ) -> ScenarioResult:
     """Build (if needed) and solve a scenario batch in one batched solve.
 
@@ -132,6 +133,15 @@ def run_scenarios(
         ``[B, T, H, N]`` path too — the slice is along the SCENARIO axis ``B`` (each
         scenario's full ``T``-step sequence solves together). ``None`` (default) solves the
         whole batch.
+    output_device:
+        Where the RESULT voltages ``v`` are collected. ``None`` (default) keeps them on the
+        solve ``device``. When generating a large dataset on the GPU, the full ``[B, ...]``
+        result tensor would otherwise accumulate in VRAM and OOM even with a small
+        ``chunk_size`` (``chunk_size`` bounds the per-solve WORKSPACE, not the collected
+        OUTPUT). Set ``output_device="cpu"`` to move each chunk's result off the GPU as it is
+        produced, so VRAM stays bounded to one chunk; the dataset is written from host memory.
+        Intended for (non-differentiable) data generation — leave ``None`` to keep ``v`` on the
+        solve device for a differentiable GPU pipeline.
     """
     is_coherent = isinstance(spec, CoherentSpectrumConfig)
     if is_coherent:
@@ -188,6 +198,8 @@ def run_scenarios(
 
     if chunk_size is None or chunk_size >= b or b <= 1:
         v, index, converged, failed, freqs = _solve(op_full, inj_full)
+        if output_device is not None:
+            v = v.to(output_device)
         return ScenarioResult(
             v=v,
             index=index,
@@ -218,6 +230,10 @@ def run_scenarios(
         v_c, index, conv_c, failed_c, freqs = _solve(op_c, inj_c)
         if v_c.ndim == batched_ndim - 1:
             v_c = v_c.unsqueeze(0)
+        # move each chunk OFF the solve device as it is produced (when requested) so the
+        # collected result does not accumulate in VRAM and OOM regardless of chunk_size.
+        if output_device is not None:
+            v_c = v_c.to(output_device)
         v_parts.append(v_c)
         converged = converged and conv_c
         failed.extend(start + i for i in failed_c)

@@ -124,6 +124,26 @@ def test_chunked_equals_whole_coherent(grid3):
     torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
 
 
+def test_output_device_collects_off_solve_device(grid3):
+    """output_device collects the result there (CPU here) without changing the values, so a
+    large GPU batch can stream its result to host memory instead of accumulating in VRAM."""
+    cfg = _cfg(n=10)
+    whole = run_scenarios(
+        grid3, cfg, calculation="harmonic", harmonic_orders=[1, 5], dtype=CDT
+    )
+    streamed = run_scenarios(
+        grid3,
+        cfg,
+        calculation="harmonic",
+        harmonic_orders=[1, 5],
+        dtype=CDT,
+        chunk_size=3,
+        output_device="cpu",
+    )
+    assert streamed.v.device.type == "cpu"
+    torch.testing.assert_close(streamed.v, whole.v.cpu(), rtol=1e-7, atol=1e-9)
+
+
 def test_chunked_is_differentiable(grid3):
     """A scalar loss over a chunked batch backprops to a grid line-R tensor."""
     r = torch.tensor([[0.5]], dtype=torch.float64, requires_grad=True)
