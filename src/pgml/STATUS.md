@@ -87,7 +87,8 @@ sparse work):
    one `lu_factor` is reused across iterations and the batch (~5–7× faster on CIGRE B=64).
    (Newton's `J` is op-dependent → no reuse; it stays the per-scenario path.)
 3. ✅ **Scenario CHUNK tiling** (`run_scenarios(chunk_size=...)`): streams `B` in VRAM-sized
-   slices and concatenates (grad-preserving). Any batch fits regardless of the dense
+   slices and concatenates (grad-preserving) — including the node-coherent `[B,T,H,N]` path
+   (the slice is along the scenario axis `B`). Any batch fits regardless of the dense
    `[B,H,N,N]` footprint.
 
 **Open fork 1 — topology / switch-state batching (decision needed).** Vary which

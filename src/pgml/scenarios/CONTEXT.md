@@ -67,7 +67,8 @@ verified `batched == loop-of-individual`).
   (so a large sweep yields data + diagnosable failures). `chunk_size` streams the batch in
   slices of that many scenarios and concatenates (VRAM tiling for a batch whose dense
   `[B,H,N,N]` system would not fit); the result equals the whole solve within the solver
-  tolerance and stays differentiable. Not applied to the coherent `[B,T,H,N]` path.
+  tolerance and stays differentiable. Applies to the coherent `[B,T,H,N]` path too — the
+  slice is along the SCENARIO axis `B` (each scenario's full `T`-step sequence solves together).
   `symmetry` forwards to the solver (None/"auto" lets per-phase samples promote to asymmetric).
   `spec` = `ScenarioConfig` | `CartesianConfig` | `CoherentSpectrumConfig` (forces harmonic,
   defaults `harmonic_orders=[1, *orders]`) | a pre-built `SampledScenarios`.

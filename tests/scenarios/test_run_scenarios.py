@@ -103,6 +103,27 @@ def test_chunked_equals_whole_harmonic_with_size1_tail(grid3):
     torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
 
 
+def test_chunked_equals_whole_coherent(grid3):
+    """Coherent (node-coherent ``[B, T, H, N]``) chunking slices the SCENARIO axis ``B`` and
+    concatenates -> the same sequences as the whole solve, incl. a size-1 tail (7 / 3 ->
+    3,3,1) that the solver returns without the leading scenario axis."""
+    from pgml.scenarios import CoherentSpectrumConfig
+
+    cfg = CoherentSpectrumConfig(
+        selector=Selector(component="load"),
+        orders=[3, 5],
+        n_steps=4,
+        n_scenarios=7,
+        n_modes=2,
+        seed=0,
+    )
+    whole = run_scenarios(grid3, cfg, dtype=CDT)
+    chunked = run_scenarios(grid3, cfg, dtype=CDT, chunk_size=3)
+    assert whole.v.ndim == 4  # [B, T, H, N]
+    assert chunked.v.shape == whole.v.shape == (7, 4, 3, grid3_n(grid3))
+    torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
+
+
 def test_chunked_is_differentiable(grid3):
     """A scalar loss over a chunked batch backprops to a grid line-R tensor."""
     r = torch.tensor([[0.5]], dtype=torch.float64, requires_grad=True)

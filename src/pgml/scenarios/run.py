@@ -128,8 +128,10 @@ def run_scenarios(
         and concatenate, so a batch whose dense ``[B, H, N, N]`` system exceeds memory
         still fits (stream the batch instead of materialising it whole). The result is
         identical to the un-chunked solve (each scenario is independent) and stays
-        differentiable (the concatenation preserves the graph). Not applied to the
-        node-coherent ``[B, T, H, N]`` path. ``None`` (default) solves the whole batch.
+        differentiable (the concatenation preserves the graph). Applies to the node-coherent
+        ``[B, T, H, N]`` path too — the slice is along the SCENARIO axis ``B`` (each
+        scenario's full ``T``-step sequence solves together). ``None`` (default) solves the
+        whole batch.
     """
     is_coherent = isinstance(spec, CoherentSpectrumConfig)
     if is_coherent:
@@ -184,7 +186,7 @@ def run_scenarios(
     inj_full = sampled.harmonic_injection or None
     b = int(sampled.n_samples)
 
-    if chunk_size is None or chunk_size >= b or b <= 1 or is_coherent:
+    if chunk_size is None or chunk_size >= b or b <= 1:
         v, index, converged, failed, freqs = _solve(op_full, inj_full)
         return ScenarioResult(
             v=v,
@@ -195,9 +197,15 @@ def run_scenarios(
             failed_states=failed,
         )
 
-    # Stream the batch in chunks (a size-1 chunk loses its batch axis in the solver -> add
-    # it back so the per-chunk results concatenate into the full [B, ...] tensor).
-    batched_ndim = 2 if calculation == "power_flow" else 3
+    # Stream the batch in chunks along the SCENARIO axis (a size-1 chunk loses its leading
+    # scenario axis in the solver -> add it back so the per-chunk results concatenate into the
+    # full [B, ...] tensor). The node-coherent path carries an extra step axis -> [B, T, H, N].
+    if calculation == "power_flow":
+        batched_ndim = 2
+    elif is_coherent:
+        batched_ndim = 4
+    else:
+        batched_ndim = 3
     v_parts: list[Tensor] = []
     failed: list[int] = []
     converged = True
