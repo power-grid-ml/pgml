@@ -1,13 +1,25 @@
-# pgml examples
+# Examples
 
-Runnable, documented studies on real benchmark grids. Run any with:
+Runnable, documented studies, organised per package:
+
+- **`pgml` examples** — the differentiable harmonic power-flow core — live in **this
+  directory** (documented below).
+- **`pgl` examples** — harmonic state estimation — live in **[`pgl/`](pgl/)** (see
+  [`pgl/README.md`](pgl/README.md)).
+- `pgg` and later packages get their own subdirectory as they land.
+
+Run any `pgml` example from the repository root:
 
 ```bash
 pixi run -e cpu python examples/<script>.py [out_dir]
 ```
 
-Each script's module docstring is the authoritative "what / how / outputs" reference;
-this file is the map + how to control them.
+Outputs default to `examples/evaluation_output/<name>/` (anchored to the `examples/` tree,
+not the current directory), or `$PGML_EXPERIMENTS/<name>/` when that variable is set. Each
+script's module docstring is the authoritative "what / how / outputs" reference; this file is
+the map + how to control them.
+
+## `pgml` examples
 
 ## The two full-CIGRE-LV scenario studies
 
