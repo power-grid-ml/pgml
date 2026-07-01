@@ -22,7 +22,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/scenario_randomized.py [out_dir]
+    pixi run -e cpu python examples/pgml/scenario_randomized.py [out_dir]
 
 Outputs (default ``evaluation_output/scenario2/``): ``symmetric/`` & ``asymmetric/``
 parquet+CSV datasets, ``fundamental_phases.svg``, ``harmonics_3d.html``, and a printed
@@ -63,6 +63,11 @@ N_SAMPLES = 16
 SEED = 0
 
 
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+
+
 def build_config() -> ScenarioConfig:
     """Random per-phase load scaling U(0,1) + a random EN 50160-bounded spectrum/load."""
     return ScenarioConfig(
@@ -91,7 +96,7 @@ def build_config() -> ScenarioConfig:
     )
 
 
-def main(out_dir: str = "evaluation_output/scenario2") -> None:
+def main(out_dir: str = str(_OUT / "scenario2")) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -248,16 +253,27 @@ def _opendss_compare(grid, sampled, res, out: Path) -> None:
             rel = np.max(np.abs(pgml[k] - dss[k])) / (np.max(np.abs(pgml[k])) + 1e-30)
             print(f"    h{o}: {rel:.2e}")
 
-        with open(out / "compare_harmonics.csv", "w", newline="", encoding="utf-8") as fh:
+        with open(
+            out / "compare_harmonics.csv", "w", newline="", encoding="utf-8"
+        ) as fh:
             w = csv.writer(fh)
-            w.writerow(["order", "phase", "node", "pgml_mag_V", "opendss_mag_V", "abs_diff_V"])
+            w.writerow(
+                ["order", "phase", "node", "pgml_mag_V", "opendss_mag_V", "abs_diff_V"]
+            )
             for k, o in enumerate(ORDERS):
                 if o == 1:
                     continue
                 for n in range(len(node_ids)):
-                    w.writerow([o, _PNAME.get(pcodes[n], "?"), node_ids[n],
-                                f"{abs(pgml[k, n]):.6e}", f"{abs(dss[k, n]):.6e}",
-                                f"{abs(pgml[k, n] - dss[k, n]):.3e}"])
+                    w.writerow(
+                        [
+                            o,
+                            _PNAME.get(pcodes[n], "?"),
+                            node_ids[n],
+                            f"{abs(pgml[k, n]):.6e}",
+                            f"{abs(dss[k, n]):.6e}",
+                            f"{abs(pgml[k, n] - dss[k, n]):.3e}",
+                        ]
+                    )
         _compare_plot(pgml, dss, node_ids, pcodes, out / "compare_harmonics.svg")
         print("comparison (scenario 0) -> compare_harmonics.csv / .svg")
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -274,10 +290,22 @@ def _compare_plot(pgml, dss, node_ids, pcodes, path: Path) -> None:
         for c in (0, 1, 2):
             rows = [n for n in range(len(node_ids)) if pcodes[n] == c]
             xs = range(len(rows))
-            ax.plot(xs, [abs(pgml[k, n]) for n in rows], "-", color=colors[c],
-                    label=f"pgml {_PNAME[c]}")
-            ax.plot(xs, [abs(dss[k, n]) for n in rows], "--x", ms=3, color=colors[c],
-                    alpha=0.7, label=f"OpenDSS {_PNAME[c]}")
+            ax.plot(
+                xs,
+                [abs(pgml[k, n]) for n in rows],
+                "-",
+                color=colors[c],
+                label=f"pgml {_PNAME[c]}",
+            )
+            ax.plot(
+                xs,
+                [abs(dss[k, n]) for n in rows],
+                "--x",
+                ms=3,
+                color=colors[c],
+                alpha=0.7,
+                label=f"OpenDSS {_PNAME[c]}",
+            )
         ax.set(title=f"h{o}", xlabel="node (per phase)", ylabel="|V| [V]")
         ax.legend(fontsize=6, ncol=2)
     fig.suptitle("pgml vs OpenDSS — harmonic |V| per phase (scenario 0, asymmetric)")
@@ -286,4 +314,4 @@ def _compare_plot(pgml, dss, node_ids, pcodes, path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/scenario2")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "scenario2"))

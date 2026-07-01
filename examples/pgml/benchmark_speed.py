@@ -43,14 +43,14 @@ RUN
 ::
 
     # CPU-only host (this machine):
-    pixi run -e cpu python examples/benchmark_speed.py [out_dir]
+    pixi run -e cpu python examples/pgml/benchmark_speed.py [out_dir]
 
     # CUDA host (the GPU copy; the default pixi environment ships pytorch-gpu and also
     # runs the CPU series, so this single command yields the CPU-vs-GPU figures):
-    pixi run python examples/benchmark_speed.py [out_dir]
+    pixi run python examples/pgml/benchmark_speed.py [out_dir]
 
     # Faster, smaller sweep while iterating:
-    pixi run -e cpu python examples/benchmark_speed.py --quick
+    pixi run -e cpu python examples/pgml/benchmark_speed.py --quick
 
 Outputs (default ``evaluation_output/benchmark/``): ``results_<device>.json`` (raw
 numbers + host metadata), ``benchmark_summary.csv`` (flat table of every timed run),
@@ -102,6 +102,11 @@ SEED = 0
 # ---------------------------------------------------------------------------
 # grids
 # ---------------------------------------------------------------------------
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+
+
 def add_pv_systems(grid, *, fraction: float = 0.5) -> int:
     """Attach a PV generator (unity power factor) to a fraction of the load nodes.
 
@@ -660,7 +665,7 @@ def print_summary(rows: list[dict], dims: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("out_dir", nargs="?", default="evaluation_output/benchmark")
+    ap.add_argument("out_dir", nargs="?", default=str(_OUT / "benchmark"))
     ap.add_argument("--max-batch", type=int, default=512, help="Largest batch size.")
     ap.add_argument("--repeats", type=int, default=3, help="Timed repeats (median).")
     ap.add_argument("--quick", action="store_true", help="Smaller, faster sweep.")

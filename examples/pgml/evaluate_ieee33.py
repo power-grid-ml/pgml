@@ -2,7 +2,7 @@
 
 Run::
 
-    pixi run -e cpu python examples/evaluate_ieee33.py [out_dir]
+    pixi run -e cpu python examples/pgml/evaluate_ieee33.py [out_dir]
 
 Produces (default ``evaluation_output/``):
 - ``ybus_heatmaps.svg``       — our full Y vs pandapower network Y vs OpenDSS SystemY.
@@ -63,6 +63,11 @@ CONVERTER_SPECTRUM = [
 HARMONIC_ORDERS_3D = [5, 7, 9, 11, 13]
 
 
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+
+
 def _build_dss_passive(net) -> None:
     """Single-phase positive-sequence IEEE-33 passive circuit in OpenDSS (no loads)."""
     import opendssdirect as dss
@@ -88,7 +93,7 @@ def _build_dss_passive(net) -> None:
     dss.Text.Command("Solve")
 
 
-def main(out_dir: str = "evaluation_output") -> None:
+def main(out_dir: str = str(_OUT)) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -207,4 +212,4 @@ def main(out_dir: str = "evaluation_output") -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/references")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "references"))

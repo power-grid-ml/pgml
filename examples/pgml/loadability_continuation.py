@@ -26,7 +26,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/loadability_continuation.py [out_dir]
+    pixi run -e cpu python examples/pgml/loadability_continuation.py [out_dir]
 
 Outputs (default ``evaluation_output/loadability/``): ``pv_nose.svg`` (P-V curve),
 ``voltage_profile_nose.svg`` (critical bus highlighted), ``limiting_loads.svg`` (bar
@@ -48,6 +48,11 @@ from pgml.schemas.grid_schema import Generator, Load, Phase
 from pgml.solver import loadability_limit, solve_power_flow
 
 CDT = torch.complex128
+
+
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 
 def scale_loads(grid, lam: float):
@@ -75,7 +80,7 @@ def _node_pu(result, grid, node_id: int) -> float:
     return abs(result.v.reshape(-1)[row].item()) / base
 
 
-def main(out_dir: str = "evaluation_output/loadability") -> None:
+def main(out_dir: str = str(_OUT / "loadability")) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -236,4 +241,4 @@ def _plot_limiting(res, path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/loadability")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "loadability"))

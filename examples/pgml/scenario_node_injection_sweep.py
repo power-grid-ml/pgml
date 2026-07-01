@@ -29,7 +29,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/scenario_node_injection_sweep.py [out_dir]
+    pixi run -e cpu python examples/pgml/scenario_node_injection_sweep.py [out_dir]
 
 Outputs (default ``evaluation_output/scenario1/``): ``spread_h11.csv`` (m x i, per-unit),
 ``spread_h11.npz`` (per-unit magnitude + raw real/imag volts + the ``|V1|`` base),
@@ -62,6 +62,11 @@ SOURCE_POWER_VA = 1.0e5  # error-source strength S_sc (short-circuit power); tun
 KIND = "voltage"  # "voltage" (Thévenin) or "current" (Norton)
 
 
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+
+
 def read_spectrum_csv(path: Path) -> dict:
     """Parse ``order, magnitude_percent, phase_deg`` -> ``{order: (frac, phase_deg)}``.
 
@@ -81,7 +86,7 @@ def read_spectrum_csv(path: Path) -> dict:
     }
 
 
-def main(out_dir: str = "evaluation_output/scenario1") -> None:
+def main(out_dir: str = str(_OUT / "scenario1")) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -257,4 +262,4 @@ def _compare_plot(node_ids, pgml_pu, dss_pu, inj_node, path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/scenario1")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "scenario1"))
