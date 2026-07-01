@@ -3,7 +3,7 @@ pgml.solver
 
 Complex batched differentiable solve of ``Y(f) V(f) = I(f)``.
 
-The solver package provides three entry points:
+The solver package provides the following entry points:
 
 - :func:`~pgml.solver.solve_harmonic` — batched complex linear solve for a
   single assembled Y-bus.  Supports Norton mode (default) and ideal-slack
@@ -15,6 +15,18 @@ The solver package provides three entry points:
   runs the fundamental power flow to convergence (``method=`` selects the
   fundamental solver: ``"current_injection"`` or ``"newton"`` for stiff
   inverter control loops), then solves each harmonic in one batched pass.
+- :func:`~pgml.solver.assemble_harmonic_system` — assembles both the harmonic
+  admittance matrix ``Y(h)`` and the realized nodal injection vector ``I(h)``
+  for orders ``h > 1`` (used by the physics-consistency layer).
+- :func:`~pgml.solver.assemble_harmonic_ybus` — assembles the harmonic
+  admittance matrix ``Y(h)`` for orders ``h > 1`` WITHOUT the injection RHS.
+  Used by the physics-informed injection decoder in ``pgl``: the model predicts
+  the nodal injection current ``I_pred`` and reconstructs the full voltage state
+  via ``V(h) = solve(Y(h), I_pred)`` — a self-consistency that uses only the
+  (differentiable) grid description, not the ground-truth injection.  ``Y`` is
+  grid-constant (assembled once, reused across the batch) and differentiable
+  w.r.t. the network parameters, so the same call powers a learned
+  grid-parameter calibration.
 
 .. rubric:: Differentiability
 
