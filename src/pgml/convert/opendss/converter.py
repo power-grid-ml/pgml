@@ -105,6 +105,7 @@ from pgml.convert._common import (
     phases_for,
     thevenin_from_z,
 )
+from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
     Grid,
     Phase,
@@ -511,16 +512,31 @@ def to_grid(
 
 
 def _phase_num_to_enum(phase_num: int) -> Phase:
-    """Map OpenDSS phase number (1, 2, 3, 0) to our Phase enum (A, B, C, N).
+    """Map an OpenDSS bus-node index (1, 2, 3, 4) to our Phase enum (A, B, C, N).
 
-    OpenDSS numbers phases 1=A, 2=B, 3=C, 0=neutral.
+    OpenDSS numbers bus conductors 1=A, 2=B, 3=C; index 4 on a four-wire bus
+    (``bus1=Bus.1.2.3.4``) is the explicit neutral conductor. Index 0 is the
+    grounded reference node — it never appears in ``YNodeOrder`` and must be
+    dropped from connection strings by the caller, not mapped to a phase row.
+    Any other index has no phase-domain equivalent and raises.
     """
-    _MAP: dict[int, Phase] = {1: Phase.A, 2: Phase.B, 3: Phase.C, 0: Phase.N}
-    return _MAP.get(phase_num, Phase.A)
+    _MAP: dict[int, Phase] = {1: Phase.A, 2: Phase.B, 3: Phase.C, 4: Phase.N}
+    try:
+        return _MAP[phase_num]
+    except KeyError:
+        raise ConversionError(
+            f"OpenDSS bus-node index {phase_num} has no phase-domain mapping "
+            "(expected 1=A, 2=B, 3=C, 4=N; 0 is the grounded reference)."
+        ) from None
 
 
 def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]]:
     """Parse a DSS bus connection string ``'busname.1.2.3'`` into ``(bus_name, [phases])``.
+
+    Node index ``0`` (a conductor tied to the grounded reference, e.g. the
+    return conductor of ``"bus0.1.0"``) is dropped: the ground return is
+    implicit in the grid model's grounded-wye convention and has no node-phase
+    row.
 
     Parameters
     ----------
@@ -539,7 +555,7 @@ def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]
     bus_name = parts[0]
     if len(parts) > 1:
         phase_nums = [int(p) for p in parts[1:] if p.isdigit()]
-        phases = [_phase_num_to_enum(pn) for pn in phase_nums]
+        phases = [_phase_num_to_enum(pn) for pn in phase_nums if pn != 0]
     else:
         # Default: phases 1..n_phases
         phases = [_phase_num_to_enum(i + 1) for i in range(n_phases)]
