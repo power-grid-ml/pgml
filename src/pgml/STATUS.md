@@ -168,6 +168,44 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
 - **Deferred (no priority)**: appliance-state harmonic mixture — a node fingerprint as a sum
   of per-appliance state spectra (state→spectrum library keyed by `consumer_type`).
 
+## Known modeling gaps (physics NOT currently modeled — keep this list honest)
+
+Consolidated during the 2026-07 architecture/correctness review. Each entry states what
+the simulator deliberately (or currently) does NOT capture, so results are never read as
+more physical than they are. Items already tracked as open work above are referenced.
+
+- **Transformer, frequency dependence.** Leakage reactance scales ∝ h with CONSTANT
+  winding resistance — no frequency-correction curve; the schema's
+  `resistance_frequency` / `harmonic_xr_constant` fields are not yet consumed (item C
+  above). No saturation / no inrush (steady-state tool). The magnetizing/core-loss
+  branch IS modeled (`y_m` on the HV diagonal).
+- **Transformer, construction.** Non-solid neutral grounding (`GroundingImpedance`),
+  zigzag windings, and delta-wye clocks other than 1/11 raise `ModelingError`
+  (deliberate: fail loud, never approximate silently). Clock 6 (Yy6/Dd6) is modeled
+  (reversed LV polarity).
+- **Load harmonic behaviour.** Loads inject harmonics as PURE current sources
+  (`include_load_shunt=False`, ≡ OpenDSS `NeglectLoadY=yes`); the frequency-dependent
+  load Norton shunt (damping near resonances!) is unimplemented and RAISES when
+  requested (item C above). Harmonic resonance magnitudes are therefore conservative
+  (undamped) at load-heavy buses.
+- **Sources.** Zero-sequence source impedance is taken equal to the positive-sequence
+  value (no converter reads `r0x0_max` / `R0/X0` / `z01_ratio`) — see
+  `docs/pgml/modeling/conventions.md` §6. Affects asymmetric fault-like states, not the
+  balanced fundamental.
+- **Line geometry (Carson/Deri).** No conductor temperature dependence (`Rdc` is a
+  constant), no sub-conductor bundling (HV construction), transposition/balance per the
+  documented Deri assumptions. Carson shunt `C` is physically correct but not bit-exact
+  to OpenDSS's `capradius` convention (irrelevant for c=0 feeders). The
+  `geometry.sequence.two_conductor_*` helpers are diagnostic-only (not differentiable).
+- **EN 50160 table.** Orders 1–25 are the standard's (amended A2:2019) values; orders
+  26–49 are a manual flat extension (marked in `data/standards/en50160.yaml`).
+- **Scenario sampling.** All pre-solve sampling executes on CPU (`SobolEngine` is
+  CPU-only); tensors are promoted to the solve device afterwards. Deliberate — the
+  sampled tensors are tiny next to the `[B,H,N,N]` solve.
+- **Per-node harmonic-source sweeps** (`scenarios.run_node_injection_sweep`) loop one
+  solve per node: the solver cannot yet stamp a different target row per batch element.
+  Batch the target-row index (`[B, P]` scatter) to lift the loop.
+
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 
 - `schemas/` is FROZEN (orchestrator-only); everything imports and conforms to it. Each
