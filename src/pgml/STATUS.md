@@ -120,7 +120,7 @@ sparse is premature here — revisit ONLY if target grids exceed a few thousand 
 ### B. Harmonic state estimation — the `pgl` package
 
 The ML layer is its own package, `pgl` (clean API border, separate deps, own agents). It
-consumes pgml's public API only — topology `assembly.node_phase_index` + `evaluation.topology`,
+consumes pgml's public API only — topology `assembly.node_phase_index` + `pgml.topology`,
 the forward `pgml.simulate`/`solver.*` (gradients flow params→V), and training data
 `scenarios.run_scenarios`/`read_dataset`/`write_dataset` (measurement model = masked subset of
 the state). The PyG `Data`/`Batch` builder is a `pgl` concern. Design + status:
