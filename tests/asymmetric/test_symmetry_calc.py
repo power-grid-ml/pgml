@@ -114,3 +114,55 @@ def test_auto_promotes_to_asymmetric_when_per_phase_present():
     res_auto = solve_power_flow(grid, symmetry="auto", dtype=CDT)
     res_asym = solve_power_flow(grid, symmetry="asymmetric", dtype=CDT)
     assert torch.allclose(res_auto.v, res_asym.v, atol=1e-12)
+
+
+def _attach_spectrum(grid):
+    """A 5th-harmonic current spectrum on every load (fundamental + h5)."""
+    from pgml.schemas.grid_schema import (
+        HarmonicComponent,
+        SpectrumPoint,
+        StaticSpectrum,
+    )
+
+    spec = StaticSpectrum(
+        spectrum=SpectrumPoint(
+            components=[
+                HarmonicComponent(order=1, magnitude_pu=1.0, phase_deg=0.0),
+                HarmonicComponent(order=5, magnitude_pu=0.2, phase_deg=0.0),
+            ]
+        )
+    )
+    for a in grid.appliances:
+        if isinstance(a, Load):
+            a.spectrum = spec
+    return grid
+
+
+def test_symmetry_threads_into_harmonic_injections():
+    """`symmetry="symmetric"` is honored INSIDE `_harmonic_injections` — the
+    harmonic currents scale from the equal-split fundamental draw, not the
+    per-phase one. Pins the `resolve_operating_power(asymmetric=...)`
+    threading through `assemble_harmonic_system`."""
+    from pgml.solver import solve_harmonic_flow
+
+    p = (3000.0, 1000.0, 500.0)
+    q = (600.0, 200.0, 100.0)
+
+    r_asym = solve_harmonic_flow(
+        _attach_spectrum(_grid(p, q)), [1, 5], symmetry="asymmetric", dtype=CDT
+    )
+    r_sym = solve_harmonic_flow(
+        _attach_spectrum(_grid(p, q)), [1, 5], symmetry="symmetric", dtype=CDT
+    )
+    r_bal = solve_harmonic_flow(
+        _attach_spectrum(_balanced_grid(sum(p), sum(q))),
+        [1, 5],
+        symmetry="asymmetric",
+        dtype=CDT,
+    )
+
+    h5_asym, h5_sym, h5_bal = r_asym.v[1], r_sym.v[1], r_bal.v[1]
+    # The h5 voltages must DIFFER (the per-phase imbalance drives the currents)...
+    assert not torch.allclose(h5_sym, h5_asym, atol=1e-6)
+    # ...and the symmetric solve must equal the equal-split baseline grid exactly.
+    assert torch.allclose(h5_sym, h5_bal, atol=1e-12)
