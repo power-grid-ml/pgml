@@ -145,14 +145,9 @@ def resolve_vector_group(t) -> VectorGroup:
     """
     if t.from_connection is not None and t.to_connection is not None:
         from_conn, to_conn = t.from_connection, t.to_connection
-        shift = t.tap.shift_deg
-        # The clock is a DISCRETE selector (nearest multiple of 30°), not a
-        # gradient leaf: the phase shift is realised by the constant incidence
-        # topology, so a tensor-valued shift_deg is read for its value only and
-        # deliberately does not participate in autograd.
-        if hasattr(shift, "detach"):
-            shift = shift.detach()
-        clock = int(round(float(shift) / 30.0)) % 12
+        # `tap.shift_deg` is a plain float by schema (a discrete clock selector,
+        # never a gradient leaf); the shift is realised by the constant incidence.
+        clock = int(round(float(t.tap.shift_deg) / 30.0)) % 12
     else:
         from_conn = WindingConnection(defaults.get("transformer.vector_group.from"))
         to_conn = WindingConnection(defaults.get("transformer.vector_group.to"))

@@ -690,8 +690,10 @@ class ComplexTap(GridModel):
     ratio_magnitude: PosNum = Field(
         description="Off-nominal tap ratio magnitude (1.0 = nominal / on-tap)."
     )
-    shift_deg: Num = si_field(
-        "Phase shift from the vector-group clock (clock·30°) plus any phase-shifter tap.",
+    shift_deg: float = si_field(
+        "Phase shift from the vector-group clock (clock·30°). A DISCRETE selector of "
+        "the constant winding-incidence topology — a plain float, deliberately not "
+        "tensor-capable (the continuous, differentiable tap is `ratio_magnitude`).",
         short="deg",
         long="degree",
         default=0.0,
@@ -845,6 +847,17 @@ class ShuntReactor(BranchBase):
         "Shunt capacitance matrix C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
     )
 
+    @model_validator(mode="after")
+    def _check(self) -> "ShuntReactor":
+        # Single-terminal shunt: matrices align to `from_phases` (the stamp reads
+        # only the from side; `to_node`/`to_phases` conventionally mirror it).
+        n = len(self.from_phases)
+        for f in ("conductance_s", "capacitance_f"):
+            m = getattr(self, f)
+            if len(m) != n or any(len(r) != n for r in m):
+                raise ValueError(f"`{f}` must be {n}x{n} to match phase count.")
+        return self
+
 
 class GenericBranch(BranchBase):
     component: Literal["generic_branch"] = "generic_branch"
@@ -860,6 +873,24 @@ class GenericBranch(BranchBase):
     shunt_capacitance_to_f: Optional[PerPhaseMatrix] = si_field(
         "Shunt C at to end.", short="F", long="farad", default=None
     )
+
+    @model_validator(mode="after")
+    def _check(self) -> "GenericBranch":
+        n = len(self.from_phases)
+        if len(self.to_phases) != n:
+            raise ValueError(
+                "GenericBranch `from_phases`/`to_phases` must have equal length."
+            )
+        for f in (
+            "series_resistance_ohm",
+            "series_inductance_h",
+            "shunt_capacitance_from_f",
+            "shunt_capacitance_to_f",
+        ):
+            m = getattr(self, f)
+            if m is not None and (len(m) != n or any(len(r) != n for r in m)):
+                raise ValueError(f"`{f}` must be {n}x{n} to match phase count.")
+        return self
 
 
 Branch = Annotated[

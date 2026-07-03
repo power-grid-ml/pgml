@@ -2,7 +2,7 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
-`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.1"`) stamps the contract version
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.2"`) stamps the contract version
 into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
 minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
 while the library is < 1.0.0); bump the patch/minor on any contract change.
@@ -29,7 +29,8 @@ while the library is < 1.0.0); bump the patch/minor on any contract change.
     Control is honored by the NONLINEAR solve (`device_current_injections`); the linear
     const-Z assembler uses the base P/Q.
 - `result_schema.py` — output: ResultSet, SolverDiagnostics, NodeResult (v_re/v_im),
-  BranchResult (i_from_*, i_to_*), InjectionResult; optional per-phase P/Q/S;
+  BranchResult (i_from_*, i_to_*), InjectionResult (`injection_kind` covers
+  load/generator/storage/source/shunt); optional per-phase P/Q/S;
   indexed by frequency_hz; phasors as (real, imag).
 - `scenario_schema.py` — realized inputs: Scenario, *OperatingPoint,
   RealizedSpectrumPoint, ParameterPerturbation.
@@ -40,6 +41,9 @@ Invariants every consumer must honor:
 - Reactances/susceptances are NEVER stored; derive from L,C at frequency h.
 - A Line/Transformer may carry `type_ref` instead of explicit params; it must be
   materialised (resolved against Grid.types) BEFORE assembly.
+- Matrix dimensions are validated on construction: Line, Source, ShuntReactor and
+  GenericBranch all reject a per-phase matrix that is not `n×n` for their phase
+  count (ShuntReactor validates against `from_phases` — it is single-terminal).
 
 ## Float / tensor duality (duck-typed, torch-free)
 Physical fields accept EITHER plain python floats/lists (the serializable default)
@@ -55,6 +59,9 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
 - Converted (load-flow path): Node.u_rated_v; Line R/L/G/C + length; Source u_ref/
   angle + R/L; Switch; ShuntReactor; GenericBranch; ShuntAppliance; Load/Generator
   P/Q (+per-phase); Transformer R/L/ratings + ComplexTap + grounding/zero-seq.
+  CARVE-OUT: `ComplexTap.shift_deg` is a plain `float` (a discrete vector-group
+  clock selector realised by the constant winding incidence — never a gradient
+  leaf; the continuous differentiable tap is `ratio_magnitude`).
 - Asymmetry (rev: Increment 0): `Load.connection`/`Generator.connection` are now
   `Optional[WindingConnection]` defaulting to `None` (= resolve from config
   `appliance.load.{single_phase_,}default_connection`); DELTA needs >=2 phases, zigzag

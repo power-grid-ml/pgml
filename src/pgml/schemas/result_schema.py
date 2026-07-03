@@ -262,12 +262,12 @@ class BranchResult(GridModel):
 
 
 class InjectionResult(GridModel):
-    """Per-appliance (load/generator/source/shunt) current and optional power at one
-    frequency and step. LOAD reference: positive = into the appliance."""
+    """Per-appliance (load/generator/storage/source/shunt) current and optional power
+    at one frequency and step. LOAD reference: positive = into the appliance."""
 
     result_set_id: int = Field(description="Loose ref to ResultSet.id.")
     injection_id: int = Field(description="Loose ref to the grid appliance id.")
-    injection_kind: Literal["load", "generator", "source", "shunt"] = Field(
+    injection_kind: Literal["load", "generator", "storage", "source", "shunt"] = Field(
         description="Appliance kind (mirrors grid_schema discriminator)."
     )
     frequency_hz: float = si_field(
