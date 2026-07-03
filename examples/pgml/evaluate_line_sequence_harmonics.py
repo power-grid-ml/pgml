@@ -42,7 +42,7 @@ import torch
 
 from pgml import defaults as config
 from pgml import evaluation as ev
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 from pgml.geometry.carson import kron_reduce, series_impedance
 from pgml.geometry.sequence import (
     positive_sequence_z,

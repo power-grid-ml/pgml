@@ -27,7 +27,7 @@ from pgml.evaluation import (
     save_figure,
     voltage_profile,
 )
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 from pgml.solver import solve_power_flow
 
 CDT = torch.complex128

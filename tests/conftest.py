@@ -8,9 +8,6 @@ the suite. (Previously every pandapower-touching test file repeated this shim.)
 
 from __future__ import annotations
 
-import numpy as np
+from pgml.convert.pandapower import ensure_numpy_compat
 
-if not hasattr(np, "Inf"):
-    np.Inf = np.inf  # type: ignore[attr-defined]
-if not hasattr(np, "in1d"):
-    np.in1d = np.isin  # type: ignore[attr-defined]
+ensure_numpy_compat()

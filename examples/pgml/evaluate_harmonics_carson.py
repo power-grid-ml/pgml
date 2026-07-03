@@ -38,7 +38,7 @@ from pgml.schemas.grid_schema import Line
 from pgml.solver import solve_harmonic_flow
 
 from pgml import evaluation as ev
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 
 CDT = torch.complex128
 ORDERS_3D = [5, 7, 11, 13]

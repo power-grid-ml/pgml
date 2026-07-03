@@ -4,7 +4,7 @@ The plot functions never touch torch or a reference library; they consume these
 plain-numpy containers. Builders here adapt our solver outputs
 (:class:`~pgml.solver.PowerFlowResult`, :class:`~pgml.solver.HarmonicFlowResult`,
 assembled Y-bus tensors) into them. Reference-library adapters that emit the SAME
-containers live in :mod:`pgml.evaluation.references`, so "ours vs reference" is just
+containers live in :mod:`pgml.evaluation.oracles`, so "ours vs reference" is just
 a list of these objects handed to one plot function.
 """
 

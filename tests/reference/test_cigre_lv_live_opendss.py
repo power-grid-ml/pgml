@@ -1,6 +1,6 @@
 """Parity tests: CIGRE LV harmonic flow vs LIVE OpenDSS oracle.
 
-Tests :func:`pgml.evaluation.references.opendss_harmonic_voltages` — the live
+Tests :func:`pgml.evaluation.oracles.opendss_harmonic_voltages` — the live
 OpenDSS harmonic oracle that reads OpenDSS ``SystemY(h)`` at each harmonic order
 and solves the system.
 
@@ -48,7 +48,7 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
-from pgml.evaluation.references import (
+from pgml.evaluation.oracles import (
     cigre_lv_full_grid,
     opendss_dyn_transformer_harmonic_voltages,
     opendss_harmonic_voltages,

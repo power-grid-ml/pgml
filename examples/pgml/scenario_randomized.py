@@ -41,7 +41,7 @@ import torch
 from pgml import evaluation as ev
 from pgml.convert.pandapower import PhaseMode
 from pgml.evaluation.data import VoltageProfile, harmonic_profile
-from pgml.evaluation.references import cigre_lv_full_grid
+from pgml.evaluation.oracles import cigre_lv_full_grid
 from pgml.geometry.synthesis import synthesize_grid_geometry
 from pgml.scenarios import (
     ParameterSpec,
@@ -233,7 +233,7 @@ def _opendss_compare(grid, sampled, res, out: Path) -> None:
     try:
         import numpy as np
 
-        from pgml.evaluation.references import opendss_harmonic_voltages
+        from pgml.evaluation.oracles import opendss_harmonic_voltages
 
         j = 0
         at = lambda x: float(x[j]) if hasattr(x, "__len__") else float(x)  # noqa: E731

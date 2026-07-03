@@ -38,4 +38,23 @@ def save_figure(
     return str(p)
 
 
-__all__ = ["DPI", "COMPARE_ALPHA", "LINESTYLES", "ANGLE_CMAP", "save_figure"]
+def save_html(fig, path) -> str:
+    """Save a plotly ``Figure`` as a self-contained HTML file (plotly.js inlined).
+
+    Creates the parent directory; the file opens offline in any browser. The
+    plotly counterpart of :func:`save_figure`.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(p, include_plotlyjs=True, full_html=True)
+    return str(p)
+
+
+__all__ = [
+    "DPI",
+    "COMPARE_ALPHA",
+    "LINESTYLES",
+    "ANGLE_CMAP",
+    "save_figure",
+    "save_html",
+]

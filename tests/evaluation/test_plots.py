@@ -29,7 +29,7 @@ from pgml.evaluation import (
     save_figure,
     voltage_profile,
 )
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 from pgml.evaluation.topology import branch_edges
 from pgml.schemas.grid_schema import (
     Grid,

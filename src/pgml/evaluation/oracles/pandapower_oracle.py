@@ -21,10 +21,7 @@ from pgml.evaluation.data import LabeledMatrix, VoltageProfile, row_labels
 from pgml.evaluation.topology import distance_from_slack
 
 
-def _numpy_shim() -> None:
-    """numpy 2.x compatibility shim required by pandapower 2.14 (Inf/in1d)."""
-    np.Inf = np.inf  # type: ignore[attr-defined]
-    np.in1d = np.isin  # type: ignore[attr-defined]
+from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
 
 
 def pandapower_ybus(

@@ -78,7 +78,7 @@ def test_grid_synthesis_dispatches_by_phase_count():
     import warnings
 
     from pgml.convert.pandapower import PhaseMode
-    from pgml.evaluation.references import cigre_lv_full_grid
+    from pgml.evaluation.oracles import cigre_lv_full_grid
     from pgml.geometry.synthesis import synthesize_grid_geometry
     from pgml.schemas.grid_schema import Line
 

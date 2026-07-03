@@ -11,13 +11,7 @@ imports are deferred to function scope except for ``numpy``, which is a core dep
 
 from __future__ import annotations
 
-import numpy as np
-
-
-def _numpy_shim() -> None:
-    """numpy 2.x compatibility shim required by pandapower 2.14 (Inf/in1d)."""
-    np.Inf = np.inf  # type: ignore[attr-defined]
-    np.in1d = np.isin  # type: ignore[attr-defined]
+from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
 
 
 # Typical 6-pulse converter line-current spectrum (fraction of fundamental).

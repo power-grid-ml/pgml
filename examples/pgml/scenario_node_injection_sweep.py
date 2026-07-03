@@ -50,7 +50,7 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
-from pgml.evaluation.references import cigre_lv_full_grid
+from pgml.evaluation.oracles import cigre_lv_full_grid
 from pgml.geometry.synthesis import synthesize_grid_geometry
 from pgml.scenarios import NodeInjectionSweepConfig, run_node_injection_sweep
 from pgml.solver import NodeHarmonicSource, solve_harmonic_flow
@@ -189,7 +189,7 @@ def _opendss_compare(
     grid, spectrum, res, k, injection_ids, node_ids, out: Path
 ) -> None:
     try:
-        from pgml.evaluation.references import opendss_harmonic_voltages
+        from pgml.evaluation.oracles import opendss_harmonic_voltages
     except ImportError:
         print("OpenDSS oracle unavailable — skipping comparison.")
         return

@@ -21,7 +21,7 @@ import torch
 from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly.ybus import _stamp_sources
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 from pgml.schemas.grid_schema import Phase
 from pgml.solver import solve_harmonic_flow
 

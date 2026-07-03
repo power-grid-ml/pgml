@@ -2,15 +2,15 @@
 
 Compares :func:`pgml.solver.solve_harmonic_flow` (with ``node_sources``) against:
 
-1. :func:`pgml.evaluation.references.numpy_harmonic_voltages` — pure-numpy oracle
+1. :func:`pgml.evaluation.oracles.numpy_harmonic_voltages` — pure-numpy oracle
    on the plain CIGRE LV grid (no conductor geometry).  Machine-precision parity
    (~1e-12 V) for both ``kind="current"`` and ``kind="voltage"``.
 
-2. :func:`pgml.evaluation.references.opendss_harmonic_voltages` — live OpenDSS
+2. :func:`pgml.evaluation.oracles.opendss_harmonic_voltages` — live OpenDSS
    oracle on the CIGRE LV grid with synthesized conductor geometry (single-phase
    path).  Near-machine-precision parity (~1e-11 V).
 
-3. :func:`pgml.evaluation.references.opendss_harmonic_voltages` — live OpenDSS
+3. :func:`pgml.evaluation.oracles.opendss_harmonic_voltages` — live OpenDSS
    oracle on the CIGRE LV grid with the three-phase sequence-aware harmonic model.
    Matches the existing sequence-aware tolerance (~1e-5 V); the Carson-model
    discrepancy is the same as in :mod:`test_cigre_lv_live_opendss` and is expected
@@ -36,7 +36,7 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
-from pgml.evaluation.references import (
+from pgml.evaluation.oracles import (
     cigre_lv_full_grid,
     numpy_harmonic_voltages,
     opendss_harmonic_voltages,

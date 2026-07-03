@@ -26,12 +26,11 @@ import math
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 
-# numpy 2.x compatibility shim for pandapower 2.14 (Inf/in1d), before importing it.
-np.Inf = np.inf  # type: ignore[attr-defined]
-np.in1d = np.isin  # type: ignore[attr-defined]
+from pgml.convert.pandapower import ensure_numpy_compat
+
+ensure_numpy_compat()  # numpy 2.x compat for pandapower 2.14, before importing it
 
 import pandapower as pp  # noqa: E402
 import pandapower.networks as pn  # noqa: E402
@@ -48,7 +47,7 @@ from pgml.geometry.synthesis import apply_default_harmonic_model  # noqa: E402
 from pgml.solver import solve_harmonic_flow, solve_power_flow  # noqa: E402
 
 from pgml import evaluation as ev  # noqa: E402
-from pgml.evaluation import references as ref  # noqa: E402
+from pgml.evaluation import oracles as ref  # noqa: E402
 
 CDT = torch.complex128
 # Typical 6-pulse converter line-current spectrum (mag relative to fundamental).

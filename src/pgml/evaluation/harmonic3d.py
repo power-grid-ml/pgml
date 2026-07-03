@@ -20,6 +20,7 @@ import plotly.colors as pcolors
 import plotly.graph_objects as go
 
 from .data import HarmonicProfile
+from .style import save_html
 from .topology import branch_edges
 
 _PALETTE = pcolors.qualitative.Plotly
@@ -154,10 +155,7 @@ def plot_harmonic_profile_3d(
         legend=dict(itemsizing="constant"),
     )
     if out_html is not None:
-        from pathlib import Path
-
-        Path(out_html).parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(out_html, include_plotlyjs=True, full_html=True)
+        save_html(fig, out_html)
     return fig
 
 

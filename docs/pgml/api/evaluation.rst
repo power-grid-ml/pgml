@@ -14,7 +14,7 @@ implementations.
 - **data** — framework-agnostic plot containers (:class:`~pgml.evaluation.VoltageProfile`,
   :class:`~pgml.evaluation.HarmonicProfile`, :class:`~pgml.evaluation.LabeledMatrix`)
   and builder functions that consume solver results.
-- **references** — lazy adapters for pandapower, OpenDSS, and standalone oracle
+- **oracles** — lazy adapters for pandapower, OpenDSS, and standalone oracle
   functions; all emit the same containers.
 - **ybus_plots** — Y-bus heatmaps side-by-side and a difference heatmap.
 - **profiles** — voltage-drop diagram and harmonic magnitude/angle plot.
@@ -26,7 +26,7 @@ implementations.
 .. note::
 
    Reference library adapters (``pandapower``, ``opendssdirect``) are imported
-   lazily inside :mod:`pgml.evaluation.references` so the rest of the package
+   lazily inside :mod:`pgml.evaluation.oracles` so the rest of the package
    is available even when those libraries are absent.
 
 3D harmonic profile — dash_map
@@ -58,22 +58,22 @@ labels in ``reference_labels`` are dashed, all others solid.
 Reference builders and oracle functions
 ----------------------------------------
 
-:mod:`pgml.evaluation.references` provides reference-grid builders and harmonic
+:mod:`pgml.evaluation.oracles` provides reference-grid builders and harmonic
 oracle functions for validation and regression testing.
 
 Grid builders
 ~~~~~~~~~~~~~
 
-- :func:`~pgml.evaluation.references.ieee33_geometry_grid` — IEEE 33-bus feeder
+- :func:`~pgml.evaluation.oracles.ieee33_geometry_grid` — IEEE 33-bus feeder
   with synthesized Carson conductor geometry.
-- :func:`~pgml.evaluation.references.cigre_lv_geometry_grid` — residential CIGRE
+- :func:`~pgml.evaluation.oracles.cigre_lv_geometry_grid` — residential CIGRE
   LV feeder (one feeder, Carson geometry).
-- :func:`~pgml.evaluation.references.cigre_lv_full_grid` — the **full** CIGRE LV
+- :func:`~pgml.evaluation.oracles.cigre_lv_full_grid` — the **full** CIGRE LV
   benchmark (all three feeders, three 20/0.4 kV transformers, MV ext-grid source).
   Unlike ``cigre_lv_geometry_grid``, this uses standard R/X lines and converts the
   complete pandapower network::
 
-      from pgml.evaluation.references import cigre_lv_full_grid
+      from pgml.evaluation.oracles import cigre_lv_full_grid
       from pgml.convert.pandapower import PhaseMode
 
       grid, id_map = cigre_lv_full_grid()
@@ -95,7 +95,7 @@ Two functions return complex ``[H, N]`` node voltages aligned to
 :func:`pgml.assembly.node_phase_index`, for use as regression and ground-truth
 oracles.
 
-**Pure-numpy regression oracle** (:func:`~pgml.evaluation.references.numpy_harmonic_voltages`)
+**Pure-numpy regression oracle** (:func:`~pgml.evaluation.oracles.numpy_harmonic_voltages`)
 
 Reimplements pgml's EXACT Y-bus formulas (R const / X∝h) in pure numpy without
 any live OpenDSS circuit.  Gives machine-precision parity (~1e-13 V absolute) vs
@@ -103,7 +103,7 @@ any live OpenDSS circuit.  Gives machine-precision parity (~1e-13 V absolute) vs
 regression oracle and to validate CIGRE LV (both ``SINGLE_PHASE_EQUIV`` and
 ``THREE_PHASE``) with plain R/X lines::
 
-    from pgml.evaluation.references import numpy_harmonic_voltages
+    from pgml.evaluation.oracles import numpy_harmonic_voltages
 
     v_ref = numpy_harmonic_voltages(
         grid, harmonic_injection, orders=[1, 5, 7, 11],
@@ -111,7 +111,7 @@ regression oracle and to validate CIGRE LV (both ``SINGLE_PHASE_EQUIV`` and
     )
     # v_ref  complex [H, N], H = len(orders)
 
-**Live OpenDSS harmonic oracle** (:func:`~pgml.evaluation.references.opendss_harmonic_voltages`)
+**Live OpenDSS harmonic oracle** (:func:`~pgml.evaluation.oracles.opendss_harmonic_voltages`)
 
 Builds and runs a live OpenDSS circuit using pgml's Carson/Deri line model,
 returning complex ``[H, N]`` voltages.  Gives near-machine-precision parity
@@ -126,7 +126,7 @@ sequence-aware grids).  Requires either:
 Plain R/X grids without either tag raise ``ValueError`` — use
 ``numpy_harmonic_voltages`` instead::
 
-    from pgml.evaluation.references import opendss_harmonic_voltages
+    from pgml.evaluation.oracles import opendss_harmonic_voltages
 
     v_dss = opendss_harmonic_voltages(
         grid, harmonic_injection, orders=[1, 5, 7],
