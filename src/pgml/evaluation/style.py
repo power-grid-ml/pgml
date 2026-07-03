@@ -38,6 +38,28 @@ def save_figure(
     return str(p)
 
 
+def positive_log_norm(values):
+    """A matplotlib ``LogNorm`` spanning the positive finite entries, or ``None``.
+
+    The shared guard for every log-scaled heatmap: no positive finite data →
+    ``None`` (the caller falls back to a linear scale); a degenerate
+    ``vmax <= vmin`` widens to one decade so the scale stays valid. NaN/inf
+    entries (e.g. empty statistic buckets) are ignored.
+    """
+    import numpy as np
+    from matplotlib.colors import LogNorm
+
+    values = np.asarray(values)
+    pos = values[np.isfinite(values) & (values > 0)]
+    if pos.size == 0:
+        return None
+    vmin = float(pos.min())
+    vmax = float(pos.max())
+    if vmax <= vmin:
+        vmax = vmin * 10.0
+    return LogNorm(vmin=vmin, vmax=vmax)
+
+
 def save_html(fig, path) -> str:
     """Save a plotly ``Figure`` as a self-contained HTML file (plotly.js inlined).
 
@@ -55,6 +77,7 @@ __all__ = [
     "COMPARE_ALPHA",
     "LINESTYLES",
     "ANGLE_CMAP",
+    "positive_log_norm",
     "save_figure",
     "save_html",
 ]

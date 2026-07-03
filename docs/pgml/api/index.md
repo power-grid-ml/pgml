@@ -26,7 +26,7 @@ paths
 | Symbol | Purpose |
 |--------|---------|
 | {mod}`pgml.simulation` | `simulate`, `simulate_serializable`, `SimulationConfig`, `SolvedState`, `ResultBundle` — the stable public facade |
-| {mod}`pgml.errors` | `PgmError`, `InputError`, `ComputationError`, and leaf exception classes |
+| {mod}`pgml.errors` | `PgmlError`, `InputError`, `ComputationError`, and leaf exception classes |
 
 ## Subpackage overview
 

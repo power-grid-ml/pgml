@@ -12,7 +12,7 @@ converter pipelines) but the facade below is the recommended starting point.
 | `pgml.simulate_serializable(grid, config)` | `pgml.simulation` | As above but return JSON-ready {class}`~pgml.simulation.ResultBundle` |
 | `pgml.SimulationConfig` | `pgml.simulation` | Serializable definition of WHAT to simulate |
 | `pgml.Grid` | `pgml.schemas` | The input grid (frozen pydantic contract) |
-| `pgml.PgmError` and subclasses | `pgml.errors` | Exception hierarchy with HTTP status hints |
+| `pgml.PgmlError` and subclasses | `pgml.errors` | Exception hierarchy with HTTP status hints (`PgmError` is a deprecated alias) |
 
 ## `SimulationConfig` vs execution kwargs
 

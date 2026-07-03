@@ -33,7 +33,8 @@ def test_facade_reexports_public_surface():
     assert pgml.SimulationConfig is SimulationConfig
     assert pgml.Grid.__name__ == "Grid"
     for name in (
-        "PgmError",
+        "PgmlError",
+        "PgmError",  # deprecated alias, kept importable
         "InputError",
         "ComputationError",
         "ConvergenceError",
@@ -49,6 +50,7 @@ def test_facade_reexports_public_surface():
 # exception hierarchy + REST status hints
 # --------------------------------------------------------------------------- #
 def test_exception_hierarchy_and_http_status():
+    assert pgml.PgmError is pgml.PgmlError  # deprecated alias stays identical
     assert issubclass(InputError, PgmError) and InputError.http_status == 422
     assert (
         issubclass(ComputationError, PgmError) and ComputationError.http_status == 500

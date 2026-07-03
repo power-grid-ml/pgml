@@ -32,7 +32,7 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | **Benchmark input grids** (IEEE-33 / CIGRE LV via pandapower; the canonical example/training feeders) | `grids.py` | — |
 | **Evaluation plots** (Y-bus heatmaps, voltage/harmonic profiles, 3D, refs-vs-ours) + the optional reference oracles | `evaluation/` | `evaluation/CONTEXT.md` |
 | The **public API** (`simulate`, `SolvedState`, `SimulationConfig`, `ResultBundle`) | `simulation.py` | `docs/pgml/public-api.md` |
-| The **error hierarchy** (`PgmError` → `InputError` / `ComputationError`, http_status hints) | `errors.py` | — |
+| The **error hierarchy** (`PgmlError` → `InputError` / `ComputationError`, http_status hints; `PgmError` = deprecated alias) | `errors.py` | — |
 
 ## Frozen-contract rule
 

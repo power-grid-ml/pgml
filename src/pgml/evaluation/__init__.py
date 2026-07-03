@@ -26,6 +26,7 @@ from .data import (
     LabeledMatrix,
     VoltageProfile,
     harmonic_profile,
+    harmonic_profile_from_array,
     harmonic_profiles,
     labeled_matrix,
     voltage_profile,
@@ -50,6 +51,7 @@ __all__ = [
     "LabeledMatrix",
     "voltage_profile",
     "harmonic_profile",
+    "harmonic_profile_from_array",
     "harmonic_profiles",
     "labeled_matrix",
     # topology
