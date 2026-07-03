@@ -9,19 +9,27 @@ implementations.
 
 .. rubric:: Sub-modules
 
-- **topology** — distance from slack along the branch graph (the x-axis of
-  voltage/harmonic profiles).
+- **topology** — re-exports the dependency-free :mod:`pgml.topology` (``slack_node_id``,
+  ``branch_edges``, ``distance_from_slack`` — the x-axis of voltage/harmonic profiles) and
+  adds the one helper that genuinely needs networkx: ``grid_graph``, the topology-graph
+  layout used by :func:`~pgml.evaluation.plot_grid_graph`.
 - **data** — framework-agnostic plot containers (:class:`~pgml.evaluation.VoltageProfile`,
   :class:`~pgml.evaluation.HarmonicProfile`, :class:`~pgml.evaluation.LabeledMatrix`)
-  and builder functions that consume solver results.
-- **oracles** — lazy adapters for pandapower, OpenDSS, and standalone oracle
-  functions; all emit the same containers.
+  and builder functions that consume solver results, including the shared row-building
+  primitive :func:`~pgml.evaluation.harmonic_profile_from_array` (a plain complex
+  ``[H, N]`` array in, a :class:`~pgml.evaluation.HarmonicProfile` out — the solver-result
+  path here and the ML estimator/dataset path in ``pgl.evaluation`` both delegate to it).
+- **oracles** — lazy adapters for pandapower, OpenDSS, and standalone oracle functions,
+  plus the reference-grid builders re-exported from :mod:`pgml.grids`; all emit the same
+  containers.
 - **ybus_plots** — Y-bus heatmaps side-by-side and a difference heatmap.
 - **profiles** — voltage-drop diagram and harmonic magnitude/angle plot.
 - **harmonic3d** — interactive 3D harmonic surface plot (Plotly → HTML).
 - **graph_plots** — topology graph coloured by a per-node value.
-- **style** — shared styling and the high-quality :func:`~pgml.evaluation.save_figure`
-  helper.
+- **style** — shared styling: the high-quality :func:`~pgml.evaluation.save_figure` /
+  :func:`~pgml.evaluation.save_html` save helpers and
+  :func:`~pgml.evaluation.style.positive_log_norm`, the shared positive-data ``LogNorm``
+  guard for log-scaled heatmaps.
 
 .. note::
 
@@ -58,35 +66,14 @@ labels in ``reference_labels`` are dashed, all others solid.
 Reference builders and oracle functions
 ----------------------------------------
 
-:mod:`pgml.evaluation.oracles` provides reference-grid builders and harmonic
-oracle functions for validation and regression testing.
-
-Grid builders
-~~~~~~~~~~~~~
-
-- :func:`~pgml.evaluation.oracles.ieee33_geometry_grid` — IEEE 33-bus feeder
-  with synthesized Carson conductor geometry.
-- :func:`~pgml.evaluation.oracles.cigre_lv_geometry_grid` — residential CIGRE
-  LV feeder (one feeder, Carson geometry).
-- :func:`~pgml.evaluation.oracles.cigre_lv_full_grid` — the **full** CIGRE LV
-  benchmark (all three feeders, three 20/0.4 kV transformers, MV ext-grid source).
-  Unlike ``cigre_lv_geometry_grid``, this uses standard R/X lines and converts the
-  complete pandapower network::
-
-      from pgml.evaluation.oracles import cigre_lv_full_grid
-      from pgml.convert.pandapower import PhaseMode
-
-      grid, id_map = cigre_lv_full_grid()
-      # or with explicit phase mode and source impedance:
-      grid, id_map = cigre_lv_full_grid(
-          phase_mode=PhaseMode.THREE_PHASE,
-          source_impedance_ohm=5.0,   # None -> config default source.series_impedance_ohm
-      )
-
-  The ``source_impedance_ohm`` parameter applies a finite upstream-grid impedance to
-  the converted MV source so harmonics are not fully absorbed at the slack bus.
-  Passing ``0`` keeps the converted near-ideal source.  The split between R and X is
-  controlled by the config key ``source.rx_ratio`` (default 10).
+:mod:`pgml.evaluation.oracles` provides harmonic oracle functions for validation and
+regression testing, plus the reference-grid builders re-exported from :mod:`pgml.grids`
+(see :doc:`grids` for the canonical documentation of
+:func:`~pgml.grids.ieee33_geometry_grid`, :func:`~pgml.grids.cigre_lv_geometry_grid`,
+:func:`~pgml.grids.cigre_lv_full_grid`, :func:`~pgml.grids.add_pv_systems`, and
+:func:`~pgml.grids.se_benchmark_scenario_config`) — ``from pgml.evaluation.oracles import
+cigre_lv_full_grid`` and ``from pgml.grids import cigre_lv_full_grid`` import the identical
+function.
 
 Harmonic oracle functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~

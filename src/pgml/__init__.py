@@ -15,7 +15,8 @@ Lower-level / optional surfaces are reached via their subpackages (so a minimal 
 install need not import the extras): :mod:`pgml.solver` (raw differentiable tensors),
 :mod:`pgml.scenarios` (batched data generation), :mod:`pgml.convert`,
 :mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.defaults` (modeling defaults),
-:mod:`pgml.assembly`, :mod:`pgml.geometry`.
+:mod:`pgml.assembly`, :mod:`pgml.geometry`, :mod:`pgml.topology` (dependency-free graph
+helpers), :mod:`pgml.grids` (reference grid builders, needs the ``convert`` extra).
 """
 
 from __future__ import annotations

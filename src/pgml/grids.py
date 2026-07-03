@@ -15,7 +15,9 @@ from __future__ import annotations
 from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
 
 
-# Typical 6-pulse converter line-current spectrum (fraction of fundamental).
+#: Typical 6-pulse converter line-current spectrum, as ``(order, magnitude_pu, phase_deg)``
+#: relative to the fundamental. Attached to the farthest loads by :func:`ieee33_geometry_grid`
+#: and :func:`cigre_lv_geometry_grid` to give the harmonic examples a realistic source.
 CONVERTER_SPECTRUM = [
     (1, 1.0, 0.0),
     (5, 0.20, 0.0),
@@ -73,9 +75,10 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
 
     The stock pandapower ext-grid converts to a near-ideal source (R~1e-6 Ohm) which
     short-circuits the bus at harmonics; a FINITE series impedance is applied so the
-    source does not fully absorb injected harmonics (``source_impedance_ohm`` |Z| at the
-    source's rated voltage, ``source.rx_ratio`` for the X/R split — config defaults under
-    ``source.*``). Larger = weaker upstream grid = more cross-feeder coupling.
+    source does not fully absorb injected harmonics (``source_impedance_ohm`` is ``|Z|``
+    at the source's rated voltage, ``source.rx_ratio`` for the X/R split — config
+    defaults under ``source.*``). Larger = weaker upstream grid = more cross-feeder
+    coupling.
 
     Parameters
     ----------
@@ -150,9 +153,11 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
-# The harmonic orders the SE benchmark randomizes: general LV loads inject the
-# odd orders up to 13; PV inverters concentrate on the non-triplen 5/7/11/13.
+#: Harmonic orders :func:`se_benchmark_scenario_config` randomizes for general LV loads
+#: (the odd orders up to 13, including the triplen 3/9).
 LOAD_HARMONIC_ORDERS = [3, 5, 7, 9, 11, 13]
+#: Harmonic orders :func:`se_benchmark_scenario_config` randomizes for PV inverters
+#: (the non-triplen 5/7/11/13 — a typical inverter switching signature).
 PV_HARMONIC_ORDERS = [5, 7, 11, 13]
 
 

@@ -83,10 +83,18 @@ pinned so the positive-sequence coupling equals the scalar off-nominal-tap pi
 Single-phase / positive-sequence-equivalent runs (P = 1) collapse the group into that
 complex scalar tap directly, so the two modes agree to machine precision.
 
+**Clock 6 (`Yy6` / `Dd6`) — reversed LV winding polarity.** Unlike clock 0, clock 6 is
+NOT in phase: it is a genuine 180° group, realised as a `−1` on the LV incidence
+(`N_lv → −N_lv`) rather than a phase-shifted delta incidence. Because
+`(−N)ᵀ·Y·(−N) = Nᵀ·Y·N`, the sign flip cancels in both self blocks (HV-HV, LV-LV) and
+survives only in the HV↔LV coupling blocks — matching the single-phase-equivalent
+path's complex rotation `e^(jπ) = −1`.
+
 ## Scope (what is and isn't modelled)
-- Supported: Dyn1 / Dyn11 (clock 1 / 11), and in-phase wye-wye / delta-delta
-  (clock 0 / 6). Other clocks raise `NotImplementedError` (they need a cyclic phase
-  permutation of the winding pairing).
+- Supported: Dyn1 / Dyn11 (clock 1 / 11) for delta-wye pairings; and, for wye-wye /
+  delta-delta pairings, clock 0 (in phase, `shift_deg = 0`) and clock 6 (180°
+  reversed polarity, `shift_deg = 180` — see above). Other clocks raise
+  `NotImplementedError` (they need a cyclic phase permutation of the winding pairing).
 - Solid neutral grounding only (`*_grounding` = None / 0). A non-solid grounding
   impedance (`GroundingImpedance`) and zigzag windings are not modelled yet.
 - Magnetizing branch is a simple shunt on the HV terminal (referred to the HV line

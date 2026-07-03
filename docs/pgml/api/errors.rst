@@ -16,6 +16,17 @@ adapter can map them to HTTP status codes without inspecting internals.
   computation failed (e.g. the nonlinear power flow did not converge).
   Maps to HTTP **500**.
 
+Each branch has leaf classes for specific failures: :class:`~pgml.errors.ConfigurationError`
+/ :class:`~pgml.errors.ConversionError` / :class:`~pgml.errors.ModelingError` under
+``InputError``, and :class:`~pgml.errors.ConvergenceError` (carries the solver
+``iterations`` / ``residual`` / ``diagnostics``) under ``ComputationError``.
+
+.. rubric:: Deprecated alias
+
+``PgmError`` is kept as an alias of :class:`~pgml.errors.PgmlError` for existing catchers
+(the ``pgm`` prefix reads as *power-grid-model*, the reference library, elsewhere in this
+codebase — ``PgmlError`` is unambiguous). New code should catch or raise ``PgmlError``.
+
 .. rubric:: Schema validation is NOT wrapped
 
 Constructing a :class:`~pgml.schemas.grid_schema.Grid` (or any other schema model)

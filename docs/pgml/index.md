@@ -61,8 +61,15 @@ figures.
 - **Scenarios / data** — `pgml.scenarios`: `ScenarioConfig` / `CoherentSpectrumConfig` /
   `run_scenarios` (batched solve), `write_dataset` / `read_dataset` (parquet I/O).
 - **Topology** — `pgml.assembly.node_phase_index` (the row layout), branch parameters, and
-  `pgml.evaluation.topology` (a networkx graph with distance-from-slack). The
-  PyTorch-Geometric `Data` / `Batch` builder is a `pgl` concern built on these.
+  `pgml.topology` (dependency-free: `slack_node_id`, `branch_edges`,
+  `distance_from_slack` — the graph features a training process needs, without pulling in
+  matplotlib/plotly/networkx). `pgml.evaluation.topology` adds the one networkx view
+  (`grid_graph`) used by the plotting stack. The PyTorch-Geometric `Data` / `Batch` builder
+  is a `pgl` concern built on these.
+- **Reference grids** — `pgml.grids`: the canonical IEEE-33 / CIGRE LV benchmark builders
+  (pandapower → `Grid`, with synthesized Carson geometry and converter harmonic spectra),
+  plus `add_pv_systems` and `se_benchmark_scenario_config` for the state-estimation
+  benchmark recipe. Requires the `convert` extra (pandapower).
 
 ## Two hard constraints
 
