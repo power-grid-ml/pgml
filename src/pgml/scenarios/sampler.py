@@ -94,10 +94,16 @@ class SampledScenarios:
 
 
 class _Nominal(NamedTuple):
-    """Nominal nameplate power of one Load/Generator (totals + per-phase split)."""
+    """Nominal nameplate power of one Load/Generator (totals + per-phase split).
 
-    p_total: float
-    q_total: float
+    Entries keep the schema's float/tensor duality: a tensor-valued nameplate
+    (``p_nom_w`` as an autograd leaf) passes through UNTOUCHED so a
+    ``mode="scale"`` operating point stays differentiable w.r.t. the grid's own
+    rated power.
+    """
+
+    p_total: object  # float or 0-d array-like
+    q_total: object
     p_pp: list  # per-phase active nominal (nameplate split or total / n)
     q_pp: list  # per-phase reactive nominal
     n: int  # phase count
@@ -165,6 +171,27 @@ def _spec_dims(spec: ParameterSpec, n_comp: int, nph: list) -> tuple[int, int]:
     return 0, (sum(nph) if spec.per == "each" else nph[0])
 
 
+def _reject_overlapping_writers(writers) -> None:
+    """Raise when two specs/axes vary the same field of the same component.
+
+    ``writers`` yields ``(spec_name, component_id, field_key)`` triples. Without
+    this guard the last writer would silently win in ``operating_point`` while
+    BOTH values stay recorded in ``samples`` — the persisted record would no
+    longer match the operating point that was actually solved.
+    """
+    seen: dict[tuple, str] = {}
+    for name, cid, key in writers:
+        k = (cid, key)
+        if k in seen:
+            raise InputError(
+                f"Parameters {seen[k]!r} and {name!r} both vary {key!r} of "
+                f"component {cid}; overlapping writers on one field are "
+                "ambiguous (last-writer-wins would desync the recorded samples "
+                "from the realized operating point). Narrow the selectors."
+            )
+        seen[k] = name
+
+
 def _resolve(grid: Grid, config: ScenarioConfig):
     """``(factor_index, op_layouts, harm_layouts, total_dim)`` for the unit-cube layout.
 
@@ -216,6 +243,20 @@ def _resolve(grid: Grid, config: ScenarioConfig):
         )
         dim += base_dim + phase_dim
 
+    writers = [
+        (lay.spec.name, cid, fld)
+        for lay in op_layouts
+        for cid in lay.ids
+        for fld in (("p", "q") if lay.spec.field == "pq" else (lay.spec.field,))
+    ]
+    writers += [
+        (lay.spec.name, cid, (lay.spec.field, order))
+        for lay in harm_layouts
+        for cid in lay.ids
+        for order in lay.spec.orders
+    ]
+    _reject_overlapping_writers(writers)
+
     return factor_index, op_layouts, harm_layouts, dim
 
 
@@ -238,6 +279,15 @@ def _component_base(
     return vals, vals
 
 
+def _scalar_passthrough(x):
+    """A python float for plain numbers; array-likes (tensors) pass UNTOUCHED.
+
+    ``float(tensor)`` would silently detach an autograd leaf — the exact
+    gradient break the schema's float/tensor duality exists to prevent.
+    """
+    return x if hasattr(x, "detach") or hasattr(x, "__array__") else float(x)
+
+
 def _nominal(grid: Grid) -> dict:
     """``{id: _Nominal}`` for every in-service Load/Generator (totals + per-phase)."""
     out: dict[int, _Nominal] = {}
@@ -245,16 +295,19 @@ def _nominal(grid: Grid) -> dict:
         if not isinstance(a, (Load, Generator)):
             continue
         n = len(a.phases)
-        p_total, q_total = float(a.p_nom_w), float(a.q_nom_var)
+        p_total = _scalar_passthrough(a.p_nom_w)
+        q_total = _scalar_passthrough(a.q_nom_var)
+        # Fresh `/ n` per slot: a `[x] * n` literal would alias one autograd
+        # node into every phase (see assembly._params.resolve_operating_power).
         p_pp = (
-            [float(x) for x in a.p_nom_per_phase_w]
+            [_scalar_passthrough(x) for x in a.p_nom_per_phase_w]
             if a.p_nom_per_phase_w is not None
-            else [p_total / n] * n
+            else [p_total / n for _ in range(n)]
         )
         q_pp = (
-            [float(x) for x in a.q_nom_per_phase_var]
+            [_scalar_passthrough(x) for x in a.q_nom_per_phase_var]
             if a.q_nom_per_phase_var is not None
-            else [q_total / n] * n
+            else [q_total / n for _ in range(n)]
         )
         out[a.id] = _Nominal(p_total, q_total, p_pp, q_pp, n)
     return out
@@ -302,10 +355,17 @@ def _harmonic_injections(
     by_id = {a.id: a for a in grid.appliances if isinstance(a, (Load, Generator))}
     # building store: {id: {order: [mag, phase]}}, seeded from stored spectra.
     built: dict[int, dict] = {}
+    # pristine stored spectra (never mutated; `mode="scale"` references these).
+    stored_cache: dict[int, dict] = {}
+
+    def _stored(cid: int) -> dict:
+        if cid not in stored_cache:
+            stored_cache[cid] = _stored_spectrum(by_id[cid])
+        return stored_cache[cid]
 
     def _dev(cid: int) -> dict:
         if cid not in built:
-            built[cid] = _stored_spectrum(by_id[cid])
+            built[cid] = {o: list(mp) for o, mp in _stored(cid).items()}
         return built[cid]
 
     for lay in harm_layouts:
@@ -316,7 +376,7 @@ def _harmonic_injections(
         samples[spec.name] = vals  # [B, n_eff, n_orders]
         for j, cid in enumerate(lay.ids):
             comp = vals[:, j if spec.per == "each" else 0, :]  # [B, n_orders]
-            dev, stored = _dev(cid), _stored_spectrum(by_id[cid])
+            dev, stored = _dev(cid), _stored(cid)
             for o, order in enumerate(spec.orders):
                 v = comp[:, o]  # [B]
                 slot = dev.setdefault(order, [0.0, 0.0])
@@ -428,6 +488,12 @@ def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:
             raise InputError(
                 f"Cartesian axis {ax.name!r} matched no in-service components."
             )
+    _reject_overlapping_writers(
+        (ax.name, cid, fld)
+        for ax, ids in resolved
+        for cid in ids
+        for fld in (("p", "q") if ax.field == "pq" else (ax.field,))
+    )
     levels = [torch.tensor(ax.values, dtype=torch.float64) for ax, _ in resolved]
     combos = torch.cartesian_prod(*levels)  # [B, n_axes] (or [B] for a single axis)
     if combos.ndim == 1:

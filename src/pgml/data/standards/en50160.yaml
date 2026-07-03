@@ -1,4 +1,6 @@
-# Limits according to DIN EN 50160
+# Limits according to DIN EN 50160 (as amended: EN 50160:2010/A2:2019, kept in
+# EN 50160:2022, raised the odd-triplen limits h15 0.5 % -> 1.0 % and
+# h21 0.5 % -> 0.75 %; the values below are the amended ones).
 max_harmonic_values:
   1: 1
   2: 0.02

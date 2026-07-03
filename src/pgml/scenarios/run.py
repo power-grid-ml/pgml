@@ -245,9 +245,6 @@ def run_scenarios(
         converged=converged,
         failed_states=tuple(failed),
     )
-    raise InputError(
-        f"Unknown calculation {calculation!r} (use 'power_flow'/'harmonic')."
-    )
 
 
 __all__ = ["ScenarioResult", "run_scenarios"]

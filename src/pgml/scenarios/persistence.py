@@ -202,6 +202,14 @@ def _write_samples(samples: dict, b: int, path: Path, comp: str) -> dict:
     shared: dict = {}
     for name, t in samples.items():
         arr = t.detach().to("cpu").numpy()  # NATURAL dtype (preserve int vs float)
+        if np.issubdtype(arr.dtype, np.complexfloating):
+            # A float64 cast would silently DROP the imaginary part (and the
+            # shared-sample JSON path cannot encode complex at all).
+            raise InputError(
+                f"sample column {name!r} is complex-valued; the parquet sample "
+                "layout stores real columns only — split into real/imag (or "
+                "magnitude/phase) columns before persisting."
+            )
         if arr.ndim >= 1 and arr.shape[0] == b:
             flat = arr.reshape(b, -1)
             cols[name] = _array_col(flat) if flat.shape[1] > 1 else flat[:, 0]
