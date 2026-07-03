@@ -145,7 +145,14 @@ def resolve_vector_group(t) -> VectorGroup:
     """
     if t.from_connection is not None and t.to_connection is not None:
         from_conn, to_conn = t.from_connection, t.to_connection
-        clock = int(round(float(t.tap.shift_deg) / 30.0)) % 12
+        shift = t.tap.shift_deg
+        # The clock is a DISCRETE selector (nearest multiple of 30°), not a
+        # gradient leaf: the phase shift is realised by the constant incidence
+        # topology, so a tensor-valued shift_deg is read for its value only and
+        # deliberately does not participate in autograd.
+        if hasattr(shift, "detach"):
+            shift = shift.detach()
+        clock = int(round(float(shift) / 30.0)) % 12
     else:
         from_conn = WindingConnection(defaults.get("transformer.vector_group.from"))
         to_conn = WindingConnection(defaults.get("transformer.vector_group.to"))
@@ -169,7 +176,7 @@ def resolve_vector_group(t) -> VectorGroup:
 
 def group_key(vg: VectorGroup, p: int) -> tuple:
     """Hashable key grouping transformers that share one incidence ``N``."""
-    return (vg.from_side.kind, vg.to_side.kind, vg.clock_transpose, p)
+    return (vg.from_side.kind, vg.to_side.kind, vg.clock_transpose, vg.clock, p)
 
 
 def side_incidence(
@@ -202,9 +209,16 @@ def block_incidence(vg: VectorGroup, p: int, rdt, device) -> Tensor:
     The clock transpose is passed to BOTH sides; ``side_incidence`` only consumes it
     for a delta winding (ignored for wye / grounded-wye), so it correctly selects the
     clock orientation whether the delta is on the HV (Dyn) or LV (Yd) side.
+
+    Clock 6 (a 180° group, Yy6 / Dd6) is a reversed LV winding polarity: a ``−1``
+    on the LV incidence. It flips the sign of the HV↔LV coupling blocks while
+    leaving both self blocks unchanged (``(−N)ᵀ·Y·(−N) = Nᵀ·Y·N``), matching the
+    single-phase-equivalent path's complex rotation ``e^{jπ} = −1``.
     """
     n_hv = side_incidence(vg.from_side, p, vg.clock_transpose, rdt, device)
     n_lv = side_incidence(vg.to_side, p, vg.clock_transpose, rdt, device)
+    if vg.clock == 6:
+        n_lv = -n_lv
     n = torch.zeros((2 * p, 2 * p), dtype=rdt, device=device)
     n[:p, :p] = n_hv
     n[p:, p:] = n_lv

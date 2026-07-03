@@ -163,8 +163,10 @@ def resolve_operating_power(
         # gradient would wrongly perturb all phases under tensor duality.
         return [p_t / n for _ in range(n)], [q_t / n for _ in range(n)]
 
-    p_list = list(p_per) if p_per is not None else [p_total / n] * n
-    q_list = list(q_per) if q_per is not None else [q_total / n] * n
+    # Same independent-entries rule as the symmetric branch above: each ``/ n``
+    # is a fresh autograd node, never one object aliased into every slot.
+    p_list = list(p_per) if p_per is not None else [p_total / n for _ in range(n)]
+    q_list = list(q_per) if q_per is not None else [q_total / n for _ in range(n)]
     return p_list, q_list
 
 

@@ -150,7 +150,9 @@ and `branch_currents` pick it up automatically — no edit to either dispatch.
   `y_m = G_m + j·(−1/(2π f L_m))` is added to the HV terminal diagonal directly.
   - `from_connection`/`to_connection` resolve via `resolve_vector_group` (explicit, else
     config `transformer.vector_group.*`, default Dyn11). Supported clocks: Dyn → 1/11,
-    wye-wye/delta-delta → 0/6 (others raise NotImplementedError); zigzag and non-solid
+    wye-wye/delta-delta → 0/6 (others raise NotImplementedError); clock 6 (a 180° group,
+    Yy6/Dd6) is a reversed LV winding polarity, realised as `−N_lv` (flips the coupling
+    blocks' sign, self blocks unchanged); zigzag and non-solid
     `*_grounding` not modelled yet. `P==1` (single-phase / positive-sequence equivalent)
     folds the group into a complex scalar tap `t = (u_from/u_to)·tap_mag·e^{jθ}` and uses
     the textbook off-nominal-tap pi — reducing EXACTLY to the 3-phase positive sequence.

@@ -113,6 +113,9 @@ def evaluate_characteristic(
         )
 
     # Interval index: idx in [1, k-1] so [idx-1, idx] is a valid segment everywhere.
+    # The .detach() feeds only the integer segment SELECTION (searchsorted has no
+    # gradient); the interpolation below re-reads the tracked x/xp/fp, so no
+    # gradient path is severed — this is not on the differentiable value path.
     idx = torch.searchsorted(xp, x.detach(), right=True).clamp(1, k - 1)
     x0 = xp[idx - 1]
     x1 = xp[idx]
@@ -191,6 +194,7 @@ def resolve_injection_power(
     p = torch.broadcast_to(p, v_pu.shape)
     beta = _beta_from_smoothing(getattr(control, "smoothing", 0.0))
     s_rated = control.s_rated_va
+    s_t = _as_rt(s_rated, rdt, device) if s_rated is not None else None
 
     # --- active power: Volt-Watt curtails it; others pass it through ----------
     if isinstance(control, VoltWattControl):
@@ -201,6 +205,13 @@ def resolve_injection_power(
         p_eff = p * frac
     else:
         p_eff = p
+
+    # --- capability clamp, watt priority: P itself cannot exceed the rating ---
+    # An oversized source (available P above the inverter VA rating) is clipped
+    # to the circle before any reactive-power law sees it, so P² + Q² <= S²
+    # holds for the pair actually injected (OpenDSS PVSystem kVA semantics).
+    if s_t is not None:
+        p_eff = smooth_clamp(p_eff, -s_t, s_t, beta)
 
     # --- reactive power per mode ---------------------------------------------
     if isinstance(control, ConstantReactivePowerControl):
@@ -233,7 +244,6 @@ def resolve_injection_power(
             # Validated to require s_rated; this branch is only reached when set.
             q_base = _as_rt(s_rated, rdt, device)
         else:  # AVAILABLE: vars left under the capability circle at the present P.
-            s_t = _as_rt(s_rated, rdt, device) if s_rated is not None else None
             if s_t is None:
                 q_base = p_eff.abs()  # no rating -> reference the active power
             else:
@@ -243,8 +253,7 @@ def resolve_injection_power(
         q_eff = torch.zeros_like(p_eff)
 
     # --- capability clamp: bound |Q| to the apparent-power circle -------------
-    if s_rated is not None:
-        s_t = _as_rt(s_rated, rdt, device)
+    if s_t is not None:
         q_max = torch.sqrt(torch.clamp(s_t * s_t - p_eff * p_eff, min=0.0))
         q_eff = smooth_clamp(q_eff, -q_max, q_max, beta)
 

@@ -294,7 +294,10 @@ each variant reusing `CurveParam` for its characteristic:
 - `VoltVar(q_v_curve, q_base)` — `Q(|V|)`, `q_base` ∈ {available-VAr, kVA rating}
 - `VoltWatt(p_v_curve)` — `P(|V|)` curtailment
 - `CombinedVoltVarVoltWatt(...)`
-- an optional reactive-capability limit (kVA circle / PQ area) applied as a smooth clamp
+- an optional capability limit (kVA circle / PQ area) applied as a smooth clamp, with
+  watt priority: the active power itself is clipped to the rating first (an oversized
+  source cannot exceed the inverter VA rating through `P` alone), then `|Q|` is bounded
+  by the remaining circle headroom
 
 **Where it slots in.** `device_current_injections` already computes `S_eff(V_term)` from a
 fixed `S0` and a ZIP voltage factor (`assembly/ybus.py:1648–1667`). A control law makes the

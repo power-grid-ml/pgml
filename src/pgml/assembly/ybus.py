@@ -903,6 +903,34 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
 
 
 # ---- source Thevenin -> Norton shunt --------------------------------------
+def _source_series_admittance(group, f, cdt, rdt, device, param_overrides):
+    """Stacked source series admittance ``Y_s = Z_s^{-1}`` ``[H, K, P, P]``.
+
+    One override-aware R/L stack for a group of same-phase-count sources. Shared
+    by the shunt stamp and the Norton-EMF injection so the admittance the source
+    presents to the network and the one driving its EMF cannot drift apart.
+    """
+    r_list, l_list = [], []
+    for s in group:
+        r_list.append(
+            _override(
+                param_overrides,
+                ("source", s.id, "resistance_ohm"),
+                _real_matrix(s.resistance_ohm, rdt, device),
+            )
+        )
+        l_list.append(
+            _override(
+                param_overrides,
+                ("source", s.id, "inductance_h"),
+                _real_matrix(s.inductance_h, rdt, device),
+            )
+        )
+    r = torch.stack(r_list, 0)  # [K,P,P]
+    ind = torch.stack(l_list, 0)
+    return series_admittance_matrix(r, ind, f, cdt)
+
+
 def _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides):
     sources = [a for a in grid.appliances if isinstance(a, Source) and a.in_service]
     if not sources:
@@ -910,26 +938,8 @@ def _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides):
     by_p: dict[int, list] = {}
     for s in sources:
         by_p.setdefault(len(s.phases), []).append(s)
-    for p, group in by_p.items():
-        r_list, l_list = [], []
-        for s in group:
-            r_list.append(
-                _override(
-                    param_overrides,
-                    ("source", s.id, "resistance_ohm"),
-                    _real_matrix(s.resistance_ohm, rdt, device),
-                )
-            )
-            l_list.append(
-                _override(
-                    param_overrides,
-                    ("source", s.id, "inductance_h"),
-                    _real_matrix(s.inductance_h, rdt, device),
-                )
-            )
-        r = torch.stack(r_list, 0)
-        ind = torch.stack(l_list, 0)
-        ys = series_admittance_matrix(r, ind, f, cdt)  # [H,K,P,P]  Y_s = Z_s^-1
+    for _p, group in by_p.items():
+        ys = _source_series_admittance(group, f, cdt, rdt, device, param_overrides)
         rows, cols = _shunt_node_indices(group, index, device, terminal="node")
         y = scatter_blocks_into(y, ys, rows, cols)
     return y
@@ -1021,7 +1031,7 @@ def _transformer_block_groups(grid, f, index, cdt, rdt, device, param_overrides)
         by_key.setdefault(_xfmr_group_key(vg, len(t.from_phases)), []).append(t)
 
     two_pi_f = (2.0 * torch.pi) * f  # [H]
-    for (_fk, _tk, _ct, p), group in by_key.items():
+    for (_fk, _tk, _ct, _clock, p), group in by_key.items():
         vg0 = vgs[id(group[0])]
         eye_p = torch.eye(p, dtype=cdt, device=device)
 
@@ -1336,33 +1346,17 @@ def build_injections(
         by_p: dict[int, list] = {}
         for s in sources:
             by_p.setdefault(len(s.phases), []).append(s)
-        for p, group in by_p.items():
-            r_list, l_list, vth_list, row_list = [], [], [], []
+        for _p, group in by_p.items():
+            vth_list, row_list = [], []
             for s in group:
-                r_list.append(
-                    _override(
-                        param_overrides,
-                        ("source", s.id, "resistance_ohm"),
-                        _real_matrix(s.resistance_ohm, rdt, device),
-                    )
-                )
-                l_list.append(
-                    _override(
-                        param_overrides,
-                        ("source", s.id, "inductance_h"),
-                        _real_matrix(s.inductance_h, rdt, device),
-                    )
-                )
                 u_ref = torch.as_tensor(s.u_ref_v, dtype=rdt, device=device)
                 ang = torch.as_tensor(s.u_angle_deg, dtype=rdt, device=device) * (
                     math.pi / 180.0
                 )
                 vth_list.append(torch.polar(u_ref, ang).to(cdt))  # [P]
                 row_list.append([index.row(s.node, ph) for ph in s.phases])
-            r = torch.stack(r_list, 0)  # [K,P,P]
-            ind = torch.stack(l_list, 0)
             vth = torch.stack(vth_list, 0)  # [K,P]
-            ys = series_admittance_matrix(r, ind, f, cdt)  # [H,K,P,P]
+            ys = _source_series_admittance(group, f, cdt, rdt, device, param_overrides)
             # i_s = Y_s @ V_th  -> [H,K,P]
             i_s = torch.matmul(ys, vth[None, :, :, None].to(cdt)).squeeze(-1)
             rows = torch.as_tensor(row_list, dtype=torch.int64, device=device)  # [K,P]
