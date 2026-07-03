@@ -316,7 +316,7 @@ fundamental==PF, OpenDSS ballpark (fundamental exact, harmonics within 4% — Ca
 gap), shapes/orders. `tests/differentiability/test_harmonic_flow_gradcheck.py`:
 gradcheck of `V(h)` w.r.t. line R/L, load P/Q, and injection magnitude (incl.
 batched). The live-OpenDSS per-order comparison (with Carson + load shunt) is for
-the opendss-reference agent when those models land.
+the reference-integrator agent (OpenDSS) when those models land.
 
 Increment 2 (per-phase / connection-aware): `tests/asymmetric/test_harmonic_per_phase.py`
 (WYE `spectrum_per_phase` A-only, DELTA L-L terminal voltage + `M^T` scatter vs numpy
