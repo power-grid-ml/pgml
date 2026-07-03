@@ -38,6 +38,7 @@ from typing import Any, Optional
 from pgml import defaults
 from pgml.schemas.grid_schema import (
     ConstantParam,
+    Generator,
     GridMetadata,
     Line,
     Load,
@@ -377,6 +378,63 @@ def build_load(
     return Load(**kwargs)
 
 
+def build_generator(
+    *,
+    id: int,
+    node: int,
+    mode: PhaseMode,
+    p_total_w: float,
+    q_total_var: float,
+    name: Optional[str] = None,
+    connection: Optional[WindingConnection] = None,
+    native_phases: Optional[tuple[Phase, ...]] = None,
+    consumer_type: Optional[str] = None,
+) -> Generator:
+    """Build a :class:`~pgml.schemas.grid_schema.Generator` (PQ injection).
+
+    Mirrors :func:`build_load` with the GENERATION-POSITIVE nameplate convention:
+    ``p_total_w > 0`` injects into the grid (the assembly applies the −1 sign for
+    the :class:`Generator` component). Used for source-library static generators
+    (pandapower ``sgen``, power-grid-model ``sym_gen``).
+    """
+    kwargs: dict[str, Any] = {
+        "id": id,
+        "name": name,
+        "node": node,
+        "p_nom_w": p_total_w,
+        "q_nom_var": q_total_var,
+    }
+    if consumer_type is not None:
+        kwargs["consumer_type"] = consumer_type
+    if mode is PhaseMode.SINGLE_PHASE_EQUIV:
+        kwargs["phases"] = _PHASE_A
+        return Generator(**kwargs)
+    kwargs["phases"] = phases_for(mode, native=native_phases)
+    if connection is not None:
+        kwargs["connection"] = connection
+    return Generator(**kwargs)
+
+
+def warn_dropped_elements(logger, source_name: str, dropped: dict) -> None:
+    """Log one WARNING per non-empty element table the converter does not read.
+
+    A silently dropped element (a shunt, a 3-winding transformer, ...) yields a
+    grid that solves but is physically WRONG relative to the source network —
+    the caller must be told. ``dropped`` maps ``element kind -> count`` (zero /
+    falsy counts are skipped).
+    """
+    for kind, count in dropped.items():
+        if count:
+            logger.warning(
+                "%s -> Grid: %d %r element(s) present in the source network are "
+                "NOT converted (unsupported by the converter) — the converted "
+                "grid omits their physics.",
+                source_name,
+                count,
+                kind,
+            )
+
+
 def build_source(
     *,
     id: int,
@@ -587,6 +645,8 @@ __all__ = [
     "make_metadata",
     "build_node",
     "build_load",
+    "build_generator",
+    "warn_dropped_elements",
     "build_source",
     "build_line_from_matrices",
     "build_line_from_sequence",

@@ -205,6 +205,14 @@ more physical than they are. Items already tracked as open work above are refere
 - **Per-node harmonic-source sweeps** (`scenarios.run_node_injection_sweep`) loop one
   solve per node: the solver cannot yet stamp a different target row per batch element.
   Batch the target-row index (`[B, P]` scatter) to lift the loop.
+- **Converter coverage.** Converted: pandapower `bus`/`line`/`load`/`asymmetric_load`/
+  `trafo`/bus-bus `switch`/`ext_grid`/`sgen`; pgm `node`/`line`/`sym_load`/`asym_load`/
+  `source`/`sym_gen`. NOT converted (a WARNING names any non-empty dropped kind):
+  pandapower `gen` (PV bus — pgml has no voltage-regulating bus yet), `shunt`,
+  `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
+  `asymmetric_sgen`; pgm `transformer`, `three_winding_transformer`, `shunt`,
+  `asym_gen`, `link`, `transformer_tap_regulator`. pandapower tap-changer positions
+  (`tap_pos`/`tap_step`) are not read (off-nominal tap stays 1.0).
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 

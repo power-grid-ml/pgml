@@ -48,7 +48,9 @@ API:
   latter moved verbatim from the pgm converter; same fallback floors).
 - `make_metadata(name, description) -> GridMetadata`.
 - Emit helpers (the single place the phase decision + per-phase mapping live):
-  `build_node`, `build_load`, `build_source`, `build_line_from_sequence`,
+  `build_node`, `build_load`, `build_generator` (generation-positive PQ, for
+  pp `sgen` / pgm `sym_gen`), `warn_dropped_elements` (the loud-drop contract),
+  `build_source`, `build_line_from_sequence`,
   `build_line_from_matrices`. `build_line_from_matrices` takes explicit n x n
   R/L/C(/G) matrices + a `phases` tuple — implemented and unit-tested for the
   OpenDSS converter (pp/pgm route through `build_line_from_sequence`).
@@ -75,6 +77,11 @@ calls `to_grid(net)` with no `phase_mode` and stays green.
   diagonal R/L); zero-seq source impedance = positive-seq (no short-circuit data read);
 - standard balanced `net.load` / `sym_load`: `connection=None` (resolves to WYE from
   config), no per-phase split (the symmetric/auto calc splits the total equally);
+- static generators: pandapower `sgen` and pgm `sym_gen` -> `Generator`
+  (generation-positive nameplate; id_map buckets `"sgen"` / `"sym_gen"`); every other
+  non-empty pgm component (`transformer`, `three_winding_transformer`, `shunt`,
+  `asym_gen`, `link`, `transformer_tap_regulator`) triggers a `warn_dropped_elements`
+  WARNING — nothing is dropped silently;
 - ASYMMETRIC loads captured: pandapower `net.asymmetric_load` -> `connection=WYE`
   (`type=="wye"`) or `DELTA`, `p_nom_per_phase_w=(p_a,p_b,p_c)*1e6`,
   `q_nom_per_phase_var=(q_a,q_b,q_c)*1e6`; pgm `asym_load` -> `p_specified`/
@@ -109,8 +116,12 @@ to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
 ```
 
 Pure function. Converts a (materialised) pandapower network to a schema `Grid`
-and an `id_map` dictionary.  Handles: `bus`, `line`, `load`, `ext_grid`.
-Structured to extend to `trafo`/`shunt`/`gen`/`sgen` without redesign.
+and an `id_map` dictionary.  Handles: `bus`, `line`, `load`, `asymmetric_load`,
+`ext_grid`, `trafo`, bus-bus `switch`, and `sgen` (-> `Generator`,
+generation-positive). Every OTHER non-empty element table (`gen`, `shunt`,
+`trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `storage`, `motor`,
+`asymmetric_sgen`) triggers a WARNING naming the kind and count — nothing is
+dropped silently.
 
 ### id_map format
 ```python
@@ -118,6 +129,7 @@ Structured to extend to `trafo`/`shunt`/`gen`/`sgen` without redesign.
     "bus":      {pp_bus_index: Node.id, ...},
     "line":     {pp_line_index: Line.id, ...},
     "load":     {pp_load_index: Load.id, ...},
+    "sgen":     {pp_sgen_index: Generator.id, ...},
     "ext_grid": {pp_extgrid_index: Source.id, ...},
     "slack_v_complex": complex,   # phasor V (line-to-line, V) for ideal-slack solve
 }
@@ -148,9 +160,9 @@ pandapower's const-Z reference.
 ### numpy 2.x compatibility
 pandapower 2.14 uses removed numpy aliases. Apply before importing:
 ```python
-import numpy as np
-np.Inf = np.inf
-np.in1d = np.isin
+from pgml.convert.pandapower import ensure_numpy_compat
+
+ensure_numpy_compat()
 ```
 
 ### Validated on

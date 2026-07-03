@@ -66,12 +66,14 @@ from typing import Any
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
+    build_generator,
     build_line_from_sequence,
     build_load,
     build_node,
     build_source,
     make_metadata,
     thevenin_from_sk,
+    warn_dropped_elements,
 )
 from pgml.schemas.grid_schema import (
     Grid,
@@ -143,6 +145,7 @@ def to_grid(
         "line": {},
         "sym_load": {},
         "asym_load": {},
+        "sym_gen": {},
         "source": {},
         "load_types": {},
         "slack_v_complex": None,
@@ -357,6 +360,48 @@ def to_grid(
                     load_model=load_model,
                 )
             )
+
+    # ------------------------------------------------------------------ #
+    # 6. Symmetric generators (sym_gen) -> Generator (PQ injection)        #
+    # ------------------------------------------------------------------ #
+    # pgm sym_gen is GENERATION-POSITIVE (p_specified > 0 injects), matching
+    # the Generator nameplate convention; the assembly applies the sign.
+    for row in input_data.get("sym_gen", []):
+        if int(row["status"]) == 0:
+            continue
+        pgm_id = int(row["id"])
+        pgm_node = int(row["node"])
+        if pgm_node not in id_map["node"]:
+            continue
+        gen_id = _id.next()
+        id_map["sym_gen"][pgm_id] = gen_id
+        appliances.append(
+            build_generator(
+                id=gen_id,
+                name=f"sym_gen_{pgm_id}",
+                node=id_map["node"][pgm_node],
+                mode=phase_mode,
+                p_total_w=float(row["p_specified"]),
+                q_total_var=float(row["q_specified"]),
+            )
+        )
+
+    # Components the converter does NOT read: fail loud, never silently wrong.
+    warn_dropped_elements(
+        _logger,
+        "power-grid-model",
+        {
+            kind: len(input_data.get(kind, []))
+            for kind in (
+                "transformer",
+                "three_winding_transformer",
+                "shunt",
+                "asym_gen",
+                "link",
+                "transformer_tap_regulator",
+            )
+        },
+    )
 
     description = (
         f"Imported from power-grid-model input_data (f0={base_frequency_hz} Hz). "
