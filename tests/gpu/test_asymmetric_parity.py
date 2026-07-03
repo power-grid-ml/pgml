@@ -1,4 +1,4 @@
-"""GPU gate: CPU-vs-CUDA parity of the connection-aware (Increment 1) load models.
+"""GPU gate: CPU-vs-CUDA parity of the connection-aware load models.
 
 A DELTA load and a WYE-with-neutral load grid must assemble + solve identically on
 CPU and CUDA (skips cleanly without CUDA). Pins device/dtype honoring of the
@@ -177,7 +177,7 @@ def test_device_current_injection_cpu_cuda_parity():
 
 
 # ---------------------------------------------------------------------------
-# Increment 2: connection-aware per-phase harmonic injection CPU-vs-CUDA parity.
+# Connection-aware per-phase harmonic injection CPU-vs-CUDA parity.
 # ---------------------------------------------------------------------------
 def _spec(comps):
     return StaticSpectrum(

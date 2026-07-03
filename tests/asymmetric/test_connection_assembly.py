@@ -1,4 +1,4 @@
-"""Increment 1: connection-aware load Y-block + nodal current injection.
+"""Connection-aware load Y-block + nodal current injection.
 
 Hand-built 3-phase grids whose const-Z Y-block and ZIP nodal injection are
 recomputed independently in numpy:

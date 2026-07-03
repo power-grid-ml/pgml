@@ -1,4 +1,4 @@
-"""Increment 0: calculation-symmetry / connection resolution + modeling logging.
+"""Calculation-symmetry / connection resolution + modeling logging.
 
 Pins the power-grid-model-style resolution rule (`docs/pgml/modeling/asymmetric.md`
 §1) and the INFO modeling summary (neutral modeled iff a node carries Phase.N).
@@ -137,7 +137,7 @@ def test_logs_ground_return_when_no_neutral(caplog):
 
 
 def test_resolve_asymmetric_is_pure_no_logging(caplog):
-    # resolve_asymmetric is PURE (Increment 1): it must NOT log — it runs on every
+    # resolve_asymmetric is PURE: it must NOT log — it runs on every
     # power-flow residual evaluation. log_modeling_summary is the single INFO emitter.
     with caplog.at_level(logging.INFO, logger="pgml"):
         result = resolve_asymmetric(_balanced_grid(), mode="auto")

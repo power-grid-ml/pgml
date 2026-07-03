@@ -60,7 +60,13 @@ from pgml.geometry.synthesis import (
 from pgml.schemas.grid_schema import Load, Phase
 from pgml.solver import solve_harmonic_flow
 
-# Every test in this module drives a live OpenDSS process.
+# Every test in this module drives a live OpenDSS process. Skip (not error)
+# when opendssdirect is absent, matching the other opendss-marked modules.
+try:
+    import opendssdirect as _dss  # noqa: F401
+except ImportError:  # pragma: no cover - environment guard
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
 pytestmark = pytest.mark.opendss
 
 # ---------------------------------------------------------------------------

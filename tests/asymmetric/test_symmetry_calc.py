@@ -1,4 +1,4 @@
-"""Increment 1: calculation-symmetry threading through the power flow.
+"""Calculation-symmetry threading through the power flow.
 
 A grid with genuine per-phase load data:
 - ``symmetry="symmetric"`` IGNORES the per-phase split and distributes the total

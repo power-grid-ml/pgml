@@ -1,4 +1,4 @@
-"""Increment 2 lifted the connection-aware harmonic-injection guard.
+"""The connection-aware harmonic injection accepts every load connection.
 
 DELTA and WYE-on-a-Phase.N-node harmonic injection used to raise
 ``NotImplementedError`` (the deferred-boundary guard) because the fundamental

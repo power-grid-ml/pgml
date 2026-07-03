@@ -150,9 +150,116 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
+# The harmonic orders the SE benchmark randomizes: general LV loads inject the
+# odd orders up to 13; PV inverters concentrate on the non-triplen 5/7/11/13.
+LOAD_HARMONIC_ORDERS = [3, 5, 7, 9, 11, 13]
+PV_HARMONIC_ORDERS = [5, 7, 11, 13]
+
+
+def add_pv_systems(grid, *, fraction: float = 0.5) -> int:
+    """Attach a unity-power-factor PV generator to a fraction of the load nodes.
+
+    Each PV unit mirrors its host load's node/phases and is rated at half the
+    load's nameplate active power, tagged ``consumer_type="pv"`` so scenario
+    selectors can target it. The harmonic content of the PV inverters is
+    supplied by the scenario, so no stored spectrum is attached here. Returns
+    the number of PV systems added.
+    """
+    from pgml.schemas.grid_schema import Generator, Load
+
+    loads = [a for a in grid.appliances if isinstance(a, Load) and a.in_service]
+    next_id = max((a.id for a in grid.appliances), default=0) + 1
+    added = 0
+    for k, ld in enumerate(loads):
+        if (k % max(1, round(1.0 / fraction))) != 0:
+            continue
+        grid.appliances.append(
+            Generator(
+                id=next_id,
+                name=f"pv_{ld.id}",
+                node=ld.node,
+                phases=ld.phases,
+                p_nom_w=0.5 * float(ld.p_nom_w),
+                q_nom_var=0.0,
+                consumer_type="pv",
+            )
+        )
+        next_id += 1
+        added += 1
+    return added
+
+
+def se_benchmark_scenario_config(grid, *, n_samples: int, seed: int):
+    """The canonical randomized state-estimation benchmark sampling recipe.
+
+    Sobol over: a per-phase-independent load apparent-power scale (asymmetric
+    demand), a per-load harmonic current spectrum as a fraction of the EN 50160
+    limit, and — when the grid carries PV (:func:`add_pv_systems`) — one SHARED
+    irradiance scale for all PV plus a per-inverter harmonic signature. The
+    single source of the recipe: the dataset-generation example and the pgl test
+    fixtures both build from here, so what the tests train on cannot silently
+    drift from what the documented benchmark generates.
+    """
+    from pgml.schemas.grid_schema import Generator
+    from pgml.scenarios import ParameterSpec, ScenarioConfig, Selector, Uniform
+
+    has_pv = any(isinstance(a, Generator) for a in grid.appliances)
+    params = [
+        # Loads: per-phase-independent apparent-power scale -> asymmetric demand.
+        ParameterSpec(
+            name="load_scale",
+            selector=Selector(component="load"),
+            distribution=Uniform(low=0.3, high=1.0),
+            field="pq",
+            mode="scale",
+            per="each",
+            symmetry="independent",
+        ),
+        # Loads: per-load harmonic current spectrum (fraction of the EN 50160 limit).
+        ParameterSpec(
+            name="load_spectrum",
+            selector=Selector(component="load"),
+            distribution=Uniform(low=0.0, high=1.0),
+            field="h_mag",
+            orders=LOAD_HARMONIC_ORDERS,
+            harmonic_reference="en50160",
+            per="each",
+        ),
+    ]
+    if has_pv:
+        params += [
+            # PV: ONE shared irradiance factor scales every PV together (per="shared").
+            ParameterSpec(
+                name="pv_scale",
+                selector=Selector(component="generator", consumer_type="pv"),
+                distribution=Uniform(low=0.0, high=1.0),
+                field="pq",
+                mode="scale",
+                per="shared",
+            ),
+            # PV: per-inverter harmonic signature (each inverter independent).
+            ParameterSpec(
+                name="pv_spectrum",
+                selector=Selector(component="generator", consumer_type="pv"),
+                distribution=Uniform(low=0.0, high=1.0),
+                field="h_mag",
+                orders=PV_HARMONIC_ORDERS,
+                harmonic_reference="en50160",
+                per="each",
+            ),
+        ]
+    return ScenarioConfig(
+        n_samples=n_samples, seed=seed, method="sobol", parameters=params
+    )
+
+
 __all__ = [
     "CONVERTER_SPECTRUM",
+    "LOAD_HARMONIC_ORDERS",
+    "PV_HARMONIC_ORDERS",
     "ieee33_geometry_grid",
     "cigre_lv_full_grid",
     "cigre_lv_geometry_grid",
+    "add_pv_systems",
+    "se_benchmark_scenario_config",
 ]

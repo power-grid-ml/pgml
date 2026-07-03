@@ -1,4 +1,4 @@
-"""Per-phase / connection-aware harmonic injection (Increment 2).
+"""Per-phase / connection-aware harmonic injection.
 
 These pin the connection-aware harmonic CURRENT builder
 (``pgml.solver.harmonic_flow._harmonic_injections``): the per-element fundamental
@@ -7,7 +7,7 @@ current uses the TERMINAL voltage ``V_term = M @ V_used`` (WYE phase row, WYE-N
 per-phase spectrum sources (``spectrum`` / ``spectrum_per_phase`` / runtime
 ``harmonic_injection`` override) are all exercised against an independent numpy
 oracle. WYE-to-ground with a device-level ``spectrum`` is a bit-exact regression
-of the pre-Increment-2 behavior.
+of the historical device-level behavior.
 """
 
 from __future__ import annotations
@@ -371,7 +371,7 @@ def test_wye_neutral_harmonic_returns_into_n_row():
 
 
 # ---------------------------------------------------------------------------
-# 4. Regression: device-level spectrum on WYE-to-ground == pre-Increment-2.
+# 4. Regression: device-level spectrum on WYE-to-ground == the historical stamp.
 # ---------------------------------------------------------------------------
 def test_wye_ground_device_spectrum_matches_numpy_oracle():
     """Single-phase WYE-to-ground load reproduces the legacy numpy oracle exactly."""
