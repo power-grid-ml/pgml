@@ -196,9 +196,24 @@ is the OFF-NOMINAL tap + clock only. The CIGRE LV trafos are Dyn1
 (`from_connection=DELTA`, `to_connection=WYE_GROUNDED`, `shift_degree=30`); assembly
 builds the full vector-group winding-incidence primitive (delta blocks zero-sequence
 / triplen harmonics). See `docs/pgml/modeling/transformer.md`. pandapower tap-changer
-positions (`tap_pos`/`tap_step`) are not read yet (off-nominal tap stays 1.0). The
-OpenDSS converter does NOT emit transformers yet (DSS `Transformer` parsing is a
-documented gap; CIGRE/IEEE feeders enter via pandapower).
+positions (`tap_pos`/`tap_step`) are not read yet (off-nominal tap stays 1.0).
+
+## OpenDSS converter — transformer element coverage
+`convert.opendss.to_grid` converts two-winding DSS `Transformer` elements (winding 1 =
+HV/from, winding 2 = LV/to). Leakage: DSS's per-winding `%R` and inter-winding `XHL` are
+PERCENT (base-invariant) quantities, so `R_lv=(%R_wdg1+%R_wdg2)/100*Z_base_LV`,
+`X_lv=XHL%/100*Z_base_LV` with `Z_base_LV=kV_lv²*1000/kVA` recovers the LV-referred R/L
+directly (no HV/LV referral arithmetic needed) — requires both windings to share one kVA
+rating (`ConversionError` otherwise). Connections: `IsDelta()` per winding; a wye winding
+converts only when solidly grounded (OpenDSS's shorthand bus rule or an explicit `.0`
+neutral); an explicit non-zero neutral node raises. Vector group: `LeadLag` (`Lag`->clock
+1/shift 30, `Lead`->clock 11/shift 330) for a Dy/Yd pairing (verified against a live
+solve), clock 0 for a matching Yy/Dd pairing (OpenDSS has no explicit clock parameter
+beyond the binary `LeadLag` toggle, so `Yy6`/`Dd6` is not detected). Magnetizing:
+`%noloadloss`/`%imag` -> `magnetizing_conductance_s`/`magnetizing_inductance_h` via the
+same closed-form the pandapower converter uses (HV-referred). NOT read: 3-winding units,
+`RegControl` regulators, `XfmrCode`/frequency-correction curves. See
+`src/pgml/convert/opendss/CONTEXT.md` and `tests/reference/test_opendss_transformer.py`.
 
 ## Cross-converter conventions (voltage base, slack, frequency)
 
@@ -227,4 +242,15 @@ documented gap; CIGRE/IEEE feeders enter via pandapower).
 - `base_frequency_hz` is read from the source (`net.f_hz`,
   `dss.Solution.Frequency()`); pgm has no f0 field so the caller passes it. For
   IEEE33 (no line charging) the absolute f0 cancels in `X=2πf·L`; it matters once
-  C≠0 / for harmonics.
+  C≠0 / for harmonics. `dss.Solution.Frequency()` reflects OpenDSS's process-global
+  `DefaultBaseFrequency`, which `Clear` does NOT reset — a prior test/circuit that
+  changed it silently leaks into the next one unless it is reasserted explicitly
+  (`set DefaultBaseFrequency=<f0>`), a shared gotcha for any test file that drives a live
+  `opendssdirect` engine (see `tests/reference/test_opendss_transformer.py`'s `_dss_clear`).
+- OpenDSS `Vsource.basekv` IS the L-L nominal for a `phases>=3` source, but is used
+  DIRECTLY (no sqrt(3) anywhere) as the solved single-conductor EMF for a `phases=1`
+  source — undocumented by OpenDSS's general docs, verified empirically
+  (`tests/convert/test_opendss_vsource_basekv.py`). The converter's `u_ref_v =
+  basekv*pu*1000` and `u_rated_v = kVBase()*sqrt(3)*1000` need no phase-count branch:
+  both simply mirror whatever OpenDSS itself solves for at that phase count. See
+  `docs/pgml/modeling/conventions.md` sec. 1/6.

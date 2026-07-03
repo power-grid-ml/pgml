@@ -68,8 +68,29 @@ Vsource (external network)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 R1/X1 are read via ``dss.Text.Command('? Vsource.<name>.r1')`` etc. (in Ohms).
 The Vsource is converted to a :class:`~pgml.schemas.grid_schema.Source` with
-Thevenin impedance = (R1, L=X1/(2*pi*f0)), and u_ref_v = BasekV * pu * 1e3 V
-(BasekV is line-to-line kV; for single-phase positive-sequence convention we keep it).
+Thevenin impedance = (R1, L=X1/(2*pi*f0)), and ``u_ref_v = BasekV * pu * 1e3`` V.
+
+``BasekV`` semantics (verified empirically; NOT fully spelled out by the general
+OpenDSS documentation, which describes ``basekv`` as line-to-line only):
+
+- For a Vsource with ``phases>=3``, ``BasekV`` genuinely is the line-to-line
+  nominal -- OpenDSS internally divides by ``sqrt(3)`` to get the solved
+  line-to-neutral EMF, matching the documented convention.
+- For a ``phases=1`` Vsource, OpenDSS uses ``BasekV`` DIRECTLY, unscaled, as
+  the magnitude of the single conductor-pair EMF -- there is no internal
+  ``sqrt(3)`` anywhere for a 1-phase source (confirmed by comparing the
+  solved ``Bus.Voltages()`` magnitude to ``BasekV*pu`` for both a genuine
+  line-to-neutral ``basekv`` and the legacy positive-sequence-equivalent
+  style, where ``basekv`` is set to the ORIGINAL 3-phase system's
+  line-to-line nominal, e.g. the IEEE 33-bus fixtures used throughout this
+  test suite). Because ``u_ref_v = BasekV * pu * 1e3`` and (for the node
+  voltage base) ``u_rated_v = kVBase() * sqrt(3) * 1e3`` both simply mirror
+  whatever OpenDSS itself does with ``BasekV`` for the given phase count,
+  NEITHER formula needs a phase-count branch: they are correct for a
+  ``phases>=3`` source (recovering the L-L nominal) and for a ``phases=1``
+  source (recovering the L-N/single-conductor EMF) alike. See
+  ``docs/pgml/modeling/references/opendss/index.md`` and
+  ``tests/convert/test_opendss_vsource_basekv.py`` for the empirical proof.
 
 Phase convention
 ~~~~~~~~~~~~~~~~
@@ -92,7 +113,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+from typing import Any, Optional
 
 from pgml.convert._common import (
     IdCounter,
@@ -107,10 +128,12 @@ from pgml.convert._common import (
 )
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
+    ComplexTap,
     Grid,
     Phase,
     Provenance,
     SourceConvention,
+    Transformer,
     WindingConnection,
 )
 
@@ -170,6 +193,7 @@ def to_grid(
 
         - ``"bus"``     -> ``{dss_bus_name_lower: Node.id}``
         - ``"line"``    -> ``{dss_line_name_lower: Line.id}``
+        - ``"trafo"``   -> ``{dss_trafo_name_lower: Transformer.id}``
         - ``"load"``    -> ``{dss_load_name_lower: Load.id}``
         - ``"vsource"`` -> ``{dss_vsrc_name_lower: Source.id}``
         - ``"slack_v_complex"`` -> complex slack voltage phasor (V, line-to-line)
@@ -181,8 +205,12 @@ def to_grid(
     - Node ids are assigned in YNodeOrder sequence (bus.phase pairs,
       alphabetical in DSS's internal order) so our compact node-phase index
       matches the DSS Y-matrix row ordering for alignment in oracle tests.
-    - Only ``Line``, ``Vsource``, and ``Load`` element types are handled;
-      the structure is designed to extend to Transformer etc.
+    - ``Line``, ``Transformer``, ``Vsource``, and ``Load`` element types are
+      handled; the structure extends to Capacitor/Reactor similarly.
+      Two-winding ``Transformer`` elements convert to
+      :class:`~pgml.schemas.grid_schema.Transformer` (winding 1 = HV/from,
+      winding 2 = LV/to; solidly grounded wye or delta windings only; see
+      the module CONTEXT.md for the full field mapping and scope).
     - ``u_rated_v`` is line-to-line for every bus (kVBase * sqrt(3) * 1000),
       consistent with the pandapower/pgm converters and the assembly const-Z
       shunt formula. OpenDSS ``kVBase()`` returns L-N, recovered to L-L by the
@@ -196,6 +224,7 @@ def to_grid(
     id_map: dict[str, Any] = {
         "bus": {},
         "line": {},
+        "trafo": {},
         "load": {},
         "vsource": {},
         "slack_v_complex": None,
@@ -342,7 +371,216 @@ def to_grid(
         ret = dss.Lines.Next()
 
     # ---------------------------------------------------------------------- #
-    # 3. Vsources -> Source (Thevenin)                                        #
+    # 3. Transformers (two-winding, vector-group aware)                       #
+    # ---------------------------------------------------------------------- #
+    # Winding 1 = HV/from, winding 2 = LV/to (standard OpenDSS convention: the
+    # convention also used by this converter's own live-oracle transformer
+    # builder, `pgml.evaluation.oracles.opendss_oracle
+    # ._build_circuit_with_real_transformer`). The leakage is referred to the
+    # TO/LV coil (pgml's storage convention, see docs/pgml/modeling/
+    # transformer.md and conventions.md sec. 2): OpenDSS's per-winding `%R`
+    # and inter-winding `XHL` are per-unit (base-invariant) quantities on the
+    # transformer's kVA rating, so
+    #     R_lv_ohm = (%R_wdg1 + %R_wdg2)/100 * Z_base_LV
+    #     X_lv_ohm = %XHL/100 * Z_base_LV,   Z_base_LV = kV_lv^2*1000/kVA
+    # recovers the total leakage referred to the LV coil -- valid whenever
+    # both windings share one kVA rating (checked below; OpenDSS's own
+    # convention places `XHL` on winding 1's kVA base, which coincides with
+    # winding 2's when the two are equal).
+    #
+    # Vector group / clock: OpenDSS has no explicit clock parameter -- its
+    # `LeadLag` toggle only distinguishes the 30-degree Dy/Yd shift (verified
+    # against a live solve: `Lag` -> the LV bus lags the HV bus by ~30 deg
+    # (Dyn1, `shift_deg=30`); `Lead` -> LV leads by ~30 deg (Dyn11,
+    # `shift_deg=330`)). A matching Yy/Dd pairing has no inherent phase shift
+    # (clock 0); OpenDSS cannot express a Yy6/Dd6 (180-degree) group through
+    # this element, so it is not detected here (see the module CONTEXT.md).
+    #
+    # Grounding: OpenDSS's shorthand bus notation (no explicit
+    # (n_phases+1)-th conductor, or an explicit trailing `.0`) solidly grounds
+    # a wye winding's neutral; ONLY that case is converted
+    # (`WindingConnection.WYE_GROUNDED`). An explicit non-zero neutral node
+    # (a genuinely floating or impedance-grounded neutral) is out of scope
+    # (pgml's transformer assembly models solid grounding only) and raises.
+    # ---------------------------------------------------------------------- #
+    ret = dss.Transformers.First()
+    while ret:
+        trafo_name = dss.Transformers.Name().lower()
+        n_wdg = dss.Transformers.NumWindings()
+        if n_wdg != 2:
+            raise ConversionError(
+                f"OpenDSS transformer '{trafo_name}' has {n_wdg} windings; "
+                "only two-winding transformers are supported."
+            )
+
+        dss.Circuit.SetActiveElement(f"Transformer.{trafo_name}")
+        n_phases = dss.CktElement.NumPhases()
+        bus_names_raw = [b.lower() for b in dss.CktElement.BusNames()]
+        if len(bus_names_raw) != 2:
+            raise ConversionError(
+                f"OpenDSS transformer '{trafo_name}': expected 2 terminals, "
+                f"found {len(bus_names_raw)}."
+            )
+
+        wdg_kv: list[float] = []
+        wdg_kva: list[float] = []
+        wdg_pct_r: list[float] = []
+        wdg_tap: list[float] = []
+        wdg_is_delta: list[bool] = []
+        for w in (1, 2):
+            dss.Transformers.Wdg(w)
+            wdg_kv.append(float(dss.Transformers.kV()))
+            wdg_kva.append(float(dss.Transformers.kVA()))
+            wdg_pct_r.append(float(dss.Transformers.R()))
+            wdg_tap.append(float(dss.Transformers.Tap()))
+            wdg_is_delta.append(bool(dss.Transformers.IsDelta()))
+        xhl_pct = float(dss.Transformers.Xhl())
+
+        dss.Text.Command(f"? Transformer.{trafo_name}.%noloadloss")
+        noloadloss_pct = float(dss.Text.Result().strip() or 0.0)
+        dss.Text.Command(f"? Transformer.{trafo_name}.%imag")
+        imag_pct = float(dss.Text.Result().strip() or 0.0)
+        dss.Text.Command(f"? Transformer.{trafo_name}.xrconst")
+        xrconst_str = dss.Text.Result().strip().lower()
+        harmonic_xr_constant = xrconst_str in ("yes", "true", "1")
+
+        kva_from, kva_to = wdg_kva
+        if not math.isclose(kva_from, kva_to, rel_tol=1e-6):
+            raise ConversionError(
+                f"OpenDSS transformer '{trafo_name}': winding kVA ratings "
+                f"differ ({kva_from} vs {kva_to} kVA); differing per-winding "
+                "power bases are not supported (the %R/%XHL per-unit values "
+                "are only base-invariant when both windings share one kVA "
+                "rating)."
+            )
+        s_rated_va = kva_to * 1_000.0
+
+        kv_from, kv_to = wdg_kv
+        u_rated_from_v = kv_from * 1_000.0
+        u_rated_to_v = kv_to * 1_000.0
+
+        # Total leakage referred to the LV (to-side) coil.
+        z_base_lv_ohm = (kv_to**2 * 1_000.0) / kva_to
+        r_pct_total = wdg_pct_r[0] + wdg_pct_r[1]
+        r_lv_ohm = r_pct_total / 100.0 * z_base_lv_ohm
+        x_lv_ohm = xhl_pct / 100.0 * z_base_lv_ohm
+        l_lv_h = x_lv_ohm / two_pi_f0
+
+        # Magnetizing shunt referred to the HV terminal (same derivation the
+        # pandapower converter uses for pfe_kw/i0_percent -> G_m/B_m).
+        pfe_w = noloadloss_pct / 100.0 * s_rated_va
+        g_m = pfe_w / (u_rated_from_v**2) if pfe_w > 0.0 else 0.0
+        l_m: Optional[float] = None
+        if imag_pct > 0.0:
+            i0_amp = imag_pct / 100.0 * s_rated_va / u_rated_from_v
+            s_nl = u_rated_from_v * i0_amp
+            q_nl_sq = s_nl**2 - pfe_w**2
+            if q_nl_sq > 0.0:
+                b_m = math.sqrt(q_nl_sq) / (u_rated_from_v**2)
+                if b_m > 0.0:
+                    l_m = 1.0 / (two_pi_f0 * b_m)
+
+        from_bus_name, from_phase_list, from_grounded = _parse_transformer_winding_bus(
+            bus_names_raw[0], n_phases
+        )
+        to_bus_name, to_phase_list, to_grounded = _parse_transformer_winding_bus(
+            bus_names_raw[1], n_phases
+        )
+        if len(from_phase_list) != len(to_phase_list):
+            raise ConversionError(
+                f"OpenDSS transformer '{trafo_name}': the HV and LV windings "
+                f"carry different phase counts ({len(from_phase_list)} vs "
+                f"{len(to_phase_list)}); not supported."
+            )
+
+        if (
+            from_bus_name not in bus_name_to_node_id
+            or to_bus_name not in bus_name_to_node_id
+        ):
+            ret = dss.Transformers.Next()
+            continue
+
+        is_delta_from, is_delta_to = wdg_is_delta
+        if is_delta_from:
+            from_connection = WindingConnection.DELTA
+        else:
+            if not from_grounded:
+                raise ConversionError(
+                    f"OpenDSS transformer '{trafo_name}': the HV winding is an "
+                    "ungrounded/impedance-grounded wye (explicit non-zero "
+                    "neutral node); only solidly grounded wye and delta "
+                    "windings are converted."
+                )
+            from_connection = WindingConnection.WYE_GROUNDED
+
+        if is_delta_to:
+            to_connection = WindingConnection.DELTA
+        else:
+            if not to_grounded:
+                raise ConversionError(
+                    f"OpenDSS transformer '{trafo_name}': the LV winding is an "
+                    "ungrounded/impedance-grounded wye (explicit non-zero "
+                    "neutral node); only solidly grounded wye and delta "
+                    "windings are converted."
+                )
+            to_connection = WindingConnection.WYE_GROUNDED
+
+        if is_delta_from != is_delta_to:
+            # Dy / Yd pairing: OpenDSS's binary LeadLag toggle is the only
+            # clock information available (verified empirically: `Lag` -> LV
+            # lags HV by 30 deg; `Lead` -> LV leads HV by 30 deg).
+            dss.Text.Command(f"? Transformer.{trafo_name}.leadlag")
+            leadlag = dss.Text.Result().strip().lower()
+            if leadlag in ("lag", "ansi", ""):
+                shift_deg = 30.0
+            elif leadlag in ("lead", "euro"):
+                shift_deg = 330.0
+            else:
+                raise ConversionError(
+                    f"OpenDSS transformer '{trafo_name}': unrecognized "
+                    f"LeadLag value {leadlag!r}."
+                )
+        else:
+            # Yy / Dd: no inherent phase shift is expressible through a plain
+            # OpenDSS Transformer element (clock 0 only).
+            shift_deg = 0.0
+
+        tap_from, tap_to = wdg_tap
+        ratio_magnitude = tap_from / tap_to
+
+        trafo_id = _id.next()
+        id_map["trafo"][trafo_name] = trafo_id
+
+        tx_from_phases = phases_for(phase_mode, native=tuple(from_phase_list))
+        tx_to_phases = phases_for(phase_mode, native=tuple(to_phase_list))
+
+        branches.append(
+            Transformer(
+                id=trafo_id,
+                name=trafo_name,
+                from_node=bus_name_to_node_id[from_bus_name],
+                to_node=bus_name_to_node_id[to_bus_name],
+                from_phases=tx_from_phases,
+                to_phases=tx_to_phases,
+                s_rated_va=s_rated_va,
+                u_rated_from_v=u_rated_from_v,
+                u_rated_to_v=u_rated_to_v,
+                from_connection=from_connection,
+                to_connection=to_connection,
+                series_resistance_ohm=r_lv_ohm,
+                series_inductance_h=l_lv_h,
+                magnetizing_conductance_s=g_m,
+                magnetizing_inductance_h=l_m,
+                tap=ComplexTap(ratio_magnitude=ratio_magnitude, shift_deg=shift_deg),
+                harmonic_xr_constant=harmonic_xr_constant,
+                provenance=_PROVENANCE,
+            )
+        )
+
+        ret = dss.Transformers.Next()
+
+    # ---------------------------------------------------------------------- #
+    # 4. Vsources -> Source (Thevenin)                                        #
     # ---------------------------------------------------------------------- #
     appliances: list = []
 
@@ -374,8 +612,13 @@ def to_grid(
         x1_ohm = float(x1_str) if x1_str else 0.0
         r_s, l_s = thevenin_from_z(r1_ohm, x1_ohm, two_pi_f0)
 
-        # u_ref_v: BasekV is L-L for the source reference phasor
-        u_ref_v = basekv * pu * 1_000.0  # V (L-L magnitude)
+        # BasekV is the L-L nominal for a >=3-phase Vsource, but for a
+        # phases=1 Vsource OpenDSS uses it DIRECTLY as the single
+        # conductor-pair EMF (no internal sqrt(3) either way) -- see the
+        # module docstring's "Vsource" section for the empirical basis. This
+        # single formula is correct for both cases: it simply reproduces
+        # whatever magnitude OpenDSS itself solves for at that bus.
+        u_ref_v = basekv * pu * 1_000.0  # V
 
         if id_map["slack_v_complex"] is None:
             id_map["slack_v_complex"] = u_ref_v * complex(
@@ -404,7 +647,7 @@ def to_grid(
         ret = dss.Vsources.Next()
 
     # ---------------------------------------------------------------------- #
-    # 4. Loads                                                                #
+    # 5. Loads                                                                #
     # ---------------------------------------------------------------------- #
     ret = dss.Loads.First()
     while ret:
@@ -560,6 +803,50 @@ def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]
         # Default: phases 1..n_phases
         phases = [_phase_num_to_enum(i + 1) for i in range(n_phases)]
     return bus_name, phases
+
+
+def _parse_transformer_winding_bus(
+    bus_str: str, n_phases: int
+) -> tuple[str, list[Phase], bool]:
+    """Parse a transformer winding bus string into ``(bus_name, phases, grounded)``.
+
+    ``phases`` is the ordered list of the ``n_phases`` conducting-phase
+    conductors (the leading node indices, or the default ``1..n_phases`` when
+    no explicit list is given, mirroring :func:`_parse_bus_connection`).
+
+    ``grounded`` applies only to a WYE winding (a DELTA winding has no neutral
+    and the caller ignores it): ``True`` when the winding's neutral is
+    solidly tied to the system ground reference node ``0`` -- either
+    implicitly, via OpenDSS's shorthand-bus rule (a bus string with no
+    explicit ``(n_phases+1)``-th conductor auto-grounds the missing neutral),
+    or explicitly via a trailing ``.0``. An explicit NON-ZERO
+    ``(n_phases+1)``-th conductor (e.g. ``.4``) creates a genuine
+    floating/impedance-grounded neutral node (governed by the winding's
+    ``Rneut``/``Xneut``), which this converter does not model (the caller
+    raises :class:`~pgml.errors.ConversionError`).
+
+    Parameters
+    ----------
+    bus_str:
+        Lowercase DSS bus string for one transformer terminal, e.g.
+        ``"hv.1.2.3"`` or ``"lv.1.2.3.0"``.
+    n_phases:
+        Number of phase conductors on the transformer (``CktElement.NumPhases()``).
+    """
+    parts = bus_str.split(".")
+    bus_name = parts[0]
+    node_nums = [int(p) for p in parts[1:] if p.isdigit()]
+    if not node_nums:
+        node_nums = list(range(1, n_phases + 1))
+    phase_nums = node_nums[:n_phases]
+    if len(phase_nums) != n_phases:
+        raise ConversionError(
+            f"transformer winding bus {bus_str!r}: expected {n_phases} phase "
+            f"conductors, found {len(phase_nums)}."
+        )
+    phases = [_phase_num_to_enum(pn) for pn in phase_nums]
+    grounded = len(node_nums) <= n_phases or node_nums[n_phases] == 0
+    return bus_name, phases, grounded
 
 
 def _flat_to_matrix(flat: list[float], n: int) -> list[list[float]]:

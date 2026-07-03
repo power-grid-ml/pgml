@@ -155,8 +155,12 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
 - **Criticality on a batch**: the single-grid IFT-Jacobian criticality SVD is skipped for a
   batched solve (`b>1`, logged). A per-element batched criticality would need per-scenario
   operating-point slicing (and a `criticality` knob on `solve_harmonic_flow`).
-- **Convert**: `convert/pandapower/` lacks a `CONTEXT.md` (others have one); the OpenDSS
-  converter does not yet emit `Transformer` elements (DSS→pgml transformer parsing).
+- **Convert**: `convert/pandapower/` lacks a `CONTEXT.md` (others have one). The OpenDSS
+  converter emits two-winding `Transformer` elements (solidly grounded wye or delta
+  windings, `LeadLag`-derived clock 0/1/11); not yet read: 3-winding units, `RegControl`
+  regulators, `XfmrCode`/frequency-correction curves, `Yy6`/`Dd6`, and an explicit
+  non-zero (floating/impedance-grounded) neutral node — see
+  `src/pgml/convert/opendss/CONTEXT.md`.
 - **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`), zigzag
   windings, and clocks other than Dyn1/Dyn11 raise `ModelingError` — add when needed.
 - **Geometry**: low-X R/X lines hit the GMR floor (flagged `synth_unphysical`; still matches
@@ -178,7 +182,10 @@ more physical than they are. Items already tracked as open work above are refere
   winding resistance — no frequency-correction curve; the schema's
   `resistance_frequency` / `harmonic_xr_constant` fields are not yet consumed (item C
   above). No saturation / no inrush (steady-state tool). The magnetizing/core-loss
-  branch IS modeled (`y_m` on the HV diagonal).
+  branch IS modeled (`y_m` on the HV diagonal) — but as a shunt at the EXTERNAL HV
+  terminal, whereas OpenDSS places it inside its leakage "T" model; for a typical
+  ~0.5 % magnetizing current the difference is ~1e-3 pu on a live-solve comparison
+  (documented in `docs/pgml/modeling/transformer.md`).
 - **Transformer, construction.** Non-solid neutral grounding (`GroundingImpedance`),
   zigzag windings, and delta-wye clocks other than 1/11 raise `ModelingError`
   (deliberate: fail loud, never approximate silently). Clock 6 (Yy6/Dd6) is modeled

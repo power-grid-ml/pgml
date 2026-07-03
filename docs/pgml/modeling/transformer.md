@@ -115,6 +115,24 @@ New Transformer.T1 windings=2 phases=3
 reference and never appears in `YNodeOrder`, so the exported `SystemY` rows are only
 `.1/.2/.3` and map cleanly to pgml `(node, phase)` rows.
 
+This is the pgml -> DSS direction (`pgml.evaluation.oracles.opendss_oracle
+._build_circuit_with_real_transformer`), used to validate the harmonic assembly against
+a live OpenDSS `Transformer` element. The FORWARD direction, DSS -> pgml
+(`pgml.convert.opendss.to_grid`), inverts the same per-unit leakage identity: OpenDSS's
+`%R`/`XHL` are percent (base-invariant) quantities, so
+`R_lv = (%R_wdg1+%R_wdg2)/100 * Z_base_LV`, `X_lv = XHL%/100 * Z_base_LV` with
+`Z_base_LV = kV_lv²*1000/kVA` recovers the LV-referred leakage directly (both windings
+must share one kVA rating). The clock comes from `LeadLag` (`Lag` -> clock 1, `Lead` ->
+clock 11 for a Dy/Yd pairing; clock 0 for a matching Yy/Dd pairing, since OpenDSS has no
+explicit clock parameter beyond that binary toggle). Grounding follows OpenDSS's own
+shorthand-bus rule (no explicit `(n_phases+1)`-th conductor, or an explicit `.0`, solidly
+grounds a wye winding); only solidly grounded wye or delta windings convert. Validated by
+a live 2-bus MV-source -> transformer -> LV-load oracle (Dyn11 and Yy0 cases,
+voltage magnitude + angle vs OpenDSS's own `Solve`) in
+`tests/reference/test_opendss_transformer.py`. See `src/pgml/convert/opendss/CONTEXT.md`
+for the full field mapping and the current scope (two-winding only; no regulators, no
+3-winding units, no frequency-correction curves, no `Yy6`/`Dd6`).
+
 ## CIGRE LV
 The three `create_cigre_network_lv()` transformers are Dyn1 (delta HV / grounded-wye
 LV, 20 kV / 0.4 kV, 0.5 / 0.15 / 0.3 MVA, `shift_degree = 30`). pgml's pandapower
