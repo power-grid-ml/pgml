@@ -59,12 +59,13 @@ all = [
 path = "src/pgml/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-# The monorepo ships three importable packages from one distribution: the differentiable
-# physics base `pgml`, the learning framework `pgl`, and the grid-generation `pgg`. One-way
-# dependency: pgl/pgg import pgml's public API; pgml imports neither. Hatchling packages all
-# VCS-tracked files under these roots, so the shipped reference data (`pgml/data/*.yaml` —
-# modeling defaults + the EN 50160 table, read via importlib.resources) is included.
-packages = ["src/pgml", "src/pgl", "src/pgg"]
+# The monorepo ships four importable packages from one distribution: the differentiable
+# physics base `pgml`, the learning framework `pgl`, the grid-generation `pgg`, and the
+# real-dataset hub `pghub`. One-way dependency: pgl/pgg/pghub import pgml's public API;
+# pgml imports none of them. Hatchling packages all VCS-tracked files under these roots,
+# so the shipped reference data (`pgml/data/*.yaml` — modeling defaults + the EN 50160
+# table, read via importlib.resources) is included.
+packages = ["src/pgml", "src/pgl", "src/pgg", "src/pghub"]
 
 # ---------------------------------------------------------------------------
 # pytest

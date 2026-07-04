@@ -44,6 +44,7 @@ matplotlib = ">=3.11.0,<4"
 networkx = ">=3.6.1,<4"
 plotly = ">=5,<7"
 pyyaml = ">=6,<7"
+openpyxl = ">=3.1.5,<4"
 
 [feature.docs.dependencies]
 sphinx = ">=9.1.0,<10"
