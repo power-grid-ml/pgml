@@ -61,6 +61,14 @@ Phases 0–3 done; phase 4 (batched sampling) done bar scale/topology. The subpa
 
 ## Open work — where to start
 
+- **IFT backward rejects shared parameter tensors.** When one tensor object feeds two
+  Grid parameters (e.g. ``q = p * k`` reusing the ``p`` graph node for both
+  ``p_nom_w`` and ``q_nom_var``), ``_IFTPowerFlow.backward``
+  (``solver/power_flow.py``) raises "backward through the graph a second time" on the
+  first backward pass. Downstream packages currently work around it by building
+  independent expressions per parameter (see ``pgg.repair.TensorizedGrid``); harden
+  the IFT (retain_graph or input deduplication) or document the constraint.
+
 WHAT / WHY / WHERE / HOW. "⚠️ decision" = confirm the approach with the maintainer before a
 large rework (schema changes are orchestrator-only — ask first).
 
