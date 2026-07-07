@@ -10,6 +10,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+
 # ---------------------------------------------------------------------------
 # Fix __module__ for re-exported symbols so Sphinx registers them under the
 # public package path (e.g. pgml.assembly.NodePhaseIndex) rather than the
@@ -20,26 +21,77 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 def _patch_module(pkg_path: str, names: list) -> None:
     """Set __module__ = pkg_path for each name imported into that package."""
     import importlib
+
     pkg = importlib.import_module(pkg_path)
     for name in names:
         obj = getattr(pkg, name, None)
         if obj is not None and hasattr(obj, "__module__"):
             obj.__module__ = pkg_path
 
+
 _patch_module("pgml.assembly", ["NodePhaseIndex", "YBus"])
 _patch_module("pgml.solver", ["PowerFlowResult", "HarmonicFlowResult"])
 _patch_module("pgml.scenarios", ["SampledScenarios", "ScenarioResult"])
-_patch_module("pgml.geometry", [
-    "series_impedance", "internal_impedance", "potential_coefficients",
-    "kron_reduce", "line_constants", "i0_over_i1",
-    "positive_sequence_z", "skin_resistance_multiplier", "fit_equivalent_rdc",
-    "two_conductor_geometry", "two_conductor_loop_z", "phase_to_sequence",
-    "sequence_impedances", "carson_earth_resistance", "zero_sequence_harmonic_z",
-    "sequence_to_phase_z", "sequence_aware_phase_z",
-    "synthesize_line_geometry", "synthesize_grid_geometry",
-    "positive_sequence_resistance_model", "apply_positive_sequence_harmonic_model",
-    "apply_sequence_aware_harmonic_model", "apply_default_harmonic_model",
-])
+_patch_module(
+    "pgml.geometry",
+    [
+        "series_impedance",
+        "internal_impedance",
+        "potential_coefficients",
+        "kron_reduce",
+        "line_constants",
+        "i0_over_i1",
+        "positive_sequence_z",
+        "skin_resistance_multiplier",
+        "fit_equivalent_rdc",
+        "two_conductor_geometry",
+        "two_conductor_loop_z",
+        "phase_to_sequence",
+        "sequence_impedances",
+        "carson_earth_resistance",
+        "zero_sequence_harmonic_z",
+        "sequence_to_phase_z",
+        "sequence_aware_phase_z",
+        "synthesize_line_geometry",
+        "synthesize_grid_geometry",
+        "positive_sequence_resistance_model",
+        "apply_positive_sequence_harmonic_model",
+        "apply_sequence_aware_harmonic_model",
+        "apply_default_harmonic_model",
+    ],
+)
+# pgd (the dashboard/service layer) has the same aggregator-package shape: pgd.core and
+# pgd.storage each re-export classes defined in several private submodules
+# (core/{gridstore,jobs,errors}.py; storage/{duck,interface}.py) via __all__, and the
+# rest of pgd's own docstrings cross-reference them under the aggregator's short name
+# (e.g. ``pgd.core.GridStore``, ``pgd.storage.DuckDBStore``) — patch so autodoc registers
+# them there instead of under the private submodule path.
+_patch_module(
+    "pgd.core",
+    [
+        "GridStore",
+        "GridRecord",
+        "GridRevision",
+        "BranchLimit",
+        "GridNotFoundError",
+        "GridEditError",
+        "GridEditValidationError",
+        "EstimationUnavailable",
+        "JobManager",
+        "JobRecord",
+        "JobCancelled",
+    ],
+)
+_patch_module(
+    "pgd.storage",
+    [
+        "DuckDBStore",
+        "TimeseriesStore",
+        "DatasetInfo",
+        "SeriesSpec",
+        "DiagramSpec",
+    ],
+)
 
 # ---------------------------------------------------------------------------
 # Project information
@@ -151,6 +203,7 @@ suppress_warnings = [
     "ref.python",
 ]
 
+
 # ---------------------------------------------------------------------------
 # Silence "duplicate object description" warnings for re-exported schema types.
 #
@@ -178,13 +231,18 @@ def _patch_py_domain_silent_overwrite(app) -> None:  # noqa: ANN001
 
     _orig_note = PythonDomain.note_object
 
-    def _note_object_silent(self, fullname, objtype, node_id,  # noqa: ANN001
-                             aliased=False, location=None):
+    def _note_object_silent(
+        self,
+        fullname,
+        objtype,
+        node_id,  # noqa: ANN001
+        aliased=False,
+        location=None,
+    ):
         # If already registered, keep the first entry silently.
         if fullname in self.objects:
             return
-        _orig_note(self, fullname, objtype, node_id, aliased=aliased,
-                   location=location)
+        _orig_note(self, fullname, objtype, node_id, aliased=aliased, location=location)
 
     PythonDomain.note_object = _note_object_silent
 
