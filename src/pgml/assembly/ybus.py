@@ -1396,6 +1396,305 @@ def _scatter_injection(i: Tensor, values: Tensor, rows: Tensor) -> Tensor:
 # ---------------------------------------------------------------------------
 # ZIP device current injections (voltage-dependent, nonlinear power flow)
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _UncontrolledGroupPlan:
+    """V-independent tensors for one incidence group of uncontrolled devices.
+
+    Everything here depends only on the grid, the operating point, and the
+    overrides — not on the voltage — so it is computed once per solve and reused
+    across the fixed-point / Newton iterations (:func:`injections_from_plan`).
+    """
+
+    m_c: Tensor  # [n_elem, n_used] complex incidence
+    rows: Tensor  # [K, n_used] int64 global rows (scatter targets)
+    flat_rows: Tensor  # [K * n_used] int64 (gather index)
+    n_used: int
+    p_pp: Tensor  # [*pbatch, 1, K, n_elem] signed active power
+    q_pp: Tensor  # [*qbatch, 1, K, n_elem] signed reactive power
+    v0: Tensor  # [K, n_elem] nominal voltage magnitude
+    zip_p: Tensor  # [K, 3] ZIP triples (z, i, p) for P
+    zip_q: Tensor  # [K, 3] ZIP triples for Q
+
+
+@dataclass(frozen=True)
+class _ControlledAppliancePlan:
+    """V-independent tensors for one inverter-controlled appliance."""
+
+    control: object  # the schema InverterControl (drives resolve_injection_power)
+    sign: float
+    v0: object  # float or tensor nominal voltage magnitude
+    p_avail: Tensor  # [*pb, n_elem] available power (native sign)
+    m_c: Tensor  # [n_elem, n_used] complex incidence
+    arow: Tensor  # [n_used] int64 global rows of THIS appliance
+    n_used: int
+
+
+@dataclass(frozen=True)
+class InjectionPlan:
+    """Precomputed :func:`device_current_injections` state (everything but ``V``).
+
+    Resolving the operating point walks python lists of appliances, pydantic
+    fields, and config defaults — cheap once, but the nonlinear solvers evaluate
+    the injection at EVERY iteration (and Newton also inside its line search and
+    Jacobian), where that python work dominated the solve time. The plan captures
+    the V-independent tensors once (:func:`build_injection_plan`); each iteration
+    then runs :func:`injections_from_plan` — pure tensor ops.
+
+    The plan's tensors keep whatever autograd graph the inputs carry: built under
+    ``torch.no_grad()`` it is a detached fast path (the fixed-point forward);
+    built with gradients enabled the result stays differentiable w.r.t. the
+    parameter leaves exactly like :func:`device_current_injections`.
+    """
+
+    h: int
+    n: int
+    cdt: torch.dtype
+    device: torch.device
+    uncontrolled: tuple[_UncontrolledGroupPlan, ...]
+    controlled: tuple[_ControlledAppliancePlan, ...]
+
+
+def build_injection_plan(
+    grid: Grid,
+    index: NodePhaseIndex,
+    frequencies_hz,
+    *,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    operating_point: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
+    symmetry: Optional[str] = None,
+) -> InjectionPlan:
+    """Precompute the V-independent part of :func:`device_current_injections`.
+
+    Same parameters and resolution rules as :func:`device_current_injections`
+    (operating-point overrides, per-phase splitting, ZIP coefficients, incidence
+    grouping); returns the :class:`InjectionPlan` consumed by
+    :func:`injections_from_plan`.
+    """
+    if device is None:
+        device = torch.device("cpu")
+    f = _as_freq_tensor(frequencies_hz, dtype, device)
+    h = f.shape[0]
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    n = index.size
+
+    loads = [
+        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
+    ]
+    if not loads:
+        return InjectionPlan(
+            h=h, n=n, cdt=cdt, device=device, uncontrolled=(), controlled=()
+        )
+
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+    node_map = {nd.id: nd for nd in grid.nodes}
+    uncontrolled = [a for a in loads if getattr(a, "control", None) is None]
+    controlled = [a for a in loads if getattr(a, "control", None) is not None]
+
+    group_plans: list[_UncontrolledGroupPlan] = []
+    for grp in group_appliances(uncontrolled, node_map):
+        n_elem = grp.n_elem
+        is_delta = grp.connection == WindingConnection.DELTA
+        m = build_incidence(grp, rdt, device)  # [n_elem, n_used] real
+        m_c = m.to(cdt)
+
+        p_list, q_list, v0_list, zipp_list, zipq_list = [], [], [], [], []
+        for a in grp.appliances:
+            kind = "load" if isinstance(a, Load) else "generator"
+            sign = 1.0 if isinstance(a, Load) else -1.0
+            node = node_map[a.node]
+            v0 = phase_voltage_magnitude(
+                node.u_rated_v, len(node.phases), line_to_line=is_delta
+            )
+
+            # Resolve total / per-phase honoring operating_point, keeping tensors.
+            p_total, q_total = a.p_nom_w, a.q_nom_var
+            p_per, q_per = a.p_nom_per_phase_w, a.q_nom_per_phase_var
+            if operating_point is not None and a.id in operating_point:
+                op = operating_point[a.id]
+                if "p_per_phase_w" in op:
+                    p_per = op["p_per_phase_w"]
+                elif "p_w" in op:
+                    p_total, p_per = op["p_w"], None
+                if "q_per_phase_var" in op:
+                    q_per = op["q_per_phase_var"]
+                elif "q_var" in op:
+                    q_total, q_per = op["q_var"], None
+            if not asymmetric:
+                # Symmetric calc: ignore the per-phase split, distribute the total
+                # equally over the elements (power-grid-model rule).
+                if p_per is not None:
+                    p_total, p_per = _tensor_sum(p_per, rdt, device), None
+                if q_per is not None:
+                    q_total, q_per = _tensor_sum(q_per, rdt, device), None
+
+            p_t = _override(
+                param_overrides,
+                (kind, a.id, "p_nom_per_phase_w"),
+                _per_phase_power_tensor(p_total, p_per, n_elem, rdt, device),
+            )
+            q_t = _override(
+                param_overrides,
+                (kind, a.id, "q_nom_per_phase_var"),
+                _per_phase_power_tensor(q_total, q_per, n_elem, rdt, device),
+            )
+            p_list.append(sign * p_t)  # [n_elem]
+            q_list.append(sign * q_t)  # [n_elem]
+            v0_t = (
+                v0
+                if isinstance(v0, Tensor)
+                else torch.as_tensor(v0, dtype=rdt, device=device)
+            )
+            v0_list.append(v0_t.to(dtype=rdt, device=device).reshape(()).expand(n_elem))
+            zp, zq = _zip_coeffs(a, rdt, device)
+            zipp_list.append(zp)  # [3]
+            zipq_list.append(zq)
+
+        # Stack with K at dim -2 so any per-load batch dims stay leading and broadcast
+        # against the [*b, H, K, n_elem] voltage tensor. A scenario sweep may vary only
+        # SOME devices (e.g. loads but not generators), so the per-device entries can
+        # carry different leading batch shapes; broadcast them to a common batch before
+        # stacking (a device with no batched override broadcasts its nominal across the
+        # batch) instead of failing the stack.
+        p_lead = torch.broadcast_shapes(*[t.shape[:-1] for t in p_list])
+        q_lead = torch.broadcast_shapes(*[t.shape[:-1] for t in q_list])
+        p_pp = torch.stack(
+            [t.broadcast_to(*p_lead, t.shape[-1]) for t in p_list], -2
+        )  # [*pbatch, K, n_elem]
+        q_pp = torch.stack([t.broadcast_to(*q_lead, t.shape[-1]) for t in q_list], -2)
+        rows = used_rows(grp, index, device)  # [K, n_used] int64
+        group_plans.append(
+            _UncontrolledGroupPlan(
+                m_c=m_c,
+                rows=rows,
+                flat_rows=rows.reshape(-1),
+                n_used=grp.n_used,
+                # Insert a singleton H axis so the powers broadcast over H at apply.
+                p_pp=p_pp.unsqueeze(-3),  # [*pbatch, 1, K, n_elem]
+                q_pp=q_pp.unsqueeze(-3),
+                v0=torch.stack(v0_list, -2),  # [K, n_elem]
+                zip_p=torch.stack(zipp_list, 0),  # [K, 3]
+                zip_q=torch.stack(zipq_list, 0),
+            )
+        )
+
+    controlled_plans: list[_ControlledAppliancePlan] = []
+    for grp in group_appliances(controlled, node_map):
+        is_delta = grp.connection == WindingConnection.DELTA
+        m_c = build_incidence(grp, rdt, device).to(cdt)  # [n_elem, n_used]
+        rows = used_rows(grp, index, device)  # [K, n_used]
+        for ki, a in enumerate(grp.appliances):
+            sign = 1.0 if isinstance(a, Load) else -1.0
+            node = node_map[a.node]
+            v0 = phase_voltage_magnitude(
+                node.u_rated_v, len(node.phases), line_to_line=is_delta
+            )
+            p_list, _q_list = resolve_operating_power(
+                a, operating_point, asymmetric=asymmetric
+            )
+            controlled_plans.append(
+                _ControlledAppliancePlan(
+                    control=a.control,
+                    sign=sign,
+                    v0=v0,
+                    p_avail=_stack_elements(p_list, rdt, device),  # [*pb, n_elem]
+                    m_c=m_c,
+                    arow=rows[ki],  # [n_used]
+                    n_used=grp.n_used,
+                )
+            )
+
+    return InjectionPlan(
+        h=h,
+        n=n,
+        cdt=cdt,
+        device=device,
+        uncontrolled=tuple(group_plans),
+        controlled=tuple(controlled_plans),
+    )
+
+
+def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
+    """Evaluate ``I_device(V)`` from a precomputed :class:`InjectionPlan`.
+
+    The per-iteration half of :func:`device_current_injections`: pure tensor ops
+    (gather, einsum, the ZIP law, scatter) with no python resolution work.
+    ``v`` is complex ``[*batch, H, N]`` (or ``[*batch, N]`` / ``[N]``; a missing H
+    axis is broadcast). Returns ``[*batch, H, N]`` exactly like
+    :func:`device_current_injections`.
+    """
+    h, n, cdt, device = plan.h, plan.n, plan.cdt, plan.device
+    rdt = v.real.dtype if v.is_complex() else v.dtype
+
+    v = v.to(dtype=cdt, device=device)
+    if v.shape[-1] != n:
+        raise ValueError(
+            f"device_current_injections: v last dim {v.shape[-1]} != N={n}"
+        )
+    if v.ndim == 1:
+        v = v.reshape(1, n)  # [1, N]; treated as [H=1, N] -> broadcast over H below
+    has_h = v.ndim >= 2 and v.shape[-2] == h
+    if not has_h:
+        v = v.unsqueeze(-2)  # [..., 1, N]
+    batch_lead = v.shape[:-2]
+
+    out = torch.zeros((*batch_lead, h, n), dtype=cdt, device=device)
+
+    for g in plan.uncontrolled:
+        k = g.rows.shape[0]
+        # Gather USED-row voltages, then form the ELEMENT (terminal) voltages
+        # V_term = M @ V_used.  v[*b, H, N] -> V_used[*b, H, K, n_used].
+        v_used = v.index_select(-1, g.flat_rows)  # [*b, H, K*n_used]
+        v_used = v_used.reshape(*batch_lead, h, k, g.n_used)
+        # V_term[..., e] = sum_u M[e,u] V_used[..., u]  -> [*b,H,K,n_elem].
+        vt = torch.einsum("eu,...ku->...ke", g.m_c, v_used)
+
+        vmag = torch.abs(vt)  # [*b, H, K, n_elem] real
+        ratio = vmag / g.v0  # |V_term| / |V0|  broadcasts [K,n_elem]
+
+        # ZIP scaling per power component: z*ratio^2 + i*ratio + p.
+        z_p, i_p, pp_p = g.zip_p[..., 0], g.zip_p[..., 1], g.zip_p[..., 2]  # [K]
+        z_q, i_q, pp_q = g.zip_q[..., 0], g.zip_q[..., 1], g.zip_q[..., 2]
+        scale_p = z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
+        scale_q = z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
+
+        s_eff = torch.complex(g.p_pp * scale_p, g.q_pp * scale_q).to(cdt)
+        # i_elem = conj(S_eff) / conj(V_term). NOTE: terminal voltage is assumed
+        # non-zero here (a converged PF never has a 0 V live terminal), so this
+        # divide is UNGUARDED — unlike the otherwise-identical conj(vt) divide in
+        # solver/harmonic_flow.py::_harmonic_injections, which DOES mask vt==0
+        # because a gradcheck perturbation / dead harmonic terminal can hit zero.
+        i_elem = torch.conj(s_eff) / torch.conj(vt)  # [*b,H,K,n_elem]
+        # Nodal current at the used rows: I_used = M^T @ i_elem -> [*b,H,K,n_used].
+        i_used = torch.einsum("eu,...ke->...ku", g.m_c, i_elem)
+        out = _scatter_injection(out, i_used, g.rows)
+
+    # --- inverter-controlled injections (voltage-dependent (P, Q) law) --------
+    for c in plan.controlled:
+        v_used = v.index_select(-1, c.arow).reshape(*batch_lead, h, c.n_used)
+        vt = torch.einsum("eu,...u->...e", c.m_c, v_used)  # [*b, H, n_elem]
+        v_pu = torch.abs(vt) / c.v0  # [*b, H, n_elem]
+
+        p_eff, q_eff = resolve_injection_power(
+            c.control, c.p_avail, v_pu, rdt=rdt, device=device
+        )  # [*b, H, n_elem] native
+        s_eff = torch.complex(c.sign * p_eff, c.sign * q_eff).to(cdt)
+        # Guard the conj(vt) divide for a transiently/perturbed-to-zero terminal
+        # (the iteration / a gradcheck step can reach 0 V) — mask the denominator,
+        # then mask the result, keeping the gradient finite on live terminals.
+        vtc = torch.conj(vt)
+        safe = torch.where(vtc.abs() < 1e-300, torch.ones_like(vtc), vtc)
+        i_elem = torch.where(
+            vtc.abs() < 1e-300, torch.zeros_like(s_eff), torch.conj(s_eff) / safe
+        )  # [*b, H, n_elem]
+        i_used = torch.einsum("eu,...e->...u", c.m_c, i_elem)  # [*b, H, n_used]
+        out = _scatter_injection(out, i_used.unsqueeze(-2), c.arow.unsqueeze(0))
+
+    return out
+
+
 def _zip_coeffs(appliance, rdt, device) -> tuple[Tensor, Tensor]:
     """Per-power-component ZIP coefficient pairs ``(zip_p[3], zip_q[3])`` = (z, i, p).
 
@@ -1514,194 +1813,17 @@ def device_current_injections(
         Complex ``I_device`` ``[*batch, H, N]`` (matching ``v``'s batch broadcast).
         Purely passive grids -> zeros. Aligned to ``index``.
     """
-    if device is None:
-        device = v.device
-    f = _as_freq_tensor(frequencies_hz, dtype, device)
-    h = f.shape[0]
-    cdt = _cdtype(dtype)
-    rdt = _rdtype(dtype)
-    n = index.size
-
-    v = v.to(dtype=cdt, device=device)
-    # Normalise v to leading shape [*batch, H, N]: insert an H axis if absent.
-    if v.shape[-1] != n:
-        raise ValueError(
-            f"device_current_injections: v last dim {v.shape[-1]} != N={n}"
-        )
-    if v.ndim == 1:
-        v = v.reshape(1, n)  # [1, N]; treated as [H=1, N] -> broadcast over H below
-    # If there is no explicit H axis matching h, broadcast a singleton H in.
-    has_h = v.ndim >= 2 and v.shape[-2] == h
-    if not has_h:
-        v = v.unsqueeze(-2)  # [..., 1, N]
-    batch_lead = v.shape[:-2]
-
-    out = torch.zeros((*batch_lead, h, n), dtype=cdt, device=device)
-
-    loads = [
-        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
-    ]
-    if not loads:
-        return out
-
-    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
-
-    node_map = {nd.id: nd for nd in grid.nodes}
-
-    # Appliances with an inverter `control` follow a voltage-dependent (P, Q) law and
-    # are handled per-element below; the control-free majority keeps the bit-exact
-    # stacked ZIP path (so every existing grid stays byte-identical).
-    uncontrolled = [a for a in loads if getattr(a, "control", None) is None]
-    controlled = [a for a in loads if getattr(a, "control", None) is not None]
-
-    for grp in group_appliances(uncontrolled, node_map):
-        n_elem = grp.n_elem
-        is_delta = grp.connection == WindingConnection.DELTA
-        m = build_incidence(grp, rdt, device)  # [n_elem, n_used] real
-        m_c = m.to(cdt)
-
-        p_list, q_list, v0_list, zipp_list, zipq_list = [], [], [], [], []
-        for a in grp.appliances:
-            kind = "load" if isinstance(a, Load) else "generator"
-            sign = 1.0 if isinstance(a, Load) else -1.0
-            node = node_map[a.node]
-            v0 = phase_voltage_magnitude(
-                node.u_rated_v, len(node.phases), line_to_line=is_delta
-            )
-
-            # Resolve total / per-phase honoring operating_point, keeping tensors.
-            p_total, q_total = a.p_nom_w, a.q_nom_var
-            p_per, q_per = a.p_nom_per_phase_w, a.q_nom_per_phase_var
-            if operating_point is not None and a.id in operating_point:
-                op = operating_point[a.id]
-                if "p_per_phase_w" in op:
-                    p_per = op["p_per_phase_w"]
-                elif "p_w" in op:
-                    p_total, p_per = op["p_w"], None
-                if "q_per_phase_var" in op:
-                    q_per = op["q_per_phase_var"]
-                elif "q_var" in op:
-                    q_total, q_per = op["q_var"], None
-            if not asymmetric:
-                # Symmetric calc: ignore the per-phase split, distribute the total
-                # equally over the elements (power-grid-model rule).
-                if p_per is not None:
-                    p_total, p_per = _tensor_sum(p_per, rdt, device), None
-                if q_per is not None:
-                    q_total, q_per = _tensor_sum(q_per, rdt, device), None
-
-            p_t = _override(
-                param_overrides,
-                (kind, a.id, "p_nom_per_phase_w"),
-                _per_phase_power_tensor(p_total, p_per, n_elem, rdt, device),
-            )
-            q_t = _override(
-                param_overrides,
-                (kind, a.id, "q_nom_per_phase_var"),
-                _per_phase_power_tensor(q_total, q_per, n_elem, rdt, device),
-            )
-            p_list.append(sign * p_t)  # [n_elem]
-            q_list.append(sign * q_t)  # [n_elem]
-            v0_t = (
-                v0
-                if isinstance(v0, Tensor)
-                else torch.as_tensor(v0, dtype=rdt, device=device)
-            )
-            v0_list.append(v0_t.to(dtype=rdt, device=device).reshape(()).expand(n_elem))
-            zp, zq = _zip_coeffs(a, rdt, device)
-            zipp_list.append(zp)  # [3]
-            zipq_list.append(zq)
-
-        k = len(p_list)
-        # Stack with K at dim -2 so any per-load batch dims stay leading and broadcast
-        # against the [*b, H, K, n_elem] voltage tensor. A scenario sweep may vary only
-        # SOME devices (e.g. loads but not generators), so the per-device entries can
-        # carry different leading batch shapes; broadcast them to a common batch before
-        # stacking (a device with no batched override broadcasts its nominal across the
-        # batch) instead of failing the stack.
-        p_lead = torch.broadcast_shapes(*[t.shape[:-1] for t in p_list])
-        q_lead = torch.broadcast_shapes(*[t.shape[:-1] for t in q_list])
-        p_pp = torch.stack(
-            [t.broadcast_to(*p_lead, t.shape[-1]) for t in p_list], -2
-        )  # [*pbatch, K, n_elem]
-        q_pp = torch.stack([t.broadcast_to(*q_lead, t.shape[-1]) for t in q_list], -2)
-        v0 = torch.stack(v0_list, -2)  # [K, n_elem]
-        zip_p = torch.stack(zipp_list, 0)  # [K, 3]
-        zip_q = torch.stack(zipq_list, 0)
-        rows = used_rows(grp, index, device)  # [K, n_used] int64
-
-        # Insert a singleton H axis into power tensors so they broadcast over H.
-        p_pp = p_pp.unsqueeze(-3)  # [*pbatch, 1, K, n_elem]
-        q_pp = q_pp.unsqueeze(-3)
-
-        # Gather USED-row voltages, then form the ELEMENT (terminal) voltages
-        # V_term = M @ V_used.  v[*b, H, N] -> V_used[*b, H, K, n_used].
-        flat_rows = rows.reshape(-1)  # [K*n_used]
-        v_used = v.index_select(-1, flat_rows)  # [*b, H, K*n_used]
-        v_used = v_used.reshape(*batch_lead, h, k, grp.n_used)  # [*b,H,K,n_used]
-        # V_term[..., e] = sum_u M[e,u] V_used[..., u]  -> [*b,H,K,n_elem].
-        vt = torch.einsum("eu,...ku->...ke", m_c, v_used)
-
-        vmag = torch.abs(vt)  # [*b, H, K, n_elem] real
-        ratio = vmag / v0  # |V_term| / |V0|  broadcasts [K,n_elem]
-
-        # ZIP scaling per power component: z*ratio^2 + i*ratio + p.
-        z_p, i_p, pp_p = zip_p[..., 0], zip_p[..., 1], zip_p[..., 2]  # [K]
-        z_q, i_q, pp_q = zip_q[..., 0], zip_q[..., 1], zip_q[..., 2]
-        scale_p = z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
-        scale_q = z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
-
-        s_eff = torch.complex(p_pp * scale_p, q_pp * scale_q).to(cdt)  # [*b,H,K,n_elem]
-        # i_elem = conj(S_eff) / conj(V_term). NOTE: terminal voltage is assumed
-        # non-zero here (a converged PF never has a 0 V live terminal), so this
-        # divide is UNGUARDED — unlike the otherwise-identical conj(vt) divide in
-        # solver/harmonic_flow.py::_harmonic_injections, which DOES mask vt==0
-        # because a gradcheck perturbation / dead harmonic terminal can hit zero.
-        i_elem = torch.conj(s_eff) / torch.conj(vt)  # [*b,H,K,n_elem]
-        # Nodal current at the used rows: I_used = M^T @ i_elem -> [*b,H,K,n_used].
-        i_used = torch.einsum("eu,...ke->...ku", m_c, i_elem)
-
-        out = _scatter_injection(out, i_used, rows)
-
-    # --- inverter-controlled injections (voltage-dependent (P, Q) law) --------
-    for grp in group_appliances(controlled, node_map):
-        is_delta = grp.connection == WindingConnection.DELTA
-        m_c = build_incidence(grp, rdt, device).to(cdt)  # [n_elem, n_used]
-        rows = used_rows(grp, index, device)  # [K, n_used]
-        for ki, a in enumerate(grp.appliances):
-            sign = 1.0 if isinstance(a, Load) else -1.0
-            node = node_map[a.node]
-            v0 = phase_voltage_magnitude(
-                node.u_rated_v, len(node.phases), line_to_line=is_delta
-            )
-            p_list, _q_list = resolve_operating_power(
-                a, operating_point, asymmetric=asymmetric
-            )
-            p_avail = _stack_elements(
-                p_list, rdt, device
-            )  # [*pb, n_elem] (native sign)
-
-            arow = rows[ki]  # [n_used]
-            v_used = v.index_select(-1, arow).reshape(*batch_lead, h, grp.n_used)
-            vt = torch.einsum("eu,...u->...e", m_c, v_used)  # [*b, H, n_elem]
-            v_pu = torch.abs(vt) / v0  # [*b, H, n_elem]
-
-            p_eff, q_eff = resolve_injection_power(
-                a.control, p_avail, v_pu, rdt=rdt, device=device
-            )  # [*b, H, n_elem] native
-            s_eff = torch.complex(sign * p_eff, sign * q_eff).to(cdt)
-            # Guard the conj(vt) divide for a transiently/perturbed-to-zero terminal
-            # (the iteration / a gradcheck step can reach 0 V) — mask the denominator,
-            # then mask the result, keeping the gradient finite on live terminals.
-            vtc = torch.conj(vt)
-            safe = torch.where(vtc.abs() < 1e-300, torch.ones_like(vtc), vtc)
-            i_elem = torch.where(
-                vtc.abs() < 1e-300, torch.zeros_like(s_eff), torch.conj(s_eff) / safe
-            )  # [*b, H, n_elem]
-            i_used = torch.einsum("eu,...e->...u", m_c, i_elem)  # [*b, H, n_used]
-            out = _scatter_injection(out, i_used.unsqueeze(-2), arow.unsqueeze(0))
-
-    return out
+    plan = build_injection_plan(
+        grid,
+        index,
+        frequencies_hz,
+        dtype=dtype,
+        device=device if device is not None else v.device,
+        operating_point=operating_point,
+        param_overrides=param_overrides,
+        symmetry=symmetry,
+    )
+    return injections_from_plan(plan, v)
 
 
 def _stack_elements(vals, rdt: torch.dtype, device) -> Tensor:
@@ -1735,11 +1857,14 @@ def _tensor_sum(per_phase, rdt: torch.dtype, device):
 __all__ = [
     "YBus",
     "BranchCurrent",
+    "InjectionPlan",
     "assemble_ybus",
     "assemble_network_ybus",
     "branch_currents",
+    "build_injection_plan",
     "build_injections",
     "device_current_injections",
+    "injections_from_plan",
     "node_phase_index",
     "NodePhaseIndex",
 ]

@@ -16,6 +16,11 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
   operating_point=None, param_overrides=None, symmetry=None) -> Tensor`` — ZIP
   voltage-dependent device current ``[*batch, H, N]``.  ``symmetry`` matches
   the value passed to the outer assembler so both remain consistent.
+- ``build_injection_plan(...) -> InjectionPlan`` / ``injections_from_plan(plan,
+  v) -> Tensor`` — the two halves of ``device_current_injections``: the
+  V-independent resolution (once per solve) and the pure-tensor evaluation
+  (once per iteration). The nonlinear solvers reuse one plan across all their
+  iterations.
 """
 
 from __future__ import annotations
@@ -23,12 +28,15 @@ from __future__ import annotations
 from .index import NodePhaseIndex, base_voltage_per_row, node_phase_index
 from .ybus import (
     BranchCurrent,
+    InjectionPlan,
     YBus,
     assemble_network_ybus,
     assemble_ybus,
     branch_currents,
+    build_injection_plan,
     build_injections,
     device_current_injections,
+    injections_from_plan,
 )
 
 # Set canonical __module__ so autodoc registers symbols under the public
@@ -37,6 +45,7 @@ from .ybus import (
 NodePhaseIndex.__module__ = __name__
 YBus.__module__ = __name__
 BranchCurrent.__module__ = __name__
+InjectionPlan.__module__ = __name__
 
 __all__ = [
     "NodePhaseIndex",
@@ -44,9 +53,12 @@ __all__ = [
     "base_voltage_per_row",
     "YBus",
     "BranchCurrent",
+    "InjectionPlan",
     "assemble_ybus",
     "assemble_network_ybus",
     "branch_currents",
+    "build_injection_plan",
     "build_injections",
     "device_current_injections",
+    "injections_from_plan",
 ]

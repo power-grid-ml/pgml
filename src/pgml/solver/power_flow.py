@@ -63,8 +63,10 @@ from pgml.assembly import (
     NodePhaseIndex,
     assemble_network_ybus,
     assemble_ybus,
+    build_injection_plan,
     build_injections,
     device_current_injections,
+    injections_from_plan,
     node_phase_index,
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
@@ -626,8 +628,9 @@ def solve_power_flow(
         else None
     )
     v_fixed = v_fixed_fn()
-    # v_fixed may be / contain a differentiable leaf (u_ref/u_angle as tensors).
-    leaves = _grid_param_leaves(grid, param_overrides, v_fixed, operating_point)
+    # NOTE: v_fixed is derived exclusively from the grid's source fields
+    # (u_ref/u_angle), whose leaves the grid walk above already collected —
+    # no second leaf walk is needed.
 
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
@@ -638,7 +641,9 @@ def solve_power_flow(
 
         A factory (not a single closure) so the batched-Newton path can build a
         per-scenario residual from a sliced ``op`` while the full-batch ``op`` residual
-        drives the diagnostics and the IFT backward.
+        drives the IFT backward. Fully DIFFERENTIABLE w.r.t. the parameter leaves
+        (rebuilds the injection resolution on every call) — the ``dR/dθ`` half of the
+        IFT. The iteration-facing counterpart is :func:`make_fast_residual_complex`.
         """
 
         def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
@@ -658,9 +663,46 @@ def solve_power_flow(
 
         return residual_complex
 
+    def make_fast_residual_complex(op):
+        """Plan-based residual for the ITERATION paths (``dR/dV`` only).
+
+        Resolves the operating point ONCE into an :class:`InjectionPlan` (detached)
+        and evaluates the residual with pure tensor ops. Correct wherever only the
+        dependence on ``V`` matters — the no-grad forward iterations, Newton's line
+        search, and the state Jacobian ``J = dR/dx`` (the plan's power tensors are
+        constants of that differentiation). The parameter gradients ``dR/dθ`` use
+        :func:`make_residual_complex` instead.
+        """
+        with torch.no_grad():
+            plan = build_injection_plan(
+                grid,
+                index,
+                [f0],
+                dtype=dtype,
+                device=device,
+                operating_point=op,
+                param_overrides=param_overrides,
+                symmetry=sym_resolved,
+            )
+
+        def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
+            i_dev = injections_from_plan(plan, v_cmplx).squeeze(-2)  # [*b, N]
+            yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
+            return yv + i_dev - i_slack
+
+        residual_complex.plan = plan
+        return residual_complex
+
     residual_complex = make_residual_complex(operating_point)
+    fast_residual_complex = make_fast_residual_complex(operating_point)
     real_res = _make_real_residual(
-        build_system, residual_complex, fixed_rows, v_fixed_fn, n, cdt
+        build_system,
+        residual_complex,
+        fixed_rows,
+        v_fixed_fn,
+        n,
+        cdt,
+        state_residual_complex=fast_residual_complex,
     )
 
     # One-time warning when the absolute `tol` is below what the working precision can
@@ -719,7 +761,7 @@ def solve_power_flow(
                 v_fixed,
                 v_fixed_fn,
                 build_system,
-                make_residual_complex,
+                make_fast_residual_complex,
                 bsize,
                 n,
                 rdt,
@@ -767,15 +809,11 @@ def solve_power_flow(
             residual_vec,
         ) = _current_injection_forward(
             grid,
-            f0,
             index,
             build_system,
             fixed_rows,
             v_fixed,
-            operating_point,
-            param_overrides,
-            sym_resolved,
-            dtype,
+            fast_residual_complex.plan,
             n,
             rdt,
             cdt,
@@ -792,7 +830,7 @@ def solve_power_flow(
         v_star,
         y_eff0,
         i_slack0,
-        residual_complex,
+        fast_residual_complex,
         real_res,
         fixed_rows,
         residual_history,
@@ -848,15 +886,11 @@ def solve_power_flow(
 # ---------------------------------------------------------------------------
 def _current_injection_forward(
     grid,
-    f0,
     index,
     build_system,
     fixed_rows,
     v_fixed,
-    operating_point,
-    param_overrides,
-    sym_resolved,
-    dtype,
+    plan,
     n,
     rdt,
     cdt,
@@ -865,6 +899,10 @@ def _current_injection_forward(
     max_iter,
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
+
+    ``plan`` is the precomputed :class:`~pgml.assembly.InjectionPlan`: the
+    operating point is resolved once and every iteration evaluates
+    :func:`injections_from_plan` (pure tensor ops).
 
     Returns ``(v_star, iterations, residual_norm, converged, residual_history, y_eff0,
     i_slack0, converged_mask, residual_vec)``; ``residual_norm`` is the final ``||ΔV||``
@@ -942,17 +980,7 @@ def _current_injection_forward(
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
         fac = lu_factor_system(y_eff0, fixed_rows=fixed_rows)
         for _ in range(max_iter):
-            i_dev = device_current_injections(
-                grid,
-                v,
-                index,
-                [f0],
-                dtype=dtype,
-                device=device,
-                operating_point=operating_point,
-                param_overrides=param_overrides,
-                symmetry=sym_resolved,
-            ).squeeze(-2)  # [*b, N]
+            i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
             v_new = solve_factored(fac, rhs, v_fixed=v_fixed)
             # solve_factored carries Y's leading H=1; drop the singleton axis.
@@ -1215,7 +1243,7 @@ def _newton_forward_sequential(
     v_fixed,
     v_fixed_fn,
     build_system,
-    make_residual_complex,
+    make_fast_residual_complex,
     bsize,
     n,
     rdt,
@@ -1231,14 +1259,17 @@ def _newton_forward_sequential(
     it per scenario, running the proven single-grid forward, and stacking the detached
     ``V*`` ``[B, N]``. The IFT backward (full op, batch-aligned, block-diagonal) attaches
     batched gradients to the stacked result, so this is forward-only sequencing — the
-    differentiability is unchanged. Returns the same 9-tuple as :func:`_newton_forward`.
+    differentiability is unchanged. The per-scenario residual comes from
+    ``make_fast_residual_complex`` (one detached injection plan per slice — the
+    detached forward needs only ``dR/dx``). Returns the same 9-tuple as
+    :func:`_newton_forward`.
     """
     v_list, conv_list, res_list = [], [], []
     iterations = 0
     y_eff0 = i_slack0 = None
     for i in range(bsize):
         op_i = _slice_operating_point(operating_point, i)
-        rc_i = make_residual_complex(op_i)
+        rc_i = make_fast_residual_complex(op_i)
         rr_i = _make_real_residual(build_system, rc_i, fixed_rows, v_fixed_fn, n, cdt)
         v_init_i = _linear_const_z_init(
             grid,
@@ -1344,6 +1375,7 @@ def _make_real_residual(
     v_fixed_fn,
     n: int,
     cdt: torch.dtype,
+    state_residual_complex=None,
 ):
     """Return a closure ``R(x) -> [*b, 2N]`` real residual with slack pinning.
 
@@ -1351,7 +1383,19 @@ def _make_real_residual(
     ``Re/Im(V - V_fixed)``. The complex system tensors come from ``build_system``
     and the slack reference from ``v_fixed_fn`` (recomputed each call) so they
     stay differentiable w.r.t. the parameter leaves and do not reuse a freed graph.
+
+    ``state_residual_complex`` (optional) is a faster complex residual used ONLY by
+    the attached ``state_residual`` — the fixed-system form the Newton iterations,
+    the state Jacobian ``J = dR/dx``, and the criticality analysis evaluate. Those
+    differentiate w.r.t. ``x`` alone, so a plan-based residual with detached
+    parameter tensors is exact there; the full ``real_residual`` keeps the
+    differentiable ``residual_complex`` for the ``dR/dθ`` vjp.
     """
+    state_rc = (
+        state_residual_complex
+        if state_residual_complex is not None
+        else residual_complex
+    )
 
     def _pin_and_split(fc: Tensor, v: Tensor, x: Tensor) -> Tensor:
         v_fixed = v_fixed_fn() if v_fixed_fn is not None else None
@@ -1388,7 +1432,7 @@ def _make_real_residual(
         v = torch.complex(v_re, v_im).to(cdt)
         y_eff = torch.complex(y_re, y_im).to(cdt)
         i_slack = torch.complex(islack_re, islack_im).to(cdt)
-        fc = residual_complex(v, y_eff, i_slack)
+        fc = state_rc(v, y_eff, i_slack)
         return _pin_and_split(fc, v, x)
 
     real_residual.state_residual = state_residual
@@ -1894,19 +1938,23 @@ def loadability_limit(
     def build_system():
         return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
 
+    # One detached injection plan serves every λ step (loadability is a detached
+    # diagnostic; λ scales the plan's currents in the residual, not the plan).
+    with torch.no_grad():
+        plan = build_injection_plan(
+            grid,
+            index,
+            [f0],
+            dtype=dtype,
+            device=device,
+            operating_point=operating_point,
+            param_overrides=param_overrides,
+            symmetry=sym_resolved,
+        )
+
     def make_real_res(lam: float):
         def rc(v: Tensor, y: Tensor, islack: Tensor) -> Tensor:
-            i_dev = device_current_injections(
-                grid,
-                v,
-                index,
-                [f0],
-                dtype=dtype,
-                device=device,
-                operating_point=operating_point,
-                param_overrides=param_overrides,
-                symmetry=sym_resolved,
-            ).squeeze(-2)
+            i_dev = injections_from_plan(plan, v).squeeze(-2)
             yv = torch.matmul(y, v.unsqueeze(-1)).squeeze(-1)
             return yv + lam * i_dev - islack
 
