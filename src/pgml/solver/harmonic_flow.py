@@ -829,50 +829,54 @@ def _harmonic_injections(
                 )
             )
 
-    cols: list[Tensor] = []
-    for h in harm_orders:
-        contribs = []  # (m_c, rows, i_h_elem [*batch, n_elem])
-        for m_c, rows, i1_mag, i1_ang, mag1_e, ang1_e, elem_spectra in entries:
-            n_elem = mag1_e.shape[-1]
-            mag_h_e, ph_h_e = elem_spectra.get(
-                h,
-                (
-                    torch.zeros(n_elem, dtype=rdt, device=device),
-                    torch.zeros(n_elem, dtype=rdt, device=device),
-                ),
-            )
-            # Safe ratio mag_h/mag1: an element with NO spectrum has mag1 == 0 (and
-            # mag_h == 0) -> it injects nothing; avoid the 0/0 NaN with a guarded
-            # divide (the where keeps the gradient finite on the live elements).
-            safe1 = torch.where(mag1_e == 0, torch.ones_like(mag1_e), mag1_e)
-            ratio = torch.where(
-                mag1_e == 0, torch.zeros_like(mag_h_e), mag_h_e / safe1
-            )  # [*batch, n_elem]
-            ang_h = ph_h_e * (math.pi / 180.0)
-            mag = ratio * i1_mag  # [*batch, n_elem]
-            phase = ang_h + float(h) * (i1_ang - ang1_e)  # [*batch, n_elem]
-            contribs.append((m_c, rows, torch.polar(mag, phase)))
+    hh = len(harm_orders)
+    if not entries:
+        return torch.zeros((hh, n), dtype=cdt, device=device)
 
-        bshape = (
-            torch.broadcast_shapes(*[c.shape[:-1] for _, _, c in contribs])
-            if contribs
-            else ()
+    # ONE vectorized evaluation per device: the spectra coefficients are stacked
+    # over the order axis ([Hh, n_elem], python dict lookups only), so the ratio /
+    # phase / polar math and the incidence contraction run for every order at once
+    # and the nodal scatter is a single index_add per device — instead of tape ops
+    # per (device × order), which dominated multi-order assemblies.
+    h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
+    zero_e = None
+    parts = []  # (rows [n_used], i_used [*batch, Hh, n_used])
+    for m_c, rows, i1_mag, i1_ang, mag1_e, ang1_e, elem_spectra in entries:
+        n_elem = mag1_e.shape[-1]
+        if zero_e is None or zero_e.shape[-1] != n_elem:
+            zero_e = torch.zeros(n_elem, dtype=rdt, device=device)
+        pairs = [elem_spectra.get(h, (zero_e, zero_e)) for h in harm_orders]
+        cshape = torch.broadcast_shapes(*[t.shape for p in pairs for t in p])
+        mag_h = torch.stack([p[0].broadcast_to(cshape) for p in pairs], dim=-2)
+        ph_h = torch.stack([p[1].broadcast_to(cshape) for p in pairs], dim=-2)
+        # mag_h / ph_h: [*cbatch, Hh, n_elem]; i1 terms gain the order axis at -2.
+        # Safe ratio mag_h/mag1: an element with NO spectrum has mag1 == 0 (and
+        # mag_h == 0) -> it injects nothing; avoid the 0/0 NaN with a guarded
+        # divide (the where keeps the gradient finite on the live elements).
+        mag1 = mag1_e.unsqueeze(-2)
+        safe1 = torch.where(mag1 == 0, torch.ones_like(mag1), mag1)
+        ratio = torch.where(
+            mag1 == 0, torch.zeros_like(mag_h), mag_h / safe1
+        )  # [*batch, Hh, n_elem]
+        mag = ratio * i1_mag.unsqueeze(-2)
+        phase = ph_h * (math.pi / 180.0) + h_vec[:, None] * (
+            i1_ang.unsqueeze(-2) - ang1_e.unsqueeze(-2)
         )
-        col = torch.zeros((*bshape, n), dtype=cdt, device=device)
-        for m_c, rows, i_h_elem in contribs:
-            # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).
-            i_used = torch.einsum("eu,...e->...u", m_c, i_h_elem)  # [*batch, n_used]
-            # `broadcast_to` returns a VIEW; a non-contiguous complex tensor can fail
-            # the CUDA index_add backend, so materialise it (defensive, matches
-            # ybus._scatter_injection). `.contiguous()` is autograd-safe.
-            i_used = i_used.broadcast_to(*bshape, rows.shape[0]).contiguous()
-            # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add).
-            col = col.index_add(-1, rows, -i_used)
-        cols.append(col)
+        i_h_elem = torch.polar(mag, phase)  # [*batch, Hh, n_elem]
+        # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).
+        i_used = torch.einsum("eu,...e->...u", m_c, i_h_elem)  # [*batch, Hh, n_used]
+        parts.append((rows, i_used))
 
-    bshape = torch.broadcast_shapes(*[c.shape[:-1] for c in cols])
-    cols = [c.broadcast_to(*bshape, n) for c in cols]
-    return torch.stack(cols, dim=-2)  # [*batch, Hh, N]
+    bshape = torch.broadcast_shapes(*[p.shape[:-2] for _, p in parts])
+    out = torch.zeros((*bshape, hh, n), dtype=cdt, device=device)
+    for rows, i_used in parts:
+        # `broadcast_to` returns a VIEW; a non-contiguous complex tensor can fail
+        # the CUDA index_add backend, so materialise it (defensive, matches
+        # ybus._scatter_injection). `.contiguous()` is autograd-safe.
+        i_used = i_used.broadcast_to(*bshape, hh, rows.shape[0]).contiguous()
+        # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add).
+        out = out.index_add(-1, rows, -i_used)
+    return out  # [*batch, Hh, N]
 
 
 # ---------------------------------------------------------------------------

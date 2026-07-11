@@ -107,3 +107,19 @@ def test_run_scenarios_chunked_uses_one_system(grid):
     ref = run_scenarios(grid, cfg)
     chunked = run_scenarios(grid, cfg, chunk_size=2)
     assert torch.allclose(ref.v, chunked.v)
+
+
+def test_assemble_ybus_batched_operating_point(grid):
+    """The const-Z fold broadcasts a batched operating point: batched Y == loop."""
+    from pgml.assembly import assemble_ybus
+
+    load_id = next(a.id for a in grid.appliances if a.id >= 20000)
+    p = torch.tensor([1.0e5, 2.0e5, 3.0e5], dtype=torch.float64)
+    yb = assemble_ybus(grid, [50.0], operating_point={load_id: {"p_w": p}}).Y
+    n = yb.shape[-1]
+    assert yb.shape == (3, 1, n, n)
+    for i in range(3):
+        yi = assemble_ybus(
+            grid, [50.0], operating_point={load_id: {"p_w": float(p[i])}}
+        ).Y
+        assert torch.allclose(yb[i], yi)

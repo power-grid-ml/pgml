@@ -1081,13 +1081,23 @@ def _stamp_const_z_loads(
             p_pp, q_pp = resolve_operating_power(
                 a, operating_point, asymmetric=asymmetric
             )
-            # Per-element admittance y_elem = conj(P+jQ)/|V0|^2  -> [n_elem].
+            # Per-element admittance y_elem = conj(P+jQ)/|V0|^2  -> [*b, n_elem]
+            # (a batched operating point carries leading scenario dims).
             y_elem = const_z_shunt_admittance(p_pp, q_pp, v0, sign, cdt, device)
-            elem_list.append(y_elem)  # [n_elem]
-        y_elem_k = torch.stack(elem_list, 0)  # [K, n_elem]
-        # Y_block = M^T diag(y_elem) M  -> [K, n_used, n_used].
-        block = torch.einsum("ei,ke,ej->kij", m_c, y_elem_k, m_c)
-        block = block[None].expand(f.shape[0], *block.shape)  # [H,K,n_used,n_used]
+            elem_list.append(y_elem)
+        # Broadcast the per-device leading batch dims to a common shape before
+        # stacking (a device without a batched override broadcasts its nominal),
+        # then stack devices at -2: [*b, K, n_elem].
+        lead = torch.broadcast_shapes(*[t.shape[:-1] for t in elem_list])
+        y_elem_k = torch.stack(
+            [t.broadcast_to(*lead, t.shape[-1]) for t in elem_list], -2
+        )
+        # Y_block = M^T diag(y_elem) M  -> [*b, K, n_used, n_used].
+        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_k, m_c)
+        # Insert the frequency axis: [*b, H, K, n_used, n_used].
+        block = block.unsqueeze(-4).expand(
+            *block.shape[:-3], f.shape[0], *block.shape[-3:]
+        )
         rows = used_rows(grp, index, device)  # [K, n_used]
         y = scatter_blocks_into(y, block, rows, rows)
     return y

@@ -148,6 +148,18 @@ def check_connectivity(grid: Grid) -> None:
         )
 
 
+def _same_device(a: torch.device, b: torch.device) -> bool:
+    """Device equality with an unindexed spec matching any index of its type.
+
+    A tensor's device always carries an index (``cuda:0``) while a caller-supplied
+    ``torch.device("cuda")`` does not; strict ``==`` would reject that pair even
+    though they resolve to the same accelerator.
+    """
+    if a.type != b.type:
+        return False
+    return a.index is None or b.index is None or a.index == b.index
+
+
 def _branch_states_batched(branch_states: Optional[dict]) -> bool:
     """``True`` iff any state carries a leading scenario dim."""
     return bool(branch_states) and any(
@@ -987,7 +999,7 @@ def solve_power_flow(
         system.slack != slack
         or system.index.size != n
         or system.y_eff.dtype != cdt
-        or system.y_eff.device != device
+        or not _same_device(system.y_eff.device, torch.device(device))
     ):
         raise InputError(
             "The provided PowerFlowSystem does not match this solve "
@@ -1116,12 +1128,14 @@ def solve_power_flow(
         # ``examples/current_injection_convergence.py``).
         bsize = _operating_point_batch_size(operating_point)
         if bsize > 1:
-            # Newton's per-element Jacobian AND its const-Z warm start are single-grid
-            # (the residual closes over the batched op, so a per-element Jacobian would
-            # be batch-polluted). Solve each scenario with the proven single-grid Newton
-            # and stack; the SHARED IFT backward below (full op, batch-aligned) supplies
-            # batched gradients. Newton is the hard-grid / near-nose solver — for bulk
-            # batches prefer the vectorized current-injection method.
+            # A batched operating point solves SEQUENTIALLY per scenario: the
+            # per-scenario ``jacobian(vectorize=True)`` (one vectorized call per
+            # scenario) is measurably faster than a batch-native block-diagonal
+            # build — the O(B²·(2N)²) full-map Jacobian does not fit, and the O(B)
+            # column-by-column alternative costs 2N JVP evaluations per Newton
+            # step (4x slower than this loop at B=64/N=180). Newton is the
+            # hard-grid / near-nose solver — for bulk batches prefer the
+            # vectorized current-injection method.
             (
                 v_star,
                 iterations,
@@ -1598,14 +1612,16 @@ def _newton_forward(
             if linear_solver == "matrix_free":
                 dx = _newton_dir_matrix_free(res_one, x, r, b, fd_eps)
             else:
-                dx = _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b)
-            # Backtracking on the worst-case residual infinity-norm (global robustness).
-            r0 = r.abs().amax()
-            step = 1.0
+                dx = _newton_dir_dense(res_all, x, r)
+            # PER-ELEMENT backtracking on each scenario's residual infinity-norm
+            # (global robustness): a hard scenario halves only its own step.
+            r0 = r.abs().amax(dim=-1)  # [b]
+            step = torch.ones(b, 1, dtype=rdt, device=x.device)
             for _bt in range(_NEWTON_MAX_BACKTRACK):
-                if bool(res_all(x + step * dx).abs().amax() <= r0):
+                ok = res_all(x + step * dx).abs().amax(dim=-1) <= r0  # [b]
+                if bool(ok.all()):
                     break
-                step *= 0.5
+                step = torch.where(ok.unsqueeze(-1), step, 0.5 * step)
             x = x + step * dx
             # Per-element step norm + dtype-aware threshold max(tol, floor*||x||).
             dxn = (step * dx).norm(dim=-1)  # [b]
@@ -1716,31 +1732,43 @@ def _newton_forward_sequential(
     )
 
 
-def _state_jacobian_blocks(state_residual, x_flat, y_flat, is_flat, b) -> Tensor:
-    """Per-element real state Jacobian ``[B, 2N, 2N]`` — the block diagonal of ``dR/dx``.
+def _batched_state_jacobian(batched_state_res, x_flat: Tensor) -> Tensor:
+    """Block-diagonal real state Jacobian ``J = dR/dx`` ``[B, 2N, 2N]``.
 
-    The batched residual ``R[k]`` depends only on ``x[k]``, so the full Jacobian is block
-    diagonal; build each ``[2N, 2N]`` block from its own ``(x, Y, I_slack)`` in a loop.
-    This is ``O(B·(2N)²)`` memory, NOT the ``O(B²·(2N)²)`` of differentiating the batched
-    map and slicing its diagonal — the difference between fitting and OOMing at large ``B``.
+    ``batched_state_res`` maps ``x [B, 2N] -> R [B, 2N]`` where ``R[k]`` depends
+    only on ``x[k]``, so the full Jacobian is block diagonal (the off-diagonal
+    cross terms are zero). Two ways to get the blocks:
+
+    - small ``B``: differentiate the batched map once (vectorized) and slice the
+      diagonal — fast, but the intermediate is ``[B, 2N, B, 2N]`` (O(B²) memory);
+    - large ``B``: build the diagonal column-by-column with ``2N`` batched JVPs —
+      O(B) memory, using the SAME batch-aligned residual (correct for every batch
+      source, incl. batched device params / operating points).
+
+    Both avoid vmap, which does not compose with the assembly's ``index_add_``
+    scatter. Shared by the Newton forward and the IFT backward.
     """
-    blocks = []
-    for bi in range(b):
-        yr, yi = y_flat[bi].real, y_flat[bi].imag
-        ir, ii = is_flat[bi].real, is_flat[bi].imag
-        blocks.append(
-            torch.autograd.functional.jacobian(
-                lambda xb, a=yr, c=yi, d=ir, e=ii: state_residual(xb, a, c, d, e),
-                x_flat[bi],
-                vectorize=True,
-            )
-        )  # [2N, 2N]
-    return torch.stack(blocks, 0)  # [B, 2N, 2N]
+    b, twon = x_flat.shape
+    if b * b * twon * twon <= _IFT_DENSE_JAC_MAX_ELEMS:
+        jac_full = torch.autograd.functional.jacobian(
+            batched_state_res, x_flat, create_graph=False, vectorize=True
+        )  # [B, 2N, B, 2N]
+        idx_b = torch.arange(b, device=x_flat.device)
+        return jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
+    cols = []
+    for j in range(twon):
+        tangent = torch.zeros_like(x_flat)
+        tangent[:, j] = 1.0
+        _, col = torch.autograd.functional.jvp(
+            batched_state_res, x_flat, v=tangent
+        )  # [B, 2N] = J[..., j]
+        cols.append(col)
+    return torch.stack(cols, dim=-1)  # [B, 2N, 2N]
 
 
-def _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b) -> Tensor:
+def _newton_dir_dense(batched_state_res, x, r) -> Tensor:
     """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element."""
-    j = _state_jacobian_blocks(state_residual, x, y_flat, is_flat, b)  # [b, 2N, 2N]
+    j = _batched_state_jacobian(batched_state_res, x)  # [b, 2N, 2N]
     return torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
 
 
@@ -1919,22 +1947,7 @@ class _IFTPowerFlow(torch.autograd.Function):
                 xb, y_flat.real, y_flat.imag, islack_flat.real, islack_flat.imag
             )  # [B, 2N]
 
-        if b * b * twon * twon <= _IFT_DENSE_JAC_MAX_ELEMS:
-            jac_full = torch.autograd.functional.jacobian(
-                batched_state_res, x_flat, create_graph=False, vectorize=True
-            )  # [B, 2N, B, 2N]
-            idx_b = torch.arange(b, device=x_flat.device)
-            j_batched = jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
-        else:
-            cols = []
-            for j in range(twon):
-                tangent = torch.zeros_like(x_flat)
-                tangent[:, j] = 1.0
-                _, col = torch.autograd.functional.jvp(
-                    batched_state_res, x_flat, v=tangent
-                )  # [B, 2N] = J[..., j]
-                cols.append(col)
-            j_batched = torch.stack(cols, dim=-1)  # [B, 2N, 2N]
+        j_batched = _batched_state_jacobian(batched_state_res, x_flat)  # [B, 2N, 2N]
         # Adjoint: J^T λ = grad_x  ->  λ = J^{-T} grad_x  (batched solve).
         lam_flat = torch.linalg.solve(
             j_batched.transpose(-1, -2), gx_flat.unsqueeze(-1)
