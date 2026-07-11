@@ -106,6 +106,15 @@ def run_scenarios(
 ) -> ScenarioResult:
     """Build (if needed) and solve a scenario batch in one batched solve.
 
+    For ``calculation="power_flow"`` the operating-point-independent solve state
+    (assembly, slack rows, factorization) is prepared once via
+    :func:`~pgml.solver.prepare_power_flow` and reused across the whole batch —
+    and across every ``chunk_size`` slice, when chunking — since only the
+    operating point differs between scenarios; see the ``system`` parameter of
+    :func:`~pgml.solver.solve_power_flow`. The harmonic path assembles per
+    order inside :func:`~pgml.solver.solve_harmonic_flow` and does not use this
+    reuse.
+
     Parameters
     ----------
     grid, slack, dtype, device:

@@ -3,15 +3,18 @@ pgml.grids
 
 Reference grid builders: pandapower → pgml :class:`~pgml.schemas.grid_schema.Grid`, with
 optional geometry, converter harmonic spectra, and a state-estimation benchmark recipe.
+Also :func:`~pgml.grids.synthetic_feeder`, a schema-only synthetic feeder of arbitrary size
+for solver scaling and topology-batching studies.
 
-Each grid builder converts a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
+Most builders convert a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
 pandapower.  These are the suite's canonical INPUT grids — training-data generation,
 examples, and the oracle comparison tests all build on them — so they live in the core
 package rather than the evaluation oracles.  :mod:`pgml.evaluation.oracles.grids`
 re-exports the builders unchanged for existing importers.
 
-Importing :mod:`pgml.grids` itself has no heavy dependency; each builder function defers
-its ``pandapower`` import to function scope (the optional ``convert`` extra).
+Importing :mod:`pgml.grids` itself has no heavy dependency; each pandapower-backed builder
+function defers its ``pandapower`` import to function scope (the optional ``convert``
+extra). :func:`~pgml.grids.synthetic_feeder` has no such dependency at all.
 
 Grid builders
 -------------
@@ -37,6 +40,32 @@ Grid builders
   bus at harmonics; ``source_impedance_ohm`` applies a finite upstream-grid impedance so
   harmonics are not fully absorbed at the slack. Passing ``0`` keeps the converted
   near-ideal source; the R/X split is controlled by the config key ``source.rx_ratio``.
+
+Synthetic feeder (solver scaling benchmarks)
+------------------------------------------------
+
+- :func:`~pgml.grids.synthetic_feeder` — a parameterizable 3-phase radial MV
+  feeder of *arbitrary* size, built directly on the schema with **no external
+  dependency** (unlike the pandapower-backed builders above). Node 0 is the
+  station bus carrying the :class:`~pgml.schemas.grid_schema.Source`; the
+  remaining ``n_nodes - 1`` nodes are spread over ``n_feeders`` radial chains
+  of typical 20 kV overhead-line segments, each carrying an equal share of
+  ``total_load_w`` as a constant-power WYE load. The node-phase system has
+  ``3 * n_nodes`` rows, so ``n_nodes`` is a direct scaling knob for solver
+  benchmarks::
+
+      from pgml.grids import synthetic_feeder
+      from pgml.solver import solve_power_flow
+
+      grid = synthetic_feeder(300, n_feeders=8)
+      result = solve_power_flow(grid)   # 900-row system
+
+  Passing ``tie_switches=k`` adds ``k`` normally-open
+  :class:`~pgml.schemas.grid_schema.Switch` elements between the far ends of
+  adjacent feeders — open by default (the base grid stays radial and fully
+  energized) and the canonical grid for exercising the solver's
+  ``branch_states`` switch-state batching (see the "Topology / switch-state
+  batching" section of :doc:`solver`).
 
 State-estimation benchmark
 ---------------------------

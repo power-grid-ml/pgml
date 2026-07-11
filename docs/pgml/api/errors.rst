@@ -17,9 +17,28 @@ adapter can map them to HTTP status codes without inspecting internals.
   Maps to HTTP **500**.
 
 Each branch has leaf classes for specific failures: :class:`~pgml.errors.ConfigurationError`
-/ :class:`~pgml.errors.ConversionError` / :class:`~pgml.errors.ModelingError` under
-``InputError``, and :class:`~pgml.errors.ConvergenceError` (carries the solver
-``iterations`` / ``residual`` / ``diagnostics``) under ``ComputationError``.
+/ :class:`~pgml.errors.ConversionError` / :class:`~pgml.errors.ConnectivityError` /
+:class:`~pgml.errors.ModelingError` under ``InputError``, and
+:class:`~pgml.errors.ConvergenceError` (carries the solver ``iterations`` /
+``residual`` / ``diagnostics``) under ``ComputationError``.
+
+.. rubric:: Connectivity failures
+
+:class:`~pgml.errors.ConnectivityError` is raised when part of a grid has no
+galvanic path to any in-service :class:`~pgml.schemas.grid_schema.Source` — an
+open switch, an out-of-service line or transformer, or a missing source
+altogether leaves the nodal system singular there. The pre-solve check
+(:func:`pgml.solver.check_connectivity`, :func:`pgml.topology.connectivity_report`)
+raises it **before** any factorization is attempted, so the message names the
+disconnected nodes, the separating branches, and how to fix them, instead of
+surfacing as an opaque numerical failure. It carries three attributes for
+programmatic handling: ``unenergized_nodes`` (the affected node ids),
+``islands`` (each disconnected component as a tuple of node ids), and
+``reconnectable`` (:class:`~pgml.topology.ReconnectHint` entries naming a
+branch that would reconnect an island). See :doc:`solver` for the
+``on_disconnected`` modes that control how :func:`~pgml.solver.solve_power_flow`
+and :func:`~pgml.solver.solve_harmonic_flow` react to this condition, and
+:doc:`topology` for the underlying connectivity report.
 
 .. rubric:: Deprecated alias
 
