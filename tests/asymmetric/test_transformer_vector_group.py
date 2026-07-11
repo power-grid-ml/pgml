@@ -241,3 +241,26 @@ class TestUnsupportedGroups:
         grid = _grid(WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 150.0)
         with pytest.raises(NotImplementedError):
             assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+
+    def test_finite_grounding_impedance_raises(self) -> None:
+        """A nonzero neutral grounding impedance is rejected, not ignored."""
+        from pgml.schemas.grid_schema import GroundingImpedance, Transformer
+
+        grid = _grid(
+            WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED, 0.0
+        )
+        trafo = next(b for b in grid.branches if isinstance(b, Transformer))
+        trafo.to_grounding = GroundingImpedance(r_ohm=5.0)
+        with pytest.raises(NotImplementedError, match="grounding"):
+            assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+
+    def test_zero_grounding_impedance_is_solid(self) -> None:
+        """An explicit r=x=0 grounding equals the solid default and assembles."""
+        from pgml.schemas.grid_schema import GroundingImpedance, Transformer
+
+        grid = _grid(
+            WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED, 0.0
+        )
+        trafo = next(b for b in grid.branches if isinstance(b, Transformer))
+        trafo.to_grounding = GroundingImpedance(r_ohm=0.0, x_ohm=0.0)
+        assemble_network_ybus(grid, [F0], dtype=torch.complex128)

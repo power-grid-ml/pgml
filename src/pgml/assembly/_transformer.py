@@ -135,6 +135,13 @@ def _classify(conn: WindingConnection) -> SideConn:
     )
 
 
+def _grounding_is_finite(grounding) -> bool:
+    """True when a nonzero neutral grounding impedance is set (r=x=0 = solid)."""
+    if grounding is None:
+        return False
+    return float(grounding.r_ohm) != 0.0 or float(grounding.x_ohm) != 0.0
+
+
 def resolve_vector_group(t) -> VectorGroup:
     """Resolve a transformer's vector group: explicit connections + clock, else defaults.
 
@@ -142,7 +149,19 @@ def resolve_vector_group(t) -> VectorGroup:
     modeling defaults ``transformer.vector_group.{from,to}`` (Dyn11). The clock is read
     from ``tap.shift_deg`` (rounded to the nearest 30°) when the connections are
     explicit, else ``transformer.vector_group.clock``.
+
+    Windings are stamped solidly grounded: a finite neutral grounding impedance
+    would alter the zero-sequence path, so it is rejected rather than silently
+    ignored.
     """
+    for side in ("from", "to"):
+        if _grounding_is_finite(getattr(t, f"{side}_grounding", None)):
+            raise ModelingError(
+                f"transformer {t.id}: a finite {side}-side neutral grounding "
+                "impedance is not modelled (windings are stamped solidly "
+                "grounded); remove the GroundingImpedance or set r_ohm = "
+                "x_ohm = 0."
+            )
     if t.from_connection is not None and t.to_connection is not None:
         from_conn, to_conn = t.from_connection, t.to_connection
         # `tap.shift_deg` is a plain float by schema (a discrete clock selector,

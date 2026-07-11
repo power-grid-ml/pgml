@@ -203,3 +203,52 @@ def test_backward_reaches_all_leaves():
         assert leaf.grad is not None and torch.isfinite(leaf.grad).all()
     assert r.grad.abs().sum() > 0
     assert p.grad.abs().sum() > 0
+
+
+def test_gradcheck_operating_point():
+    """A differentiable ``operating_point`` (per-appliance P/Q overrides) receives
+    gradients through the IFT backward — including DERIVED expressions, so a
+    neural network's output can drive the load powers directly."""
+    from torch.autograd import gradcheck
+
+    def f(p, q):
+        g = _two_bus([[1e-3]], [[1e-6]], 2000.0, 500.0)
+        r = solve_power_flow(
+            g, slack="ideal", dtype=CDT, operating_point={30: {"p_w": p, "q_var": q}}
+        )
+        return r.v.real.sum() + r.v.imag.sum()
+
+    p = torch.tensor(2100.0, dtype=torch.float64, requires_grad=True)
+    q = torch.tensor(400.0, dtype=torch.float64, requires_grad=True)
+    assert gradcheck(f, (p, q), eps=1e-4, atol=1e-6, rtol=1e-4)
+
+
+def test_backward_operating_point_derived_batched():
+    """Batched operating point derived from a shared leaf (theta -> p, q): the
+    gradient reaches theta once, without double counting."""
+    theta = torch.full((3,), 1.1, dtype=torch.float64, requires_grad=True)
+    g = _two_bus([[1e-3]], [[1e-6]], 2000.0, 500.0)
+    op = {30: {"p_w": 2000.0 * theta, "q_var": 500.0 * theta}}
+    res = solve_power_flow(g, slack="ideal", dtype=CDT, operating_point=op)
+    assert res.v.shape[0] == 3
+    res.v.abs().sum().backward()
+    assert theta.grad is not None and torch.isfinite(theta.grad).all()
+    assert theta.grad.abs().min() > 0
+
+
+def test_backward_operating_point_neural_network():
+    """Deep-graph leaf resolution: an nn.Sequential's output drives the load
+    powers; gradients must reach EVERY network parameter (regression test for
+    grad_fn-wrapper id reuse silently truncating the leaf walk)."""
+    mlp = torch.nn.Sequential(
+        torch.nn.Linear(4, 8), torch.nn.ReLU(), torch.nn.Linear(8, 2)
+    ).double()
+    theta = 1.0 + 0.1 * torch.tanh(mlp(torch.rand(4, dtype=torch.float64)))
+    g = _two_bus([[1e-3]], [[1e-6]], 2000.0, 500.0)
+    op = {30: {"p_w": 2000.0 * theta[0], "q_var": 500.0 * theta[1]}}
+    res = solve_power_flow(g, slack="ideal", dtype=CDT, operating_point=op)
+    res.v.abs().sum().backward()
+    for name, p in mlp.named_parameters():
+        assert p.grad is not None, f"no grad reached {name}"
+        assert torch.isfinite(p.grad).all()
+    assert sum(float(p.grad.abs().sum()) for p in mlp.parameters()) > 0
