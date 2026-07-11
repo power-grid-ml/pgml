@@ -645,6 +645,101 @@ def _y_eff_and_islack(
     return y, i_slack
 
 
+@dataclass(frozen=True)
+class PowerFlowSystem:
+    """Precomputed solve state for REPEATED solves of one grid (assembly + LU).
+
+    Everything about the network side of a nonlinear power flow is operating-point
+    INDEPENDENT: the node-phase index, the effective admittance, the slack rows and
+    reference, the factorization, and the grid-side parameter leaves. A chunked
+    scenario run (:func:`pgml.scenarios.run_scenarios`) or any solve-in-a-loop
+    caller therefore pays assembly + factorization once via
+    :func:`prepare_power_flow` and passes the system to every
+    :func:`solve_power_flow` call — only the injections change between calls.
+
+    The cached tensors are DETACHED and drive the (already detached) forward
+    iteration and diagnostics; when parameter gradients are requested, the IFT
+    backward rebuilds its differentiable system from the leaves as always, so
+    differentiability is unchanged. The system must come from the SAME grid,
+    slack, dtype, device, ``param_overrides`` and ``branch_states`` as the solve
+    that consumes it (validated where cheap: slack / dtype / device / size).
+    """
+
+    index: NodePhaseIndex
+    f0: float
+    slack: str
+    y_eff: Tensor  # detached [*, N, N]
+    i_slack: Tensor  # detached [1, N] (norton) or [N] (ideal)
+    fixed_rows: Optional[Tensor]
+    v_fixed: Optional[Tensor]  # detached slack reference
+    factorization: object  # FactoredSystem of y_eff
+    static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
+
+
+def prepare_power_flow(
+    grid: Grid,
+    *,
+    slack: str = "ideal",
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+    branch_states: Optional[dict] = None,
+    linear_solver: str = "auto",
+) -> PowerFlowSystem:
+    """Assemble + factor the operating-point-independent power-flow system once.
+
+    Runs the connectivity check (raising
+    :class:`~pgml.errors.ConnectivityError` like :func:`solve_power_flow` with
+    ``on_disconnected="raise"``), assembles ``Y_eff`` and the slack quantities,
+    and factors ``Y_eff`` with the selected backend
+    (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver`` as in
+    :func:`solve_power_flow`). Pass the result as ``solve_power_flow(...,
+    system=...)`` to skip that work on every subsequent call.
+    """
+    if slack not in ("ideal", "norton"):
+        raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    if branch_states is not None:
+        if _branch_states_batched(branch_states):
+            _check_connectivity_with_states(grid, branch_states)
+        else:
+            check_connectivity(_apply_scalar_states(grid, branch_states))
+    else:
+        check_connectivity(grid)
+
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    index = node_phase_index(grid)
+    f0 = float(grid.base_frequency_hz)
+    leaves = _grid_param_leaves(grid, param_overrides, None, None, branch_states)
+    if device is None:
+        device = leaves[0].device if leaves else torch.device("cpu")
+
+    fixed_rows, v_fixed = (
+        _slack_rows_and_vref(grid, index, rdt, cdt, device)
+        if slack == "ideal"
+        else (None, None)
+    )
+    with torch.no_grad():
+        y_eff, i_slack = _y_eff_and_islack(
+            grid, f0, index, dtype, device, slack, param_overrides, branch_states
+        )
+        factor_backend = (
+            linear_solver if linear_solver in ("dense", "sparse") else "auto"
+        )
+        fac = lu_factor_system(y_eff, fixed_rows=fixed_rows, backend=factor_backend)
+    return PowerFlowSystem(
+        index=index,
+        f0=f0,
+        slack=slack,
+        y_eff=y_eff,
+        i_slack=i_slack,
+        fixed_rows=fixed_rows,
+        v_fixed=v_fixed.detach() if v_fixed is not None else None,
+        factorization=fac,
+        static_leaves=tuple(leaves),
+    )
+
+
 def solve_power_flow(
     grid: Grid,
     *,
@@ -661,6 +756,7 @@ def solve_power_flow(
     linear_solver: str = "auto",
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
+    system: Optional[PowerFlowSystem] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -749,6 +845,16 @@ def solve_power_flow(
         ``operating_point`` by the usual rules (align, or use extra leading dims
         for a cartesian sweep). ``method="newton"`` supports batched states OR a
         batched operating point, not both at once.
+    system:
+        Optional :class:`PowerFlowSystem` from :func:`prepare_power_flow` — the
+        operating-point-independent solve state (index, ``Y_eff``, slack rows,
+        factorization, grid leaves) computed ONCE and reused across repeated
+        solves of the SAME grid / slack / dtype / device / overrides / states
+        (e.g. the chunk loop of :func:`pgml.scenarios.run_scenarios`). Skips
+        assembly, factorization, the connectivity check (prepare ran it), and
+        the grid leaf walk; the IFT backward still rebuilds differentiably, so
+        gradients are unchanged. The ``current_injection`` forward benefits;
+        Newton reuses the cached leaves only.
 
     Returns
     -------
@@ -794,7 +900,7 @@ def solve_power_flow(
             "per-scenario topology has no single energized sub-grid. Use "
             '"raise" (per-scenario check) or "ignore".'
         )
-    if on_disconnected != "ignore":
+    if system is None and on_disconnected != "ignore":
         if branch_states is not None:
             if _branch_states_batched(branch_states):
                 _check_connectivity_with_states(grid, branch_states)
@@ -856,27 +962,56 @@ def solve_power_flow(
             "point only); batch one of the two, or use method='current_injection'."
         )
 
-    leaves = _grid_param_leaves(
-        grid, param_overrides, None, operating_point, branch_states
-    )
+    if system is not None:
+        # The grid-side leaves were walked once in prepare_power_flow; only the
+        # per-call operating point can add new ones.
+        leaves = list(system.static_leaves)
+        seen = {id(t) for t in leaves}
+        if operating_point is not None:
+            _collect_leaves(operating_point, leaves, seen)
+    else:
+        leaves = _grid_param_leaves(
+            grid, param_overrides, None, operating_point, branch_states
+        )
     if device is None:
-        device = leaves[0].device if leaves else torch.device("cpu")
+        device = (
+            system.y_eff.device
+            if system is not None
+            else (leaves[0].device if leaves else torch.device("cpu"))
+        )
 
     # Slack rows are constant indices; the reference VOLTAGE is recomputed fresh
     # from the (possibly tensor) u_ref/u_angle on every residual eval so the
     # graph is not reused across gradcheck's multiple backward passes.
+    if system is not None and (
+        system.slack != slack
+        or system.index.size != n
+        or system.y_eff.dtype != cdt
+        or system.y_eff.device != device
+    ):
+        raise InputError(
+            "The provided PowerFlowSystem does not match this solve "
+            f"(system: slack={system.slack!r}, N={system.index.size}, "
+            f"dtype={system.y_eff.dtype}, device={system.y_eff.device}; solve: "
+            f"slack={slack!r}, N={n}, dtype={cdt}, device={device}). Prepare it "
+            "with the same grid and arguments."
+        )
+
     def v_fixed_fn():
         if slack != "ideal":
             return None
         _, vf = _slack_rows_and_vref(grid, index, rdt, cdt, device)
         return vf
 
-    fixed_rows = (
-        _slack_rows_and_vref(grid, index, rdt, cdt, device)[0]
-        if slack == "ideal"
-        else None
-    )
-    v_fixed = v_fixed_fn()
+    if system is not None:
+        fixed_rows, v_fixed = system.fixed_rows, system.v_fixed
+    else:
+        fixed_rows = (
+            _slack_rows_and_vref(grid, index, rdt, cdt, device)[0]
+            if slack == "ideal"
+            else None
+        )
+        v_fixed = v_fixed_fn()
     # NOTE: v_fixed is derived exclusively from the grid's source fields
     # (u_ref/u_angle), whose leaves the grid walk above already collected —
     # no second leaf walk is needed.
@@ -1072,6 +1207,7 @@ def solve_power_flow(
             tol,
             max_iter,
             factor_backend,
+            system,
         )
 
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
@@ -1150,6 +1286,7 @@ def _current_injection_forward(
     tol,
     max_iter,
     factor_backend="auto",
+    system=None,
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
@@ -1164,7 +1301,10 @@ def _current_injection_forward(
     the dtype's resolvable relative precision (0 for float64; ~1e-6 for float32).
     """
     with torch.no_grad():
-        y_eff0, i_slack0 = build_system()
+        if system is not None:
+            y_eff0, i_slack0 = system.y_eff, system.i_slack
+        else:
+            y_eff0, i_slack0 = build_system()
         lead = torch.broadcast_shapes(i_slack0.shape[:-1], y_eff0.shape[:-2])
         # Phase-aware balanced warm start: the source reference magnitude rotated by
         # the standard positive-sequence angle of each row's phase (a=0, b=-120,
@@ -1231,7 +1371,11 @@ def _current_injection_forward(
         # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
         # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
-        fac = lu_factor_system(y_eff0, fixed_rows=fixed_rows, backend=factor_backend)
+        fac = (
+            system.factorization
+            if system is not None
+            else lu_factor_system(y_eff0, fixed_rows=fixed_rows, backend=factor_backend)
+        )
         for _ in range(max_iter):
             i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
@@ -2394,6 +2538,8 @@ def _nose_criticality(
 
 __all__ = [
     "check_connectivity",
+    "prepare_power_flow",
+    "PowerFlowSystem",
     "solve_power_flow",
     "PowerFlowResult",
     "ConvergenceDiagnostics",

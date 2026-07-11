@@ -46,13 +46,16 @@ from .power_flow import (
     ConvergenceDiagnostics,
     LoadabilityResult,
     PowerFlowResult,
+    PowerFlowSystem,
     check_connectivity,
     loadability_limit,
+    prepare_power_flow,
     solve_power_flow,
 )
 
 # Canonical __module__ for public re-exports (avoids autodoc duplicate warnings).
 PowerFlowResult.__module__ = __name__
+PowerFlowSystem.__module__ = __name__
 ConvergenceDiagnostics.__module__ = __name__
 LoadabilityResult.__module__ = __name__
 HarmonicFlowResult.__module__ = __name__
@@ -60,6 +63,8 @@ NodeHarmonicSource.__module__ = __name__
 
 __all__ = [
     "check_connectivity",
+    "prepare_power_flow",
+    "PowerFlowSystem",
     "solve_harmonic",
     "solve_power_flow",
     "PowerFlowResult",

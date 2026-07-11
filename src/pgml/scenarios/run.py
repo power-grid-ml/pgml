@@ -17,7 +17,7 @@ from torch import Tensor
 from pgml.assembly import NodePhaseIndex
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
-from pgml.solver import solve_harmonic_flow, solve_power_flow
+from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
 from .config import (
     CartesianConfig,
@@ -164,6 +164,15 @@ def run_scenarios(
     if calculation == "harmonic" and not harmonic_orders:
         raise InputError("calculation='harmonic' requires harmonic_orders.")
 
+    # The network side (assembly + slack + factorization) is operating-point
+    # independent: prepare it ONCE and reuse it across every chunk. The harmonic
+    # path assembles per order inside solve_harmonic_flow and keeps its own flow.
+    system = (
+        prepare_power_flow(grid, slack=slack, dtype=dtype, device=device)
+        if calculation == "power_flow"
+        else None
+    )
+
     def _solve(op, inj):
         """Solve one (sub)batch -> (v, index, converged, failed_states, frequencies)."""
         if calculation == "power_flow":
@@ -174,6 +183,7 @@ def run_scenarios(
                 symmetry=symmetry,
                 dtype=dtype,
                 device=device,
+                system=system,
             )
             return r.v, r.index, r.converged, r.failed_states, None
         if calculation == "harmonic":
