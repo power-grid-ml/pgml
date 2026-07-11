@@ -1,16 +1,21 @@
-"""Reference grid builders: pandapower -> pgml Grid with optional geometry and spectra.
+"""Reference grid builders: benchmark networks and synthetic feeders as pgml Grids.
 
-Each function converts a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
+Most functions convert a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
 pandapower into a pgml :class:`~pgml.schemas.grid_schema.Grid`.  These are the
 suite's canonical INPUT grids — training-data generation, examples, and the oracle
 comparison tests all build on them — so they live in the core package rather than
-the evaluation oracles.
+the evaluation oracles.  :func:`synthetic_feeder` additionally builds a
+parameterizable radial MV feeder of ANY size directly on the schema (no external
+dependency) — the scaling knob for solver benchmarks and topology studies.
 
-Importing this module requires ``pandapower`` (optional dependency).  All pandapower
-imports are deferred to function scope except for ``numpy``, which is a core dependency.
+The pandapower-backed builders require ``pandapower`` (optional dependency); its
+imports are deferred to function scope, so importing this module (and using
+:func:`synthetic_feeder`) works without it.
 """
 
 from __future__ import annotations
+
+import math
 
 from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
 
@@ -194,6 +199,118 @@ def add_pv_systems(grid, *, fraction: float = 0.5) -> int:
     return added
 
 
+def synthetic_feeder(
+    n_nodes: int,
+    *,
+    n_feeders: int = 8,
+    segment_m: float = 200.0,
+    total_load_w: float = 5.0e6,
+    power_factor: float = 0.95,
+    u_rated_v: float = 20.0e3,
+    base_frequency_hz: float = 50.0,
+    tie_switches: int = 0,
+):
+    """A synthetic 3-phase radial MV feeder of arbitrary size (schema-only, no deps).
+
+    Node 0 is the station bus holding the :class:`~pgml.schemas.grid_schema.Source`
+    (Thevenin ~250 MVA short-circuit strength); the remaining ``n_nodes - 1`` nodes
+    are distributed over ``n_feeders`` radial chains of explicit-R/L/C lines
+    (typical 20 kV overhead-line constants), each non-station node carrying an equal
+    share of ``total_load_w`` as a constant-power WYE load at the given
+    ``power_factor``. The result converges under the current-injection fixed point
+    across sizes (light per-node loading by construction) and its node-phase system
+    has ``3 * n_nodes`` rows — the scaling knob for solver benchmarks.
+
+    ``tie_switches`` adds that many NORMALLY-OPEN tie switches between the far ends
+    of adjacent feeders (ids ``30000 + k``) — closed/open combinations of these are
+    the canonical switch-state batching study. They are open by default so the base
+    grid stays radial and fully energized.
+
+    Sizes below ``1 + n_feeders`` shrink the feeder count to ``n_nodes - 1``.
+    """
+    from pgml.schemas.grid_schema import Grid, Line, Load, Node, Phase, Source, Switch
+
+    if n_nodes < 2:
+        raise ValueError("synthetic_feeder needs at least 2 nodes (station + 1).")
+    abc = (Phase.A, Phase.B, Phase.C)
+    n_feeders = max(1, min(n_feeders, n_nodes - 1))
+
+    nodes = [Node(id=i, u_rated_v=u_rated_v, phases=abc) for i in range(n_nodes)]
+
+    # Typical 20 kV overhead line constants (per meter), mutually coupled 3x3.
+    r = [[0.3e-3 if i == j else 0.05e-3 for j in range(3)] for i in range(3)]
+    ell = [[1.15e-6 if i == j else 0.4e-6 for j in range(3)] for i in range(3)]
+    c = [[1.0e-11 if i == j else -2.0e-12 for j in range(3)] for i in range(3)]
+
+    # Assign node i (i >= 1) to feeder (i-1) % n_feeders; chain order by index.
+    heads = [0] * n_feeders  # current end node of each feeder chain
+    tails: list[int] = []
+    branches = []
+    for i in range(1, n_nodes):
+        f = (i - 1) % n_feeders
+        branches.append(
+            Line(
+                id=10000 + i,
+                from_node=heads[f],
+                to_node=i,
+                from_phases=abc,
+                to_phases=abc,
+                length_m=segment_m,
+                series_resistance_ohm_per_m=r,
+                series_inductance_h_per_m=ell,
+                shunt_capacitance_f_per_m=c,
+            )
+        )
+        heads[f] = i
+    tails = heads
+
+    for k in range(min(tie_switches, n_feeders - 1)):
+        branches.append(
+            Switch(
+                id=30000 + k,
+                from_node=tails[k],
+                to_node=tails[k + 1],
+                from_phases=abc,
+                to_phases=abc,
+                closed=False,
+                resistance_ohm=1.0e-3,
+            )
+        )
+
+    z_diag = [[0.16 if i == j else 0.0 for j in range(3)] for i in range(3)]
+    l_diag = [[5.0e-3 if i == j else 0.0 for j in range(3)] for i in range(3)]
+    u_ln = u_rated_v / math.sqrt(3.0)
+    appliances = [
+        Source(
+            id=1,
+            node=0,
+            phases=abc,
+            u_ref_v=(u_ln, u_ln, u_ln),
+            u_angle_deg=(0.0, -120.0, 120.0),
+            resistance_ohm=z_diag,
+            inductance_h=l_diag,
+        )
+    ]
+    p_node = total_load_w / (n_nodes - 1)
+    q_node = p_node * math.tan(math.acos(power_factor))
+    for i in range(1, n_nodes):
+        appliances.append(
+            Load(
+                id=20000 + i,
+                node=i,
+                phases=abc,
+                p_nom_w=p_node,
+                q_nom_var=q_node,
+            )
+        )
+    return Grid(
+        base_frequency_hz=base_frequency_hz,
+        nodes=nodes,
+        branches=branches,
+        appliances=appliances,
+    )
+
+
 def se_benchmark_scenario_config(grid, *, n_samples: int, seed: int):
     """The canonical randomized state-estimation benchmark sampling recipe.
 
@@ -267,4 +384,5 @@ __all__ = [
     "cigre_lv_geometry_grid",
     "add_pv_systems",
     "se_benchmark_scenario_config",
+    "synthetic_feeder",
 ]

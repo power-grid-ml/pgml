@@ -430,6 +430,26 @@ def _slack_rows_and_vref(
 # ---------------------------------------------------------------------------
 # system builders (used by both the forward fixed point and the IFT backward)
 # ---------------------------------------------------------------------------
+def _apply_y(y_eff: Tensor, v: Tensor) -> Tensor:
+    """``Y @ V`` over the scenario batch, reading a SHARED ``Y`` exactly once.
+
+    When every leading dim of ``y_eff`` is singleton (one network shared by the
+    whole batch — the usual case), a broadcast ``matmul`` against ``[..., N, 1]``
+    columns degenerates into ``B`` separate matrix-vector products that re-read the
+    ``N×N`` matrix per scenario (memory-bandwidth-bound: dominant at large ``N``).
+    Folding the batch into the rows of ONE ``[B, N] @ [N, N]`` GEMM reads the
+    matrix once. A genuinely batched ``y_eff`` (per-scenario topology) keeps the
+    batched matmul — each scenario owns its matrix there. Differentiable in both.
+    """
+    n = y_eff.shape[-1]
+    if y_eff.reshape(-1, n, n).shape[0] == 1:
+        lead = torch.broadcast_shapes(v.shape[:-1], y_eff.shape[:-2])
+        v_b = v.broadcast_to(*lead, n)
+        yv = torch.matmul(v_b.reshape(-1, n), y_eff.reshape(n, n).mT)
+        return yv.reshape(*lead, n)
+    return torch.matmul(y_eff, v.unsqueeze(-1)).squeeze(-1)
+
+
 def _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides):
     """Effective admittance ``Y_eff`` ``[1,N,N]`` and slack current ``[1,N]`` or ``[N]``.
 
@@ -472,7 +492,7 @@ def solve_power_flow(
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
     criticality: str = "auto",
-    linear_solver: str = "dense",
+    linear_solver: str = "auto",
     on_disconnected: str = "raise",
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
@@ -516,10 +536,21 @@ def solve_power_flow(
         also on a converged solve (a voltage-collapse MARGIN naming the weakest bus);
         ``"never"`` to skip it.
     linear_solver:
-        Inner linear solve for ``method="newton"``: ``"dense"`` (default, the explicit
-        ``[2N, 2N]`` Jacobian + direct solve) or ``"matrix_free"`` (Jacobian-free
-        Newton-Krylov — GMRES on finite-difference Jacobian-vector products, ``O(N)``
-        memory for large grids). Ignored by ``method="current_injection"``.
+        The inner linear-solve backend.
+
+        For ``method="current_injection"`` this selects the factorization of the
+        constant ``Y_eff`` (:func:`pgml.solver.harmonic.lu_factor_system`):
+        ``"auto"`` (default) uses the scipy SuperLU SPARSE factorization on CPU
+        systems of ≥ ~500 rows — a power-grid ``Y`` has O(N) nonzeros, so sparse is
+        ~O(N) where dense LU is O(N³) — and the batched dense torch LU everywhere
+        else (CUDA is always dense); ``"dense"`` / ``"sparse"`` force the choice
+        (``"matrix_free"`` is treated as ``"auto"`` here).
+
+        For ``method="newton"``: ``"dense"`` (the explicit ``[2N, 2N]`` Jacobian +
+        direct solve; ``"auto"`` resolves to this) or ``"matrix_free"``
+        (Jacobian-free Newton-Krylov — GMRES on finite-difference Jacobian-vector
+        products, ``O(N)`` memory for large grids). ``"sparse"`` raises — Newton's
+        Jacobian is built dense.
     on_disconnected:
         What to do when the pre-solve connectivity check finds (node, phase) rows
         with no galvanic path to an in-service source (an open switch or
@@ -553,10 +584,21 @@ def solve_power_flow(
         raise InputError(
             f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
         )
-    if linear_solver not in ("dense", "matrix_free"):
+    if linear_solver not in ("auto", "dense", "sparse", "matrix_free"):
         raise InputError(
-            f"Unsupported linear_solver {linear_solver!r} (use 'dense'/'matrix_free')."
+            f"Unsupported linear_solver {linear_solver!r} "
+            "(use 'auto'/'dense'/'sparse'/'matrix_free')."
         )
+    if method == "newton" and linear_solver == "sparse":
+        raise InputError(
+            "method='newton' supports linear_solver 'auto'/'dense'/'matrix_free' "
+            "(its Jacobian is built dense); 'sparse' selects the fixed-point "
+            "factorization backend of method='current_injection'."
+        )
+    # Newton's inner solve: 'auto' resolves to the proven dense Jacobian path.
+    newton_solver = "dense" if linear_solver == "auto" else linear_solver
+    # Fixed-point factorization backend: 'matrix_free' has no meaning there.
+    factor_backend = linear_solver if linear_solver in ("dense", "sparse") else "auto"
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -658,8 +700,7 @@ def solve_power_flow(
                 param_overrides=param_overrides,
                 symmetry=sym_resolved,
             ).squeeze(-2)  # [*b, N]
-            yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
-            return yv + i_dev - i_slack
+            return _apply_y(y_eff, v_cmplx) + i_dev - i_slack
 
         return residual_complex
 
@@ -687,8 +728,7 @@ def solve_power_flow(
 
         def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
             i_dev = injections_from_plan(plan, v_cmplx).squeeze(-2)  # [*b, N]
-            yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
-            return yv + i_dev - i_slack
+            return _apply_y(y_eff, v_cmplx) + i_dev - i_slack
 
         residual_complex.plan = plan
         return residual_complex
@@ -768,7 +808,7 @@ def solve_power_flow(
                 cdt,
                 tol,
                 max_iter,
-                linear_solver,
+                newton_solver,
             )
         else:
             v_init = _linear_const_z_init(
@@ -794,7 +834,7 @@ def solve_power_flow(
                 converged_mask,
                 residual_vec,
             ) = _newton_forward(
-                real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver
+                real_res, v_init, n, rdt, cdt, device, tol, max_iter, newton_solver
             )
     else:
         (
@@ -820,6 +860,7 @@ def solve_power_flow(
             device,
             tol,
             max_iter,
+            factor_backend,
         )
 
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
@@ -897,6 +938,7 @@ def _current_injection_forward(
     device,
     tol,
     max_iter,
+    factor_backend="auto",
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
@@ -978,7 +1020,7 @@ def _current_injection_forward(
         # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
         # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
-        fac = lu_factor_system(y_eff0, fixed_rows=fixed_rows)
+        fac = lu_factor_system(y_eff0, fixed_rows=fixed_rows, backend=factor_backend)
         for _ in range(max_iter):
             i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
@@ -1955,8 +1997,7 @@ def loadability_limit(
     def make_real_res(lam: float):
         def rc(v: Tensor, y: Tensor, islack: Tensor) -> Tensor:
             i_dev = injections_from_plan(plan, v).squeeze(-2)
-            yv = torch.matmul(y, v.unsqueeze(-1)).squeeze(-1)
-            return yv + lam * i_dev - islack
+            return _apply_y(y, v) + lam * i_dev - islack
 
         return _make_real_residual(build_system, rc, fixed_rows, v_fixed_fn, n, cdt)
 
