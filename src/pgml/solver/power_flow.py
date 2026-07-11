@@ -260,12 +260,17 @@ def _tensor_leaves(t: Tensor, out: list, seen: set) -> None:
     if grad_fn is None:
         return
     stack = [grad_fn]
-    fn_seen: set = set()
+    # Dedup by id while holding a STRONG reference to every visited node: the
+    # Python wrappers yielded by ``next_functions`` are transient, so a freed
+    # wrapper's address can be reused by a not-yet-visited node -- an id-only
+    # set would then skip it and silently drop the leaves behind it (deep
+    # graphs, e.g. a neural network driving an operating point).
+    fn_seen: dict = {}
     while stack:
         fn = stack.pop()
         if id(fn) in fn_seen:
             continue
-        fn_seen.add(id(fn))
+        fn_seen[id(fn)] = fn
         var = getattr(fn, "variable", None)  # AccumulateGrad -> the leaf tensor
         if var is not None:
             if var.requires_grad and id(var) not in seen:
@@ -302,13 +307,20 @@ def _collect_leaves(obj, out: list, seen: set) -> None:
 
 
 def _grid_param_leaves(
-    grid: Grid, param_overrides: Optional[dict], v_fixed: Optional[Tensor]
+    grid: Grid,
+    param_overrides: Optional[dict],
+    v_fixed: Optional[Tensor],
+    operating_point: Optional[dict] = None,
 ) -> list[Tensor]:
     """All distinct autograd leaves the residual depends on (deterministic order).
 
     Physical fields may be plain leaves or derived expressions (float/tensor duality);
     both are resolved to their true leaves (see :func:`_tensor_leaves`), so a single leaf
     feeding several fields is captured exactly once and its gradient is not double counted.
+    ``operating_point`` entries (per-appliance ``p_w``/``q_var``, possibly batched)
+    enter the residual exactly like grid fields, so their leaves are collected too: a
+    differentiable operating point — e.g. the output of a neural network — receives
+    gradients through the IFT backward.
     """
     out: list[Tensor] = []
     seen: set = set()
@@ -321,6 +333,8 @@ def _grid_param_leaves(
     if param_overrides is not None:
         for val in param_overrides.values():
             _collect_leaves(val, out, seen)
+    if operating_point is not None:
+        _collect_leaves(operating_point, out, seen)
     if v_fixed is not None and isinstance(v_fixed, Tensor) and v_fixed.requires_grad:
         _tensor_leaves(v_fixed, out, seen)
     return out
@@ -488,7 +502,7 @@ def solve_power_flow(
     log_modeling_summary(grid, asymmetric=asymmetric)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
-    leaves = _grid_param_leaves(grid, param_overrides, None)
+    leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
     if device is None:
         device = leaves[0].device if leaves else torch.device("cpu")
 
@@ -508,7 +522,7 @@ def solve_power_flow(
     )
     v_fixed = v_fixed_fn()
     # v_fixed may be / contain a differentiable leaf (u_ref/u_angle as tensors).
-    leaves = _grid_param_leaves(grid, param_overrides, v_fixed)
+    leaves = _grid_param_leaves(grid, param_overrides, v_fixed, operating_point)
 
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
@@ -1755,7 +1769,7 @@ def loadability_limit(
     f0 = float(grid.base_frequency_hz)
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
-    leaves = _grid_param_leaves(grid, param_overrides, None)
+    leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
     if device is None:
         device = leaves[0].device if leaves else torch.device("cpu")
 

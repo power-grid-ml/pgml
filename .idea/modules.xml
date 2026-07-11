@@ -2,7 +2,11 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/../gridhub/.idea/gridhub.iml" filepath="$PROJECT_DIR$/../gridhub/.idea/gridhub.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../pq_measurement_placement/.idea/measurement_placement.iml" filepath="$PROJECT_DIR$/../pq_measurement_placement/.idea/measurement_placement.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../opendss-wrapper/.idea/opendss-wrapper.iml" filepath="$PROJECT_DIR$/../opendss-wrapper/.idea/opendss-wrapper.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/power-grid-ml.iml" filepath="$PROJECT_DIR$/.idea/power-grid-ml.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../pq-data/.idea/pq-data.iml" filepath="$PROJECT_DIR$/../pq-data/.idea/pq-data.iml" />
     </modules>
   </component>
 </project>
