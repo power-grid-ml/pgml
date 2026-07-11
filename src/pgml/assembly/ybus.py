@@ -142,6 +142,60 @@ def _stack_or_empty(mats: list[Tensor], p: int, rdt: torch.dtype, device) -> Ten
 
 
 # ---------------------------------------------------------------------------
+# branch-state masking (topology / switch-state batching)
+# ---------------------------------------------------------------------------
+def _branch_active(b, branch_states: Optional[dict]) -> bool:
+    """Stamp this branch? ``branch_states`` OVERRIDES the static flags.
+
+    A branch listed in ``branch_states`` is ALWAYS stamped — its (possibly
+    batched, possibly zero) state scales the primitive block, so "open" is the
+    state value 0, not an omitted stamp. Unlisted branches keep the static
+    semantics: in service, and (for a :class:`Switch`) closed.
+    """
+    if branch_states and b.id in branch_states:
+        return True
+    if not b.in_service:
+        return False
+    if isinstance(b, Switch) and not b.closed:
+        return False
+    return True
+
+
+def _group_states(
+    group, branch_states: Optional[dict], rdt: torch.dtype, device
+) -> Optional[Tensor]:
+    """Per-branch state factors ``[*batch, K]`` for a stamp group (``None`` = all 1).
+
+    Each listed branch contributes its state (float, 0-d, or ``[*batch]`` scenario
+    tensor); unlisted group members contribute the neutral 1.0. Entries broadcast
+    to a common leading batch before stacking, so one batched switch promotes the
+    whole group (and thus ``Y``) to scenario-batched. Tensor states keep their
+    autograd graph — a continuous state in ``[0, 1]`` is a differentiable
+    topology parameter.
+    """
+    if not branch_states or not any(b.id in branch_states for b in group):
+        return None
+    vals = []
+    for b in group:
+        v = branch_states.get(b.id, 1.0)
+        vt = (
+            v.to(dtype=rdt, device=device)
+            if isinstance(v, Tensor)
+            else torch.as_tensor(float(v), dtype=rdt, device=device)
+        )
+        vals.append(vt)
+    lead = torch.broadcast_shapes(*[t.shape for t in vals])
+    return torch.stack([t.broadcast_to(lead) for t in vals], dim=-1)  # [*lead, K]
+
+
+def _masked_block(block: Tensor, state: Optional[Tensor]) -> Tensor:
+    """Scale a primitive block ``[H, K, M, M]`` by per-branch states ``[*b, K]``."""
+    if state is None:
+        return block
+    return block * state[..., None, :, None, None].to(block.dtype)
+
+
+# ---------------------------------------------------------------------------
 # Branch-stamp registry (THE extension point for branch / device models)
 # ---------------------------------------------------------------------------
 # A "light" registry: one ordered list of the branch KINDS the assembler knows,
@@ -152,7 +206,8 @@ def _stack_or_empty(mats: list[Tensor], p: int, rdt: torch.dtype, device) -> Ten
 # one-line registration, not an edit to either dispatch path.
 #
 # A builder is a generator with the uniform signature
-# ``builder(grid, f, index, cdt, rdt, device, param_overrides)`` that YIELDS
+# ``builder(grid, f, index, cdt, rdt, device, param_overrides, branch_states)``
+# that YIELDS
 # ``(group, block, rows, cols)``: ``group`` is the list of source branches, ``block``
 # is the primitive admittance ``[H, K, M, M]`` (``M = 2P`` for a two-terminal series
 # branch, ``M = P`` for a single-terminal shunt), and ``rows == cols`` are the global
@@ -204,6 +259,7 @@ def assemble_ybus(
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
+    branch_states: Optional[dict] = None,
 ) -> YBus:
     """Assemble the LINEAR (const-Z) complex nodal admittance ``Y(f)``.
 
@@ -240,12 +296,21 @@ def assemble_ybus(
         ``"asymmetric"`` (``None`` -> config ``calculation.symmetry``). Resolved ONCE
         via :func:`resolve_asymmetric`: ``True`` honors per-phase data, ``False``
         splits each total equally over the phases (ignoring per-phase data).
+    branch_states:
+        Optional topology / switch-state mask ``{branch_id: state}``. A listed
+        branch is ALWAYS stamped (overriding ``in_service`` / ``closed``) and its
+        primitive block is multiplied by the state — a python float, a 0-d tensor,
+        or a ``[*batch]`` scenario tensor in ``[0, 1]`` (0 = open, 1 = in service;
+        intermediate values scale the admittance continuously and stay
+        differentiable). A batched state promotes ``Y`` to ``[*batch, H, N, N]``,
+        so one assembly covers a whole batch of switch configurations.
 
     Returns
     -------
     YBus
         ``Y`` complex ``[H, N, N]`` (``[N, N]`` if ``H == 1`` and a scalar
-        frequency was passed), the :class:`NodePhaseIndex`, and the frequencies.
+        frequency was passed; ``[*batch, H, N, N]`` with batched
+        ``branch_states``), the :class:`NodePhaseIndex`, and the frequencies.
     """
     if device is None and isinstance(frequencies_hz, Tensor):
         device = frequencies_hz.device
@@ -267,7 +332,9 @@ def assemble_ybus(
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
 
     # Passive network (shared with assemble_network_ybus).
-    y = _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_network(
+        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states
+    )
     # Linear-model device folding: source Norton + const-Z loads/gens.
     y = _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides)
     y = _stamp_const_z_loads(
@@ -288,7 +355,7 @@ def assemble_ybus(
         and not isinstance(frequencies_hz, (list, tuple))
         and h == 1
     )
-    if scalar_freq:
+    if scalar_freq and y.ndim == 3:
         y = y.reshape(n, n)
     return YBus(Y=y, index=index, frequencies_hz=f)
 
@@ -300,6 +367,7 @@ def assemble_network_ybus(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
+    branch_states: Optional[dict] = None,
 ) -> YBus:
     """Assemble the PASSIVE-NETWORK nodal admittance ``Y_net(f)``.
 
@@ -316,14 +384,15 @@ def assemble_network_ybus(
 
     Parameters
     ----------
-    grid, frequencies_hz, dtype, device, param_overrides:
+    grid, frequencies_hz, dtype, device, param_overrides, branch_states:
         Identical meaning to :func:`assemble_ybus` (no ``operating_point`` — there
-        is no device folding here).
+        is no device folding here). ``branch_states`` masks/batches branch stamps.
 
     Returns
     -------
     YBus
-        ``Y`` complex ``[H, N, N]`` (``[N, N]`` for a scalar frequency), the
+        ``Y`` complex ``[H, N, N]`` (``[N, N]`` for a scalar frequency;
+        ``[*batch, H, N, N]`` with batched ``branch_states``), the
         :class:`NodePhaseIndex`, and the frequencies.
     """
     if device is None and isinstance(frequencies_hz, Tensor):
@@ -338,19 +407,23 @@ def assemble_network_ybus(
     n = index.size
 
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
-    y = _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides)
+    y = _stamp_network(
+        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states
+    )
 
     scalar_freq = (
         not isinstance(frequencies_hz, Tensor)
         and not isinstance(frequencies_hz, (list, tuple))
         and h == 1
     )
-    if scalar_freq:
+    if scalar_freq and y.ndim == 3:
         y = y.reshape(n, n)
     return YBus(Y=y, index=index, frequencies_hz=f)
 
 
-def _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides):
+def _stamp_network(
+    grid, f, y, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     """Accumulate every PASSIVE contribution into ``y`` (shared assembler core).
 
     Iterates the branch-stamp registry (:data:`_BRANCH_STAMPS`) — lines, switches,
@@ -359,11 +432,18 @@ def _stamp_network(grid, f, y, index, cdt, rdt, device, param_overrides):
     appliance, not a branch, so outside the registry). NO source Norton, NO
     load/generator folding. Because scatter-add is order-independent, the resulting
     ``y`` is identical regardless of the registration order.
+
+    ``branch_states`` scales each listed branch's primitive block by its state
+    (:func:`_group_states`) before scattering; a batched state promotes ``y`` to
+    ``[*batch, H, N, N]`` through the scatter's broadcast.
     """
     for stamp in _BRANCH_STAMPS:
-        for _group, block, rows, cols in stamp.builder(
-            grid, f, index, cdt, rdt, device, param_overrides
+        for group, block, rows, cols in stamp.builder(
+            grid, f, index, cdt, rdt, device, param_overrides, branch_states
         ):
+            block = _masked_block(
+                block, _group_states(group, branch_states, rdt, device)
+            )
             y = scatter_blocks_into(y, block, rows, cols)
     y = _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides)
     return y
@@ -394,7 +474,9 @@ def _is_sequence_aware(line) -> bool:
 
 
 @_branch_stamp("line")
-def _line_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+def _line_block_groups(
+    grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     """Yield ``(group, block, rows, cols)`` for every line group (all three paths).
 
     Explicit-R/L/C lines go through the matrix path; lines carrying a
@@ -411,7 +493,9 @@ def _line_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
     flow_lines = [
         b
         for b in grid.branches
-        if isinstance(b, Line) and b.in_service and b.conductor_geometry is None
+        if isinstance(b, Line)
+        and _branch_active(b, branch_states)
+        and b.conductor_geometry is None
     ]
     rx_lines = [b for b in flow_lines if not _is_sequence_aware(b)]
     seq_lines = [b for b in flow_lines if _is_sequence_aware(b)]
@@ -423,7 +507,9 @@ def _line_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
         yield from _sequence_aware_block_groups(
             seq_lines, grid, f, index, cdt, rdt, device, param_overrides
         )
-    yield from _geometry_block_groups(grid, f, index, cdt, rdt, device, param_overrides)
+    yield from _geometry_block_groups(
+        grid, f, index, cdt, rdt, device, param_overrides, branch_states
+    )
 
 
 def _sequence_aware_block_groups(
@@ -549,12 +635,16 @@ def _geom_conductor_arrays(ln, rdt, device):
     return x, y, gmr, rdc, rad
 
 
-def _geometry_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+def _geometry_block_groups(
+    grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     """Yield ``(group, block, rows, cols)`` for geometry (Carson/Deri) lines."""
     glines = [
         b
         for b in grid.branches
-        if isinstance(b, Line) and b.in_service and b.conductor_geometry is not None
+        if isinstance(b, Line)
+        and _branch_active(b, branch_states)
+        and b.conductor_geometry is not None
     ]
     if not glines:
         return
@@ -729,9 +819,13 @@ def _interp1d_constant_edges(xq: Tensor, xp: Tensor, fp: Tensor) -> Tensor:
 
 
 @_branch_stamp("switch")
-def _switch_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+def _switch_block_groups(
+    grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     switches = [
-        b for b in grid.branches if isinstance(b, Switch) and b.in_service and b.closed
+        b
+        for b in grid.branches
+        if isinstance(b, Switch) and _branch_active(b, branch_states)
     ]
     if not switches:
         return
@@ -782,9 +876,13 @@ def _switch_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
 
 
 @_branch_stamp("generic_branch")
-def _generic_branch_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+def _generic_branch_block_groups(
+    grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     branches = [
-        b for b in grid.branches if isinstance(b, GenericBranch) and b.in_service
+        b
+        for b in grid.branches
+        if isinstance(b, GenericBranch) and _branch_active(b, branch_states)
     ]
     if not branches:
         return
@@ -855,9 +953,13 @@ def _shunt_node_indices(elements, index, device, *, terminal: str = "from"):
 
 
 @_branch_stamp("shunt_reactor", single_terminal=True)
-def _shunt_reactor_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+def _shunt_reactor_block_groups(
+    grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     reactors = [
-        b for b in grid.branches if isinstance(b, ShuntReactor) and b.in_service
+        b
+        for b in grid.branches
+        if isinstance(b, ShuntReactor) and _branch_active(b, branch_states)
     ]
     if not reactors:
         return
@@ -993,7 +1095,9 @@ def _stamp_const_z_loads(
 
 # ---- transformer (vector-group winding-incidence primitive) ---------------
 @_branch_stamp("transformer")
-def _transformer_block_groups(grid, f, index, cdt, rdt, device, param_overrides):
+def _transformer_block_groups(
+    grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
+):
     """Yield ``(group, block, rows, cols)`` for every transformer group.
 
     Two-winding transformer primitive: vector-group winding-incidence block. The
@@ -1019,7 +1123,11 @@ def _transformer_block_groups(grid, f, index, cdt, rdt, device, param_overrides)
     block is the full ``[H, K, 2P, 2P]`` vector-group winding-incidence primitive
     plus the magnetizing shunt on the HV diagonal.
     """
-    xfmrs = [b for b in grid.branches if isinstance(b, Transformer) and b.in_service]
+    xfmrs = [
+        b
+        for b in grid.branches
+        if isinstance(b, Transformer) and _branch_active(b, branch_states)
+    ]
     if not xfmrs:
         return
     # Group transformers sharing one incidence N (same connection pair, clock, P).
@@ -1180,8 +1288,9 @@ def _terminal_currents_from_block(v: Tensor, block: Tensor, rows: Tensor) -> Ten
     flat_rows = rows.reshape(-1)  # [K*M]
     v_term = v.index_select(-1, flat_rows)  # [*batch, H, K*M]
     v_term = v_term.reshape(*v.shape[:-1], k, m)  # [*batch, H, K, M]
-    # I_term[..., k, i] = sum_j block[H, k, i, j] V_term[..., H, k, j].
-    return torch.einsum("hkij,...hkj->...hki", block, v_term)
+    # I_term[..., k, i] = sum_j block[..., H, k, i, j] V_term[..., H, k, j]
+    # (the block may carry leading scenario dims from batched branch states).
+    return torch.einsum("...hkij,...hkj->...hki", block, v_term)
 
 
 def branch_currents(
@@ -1193,6 +1302,7 @@ def branch_currents(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
+    branch_states: Optional[dict] = None,
 ) -> list[BranchCurrent]:
     """Per-branch terminal currents from solved node voltages.
 
@@ -1234,6 +1344,12 @@ def branch_currents(
         Optional differentiability hook (see :func:`assemble_ybus`): the same
         ``(kind, id, field) -> leaf tensor`` keys the stamps use, so gradients can
         flow to physical params without mutating the schema.
+    branch_states:
+        Optional topology / switch-state mask ``{branch_id: state}`` — MUST match
+        the value the voltages were solved with (:func:`assemble_ybus`): each
+        listed branch's primitive block is scaled by its state, so an open
+        (state 0) branch reports zero current and a batched state yields
+        per-scenario currents.
 
     Returns
     -------
@@ -1269,8 +1385,11 @@ def branch_currents(
 
     for stamp in _BRANCH_STAMPS:
         for group, block, rows, _cols in stamp.builder(
-            grid, f, index, cdt, rdt, device, param_overrides
+            grid, f, index, cdt, rdt, device, param_overrides, branch_states
         ):
+            block = _masked_block(
+                block, _group_states(group, branch_states, rdt, device)
+            )
             i_term = _terminal_currents_from_block(v, block, rows)  # [*b,H,K,M]
             if stamp.single_terminal:
                 # One-terminal shunt: the whole block is the FROM current; no TO half.
@@ -1300,8 +1419,9 @@ def branch_currents(
                     i_to=i_to[..., k, :],
                 )
 
-    # Emit in grid.branches order over the in-service BranchBase branches.
-    return [results[b.id] for b in grid.branches if b.in_service and b.id in results]
+    # Emit in grid.branches order over the stamped BranchBase branches (every
+    # in-service branch, plus any branch listed in ``branch_states``).
+    return [results[b.id] for b in grid.branches if b.id in results]
 
 
 # ---------------------------------------------------------------------------

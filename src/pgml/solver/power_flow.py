@@ -148,6 +148,152 @@ def check_connectivity(grid: Grid) -> None:
         )
 
 
+def _branch_states_batched(branch_states: Optional[dict]) -> bool:
+    """``True`` iff any state carries a leading scenario dim."""
+    return bool(branch_states) and any(
+        isinstance(v, Tensor) and v.ndim >= 1 and v.numel() > 1
+        for v in branch_states.values()
+    )
+
+
+def _check_connectivity_with_states(grid: Grid, branch_states: dict) -> None:
+    """Per-scenario connectivity for masked branch states (raises on any dead row).
+
+    The static grid is condensed once: rows are merged over every conducting
+    branch NOT listed in ``branch_states`` (union-find, as in
+    :func:`pgml.topology.connectivity_report`), giving ``C`` static components of
+    which some hold a source. Each masked branch is then a component-level edge
+    that conducts where its state is non-zero, so per-scenario energization is a
+    boolean propagation over the tiny condensed graph — vectorized over the whole
+    scenario batch ``[B, C]`` instead of a per-scenario python search.
+    """
+    from pgml.topology import _UnionFind, _branch_rows, _conducting
+
+    uf = _UnionFind()
+    for node in grid.nodes:
+        for ph in node.phases:
+            uf.find((int(node.id), ph))
+    masked_ids = set(branch_states.keys())
+    for b in grid.branches:
+        if int(b.id) in masked_ids or not _conducting(b):
+            continue
+        rows = _branch_rows(b)
+        for r in rows[1:]:
+            uf.union(rows[0], r)
+
+    roots: dict = {}
+    comp_nodes: dict[int, set] = {}
+    for node in grid.nodes:
+        for ph in node.phases:
+            root = uf.find((int(node.id), ph))
+            cid = roots.setdefault(root, len(roots))
+            comp_nodes.setdefault(cid, set()).add(int(node.id))
+    n_comp = len(roots)
+
+    energized0 = torch.zeros(n_comp, dtype=torch.bool)
+    for a in grid.appliances:
+        if isinstance(a, Source) and getattr(a, "in_service", True):
+            for ph in a.phases:
+                energized0[roots[uf.find((int(a.node), ph))]] = True
+
+    # Component-level edges of the masked branches, each carrying its state.
+    edges_u, edges_v, states = [], [], []
+    branch_by_id = {int(b.id): b for b in grid.branches}
+    for bid, sval in branch_states.items():
+        b = branch_by_id.get(int(bid))
+        if b is None:
+            raise InputError(f"branch_states references unknown branch id {bid}.")
+        comps = {roots[uf.find(r)] for r in _branch_rows(b)}
+        comps = sorted(comps)
+        s = (
+            sval.detach().reshape(-1)
+            if isinstance(sval, Tensor)
+            else torch.tensor([float(sval)])
+        )
+        for other in comps[1:]:
+            edges_u.append(comps[0])
+            edges_v.append(other)
+            states.append(s)
+
+    b_size = max((int(s.numel()) for s in states), default=1)
+    energized = energized0.expand(b_size, n_comp).clone()  # [B, C]
+    if edges_u:
+        # A masked branch whose terminals share one static component adds no
+        # edge — the component graph already contains it.
+        active = torch.stack(
+            [(s != 0).expand(b_size).clone() for s in states], dim=-1
+        )  # [B, E]
+        u_idx = torch.tensor(edges_u, dtype=torch.int64)
+        v_idx = torch.tensor(edges_v, dtype=torch.int64)
+        for _ in range(len(edges_u) + 1):
+            e_u = energized.index_select(1, u_idx)  # [B, E]
+            e_v = energized.index_select(1, v_idx)
+            # Boolean OR-accumulate along the component axis (int add + clamp:
+            # duplicate edge targets accumulate, then saturate to a bool).
+            new = energized.to(torch.int32)
+            new.index_add_(1, u_idx, (e_v & active).to(torch.int32))
+            new.index_add_(1, v_idx, (e_u & active).to(torch.int32))
+            new = new.clamp_(max=1).bool()
+            if bool((new == energized).all()):
+                break
+            energized = new
+
+    dead = ~energized  # [B, C]
+    if not bool(dead.any()):
+        return
+    dead_scen = dead.any(dim=1)  # [B]
+    scen_idx = torch.nonzero(dead_scen).reshape(-1).tolist()
+    worst = int(torch.nonzero(dead_scen).reshape(-1)[0])
+    dead_nodes = sorted(
+        {
+            n
+            for c in torch.nonzero(dead[worst]).reshape(-1).tolist()
+            for n in comp_nodes[c]
+        }
+    )
+    shown = ", ".join(str(i) for i in scen_idx[:10])
+    more = "" if len(scen_idx) <= 10 else f", … (+{len(scen_idx) - 10} more)"
+    node_str = ", ".join(str(n) for n in dead_nodes[:12]) + (
+        "" if len(dead_nodes) <= 12 else ", …"
+    )
+    raise ConnectivityError(
+        f"branch_states disconnect part of the grid in {len(scen_idx)} of {b_size} "
+        f"scenario(s) (indices [{shown}{more}]); e.g. scenario {worst} leaves "
+        f"node(s) {node_str} with no path to a source. Keep every scenario's "
+        "non-zero states spanning the grid (a state of exactly 0 opens the "
+        'branch), drop the offending scenarios, or pass on_disconnected="ignore" '
+        "and filter via converged_mask.",
+        unenergized_nodes=tuple(dead_nodes),
+    )
+
+
+def _apply_scalar_states(grid: Grid, branch_states: dict) -> Grid:
+    """A grid copy whose static flags realize UNBATCHED ``branch_states`` (0 = open).
+
+    Used only for the pre-solve connectivity REPORT of a single masked
+    configuration, so the rich :func:`pgml.topology.connectivity_report`
+    diagnostics (islands, reconnect hints) apply unchanged.
+    """
+    conducting = {}
+    for bid, sval in branch_states.items():
+        s = (
+            float(sval.detach().reshape(()).item())
+            if isinstance(sval, Tensor)
+            else float(sval)
+        )
+        conducting[int(bid)] = s != 0.0
+    branches = []
+    for b in grid.branches:
+        if int(b.id) in conducting:
+            on = conducting[int(b.id)]
+            update = {"in_service": on}
+            if hasattr(b, "closed"):  # a Switch: the state replaces closed too
+                update = {"in_service": True, "closed": on} if on else update
+            b = b.model_copy(update=update)
+        branches.append(b)
+    return grid.model_copy(update={"branches": branches})
+
+
 def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
     """Scatter a sub-grid solution back to the full grid with 0 V on dropped rows.
 
@@ -367,6 +513,7 @@ def _grid_param_leaves(
     param_overrides: Optional[dict],
     v_fixed: Optional[Tensor],
     operating_point: Optional[dict] = None,
+    branch_states: Optional[dict] = None,
 ) -> list[Tensor]:
     """All distinct autograd leaves the residual depends on (deterministic order).
 
@@ -376,7 +523,8 @@ def _grid_param_leaves(
     ``operating_point`` entries (per-appliance ``p_w``/``q_var``, possibly batched)
     enter the residual exactly like grid fields, so their leaves are collected too: a
     differentiable operating point — e.g. the output of a neural network — receives
-    gradients through the IFT backward.
+    gradients through the IFT backward. The same holds for ``branch_states``
+    (continuous switch / topology states).
     """
     out: list[Tensor] = []
     seen: set = set()
@@ -391,6 +539,10 @@ def _grid_param_leaves(
             _collect_leaves(val, out, seen)
     if operating_point is not None:
         _collect_leaves(operating_point, out, seen)
+    if branch_states is not None:
+        # Continuous switch/topology states are parameters like any other: their
+        # leaves receive gradients through the same IFT backward.
+        _collect_leaves(branch_states, out, seen)
     if v_fixed is not None and isinstance(v_fixed, Tensor) and v_fixed.requires_grad:
         _tensor_leaves(v_fixed, out, seen)
     return out
@@ -450,17 +602,31 @@ def _apply_y(y_eff: Tensor, v: Tensor) -> Tensor:
     return torch.matmul(y_eff, v.unsqueeze(-1)).squeeze(-1)
 
 
-def _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides):
+def _y_eff_and_islack(
+    grid, f0, index, dtype, device, slack, param_overrides, branch_states=None
+):
     """Effective admittance ``Y_eff`` ``[1,N,N]`` and slack current ``[1,N]`` or ``[N]``.
 
     ``slack="norton"``: ``Y_eff = Y_net + Y_srcNorton``, ``I_slack`` = source
     Norton current. ``slack="ideal"``: ``Y_eff = Y_net``, ``I_slack`` = 0 (slack
     rows pinned by the Schur solve in :func:`solve_harmonic`).
+
+    Batched ``branch_states`` promote ``Y_eff`` to per-scenario matrices; the
+    singleton frequency axis is folded away then (``[*batch, N, N]``) so every
+    leading dim is a scenario dim — the shape the fixed point, Newton, and the
+    IFT backward treat uniformly.
     """
     yb = assemble_network_ybus(
-        grid, [f0], dtype=dtype, device=device, param_overrides=param_overrides
+        grid,
+        [f0],
+        dtype=dtype,
+        device=device,
+        param_overrides=param_overrides,
+        branch_states=branch_states,
     )
-    y = yb.Y  # [1, N, N]
+    y = yb.Y  # [1, N, N] or [*batch, 1, N, N] (batched branch states)
+    if y.ndim > 3:
+        y = y.squeeze(-3)  # [*batch, N, N]
     if slack == "norton":
         cdt = _cdtype(dtype)
         rdt = _rdtype(dtype)
@@ -494,6 +660,7 @@ def solve_power_flow(
     criticality: str = "auto",
     linear_solver: str = "auto",
     on_disconnected: str = "raise",
+    branch_states: Optional[dict] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -567,6 +734,22 @@ def solve_power_flow(
         - ``"ignore"`` — skip the check (the historical behavior: a disconnected
           area surfaces as a singular factorization or non-convergence).
 
+        With ``branch_states``, ``"raise"`` checks every scenario's effective
+        topology (vectorized over the batch); ``"zero"`` is unsupported there (a
+        per-scenario topology has no single energized sub-grid).
+    branch_states:
+        Optional topology / switch-state batching ``{branch_id: state}``. A listed
+        branch is always stamped and its admittance scaled by the state — a float,
+        0-d tensor, or ``[*batch]`` scenario tensor: ``0`` = open, ``1`` = in
+        service, intermediate = continuous (differentiable — gradients flow to
+        state leaves through the IFT, enabling gradient-based topology search).
+        The state OVERRIDES the branch's static ``in_service`` / ``closed`` flags.
+        A batched state solves every switch configuration in ONE batched call
+        (one assembly, per-scenario ``Y``); it broadcasts against a batched
+        ``operating_point`` by the usual rules (align, or use extra leading dims
+        for a cartesian sweep). ``method="newton"`` supports batched states OR a
+        batched operating point, not both at once.
+
     Returns
     -------
     PowerFlowResult
@@ -605,8 +788,19 @@ def solve_power_flow(
             "(use 'raise'/'zero'/'ignore')."
         )
 
+    if branch_states is not None and on_disconnected == "zero":
+        raise InputError(
+            'on_disconnected="zero" is unsupported with branch_states: a '
+            "per-scenario topology has no single energized sub-grid. Use "
+            '"raise" (per-scenario check) or "ignore".'
+        )
     if on_disconnected != "ignore":
-        if on_disconnected == "raise":
+        if branch_states is not None:
+            if _branch_states_batched(branch_states):
+                _check_connectivity_with_states(grid, branch_states)
+            else:
+                check_connectivity(_apply_scalar_states(grid, branch_states))
+        elif on_disconnected == "raise":
             check_connectivity(grid)
         else:
             sub, dropped = energized_subgrid(grid)
@@ -651,7 +845,20 @@ def solve_power_flow(
     log_modeling_summary(grid, asymmetric=asymmetric)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
-    leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
+    if (
+        method == "newton"
+        and _branch_states_batched(branch_states)
+        and _operating_point_batch_size(operating_point) > 1
+    ):
+        raise InputError(
+            "method='newton' does not combine a batched operating_point with "
+            "batched branch_states (its per-scenario slicing covers the operating "
+            "point only); batch one of the two, or use method='current_injection'."
+        )
+
+    leaves = _grid_param_leaves(
+        grid, param_overrides, None, operating_point, branch_states
+    )
     if device is None:
         device = leaves[0].device if leaves else torch.device("cpu")
 
@@ -676,7 +883,9 @@ def solve_power_flow(
 
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
-        return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
+        return _y_eff_and_islack(
+            grid, f0, index, dtype, device, slack, param_overrides, branch_states
+        )
 
     def make_residual_complex(op):
         """Build ``F_c(V) = Y_eff @ V + I_device(V) - I_slack`` for an operating point.
@@ -809,6 +1018,7 @@ def solve_power_flow(
                 tol,
                 max_iter,
                 newton_solver,
+                branch_states,
             )
         else:
             v_init = _linear_const_z_init(
@@ -822,6 +1032,7 @@ def solve_power_flow(
                 param_overrides,
                 fixed_rows,
                 v_fixed,
+                branch_states,
             )
             (
                 v_star,
@@ -1068,6 +1279,7 @@ def _linear_const_z_init(
     param_overrides,
     fixed_rows,
     v_fixed,
+    branch_states=None,
 ):
     """OpenDSS-style warm start: the LINEAR const-Z solution (one linear solve).
 
@@ -1091,10 +1303,16 @@ def _linear_const_z_init(
             device=device,
             operating_point=operating_point,
             param_overrides=param_overrides,
+            branch_states=branch_states,
         )
     finally:
         pgml_log.setLevel(prev)
-    y_lin = yb.Y if yb.Y.ndim == 3 else yb.Y.unsqueeze(0)  # [1, N, N]
+    if yb.Y.ndim > 3:
+        y_lin = yb.Y.squeeze(-3)  # [*batch, N, N] (batched branch states)
+    elif yb.Y.ndim == 3:
+        y_lin = yb.Y  # [1, N, N]
+    else:
+        y_lin = yb.Y.unsqueeze(0)
     if slack == "norton":
         i_init = build_injections(
             grid,
@@ -1293,6 +1511,7 @@ def _newton_forward_sequential(
     tol,
     max_iter,
     linear_solver,
+    branch_states=None,
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
@@ -1324,6 +1543,7 @@ def _newton_forward_sequential(
             param_overrides,
             fixed_rows,
             v_fixed,
+            branch_states,
         )
         v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_forward(
             rr_i, v_init_i, n, rdt, cdt, device, tol, max_iter, linear_solver

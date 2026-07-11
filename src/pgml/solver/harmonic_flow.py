@@ -180,6 +180,7 @@ def solve_harmonic_flow(
     device: Optional[torch.device] = None,
     symmetry: Optional[str] = None,
     on_disconnected: str = "raise",
+    branch_states: Optional[dict] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -233,6 +234,13 @@ def solve_harmonic_flow(
         (node, phase) row has no path to an in-service source; ``"zero"`` solves the
         energized sub-grid and reports 0 V on the disconnected rows at every order
         (full-grid row layout preserved); ``"ignore"`` skips the check.
+    branch_states:
+        Optional topology / switch-state batching ``{branch_id: state}``, as in
+        :func:`solve_power_flow`: the state (float / 0-d / ``[*batch]`` tensor,
+        0 = open) OVERRIDES the branch's static flags and scales its stamp at the
+        fundamental AND every harmonic order, so one batched call solves every
+        switch configuration end to end. ``on_disconnected="zero"`` is unsupported
+        with states (the fundamental solve enforces this).
 
     Returns
     -------
@@ -255,8 +263,17 @@ def solve_harmonic_flow(
             "(use 'raise'/'zero'/'ignore')."
         )
     if on_disconnected == "raise":
-        check_connectivity(grid)
+        if branch_states is None:
+            check_connectivity(grid)
+        # With branch_states the (possibly per-scenario) check runs inside the
+        # fundamental solve_power_flow call below.
     elif on_disconnected == "zero":
+        if branch_states is not None:
+            raise InputError(
+                'on_disconnected="zero" is unsupported with branch_states: a '
+                "per-scenario topology has no single energized sub-grid. Use "
+                '"raise" or "ignore".'
+            )
         from pgml.topology import energized_subgrid
 
         sub, dropped = energized_subgrid(grid)
@@ -307,7 +324,8 @@ def solve_harmonic_flow(
         dtype=dtype,
         device=device,
         symmetry=sym_resolved,
-        on_disconnected="ignore",
+        on_disconnected=("ignore" if branch_states is None else on_disconnected),
+        branch_states=branch_states,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -327,6 +345,7 @@ def solve_harmonic_flow(
             symmetry=sym_resolved,
             dtype=dtype,
             device=device,
+            branch_states=branch_states,
         )
         # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
         # case — the batch varies injections, not the network), factor each order ONCE
@@ -390,6 +409,7 @@ def assemble_harmonic_system(
     symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
+    branch_states: Optional[dict] = None,
 ) -> tuple[Tensor, Tensor, NodePhaseIndex]:
     """Assemble the per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders ``h > 1``.
 
@@ -438,12 +458,18 @@ def assemble_harmonic_system(
     dtype, device:
         Complex dtype and device for the assembled system (``device=None`` ->
         ``v1.device``). Honoured throughout; gradients flow on the live tape.
+    branch_states:
+        Optional topology / switch-state mask ``{branch_id: state}`` (see
+        :func:`pgml.assembly.assemble_ybus`) — MUST match the states the
+        fundamental ``v1`` was solved with. A batched state promotes ``Y`` to
+        ``[*batch, Hh, N, N]``.
 
     Returns
     -------
     Y:
         Complex ``[Hh, N, N]`` (one slice per requested order) — or ``[*batch, Hh,
-        N, N]`` if a BATCHED voltage ``node_source`` promotes it.
+        N, N]`` if a BATCHED voltage ``node_source`` or batched ``branch_states``
+        promotes it.
     I:
         Complex ``[*batch, Hh, N]`` harmonic nodal current injection.
     index:
@@ -469,7 +495,9 @@ def assemble_harmonic_system(
 
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
-    yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
+    yh = assemble_network_ybus(
+        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+    ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
     yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
@@ -498,6 +526,7 @@ def assemble_harmonic_ybus(
     *,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
+    branch_states: Optional[dict] = None,
 ) -> tuple[Tensor, NodePhaseIndex]:
     """The harmonic system MATRIX ``Y(h)`` for orders ``h > 1`` — no injection RHS assembled.
 
@@ -521,11 +550,16 @@ def assemble_harmonic_ybus(
     dtype, device:
         Complex dtype and device for the assembled matrix (``device=None`` -> CPU). Honoured
         throughout; gradients flow w.r.t. the network parameters on the live tape.
+    branch_states:
+        Optional topology / switch-state mask ``{branch_id: state}`` (see
+        :func:`pgml.assembly.assemble_ybus`); a batched state promotes ``Y`` to
+        ``[*batch, Hh, N, N]``.
 
     Returns
     -------
     Y:
-        Complex ``[Hh, N, N]`` (one slice per requested order).
+        Complex ``[Hh, N, N]`` (one slice per requested order; batched
+        ``branch_states`` prepend their scenario dims).
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
     """
@@ -545,7 +579,9 @@ def assemble_harmonic_ybus(
         device = torch.device("cpu")
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
-    yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
+    yh = assemble_network_ybus(
+        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+    ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
     yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
