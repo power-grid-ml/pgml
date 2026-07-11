@@ -298,3 +298,25 @@ NOT baked into Y; split as implemented below.
 Verification (CPU): const-Z consistency (norton + ideal, 1ph + 3ph) exact to
 1e-9..1e-10; gradcheck (float64) of the downstream power-flow V w.r.t. line R/L and
 load P/Q passes; full suite green.
+
+# =====================================================================
+# rev 2 additions (branch-state masking + injection plan)
+# =====================================================================
+- Every public assembler gains `branch_states: Optional[dict] = None`
+  (`{branch_id: float | 0-d | [*batch] tensor}`): a listed branch is ALWAYS
+  stamped and its primitive block multiplied by the state (0 = open, 1 = in
+  service, continuous in between, autograd-carrying), OVERRIDING the static
+  `in_service`/`closed` flags. Applied centrally in `_stamp_network` /
+  `branch_currents` via `_group_states`/`_masked_block`; a batched state
+  promotes `Y` to `[*batch, H, N, N]` through the scatter broadcast, and
+  `branch_currents` scales each branch's terminal currents by the same state
+  (an open branch reports exactly 0 A). Builders take the extra
+  `branch_states` argument for their in-service filter only.
+- `build_injection_plan(grid, index, frequencies_hz, *, dtype, device,
+  operating_point, param_overrides, symmetry) -> InjectionPlan` and
+  `injections_from_plan(plan, v) -> Tensor` — the two halves of
+  `device_current_injections` (which now composes them, byte-identical): the
+  V-independent operating-point resolution (once per solve) and the pure-tensor
+  per-iteration evaluation. The nonlinear solvers reuse one plan across all
+  iterations; a plan built under `no_grad` is the detached fast path, one built
+  on the tape stays differentiable.

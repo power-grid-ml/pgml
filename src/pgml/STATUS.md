@@ -97,17 +97,40 @@ sparse work):
    slices and concatenates (grad-preserving) — including the node-coherent `[B,T,H,N]` path
    (the slice is along the scenario axis `B`). Any batch fits regardless of the dense
    `[B,H,N,N]` footprint.
+4. ✅ **InjectionPlan fast path** (`assembly.build_injection_plan`/`injections_from_plan`):
+   the V-independent operating-point resolution is computed once per solve and reused
+   across every fixed-point / Newton / line-search / diagnostics evaluation (it dominated
+   the CPU solve at ~57%). 2–3× end-to-end on CPU.
+5. ✅ **Batch-shared `Y` as one GEMM** (`power_flow._apply_y`): residuals apply a
+   scenario-shared `Y` as a single `[B,N]@[N,N]` GEMM instead of `B` broadcast GEMVs that
+   re-read the matrix per scenario (bandwidth-bound at large N).
+6. ✅ **Prepared system** (`solver.prepare_power_flow -> PowerFlowSystem`): assembly + slack
+   rows + factorization + grid leaves computed once and reused across repeated solves;
+   `run_scenarios` shares one system across its whole chunk loop.
 
-**Open fork 1 — topology / switch-state batching (decision needed).** Vary which
-branches/switches are in service across the batch. Today a batch shares ONE `grid`; topology
-changes the sparsity of `Y`, so it cannot be an `operating_point` override. Options:
-(a) per-config assembly + stacked solve (simple, exact, cost = K assemblies — best when K is
-small); (b) admittance masking — assemble the superset `Y` once, zero out open branches per
-scenario via a `[B, n_branch]` mask (one assembly, vectorized, differentiable; cannot add
-branches absent from the superset); (c) continuous switch state in [0,1] for gradient-based
-topology search (superset of b). Recommendation: (b)/(c) for switch states, (a) for genuinely
-structural changes. Decision: switch open/close only, or branch add/remove? — that picks (b)
-vs (a).
+**Pre-solve structural checks (convergence hygiene).** Every solve entry point now runs a
+connectivity check first: rows with no galvanic path to an in-service source raise
+`ConnectivityError` with the islands, the separating open/out-of-service branches, and the
+concrete fixes (`pgml.topology.connectivity_report`); `on_disconnected="zero"` instead
+solves the energized sub-grid and reports 0 V on dead rows (power-grid-model's "energized"
+convention); `"ignore"` restores the historical behavior. This is the a-priori
+non-convergence class the reference tools also guard structurally (pandapower's
+connectivity check, pgm's energized flag) — the remaining causes (loadability, oscillating
+fixed point) stay post-hoc via `ConvergenceDiagnostics.likely_cause`, the criticality SVD,
+and `loadability_limit`.
+
+**Topology / switch-state batching — DONE (admittance masking, options b + c).**
+`branch_states: {branch_id: state}` on `assemble_ybus` / `assemble_network_ybus` /
+`branch_currents` / `solve_power_flow` / `solve_harmonic_flow`: each listed branch is always
+stamped and its primitive block is scaled by the state (0 = open, 1 = in service,
+intermediate = continuous, differentiable — gradients flow through the IFT for
+gradient-based topology search), OVERRIDING the static `in_service`/`closed` flags. A
+`[*batch]` state solves every switch configuration in one batched call (one assembly,
+per-scenario `Y`); it broadcasts against a batched `operating_point` (aligned or
+cartesian). Per-scenario connectivity is checked up front (vectorized over the condensed
+component graph) and raises `ConnectivityError` naming the failing scenarios. Genuinely
+STRUCTURAL changes (adding branches absent from the superset) still need per-config
+assembly — build the superset grid instead where possible.
 
 **Open fork 2 — multi-grid batching (decision needed).** Solve several *distinct* grids
 (different node counts) in one batched call, for training across feeders. Options:
@@ -118,11 +141,20 @@ GNN pipeline. Decision: does training want one PyG `Batch` (→ a) or fixed-size
 (→ b)? Interacts with the dense `torch.linalg.solve` — a sparse batched solve may need a
 different backend.
 
-**Deferred — sparse solve (only past ~thousands of buses).** A power-flow `Y` is ~O(N) nnz
-and distribution feeders are radial, so a sparse direct factorization (KLU/SuiteSparse; GPU:
-cuSPARSE/cuDSS) is ~O(N) vs dense O(N³). But at the small N this library validates on
-(hundreds of rows), dense-on-GPU is faster and the VRAM wall is hit on `B`, not `N`. So
-sparse is premature here — revisit ONLY if target grids exceed a few thousand buses.
+**Sparse solve — DONE (CPU scipy SuperLU behind `lu_factor_system(backend=...)`).**
+`"auto"` (the default, also via `solve_power_flow(linear_solver=...)`) picks the sparse
+factorization on CPU systems ≥ ~500 rows and the batched dense torch LU everywhere else;
+CUDA stays dense (torch has no batched sparse direct solve — dense batched LU is what GPUs
+are built for, so any GPU sparse path must first beat that baseline:
+`examples/pgml/benchmark_sparse.py`). Differentiable through the adjoint `_SparseSolveFn`
+(one conjugate-transposed solve + a batch-folded outer product; gradcheck-verified). A
+singular factorization raises `ComputationError` pointing at `check_connectivity`.
+Measured (i7-12700, c128): 4800 rows end-to-end nonlinear solve 3× dense; single-RHS
+back-substitution 50×. Open follow-ups: thread the multi-RHS back-substitution across CPU
+cores (SuperLU solves the batch column-by-column single-threaded — the pgm trick); a
+sparse/matrix-free IFT backward + Newton Jacobian for very large N (both are still dense
+`[2N, 2N]`); sparse-direct assembly (COO from the stamps, skipping the dense `Y`) once
+grids exceed a few thousand rows.
 
 ### B. Harmonic state estimation — the `pgl` package
 
