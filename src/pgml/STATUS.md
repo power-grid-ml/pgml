@@ -132,14 +132,18 @@ component graph) and raises `ConnectivityError` naming the failing scenarios. Ge
 STRUCTURAL changes (adding branches absent from the superset) still need per-config
 assembly — build the superset grid instead where possible.
 
-**Open fork 2 — multi-grid batching (decision needed).** Solve several *distinct* grids
-(different node counts) in one batched call, for training across feeders. Options:
-(a) disjoint union / block-diagonal `Y` (natural fit for PyTorch-Geometric's `Batch`; sparse
-`Y` preferred at scale); (b) padded + masked dense (`[G, N_max, N_max]`; wastes work when
-sizes vary); (c) group-by-size buckets (no waste, several solves). Recommendation: (a) for the
-GNN pipeline. Decision: does training want one PyG `Batch` (→ a) or fixed-size dense tensors
-(→ b)? Interacts with the dense `torch.linalg.solve` — a sparse batched solve may need a
-different backend.
+**Multi-grid batching — DONE at the pgml layer (disjoint union, option a).**
+`pgml.multigrid.merge_grids(grids) -> MergedGrid`: the union of an ensemble IS a valid
+`Grid` (ids remapped per kind, member row slices contiguous), its assembly is the
+block-diagonal `Y` for free, and the sparse backend factors it in ~O(Σ nnz) — no solver
+changes. `MergedGrid` translates per-member `operating_point` / `branch_states` into
+merged ids and `split()`s any solved `[..., N_total]` state back into per-member views
+(differentiable; parameter tensors are SHARED with the members, so gradients reach the
+original grids' leaves). Measured: 64 small feeders (3060 rows) solve in one prepared
+call at 9× the per-grid loop; 12k grid-scenarios/s with batched operating points.
+The pgl side (per-sample PyG `Data`/`Batch`, cross-grid normalization, multi-grid
+training) is deliberately NOT part of this — pgl consumes the same pgml interfaces and
+handles variable-size graphs natively via PyG when that milestone lands.
 
 **Sparse solve — DONE (CPU scipy SuperLU behind `lu_factor_system(backend=...)`).**
 `"auto"` (the default, also via `solve_power_flow(linear_solver=...)`) picks the sparse
