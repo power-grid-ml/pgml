@@ -250,6 +250,13 @@ more physical than they are. Items already tracked as open work above are refere
 - **Scenario sampling.** All pre-solve sampling executes on CPU (`SobolEngine` is
   CPU-only); tensors are promoted to the solve device afterwards. Deliberate — the
   sampled tensors are tiny next to the `[B,H,N,N]` solve.
+- **complex64 accuracy on ill-conditioned grids.** A physical feeder's `Y` reaches
+  condition numbers of 1e6–1e9 in SI units (CIGRE LV fundamental ~3.5e8), so a
+  complex64 ASSEMBLY + direct solve can lose most of its digits (κ·eps₆₄ ≈ O(1)) —
+  measured, not theoretical. complex64 remains the THROUGHPUT dtype; for datasets on
+  such grids, generate at complex128 and store as complex64 (the persisted values
+  then carry only the final rounding). `pgl.physics.NetworkSolver` assembles/solves
+  its decode operators at complex128 internally for exactly this reason.
 - **Per-node harmonic-source sweeps** (`scenarios.run_node_injection_sweep`) loop one
   solve per node: the solver cannot yet stamp a different target row per batch element.
   Batch the target-row index (`[B, P]` scatter) to lift the loop.
