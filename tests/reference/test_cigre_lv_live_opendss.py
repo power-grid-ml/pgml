@@ -1,6 +1,6 @@
 """Parity tests: CIGRE LV harmonic flow vs LIVE OpenDSS oracle.
 
-Tests :func:`pgml.evaluation.references.opendss_harmonic_voltages` — the live
+Tests :func:`pgml.evaluation.oracles.opendss_harmonic_voltages` — the live
 OpenDSS harmonic oracle that reads OpenDSS ``SystemY(h)`` at each harmonic order
 and solves the system.
 
@@ -48,7 +48,7 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
-from pgml.evaluation.references import (
+from pgml.evaluation.oracles import (
     cigre_lv_full_grid,
     opendss_dyn_transformer_harmonic_voltages,
     opendss_harmonic_voltages,
@@ -60,7 +60,13 @@ from pgml.geometry.synthesis import (
 from pgml.schemas.grid_schema import Load, Phase
 from pgml.solver import solve_harmonic_flow
 
-# Every test in this module drives a live OpenDSS process.
+# Every test in this module drives a live OpenDSS process. Skip (not error)
+# when opendssdirect is absent, matching the other opendss-marked modules.
+try:
+    import opendssdirect as _dss  # noqa: F401
+except ImportError:  # pragma: no cover - environment guard
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
 pytestmark = pytest.mark.opendss
 
 # ---------------------------------------------------------------------------

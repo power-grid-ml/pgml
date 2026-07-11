@@ -28,6 +28,8 @@ import opendssdirect as dss  # noqa: E402
 
 from pgml.convert._common import PhaseMode  # noqa: E402
 from pgml.convert.opendss import to_grid  # noqa: E402
+from pgml.convert.opendss.converter import _parse_bus_connection  # noqa: E402
+from pgml.errors import ConversionError  # noqa: E402
 from pgml.schemas.grid_schema import (  # noqa: E402
     Line,
     Load,
@@ -317,3 +319,89 @@ def test_delta_load_collapsed_logs_info(caplog) -> None:
         "Expected INFO about delta load collapse; got: "
         + str([r.message for r in caplog.records])
     )
+
+
+# ---------------------------------------------------------------------------
+# Bus-connection parsing (DSS node index -> Phase)
+# ---------------------------------------------------------------------------
+
+
+class TestBusConnectionParsing:
+    """DSS bus-node indices map 1=A, 2=B, 3=C, 4=N; 0 (ground) is dropped."""
+
+    def test_four_wire_suffix_maps_to_neutral(self) -> None:
+        name, phases = _parse_bus_connection("b1.1.2.3.4", 4)
+        assert name == "b1"
+        assert phases == [Phase.A, Phase.B, Phase.C, Phase.N]
+
+    def test_ground_suffix_zero_is_dropped(self) -> None:
+        """A ``.0`` conductor is tied to the grounded reference — no phase row."""
+        name, phases = _parse_bus_connection("b1.1.0", 2)
+        assert name == "b1"
+        assert phases == [Phase.A]
+
+    def test_unknown_suffix_raises(self) -> None:
+        with pytest.raises(ConversionError):
+            _parse_bus_connection("b1.1.5", 2)
+
+
+# ---------------------------------------------------------------------------
+# Four-wire circuit with an explicit neutral conductor
+# ---------------------------------------------------------------------------
+
+
+def _build_four_wire_circuit() -> None:
+    """Build a 2-bus circuit whose line carries an explicit 4th (neutral) wire.
+
+    The neutral is grounded at the source through a small reactor so the DSS
+    solve converges; the reactor is not a converted element (only its effect on
+    ``YNodeOrder`` matters here — it makes ``src.4`` a real system node).
+    """
+    dss.Text.Command("Clear")
+    dss.Text.Command(
+        "New Circuit.four_wire_test basekv=0.4 pu=1.0 phases=3 bus1=src frequency=50"
+    )
+    dss.Text.Command(
+        "New Line.l4w phases=4 bus1=src.1.2.3.4 bus2=b1.1.2.3.4 "
+        "rmatrix=[0.2 | 0.05 0.2 | 0.05 0.05 0.2 | 0.05 0.05 0.05 0.25] "
+        "xmatrix=[0.4 | 0.1 0.4 | 0.1 0.1 0.4 | 0.1 0.1 0.1 0.45] "
+        "length=1 units=km"
+    )
+    dss.Text.Command("New Reactor.ngnd phases=1 bus1=src.4.0 R=0.01 X=0.01")
+    dss.Text.Command(
+        "New Load.wye3ph phases=3 bus1=b1.1.2.3 kv=0.4 kw=10 kvar=3 model=1"
+    )
+    dss.Text.Command("Set voltagebases=[0.4]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+    assert dss.Solution.Converged(), "DSS four-wire test circuit did not converge"
+
+
+class TestFourWire:
+    """An explicit 4th conductor converts to ``Phase.N``, not a phase alias."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _circuit(self, request) -> None:
+        _build_four_wire_circuit()
+        grid, id_map = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
+        request.cls._grid = grid
+        request.cls._id_map = id_map
+
+    def test_nodes_carry_neutral_phase(self) -> None:
+        """Both buses register the neutral conductor as a ``Phase.N`` row."""
+        for name in ("src", "b1"):
+            node = next(n for n in self._grid.nodes if n.name == name)
+            assert set(node.phases) == {Phase.A, Phase.B, Phase.C, Phase.N}, (
+                f"Node {name}: phases {node.phases}"
+            )
+
+    def test_line_phases_include_neutral(self) -> None:
+        """The 4-wire line keeps all four conductors, the 4th mapped to N."""
+        line = next(b for b in self._grid.branches if isinstance(b, Line))
+        assert line.from_phases == (Phase.A, Phase.B, Phase.C, Phase.N)
+        assert line.to_phases == (Phase.A, Phase.B, Phase.C, Phase.N)
+
+    def test_line_matrices_are_4x4(self) -> None:
+        line = next(b for b in self._grid.branches if isinstance(b, Line))
+        r = line.series_resistance_ohm_per_m
+        assert len(r) == 4 and all(len(row) == 4 for row in r)

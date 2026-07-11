@@ -21,10 +21,7 @@ from pgml.evaluation.data import LabeledMatrix, VoltageProfile, row_labels
 from pgml.evaluation.topology import distance_from_slack
 
 
-def _numpy_shim() -> None:
-    """numpy 2.x compatibility shim required by pandapower 2.14 (Inf/in1d)."""
-    np.Inf = np.inf  # type: ignore[attr-defined]
-    np.in1d = np.isin  # type: ignore[attr-defined]
+from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
 
 
 def pandapower_ybus(
@@ -38,9 +35,13 @@ def pandapower_ybus(
     _numpy_shim()
     y_pu = net._ppc["internal"]["Ybus"].toarray()
     base_mva = float(net._ppc["baseMVA"])
-    base_kv = float(net._ppc["bus"][0, 9])
-    y_base = base_mva / (base_kv**2)  # 1 / z_base
-    y_si = y_pu * y_base
+    # MATPOWER mixed per-unit: each bus carries its own voltage base (ppc bus
+    # column 9, BASE_KV, line-to-line), so Y_SI[i, j] = Y_pu[i, j] * S_base /
+    # (V_base_i * V_base_j). On a single voltage level this reduces to the
+    # familiar S_base / V_base^2; across a transformer boundary the two buses
+    # have different bases and a scalar base would produce wrong admittances.
+    base_kv = np.asarray(net._ppc["bus"][:, 9], dtype=float)
+    y_si = y_pu * (base_mva / np.outer(base_kv, base_kv))
     bus_lookup = net._pd2ppc_lookups["bus"]
 
     n = index.size

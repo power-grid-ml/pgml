@@ -1,4 +1,4 @@
-"""Differentiability gate for the connection-aware (Increment 1) load models.
+"""Differentiability gate for the connection-aware load models.
 
 float64 gradcheck of the solved power-flow voltage ``v`` w.r.t. a load's per-phase
 P/Q through BOTH a DELTA load and a WYE-with-neutral load. Per-phase P/Q leaves are

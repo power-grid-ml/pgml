@@ -40,11 +40,17 @@ def i0_over_i1(z: Tensor, *, terms: int = 40) -> Tensor:
     its reciprocal. Overflow-free for all ``z`` and differentiable (pure arithmetic).
     Clamped to 1 for ``|z| > 35`` (matches OpenDSS's skin-effect cutoff).
     """
-    f = torch.zeros_like(z)
+    # Both branches of a `torch.where` participate in the backward pass, so the
+    # continued fraction must never see the huge arguments the cutoff masks out:
+    # its truncated evaluation can produce non-finite intermediates there, which
+    # would poison the gradient of `z` even though the forward value is clamped.
+    clamped = z.abs() > 35.0
+    z_safe = torch.where(clamped, torch.ones_like(z), z)
+    f = torch.zeros_like(z_safe)
     for k in range(terms, 0, -1):
-        f = 1.0 / ((2.0 * k) / z + f)
+        f = 1.0 / ((2.0 * k) / z_safe + f)
     ratio = 1.0 / f  # I0/I1
-    return torch.where(z.abs() > 35.0, torch.ones_like(ratio), ratio)
+    return torch.where(clamped, torch.ones_like(ratio), ratio)
 
 
 def internal_impedance(rdc: Tensor, freqs: Tensor) -> Tensor:

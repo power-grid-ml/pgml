@@ -409,6 +409,66 @@ def assemble_harmonic_system(
     return yh, ih, index
 
 
+def assemble_harmonic_ybus(
+    grid: Grid,
+    harmonic_orders,
+    *,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+) -> tuple[Tensor, NodePhaseIndex]:
+    """The harmonic system MATRIX ``Y(h)`` for orders ``h > 1`` — no injection RHS assembled.
+
+    Returns exactly the ``Y(h)`` of :func:`assemble_harmonic_system` (the passive network
+    admittance :func:`pgml.assembly.assemble_network_ybus` plus the source Norton shunt, so the
+    matrix is non-singular at the harmonics), WITHOUT the data-derived current ``I(h)``. This is
+    the operator a physics-informed decoder learns to invert: it predicts the nodal injection
+    ``I_pred(h)`` and reconstructs ``V(h) = solve_harmonic(Y(h), I_pred(h))`` — a self-consistency
+    that uses ONLY the (differentiable) grid description, never a ground-truth injection. ``Y`` is
+    grid-constant (factor once, reuse across a batch) and differentiable w.r.t. the network
+    parameters, so the same call powers a learned grid-parameter calibration.
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid`.
+    harmonic_orders:
+        Iterable of integer orders ``h > 1`` (passing order 1 raises — the fundamental is the
+        passive :func:`pgml.assembly.assemble_network_ybus` at ``f0`` with an ideal slack, not a
+        Norton-shunted harmonic system).
+    dtype, device:
+        Complex dtype and device for the assembled matrix (``device=None`` -> CPU). Honoured
+        throughout; gradients flow w.r.t. the network parameters on the live tape.
+
+    Returns
+    -------
+    Y:
+        Complex ``[Hh, N, N]`` (one slice per requested order).
+    index:
+        The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
+    """
+    orders = [int(h) for h in harmonic_orders]
+    if not orders:
+        raise InputError("harmonic_orders must be non-empty.")
+    if any(h == 1 for h in orders):
+        raise InputError(
+            "assemble_harmonic_ybus assembles the LINEAR harmonic orders h > 1; order 1 is "
+            "the fundamental (assemble_network_ybus at f0 with an ideal slack)."
+        )
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    f0 = float(grid.base_frequency_hz)
+    index = node_phase_index(grid)
+    if device is None:
+        device = torch.device("cpu")
+    freqs = [h * f0 for h in orders]
+    fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
+    yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
+    if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
+        yh = yh.unsqueeze(0)
+    yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
+    return yh, index
+
+
 # ---------------------------------------------------------------------------
 # harmonic current injection from spectra (connection-aware, per-element)
 # ---------------------------------------------------------------------------
@@ -857,6 +917,7 @@ def _add_to_diagonal(yh, y_diag, cdt, device):
 __all__ = [
     "solve_harmonic_flow",
     "assemble_harmonic_system",
+    "assemble_harmonic_ybus",
     "HarmonicFlowResult",
     "NodeHarmonicSource",
 ]

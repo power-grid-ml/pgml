@@ -30,7 +30,6 @@ dependencies = [
     "pydantic>=2.12,<3",
     "numpy>=2,<3",
     "scipy>=1.11",
-    "sympy>=1.14,<2",
     "pyyaml>=6,<7",
 ]
 
@@ -44,7 +43,21 @@ oracles = ["pandapower>=2.14,<3", "power-grid-model>=1.13,<2", "opendssdirect-py
 # `pgl` (power-grid-learn): the learning framework — training (lightning) + graph models
 # (torch-geometric) + tracking (mlflow), plus the data path (scenarios) and the CIGRE LV
 # grid (convert). torch is intentionally inherited (conda-provided on the CUDA clusters).
-learn = ["pgml[ml,scenarios,convert,viz]"]
+learn = ["pgml[ml,scenarios,convert]"]  # + `viz` only for pgl.evaluation plots
+# `pgd` (dashboard / service layer): a FastAPI application serving the web UI and a REST /
+# WebSocket API over pgml simulation, pgl state estimation, and live measurements. Bundles
+# the async web stack plus the local persistence layer (DuckDB / Arrow) the services read
+# and write; `pgml[scenarios]` supplies the dataset I/O the grid / simulation services expose.
+pgd = [
+    "pgml[scenarios]",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=13",
+    "httpx>=0.27",
+    "duckdb>=1.0",
+    "pyarrow>=16",
+    "pydantic-settings>=2.5",
+]
 docs = [
     "sphinx>=9.1,<10",
     "furo>=2025.1.0",
@@ -53,19 +66,22 @@ docs = [
 ]
 dev = ["pytest>=9,<10", "ruff>=0.15,<0.16"]
 all = [
-    "pgml[convert,scenarios,ml,viz,opendss,oracles,learn]",
+    "pgml[convert,scenarios,ml,viz,opendss,oracles,learn,pgd]",
 ]
 
 [tool.hatch.version]
 path = "src/pgml/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-# The monorepo ships three importable packages from one distribution: the differentiable
-# physics base `pgml`, the learning framework `pgl`, and the grid-generation `pgg`. One-way
-# dependency: pgl/pgg import pgml's public API; pgml imports neither. Hatchling packages all
-# VCS-tracked files under these roots, so the shipped reference data (`pgml/data/*.yaml` —
-# modeling defaults + the EN 50160 table, read via importlib.resources) is included.
-packages = ["src/pgml", "src/pgl", "src/pgg"]
+# The monorepo ships five importable packages from one distribution: the differentiable
+# physics base `pgml`, the learning framework `pgl`, the grid-generation `pgg`, the
+# real-dataset hub `pghub`, and the dashboard service layer `pgd`. One-way dependency:
+# pgl/pgg/pghub/pgd import pgml's public API; pgml imports none of them. Hatchling packages
+# all VCS-tracked files under these roots, so the shipped reference data (`pgml/data/*.yaml`
+# — modeling defaults + the EN 50160 table, read via importlib.resources) is included. The
+# dashboard SPA is a build artifact (`pgd/static/dist`, git-ignored) served at runtime;
+# bundling it into the wheel is a `force-include` / `artifacts` step for when it ships.
+packages = ["src/pgml", "src/pgl", "src/pgg", "src/pghub", "src/pgd"]
 
 # ---------------------------------------------------------------------------
 # pytest

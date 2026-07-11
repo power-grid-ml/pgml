@@ -12,9 +12,10 @@ from typing import Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LogNorm, SymLogNorm
+from matplotlib.colors import SymLogNorm
 
 from .data import LabeledMatrix
+from .style import positive_log_norm
 
 
 def _component(m: np.ndarray, part: str) -> np.ndarray:
@@ -33,10 +34,7 @@ def _make_norm(data: np.ndarray, part: str):
     if finite.size == 0:
         return None
     if part == "abs":
-        pos = finite[finite > 0]
-        vmin = float(pos.min()) if pos.size else 1e-12
-        vmax = float(finite.max()) if finite.size else 1.0
-        return LogNorm(vmin=vmin, vmax=max(vmax, vmin * 10))
+        return positive_log_norm(data)
     amax = float(np.abs(finite).max()) or 1.0
     linthresh = max(amax * 1e-6, 1e-12)
     return SymLogNorm(linthresh=linthresh, vmin=-amax, vmax=amax)
@@ -126,8 +124,7 @@ def plot_ybus_difference(
         raise ValueError(f"Shape mismatch: {a.matrix.shape} vs {b.matrix.shape}.")
     diff = a.matrix - b.matrix
     mag = np.abs(diff)
-    pos = mag[mag > 0]
-    norm = LogNorm(vmin=float(pos.min()), vmax=float(mag.max())) if pos.size else None
+    norm = positive_log_norm(mag)
 
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     im = ax.imshow(mag, cmap=cmap, norm=norm, aspect="equal", interpolation="nearest")

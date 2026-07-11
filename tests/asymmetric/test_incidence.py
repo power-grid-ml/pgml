@@ -1,4 +1,4 @@
-"""Increment 1: connection-aware terminal incidence ``M`` construction.
+"""Connection-aware terminal incidence ``M`` construction.
 
 Verifies the WYE-ground / WYE-neutral / DELTA-3 incidence matrices and the
 identity-reduction guarantee ``M^T diag(y) M == diag(y)`` for WYE-to-ground.

@@ -8,11 +8,10 @@ Public API
 
 Usage example::
 
-    import numpy as np
-    np.Inf = np.inf          # numpy 2.x compat shim (pandapower 2.14 uses removed alias)
-    np.in1d = np.isin        # same
+    from pgml.convert.pandapower import ensure_numpy_compat, to_grid
+
+    ensure_numpy_compat()    # numpy 2.x compat (pandapower 2.14 uses removed aliases)
     import pandapower.networks as pn
-    from pgml.convert.pandapower import to_grid
 
     net = pn.case33bw()
     grid, id_map = to_grid(net)
@@ -39,8 +38,23 @@ A dict with string keys for each element table that was converted::
 Only entries that were actually converted are included.
 """
 
+import numpy as np
+
 from pgml.convert._common import PhaseMode
 
 from .converter import to_grid
 
-__all__ = ["to_grid", "PhaseMode"]
+
+def ensure_numpy_compat() -> None:
+    """Restore the numpy-1.x aliases pandapower 2.14 still reads (numpy 2.x compat).
+
+    pandapower 2.14 — the newest release installable alongside this package —
+    uses ``np.Inf`` and ``np.in1d``, both removed in numpy 2.0. Call once before
+    importing / running pandapower; idempotent. This is the single home of the
+    shim so the pandapower pin is documented in exactly one place.
+    """
+    np.Inf = np.inf  # type: ignore[attr-defined]
+    np.in1d = np.isin  # type: ignore[attr-defined]
+
+
+__all__ = ["to_grid", "PhaseMode", "ensure_numpy_compat"]

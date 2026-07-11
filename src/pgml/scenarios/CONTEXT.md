@@ -80,7 +80,10 @@ verified `batched == loop-of-individual`).
   `v` is `[B,N]` (power_flow), `[B,H,N]` (harmonic), or `[B,T,H,N]` (coherent; timestamps in
   `sampled.samples["time_s"]`).
 - `SampledScenarios` also carries `harmonic_injection = {id: {order: (mag, phase)}}` (mag/phase
-  `[B]` for random specs, `[B,T]` for coherent), passed to `solve_harmonic_flow`.
+  `[B]` for spec-varied orders, `[B,T]` for coherent; orders seeded only from a device's stored
+  `StaticSpectrum` and untouched by any spec stay plain float pairs — the solver broadcasts
+  scalars), passed to `solve_harmonic_flow`. Two specs writing the same `(device, field, order)`
+  (or the same power field of one component) raise `InputError` at resolve time.
 - SPECTRUM-SWEEP (diagonal per-target harmonic-injection sweep): `SpectrumSweepConfig(name,
   selector, orders, magnitudes_pu, phases_deg)` — serializable config; classmethod
   `SpectrumSweepConfig.from_spectrum(selector, spectrum, *, name="injection")` builds it from

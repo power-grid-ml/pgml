@@ -35,7 +35,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/current_injection_convergence.py [out_dir]
+    pixi run -e cpu python examples/pgml/current_injection_convergence.py [out_dir]
 
 Outputs (default ``evaluation_output/current_injection/``): ``residual_vs_iter.svg``,
 ``voltage_vs_iter.svg``, ``pv_nose.svg``, and a printed convergence table. Tune the source
@@ -68,6 +68,11 @@ LEVELS = [0.40, 0.70, 0.90, 0.97, 1.10]
 CDT = torch.complex128
 _Z = complex(R_OHM, X_OHM)
 _TAN_PHI = math.tan(math.acos(POWER_FACTOR)) if POWER_FACTOR < 1.0 else 0.0
+
+
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 
 def build_two_bus(p_w: float, q_var: float) -> Grid:
@@ -150,7 +155,7 @@ def current_injection_trace(s: complex, n_iter: int) -> list[complex]:
     return traj
 
 
-def main(out_dir: str = "evaluation_output/current_injection") -> None:
+def main(out_dir: str = str(_OUT / "current_injection")) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -341,4 +346,4 @@ def _plot_pv_nose(runs, p_max, path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/current_injection")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "current_injection"))

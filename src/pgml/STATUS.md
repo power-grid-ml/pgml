@@ -61,6 +61,13 @@ Phases 0–3 done; phase 4 (batched sampling) done bar scale/topology. The subpa
 
 ## Open work — where to start
 
+- **IFT backward supports shared/derived parameter tensors.** RESOLVED — a single leaf may
+  feed several Grid fields (``p_nom_w = p`` and ``q_nom_var = p * k``): the IFT captures the
+  true autograd leaves (resolving each field through its derived-expression history) and
+  differentiates the residual at those leaves under ``retain_graph=True``, so the first
+  ``.backward()`` succeeds and the gradient is exact (no double count). Guaranteed by
+  ``tests/differentiability/test_shared_param_tensor.py`` (finite-difference + gradcheck).
+
 WHAT / WHY / WHERE / HOW. "⚠️ decision" = confirm the approach with the maintainer before a
 large rework (schema changes are orchestrator-only — ask first).
 
@@ -120,7 +127,7 @@ sparse is premature here — revisit ONLY if target grids exceed a few thousand 
 ### B. Harmonic state estimation — the `pgl` package
 
 The ML layer is its own package, `pgl` (clean API border, separate deps, own agents). It
-consumes pgml's public API only — topology `assembly.node_phase_index` + `evaluation.topology`,
+consumes pgml's public API only — topology `assembly.node_phase_index` + `pgml.topology`,
 the forward `pgml.simulate`/`solver.*` (gradients flow params→V), and training data
 `scenarios.run_scenarios`/`read_dataset`/`write_dataset` (measurement model = masked subset of
 the state). The PyG `Data`/`Batch` builder is a `pgl` concern. Design + status:
@@ -155,8 +162,12 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
 - **Criticality on a batch**: the single-grid IFT-Jacobian criticality SVD is skipped for a
   batched solve (`b>1`, logged). A per-element batched criticality would need per-scenario
   operating-point slicing (and a `criticality` knob on `solve_harmonic_flow`).
-- **Convert**: `convert/pandapower/` lacks a `CONTEXT.md` (others have one); the OpenDSS
-  converter does not yet emit `Transformer` elements (DSS→pgml transformer parsing).
+- **Convert**: `convert/pandapower/` lacks a `CONTEXT.md` (others have one). The OpenDSS
+  converter emits two-winding `Transformer` elements (solidly grounded wye or delta
+  windings, `LeadLag`-derived clock 0/1/11); not yet read: 3-winding units, `RegControl`
+  regulators, `XfmrCode`/frequency-correction curves, `Yy6`/`Dd6`, and an explicit
+  non-zero (floating/impedance-grounded) neutral node — see
+  `src/pgml/convert/opendss/CONTEXT.md`.
 - **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`), zigzag
   windings, and clocks other than Dyn1/Dyn11 raise `ModelingError` — add when needed.
 - **Geometry**: low-X R/X lines hit the GMR floor (flagged `synth_unphysical`; still matches
@@ -167,6 +178,55 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
   the matrix-free GMRES near the nose; batched continuation (currently single-grid).
 - **Deferred (no priority)**: appliance-state harmonic mixture — a node fingerprint as a sum
   of per-appliance state spectra (state→spectrum library keyed by `consumer_type`).
+
+## Known modeling gaps (physics NOT currently modeled — keep this list honest)
+
+Consolidated during the 2026-07 architecture/correctness review. Each entry states what
+the simulator deliberately (or currently) does NOT capture, so results are never read as
+more physical than they are. Items already tracked as open work above are referenced.
+
+- **Transformer, frequency dependence.** Leakage reactance scales ∝ h with CONSTANT
+  winding resistance — no frequency-correction curve; the schema's
+  `resistance_frequency` / `harmonic_xr_constant` fields are not yet consumed (item C
+  above). No saturation / no inrush (steady-state tool). The magnetizing/core-loss
+  branch IS modeled (`y_m` on the HV diagonal) — but as a shunt at the EXTERNAL HV
+  terminal, whereas OpenDSS places it inside its leakage "T" model; for a typical
+  ~0.5 % magnetizing current the difference is ~1e-3 pu on a live-solve comparison
+  (documented in `docs/pgml/modeling/transformer.md`).
+- **Transformer, construction.** Non-solid neutral grounding (`GroundingImpedance`),
+  zigzag windings, and delta-wye clocks other than 1/11 raise `ModelingError`
+  (deliberate: fail loud, never approximate silently). Clock 6 (Yy6/Dd6) is modeled
+  (reversed LV polarity).
+- **Load harmonic behaviour.** Loads inject harmonics as PURE current sources
+  (`include_load_shunt=False`, ≡ OpenDSS `NeglectLoadY=yes`); the frequency-dependent
+  load Norton shunt (damping near resonances!) is unimplemented and RAISES when
+  requested (item C above). Harmonic resonance magnitudes are therefore conservative
+  (undamped) at load-heavy buses.
+- **Sources.** Zero-sequence source impedance is taken equal to the positive-sequence
+  value (no converter reads `r0x0_max` / `R0/X0` / `z01_ratio`) — see
+  `docs/pgml/modeling/conventions.md` §6. Affects asymmetric fault-like states, not the
+  balanced fundamental.
+- **Line geometry (Carson/Deri).** No conductor temperature dependence (`Rdc` is a
+  constant), no sub-conductor bundling (HV construction), transposition/balance per the
+  documented Deri assumptions. Carson shunt `C` is physically correct but not bit-exact
+  to OpenDSS's `capradius` convention (irrelevant for c=0 feeders). The
+  `geometry.sequence.two_conductor_*` helpers are diagnostic-only (not differentiable).
+- **EN 50160 table.** Orders 1–25 are the standard's (amended A2:2019) values; orders
+  26–49 are a manual flat extension (marked in `data/standards/en50160.yaml`).
+- **Scenario sampling.** All pre-solve sampling executes on CPU (`SobolEngine` is
+  CPU-only); tensors are promoted to the solve device afterwards. Deliberate — the
+  sampled tensors are tiny next to the `[B,H,N,N]` solve.
+- **Per-node harmonic-source sweeps** (`scenarios.run_node_injection_sweep`) loop one
+  solve per node: the solver cannot yet stamp a different target row per batch element.
+  Batch the target-row index (`[B, P]` scatter) to lift the loop.
+- **Converter coverage.** Converted: pandapower `bus`/`line`/`load`/`asymmetric_load`/
+  `trafo`/bus-bus `switch`/`ext_grid`/`sgen`; pgm `node`/`line`/`sym_load`/`asym_load`/
+  `source`/`sym_gen`. NOT converted (a WARNING names any non-empty dropped kind):
+  pandapower `gen` (PV bus — pgml has no voltage-regulating bus yet), `shunt`,
+  `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
+  `asymmetric_sgen`; pgm `transformer`, `three_winding_transformer`, `shunt`,
+  `asym_gen`, `link`, `transformer_tap_regulator`. pandapower tap-changer positions
+  (`tap_pos`/`tap_step`) are not read (off-nominal tap stays 1.0).
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 

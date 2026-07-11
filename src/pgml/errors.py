@@ -3,7 +3,7 @@
 A small, stable error model so callers can catch pgml-specific failures and a REST
 adapter can map them to HTTP status codes without knowing the internals.
 
-Two branches under :class:`PgmError`:
+Two branches under :class:`PgmlError`:
 
 - :class:`InputError` — the caller supplied something invalid (bad configuration,
   an unconvertible source network, an unsupported modeling choice). Maps to a 4xx;
@@ -24,7 +24,7 @@ A REST adapter can therefore do::
         result = simulate(grid, config)
     except pydantic.ValidationError as e:
         return JSONResponse(status_code=422, content=e.errors())
-    except PgmError as e:
+    except PgmlError as e:
         return JSONResponse(status_code=e.http_status, content={"error": str(e)})
 """
 
@@ -33,22 +33,28 @@ from __future__ import annotations
 from typing import Optional
 
 
-class PgmError(Exception):
+class PgmlError(Exception):
     """Base class for all pgml-raised errors. ``http_status`` is a REST hint."""
 
     http_status: int = 500
 
 
+#: Deprecated alias — in a codebase where ``pgm`` names the power-grid-model
+#: reference library (:mod:`pgml.convert.pgm`), ``PgmError`` read as "a
+#: power-grid-model error". Catchers of the old name keep working.
+PgmError = PgmlError
+
+
 # --------------------------------------------------------------------------- #
 # Input errors (the caller's fault) -> 422
 # --------------------------------------------------------------------------- #
-class InputError(PgmError, ValueError):
+class InputError(PgmlError, ValueError):
     """Invalid input: configuration, conversion, or an unsupported modeling choice.
 
     Also subclasses the builtin :class:`ValueError` so that migrating a runtime
     ``raise ValueError(...)`` to ``raise InputError(...)`` stays backward-compatible
     with callers (and tests) that catch ``ValueError``, while being catchable as
-    :class:`PgmError` and carrying ``http_status = 422``. (Schema validation is
+    :class:`PgmlError` and carrying ``http_status = 422``. (Schema validation is
     separate — it raises pydantic ``ValidationError``, not this.)
     """
 
@@ -70,14 +76,14 @@ class ModelingError(InputError, NotImplementedError):
     Also subclasses the builtin :class:`NotImplementedError` so that ``raise
     ModelingError(...)`` is backward-compatible with code (and tests) that catch
     ``NotImplementedError`` for an unsupported model, while still being catchable as
-    :class:`InputError` / :class:`PgmError` and carrying ``http_status = 422``.
+    :class:`InputError` / :class:`PgmlError` and carrying ``http_status = 422``.
     """
 
 
 # --------------------------------------------------------------------------- #
 # Computation errors (the inputs were valid, the computation failed) -> 500
 # --------------------------------------------------------------------------- #
-class ComputationError(PgmError):
+class ComputationError(PgmlError):
     """The inputs were acceptable but the computation failed."""
 
     http_status: int = 500
@@ -108,6 +114,7 @@ class ConvergenceError(ComputationError):
 
 
 __all__ = [
+    "PgmlError",
     "PgmError",
     "InputError",
     "ConfigurationError",

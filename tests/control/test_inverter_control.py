@@ -156,6 +156,24 @@ def test_volt_var_capability_clamp_binds():
     assert math.isclose(q.item(), -qmax, rel_tol=1e-9)
 
 
+def test_capability_clamps_active_power_watt_priority():
+    # Available P above the VA rating: P itself is clipped to the circle
+    # (watt priority), so P² + Q² <= S² holds for the injected pair and the
+    # reactive headroom collapses to zero.
+    c = VoltVarControl(
+        s_rated_va=10000.0,
+        q_reference=QReference.RATED,
+        characteristic=Characteristic(x_values=[1.0, 1.05], y_values=[0.0, -1.0]),
+    )
+    p, _ = _p_v(12000.0, 0.0)  # oversized source: 12 kW into a 10 kVA inverter
+    pe, q = resolve_injection_power(
+        c, p, torch.tensor([[1.05]], dtype=RDT), rdt=RDT, device=None
+    )
+    assert math.isclose(pe.item(), 10000.0, rel_tol=1e-9)
+    assert abs(q.item()) < 1e-9
+    assert pe.item() ** 2 + q.item() ** 2 <= 10000.0**2 * (1.0 + 1e-12)
+
+
 def test_volt_var_available_reference():
     # q_reference="available": base = sqrt(S^2 - P^2), so curve y=1 injects exactly that.
     c = VoltVarControl(

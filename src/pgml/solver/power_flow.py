@@ -38,8 +38,9 @@ I_device(V) - I_slack)`` and ideal-slack rows carry ``Re/Im(V - V_fixed)``
 Implemented as a :class:`torch.autograd.Function`: ``forward`` returns the
 no_grad ``V*``; ``backward`` builds the real ``[2N, 2N]`` Jacobian at ``V*``,
 solves the adjoint, and runs ``torch.autograd.grad`` on a single residual
-evaluation to produce gradients for every parameter leaf (network params, device
-P/Q, slack voltage).
+evaluation to produce gradients at every parameter LEAF (network params, device
+P/Q, slack voltage), reached through any derived-parameter expression a Grid
+field holds (float/tensor duality: one leaf may feed several fields).
 
 Differentiability + GPU (CLAUDE.md): the differentiable path is the IFT backward
 (no unrolling). ``no_grad`` in the forward iteration is expected. No
@@ -236,12 +237,60 @@ class LoadabilityResult:
 # ---------------------------------------------------------------------------
 # leaf discovery (tensor-duality + overrides + slack voltage)
 # ---------------------------------------------------------------------------
+def _tensor_leaves(t: Tensor, out: list, seen: set) -> None:
+    """Append the distinct autograd LEAVES reachable from ``t`` (dedup by id).
+
+    A physical Grid field may hold a plain leaf OR a derived expression (float/tensor
+    duality: one leaf ``p`` can drive both ``p_nom_w=p`` and ``q_nom_var=p*k``). The IFT
+    backward must attach parameter gradients at the true LEAVES, not the derived
+    intermediates: if two fields share a leaf, differentiating the residual w.r.t. the
+    intermediates would count that leaf once through the intermediate AND again when the
+    outer autograd engine walks the intermediate's history — a silent double count. Leaves
+    have no history, so differentiating w.r.t. them is unambiguous and the outer engine
+    connects to them directly. A leaf ``t`` is appended as itself; a non-leaf is resolved
+    by walking its ``grad_fn`` graph to the ``AccumulateGrad`` nodes (whose ``.variable`` is
+    the leaf tensor). Detached / no-grad branches are naturally excluded.
+    """
+    if t.is_leaf:
+        if t.requires_grad and id(t) not in seen:
+            seen.add(id(t))
+            out.append(t)
+        return
+    grad_fn = t.grad_fn
+    if grad_fn is None:
+        return
+    stack = [grad_fn]
+    # Dedup by id while holding a STRONG reference to every visited node: the
+    # Python wrappers yielded by ``next_functions`` are transient, so a freed
+    # wrapper's address can be reused by a not-yet-visited node -- an id-only
+    # set would then skip it and silently drop the leaves behind it (deep
+    # graphs, e.g. a neural network driving an operating point).
+    fn_seen: dict = {}
+    while stack:
+        fn = stack.pop()
+        if id(fn) in fn_seen:
+            continue
+        fn_seen[id(fn)] = fn
+        var = getattr(fn, "variable", None)  # AccumulateGrad -> the leaf tensor
+        if var is not None:
+            if var.requires_grad and id(var) not in seen:
+                seen.add(id(var))
+                out.append(var)
+            continue
+        for nxt, _ in fn.next_functions:
+            if nxt is not None:
+                stack.append(nxt)
+
+
 def _collect_leaves(obj, out: list, seen: set) -> None:
-    """Recursively collect distinct grad-requiring tensors reachable from ``obj``."""
+    """Recursively collect the distinct autograd leaves reachable from ``obj``.
+
+    Tensor fields (leaf or derived) are resolved to their true leaves via
+    :func:`_tensor_leaves`; containers and pydantic models are walked structurally.
+    """
     if isinstance(obj, Tensor):
-        if obj.requires_grad and id(obj) not in seen:
-            seen.add(id(obj))
-            out.append(obj)
+        if obj.requires_grad:
+            _tensor_leaves(obj, out, seen)
         return
     if isinstance(obj, (list, tuple)):
         for el in obj:
@@ -258,9 +307,21 @@ def _collect_leaves(obj, out: list, seen: set) -> None:
 
 
 def _grid_param_leaves(
-    grid: Grid, param_overrides: Optional[dict], v_fixed: Optional[Tensor]
+    grid: Grid,
+    param_overrides: Optional[dict],
+    v_fixed: Optional[Tensor],
+    operating_point: Optional[dict] = None,
 ) -> list[Tensor]:
-    """All distinct autograd leaves the residual depends on (deterministic order)."""
+    """All distinct autograd leaves the residual depends on (deterministic order).
+
+    Physical fields may be plain leaves or derived expressions (float/tensor duality);
+    both are resolved to their true leaves (see :func:`_tensor_leaves`), so a single leaf
+    feeding several fields is captured exactly once and its gradient is not double counted.
+    ``operating_point`` entries (per-appliance ``p_w``/``q_var``, possibly batched)
+    enter the residual exactly like grid fields, so their leaves are collected too: a
+    differentiable operating point — e.g. the output of a neural network — receives
+    gradients through the IFT backward.
+    """
     out: list[Tensor] = []
     seen: set = set()
     for node in grid.nodes:
@@ -272,10 +333,10 @@ def _grid_param_leaves(
     if param_overrides is not None:
         for val in param_overrides.values():
             _collect_leaves(val, out, seen)
+    if operating_point is not None:
+        _collect_leaves(operating_point, out, seen)
     if v_fixed is not None and isinstance(v_fixed, Tensor) and v_fixed.requires_grad:
-        if id(v_fixed) not in seen:
-            seen.add(id(v_fixed))
-            out.append(v_fixed)
+        _tensor_leaves(v_fixed, out, seen)
     return out
 
 
@@ -441,7 +502,7 @@ def solve_power_flow(
     log_modeling_summary(grid, asymmetric=asymmetric)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
-    leaves = _grid_param_leaves(grid, param_overrides, None)
+    leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
     if device is None:
         device = leaves[0].device if leaves else torch.device("cpu")
 
@@ -461,7 +522,7 @@ def solve_power_flow(
     )
     v_fixed = v_fixed_fn()
     # v_fixed may be / contain a differentiable leaf (u_ref/u_angle as tensors).
-    leaves = _grid_param_leaves(grid, param_overrides, v_fixed)
+    leaves = _grid_param_leaves(grid, param_overrides, v_fixed, operating_point)
 
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
@@ -1237,6 +1298,13 @@ class _IFTPowerFlow(torch.autograd.Function):
     ``[2N, 2N]`` Jacobian of the real residual at ``V*``, solves the adjoint
     ``J^T λ = grad_x`` (one solve per batch system), then forms the parameter
     gradients ``-(dR/dθ)^T λ`` via a single vjp of the residual at ``V*``.
+
+    The captured ``*leaves`` are the true autograd leaves. A Grid field may be a
+    derived expression (``q_nom_var = p * k``) sharing history with the outer
+    autograd tape, so the residual reaches the leaves THROUGH that shared history;
+    differentiating at the leaves (not the intermediates) keeps a leaf feeding
+    several fields from being double counted, and the vjp keeps the shared graph
+    alive (``retain_graph=True``) for the outer engine.
     """
 
     @staticmethod
@@ -1319,16 +1387,27 @@ class _IFTPowerFlow(torch.autograd.Function):
         lam = lam_flat.reshape(*lead, twon) if lead else lam_flat.reshape(twon)
 
         # grad_theta = -(dR/dθ)^T λ via a single residual vjp at x* (θ tracking).
+        # ``leaves`` are the true autograd leaves (see ``_grid_param_leaves``); the residual
+        # reaches them THROUGH any derived-parameter intermediates a Grid field holds
+        # (float/tensor duality: ``q_nom_var = p * k``). Because the leaves have no history,
+        # this single grad gives each an unambiguous total — no double count from a leaf that
+        # feeds several fields — and the outer engine attaches directly to the leaves.
         x_const = x_star.detach()
         with torch.enable_grad():
-            r_theta = real_res(x_const)  # [*b', 2N]; depends on leaves
+            r_theta = real_res(x_const)  # [*b', 2N]; depends on the leaves
             # r_theta may carry a broadcast singleton batch dim; align λ to it.
             grad_out = (-lam).reshape(r_theta.shape).to(r_theta.dtype)
+            # retain_graph=True: those derived-parameter intermediates were built in the
+            # caller's forward pass, so their history is shared with the outer autograd tape.
+            # Freeing it here (retain_graph=False) would break the FIRST outer .backward()
+            # ("backward through the graph a second time") whenever such an intermediate is
+            # also used elsewhere on the outer tape. The freshly built residual sub-graph is
+            # dropped normally on scope exit; the outer engine owns the shared history.
             grads = torch.autograd.grad(
                 r_theta,
                 leaves,
                 grad_outputs=grad_out,
-                retain_graph=False,
+                retain_graph=True,
                 allow_unused=True,
             )
 
@@ -1690,7 +1769,7 @@ def loadability_limit(
     f0 = float(grid.base_frequency_hz)
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
-    leaves = _grid_param_leaves(grid, param_overrides, None)
+    leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
     if device is None:
         device = leaves[0].device if leaves else torch.device("cpu")
 

@@ -26,15 +26,18 @@ A change that breaks float64 `gradcheck` or the GPU device/dtype test is not don
 
 `pgml` is the **base** package; the others are one-way dependents that import only `pgml`'s
 public API and never its internals. `pgml` imports none of them. `pgl` and `pgg` are
-independent of each other.
+independent of each other; `pgg` may additionally import `pghub` (real-grid seeding and
+comparison), never the reverse. `pgd` imports the `pgml` and `pgl` public APIs and talks to
+the external `devicecom` measurement service (sibling repository) over the network only —
+never as an import.
 
 | package | role | status | open in |
 |---|---|---|---|
 | **pgml** | differentiable, GPU-ready harmonic power flow (the gradient engine) | active — base | `src/pgml/CONTEXT.md`, `src/pgml/STATUS.md` |
 | **pgl** | power-grid-learn — harmonic state-estimation models + training | in development | `src/pgl/CONTEXT.md`, `src/pgl/STATUS.md` |
-| **pgg** | power-grid-generation — differentiable synthetic grid generation | scaffolded | `src/pgg/CONTEXT.md`, `src/pgg/STATUS.md` |
-| **pgd** *(future)* | dashboard: visualize grids, simulation, training | planned | — |
-| **pghub** *(future)* | hub/DB of grids (load from sources, persist) | planned | — |
+| **pgg** | power-grid-generation — QD synthesis of LV grids (CVT-MAP-Elites + differentiable repair) | active | `src/pgg/CONTEXT.md`, `src/pgg/STATUS.md` |
+| **pghub** | dataset hub — real grid datasets → `pgml.Grid`, structural metrics, embeddings | active | `src/pghub/CONTEXT.md`, `src/pghub/STATUS.md` |
+| **pgd** | dashboard — FastAPI backend + web SPA over simulation, state estimation, and live measurements (DuckDB/parquet aggregation, one-line diagram, grid editing) | active | `src/pgd/CONTEXT.md`, `src/pgd/STATUS.md` |
 
 **Deployment.** The training clusters provide conda only (no pixi) and a recent CUDA
 toolkit; torch comes from conda and the packages pip-install on top (`deploy/environment.yml`).

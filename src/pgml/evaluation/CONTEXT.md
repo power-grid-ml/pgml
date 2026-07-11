@@ -14,7 +14,7 @@ opendssdirect are imported lazily INSIDE functions, so even
 `import pgml.evaluation.oracles` succeeds without them installed.  Install
 `pgml[oracles]` (pyproject.toml) to pull in all oracle dependencies.
 
-The old `pgml.evaluation.references` module remains as a thin compatibility shim
+The old `pgml.evaluation.oracles` module remains as a thin compatibility shim
 that re-exports everything from `pgml.evaluation.oracles`; new code should import
 from the canonical `pgml.evaluation.oracles` path.
 
@@ -115,7 +115,7 @@ Requires `opendssdirect` (imported lazily inside functions).
 - `opendss_dyn_transformer_harmonic_voltages(grid, harmonic_injection, orders, ...) ->
   np.ndarray` — genuine vector-group validation using real OpenDSS Transformer elements.
 
-## Compatibility shim (`pgml.evaluation.references`)
+## Compatibility shim (`pgml.evaluation.oracles`)
 Re-exports all of `pgml.evaluation.oracles`; kept for backward compatibility with
 existing importers.  New code should import from `pgml.evaluation.oracles` directly.
 

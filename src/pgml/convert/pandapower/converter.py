@@ -55,12 +55,14 @@ from typing import Any
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
+    build_generator,
     build_line_from_sequence,
     build_load,
     build_node,
     build_source,
     make_metadata,
     phases_for,
+    warn_dropped_elements,
 )
 from pgml.schemas.grid_schema import (
     ComplexTap,
@@ -133,6 +135,7 @@ def to_grid(
         "switch": {},
         "load": {},
         "asymmetric_load": {},
+        "sgen": {},
         "ext_grid": {},
         "slack_v_complex": None,
     }
@@ -459,6 +462,54 @@ def to_grid(
                         q_per_phase_var=(q_a, q_b, q_c),
                     )
                 )
+
+    # ------------------------------------------------------------------ #
+    # 8. Static generators (net.sgen) -> Generator (PQ injection)          #
+    # ------------------------------------------------------------------ #
+    # pandapower sgen is GENERATION-POSITIVE (p_mw > 0 injects), matching the
+    # Generator nameplate convention; the assembly applies the injection sign.
+    sgen = getattr(net, "sgen", None)
+    if sgen is not None and len(sgen):
+        for pp_idx, row in sgen.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            gen_id = _id.next()
+            id_map["sgen"][pp_idx] = gen_id
+            appliances.append(
+                build_generator(
+                    id=gen_id,
+                    name=str(row.get("name", f"sgen_{pp_idx}") or f"sgen_{pp_idx}"),
+                    node=id_map["bus"][bus_pp],
+                    mode=phase_mode,
+                    p_total_w=float(row["p_mw"]) * 1.0e6,
+                    q_total_var=float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6,
+                )
+            )
+
+    # Elements the converter does NOT read: fail loud, never silently wrong.
+    warn_dropped_elements(
+        _logger,
+        "pandapower",
+        {
+            kind: len(tbl)
+            for kind in (
+                "gen",
+                "shunt",
+                "trafo3w",
+                "impedance",
+                "ward",
+                "xward",
+                "dcline",
+                "storage",
+                "motor",
+                "asymmetric_sgen",
+            )
+            if (tbl := getattr(net, kind, None)) is not None
+        },
+    )
 
     description = f"Imported from pandapower (f0={f0_hz} Hz). " + (
         "Single-phase positive-sequence equivalent."

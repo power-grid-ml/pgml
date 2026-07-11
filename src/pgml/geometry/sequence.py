@@ -26,9 +26,13 @@ floor. This module implements that model two equivalent ways:
 ``Z0/Z1/Z2`` (Fortescue), used to SHOW that genuine 3-phase geometry keeps earth return
 only in ``Z0``.
 
-Everything is torch / autograd-safe / GPU-ready / batched over a leading set of lines
-``*B`` and over ``H`` frequencies, so gradients flow ``R1, X1 -> Z1(h) -> Y-bus``.
-See ``docs/pgml/modeling/harmonic-line-model.md`` for the decision record.
+:func:`positive_sequence_z` and :func:`phase_to_sequence` are torch / autograd-safe /
+GPU-ready / batched over a leading set of lines ``*B`` and over ``H`` frequencies, so
+gradients flow ``R1, X1 -> Z1(h) -> Y-bus``. The two ``two_conductor_*`` helpers are
+DIAGNOSTIC-ONLY exceptions: they collapse their inputs to python floats (not
+differentiable, not batched) and exist to cross-check the direct model against a
+physical Carson loop. See ``docs/pgml/modeling/harmonic-line-model.md`` for the
+decision record.
 """
 
 from __future__ import annotations

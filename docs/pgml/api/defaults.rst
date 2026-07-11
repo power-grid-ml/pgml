@@ -43,7 +43,7 @@ Upstream-grid (slack Source) modelling
 ``source.series_impedance_ohm`` (default 5.0 Ω)
     Magnitude of the upstream-grid Thévenin/Norton series impedance, applied at the
     source's rated voltage.  Used by builders like
-    :func:`~pgml.evaluation.references.cigre_lv_full_grid` when the converted source is
+    :func:`~pgml.grids.cigre_lv_full_grid` when the converted source is
     near-ideal (e.g. the stock pandapower ext-grid gives R ~1e-6 Ω, which short-circuits
     the bus at harmonics).  Larger values produce a weaker upstream grid with more
     cross-feeder harmonic coupling; the user/grid value always wins via

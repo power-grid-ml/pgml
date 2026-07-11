@@ -4,7 +4,7 @@ The plot functions never touch torch or a reference library; they consume these
 plain-numpy containers. Builders here adapt our solver outputs
 (:class:`~pgml.solver.PowerFlowResult`, :class:`~pgml.solver.HarmonicFlowResult`,
 assembled Y-bus tensors) into them. Reference-library adapters that emit the SAME
-containers live in :mod:`pgml.evaluation.references`, so "ours vs reference" is just
+containers live in :mod:`pgml.evaluation.oracles`, so "ours vs reference" is just
 a list of these objects handed to one plot function.
 """
 
@@ -138,29 +138,38 @@ def voltage_profile(
     )
 
 
-def harmonic_profile(
-    hresult,
+def harmonic_profile_from_array(
+    v_hn: np.ndarray,
     grid: Grid,
     order: int,
     *,
-    label: str = "pgml",
+    frequencies_hz,
+    label: str,
+    index=None,
     phase: Phase = Phase.A,
     slack: Optional[int] = None,
-    scenario: int = 0,
     unit: str = "pu",
 ) -> HarmonicProfile:
-    """Build a :class:`HarmonicProfile` (magnitude + angle vs distance) at ``order``.
+    """Build a :class:`HarmonicProfile` from a plain complex ``[H, N]`` array.
 
-    Selects the slice of ``hresult.v`` whose frequency matches ``order * f0``.
-    ``unit="pu"`` divides by the node L-N base; ``unit="V"`` keeps volts.
+    The row-building primitive every harmonic-profile adapter shares — the
+    solver-result path (:func:`harmonic_profile`) and the ML estimator/dataset
+    path (``pgl.evaluation``) both delegate here, so the per-unit base and the
+    node/phase/order alignment cannot drift between the two. ``frequencies_hz``
+    (one entry per ``H``-row) is REQUIRED: a bare array cannot reveal its own
+    row-to-order layout. ``index`` is the :class:`NodePhaseIndex` of the rows
+    (default: rebuilt from ``grid``). ``unit="pu"`` divides by the node L-N
+    base; ``unit="V"`` keeps volts.
     """
-    index = hresult.index
-    n = index.size
-    freqs = to_numpy(hresult.frequencies_hz)
+    if index is None:
+        from pgml.assembly import node_phase_index
+
+        index = node_phase_index(grid)
+    v_hn = np.asarray(v_hn)
+    freqs = np.asarray(to_numpy(frequencies_hz), dtype=float)
     f0 = float(grid.base_frequency_hz)
     k = int(np.argmin(np.abs(freqs - order * f0)))
-    vmat = _scenario_slice(to_numpy(hresult.v), n, scenario, extra_axes=1)  # (H, N)
-    vh = vmat[k]
+    vh = v_hn[k]  # [N]
     dist = distance_from_slack(grid, slack)
     ds, mags, angs, nids = [], [], [], []
     for node in grid.nodes:
@@ -181,6 +190,39 @@ def harmonic_profile(
         frequency_hz=float(freqs[k]),
         label=label,
         node_ids=np.asarray(nids)[o],
+        unit=unit,
+    )
+
+
+def harmonic_profile(
+    hresult,
+    grid: Grid,
+    order: int,
+    *,
+    label: str = "pgml",
+    phase: Phase = Phase.A,
+    slack: Optional[int] = None,
+    scenario: int = 0,
+    unit: str = "pu",
+) -> HarmonicProfile:
+    """Build a :class:`HarmonicProfile` (magnitude + angle vs distance) at ``order``.
+
+    Selects the slice of ``hresult.v`` whose frequency matches ``order * f0``.
+    ``unit="pu"`` divides by the node L-N base; ``unit="V"`` keeps volts.
+    """
+    index = hresult.index
+    vmat = _scenario_slice(
+        to_numpy(hresult.v), index.size, scenario, extra_axes=1
+    )  # (H, N)
+    return harmonic_profile_from_array(
+        vmat,
+        grid,
+        order,
+        frequencies_hz=hresult.frequencies_hz,
+        label=label,
+        index=index,
+        phase=phase,
+        slack=slack,
         unit=unit,
     )
 

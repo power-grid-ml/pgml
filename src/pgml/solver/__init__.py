@@ -39,6 +39,7 @@ from .harmonic_flow import (
     HarmonicFlowResult,
     NodeHarmonicSource,
     assemble_harmonic_system,
+    assemble_harmonic_ybus,
     solve_harmonic_flow,
 )
 from .power_flow import (
@@ -65,6 +66,7 @@ __all__ = [
     "LoadabilityResult",
     "solve_harmonic_flow",
     "assemble_harmonic_system",
+    "assemble_harmonic_ybus",
     "HarmonicFlowResult",
     "NodeHarmonicSource",
 ]

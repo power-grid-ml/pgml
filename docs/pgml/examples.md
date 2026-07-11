@@ -51,10 +51,10 @@ Outputs (default `evaluation_output/`):
 | `harmonic_default_vs_naive_h5.svg` | Pairwise h=5 comparison |
 | `grid_voltage_map.svg` | Topology coloured by voltage pu |
 
-```{literalinclude} ../../examples/evaluate_ieee33.py
+```{literalinclude} ../../examples/pgml/evaluate_ieee33.py
 :language: python
 :lines: 1-30
-:caption: examples/evaluate_ieee33.py (header)
+:caption: examples/pgml/evaluate_ieee33.py (header)
 ```
 
 ---
@@ -87,10 +87,10 @@ single-conductor Carson model, and a live OpenDSS profile. See the
 IEEE-33 at the 5th harmonic: the config-default line model versus the naive "X ∝ h" model.
 ```
 
-```{literalinclude} ../../examples/evaluate_harmonics_carson.py
+```{literalinclude} ../../examples/pgml/evaluate_harmonics_carson.py
 :language: python
 :lines: 1-25
-:caption: examples/evaluate_harmonics_carson.py (header)
+:caption: examples/pgml/evaluate_harmonics_carson.py (header)
 ```
 
 ---

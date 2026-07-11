@@ -52,7 +52,7 @@ transformer impedance, per-km vs total, imperial vs metric earth return) must be
 |---|---|---|---|
 | **pgml** | `Node.u_rated_v` [V] | **L-L** (≥3φ) / L-N (1φ) | working voltages are **L-N** (`phase_voltage_magnitude`); pu = `\|V_LN\|/(u_rated/√3)` |
 | **pandapower** | `bus.vn_kv` [kV] | **L-L** | `res_bus.vm_pu = \|V_LL\|/vn_kv`; asym `res_bus_3ph` uses the L-N base (`vn_kv/√3`) |
-| **OpenDSS** | `Vsource.basekv` [kV] | **L-L** | but `Bus.kVBase()` **always returns L-N** (`=basekv/√3`); `AllBusVolts` are L-N phasors |
+| **OpenDSS** | `Vsource.basekv` [kV] | **L-L for `phases>=3`; used directly (no √3) for `phases=1`** — see the gotcha below | but `Bus.kVBase()` **always returns `(matched voltagebases class)/√3`, regardless of local phase count** (`=basekv/√3` when `voltagebases` matches the source's own `basekv`); `AllBusVolts` are L-N phasors |
 | **pgm** | `node.u_rated` [V] | **L-L** | symmetric output `u` = L-L, `u_pu=u/u_rated`; asymmetric output `u` = **L-N** |
 
 **Decision & rationale.** Store the universal nameplate (line-to-line) and derive the
@@ -68,7 +68,21 @@ admittance `y=conj(S)/V²` agree with pandapower's positive-sequence reference i
   const-Z shunt; the converter now recovers L-L correctly.)
 
 **Gotchas.**
-- OpenDSS `Bus.kVBase()` is L-N regardless of phase count — `×√3` is mandatory.
+- OpenDSS `Bus.kVBase()` returns `(matched voltagebases class)/√3` for EVERY bus,
+  regardless of local phase count — `×√3` is mandatory to recover the nameplate
+  `Node.u_rated_v` the converter stores.
+- **OpenDSS `Vsource.basekv` is documented as line-to-line, but that is only true for a
+  `phases>=3` Vsource.** For a `phases=1` Vsource, OpenDSS uses `basekv` DIRECTLY,
+  unscaled, as the solved single-conductor-pair EMF magnitude — no internal `×√3` or
+  `/√3` anywhere (verified empirically: `Bus.Voltages()` magnitude equals `basekv·pu`
+  exactly for a 1-phase source, whether `basekv` is a genuine line-to-neutral value or
+  the historical positive-sequence-equivalent convention of feeding in the parent
+  3-phase system's line-to-line nominal, e.g. the IEEE 33-bus fixtures). The converter's
+  `u_ref_v = basekv·pu·1000` and `u_rated_v = kVBase()·√3·1000` formulas need NO
+  phase-count branch — they simply mirror whatever magnitude OpenDSS itself solves for,
+  which is L-L-scaled for `phases>=3` and used as-is for `phases=1`. See
+  `tests/convert/test_opendss_vsource_basekv.py` for the live-circuit proof and
+  `src/pgml/convert/opendss/converter.py`'s Vsource docstring section for the derivation.
 - pgm asymmetric power flow reports `u` as L-N; a future asym oracle must multiply by √3
   (or use `u_pu` with the correct base) before comparing to pgml's L-L `u_rated`.
 - The 3-phase slack EMF must be L-N (`u_rated/√3`); pinning the L-L magnitude on each
@@ -86,17 +100,26 @@ This is the headline cross-tool difference.
 | **pgml** | `series_resistance_ohm`, `series_inductance_h` | **TO / LV coil** | stored directly |
 | **pandapower** | `vk_percent`, `vkr_percent`, `sn_mva` | **LV side** ✅ | `Z_base_LV=vn_lv_v²/sn_va`; `R=vkr%·Z_base_LV`, `\|Z\|=vk%·Z_base_LV`, `X=√(\|Z\|²−R²)`, `L=X/2πf₀` |
 | **pgm** | `uk`, `pk`, `sn`, `u2` | **to-side (LV)** ✅ | `R=pk·u2²/sn²`, `\|Z\|=uk·u2²/sn`, `X=√(\|Z\|²−R²)` *(transformer path not yet implemented in the converter)* |
-| **OpenDSS** | per-winding `%R`, inter-winding `XHL` | **winding 1 (HV)** ❌ | oracle back-calculates from pgml's LV-referred R/L on the LV base |
+| **OpenDSS** | per-winding `%R`, inter-winding `XHL` | **percent, i.e. base-invariant** — `XHL` documented "on the kVA base of winding 1"; `%R` per winding on its own kV/kVA base | `to_grid` recovers `R_lv=(%R_wdg1+%R_wdg2)/100·Z_base_LV`, `X_lv=XHL%/100·Z_base_LV`, `Z_base_LV=kV_lv²·1000/kVA` (requires both windings to share one kVA rating; the oracle direction back-calculates the same way, see below) |
 
 **Decision & rationale.** pgml refers the leakage admittance to the **TO/LV coil**, the
 same side as pandapower and pgm (the two load-flow oracles), so their `vk/vkr/uk/pk`
 convert with a single LV base and no extra referral. It is also the natural side for the
 phase-domain winding-incidence primitive `Y = Nᵀ·Y_winding·N`, where the leakage `y` sits
 on the LV coil block and the HV self-block picks up the `1/τ²` from the turns ratio (see
-the [transformer model](transformer.md)). OpenDSS instead references `XHL` to winding 1 (HV); the live
-OpenDSS Dyn oracle (`opendss_oracle._build_circuit_with_real_transformer`) back-calculates
-`%R`/`XHL` from pgml's LV-referred R/L — self-consistent because the total per-unit
-leakage is preserved.
+the [transformer model](transformer.md)). OpenDSS's `%R`/`XHL` are PERCENT (per-unit)
+quantities, so — unlike an absolute-ohm impedance — they are base-invariant and need no
+HV/LV referral arithmetic, only the LV base impedance to convert back to ohms; this holds
+as long as both windings share one kVA rating (`to_grid` raises `ConversionError`
+otherwise, an OpenDSS quirk: the *sequential* `~ wdg=1 ... kVA=x` / `~ wdg=2 ... kVA=y`
+tilde-continuation syntax silently re-syncs both windings to the LAST kVA given — only the
+array form `kvas=[x, y]` actually creates a genuine per-winding kVA mismatch). The live
+OpenDSS Dyn oracle (`opendss_oracle._build_circuit_with_real_transformer`, the pgml -> DSS
+direction used for the harmonic vector-group tests) back-calculates `%R`/`XHL` from pgml's
+LV-referred R/L with the same formula inverted — self-consistent because the total
+per-unit leakage is preserved either way. The DSS -> pgml direction
+(`convert.opendss.to_grid`) is the forward conversion documented here; see
+`src/pgml/convert/opendss/CONTEXT.md`.
 
 **Magnetizing branch.** pgml refers the magnetizing shunt `y_m=G_m+jB_m` to the **HV**
 terminal (`magnetizing_conductance_s`, `magnetizing_inductance_h`); the pandapower
@@ -131,8 +154,25 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
   pgml's "positive ⇒ LV lags" before trusting it).
 - pandapower stores `shift_degree` as a positive clock·30; verify it stores Dyn11 as 330
   (or −30) and not 30 before relying on `clock_transpose` for a non-Dyn1 group.
-- The OpenDSS converter does **not** emit `Transformer` elements (DSS→pgml transformer
-  parsing is a gap); CIGRE/IEEE feeders enter via pandapower.
+- The OpenDSS converter (`convert.opendss.to_grid`) converts two-winding `Transformer`
+  elements (winding 1 = HV/from, winding 2 = LV/to; `LeadLag` -> clock 1/11 for a Dy/Yd
+  pairing verified against a live solve, clock 0 for Yy/Dd since OpenDSS has no explicit
+  clock parameter). Scope, verified via live oracle tests
+  (`tests/reference/test_opendss_transformer.py`):
+  - only two-winding transformers (3-winding raises `ConversionError`);
+  - only solidly grounded wye (OpenDSS's shorthand-bus or explicit `.0` neutral) or delta
+    windings — an explicit non-zero neutral node (floating or impedance-grounded) raises;
+  - `Yy6`/`Dd6` (the 180° reversed-polarity group) is not detectable from a plain OpenDSS
+    `Transformer` element (no explicit clock parameter beyond the binary `LeadLag`
+    Dy/Yd toggle) and is not converted;
+  - regulators (`RegControl`), 3-winding units, and OpenDSS's own frequency-correction
+    curves (`XfmrCode`/`FreqMultCurve`) are not read;
+  - the magnetizing branch (`%noloadloss`/`%imag`) converts with the SAME closed-form
+    used by the pandapower converter (`pfe_w`/`i0%` on the HV base), but pgml stamps it
+    as a simple HV-terminal shunt while OpenDSS's own internal model places it inside the
+    leakage "T" — the two agree in direction and order of magnitude but not to the
+    tight tolerance the leakage-only (no-magnetizing) oracle achieves (documented in that
+    test file's module docstring).
 
 ---
 
@@ -176,14 +216,17 @@ scale by `Z_base=vn_kv²/sn_mva` before comparing to pgml's SI Y.
 |---|---|---|---|
 | **pgml** | `Source.u_ref_v` = **L-N per phase** (3φ), `u_angle_deg` | diagonal per-phase R/L | = positive-seq (no separate value read) |
 | **pandapower** | `ext_grid.vm_pu`·`vn_kv` (L-L), `va_degree` | from `s_sc_max_mva`, `rx_max` | `r0x0_max`/`x0x_max` (not read) |
-| **OpenDSS** | `Vsource.basekv`·`pu` (L-L), `angle` | `R1/X1` or `MVAsc3/MVAsc1`+`x1r1` | `R0/X0` (not read) |
+| **OpenDSS** | `Vsource.basekv`·`pu` (L-L for `phases>=3`; used directly, no √3, for `phases=1` — see §1's gotcha), `angle` | `R1/X1` or `MVAsc3/MVAsc1`+`x1r1` | `R0/X0` (not read) |
 | **pgm** | `source.u_ref`·`u_rated` (L-L), `u_ref_angle` | from `sk`, `rx_ratio` | `z01_ratio` (not read) |
 
-**Decision.** All converters pass the **line-to-line** magnitude to
-`convert._common.build_source`, which divides by √3 under THREE_PHASE to produce the
-per-phase **line-to-neutral** EMF (1-phase keeps it). `id_map["slack_v_complex"]` keeps the
-**L-L** phasor as a convenience for the single-phase ideal-slack `v_fixed`. At harmonics
-the source EMF is zero (a short); the source contributes only its Norton shunt
+**Decision.** All converters pass the magnitude OpenDSS itself would use as the solved
+per-conductor EMF to `convert._common.build_source`, which divides by √3 under
+THREE_PHASE to produce the per-phase **line-to-neutral** EMF for a `phases>=3` source
+(1-phase keeps it unchanged — `build_source`'s `n<3` branch, matching OpenDSS's own
+no-√3 treatment of a `phases=1` Vsource). `id_map["slack_v_complex"]` keeps that same
+raw phasor (L-L for a `phases>=3` source; the solved 1-phase EMF for a `phases=1` one)
+as a convenience for the single-phase ideal-slack `v_fixed`. At harmonics the source EMF
+is zero (a short); the source contributes only its Norton shunt
 `Y_s(h)=1/(R+j·2πh·f₀·L)`.
 
 **Gotcha.** The zero-sequence source impedance is currently taken equal to the
@@ -261,7 +304,11 @@ modelled yet (tracked as open work in `src/pgml/STATUS.md`, "frequency-dependent
 These are places a source convention is **not yet** read, so a foreign network silently
 under-converts. The core model supports each; only the converter intake is missing.
 
-- **OpenDSS converter:** does not parse `Transformer` elements.
+- **OpenDSS converter:** `Transformer` elements convert (two-winding, solidly grounded
+  wye or delta windings, `LeadLag`-derived clock 0/1/11); NOT read/converted: 3-winding
+  units, `RegControl` regulators, tap-changer control, `XfmrCode`/frequency-correction
+  curves, `Yy6`/`Dd6` (no explicit clock parameter beyond `LeadLag`), and an explicit
+  non-zero (floating or impedance-grounded) neutral node.
 - **pgm converter:** no `transformer`, no `sym_gen`/`asym_gen`; `source.z01_ratio` and line
   `tan0` ignored; pgm stores no `f0`, so the caller must pass the correct
   `base_frequency_hz` (a 50/60 Hz mismatch silently scales every L and C).

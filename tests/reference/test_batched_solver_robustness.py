@@ -53,6 +53,24 @@ class TestBatchedNewton:
         assert ci.v.shape == nt.v.shape
         assert torch.max(torch.abs(ci.v - nt.v)).item() < 1e-6
 
+    def test_newton_batched_matches_loop_of_singles(self) -> None:
+        """A batched Newton solve equals a python loop of single-scenario solves
+        (the batched==loop invariant, previously pinned only for the
+        current-injection method)."""
+        p_vals = [1500.0, 3000.0, 6000.0, 9000.0]
+        grid, op = _batched_chain_op(p_vals)
+        batched = solve_power_flow(grid, operating_point=op, method="newton", dtype=CDT)
+        assert batched.converged
+        for k, p in enumerate(p_vals):
+            single = solve_power_flow(
+                grid,
+                operating_point={30: {"p_w": float(p), "q_var": 300.0}},
+                method="newton",
+                dtype=CDT,
+            )
+            assert single.converged
+            assert torch.max(torch.abs(batched.v[k] - single.v)).item() < 1e-9
+
     def test_batched_newton_gradients_flow(self) -> None:
         """Sequential forward + shared IFT backward differentiate the batch w.r.t. a grid
         parameter (the documented leaf; the batch is supplied by ``operating_point``),

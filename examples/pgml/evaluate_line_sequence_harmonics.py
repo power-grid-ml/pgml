@@ -27,7 +27,7 @@ etc.), so defaults are explicit and documented (`pgml.defaults`), never hidden.
 
 Run::
 
-    pixi run -e cpu python examples/evaluate_line_sequence_harmonics.py [out_dir]
+    pixi run -e cpu python examples/pgml/evaluate_line_sequence_harmonics.py [out_dir]
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ import torch
 
 from pgml import defaults as config
 from pgml import evaluation as ev
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 from pgml.geometry.carson import kron_reduce, series_impedance
 from pgml.geometry.sequence import (
     positive_sequence_z,
@@ -75,6 +75,11 @@ ORDERS = [1, 5, 7, 11, 13, 17, 25]
 
 
 # --- (1) sequence R/X vs harmonic ------------------------------------------
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+
+
 def _three_phase_geometry_z(freqs):
     """Full Carson Z(h) [H,3,3] for a 3-phase overhead line (3 phase + neutral, Kron)."""
     x = torch.tensor([-1.0, 0.0, 1.0, 0.0], dtype=RDT)
@@ -403,7 +408,7 @@ def plot_unbalanced_feeder(out: Path, order: int = 9) -> None:
     )
 
 
-def main(out_dir: str = "evaluation_output/sequence") -> None:
+def main(out_dir: str = str(_OUT / "sequence")) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     plot_sequence_xr(out)
@@ -414,4 +419,4 @@ def main(out_dir: str = "evaluation_output/sequence") -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/sequence")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "sequence"))

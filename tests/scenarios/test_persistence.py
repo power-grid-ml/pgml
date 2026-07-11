@@ -162,3 +162,16 @@ def test_schema_version_and_provenance(grid3, tmp_path):
     # a minor/patch drift is read best-effort (no raise)
     _rewrite("0.0.999")
     read_dataset(tmp_path)
+
+
+def test_complex_sample_column_raises(tmp_path):
+    """A complex sample column is rejected explicitly: a silent float64 cast
+    would drop the imaginary part, and the shared-sample JSON path cannot
+    encode complex values at all."""
+    from pgml.errors import InputError
+    from pgml.scenarios.persistence import _write_samples
+
+    with pytest.raises(InputError, match="complex"):
+        _write_samples(
+            {"z": torch.ones(4, dtype=torch.complex128)}, 4, tmp_path, "zstd"
+        )

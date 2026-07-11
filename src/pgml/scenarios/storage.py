@@ -71,6 +71,13 @@ def integrate_soc(
 ) -> StorageDispatchResult:
     """Realize a requested storage power sequence under SoC + rating limits.
 
+    Only ``requested_power_w`` is differentiable. Every LIMIT parameter
+    (``energy_capacity_wh``, ``soc*``, ``efficiency_*``, ``p_rated_w``) is read
+    as a plain float — a tensor passed here (e.g. straight off a tensor-valued
+    ``Storage`` schema field) is deliberately treated as a constant, per the
+    module's off-tape decision-logic design. Learning battery SIZING through
+    this function is not supported.
+
     Parameters
     ----------
     requested_power_w:

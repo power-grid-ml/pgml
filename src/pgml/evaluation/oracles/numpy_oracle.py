@@ -1,4 +1,10 @@
-"""Pure-numpy harmonic oracle — independent reimplementation of pgml's Y-bus formulas.
+"""Pure-numpy harmonic oracle — a REGRESSION guard on pgml's Y-bus formulas.
+
+NOT independent validation: the formulas are deliberately pgml's own (and the
+3-phase transformer stamp imports ``pgml.assembly._transformer``'s incidence
+builder directly), so a bug in those formulas passes this parity check by
+construction. Independent physics validation lives in the live-OpenDSS and
+pandapower / power-grid-model oracle tests.
 
 This module provides two harmonic oracles that operate without a live OpenDSS process:
 

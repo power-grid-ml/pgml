@@ -7,7 +7,7 @@ paper-ready / interactive figures via ``pgml.evaluation``.
 
 Run::
 
-    pixi run -e cpu python examples/evaluate_harmonics_carson.py [out_dir]
+    pixi run -e cpu python examples/pgml/evaluate_harmonics_carson.py [out_dir]
 
 Per feeder (default ``evaluation_output/carson/<feeder>/``):
 - ``ybus_h5.svg``          — pgml Y(5·f0) vs OpenDSS SystemY(5·f0) (|Y|, log).
@@ -38,10 +38,15 @@ from pgml.schemas.grid_schema import Line
 from pgml.solver import solve_harmonic_flow
 
 from pgml import evaluation as ev
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 
 CDT = torch.complex128
 ORDERS_3D = [5, 7, 11, 13]
+
+
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 
 def _pgml_harmonic_y_labeled(grid, index, h, label):
@@ -156,11 +161,11 @@ def run_feeder(name: str, builder, out_dir: Path) -> None:
     print(f"[{name}] wrote figures to {out.resolve()}")
 
 
-def main(out_dir: str = "evaluation_output/carson") -> None:
+def main(out_dir: str = str(_OUT / "carson")) -> None:
     out = Path(out_dir)
     run_feeder("ieee33", ref.ieee33_geometry_grid, out)
     run_feeder("cigre_lv", ref.cigre_lv_geometry_grid, out)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/carson")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "carson"))

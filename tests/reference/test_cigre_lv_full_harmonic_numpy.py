@@ -57,7 +57,7 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
-from pgml.evaluation.references import (
+from pgml.evaluation.oracles import (
     cigre_lv_full_grid,
     numpy_harmonic_voltages,
 )

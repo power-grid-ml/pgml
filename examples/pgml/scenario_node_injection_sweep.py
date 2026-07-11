@@ -29,7 +29,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/scenario_node_injection_sweep.py [out_dir]
+    pixi run -e cpu python examples/pgml/scenario_node_injection_sweep.py [out_dir]
 
 Outputs (default ``evaluation_output/scenario1/``): ``spread_h11.csv`` (m x i, per-unit),
 ``spread_h11.npz`` (per-unit magnitude + raw real/imag volts + the ``|V1|`` base),
@@ -50,7 +50,7 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
-from pgml.evaluation.references import cigre_lv_full_grid
+from pgml.evaluation.oracles import cigre_lv_full_grid
 from pgml.geometry.synthesis import synthesize_grid_geometry
 from pgml.scenarios import NodeInjectionSweepConfig, run_node_injection_sweep
 from pgml.solver import NodeHarmonicSource, solve_harmonic_flow
@@ -60,6 +60,11 @@ SPECTRUM_CSV = Path(__file__).with_name("spectra") / "VoltageSag40ms.csv"
 RECORD_ORDER = 11  # the harmonic whose spread we map
 SOURCE_POWER_VA = 1.0e5  # error-source strength S_sc (short-circuit power); tune freely
 KIND = "voltage"  # "voltage" (Thévenin) or "current" (Norton)
+
+
+# Example outputs are anchored at examples/ (not the cwd), so a run writes
+# under examples/evaluation_output/ rather than the repository root.
+_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 
 def read_spectrum_csv(path: Path) -> dict:
@@ -81,7 +86,7 @@ def read_spectrum_csv(path: Path) -> dict:
     }
 
 
-def main(out_dir: str = "evaluation_output/scenario1") -> None:
+def main(out_dir: str = str(_OUT / "scenario1")) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -184,7 +189,7 @@ def _opendss_compare(
     grid, spectrum, res, k, injection_ids, node_ids, out: Path
 ) -> None:
     try:
-        from pgml.evaluation.references import opendss_harmonic_voltages
+        from pgml.evaluation.oracles import opendss_harmonic_voltages
     except ImportError:
         print("OpenDSS oracle unavailable — skipping comparison.")
         return
@@ -257,4 +262,4 @@ def _compare_plot(node_ids, pgml_pu, dss_pu, inj_node, path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "evaluation_output/scenario1")
+    main(sys.argv[1] if len(sys.argv) > 1 else str(_OUT / "scenario1"))

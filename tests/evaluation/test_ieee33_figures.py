@@ -27,7 +27,7 @@ from pgml.evaluation import (
     save_figure,
     voltage_profile,
 )
-from pgml.evaluation import references as ref
+from pgml.evaluation import oracles as ref
 from pgml.solver import solve_power_flow
 
 CDT = torch.complex128
@@ -60,8 +60,11 @@ def test_voltage_profiles_align_and_agree():
     ppv = ref.pandapower_voltage_profile(net, grid, id_map, label="pandapower")
     # Same nodes in the same (distance-sorted) order.
     assert ours.node_ids.tolist() == ppv.node_ids.tolist()
-    # Nonlinear PF agrees with pandapower const-power solution in pu.
-    np.testing.assert_allclose(ours.v_pu, ppv.v_pu, atol=2e-4)
+    # Nonlinear PF agrees with pandapower's const-power solution in pu.
+    # Empirically achieved: max |dv| ~ 3.2e-9 pu (both solvers converge the same
+    # equations to tight residuals); 1e-7 keeps ~30x headroom while still
+    # catching any real solver regression, which the earlier 2e-4 could hide.
+    np.testing.assert_allclose(ours.v_pu, ppv.v_pu, atol=1e-7)
 
 
 def test_full_figure_pipeline_writes_files(tmp_path):

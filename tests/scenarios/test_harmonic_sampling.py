@@ -28,8 +28,16 @@ from pgml.scenarios import (
 # --- EN 50160 loader --------------------------------------------------------
 def test_en50160_table():
     t = en50160_limits()
-    assert t[5] == 0.06 and t[3] == 0.05 and t[7] == 0.05
-    assert en50160_limit(11) == 0.035
+    # Odd non-triplen (Table 1 of the standard).
+    assert t[5] == 0.06 and t[7] == 0.05
+    assert en50160_limit(11) == 0.035 and t[13] == 0.03
+    assert t[17] == 0.02 and t[19] == 0.015 and t[23] == 0.015 and t[25] == 0.015
+    # Odd triplen — h15/h21 are the AMENDED values (EN 50160:2010/A2:2019,
+    # kept in EN 50160:2022): raised from 0.5 % to 1.0 % / 0.75 %.
+    assert t[3] == 0.05 and t[9] == 0.015
+    assert t[15] == 0.01 and t[21] == 0.0075
+    # Even orders: 2 % / 1 %, then a flat 0.5 %.
+    assert t[2] == 0.02 and t[4] == 0.01 and t[6] == 0.005 and t[24] == 0.005
     with pytest.raises(KeyError):
         en50160_limit(999)
 

@@ -172,9 +172,95 @@ class TestPositiveSequenceRegression:
         assert abs(c1 - c11 * cmath.exp(1j * math.radians(60.0))) < 1e-9 * abs(c1)
 
 
+class TestClockSix:
+    """Clock 6 (Yy6 / Dd6) is a 180° group: reversed LV winding polarity.
+
+    The HV↔LV coupling block must be the exact NEGATION of the clock-0 group's
+    (LV phasors inverted), while both self blocks are unchanged
+    (``(−N)ᵀ·Y·(−N) = Nᵀ·Y·N``).
+    """
+
+    @pytest.mark.parametrize(
+        "conn",
+        [WindingConnection.WYE_GROUNDED, WindingConnection.DELTA],
+        ids=["Yy", "Dd"],
+    )
+    def test_clock6_coupling_is_negated_clock0(self, conn) -> None:
+        c0 = _coupling_block(_grid(conn, conn, 0.0))
+        c6 = _coupling_block(_grid(conn, conn, 180.0))
+        assert np.abs(c0).max() > 1e-6  # non-vacuous
+        assert np.abs(c0 + c6).max() < 1e-12 * np.abs(c0).max(), (
+            "clock-6 coupling must invert the clock-0 coupling"
+        )
+
+    @pytest.mark.parametrize(
+        "conn",
+        [WindingConnection.WYE_GROUNDED, WindingConnection.DELTA],
+        ids=["Yy", "Dd"],
+    )
+    def test_clock6_self_blocks_unchanged(self, conn) -> None:
+        def blocks(shift):
+            yb = assemble_network_ybus(
+                _grid(conn, conn, shift), [F0], dtype=torch.complex128
+            )
+            Y = yb.Y[0].numpy()
+            idx = yb.index
+            hv = [idx.row(1, p) for p in ABC]
+            lv = [idx.row(2, p) for p in ABC]
+            return Y[np.ix_(hv, hv)], Y[np.ix_(lv, lv)]
+
+        hv0, lv0 = blocks(0.0)
+        hv6, lv6 = blocks(180.0)
+        assert np.abs(hv0 - hv6).max() < 1e-12 * np.abs(hv0).max()
+        assert np.abs(lv0 - lv6).max() < 1e-12 * np.abs(lv0).max()
+
+    def test_yy6_posseq_matches_single_phase_rotation(self) -> None:
+        """The Yy6 positive-sequence coupling equals the 180°-rotated Yy0 one,
+        consistent with the single-phase-equivalent path's ``rot = e^{jπ}``."""
+        a = cmath.exp(2j * math.pi / 3)
+        pos = np.array([1, a**2, a])
+
+        def posseq(shift):
+            yhl = _coupling_block(
+                _grid(
+                    WindingConnection.WYE_GROUNDED,
+                    WindingConnection.WYE_GROUNDED,
+                    shift,
+                )
+            )
+            return (pos.conjugate() @ yhl @ pos) / 3.0
+
+        c0 = posseq(0.0)
+        c6 = posseq(180.0)
+        assert abs(c6 - c0 * cmath.exp(1j * math.pi)) < 1e-12 * abs(c0)
+
+
 class TestUnsupportedGroups:
     def test_unsupported_delta_wye_clock_raises(self) -> None:
         """A delta-wye clock other than 1/11 is rejected (not yet modelled)."""
         grid = _grid(WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 150.0)
         with pytest.raises(NotImplementedError):
             assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+
+    def test_finite_grounding_impedance_raises(self) -> None:
+        """A nonzero neutral grounding impedance is rejected, not ignored."""
+        from pgml.schemas.grid_schema import GroundingImpedance, Transformer
+
+        grid = _grid(
+            WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED, 0.0
+        )
+        trafo = next(b for b in grid.branches if isinstance(b, Transformer))
+        trafo.to_grounding = GroundingImpedance(r_ohm=5.0)
+        with pytest.raises(NotImplementedError, match="grounding"):
+            assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+
+    def test_zero_grounding_impedance_is_solid(self) -> None:
+        """An explicit r=x=0 grounding equals the solid default and assembles."""
+        from pgml.schemas.grid_schema import GroundingImpedance, Transformer
+
+        grid = _grid(
+            WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED, 0.0
+        )
+        trafo = next(b for b in grid.branches if isinstance(b, Transformer))
+        trafo.to_grounding = GroundingImpedance(r_ohm=0.0, x_ohm=0.0)
+        assemble_network_ybus(grid, [F0], dtype=torch.complex128)

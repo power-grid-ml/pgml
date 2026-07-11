@@ -83,10 +83,18 @@ pinned so the positive-sequence coupling equals the scalar off-nominal-tap pi
 Single-phase / positive-sequence-equivalent runs (P = 1) collapse the group into that
 complex scalar tap directly, so the two modes agree to machine precision.
 
+**Clock 6 (`Yy6` / `Dd6`) — reversed LV winding polarity.** Unlike clock 0, clock 6 is
+NOT in phase: it is a genuine 180° group, realised as a `−1` on the LV incidence
+(`N_lv → −N_lv`) rather than a phase-shifted delta incidence. Because
+`(−N)ᵀ·Y·(−N) = Nᵀ·Y·N`, the sign flip cancels in both self blocks (HV-HV, LV-LV) and
+survives only in the HV↔LV coupling blocks — matching the single-phase-equivalent
+path's complex rotation `e^(jπ) = −1`.
+
 ## Scope (what is and isn't modelled)
-- Supported: Dyn1 / Dyn11 (clock 1 / 11), and in-phase wye-wye / delta-delta
-  (clock 0 / 6). Other clocks raise `NotImplementedError` (they need a cyclic phase
-  permutation of the winding pairing).
+- Supported: Dyn1 / Dyn11 (clock 1 / 11) for delta-wye pairings; and, for wye-wye /
+  delta-delta pairings, clock 0 (in phase, `shift_deg = 0`) and clock 6 (180°
+  reversed polarity, `shift_deg = 180` — see above). Other clocks raise
+  `NotImplementedError` (they need a cyclic phase permutation of the winding pairing).
 - Solid neutral grounding only (`*_grounding` = None / 0). A non-solid grounding
   impedance (`GroundingImpedance`) and zigzag windings are not modelled yet.
 - Magnetizing branch is a simple shunt on the HV terminal (referred to the HV line
@@ -106,6 +114,24 @@ New Transformer.T1 windings=2 phases=3
 `Rneut=0 Xneut=0` solidly grounds the LV neutral; the LV `.0` node is the ground
 reference and never appears in `YNodeOrder`, so the exported `SystemY` rows are only
 `.1/.2/.3` and map cleanly to pgml `(node, phase)` rows.
+
+This is the pgml -> DSS direction (`pgml.evaluation.oracles.opendss_oracle
+._build_circuit_with_real_transformer`), used to validate the harmonic assembly against
+a live OpenDSS `Transformer` element. The FORWARD direction, DSS -> pgml
+(`pgml.convert.opendss.to_grid`), inverts the same per-unit leakage identity: OpenDSS's
+`%R`/`XHL` are percent (base-invariant) quantities, so
+`R_lv = (%R_wdg1+%R_wdg2)/100 * Z_base_LV`, `X_lv = XHL%/100 * Z_base_LV` with
+`Z_base_LV = kV_lv²*1000/kVA` recovers the LV-referred leakage directly (both windings
+must share one kVA rating). The clock comes from `LeadLag` (`Lag` -> clock 1, `Lead` ->
+clock 11 for a Dy/Yd pairing; clock 0 for a matching Yy/Dd pairing, since OpenDSS has no
+explicit clock parameter beyond that binary toggle). Grounding follows OpenDSS's own
+shorthand-bus rule (no explicit `(n_phases+1)`-th conductor, or an explicit `.0`, solidly
+grounds a wye winding); only solidly grounded wye or delta windings convert. Validated by
+a live 2-bus MV-source -> transformer -> LV-load oracle (Dyn11 and Yy0 cases,
+voltage magnitude + angle vs OpenDSS's own `Solve`) in
+`tests/reference/test_opendss_transformer.py`. See `src/pgml/convert/opendss/CONTEXT.md`
+for the full field mapping and the current scope (two-winding only; no regulators, no
+3-winding units, no frequency-correction curves, no `Yy6`/`Dd6`).
 
 ## CIGRE LV
 The three `create_cigre_network_lv()` transformers are Dyn1 (delta HV / grounded-wye

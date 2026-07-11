@@ -9,13 +9,14 @@ High-level entry points (the stable, public surface):
 - :class:`SimulationConfig` — the serializable definition of WHAT to simulate.
 - :class:`~pgml.schemas.grid_schema.Grid` — the input grid (full schema in
   :mod:`pgml.schemas`).
-- the exception hierarchy from :mod:`pgml.errors` (``PgmError`` and friends).
+- the exception hierarchy from :mod:`pgml.errors` (``PgmlError`` and friends; ``PgmError`` is a deprecated alias).
 
 Lower-level / optional surfaces are reached via their subpackages (so a minimal core
 install need not import the extras): :mod:`pgml.solver` (raw differentiable tensors),
 :mod:`pgml.scenarios` (batched data generation), :mod:`pgml.convert`,
 :mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.defaults` (modeling defaults),
-:mod:`pgml.assembly`, :mod:`pgml.geometry`.
+:mod:`pgml.assembly`, :mod:`pgml.geometry`, :mod:`pgml.topology` (dependency-free graph
+helpers), :mod:`pgml.grids` (reference grid builders, needs the ``convert`` extra).
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from .errors import (  # noqa: E402
     InputError,
     ModelingError,
     PgmError,
+    PgmlError,
 )
 from .paths import experiments_root  # noqa: E402
 from .schemas.grid_schema import Grid  # noqa: E402
@@ -63,6 +65,7 @@ __all__ = [
     "experiments_root",
     # exceptions
     "PgmError",
+    "PgmlError",
     "InputError",
     "ComputationError",
     "ConfigurationError",
