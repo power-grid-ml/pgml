@@ -17,6 +17,7 @@ scenarios
 evaluation
 convert
 grids
+multigrid
 defaults
 paths
 ```
@@ -43,5 +44,6 @@ paths
 | {mod}`pgml.evaluation` | Comparison plots (references vs our solve) |
 | {mod}`pgml.convert` | Converters from pandapower / power-grid-model / OpenDSS |
 | {mod}`pgml.grids` | Reference grid builders (IEEE-33, CIGRE LV) + the state-estimation benchmark recipe + the schema-only `synthetic_feeder` |
+| {mod}`pgml.multigrid` | Disjoint-union merge of a grid ensemble into one solvable `Grid` (block-diagonal `Y` for free); per-member id maps, `operating_point`/`branch_states` translation, `split()` row views |
 | {mod}`pgml.defaults` | Documented modelling defaults (shipped in the package, importlib.resources) |
 | {mod}`pgml.paths` | Experiments-root convention (`PGML_EXPERIMENTS`) |

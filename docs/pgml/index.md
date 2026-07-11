@@ -74,6 +74,12 @@ figures.
   benchmark recipe (requires the `convert` extra, pandapower), and
   `synthetic_feeder` — a schema-only synthetic radial MV feeder of any size, with no
   external dependency, for solver-scaling and switch-state-batching studies.
+- **Multi-grid batching** — `pgml.multigrid.merge_grids`: disjoint-unions an ensemble of
+  grids into one solvable `Grid` (block-diagonal `Y` for free, no solver changes needed),
+  returning a `MergedGrid` that translates per-member `operating_point` / `branch_states`
+  into merged ids and slices any solved `[..., N_total]` state back into per-member views
+  with `split()`. Merging shares the members' own parameter tensors, so gradients through a
+  merged solve reach the original grids' leaves.
 
 ## Two hard constraints
 
