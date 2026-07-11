@@ -46,6 +46,7 @@ from .power_flow import (
     ConvergenceDiagnostics,
     LoadabilityResult,
     PowerFlowResult,
+    check_connectivity,
     loadability_limit,
     solve_power_flow,
 )
@@ -58,6 +59,7 @@ HarmonicFlowResult.__module__ = __name__
 NodeHarmonicSource.__module__ = __name__
 
 __all__ = [
+    "check_connectivity",
     "solve_harmonic",
     "solve_power_flow",
     "PowerFlowResult",

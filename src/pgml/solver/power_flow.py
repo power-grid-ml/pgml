@@ -70,8 +70,9 @@ from pgml.assembly import (
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
-from pgml.errors import InputError, ModelingError
+from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, Source
+from pgml.topology import connectivity_report, energized_subgrid
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 
@@ -123,6 +124,59 @@ def _slice_operating_point(operating_point: dict, i: int) -> dict:
         cid: {k: slc(v) for k, v in entry.items()}
         for cid, entry in operating_point.items()
     }
+
+
+def check_connectivity(grid: Grid) -> None:
+    """Raise :class:`~pgml.errors.ConnectivityError` if any row cannot reach a source.
+
+    The pre-solve structural gate: a (node, phase) row with no galvanic path to an
+    in-service :class:`~pgml.schemas.grid_schema.Source` (an open switch or an
+    out-of-service line / transformer on the only path, or no source at all) makes
+    the nodal system singular there, so the solve is refused up front with the
+    disconnected nodes and the concrete fixes named
+    (:func:`pgml.topology.connectivity_report`).
+    """
+    report = connectivity_report(grid)
+    if not report.connected:
+        raise ConnectivityError(
+            report.describe(),
+            unenergized_nodes=tuple(n for n, _ in report.unenergized),
+            islands=report.islands,
+            reconnectable=report.reconnectable,
+        )
+
+
+def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
+    """Scatter a sub-grid solution back to the full grid with 0 V on dropped rows.
+
+    The ``on_disconnected="zero"`` reassembly: ``res`` was solved on
+    :func:`pgml.topology.energized_subgrid`; every full-grid row absent from the
+    sub-grid is a de-energized conductor and reports 0 V. Out-of-place
+    ``index_copy`` so gradients keep flowing into the solved rows.
+    """
+    full_index = node_phase_index(grid)
+    sub_index = res.index
+    rows = torch.as_tensor(
+        [
+            full_index.row(sub_index.node_id_of(r), sub_index.phase_of(r))
+            for r in range(sub_index.size)
+        ],
+        dtype=torch.int64,
+        device=res.v.device,
+    )
+    v_full = torch.zeros(
+        (*res.v.shape[:-1], full_index.size), dtype=res.v.dtype, device=res.v.device
+    ).index_copy(-1, rows, res.v)
+    return PowerFlowResult(
+        v=v_full,
+        index=full_index,
+        iterations=res.iterations,
+        residual=res.residual,
+        converged=res.converged,
+        diagnostics=res.diagnostics,
+        converged_mask=res.converged_mask,
+        failed_states=res.failed_states,
+    )
 
 
 def _resolve_failed_states(mask: Optional[Tensor]) -> tuple[Optional[Tensor], tuple]:
@@ -417,6 +471,7 @@ def solve_power_flow(
     symmetry: Optional[str] = None,
     criticality: str = "auto",
     linear_solver: str = "dense",
+    on_disconnected: str = "raise",
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -463,6 +518,21 @@ def solve_power_flow(
         ``[2N, 2N]`` Jacobian + direct solve) or ``"matrix_free"`` (Jacobian-free
         Newton-Krylov — GMRES on finite-difference Jacobian-vector products, ``O(N)``
         memory for large grids). Ignored by ``method="current_injection"``.
+    on_disconnected:
+        What to do when the pre-solve connectivity check finds (node, phase) rows
+        with no galvanic path to an in-service source (an open switch or
+        out-of-service branch on the only path, or no source at all):
+
+        - ``"raise"`` (default) — raise :class:`~pgml.errors.ConnectivityError`
+          naming the disconnected nodes, the separating open / out-of-service
+          branches, and the concrete fixes.
+        - ``"zero"`` — solve the energized sub-grid
+          (:func:`pgml.topology.energized_subgrid`) and report 0 V on the
+          disconnected rows (a de-energized conductor carries no voltage); the
+          result keeps the FULL grid's row layout. Diagnostics describe the
+          energized sub-system.
+        - ``"ignore"`` — skip the check (the historical behavior: a disconnected
+          area surfaces as a singular factorization or non-convergence).
 
     Returns
     -------
@@ -485,6 +555,41 @@ def solve_power_flow(
         raise InputError(
             f"Unsupported linear_solver {linear_solver!r} (use 'dense'/'matrix_free')."
         )
+    if on_disconnected not in ("raise", "zero", "ignore"):
+        raise InputError(
+            f"Unsupported on_disconnected {on_disconnected!r} "
+            "(use 'raise'/'zero'/'ignore')."
+        )
+
+    if on_disconnected != "ignore":
+        if on_disconnected == "raise":
+            check_connectivity(grid)
+        else:
+            sub, dropped = energized_subgrid(grid)
+            if dropped:
+                _log.warning(
+                    "solve_power_flow: %d disconnected node(s) %s solved as 0 V "
+                    '(on_disconnected="zero"); the energized sub-grid carries the '
+                    "solution.",
+                    len(dropped),
+                    list(dropped[:10]),
+                )
+                sub_res = solve_power_flow(
+                    sub,
+                    slack=slack,
+                    method=method,
+                    tol=tol,
+                    max_iter=max_iter,
+                    dtype=dtype,
+                    device=device,
+                    operating_point=operating_point,
+                    param_overrides=param_overrides,
+                    symmetry=symmetry,
+                    criticality=criticality,
+                    linear_solver=linear_solver,
+                    on_disconnected="ignore",
+                )
+                return _expand_zeroed_result(grid, sub_res)
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
@@ -1763,6 +1868,7 @@ def loadability_limit(
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    check_connectivity(grid)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)
     index = node_phase_index(grid)
     n = index.size
@@ -1978,6 +2084,7 @@ def _nose_criticality(
 
 
 __all__ = [
+    "check_connectivity",
     "solve_power_flow",
     "PowerFlowResult",
     "ConvergenceDiagnostics",

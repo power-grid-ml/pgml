@@ -44,6 +44,7 @@ scenario dims. No ``.item()/.detach()/.numpy()`` on the tape; honors device/dtyp
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Sequence
@@ -69,7 +70,14 @@ from pgml.schemas.grid_schema import (
 )
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
-from .power_flow import PowerFlowResult, solve_power_flow
+from .power_flow import (
+    PowerFlowResult,
+    _expand_zeroed_result,
+    check_connectivity,
+    solve_power_flow,
+)
+
+_log = logging.getLogger("pgml")
 
 
 @dataclass(frozen=True)
@@ -171,6 +179,7 @@ def solve_harmonic_flow(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     symmetry: Optional[str] = None,
+    on_disconnected: str = "raise",
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -218,6 +227,12 @@ def solve_harmonic_flow(
         ``"asymmetric"`` (``None`` -> config). Resolved ONCE here and threaded into
         the fundamental :func:`solve_power_flow` (single log) and the harmonic
         injection power resolution.
+    on_disconnected:
+        Pre-solve connectivity handling, as in :func:`solve_power_flow`:
+        ``"raise"`` (default) raises :class:`~pgml.errors.ConnectivityError` when a
+        (node, phase) row has no path to an in-service source; ``"zero"`` solves the
+        energized sub-grid and reports 0 V on the disconnected rows at every order
+        (full-grid row layout preserved); ``"ignore"`` skips the check.
 
     Returns
     -------
@@ -234,6 +249,42 @@ def solve_harmonic_flow(
     orders = [int(h) for h in harmonic_orders]
     if not orders:
         raise InputError("harmonic_orders must be non-empty.")
+    if on_disconnected not in ("raise", "zero", "ignore"):
+        raise InputError(
+            f"Unsupported on_disconnected {on_disconnected!r} "
+            "(use 'raise'/'zero'/'ignore')."
+        )
+    if on_disconnected == "raise":
+        check_connectivity(grid)
+    elif on_disconnected == "zero":
+        from pgml.topology import energized_subgrid
+
+        sub, dropped = energized_subgrid(grid)
+        if dropped:
+            _log.warning(
+                "solve_harmonic_flow: %d disconnected node(s) %s solved as 0 V "
+                '(on_disconnected="zero"); the energized sub-grid carries the '
+                "solution.",
+                len(dropped),
+                list(dropped[:10]),
+            )
+            sub_res = solve_harmonic_flow(
+                sub,
+                orders,
+                slack=slack,
+                method=method,
+                operating_point=operating_point,
+                harmonic_injection=harmonic_injection,
+                node_sources=node_sources,
+                include_load_shunt=include_load_shunt,
+                tol=tol,
+                max_iter=max_iter,
+                dtype=dtype,
+                device=device,
+                symmetry=symmetry,
+                on_disconnected="ignore",
+            )
+            return _expand_zeroed_harmonic_result(grid, sub_res)
 
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
@@ -244,7 +295,8 @@ def solve_harmonic_flow(
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
-    # 1. Fundamental nonlinear power flow (order 1).
+    # 1. Fundamental nonlinear power flow (order 1). Connectivity was already
+    # handled above, so the inner solve skips the (redundant) check.
     pf = solve_power_flow(
         grid,
         slack=slack,
@@ -255,6 +307,7 @@ def solve_harmonic_flow(
         dtype=dtype,
         device=device,
         symmetry=sym_resolved,
+        on_disconnected="ignore",
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -294,6 +347,36 @@ def solve_harmonic_flow(
     v = torch.stack(cols, dim=-2)  # [*batch, H, N]
     frequencies_hz = torch.as_tensor([h * f0 for h in orders], dtype=rdt, device=device)
     return HarmonicFlowResult(v=v, frequencies_hz=frequencies_hz, index=index, pf=pf)
+
+
+def _expand_zeroed_harmonic_result(
+    grid: Grid, res: HarmonicFlowResult
+) -> HarmonicFlowResult:
+    """Scatter a sub-grid harmonic solution back to the full grid (0 V dead rows).
+
+    The ``on_disconnected="zero"`` reassembly at every order: rows absent from the
+    energized sub-grid report 0 V in ``v`` and in the embedded fundamental
+    :class:`PowerFlowResult`. Out-of-place ``index_copy`` (gradients preserved).
+    """
+    full_index = node_phase_index(grid)
+    sub_index = res.index
+    rows = torch.as_tensor(
+        [
+            full_index.row(sub_index.node_id_of(r), sub_index.phase_of(r))
+            for r in range(sub_index.size)
+        ],
+        dtype=torch.int64,
+        device=res.v.device,
+    )
+    v_full = torch.zeros(
+        (*res.v.shape[:-1], full_index.size), dtype=res.v.dtype, device=res.v.device
+    ).index_copy(-1, rows, res.v)
+    return HarmonicFlowResult(
+        v=v_full,
+        frequencies_hz=res.frequencies_hz,
+        index=full_index,
+        pf=_expand_zeroed_result(grid, res.pf),
+    )
 
 
 def assemble_harmonic_system(

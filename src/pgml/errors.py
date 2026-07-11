@@ -69,6 +69,53 @@ class ConversionError(InputError):
     """A reference-library network could not be converted to a pgml :class:`Grid`."""
 
 
+class ConnectivityError(InputError):
+    """Part of the grid has no galvanic path to any in-service :class:`Source`.
+
+    A (node, phase) row without a path to a source has no defined voltage: the
+    nodal system is singular there (or, with constant-power loads, the solver
+    cannot converge). Raised by the pre-solve connectivity check
+    (:func:`pgml.topology.connectivity_report`) BEFORE any factorization, so the
+    failure names the disconnected nodes and how to fix them instead of surfacing
+    as a numerical error.
+
+    Typical causes and fixes (the message lists the concrete elements):
+
+    - an OPEN :class:`Switch` on the only path — close it (``closed=True``) or
+      accept the disconnection;
+    - a :class:`Line` / :class:`Transformer` with ``in_service=False`` on the only
+      path — set it in service;
+    - no in-service :class:`Source` at all — add one (the slack);
+    - deliberately disconnected nodes — remove them from the grid, or pass
+      ``on_disconnected="zero"`` to the solver to solve the energized part and
+      report 0 V on the disconnected rows.
+
+    Attributes
+    ----------
+    unenergized_nodes:
+        Ids of the nodes with at least one unenergized phase row.
+    islands:
+        The disconnected components, each a tuple of node ids.
+    reconnectable:
+        :class:`pgml.topology.ReconnectHint` entries (branch id, kind, terminal
+        nodes, reason) for currently open / out-of-service branches that would
+        reconnect an island.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        unenergized_nodes: tuple = (),
+        islands: tuple = (),
+        reconnectable: tuple = (),
+    ) -> None:
+        super().__init__(message)
+        self.unenergized_nodes = unenergized_nodes
+        self.islands = islands
+        self.reconnectable = reconnectable
+
+
 class ModelingError(InputError, NotImplementedError):
     """A requested model is not supported (e.g. an unmodelled transformer vector
     group / clock, an open/2-phase delta connection, or a zigzag winding).
@@ -118,6 +165,7 @@ __all__ = [
     "PgmError",
     "InputError",
     "ConfigurationError",
+    "ConnectivityError",
     "ConversionError",
     "ModelingError",
     "ComputationError",
