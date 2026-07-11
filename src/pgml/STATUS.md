@@ -149,12 +149,14 @@ are built for, so any GPU sparse path must first beat that baseline:
 `examples/pgml/benchmark_sparse.py`). Differentiable through the adjoint `_SparseSolveFn`
 (one conjugate-transposed solve + a batch-folded outer product; gradcheck-verified). A
 singular factorization raises `ComputationError` pointing at `check_connectivity`.
-Measured (i7-12700, c128): 4800 rows end-to-end nonlinear solve 3× dense; single-RHS
-back-substitution 50×. Open follow-ups: thread the multi-RHS back-substitution across CPU
-cores (SuperLU solves the batch column-by-column single-threaded — the pgm trick); a
-sparse/matrix-free IFT backward + Newton Jacobian for very large N (both are still dense
-`[2N, 2N]`); sparse-direct assembly (COO from the stamps, skipping the dense `Y`) once
-grids exceed a few thousand rows.
+Measured (i7-12700, c128): 4800 rows end-to-end nonlinear solve 4× dense; single-RHS
+back-substitution 50×. Large multi-RHS batches split across up to 8 threads (SuperLU's
+back-substitution releases the GIL and is deterministic under concurrent solves; 256 RHS
+at 4800 rows 267 → 52 ms). Confirmed on an RTX A2000: at complex128, CPU-sparse beats
+GPU-dense at every size ≥ 300 rows — the complex64 data-generation path is where the GPU
+wins. Open follow-ups: a sparse/matrix-free IFT backward + Newton Jacobian for very large
+N (both are still dense `[2N, 2N]`); sparse-direct assembly (COO from the stamps,
+skipping the dense `Y`) once grids exceed a few thousand rows.
 
 ### B. Harmonic state estimation — the `pgl` package
 
