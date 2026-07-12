@@ -24,13 +24,27 @@ loads in `pgml.assembly._incidence`).
   Y_winding = [[ (y/τ²)·I3 , −(y/τ)·I3 ],
                [ −(y/τ)·I3 ,    y·I3   ]]      (6×6)
   ```
-- Incidence per winding (3-phase): `wye_grounded → I3`; `delta → M`; ungrounded
-  `wye → P = I − (1/3)·11ᵀ`, where
+- Incidence per winding (3-phase): `wye_grounded → I3`; `delta → M` (or `Mᵀ`);
+  ungrounded `wye → P = I − (1/3)·11ᵀ`, where
   ```
   M = [[ 1,−1, 0],
        [ 0, 1,−1],
        [−1, 0, 1]]        (Kersting's [D]; columns sum to zero)
   ```
+- A zigzag (interconnected-star) winding couples through the LIMB fluxes: each
+  phase leg is two half-coils in series opposition on adjacent limbs, so its
+  topology is the normalised circulant `Z = (I − C)/√3` (`C` = cyclic phase
+  permutation) and — because the limb flux is what the far winding shares — `Z`
+  left-multiplies the OTHER side's incidence block, while the zigzag's own block
+  keeps the plain star topology (`I3` grounded, `P` ungrounded). `Z·V⁺ = 1∠±30°`
+  (clock shift like a delta; the `1/√3` keeps the leakage referral at the
+  physical line-to-neutral basis) and `Z·[1,1,1]ᵀ = 0` (no zero-sequence
+  TRANSFER). A grounded zigzag's own self block stays `y·I` — the winding keeps a
+  leakage-limited zero-sequence path to ground on its own side, the classic
+  grounding-transformer property. The path VALUE equals the positive-sequence
+  leakage; the true zigzag zero-sequence leakage (set by the half-coil geometry)
+  is typically smaller and would need the `TransformerZeroSeq` value override,
+  which is not consumed yet.
 - `N = blockdiag(N_hv, N_lv)`; `Y_node = Nᵀ Y_winding N`.
 
 Properties (all verified numerically):
@@ -70,18 +84,34 @@ leave `tap = (1.0, clock·30)`.
 pgml uses the pandapower / MATPOWER convention `shift_deg = clock·30`, a positive angle
 making the LV phasor LAG the HV one:
 
-| Vector group | clock | `shift_deg` | LV vs HV | delta incidence |
+| Vector group | clock | `shift_deg` | LV vs HV | realisation |
 |---|---|---|---|---|
-| Dyn1  | 1  | 30  | lags 30°  | `Mᵀ` |
-| Dyn11 | 11 | 330 | leads 30° | `M`  |
+| Dyn1  | 1  | 30  | lags 30°  | HV delta `Mᵀ` |
+| Dyn5  | 5  | 150 | lags 150° | HV delta + LV connection rotated one phase |
+| Dyn11 | 11 | 330 | leads 30° | HV delta `M`  |
 | YNyn0 | 0  | 0   | in phase  | `I3` both sides |
+| Yzn5  | 5  | 150 | lags 150° | LV zigzag `Z` + phase rotation |
+| Yy6 / Dd6 | 6 | 180 | reversed | `−1` on the LV incidence |
 
-`VectorGroup.clock_transpose = sin(clock·30°) > 0` (Dyn1 → `Mᵀ`, Dyn11 → `M`),
-pinned so the positive-sequence coupling equals the scalar off-nominal-tap pi
-`Y_ft = −y_se/conj(t)`, `t = n·e^{j·shift_deg}` (and against a live OpenDSS export).
+Every IEC clock number consistent with the pairing PARITY is modelled: each delta or
+zigzag winding contributes an intrinsic ±30° (the `M`/`Mᵀ`, `Z`/`Zᵀ` orientation), a
+cyclic permutation `C^m` of the TO-side bus connection contributes `m·(−120°)` (±4
+clock steps), and a reversed TO-winding polarity contributes 180° (6 steps). So Dy /
+Yd / Yz / Zy pairings admit exactly the odd clocks {1,3,5,7,9,11} and Yy / Dd / Dz /
+Zd the even clocks {0,2,4,6,8,10}; a parity-inconsistent clock raises. The concrete
+combination is selected by matching the realised positive-sequence rotation of the
+candidate incidence against `clock·30°`, so the sign convention is pinned by
+construction: the positive-sequence coupling equals the scalar off-nominal-tap pi
+`Y_ft = −y_se/conj(t)`, `t = n·e^{j·shift_deg}` (verified against a live OpenDSS
+export, and to machine precision for every pairing × clock in
+`tests/reference/test_transformer_clock_matrix.py`).
 
 Single-phase / positive-sequence-equivalent runs (P = 1) collapse the group into that
-complex scalar tap directly, so the two modes agree to machine precision.
+complex scalar tap directly, so the two modes agree to machine precision. The P = 1
+path honours the EXACT `tap.shift_deg`, so an arbitrary positive-sequence
+phase-shifter angle (a MATPOWER import) is representable there; the phase-domain
+stamp rejects a shift that is not a multiple of 30°, since no constant 3-phase
+winding topology realises it.
 
 **Clock 6 (`Yy6` / `Dd6`) — reversed LV winding polarity.** Unlike clock 0, clock 6 is
 NOT in phase: it is a genuine 180° group, realised as a `−1` on the LV incidence
@@ -90,13 +120,23 @@ NOT in phase: it is a genuine 180° group, realised as a `−1` on the LV incide
 survives only in the HV↔LV coupling blocks — matching the single-phase-equivalent
 path's complex rotation `e^(jπ) = −1`.
 
+## Leakage referral (the converter contract)
+The schema's `series_resistance_ohm` / `series_inductance_h` are referred to the
+TO-side COIL. With `z_LL = (vk/100)·u_LL,to²/S` (the usual LV line-to-line-base
+leakage): a wye or zigzag TO winding stores `z_coil = z_LL` unchanged; a DELTA TO
+winding stores `z_coil = 3·z_LL` (the delta coil base is `3·u_LL²/S`). Pinned in
+`tests/reference/test_transformer_clock_matrix.py`.
+
 ## Scope (what is and isn't modelled)
-- Supported: Dyn1 / Dyn11 (clock 1 / 11) for delta-wye pairings; and, for wye-wye /
-  delta-delta pairings, clock 0 (in phase, `shift_deg = 0`) and clock 6 (180°
-  reversed polarity, `shift_deg = 180` — see above). Other clocks raise
-  `NotImplementedError` (they need a cyclic phase permutation of the winding pairing).
+- Supported: every winding pairing of {wye, grounded wye, delta, zigzag, grounded
+  zigzag} except zigzag-zigzag, at every clock number of the pairing's parity.
 - Solid neutral grounding only (`*_grounding` = None / 0). A non-solid grounding
-  impedance (`GroundingImpedance`) and zigzag windings are not modelled yet.
+  impedance (`GroundingImpedance`) is rejected, not ignored.
+- The zero-sequence PATH follows the winding topology; its VALUE equals the
+  positive-sequence leakage. The explicit `TransformerZeroSeq` value override is
+  not consumed yet — relevant mainly for grounded zigzag (true Z0 < Z1) and for
+  three-limb-core YNyn units.
+- Two-winding units only (no 3-winding transformers, no regulators).
 - Magnetizing branch is a simple shunt on the HV terminal (referred to the HV line
   voltage), unchanged.
 - Default vector group when a source carries no winding metadata:
