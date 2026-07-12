@@ -31,6 +31,15 @@ Everything here is about the **simulation and modeling** layer (`pgml`). The lea
 - **[Per-node harmonic disturbance source](error-injection.md)** — injecting a defined
   harmonic "error" at any node, independent of whether a device sits there.
 
+## Solver architecture
+
+- **[Performance and structural checks](solver-performance.md)** — why the solve is
+  organised the way it is: factor-once/solve-many, the precomputed injection plan, the
+  measured dense/sparse crossover (and why CUDA stays dense), threaded back-substitution,
+  the pre-solve connectivity check compared to pandapower / power-grid-model / OpenDSS,
+  switch states as differentiable admittance scaling, disjoint-union grid ensembles, and
+  the single/double-precision policy.
+
 ## Reference libraries
 
 - **[Reference-library notes](references/index.md)** — distilled briefs on the tools pgml
@@ -46,5 +55,6 @@ transformer
 harmonic-line-model
 der-pv-storage
 error-injection
+solver-performance
 references/index
 ```

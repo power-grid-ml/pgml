@@ -368,3 +368,9 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   `injections_from_plan` resolve the operating point once per solve (the
   V-independent tensors) and make every iteration pure tensor ops; residuals
   apply a batch-shared `Y` as one GEMM (`_apply_y`).
+- INVARIANT (do not swap): the IFT backward's `dR/dθ` vjp must use the
+  DIFFERENTIABLE residual (`make_residual_complex`, re-resolves from the
+  parameter leaves each eval); the iteration / state-Jacobian / diagnostics
+  paths use the detached plan residual (`make_fast_residual_complex`). Using
+  the detached one for `dR/dθ` silently zeroes parameter gradients; using the
+  differentiable one in the loop rebuilds python resolution per iteration.

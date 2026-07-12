@@ -162,6 +162,21 @@ wins. Open follow-ups: a sparse/matrix-free IFT backward + Newton Jacobian for v
 N (both are still dense `[2N, 2N]`); sparse-direct assembly (COO from the stamps,
 skipping the dense `Y`) once grids exceed a few thousand rows.
 
+**Open — GPU / memory micro-optimisations (benchmark-informed).** A validated complex64
+data-generation fast path (generate at complex128, store complex64 — see the conditioning
+caveat under "Known modeling gaps"); retune the IFT backward's JVP-vs-dense threshold
+(`_IFT_DENSE_JAC_MAX_ELEMS`) on current GPU numbers; chunk-to-chunk warm starting for
+sorted/correlated scenario chunks (OpenDSS-style); `torch.cuda.CUDAGraph` / `torch.compile`
+over the fixed-point iteration (static shapes per chunk — likely wins at small N where
+launch overhead dominates).
+
+**Resolved as won't-do (measured): batch-native Newton forward.** A batched operating
+point solves sequentially per scenario in Newton: the O(B²(2N)²) full-map Jacobian does
+not fit, and building the block diagonal column-by-column (2N JVP sweeps per step)
+measured 4× slower than the per-scenario vectorized Jacobian at B=64/N=180. Kept from the
+attempt: the shared `_batched_state_jacobian` helper, the per-element line search, and the
+batch-broadcasting const-Z fold. Bulk batches belong to the current-injection method.
+
 ### B. Harmonic state estimation — the `pgl` package
 
 The ML layer is its own package, `pgl` (clean API border, separate deps, own agents). It
