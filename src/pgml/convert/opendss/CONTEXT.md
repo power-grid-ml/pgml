@@ -79,10 +79,36 @@ both windings to share one kVA rating (checked; `ConversionError` if they
 differ):
 ```
 Z_base_LV = kV_lv^2 * 1000 / kVA
-R_lv_ohm  = (%R_wdg1 + %R_wdg2) / 100 * Z_base_LV
-X_lv_ohm  = %XHL / 100 * Z_base_LV
+R_ll_ohm  = (%R_wdg1 + %R_wdg2) / 100 * Z_base_LV
+X_ll_ohm  = %XHL / 100 * Z_base_LV
+```
+`R_ll_ohm`/`X_ll_ohm` are on the STANDARD line-to-line base -- the same
+quantity pandapower's `vkr%`/`vk%` recover. pgml stores the leakage referred to
+the ACTUAL TO-side COIL, which coincides with the L-L base for a wye/zigzag LV
+winding but is **3x LARGER for a DELTA LV winding** (a delta coil is rated at
+the L-L voltage with 1/3 the per-phase kVA, so its natural impedance base is
+`Z_base_coil = V_LL^2/(S/3) = 3*Z_base_LV`; pinned exactly by
+`tests/reference/test_transformer_clock_matrix.py`'s `y_LL = (3 if
+to_kind=="delta" else 1) / y_coil` assertion and re-derived in
+`docs/pgml/modeling/references/opendss/index.md`):
+```
+factor    = 3.0 if LV winding is DELTA else 1.0
+R_lv_ohm  = factor * R_ll_ohm
+X_lv_ohm  = factor * X_ll_ohm
 L_lv_h    = X_lv_ohm / (2*pi*f0)
 ```
+This was a **latent bug** fixed alongside the rotation work below: the
+converter previously stored `R_ll_ohm`/`X_ll_ohm` directly regardless of the
+LV connection, which is correct for a wye/zigzag LV winding (the common case,
+e.g. Dyn11/Yy0 -- untouched by the fix) but off by a factor of 3 for a DELTA LV
+winding (e.g. `YNd*`). Live-oracle evidence
+(`tests/reference/test_opendss_transformer.py::TestYNd5RotatedOracle`, a
+WYE-grounded-HV / DELTA-LV 20/0.4 kV unit): the pre-fix (no factor-3) leakage
+produces a ~7e-3 pu LV voltage-magnitude error vs a live OpenDSS solve; the
+fix reduces it to ~2e-8 pu. The oracle direction
+(`pgml.evaluation.oracles.opendss_oracle._build_circuit_with_real_transformer`)
+had the mirror-image bug (dividing by the SAME factor before back-calculating
+`%R`/`XHL` from pgml's stored R/L) and is fixed the same way.
 (Gotcha: the sequential tilde-continuation syntax `~ wdg=1 ... kVA=x` / `~
 wdg=2 ... kVA=y` silently re-syncs BOTH windings' kVA to the last value given
 -- only the array form `kvas=[x, y]` actually creates differing per-winding
@@ -96,15 +122,51 @@ shorthand-bus rule: no explicit `(n_phases+1)`-th conductor in the bus string
 explicit NON-ZERO `(n_phases+1)`-th conductor (e.g. `.4`, a genuinely floating
 or `Rneut`/`Xneut`-impedance-grounded neutral) raises `ConversionError` --
 out of scope (pgml's transformer assembly models solid grounding only).
+**Zigzag** has no OpenDSS `Transformer` connection at all, so a DSS file can
+never produce one -- nothing to detect in this direction (see "Oracle
+direction" below for the reverse).
 
-**Vector group / clock.** OpenDSS has no explicit clock parameter; its
-`LeadLag` toggle is the only source of clock information, and only means
-anything for a Dy/Yd (delta-wye) pairing: `Lag`/`ANSI` (default) -> clock 1
-(`shift_deg=30`); `Lead`/`Euro` -> clock 11 (`shift_deg=330`) -- verified
-against a live solve (`Bus.puVmagAngle()` shows the LV bus leading/lagging the
-HV bus by ~30 deg accordingly). A matching Yy or Dd pairing gets clock 0
-(`shift_deg=0`); `Yy6`/`Dd6` (180 deg reversed polarity) is NOT detectable
-from a plain `Transformer` element and is not converted.
+**Vector group / clock.** OpenDSS has no explicit clock parameter. Two
+independent mechanisms combine to determine `tap.shift_deg`:
+
+1. `LeadLag`, meaningful only for a Dy/Yd (delta-wye) pairing: `Lag`/`ANSI`
+   (default) -> clock 1 baseline (`shift_deg=30`); `Lead`/`Euro` -> clock 11
+   baseline (`shift_deg=330`) -- verified against a live solve
+   (`Bus.puVmagAngle()` shows the LV bus leading/lagging the HV bus by ~30 deg
+   accordingly). A matching Yy or Dd pairing baselines at clock 0
+   (`shift_deg=0`) regardless of `LeadLag`.
+2. **Cyclic winding-bus rotation.** Each transformer winding's bus string
+   (`bus=lv.1.2.3.0` etc.) can list its phase conductors in a CYCLIC rotation
+   of `(1, 2, 3)` -- e.g. `bus=lv.2.3.1.0` (rotation `r=1`) or `bus=lv.3.1.2.0`
+   (`r=2`) -- OpenDSS's only OTHER mechanism for expressing a clock beyond the
+   `LeadLag` baseline. `_cyclic_rotation_steps` detects `r` on each winding
+   (`phase_nums[k] == ((k + r) % 3) + 1`); the converter then NORMALIZES the
+   stored `from_phases`/`to_phases` to the canonical `(A, B, C)` tuple (never
+   the raw rotated order -- the phase-domain transformer stamp,
+   `pgml.assembly._transformer.block_incidence`, assumes winding position `k`
+   IS bus phase `k`) and instead folds the rotation into the clock:
+   ```
+   shift_deg = (base_shift_deg + 120*from_rotation - 120*to_rotation) % 360
+   ```
+   **Sign, pinned against a live OpenDSS solve** (`src.1.2.3` HV, Yy0 base,
+   30 kW/10 kvar LV load; `lag = (src_phaseA_angle - lv_phaseA_angle) % 360`):
+   rotating the HV (`from`) winding's bus string by `r=1`
+   (`bus=src.2.3.1`) gives `lag ≈ 120.09°` (clock 4, i.e. **+4** clock steps
+   per FROM-side rotation step); rotating the LV (`to`) winding by `r=1`
+   (`bus=lv.2.3.1.0`) gives `lag ≈ 240.09°` (clock 8 ≡ **-4** clock steps per
+   TO-side rotation step); `r=2` on either side doubles the effect
+   (`+8`/`-8` ≡ `-4`/`+4` mod 12). The same +-4-per-step rule was re-verified
+   for a Dyn1 base (`LeadLag=Lag`, delta HV) -- LV rotated `r=2`
+   (`bus=lv.3.1.2.0`) gives `lag ≈ 150.09°` (clock 5 = Dyn5, exactly
+   `30 + 120*2 mod 360`) -- and for a Dd0 base (both delta) with the same LV
+   rotations, confirming the rule is independent of which winding is delta.
+   This reaches every clock of the pairing's correct parity EXCEPT the
+   polarity-flip clocks `{2, 6, 10}` (the old `Yy6`/`Dd6` case), which need a
+   genuinely reversed winding construction no bus-conductor permutation can
+   express. A NON-cyclic permutation (e.g. `bus=lv.1.3.2.0`, swapping two
+   conductors) reverses the phase-rotation sequence -- a different, unrelated
+   winding -- and `_cyclic_rotation_steps` raises `ConversionError` rather
+   than silently producing a wrong clock.
 
 **Tap.** `ratio_magnitude = Tap(wdg=1) / Tap(wdg=2)` (both default 1.0).
 
@@ -131,6 +193,38 @@ matches to ~1e-7 pu / 1e-5 deg. See
 
 **Not converted:** 3-winding transformers (`ConversionError`), `RegControl`
 regulators, tap-changer control, `XfmrCode`/frequency-correction curves.
+
+### Oracle direction (`pgml -> DSS`, live-oracle transformer builder)
+
+`pgml.evaluation.oracles.opendss_oracle._build_circuit_with_real_transformer`
+(used by `opendss_dyn_transformer_harmonic_voltages` and the live-oracle tests
+in `tests/reference/test_opendss_transformer.py`) is the REVERSE direction: it
+emits a real OpenDSS `Transformer` element reproducing a pgml
+`Transformer`'s vector group, so pgml's own model can be validated against a
+live OpenDSS solve. It shares the same scope as the forward direction, plus:
+
+- **Clock realisation.** `_dss_leadlag_and_rotation(clock, shifting_pairing)`
+  is the exact inverse of the forward-direction fold above: it always rotates
+  the TO/LV winding only (`r_from=0` always) and picks whichever `LeadLag`
+  baseline (`Lag`->1, `Lead`->11 for a Dy/Yd pairing; always `Lag`/baseline 0
+  for a matching Yy/Dd pairing) leaves a residual that is a multiple of 4
+  clock steps, then emits `bus=...` with that many rotation steps via
+  `_dss_rotated_phase_suffix`. Every clock of the pairing's correct parity is
+  reachable this way except `{2, 6, 10}` (needs a reversed winding polarity --
+  no OpenDSS bus wiring can express it), which raises `NotImplementedError`
+  with a message naming the clock.
+- **Delta-LV coil referral.** Back-calculates OpenDSS's `%R`/`XHL` from pgml's
+  stored (coil-referred) `series_resistance_ohm`/`series_inductance_h` by
+  dividing by the SAME factor-of-3 the forward direction multiplies by when
+  the TO/LV winding is `DELTA` (see "Leakage" above) -- the old code used
+  pgml's stored value directly, which was 3x too large for a delta LV winding
+  and produced the mirror image of the forward-direction bug.
+- **Zigzag** (`ZIGZAG`/`ZIGZAG_GROUNDED` on either winding) raises
+  `NotImplementedError`: OpenDSS's `Transformer` element has no zigzag
+  connection at all, so there is no way to build an equivalent live circuit.
+- Only 3-phase (`p == 3`) transformers are supported (the clock-realising
+  rotation is specific to the 3-phase A/B/C cyclic group); other phase counts
+  raise `NotImplementedError`.
 
 ### Vsource `basekv` semantics (phase-count dependent; verified empirically)
 
@@ -240,9 +334,21 @@ IEEE 33-bus Baran & Wu circuit built from `pandapower.networks.case33bw()` data,
 60 Hz, 33 buses, 32 in-service lines, 1 Vsource, 32 loads.
 Oracle test: `tests/reference/test_ieee33_opendss.py`.
 Phase-mode test: `tests/convert/test_opendss_phase_mode.py`.
-Transformer oracle (MV source -> Dyn11 / Yy0 20/0.4 kV transformer -> LV
-load, live `Solve` vs `solve_power_flow`): `tests/reference/test_opendss_transformer.py`
-(voltage magnitude ~1e-7 pu, angle ~1e-5 deg on the leakage/vector-group path;
-magnetizing-branch field conversion checked separately against its closed form;
-scope guards for 3-winding, ungrounded-neutral and differing-kVA transformers).
+Transformer oracle (MV source -> Dyn11 / Yy0 / Dyn5 / YNd5 20/0.4 kV
+transformer -> LV load, live `Solve` vs pgml):
+`tests/reference/test_opendss_transformer.py` -- Dyn11/Yy0/Dyn5 via the
+nonlinear `solve_power_flow` (voltage magnitude ~1e-7 pu, Dyn5 ~1e-8 pu; angle
+~1e-5 deg); YNd5 via the linear `assemble_ybus`+`solve_harmonic` path (see the
+class docstring for why -- a delta-only LV secondary is an isolated island
+with no absolute-voltage reference pgml's nonlinear solver can anchor, a
+pre-existing solver gap orthogonal to this conversion, worked around with a
+WYE grounding load + DSS `model=2`; ~2e-8 pu / ~4e-7 deg); a dedicated
+sub-test reproduces the pre-fix (no-factor-3) leakage and confirms it misses
+by > 1e-3 pu. Cyclic winding-bus rotation parsing (`_cyclic_rotation_steps`/
+`_parse_transformer_winding_bus`, normalized-phases + folded-clock checks,
+non-cyclic-permutation rejection) and the oracle-direction scope guards
+(zigzag, clock-6 `NotImplementedError`) are covered in the same file.
+Magnetizing-branch field conversion checked separately against its closed
+form; scope guards for 3-winding, ungrounded-neutral and differing-kVA
+transformers.
 Vsource `basekv` semantics: `tests/convert/test_opendss_vsource_basekv.py`.

@@ -380,21 +380,37 @@ def to_grid(
     # TO/LV coil (pgml's storage convention, see docs/pgml/modeling/
     # transformer.md and conventions.md sec. 2): OpenDSS's per-winding `%R`
     # and inter-winding `XHL` are per-unit (base-invariant) quantities on the
-    # transformer's kVA rating, so
-    #     R_lv_ohm = (%R_wdg1 + %R_wdg2)/100 * Z_base_LV
-    #     X_lv_ohm = %XHL/100 * Z_base_LV,   Z_base_LV = kV_lv^2*1000/kVA
-    # recovers the total leakage referred to the LV coil -- valid whenever
-    # both windings share one kVA rating (checked below; OpenDSS's own
-    # convention places `XHL` on winding 1's kVA base, which coincides with
-    # winding 2's when the two are equal).
+    # STANDARD line-to-line base, so
+    #     R_ll_ohm = (%R_wdg1 + %R_wdg2)/100 * Z_base_LV
+    #     X_ll_ohm = %XHL/100 * Z_base_LV,   Z_base_LV = kV_lv^2*1000/kVA
+    # recovers the total leakage on that standard base -- valid whenever both
+    # windings share one kVA rating (checked below; OpenDSS's own convention
+    # places `XHL` on winding 1's kVA base, which coincides with winding 2's
+    # when the two are equal). pgml stores the leakage referred to the ACTUAL
+    # TO-side COIL, which is the same as the standard L-L base for a wye/
+    # zigzag LV winding but 3x LARGER for a delta LV winding (a delta coil is
+    # rated at the L-L voltage with 1/3 the per-phase kVA, so its natural
+    # impedance base is `3*Z_base_LV`; see
+    # `tests/reference/test_transformer_clock_matrix.py`'s `y_LL = 3*y_coil`
+    # pin and docs/pgml/modeling/references/opendss/index.md sec. "Transformer
+    # leakage"), so `R_lv_ohm/X_lv_ohm = 3*R_ll_ohm/X_ll_ohm` whenever the LV
+    # winding is DELTA.
     #
     # Vector group / clock: OpenDSS has no explicit clock parameter -- its
     # `LeadLag` toggle only distinguishes the 30-degree Dy/Yd shift (verified
     # against a live solve: `Lag` -> the LV bus lags the HV bus by ~30 deg
     # (Dyn1, `shift_deg=30`); `Lead` -> LV leads by ~30 deg (Dyn11,
     # `shift_deg=330`)). A matching Yy/Dd pairing has no inherent phase shift
-    # (clock 0); OpenDSS cannot express a Yy6/Dd6 (180-degree) group through
-    # this element, so it is not detected here (see the module CONTEXT.md).
+    # from `LeadLag` (clock 0 baseline). On top of that baseline, a winding
+    # whose bus connection cyclically rotates the phase-conductor order (e.g.
+    # `bus=lv.2.3.1.0`) contributes a further +-4 clock steps (verified
+    # against a live solve, see `_cyclic_rotation_steps` and the module
+    # CONTEXT.md "Cyclic winding-bus rotation" section) -- this is how Dyn5,
+    # YNd5, Yy4, etc. are converted even though OpenDSS has no explicit clock
+    # field. The polarity-flip clocks {2, 6, 10} (e.g. Yy6/Dd6, the
+    # 180-degree reversed-polarity group) need a genuinely reversed winding
+    # construction that no bus wiring can express and are still not detected
+    # here (see the module CONTEXT.md).
     #
     # Grounding: OpenDSS's shorthand bus notation (no explicit
     # (n_phases+1)-th conductor, or an explicit trailing `.0`) solidly grounds
@@ -459,11 +475,16 @@ def to_grid(
         u_rated_from_v = kv_from * 1_000.0
         u_rated_to_v = kv_to * 1_000.0
 
-        # Total leakage referred to the LV (to-side) coil.
+        # Total leakage on the standard line-to-line base, then referred to
+        # the ACTUAL TO-side coil (3x for a delta LV winding -- see the
+        # comment block above this loop).
         z_base_lv_ohm = (kv_to**2 * 1_000.0) / kva_to
         r_pct_total = wdg_pct_r[0] + wdg_pct_r[1]
-        r_lv_ohm = r_pct_total / 100.0 * z_base_lv_ohm
-        x_lv_ohm = xhl_pct / 100.0 * z_base_lv_ohm
+        r_ll_ohm = r_pct_total / 100.0 * z_base_lv_ohm
+        x_ll_ohm = xhl_pct / 100.0 * z_base_lv_ohm
+        _lv_coil_factor = 3.0 if wdg_is_delta[1] else 1.0
+        r_lv_ohm = r_ll_ohm * _lv_coil_factor
+        x_lv_ohm = x_ll_ohm * _lv_coil_factor
         l_lv_h = x_lv_ohm / two_pi_f0
 
         # Magnetizing shunt referred to the HV terminal (same derivation the
@@ -480,11 +501,11 @@ def to_grid(
                 if b_m > 0.0:
                     l_m = 1.0 / (two_pi_f0 * b_m)
 
-        from_bus_name, from_phase_list, from_grounded = _parse_transformer_winding_bus(
-            bus_names_raw[0], n_phases
+        from_bus_name, from_phase_list, from_grounded, from_rotation = (
+            _parse_transformer_winding_bus(bus_names_raw[0], n_phases)
         )
-        to_bus_name, to_phase_list, to_grounded = _parse_transformer_winding_bus(
-            bus_names_raw[1], n_phases
+        to_bus_name, to_phase_list, to_grounded, to_rotation = (
+            _parse_transformer_winding_bus(bus_names_raw[1], n_phases)
         )
         if len(from_phase_list) != len(to_phase_list):
             raise ConversionError(
@@ -532,18 +553,33 @@ def to_grid(
             dss.Text.Command(f"? Transformer.{trafo_name}.leadlag")
             leadlag = dss.Text.Result().strip().lower()
             if leadlag in ("lag", "ansi", ""):
-                shift_deg = 30.0
+                base_shift_deg = 30.0
             elif leadlag in ("lead", "euro"):
-                shift_deg = 330.0
+                base_shift_deg = 330.0
             else:
                 raise ConversionError(
                     f"OpenDSS transformer '{trafo_name}': unrecognized "
                     f"LeadLag value {leadlag!r}."
                 )
         else:
-            # Yy / Dd: no inherent phase shift is expressible through a plain
-            # OpenDSS Transformer element (clock 0 only).
-            shift_deg = 0.0
+            # Yy / Dd: `LeadLag` carries no clock information (clock 0
+            # baseline; a further rotation is folded in below).
+            base_shift_deg = 0.0
+
+        # Fold any physical winding-bus rotation into the clock (see
+        # `_cyclic_rotation_steps` and the "Cyclic winding-bus rotation"
+        # section of the module CONTEXT.md for the sign convention, pinned
+        # against a live OpenDSS solve): a cyclic rotation of the FROM/HV
+        # winding's bus conductor order contributes +120 deg per step, a
+        # TO/LV winding rotation -120 deg per step, REGARDLESS of the Dy/Yd
+        # `LeadLag` baseline above. This reaches every clock of the pairing's
+        # correct parity except the polarity-flip clocks {2, 6, 10}, which no
+        # bus-connection rotation can express (`_cyclic_rotation_steps`
+        # already rejects the non-cyclic phase-conductor order such a group
+        # would require, so this converter never silently produces one).
+        shift_deg = (
+            base_shift_deg + 120.0 * from_rotation - 120.0 * to_rotation
+        ) % 360.0
 
         tap_from, tap_to = wdg_tap
         ratio_magnitude = tap_from / tap_to
@@ -805,14 +841,61 @@ def _parse_bus_connection(bus_str: str, n_phases: int) -> tuple[str, list[Phase]
     return bus_name, phases
 
 
+def _cyclic_rotation_steps(phase_nums: list[int], n_phases: int, bus_str: str) -> int:
+    """Classify a winding's phase-conductor order as identity or a cyclic rotation.
+
+    Returns ``r`` such that ``phase_nums[k] == ((k + r) % n_phases) + 1`` for
+    every ``k`` -- e.g. ``[2, 3, 1]`` is ``r=1`` (the conductor order is
+    (A, B, C) rotated one step: winding terminal 1 lands on the bus's phase
+    B conductor, terminal 2 on C, terminal 3 on A).
+
+    Only a genuine cyclic rotation of a 3-phase winding is realisable as a
+    constant vector-group clock shift -- each step contributes exactly +-4
+    clock steps (+-120 deg), verified against a live OpenDSS solve (see the
+    module CONTEXT.md "Cyclic winding-bus rotation" section) and matching
+    :mod:`pgml.assembly._transformer`'s own internal cyclic-permutation clock
+    mechanism (``_cyclic_power``). Any OTHER permutation (e.g. swapping two
+    conductors) reverses the phase-rotation sequence (A->C->B->A instead of
+    A->B->C->A), which is a genuinely different physical winding and cannot
+    be expressed by any bus-conductor rotation -- it raises rather than
+    silently producing a wrong clock. Non-3-phase windings must use the
+    identity order; the rotation concept is specific to the 3-phase A/B/C
+    cyclic group.
+    """
+    if n_phases != 3:
+        if phase_nums != list(range(1, n_phases + 1)):
+            raise ConversionError(
+                f"transformer winding bus {bus_str!r}: a non-identity phase "
+                f"conductor order is only supported for 3-phase windings "
+                f"(got {n_phases} phases)."
+            )
+        return 0
+    for r in range(3):
+        if all(phase_nums[k] == ((k + r) % 3) + 1 for k in range(3)):
+            return r
+    raise ConversionError(
+        f"transformer winding bus {bus_str!r}: phase conductor order "
+        f"{phase_nums} is neither the identity nor a cyclic rotation of "
+        "(1, 2, 3) -- a non-cyclic permutation reverses the phase-rotation "
+        "sequence and cannot be expressed as a constant vector-group clock "
+        "shift; not supported."
+    )
+
+
 def _parse_transformer_winding_bus(
     bus_str: str, n_phases: int
-) -> tuple[str, list[Phase], bool]:
-    """Parse a transformer winding bus string into ``(bus_name, phases, grounded)``.
+) -> tuple[str, list[Phase], bool, int]:
+    """Parse a transformer winding bus string into ``(bus_name, phases, grounded, rotation)``.
 
-    ``phases`` is the ordered list of the ``n_phases`` conducting-phase
-    conductors (the leading node indices, or the default ``1..n_phases`` when
-    no explicit list is given, mirroring :func:`_parse_bus_connection`).
+    ``phases`` is ALWAYS the canonical ``(Phase.A, Phase.B, ...)`` order for
+    ``n_phases`` conductors -- never the raw DSS conductor-index order --
+    because the phase-domain transformer stamp
+    (:func:`pgml.assembly._transformer.block_incidence`) assumes winding
+    position ``k`` IS bus phase ``k``. Any physical rotation of the bus
+    connection (e.g. ``bus=lv.2.3.1.0``) is reported separately via
+    ``rotation`` so the caller folds it into the vector-group clock instead
+    of baking it into the row order (see :func:`_cyclic_rotation_steps` and
+    the module CONTEXT.md).
 
     ``grounded`` applies only to a WYE winding (a DELTA winding has no neutral
     and the caller ignores it): ``True`` when the winding's neutral is
@@ -829,7 +912,7 @@ def _parse_transformer_winding_bus(
     ----------
     bus_str:
         Lowercase DSS bus string for one transformer terminal, e.g.
-        ``"hv.1.2.3"`` or ``"lv.1.2.3.0"``.
+        ``"hv.1.2.3"``, ``"lv.1.2.3.0"``, or the rotated ``"lv.2.3.1.0"``.
     n_phases:
         Number of phase conductors on the transformer (``CktElement.NumPhases()``).
     """
@@ -844,9 +927,10 @@ def _parse_transformer_winding_bus(
             f"transformer winding bus {bus_str!r}: expected {n_phases} phase "
             f"conductors, found {len(phase_nums)}."
         )
-    phases = [_phase_num_to_enum(pn) for pn in phase_nums]
+    rotation = _cyclic_rotation_steps(phase_nums, n_phases, bus_str)
+    phases = [_phase_num_to_enum(i + 1) for i in range(n_phases)]
     grounded = len(node_nums) <= n_phases or node_nums[n_phases] == 0
-    return bus_name, phases, grounded
+    return bus_name, phases, grounded, rotation
 
 
 def _flat_to_matrix(flat: list[float], n: int) -> list[list[float]]:

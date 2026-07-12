@@ -36,6 +36,7 @@ from pgml.schemas.grid_schema import (
     Source,
     Switch,
     Transformer,
+    WindingConnection,
 )
 
 from pgml.evaluation._util import to_float
@@ -1088,13 +1089,66 @@ def opendss_harmonic_voltages(
 # ---------------------------------------------------------------------------
 
 
+def _dss_rotated_phase_suffix(p: int, r: int) -> str:
+    """DSS bus-conductor suffix ``"k1.k2..."`` for a cyclic rotation ``r`` of phases.
+
+    ``r=0`` gives the identity ``"1.2.3"``; ``r=1`` gives ``"2.3.1"``; ``r=2``
+    gives ``"3.1.2"`` -- i.e. winding terminal ``k`` (0-based) connects to bus
+    conductor ``((k + r) % p) + 1``. This is the exact bus string pgml's own
+    :func:`~pgml.convert.opendss.converter._parse_transformer_winding_bus`
+    parses back into a rotation of the same sign (round-trip verified by
+    ``tests/reference/test_opendss_transformer.py``).
+    """
+    return ".".join(str(((k + r) % p) + 1) for k in range(p))
+
+
+def _dss_leadlag_and_rotation(clock: int, shifting_pairing: bool) -> tuple[str, int]:
+    """``(LeadLag, r_to)`` reproducing ``clock`` via a LeadLag + TO-side rotation.
+
+    OpenDSS's ``Transformer`` element has no explicit clock parameter. The
+    only two mechanisms available are the binary ``LeadLag`` toggle (``Lag``
+    -> clock 1 baseline, ``Lead`` -> clock 11 baseline -- meaningful only for
+    a Dy/Yd pairing; a matching Yy/Dd pairing baselines at clock 0
+    regardless) and a cyclic rotation of one winding's bus-conductor order
+    (+-4 clock steps per step, verified against a live OpenDSS solve -- see
+    :mod:`pgml.convert.opendss.converter`'s ``_cyclic_rotation_steps`` and its
+    CONTEXT.md). This function always rotates the TO/LV side only
+    (``r_from=0``) and searches the reachable baseline(s) for one whose
+    residual to ``clock`` is a multiple of 4 clock steps -- true for every
+    clock of the pairing's correct parity except {2, 6, 10} (the
+    polarity-flip clocks, which need a genuinely reversed winding
+    construction no bus wiring can express).
+
+    Raises
+    ------
+    NotImplementedError
+        If ``clock`` needs a reversed winding polarity (clocks 2, 6, 10) --
+        not expressible by any OpenDSS ``Transformer`` element.
+    """
+    clock = clock % 12
+    bases = (1, 11) if shifting_pairing else (0,)
+    leadlags = ("Lag", "Lead") if shifting_pairing else ("Lag",)
+    for base, leadlag in zip(bases, leadlags):
+        residual = (base - clock) % 12
+        if residual % 4 == 0:
+            return leadlag, (residual // 4) % 3
+    raise NotImplementedError(
+        f"OpenDSS cannot express transformer clock {clock}: it has no "
+        "explicit clock/polarity parameter, only LeadLag (+-30 deg, Dy/Yd "
+        "only) and a bus-connection rotation (+-120 deg per step); clocks "
+        "{2, 6, 10} need a reversed winding polarity, a construction "
+        "parameter no OpenDSS Transformer element wiring can express."
+    )
+
+
 def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     """Build a full OpenDSS circuit including REAL Transformer elements.
 
     Unlike :func:`_build_seq_aware_circuit_stub`, this circuit contains a
     genuine OpenDSS ``Transformer`` element for each
     :class:`~pgml.schemas.grid_schema.Transformer` in the grid, using the
-    ``delta``/``wye`` connections and ``LeadLag`` setting derived from the schema.
+    ``delta``/``wye`` connections, ``LeadLag`` setting, and (for clocks beyond
+    {0, 1, 11}) a rotated TO-side bus connection derived from the schema.
     OpenDSS's own transformer model is used; ``XRConst=No`` (the OpenDSS default)
     matches pgml's ``R const, X∝h`` harmonic model.
 
@@ -1113,10 +1167,20 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     pure-R for switches).
 
     Transformer impedance parameters derive from the stored per-unit SI values:
-    ``kVA`` is set to 1000 kVA so that ``Z_base_LV = U_to² / kVA``; ``%R`` and
-    ``XHL`` are back-calculated from ``series_resistance_ohm`` and
-    ``series_inductance_h`` accordingly.  ``LeadLag=Lag`` maps to Dyn1 (LV lags HV
-    by 30°, matching ``tap.shift_deg = 30``); ``LeadLag=Lead`` maps to Dyn11.
+    ``kVA`` is set to 1000 kVA so that ``Z_base_LV = U_to² / kVA``. pgml stores
+    the leakage referred to the ACTUAL TO-side coil, which is 3x the standard
+    line-to-line base for a delta LV winding (see
+    ``pgml.convert.opendss.converter`` and
+    ``docs/pgml/modeling/references/opendss/index.md``); the back-calculation
+    divides by that same factor before recovering ``%R``/``XHL`` on OpenDSS's
+    standard (base-invariant) percent convention. The clock is realised via
+    :func:`_dss_leadlag_and_rotation` -- ``LeadLag`` alone for clocks 0, 1, 11
+    and a rotated TO-side bus connection (e.g. ``bus=lv.3.1.2.0``) for every
+    other clock of the pairing's correct parity; clocks 2, 6, 10 raise
+    ``NotImplementedError`` (OpenDSS cannot express them).
+
+    Zigzag windings raise ``NotImplementedError``: OpenDSS's ``Transformer``
+    element has no zigzag connection.
 
     Parameters
     ----------
@@ -1227,33 +1291,61 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     for t in grid.branches:
         if not (isinstance(t, Transformer) and t.in_service):
             continue
+        if t.from_connection in (
+            WindingConnection.ZIGZAG,
+            WindingConnection.ZIGZAG_GROUNDED,
+        ) or t.to_connection in (
+            WindingConnection.ZIGZAG,
+            WindingConnection.ZIGZAG_GROUNDED,
+        ):
+            raise NotImplementedError(
+                f"transformer {t.id}: OpenDSS's Transformer element has no "
+                "zigzag winding connection; a zigzag winding cannot be "
+                "expressed in a live OpenDSS oracle circuit."
+            )
         p = len(t.from_phases)
-        ph_str = ".".join(str(k + 1) for k in range(p))
+        if p != 3:
+            raise NotImplementedError(
+                f"transformer {t.id}: _build_circuit_with_real_transformer only "
+                f"supports 3-phase windings (got {p}); the clock-realising "
+                "bus rotation is specific to the 3-phase A/B/C cyclic group."
+            )
         u_from_kv = float(t.u_rated_from_v) / 1000.0
         u_to_kv = float(t.u_rated_to_v) / 1000.0
         lv_voltage_bases_kv.add(round(u_to_kv, 6))
 
+        is_delta_from = t.from_connection == WindingConnection.DELTA
+        is_delta_to = t.to_connection == WindingConnection.DELTA
+
         r_t = to_float(t.series_resistance_ohm)
         l_t = to_float(t.series_inductance_h)
         x_t = w0 * l_t
+        # pgml stores the leakage referred to the ACTUAL TO-side coil, 3x the
+        # standard line-to-line base for a delta LV winding (see the module
+        # CONTEXT.md and pgml.convert.opendss.converter); undo that factor
+        # before recovering OpenDSS's %R/XHL, which are on the standard base.
+        _lv_coil_factor = 3.0 if is_delta_to else 1.0
+        r_ll = r_t / _lv_coil_factor
+        x_ll = x_t / _lv_coil_factor
         # Z_base_LV = U_to² / kVA (LV LL voltage, single-phase reference base).
         z_base_lv = (u_to_kv**2 * 1e6) / (kva_ref * 1e3)
         # Total leakage in % of base; split equally between the two windings.
-        vkr_total = (r_t / z_base_lv) * 100.0
-        vk_total = (abs(r_t + 1j * x_t) / z_base_lv) * 100.0
+        vkr_total = (r_ll / z_base_lv) * 100.0
+        vk_total = (abs(r_ll + 1j * x_ll) / z_base_lv) * 100.0
         xhl = math.sqrt(max(vk_total**2 - vkr_total**2, 0.0))
         pct_r_per_winding = vkr_total / 2.0
 
-        # Connection strings and LeadLag from the schema.
-        from_conn_str = "delta" if str(t.from_connection).endswith("DELTA") else "wye"
-        to_conn_str = "delta" if str(t.to_connection).endswith("DELTA") else "wye"
-        # shift_deg > 0 → LV lags HV (Dyn1) → LeadLag=Lag.
-        # shift_deg < 0 or 330 → LV leads HV (Dyn11) → LeadLag=Lead.
-        shift = float(t.tap.shift_deg)
-        lead_lag = "Lag" if (0.0 < shift < 180.0) else "Lead"
+        from_conn_str = "delta" if is_delta_from else "wye"
+        to_conn_str = "delta" if is_delta_to else "wye"
 
-        bus_from = f"{busname[t.from_node]}.{ph_str}"
-        bus_to = f"{busname[t.to_node]}.{ph_str}"
+        # Clock -> (LeadLag, TO-side rotation).
+        shift = float(t.tap.shift_deg)
+        clock = int(round(shift / 30.0)) % 12
+        shifting_pairing = is_delta_from != is_delta_to
+        lead_lag, r_to = _dss_leadlag_and_rotation(clock, shifting_pairing)
+
+        bus_from = f"{busname[t.from_node]}.{_dss_rotated_phase_suffix(p, 0)}"
+        bus_to = f"{busname[t.to_node]}.{_dss_rotated_phase_suffix(p, r_to)}"
 
         dss.Text.Command(f"New Transformer.T{t.id} windings=2")
         dss.Text.Command(

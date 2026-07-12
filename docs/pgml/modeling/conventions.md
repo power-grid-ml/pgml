@@ -100,7 +100,7 @@ This is the headline cross-tool difference.
 | **pgml** | `series_resistance_ohm`, `series_inductance_h` | **TO / LV coil** | stored directly |
 | **pandapower** | `vk_percent`, `vkr_percent`, `sn_mva` | **LV side** ✅ | `Z_base_LV=vn_lv_v²/sn_va`; `R=vkr%·Z_base_LV`, `\|Z\|=vk%·Z_base_LV`, `X=√(\|Z\|²−R²)`, `L=X/2πf₀` |
 | **pgm** | `uk`, `pk`, `sn`, `u2` | **to-side (LV)** ✅ | `R=pk·u2²/sn²`, `\|Z\|=uk·u2²/sn`, `X=√(\|Z\|²−R²)` *(transformer path not yet implemented in the converter)* |
-| **OpenDSS** | per-winding `%R`, inter-winding `XHL` | **percent, i.e. base-invariant** — `XHL` documented "on the kVA base of winding 1"; `%R` per winding on its own kV/kVA base | `to_grid` recovers `R_lv=(%R_wdg1+%R_wdg2)/100·Z_base_LV`, `X_lv=XHL%/100·Z_base_LV`, `Z_base_LV=kV_lv²·1000/kVA` (requires both windings to share one kVA rating; the oracle direction back-calculates the same way, see below) |
+| **OpenDSS** | per-winding `%R`, inter-winding `XHL` | **percent, i.e. base-invariant, on the standard L-L base** — `XHL` documented "on the kVA base of winding 1"; `%R` per winding on its own kV/kVA base | `to_grid` recovers `R_ll=(%R_wdg1+%R_wdg2)/100·Z_base_LV`, `X_ll=XHL%/100·Z_base_LV`, `Z_base_LV=kV_lv²·1000/kVA` (requires both windings to share one kVA rating), then multiplies by **3 if the LV winding is DELTA** (its natural coil impedance base is `3·Z_base_LV` — a delta coil is rated at the L-L voltage with 1/3 the per-phase kVA, see the [transformer model](transformer.md) and `src/pgml/convert/opendss/CONTEXT.md`) to get the actual TO-coil-referred `R_lv`/`X_lv` pgml stores; the oracle direction back-calculates the same way (divides by the same factor first), see below |
 
 **Decision & rationale.** pgml refers the leakage admittance to the **TO/LV coil**, the
 same side as pandapower and pgm (the two load-flow oracles), so their `vk/vkr/uk/pk`
@@ -113,13 +113,18 @@ HV/LV referral arithmetic, only the LV base impedance to convert back to ohms; t
 as long as both windings share one kVA rating (`to_grid` raises `ConversionError`
 otherwise, an OpenDSS quirk: the *sequential* `~ wdg=1 ... kVA=x` / `~ wdg=2 ... kVA=y`
 tilde-continuation syntax silently re-syncs both windings to the LAST kVA given — only the
-array form `kvas=[x, y]` actually creates a genuine per-winding kVA mismatch). The live
+array form `kvas=[x, y]` actually creates a genuine per-winding kVA mismatch). What DOES
+still need a referral is pgml's coil-vs-line-to-line distinction: `%R`/`XHL` are recovered
+on the standard L-L base regardless of connection, but a DELTA LV winding's actual coil
+carries `3x` that impedance (§"headline" row above) — `to_grid` applies that factor, a
+latent bug fixed alongside the vector-group rotation work (see
+`src/pgml/convert/opendss/CONTEXT.md` for the before/after live-oracle error). The live
 OpenDSS Dyn oracle (`opendss_oracle._build_circuit_with_real_transformer`, the pgml -> DSS
 direction used for the harmonic vector-group tests) back-calculates `%R`/`XHL` from pgml's
-LV-referred R/L with the same formula inverted — self-consistent because the total
-per-unit leakage is preserved either way. The DSS -> pgml direction
-(`convert.opendss.to_grid`) is the forward conversion documented here; see
-`src/pgml/convert/opendss/CONTEXT.md`.
+LV-referred R/L with the same formula inverted (dividing out the same delta-LV factor
+first) — self-consistent because the total per-unit leakage is preserved either way. The
+DSS -> pgml direction (`convert.opendss.to_grid`) is the forward conversion documented
+here; see `src/pgml/convert/opendss/CONTEXT.md`.
 
 **Magnetizing branch.** pgml refers the magnetizing shunt `y_m=G_m+jB_m` to the **HV**
 terminal (`magnetizing_conductance_s`, `magnetizing_inductance_h`); the pandapower
@@ -135,7 +140,7 @@ the turns ratio, but the raw numbers differ, so do not compare them without re-r
 |---|---|---|---|
 | **pgml** | from rated **coil** voltages + connections (`nominal_turns_ratio`: delta coil=L-L, wye coil=L-N=`u/√3`) | `ComplexTap.ratio_magnitude` (1.0 = on-tap) | `tap.shift_deg = clock·30`; **positive ⇒ LV lags HV**; `clock_transpose=sin(shift)>0` picks `Mᵀ` (Dyn1) vs `M` (Dyn11) |
 | **pandapower** | `vn_hv_kv/vn_lv_kv` (MATPOWER off-nominal tap) | `tap_pos/tap_neutral/tap_step_percent`, `tap_side` | `shift_degree` (positive ⇒ LV lags, matches pgml) |
-| **OpenDSS** | ratio of winding coil kV | tap per winding | `LeadLag` = `Lag`→Dyn1 (`shift 30`) / `Lead`→Dyn11 (`shift 330`) |
+| **OpenDSS** | ratio of winding coil kV | tap per winding | `LeadLag` (`Lag`→30°/`Lead`→330° baseline, Dy/Yd only) **+** a cyclic winding-bus rotation (±120°/±4 clocks per step — the only way to reach any OTHER clock; see §2's row above and `src/pgml/convert/opendss/CONTEXT.md`) |
 | **pgm** | `u1/u2` | `tap_side/pos/nom/size/min/max` | `clock` 0–12; `winding_from/to` enums |
 
 **Decision & rationale.** The nominal ratio and the ±30° clock shift come from the rated
@@ -155,16 +160,24 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
 - pandapower stores `shift_degree` as a positive clock·30; verify it stores Dyn11 as 330
   (or −30) and not 30 before relying on `clock_transpose` for a non-Dyn1 group.
 - The OpenDSS converter (`convert.opendss.to_grid`) converts two-winding `Transformer`
-  elements (winding 1 = HV/from, winding 2 = LV/to; `LeadLag` -> clock 1/11 for a Dy/Yd
-  pairing verified against a live solve, clock 0 for Yy/Dd since OpenDSS has no explicit
-  clock parameter). Scope, verified via live oracle tests
+  elements (winding 1 = HV/from, winding 2 = LV/to; `LeadLag` -> clock 1/11 baseline for a
+  Dy/Yd pairing verified against a live solve, clock 0 baseline for Yy/Dd since OpenDSS has
+  no explicit clock parameter). On top of that baseline, a winding whose bus string
+  cyclically rotates the phase-conductor order (e.g. `bus=lv.2.3.1.0`) folds a further ±4
+  clock steps into `tap.shift_deg` (verified against a live solve; phases are normalized to
+  canonical A/B/C, never left in the rotated row order) — this is how EVERY clock of a
+  pairing's correct parity converts, not just 0/1/11. Scope, verified via live oracle tests
   (`tests/reference/test_opendss_transformer.py`):
   - only two-winding transformers (3-winding raises `ConversionError`);
   - only solidly grounded wye (OpenDSS's shorthand-bus or explicit `.0` neutral) or delta
     windings — an explicit non-zero neutral node (floating or impedance-grounded) raises;
-  - `Yy6`/`Dd6` (the 180° reversed-polarity group) is not detectable from a plain OpenDSS
-    `Transformer` element (no explicit clock parameter beyond the binary `LeadLag`
-    Dy/Yd toggle) and is not converted;
+    zigzag has no OpenDSS `Transformer` connection at all, so a DSS file can never produce
+    one;
+  - a NON-cyclic winding-bus permutation (e.g. swapping two phase conductors) reverses the
+    phase-rotation sequence and raises `ConversionError` rather than silently producing a
+    wrong clock; the polarity-flip clocks `{2, 6, 10}` (the old `Yy6`/`Dd6` case) need a
+    genuinely reversed winding construction that NO bus wiring (cyclic or not) can express,
+    so they are never produced by this converter;
   - regulators (`RegControl`), 3-winding units, and OpenDSS's own frequency-correction
     curves (`XfmrCode`/`FreqMultCurve`) are not read;
   - the magnetizing branch (`%noloadloss`/`%imag`) converts with the SAME closed-form
@@ -173,6 +186,10 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
     leakage "T" — the two agree in direction and order of magnitude but not to the
     tight tolerance the leakage-only (no-magnetizing) oracle achieves (documented in that
     test file's module docstring).
+  - the reverse direction (`opendss_oracle._build_circuit_with_real_transformer`, pgml ->
+    DSS, used by the live harmonic vector-group oracle) mirrors this scope: it emits the
+    `LeadLag` + rotated-bus equivalent for any reachable clock and raises
+    `NotImplementedError` for zigzag windings or the `{2, 6, 10}` clocks.
 
 ---
 
