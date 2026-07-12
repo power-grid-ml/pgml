@@ -3,7 +3,8 @@
 Test strategy
 -------------
 1. Load ``case33bw()`` from pandapower.
-2. Set ALL loads to ``const_z_percent=100`` so both sides solve the SAME linear
+2. Set ALL loads to 100 % constant impedance (``const_z_p_percent`` /
+   ``const_z_q_percent``) so both sides solve the SAME linear
    system (constant-impedance model; no Newton iteration needed).
 3. Run ``pp.runpp`` to get the reference voltages.
 4. Convert the net to our Grid using ``pgml.convert.pandapower.to_grid``.
@@ -70,7 +71,8 @@ def _build_ref_net() -> pp.pandapowerNet:
     net = pn.case33bw()
     # Switch ALL loads to 100 % constant-impedance so the system is linear.
     # This makes both pandapower and our linear solver solve the SAME system.
-    net.load["const_z_percent"] = 100.0
+    net.load["const_z_p_percent"] = 100.0
+    net.load["const_z_q_percent"] = 100.0
     net.load["const_i_percent"] = 0.0
     pp.runpp(net, numba=False)
     assert net.converged, "pandapower did not converge — check the test setup"

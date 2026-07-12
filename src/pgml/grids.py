@@ -17,9 +17,6 @@ from __future__ import annotations
 
 import math
 
-from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
-
-
 #: Typical 6-pulse converter line-current spectrum, as ``(order, magnitude_pu, phase_deg)``
 #: relative to the fundamental. Attached to the farthest loads by :func:`ieee33_geometry_grid`
 #: and :func:`cigre_lv_geometry_grid` to give the harmonic examples a realistic source.
@@ -54,7 +51,6 @@ def _attach_spectrum_farthest(grid, n_loads: int, spectrum) -> None:
 
 def ieee33_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     """IEEE-33 as a pgml grid with synthesized Carson geometry + converter spectra."""
-    _numpy_shim()
     import pandapower as pp
     import pandapower.networks as pn
 
@@ -97,7 +93,6 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     -------
     (Grid, id_map)
     """
-    _numpy_shim()
     import math
 
     import pandapower.networks as pn
@@ -137,11 +132,11 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     The 20/0.4 kV transformer + MV grid are abstracted to a stiff 0.4 kV source so the
     comparison isolates the LV line (Carson) model.
     """
-    _numpy_shim()
     import networkx as nx
     import pandapower as pp
     import pandapower.networks as pn
     import pandapower.topology as top
+    from pandapower.toolbox import select_subnet
 
     from pgml.convert.pandapower import to_grid
     from pgml.geometry.synthesis import synthesize_grid_geometry
@@ -149,7 +144,7 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     net = pn.create_cigre_network_lv()
     mg = top.create_nxgraph(net, include_trafos=False)
     comp = list(nx.node_connected_component(mg, 2))  # residential LV busbar = bus 2
-    sub = pp.select_subnet(net, comp, include_results=False)
+    sub = select_subnet(net, comp, include_results=False)
     pp.create_ext_grid(sub, bus=2, vm_pu=1.0)
     pp.runpp(sub, numba=False)
     grid, id_map = to_grid(sub)

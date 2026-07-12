@@ -83,11 +83,11 @@ engine; **no harmonics**, **no autograd**.
   `res_bus.vm_pu`) through a piecewise-linear `Characteristic` to an output column (e.g.
   `sgen.q_mvar`), iterating until `|Δoutput| < tol`. This is exactly how a `Q(V)` / `cosφ(P)`
   law is realised. [pp-runcontrol][pp-characteristic]
-- **Built-in DER curves.** The installed pandapower (2.14.7) ships **no dedicated
-  Volt-VAr/Volt-Watt controller class**; such laws are assembled from the generic
-  `CharacteristicControl` + `Characteristic`. (Recent pandapower releases have begun adding
-  a dedicated `DERController` family — `QModelQV`, `QModelCosphiP`, PQV capability areas;
-  verify against the target version.) [pp-characteristic]
+- **Built-in DER curves.** Volt-VAr / Volt-Watt laws are assembled from the generic
+  `CharacteristicControl` + `Characteristic`; pandapower 3.x additionally ships a
+  dedicated `DERController` family (`QModelQV`, `QModelCosphiP`, PQV capability
+  areas) — verify behaviour against the installed version before relying on it.
+  [pp-characteristic]
 
 ### 2.2 OpenDSS
 

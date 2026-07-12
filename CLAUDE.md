@@ -50,7 +50,7 @@ Sphinx lives in `docs/` (autodoc + autosummary + napoleon + MyST, furo theme); R
 feature. The published docs are **human-first** and organised per package — `docs/pgml/`
 (with the modeling decisions under `docs/pgml/modeling/`, ex-`references/`), `docs/pgl/`,
 `docs/pgg/`; figures in `docs/_static/figures/`. The API reference is generated from each
-subpackage's `__init__.py` `__all__`, so **docstrings ARE the docs**. `pandapower` is mocked at autodoc time (NumPy-2 import break);
+subpackage's `__init__.py` `__all__`, so **docstrings ARE the docs**. `pandapower` is mocked at autodoc time (heavyweight, not needed for autodoc);
 `pydantic`/`torch` are real. Keep schema docstrings RST-safe IN SOURCE (no build-time
 rewriting); `docs/conf.py` keeps only a Python-domain dedup hook for the re-exported schema
 types. A docs build with import errors or broken autosummary is NOT done — keep new

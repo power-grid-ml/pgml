@@ -77,10 +77,6 @@ import pytest
 # Optional pandapower guard (matches existing reference test conventions)
 # ---------------------------------------------------------------------------
 try:
-    import numpy as _np
-
-    _np.Inf = _np.inf
-    _np.in1d = _np.isin
     import pandapower as pp
     import pandapower.control as ppctrl
 

@@ -28,26 +28,22 @@ from pathlib import Path
 
 import torch
 
-from pgml.convert.pandapower import ensure_numpy_compat
+import pandapower as pp
+import pandapower.networks as pn
 
-ensure_numpy_compat()  # numpy 2.x compat for pandapower 2.14, before importing it
-
-import pandapower as pp  # noqa: E402
-import pandapower.networks as pn  # noqa: E402
-
-from pgml.assembly import assemble_network_ybus, assemble_ybus, node_phase_index  # noqa: E402
-from pgml.convert.pandapower import to_grid  # noqa: E402
-from pgml.schemas.grid_schema import (  # noqa: E402
+from pgml.assembly import assemble_network_ybus, assemble_ybus, node_phase_index
+from pgml.convert.pandapower import to_grid
+from pgml.schemas.grid_schema import (
     HarmonicComponent,
     Load,
     SpectrumPoint,
     StaticSpectrum,
 )
-from pgml.geometry.synthesis import apply_default_harmonic_model  # noqa: E402
-from pgml.solver import solve_harmonic_flow, solve_power_flow  # noqa: E402
+from pgml.geometry.synthesis import apply_default_harmonic_model
+from pgml.solver import solve_harmonic_flow, solve_power_flow
 
-from pgml import evaluation as ev  # noqa: E402
-from pgml.evaluation import oracles as ref  # noqa: E402
+from pgml import evaluation as ev
+from pgml.evaluation import oracles as ref
 
 CDT = torch.complex128
 # Typical 6-pulse converter line-current spectrum (mag relative to fundamental).

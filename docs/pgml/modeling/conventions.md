@@ -225,7 +225,8 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
 All four agree (consumer reference for loads, generator reference for generators); the
 converters pass P/Q through unchanged. ZIP behaviour: pgm `LoadGenType`
 (`const_power/const_impedance/const_current`) maps to pgml's `LoadModel`; pandapower
-`const_z_percent`/`const_i_percent` map to pgml `ZipCoefficients`. (Converter coverage: pgm
+`const_z_p_percent`/`const_i_p_percent` (+ the `_q_` twins) map to pgml
+`ZipCoefficients`. (Converter coverage: pgm
 `sym_gen` converts (`Generator`, generation-positive); pandapower `sgen`/`gen` and pgm
 `asym_gen` are **not yet** converted.)
 
