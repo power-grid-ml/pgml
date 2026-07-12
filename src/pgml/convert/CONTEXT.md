@@ -187,16 +187,26 @@ linear system; the source is an ideal slack (`solve_harmonic(fixed_rows, v_fixed
   matches to ~1.1e-7 pu / 2.1e-6 deg. `tests/reference/test_cigre_lv_pandapower.py`.
 
 ## pandapower converter — element coverage (extended)
-`to_grid` now handles `bus`, `line`, `load`, `ext_grid`, **`trafo`**, and **bus-bus
-`switch`** (`et='b'`, modelled as near-ideal `Switch`, R=1e-4 Ω). `id_map` adds
-`"trafo"` and `"switch"`. Transformer convention: leakage `y_se` referred to the LV
-coil; the NOMINAL ratio + vector-group shift come from `u_rated_from/to_v` +
-`from_connection`/`to_connection`, so `tap = (ratio_magnitude=1.0, shift_deg=clock·30)`
-is the OFF-NOMINAL tap + clock only. The CIGRE LV trafos are Dyn1
-(`from_connection=DELTA`, `to_connection=WYE_GROUNDED`, `shift_degree=30`); assembly
-builds the full vector-group winding-incidence primitive (delta blocks zero-sequence
-/ triplen harmonics). See `docs/pgml/modeling/transformer.md`. pandapower tap-changer
-positions (`tap_pos`/`tap_step`) are not read yet (off-nominal tap stays 1.0).
+`to_grid` handles `bus`, `line`, `load`, `sgen`, `asymmetric_load`, `ext_grid`,
+**`trafo`** (vector-group + tap-changer aware), and **bus-bus `switch`** (`et='b'`,
+modelled as near-ideal `Switch`, R=1e-4 Ω). `id_map` adds `"trafo"` and `"switch"`.
+Transformer connections come from `net.trafo['vector_group']` / the row's
+`std_types['trafo'][std_type]['vector_group']` (parsed, clock digit optional — a
+bare `'Dyn'`/`'Yzn'` is pandapower's own `runpp_3ph` form), cross-checked against
+`shift_degree` (a mismatch raises `ConversionError`); with no vector-group string
+anywhere the connection falls back on the shift parity (even clock ->
+WYE_GROUNDED/WYE_GROUNDED, odd -> DELTA/WYE_GROUNDED). `tap.ratio_magnitude` reads
+`tap_pos`/`tap_neutral`/`tap_step_percent`/`tap_side` (NaN-safe; 1.0 = no tap).
+Leakage `series_resistance_ohm`/`series_inductance_h` is the TO-side COIL value
+(`3×` the raw `vk_percent`-derived terminal quantity when `to_connection==DELTA`,
+applied THE SAME WAY REGARDLESS OF `phase_mode` — assembly's own
+`_transformer_block_groups` undoes the factor internally for the single-phase
+scalar stamp too; a phase-mode-conditional version of this factor is WRONG, see
+`src/pgml/convert/pandapower/CONTEXT.md` and the pinned oracle test
+`tests/reference/test_pandapower_grid_matrix.py`). `load`/`sgen`/`asymmetric_load`
+P/Q are scaled by the per-element `scaling` column (NaN-safe, default 1.0 —
+pandapower's own `runpp` convention). See `docs/pgml/modeling/transformer.md` and
+`src/pgml/convert/pandapower/CONTEXT.md` for the full field-mapping table.
 
 ## OpenDSS converter — transformer element coverage
 `convert.opendss.to_grid` converts two-winding DSS `Transformer` elements (winding 1 =

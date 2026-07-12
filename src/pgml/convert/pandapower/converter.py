@@ -50,7 +50,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+import re
+from typing import Any, Optional
 
 from pgml.convert._common import (
     IdCounter,
@@ -64,6 +65,7 @@ from pgml.convert._common import (
     phases_for,
     warn_dropped_elements,
 )
+from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
     ComplexTap,
     Grid,
@@ -87,6 +89,220 @@ _PROVENANCE = Provenance(
     ),
 )
 
+# IEC vector-group winding tokens (case-insensitive; matched on the lower-cased
+# alphabetic prefix of the string). Longest tokens first so "yn"/"zn" are tried
+# before their single-letter prefixes "y"/"z".
+_WINDING_TOKENS: dict[str, WindingConnection] = {
+    "yn": WindingConnection.WYE_GROUNDED,
+    "zn": WindingConnection.ZIGZAG_GROUNDED,
+    "y": WindingConnection.WYE,
+    "d": WindingConnection.DELTA,
+    "z": WindingConnection.ZIGZAG,
+}
+_WINDING_TOKENS_BY_LEN = sorted(_WINDING_TOKENS, key=len, reverse=True)
+
+_VECTOR_GROUP_RE = re.compile(r"^([A-Za-z]+)(\d*)$")
+
+
+def _parse_vector_group(
+    vector_group: str,
+) -> tuple[WindingConnection, WindingConnection, Optional[int]]:
+    """Parse an IEC vector-group string into ``(from_connection, to_connection, clock)``.
+
+    Handles ``Dyn5``, ``YNd5``, ``Yzn5``, ``Yy0``, ``YNyn0``, ``Dd0``, ``Dyn11``, ...
+    pandapower conventionally uppercases the HV token and lowercases the LV token, but
+    the split is resolved by exact (case-insensitive) token matching rather than case,
+    so unconventional casing still parses: every HV-candidate token (longest first) is
+    tried as a prefix of the lower-cased alphabetic part, and a split is accepted only
+    when the remainder EXACTLY matches one of the same five tokens.
+
+    The trailing clock digits are OPTIONAL: pandapower's own ``runpp_3ph`` zero-sequence
+    transformer model requires the bare letter form (``'Dyn'``, ``'Yzn'``, no digit --
+    it explicitly rejects a digit-suffixed string, "specified in net.trafo.shift_degree"),
+    so a real pandapower network may carry ``vector_group='Dyn'`` with the clock ONLY in
+    ``shift_degree``. Returns ``clock=None`` in that case (no cross-check is possible; the
+    caller derives the clock from ``shift_degree`` alone).
+    """
+    m = _VECTOR_GROUP_RE.match(str(vector_group).strip())
+    if not m:
+        raise ConversionError(
+            f"pandapower vector_group {vector_group!r}: expected letters "
+            "optionally followed by a clock number (e.g. 'Dyn5' or 'Dyn')."
+        )
+    letters, clock_str = m.group(1).lower(), m.group(2)
+    clock = int(clock_str) if clock_str else None
+    for hv_token in _WINDING_TOKENS_BY_LEN:
+        if letters.startswith(hv_token):
+            lv_token = letters[len(hv_token) :]
+            if lv_token in _WINDING_TOKENS:
+                return _WINDING_TOKENS[hv_token], _WINDING_TOKENS[lv_token], clock
+    raise ConversionError(
+        f"pandapower vector_group {vector_group!r}: could not split {m.group(1)!r} "
+        "into an HV/LV winding token pair."
+    )
+
+
+def _vector_group_string(net: Any, row: Any) -> Optional[str]:
+    """Return the vector-group string for a ``net.trafo`` row, or ``None``.
+
+    Precedence: an explicit, non-null ``row['vector_group']`` wins; else look up
+    ``net.std_types['trafo'][std_type]['vector_group']`` via the row's ``std_type``.
+    Returns ``None`` when neither source carries the string (a plain MATPOWER import
+    or a benchmark net that only stamps ``shift_degree``).
+    """
+    vg = row.get("vector_group", None) if hasattr(row, "get") else None
+    if vg is not None and not (isinstance(vg, float) and math.isnan(vg)):
+        return str(vg)
+    std_type = row.get("std_type", None) if hasattr(row, "get") else None
+    if std_type is None or (isinstance(std_type, float) and math.isnan(std_type)):
+        return None
+    std_types = getattr(net, "std_types", None)
+    if not std_types:
+        return None
+    entry = std_types.get("trafo", {}).get(std_type)
+    if not entry:
+        return None
+    vg = entry.get("vector_group")
+    return None if vg is None else str(vg)
+
+
+def _resolve_transformer_connections(
+    net: Any, row: Any, shift_deg: float
+) -> tuple[WindingConnection, WindingConnection]:
+    """Resolve a trafo row's ``(from_connection, to_connection)``.
+
+    A vector-group string (row column or std_type catalog) is parsed and cross-checked
+    against ``shift_degree``: pandapower's own balanced ``runpp`` uses only
+    ``shift_degree`` (the string is otherwise-unread metadata), so a clock digit that
+    disagrees with ``shift_degree`` means the source network is self-inconsistent and
+    a silent choice would be wrong for someone reading the other field. A BARE
+    vector-group (no clock digit, e.g. ``'Dyn'`` -- the form pandapower's own
+    ``runpp_3ph`` zero-sequence model requires) carries no clock to cross-check, so its
+    connections are combined with ``shift_degree``'s clock directly. Absent a
+    vector-group string anywhere, the connection is derived from the shift parity (see
+    the section-3 comment in :func:`to_grid` for the full rationale).
+    """
+    vg_str = _vector_group_string(net, row)
+    if vg_str is not None:
+        from_conn, to_conn, clock = _parse_vector_group(vg_str)
+        shift_clock = int(round(shift_deg / 30.0)) % 12
+        if clock is not None and clock % 12 != shift_clock:
+            raise ConversionError(
+                f"pandapower trafo: vector_group={vg_str!r} implies clock "
+                f"{clock % 12}, but shift_degree={shift_deg} implies clock "
+                f"{shift_clock} -- the source network is self-inconsistent "
+                "(pandapower's own balanced runpp uses only shift_degree; "
+                "vector_group is otherwise-unread metadata, so silently "
+                "preferring one would produce a transformer that disagrees "
+                "with the other for anyone relying on it). Fix the source "
+                "data so the two agree."
+            )
+        return from_conn, to_conn
+
+    off_clock = abs(shift_deg - round(shift_deg / 30.0) * 30.0)
+    if off_clock > 1.0e-6:
+        # A MATPOWER-style ideal phase shifter: not a physical vector group.
+        # WYE_GROUNDED/WYE_GROUNDED keeps the zero-sequence path transparent; the
+        # exact angle is passed through `tap.shift_deg` unconstrained (honoured
+        # exactly by the single-phase-equivalent stamp; a genuine 3-phase stamp
+        # would reject a non-multiple-of-30 shift, so this fallback is only
+        # exact under SINGLE_PHASE_EQUIV).
+        return WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED
+
+    clock = int(round(shift_deg / 30.0)) % 12
+    if clock % 2 == 0:
+        # Even clock, no vector-group string: a zero-sequence-transparent
+        # sequence-domain import (e.g. MATPOWER case118, shift_degree=0).
+        return WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED
+    # Odd clock, no vector-group string: the physical Dyn reality of most
+    # MV/LV distribution transformers (e.g. CIGRE LV/MV, shift_degree=30).
+    return WindingConnection.DELTA, WindingConnection.WYE_GROUNDED
+
+
+def _scaling_factor(row: Any) -> float:
+    """Read ``row['scaling']`` NaN-safely (missing/None/NaN -> 1.0, pandapower's own
+    default). ``load``/``sgen``/``asymmetric_load`` all carry this per-element
+    multiplier; pandapower's own ``runpp`` applies it to the nameplate P/Q before
+    solving (``res_load.p_mw = load.p_mw * load.scaling``), so a converter that
+    ignored it would silently disagree with the source network whenever a scenario
+    sets it away from 1.0 (e.g. ``mv_oberrhein``'s default ``load.scaling=0.6``,
+    ``sgen.scaling=0.0``)."""
+    f = _opt_float(row, "scaling")
+    return 1.0 if f is None else f
+
+
+def _opt_float(row: Any, column: str) -> Optional[float]:
+    """NaN-safe optional float read from a pandapower row (missing/None/NaN -> None)."""
+    if not hasattr(row, "get"):
+        return None
+    val = row.get(column, None)
+    if val is None:
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
+
+
+def _tap_ratio_magnitude(row: Any) -> float:
+    """Off-nominal tap ratio from pandapower's ``tap_*`` columns (1.0 = no tap).
+
+    ``delta = (tap_pos - tap_neutral) * tap_step_percent / 100``. Verified against a
+    live pandapower ``runpp`` on a 2-bus net (see
+    ``tests/convert/test_pandapower_vector_groups.py``): a tap on the HV side
+    increases the effective HV turns and LOWERS the LV voltage
+    (``ratio_magnitude = 1 + delta``, since pgml's tap multiplies the HV/LV ratio); a
+    tap on the LV side increases the effective LV turns and RAISES the LV voltage
+    (``ratio_magnitude = 1 / (1 + delta)``).
+
+    Any of ``tap_pos``/``tap_neutral``/``tap_step_percent``/``tap_side`` missing (NaN
+    or absent) means no tap-changer is configured -> returns 1.0. An ideal
+    phase-shifter tap (``tap_step_degree`` nonzero, or ``tap_phase_shifter`` True) is
+    not modelled by the schema's real-valued ``ratio_magnitude`` and raises.
+    """
+    step_deg = _opt_float(row, "tap_step_degree")
+    if step_deg is not None and abs(step_deg) > 1.0e-9:
+        raise ConversionError(
+            f"pandapower trafo: tap_step_degree={step_deg} (an ideal phase-shifter "
+            "tap) is not supported; only a real-valued off-nominal tap ratio is "
+            "modelled."
+        )
+    phase_shifter = (
+        row.get("tap_phase_shifter", False) if hasattr(row, "get") else False
+    )
+    if isinstance(phase_shifter, float) and math.isnan(phase_shifter):
+        phase_shifter = False
+    if bool(phase_shifter):
+        raise ConversionError(
+            "pandapower trafo: tap_phase_shifter=True (an ideal phase-shifter tap) "
+            "is not supported; only a real-valued off-nominal tap ratio is modelled."
+        )
+
+    tap_pos = _opt_float(row, "tap_pos")
+    tap_neutral = _opt_float(row, "tap_neutral")
+    tap_step_pct = _opt_float(row, "tap_step_percent")
+    tap_side = row.get("tap_side", None) if hasattr(row, "get") else None
+    if isinstance(tap_side, float) and math.isnan(tap_side):
+        tap_side = None
+    if (
+        tap_pos is None
+        or tap_neutral is None
+        or tap_step_pct is None
+        or tap_side is None
+    ):
+        return 1.0
+
+    delta = (tap_pos - tap_neutral) * tap_step_pct / 100.0
+    side = str(tap_side).strip().lower()
+    if side == "hv":
+        return 1.0 + delta
+    if side == "lv":
+        return 1.0 / (1.0 + delta)
+    raise ConversionError(
+        f"pandapower trafo: tap_side={tap_side!r} not supported (expected 'hv' or 'lv')."
+    )
+
 
 def to_grid(
     net: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV
@@ -105,10 +321,17 @@ def to_grid(
         :class:`~pgml.convert._common.PhaseMode`. ``SINGLE_PHASE_EQUIV`` (default)
         reproduces the positive-sequence single-phase-equivalent output exactly;
         ``THREE_PHASE`` expands to a genuine abc grid (sequence->phase line
-        matrices, balanced 3-phase source, asymmetric-load capture). Caveat:
-        under ``THREE_PHASE`` transformers use a per-phase diagonal stamp with no
-        vector-group phase coupling or zero-sequence path, so results are
-        approximate for non-Dyn vector groups (e.g. Yyn/YNyn).
+        matrices, balanced 3-phase source, asymmetric-load capture). Transformers
+        are vector-group aware in BOTH modes: ``SINGLE_PHASE_EQUIV`` folds the
+        winding connections + clock into the classical scalar off-nominal-tap pi
+        (magnitude + shift only, no topology); ``THREE_PHASE`` builds the full
+        phase-domain winding-incidence stamp (delta/zigzag phase coupling and
+        zero-sequence blocking), so the two modes agree on the positive-sequence
+        terminal admittance for every supported connection pair. The only
+        THREE_PHASE approximation is in the LINE model (sequence-expanded 3x3
+        matrices introduce zero-sequence mutual coupling from config defaults
+        when the dataset carries no native ``r0``/``x0``/``c0``), not the
+        transformer.
 
     Returns
     -------
@@ -209,18 +432,68 @@ def to_grid(
         )
 
     # ------------------------------------------------------------------ #
-    # 3. Transformers (two-winding, vector-group aware)                    #
+    # 3. Transformers (two-winding, vector-group + tap-changer aware)      #
     # ------------------------------------------------------------------ #
-    # The nominal turns ratio and the vector-group phase shift come from the   #
+    # Winding connections come from `net.trafo['vector_group']` when the       #
+    # column exists and is set for the row, else from                         #
+    # `net.std_types['trafo'][std_type]['vector_group']`; parsed by            #
+    # `_resolve_transformer_connections` (Dyn5, YNd5, Yzn5, Yy0, YNyn0, Dd0,   #
+    # Dyn11, ...). The clock digit is OPTIONAL: `runpp_3ph`'s own zero-        #
+    # sequence transformer model requires the bare letter form ('Dyn', 'Yzn', #
+    # no digit -- it explicitly rejects a digit-suffixed string), so a real   #
+    # network may carry `vector_group='Dyn'` with the clock only in           #
+    # `shift_degree`; the bare form skips the cross-check below (there is     #
+    # nothing to cross-check) and combines directly with `shift_degree`.      #
+    # When neither source carries a vector-group string (plain                #
+    # MATPOWER imports such as case118, or a benchmark net that only stamps   #
+    # `shift_degree`) the connection is DERIVED from the shift parity: an     #
+    # even clock (or shift_degree==0) is stamped WYE_GROUNDED/WYE_GROUNDED (a #
+    # zero-sequence-transparent sequence-domain import — physically arbitrary #
+    # but harmless for a positive-sequence-only study), an odd clock is       #
+    # stamped DELTA/WYE_GROUNDED (the physical Dyn reality of most MV/LV      #
+    # distribution transformers, e.g. CIGRE LV/MV). A shift that is not a     #
+    # multiple of 30° (a MATPOWER ideal phase shifter) also falls back to     #
+    # WYE_GROUNDED/WYE_GROUNDED with the exact angle passed through           #
+    # unconstrained (honoured exactly by the single-phase-equivalent stamp;   #
+    # `resolve_vector_group` rejects it under a genuine 3-phase stamp). A     #
+    # vector-group string whose clock digit disagrees with `shift_degree` is  #
+    # an inconsistent source network — this is a LOUD error, not a silent     #
+    # pick, because pandapower's own balanced `runpp` uses only               #
+    # `shift_degree` while the string is unread metadata; preferring either   #
+    # source would silently disagree with the other for someone relying on    #
+    # it (see `_resolve_transformer_connections`).                            #
+    #                                                                          #
+    # The nominal turns ratio and the vector-group phase shift come from the  #
     # rated voltages (`u_rated_from/to_v`) plus the winding connections, so    #
-    # `tap` carries the OFF-NOMINAL ratio only (1.0 here — pandapower tap-     #
-    # changer positions are not yet read). Assembly builds the winding-        #
-    # incidence primitive Y = N^T Y_winding N: a delta winding blocks the      #
-    # zero sequence (traps triplen harmonics) and supplies the √3 ratio + 30°  #
-    # clock shift. The single-phase-equivalent mode collapses this to the      #
-    # positive-sequence off-nominal-tap pi. Leakage is referred to the LV side #
-    # (Z_sc_LV = vk·Z_base_LV). pandapower's CIGRE LV trafos are Dyn1          #
-    # (shift_degree=30 -> clock 1).                                            #
+    # `tap.ratio_magnitude` carries the OFF-NOMINAL tap-changer deviation      #
+    # (1.0 = no tap / at neutral) read from `tap_pos`/`tap_neutral`/           #
+    # `tap_step_percent`/`tap_side` (`_tap_ratio_magnitude`; NaN-safe — a      #
+    # trafo with no tap-changer columns set converts at 1.0). An ideal         #
+    # phase-shifter tap (`tap_step_degree` nonzero or `tap_phase_shifter`      #
+    # True) is not modelled and raises.                                       #
+    #                                                                          #
+    # Assembly builds the winding-incidence primitive Y = N^T Y_winding N: a  #
+    # delta or zigzag winding blocks the zero sequence (traps triplen         #
+    # harmonics) and supplies the intrinsic √3 (delta) or unit (zigzag)       #
+    # magnitude + clock shift; `SINGLE_PHASE_EQUIV` collapses this to the     #
+    # classical positive-sequence off-nominal-tap pi -- an EXACT reduction    #
+    # of the same physical transformer, not a different model (see           #
+    # `docs/pgml/modeling/transformer.md`). Leakage (`vk_percent`/            #
+    # `vkr_percent`) is the TERMINAL (line-to-line-equivalent) impedance      #
+    # referred to the LV side (`Z_LL = vk% * Z_base_LV`); the schema field    #
+    # is always the TO-side COIL impedance, `3 * Z_LL` when the LV winding    #
+    # is DELTA and `Z_LL` otherwise (`test_transformer_clock_matrix.py`'s     #
+    # pinned "coil vs terminal" relation) -- applied REGARDLESS of            #
+    # `phase_mode`: assembly itself undoes the factor for the terminal        #
+    # admittance in BOTH modes (the p==1 scalar stamp via its own internal    #
+    # `k_ll` factor in `_transformer_block_groups`, the p==3 stamp via the    #
+    # winding-incidence transform), so the converter's job is only to supply  #
+    # the coil-referred value, once, the same way for every phase mode.       #
+    # Verified against a live pandapower runpp on a YNd5 transformer          #
+    # (mv_oberrhein's '25 MVA 110/20 kV' std type): the assembled Y-bus       #
+    # transformer entries match pandapower's own internal Ybus to machine     #
+    # precision with the factor applied, and are wrong by 3x without it --    #
+    # see `tests/reference/test_pandapower_grid_matrix.py`.                   #
     # ------------------------------------------------------------------ #
     if hasattr(net, "trafo") and len(net.trafo):
         for pp_idx, row in net.trafo.iterrows():
@@ -243,13 +516,28 @@ def to_grid(
             i0_pct = float(row.get("i0_percent", 0.0) or 0.0)
             shift_deg = float(row.get("shift_degree", 0.0) or 0.0)
 
-            # Leakage impedance referred to LV side (required by our stamp convention)
+            from_connection, to_connection = _resolve_transformer_connections(
+                net, row, shift_deg
+            )
+
+            # Terminal (line-to-line-equivalent) leakage impedance referred to
+            # the LV side: Z_LL = vk% * Z_base_LV, Z_base_LV = vn_lv_v^2/sn_va.
             z_base_lv = vn_lv_v**2 / sn_va
-            z_sc_lv = vk_pct / 100.0 * z_base_lv
-            r_sc_lv = vkr_pct / 100.0 * z_base_lv
-            x_sc_sq = z_sc_lv**2 - r_sc_lv**2
-            x_sc_lv = math.sqrt(max(x_sc_sq, 0.0))
-            l_sc_lv = x_sc_lv / two_pi_f0
+            z_ll = vk_pct / 100.0 * z_base_lv
+            r_ll = vkr_pct / 100.0 * z_base_lv
+            x_ll_sq = z_ll**2 - r_ll**2
+            x_ll = math.sqrt(max(x_ll_sq, 0.0))
+            l_ll = x_ll / two_pi_f0
+
+            # TO-side coil referral (see the section comment above): the schema
+            # field is ALWAYS coil-referred; assembly itself undoes the factor
+            # for both phase modes (the p==1 scalar stamp via the `k_ll` factor
+            # in `_transformer_block_groups`, the p==3 stamp via the
+            # winding-incidence transform), so the converter applies it
+            # unconditionally, regardless of `phase_mode`.
+            coil_factor = 3.0 if to_connection is WindingConnection.DELTA else 1.0
+            r_sc = coil_factor * r_ll
+            l_sc = coil_factor * l_ll
 
             # Magnetizing branch (referred to HV side; added to the HV diagonal)
             if pfe_w > 0.0:
@@ -267,6 +555,8 @@ def to_grid(
                     if b_m > 0.0:
                         l_m = 1.0 / (two_pi_f0 * b_m)
 
+            tap_ratio = _tap_ratio_magnitude(row)
+
             tx_phases = phases_for(phase_mode)
             branches.append(
                 Transformer(
@@ -279,15 +569,15 @@ def to_grid(
                     s_rated_va=sn_va,
                     u_rated_from_v=vn_hv_v,
                     u_rated_to_v=vn_lv_v,
-                    from_connection=WindingConnection.DELTA,  # HV of Dyn
-                    to_connection=WindingConnection.WYE_GROUNDED,  # LV of Dyn
-                    series_resistance_ohm=r_sc_lv,
-                    series_inductance_h=l_sc_lv,
+                    from_connection=from_connection,
+                    to_connection=to_connection,
+                    series_resistance_ohm=r_sc,
+                    series_inductance_h=l_sc,
                     magnetizing_conductance_s=g_m,
                     magnetizing_inductance_h=l_m,
                     # Nominal ratio comes from u_rated + connections; `tap` is the
-                    # off-nominal ratio (1.0) plus the vector-group clock angle.
-                    tap=ComplexTap(ratio_magnitude=1.0, shift_deg=shift_deg),
+                    # off-nominal tap-changer ratio plus the vector-group clock angle.
+                    tap=ComplexTap(ratio_magnitude=tap_ratio, shift_deg=shift_deg),
                     provenance=_PROVENANCE,
                 )
             )
@@ -380,8 +670,9 @@ def to_grid(
         load_id = _id.next()
         id_map["load"][pp_idx] = load_id
 
-        p_w = float(row["p_mw"]) * 1.0e6
-        q_var = float(row["q_mvar"]) * 1.0e6
+        scaling = _scaling_factor(row)
+        p_w = float(row["p_mw"]) * 1.0e6 * scaling
+        q_var = float(row["q_mvar"]) * 1.0e6 * scaling
 
         # Balanced total: connection=None resolves to WYE from config; under
         # THREE_PHASE the symmetric/auto calc splits the total equally.
@@ -413,12 +704,13 @@ def to_grid(
             if bus_pp not in id_map["bus"]:
                 continue
 
-            p_a = float(row.get("p_a_mw", 0.0) or 0.0) * 1.0e6
-            p_b = float(row.get("p_b_mw", 0.0) or 0.0) * 1.0e6
-            p_c = float(row.get("p_c_mw", 0.0) or 0.0) * 1.0e6
-            q_a = float(row.get("q_a_mvar", 0.0) or 0.0) * 1.0e6
-            q_b = float(row.get("q_b_mvar", 0.0) or 0.0) * 1.0e6
-            q_c = float(row.get("q_c_mvar", 0.0) or 0.0) * 1.0e6
+            scaling = _scaling_factor(row)
+            p_a = float(row.get("p_a_mw", 0.0) or 0.0) * 1.0e6 * scaling
+            p_b = float(row.get("p_b_mw", 0.0) or 0.0) * 1.0e6 * scaling
+            p_c = float(row.get("p_c_mw", 0.0) or 0.0) * 1.0e6 * scaling
+            q_a = float(row.get("q_a_mvar", 0.0) or 0.0) * 1.0e6 * scaling
+            q_b = float(row.get("q_b_mvar", 0.0) or 0.0) * 1.0e6 * scaling
+            q_c = float(row.get("q_c_mvar", 0.0) or 0.0) * 1.0e6 * scaling
             p_total = p_a + p_b + p_c
             q_total = q_a + q_b + q_c
             conn = (
@@ -478,14 +770,15 @@ def to_grid(
                 continue
             gen_id = _id.next()
             id_map["sgen"][pp_idx] = gen_id
+            scaling = _scaling_factor(row)
             appliances.append(
                 build_generator(
                     id=gen_id,
                     name=str(row.get("name", f"sgen_{pp_idx}") or f"sgen_{pp_idx}"),
                     node=id_map["bus"][bus_pp],
                     mode=phase_mode,
-                    p_total_w=float(row["p_mw"]) * 1.0e6,
-                    q_total_var=float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6,
+                    p_total_w=float(row["p_mw"]) * 1.0e6 * scaling,
+                    q_total_var=float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6 * scaling,
                 )
             )
 

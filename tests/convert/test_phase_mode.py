@@ -129,6 +129,8 @@ def test_pp_three_phase_transformer_vector_group(caplog):
         vkr_percent=1.0,
         pfe_kw=0.0,
         i0_percent=0.0,
+        shift_degree=30.0,
+        vector_group="Dyn1",
     )
     pp.create_load(net, bus=b_lv, p_mw=0.1, q_mvar=0.02)
 

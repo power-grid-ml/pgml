@@ -98,7 +98,7 @@ This is the headline cross-tool difference.
 | | short-circuit params | **referred to** | → pgml series R/L (referred to **TO/LV coil**) |
 |---|---|---|---|
 | **pgml** | `series_resistance_ohm`, `series_inductance_h` | **TO / LV coil** | stored directly |
-| **pandapower** | `vk_percent`, `vkr_percent`, `sn_mva` | **LV side** ✅ | `Z_base_LV=vn_lv_v²/sn_va`; `R=vkr%·Z_base_LV`, `\|Z\|=vk%·Z_base_LV`, `X=√(\|Z\|²−R²)`, `L=X/2πf₀` |
+| **pandapower** | `vk_percent`, `vkr_percent`, `sn_mva` | **LV side** ✅ | `Z_base_LV=vn_lv_v²/sn_va`; `R_ll=vkr%·Z_base_LV`, `\|Z_ll\|=vk%·Z_base_LV`, `X_ll=√(\|Z_ll\|²−R_ll²)`; stored TO-coil-referred (`3x` for a DELTA-to winding, unchanged otherwise) in BOTH phase modes, `L=X/2πf₀` — same convention as pgm/OpenDSS below |
 | **pgm** | `uk`, `pk`, `sn`, `u2` | **to-side (LV)** ✅ | `R=pk·u2_eff²/sn²`, `\|Z\|=uk·u2_eff²/sn`, `X=√(\|Z\|²−R²)`, `u2_eff`=tap-adjusted to-side voltage; stored TO-coil-referred (`3x` for a DELTA-to winding, unchanged otherwise) in BOTH phase modes — the single-phase scalar pi applies its own `y_LL=3·y_coil` referral in assembly, see `src/pgml/convert/pgm/CONTEXT.md` |
 | **OpenDSS** | per-winding `%R`, inter-winding `XHL` | **percent, i.e. base-invariant, on the standard L-L base** — `XHL` documented "on the kVA base of winding 1"; `%R` per winding on its own kV/kVA base | `to_grid` recovers `R_ll=(%R_wdg1+%R_wdg2)/100·Z_base_LV`, `X_ll=XHL%/100·Z_base_LV`, `Z_base_LV=kV_lv²·1000/kVA` (requires both windings to share one kVA rating), then multiplies by **3 if the LV winding is DELTA** (its natural coil impedance base is `3·Z_base_LV` — a delta coil is rated at the L-L voltage with 1/3 the per-phase kVA, see the [transformer model](transformer.md) and `src/pgml/convert/opendss/CONTEXT.md`) to get the actual TO-coil-referred `R_lv`/`X_lv` pgml stores; the oracle direction back-calculates the same way (divides by the same factor first), see below |
 
@@ -156,10 +156,21 @@ a delta winding cancels against the delta incidence `M`, so the positive-sequenc
 reduces exactly to the classical off-nominal-tap pi (see the [transformer model](transformer.md)).
 
 **Gotchas / current converter limits.**
-- pandapower converter **hard-codes** `from_connection=DELTA`, `to_connection=WYE_GROUNDED`
-  (correct for the CIGRE LV Dyn1 units, wrong for Yyn/Yzn/etc. — the `vector_group` string
-  is recorded in `Provenance`, not parsed).
-- Tap-changer position (`tap_pos`/`tap_step`) is **not read**; off-nominal ratio stays 1.0.
+- pandapower converter parses `net.trafo['vector_group']` (row column, else the
+  `std_type` catalog entry; a clock-less bare form like `'Dyn'` is accepted too —
+  pandapower's own `runpp_3ph` zero-sequence model requires that form and rejects a
+  digit-suffixed one), cross-checked against `shift_degree` (`ConversionError` on a
+  mismatch — pandapower's own balanced `runpp` uses only `shift_degree`, so silently
+  preferring one source is never done). With no vector-group string anywhere
+  (plain MATPOWER imports, e.g. `case118`) the connection falls back on the shift
+  parity: even clock -> `WYE_GROUNDED`/`WYE_GROUNDED`, odd -> `DELTA`/`WYE_GROUNDED`.
+  Tap-changer position (`tap_pos`/`tap_neutral`/`tap_step_percent`/`tap_side`, NaN-safe)
+  IS read; `tap_side='hv'` -> `ratio_magnitude=1+delta`, `'lv'` ->
+  `ratio_magnitude=1/(1+delta)` (verified against a live pandapower `runpp`: a
+  positive HV-side tap LOWERS the LV voltage). An ideal phase-shifter tap
+  (`tap_step_degree` nonzero, or `tap_phase_shifter=True`) is not modelled and raises.
+  See `src/pgml/convert/pandapower/CONTEXT.md` and
+  `tests/reference/test_pandapower_grid_matrix.py`.
 - pgm transformer conversion is pinned against the installed power-grid-model C++ source
   (`transformer.hpp`): `clock*30` is IDENTICAL to pgml's "positive ⇒ LV lags" (verified by
   a live `PowerGridModel.calculate_power_flow` solve, no sign flip), and `tap_side`
@@ -343,9 +354,14 @@ under-converts. The core model supports each; only the converter intake is missi
   `i0_zero_sequence`/`p0_zero_sequence` ignored; `source.z01_ratio` and line `tan0` ignored;
   pgm stores no `f0`, so the caller must pass the correct `base_frequency_hz` (a 50/60 Hz
   mismatch silently scales every L and C).
-- **pandapower converter:** transformer connection hard-coded to Dyn (`DELTA`/
-  `WYE_GROUNDED`); `tap_pos`/`tap_step` not read; `sgen`/`gen` not converted; source
-  zero-sequence (`r0x0_max`) not read.
+- **pandapower converter:** `transformer` converts (two-winding, vector-group +
+  tap-changer aware — see §2/§3 rows above and
+  `src/pgml/convert/pandapower/CONTEXT.md`); `sgen`/`asymmetric_load` convert
+  (per-element `scaling` honored); NOT read/converted: `gen` (PV/voltage-controlled
+  buses), `shunt`, `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`,
+  `motor`, `asymmetric_sgen`; an ideal phase-shifter tap
+  (`tap_step_degree`/`tap_phase_shifter`) is not modelled and raises; source
+  zero-sequence (`r0x0_max`/`x0x_max`) not read.
 
 When extending a converter, conform to §0 and record the source convention in `Provenance`;
 update this file if a new cross-tool convention difference is discovered.
