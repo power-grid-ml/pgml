@@ -144,7 +144,7 @@ machine precision at `i0=p0=0`) and documented in `tests/reference/test_pgm_tran
 
 | | nominal ratio | tap (off-nominal) | vector-group phase shift |
 |---|---|---|---|
-| **pgml** | from rated **coil** voltages + connections (`nominal_turns_ratio`: delta coil=L-L, wye coil=L-N=`u/√3`) | `ComplexTap.ratio_magnitude` (1.0 = on-tap) | `tap.shift_deg = clock·30`; **positive ⇒ LV lags HV**; `clock_transpose=sin(shift)>0` picks `Mᵀ` (Dyn1) vs `M` (Dyn11) |
+| **pgml** | from rated **coil** voltages + connections (`nominal_turns_ratio`: delta coil=L-L, wye/zigzag coil=L-N=`u/√3`) | `ComplexTap.ratio_magnitude` (1.0 = on-tap) | `tap.shift_deg = clock·30`; **positive ⇒ LV lags HV**; the delta/zigzag orientation × cyclic permutation × polarity realising the clock is selected by matching the incidence's positive-sequence rotation (self-pinning, see the [transformer model](transformer.md)) |
 | **pandapower** | `vn_hv_kv/vn_lv_kv` (MATPOWER off-nominal tap) | `tap_pos/tap_neutral/tap_step_percent`, `tap_side` | `shift_degree` (positive ⇒ LV lags, matches pgml) |
 | **OpenDSS** | ratio of winding coil kV | tap per winding | `LeadLag` (`Lag`→30°/`Lead`→330° baseline, Dy/Yd only) **+** a cyclic winding-bus rotation (±120°/±4 clocks per step — the only way to reach any OTHER clock; see §2's row above and `src/pgml/convert/opendss/CONTEXT.md`) |
 | **pgm** | `u1/u2` | `tap_side/pos/nom/size/min/max` | `clock` 0–12; `winding_from/to` enums |
@@ -176,8 +176,9 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
   a live `PowerGridModel.calculate_power_flow` solve, no sign flip), and `tap_side`
   (0=from, else=to, matching pgm's own default) selects which nameplate voltage the tap
   volts are added to (`tests/reference/test_pgm_transformer.py`).
-- pandapower stores `shift_degree` as a positive clock·30; verify it stores Dyn11 as 330
-  (or −30) and not 30 before relying on `clock_transpose` for a non-Dyn1 group.
+- pandapower stores `shift_degree` as a positive clock·30 (Dyn11 = 330, not 30); the
+  converter cross-checks it against the `vector_group` clock digit and raises on a
+  contradiction rather than silently preferring either.
 - The OpenDSS converter (`convert.opendss.to_grid`) converts two-winding `Transformer`
   elements (winding 1 = HV/from, winding 2 = LV/to; `LeadLag` -> clock 1/11 baseline for a
   Dy/Yd pairing verified against a live solve, clock 0 baseline for Yy/Dd since OpenDSS has

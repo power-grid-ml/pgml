@@ -215,14 +215,22 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
 - **Criticality on a batch**: the single-grid IFT-Jacobian criticality SVD is skipped for a
   batched solve (`b>1`, logged). A per-element batched criticality would need per-scenario
   operating-point slicing (and a `criticality` knob on `solve_harmonic_flow`).
-- **Convert**: `convert/pandapower/` lacks a `CONTEXT.md` (others have one). The OpenDSS
-  converter emits two-winding `Transformer` elements (solidly grounded wye or delta
-  windings, `LeadLag`-derived clock 0/1/11); not yet read: 3-winding units, `RegControl`
-  regulators, `XfmrCode`/frequency-correction curves, `Yy6`/`Dd6`, and an explicit
-  non-zero (floating/impedance-grounded) neutral node — see
+- **Convert**: The OpenDSS converter emits two-winding `Transformer` elements (solidly
+  grounded wye or delta windings; clock from `LeadLag` plus cyclic winding-bus rotation,
+  reaching every clock except the polarity-flip groups {2, 6, 10}); not yet read:
+  3-winding units, `RegControl` regulators, `XfmrCode`/frequency-correction curves, and
+  an explicit non-zero (floating/impedance-grounded) neutral node — see
   `src/pgml/convert/opendss/CONTEXT.md`.
-- **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`), zigzag
-  windings, and clocks other than Dyn1/Dyn11 raise `ModelingError` — add when needed.
+- **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`) and
+  zigzag-zigzag pairings raise `ModelingError`; the `TransformerZeroSeq` VALUE override
+  is not consumed (the zero-sequence path follows the winding topology, its value equals
+  the positive-sequence leakage — the tools disagree here: pgm hardcodes grounded-zigzag
+  Z0 = 0.1·Z1, pandapower reads vk0; consume the override to close the gap).
+- **Transformer (solver)**: a delta-only or otherwise fully ungrounded secondary island
+  has no absolute zero-sequence reference; the nonlinear const-P solve returns
+  line-to-line-correct but absolutely-undetermined voltages there as load → 0 (found via
+  the YNd5 OpenDSS oracle, which anchors the comparison with a grounded-wye load). A
+  reference-injection (or per-island angle/zero-seq pin) would close it.
 - **Geometry**: low-X R/X lines hit the GMR floor (flagged `synth_unphysical`; still matches
   OpenDSS on the same geometry); 2-phase lines are skipped by `synthesize_grid_geometry`.
 - **Capacitance**: Carson `C` is physically correct but not bit-exact to OpenDSS's
@@ -246,10 +254,12 @@ more physical than they are. Items already tracked as open work above are refere
   terminal, whereas OpenDSS places it inside its leakage "T" model; for a typical
   ~0.5 % magnetizing current the difference is ~1e-3 pu on a live-solve comparison
   (documented in `docs/pgml/modeling/transformer.md`).
-- **Transformer, construction.** Non-solid neutral grounding (`GroundingImpedance`),
-  zigzag windings, and delta-wye clocks other than 1/11 raise `ModelingError`
-  (deliberate: fail loud, never approximate silently). Clock 6 (Yy6/Dd6) is modeled
-  (reversed LV polarity).
+- **Transformer, construction.** Every winding pairing of {wye, grounded wye, delta,
+  zigzag, grounded zigzag} except zigzag-zigzag is modeled, at every clock of the
+  pairing's parity (`docs/pgml/modeling/transformer.md`). Non-solid neutral grounding
+  (`GroundingImpedance`) raises `ModelingError` (deliberate: fail loud, never
+  approximate silently). The zigzag zero-sequence self path uses the positive-sequence
+  leakage VALUE (`TransformerZeroSeq` not consumed) — real units have Z0 < Z1 there.
 - **Load harmonic behaviour.** Loads inject harmonics as PURE current sources
   (`include_load_shunt=False`, ≡ OpenDSS `NeglectLoadY=yes`); the frequency-dependent
   load Norton shunt (damping near resonances!) is unimplemented and RAISES when
@@ -280,13 +290,14 @@ more physical than they are. Items already tracked as open work above are refere
   solve per node: the solver cannot yet stamp a different target row per batch element.
   Batch the target-row index (`[B, P]` scatter) to lift the loop.
 - **Converter coverage.** Converted: pandapower `bus`/`line`/`load`/`asymmetric_load`/
-  `trafo`/bus-bus `switch`/`ext_grid`/`sgen`; pgm `node`/`line`/`sym_load`/`asym_load`/
-  `source`/`sym_gen`. NOT converted (a WARNING names any non-empty dropped kind):
-  pandapower `gen` (PV bus — pgml has no voltage-regulating bus yet), `shunt`,
-  `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
-  `asymmetric_sgen`; pgm `transformer`, `three_winding_transformer`, `shunt`,
-  `asym_gen`, `link`, `transformer_tap_regulator`. pandapower tap-changer positions
-  (`tap_pos`/`tap_step`) are not read (off-nominal tap stays 1.0).
+  `trafo` (vector groups incl. zigzag + tap changer)/bus-bus `switch`/`ext_grid`/
+  `sgen`; pgm `node`/`line`/`sym_load`/`asym_load`/`source`/`sym_gen`/`transformer`
+  (winding types incl. zigzag, clock, taps). NOT converted (a WARNING names any
+  non-empty dropped kind): pandapower `gen` (PV bus — pgml has no voltage-regulating
+  bus yet), `shunt`, `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`,
+  `motor`, `asymmetric_sgen`; pgm `three_winding_transformer`, `shunt`, `asym_gen`,
+  `link`, `transformer_tap_regulator`. pandapower ideal phase-shifter taps
+  (`tap_step_degree`, `tap_phase_shifter`) raise.
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 

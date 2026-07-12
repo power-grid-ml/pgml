@@ -2,7 +2,7 @@
 
 How pgml models a two-winding transformer in the phase domain, why, and how it maps
 to OpenDSS. This is the authoritative modelling-decision record for
-`pgml.assembly._transformer` + `_stamp_transformers`.
+`pgml.assembly._transformer` + `_transformer_block_groups`.
 
 ## The problem this solves
 A transformer's winding connections (wye / grounded-wye / delta) and clock number

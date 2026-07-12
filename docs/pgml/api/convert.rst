@@ -113,15 +113,30 @@ Each library exposes different asymmetric load data:
   Single-phase loads are placed on their real bus-suffix phase (e.g. ``.1``
   → ``Phase.A``).
 
-Transformer caveat (``THREE_PHASE``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Transformers (vector-group aware, both phase modes)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Under ``PhaseMode.THREE_PHASE``, transformers are stamped with a
-per-phase diagonal admittance matrix. Vector-group phase coupling and the
-zero-sequence path are **not yet modelled** (a warning is logged at
-conversion time). Results are approximate for non-Dyn vector groups (e.g.
-Yyn, YNyn). This limitation applies to the pandapower and power-grid-model
-converters; OpenDSS does not yet convert Transformer elements.
+All three converters read the winding connections and clock and set
+:attr:`~pgml.schemas.grid_schema.Transformer.from_connection` /
+:attr:`~pgml.schemas.grid_schema.Transformer.to_connection` /
+``tap.shift_deg`` on the schema object, so assembly selects the vector-group
+stamp automatically from the branch's own phase count — no ``THREE_PHASE``-specific
+approximation remains:
+
+- ``PhaseMode.SINGLE_PHASE_EQUIV`` folds the winding connections and clock into the
+  classical scalar off-nominal-tap pi (magnitude + shift only, no topology).
+- ``PhaseMode.THREE_PHASE`` builds the full phase-domain winding-incidence stamp
+  (:mod:`pgml.assembly`'s ``Y = Nᵀ·Y_winding·N`` primitive — see
+  :doc:`/pgml/modeling/transformer`): delta/zigzag phase coupling and the
+  zero-sequence path (blocked by a delta or an ungrounded wye, transferred through a
+  zigzag's limb incidence) are modelled for every winding pairing and every clock
+  number consistent with the pairing's parity.
+
+Both modes agree on the positive-sequence terminal admittance for every supported
+connection pair. Each converter's own scope (which source fields are read, which
+clocks/pairings are reachable from that source format) is documented in the
+corresponding ``to_grid`` docstring below and in
+:doc:`/pgml/modeling/conventions` §§2–3.
 
 pgml.convert.pandapower
 ------------------------
