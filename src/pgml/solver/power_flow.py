@@ -63,15 +63,18 @@ from pgml.assembly import (
     NodePhaseIndex,
     assemble_network_ybus,
     assemble_ybus,
+    build_injection_plan,
     build_injections,
     device_current_injections,
+    injections_from_plan,
     node_phase_index,
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
-from pgml.errors import InputError, ModelingError
+from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, Source
+from pgml.topology import connectivity_report, energized_subgrid
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 
@@ -123,6 +126,217 @@ def _slice_operating_point(operating_point: dict, i: int) -> dict:
         cid: {k: slc(v) for k, v in entry.items()}
         for cid, entry in operating_point.items()
     }
+
+
+def check_connectivity(grid: Grid) -> None:
+    """Raise :class:`~pgml.errors.ConnectivityError` if any row cannot reach a source.
+
+    The pre-solve structural gate: a (node, phase) row with no galvanic path to an
+    in-service :class:`~pgml.schemas.grid_schema.Source` (an open switch or an
+    out-of-service line / transformer on the only path, or no source at all) makes
+    the nodal system singular there, so the solve is refused up front with the
+    disconnected nodes and the concrete fixes named
+    (:func:`pgml.topology.connectivity_report`).
+    """
+    report = connectivity_report(grid)
+    if not report.connected:
+        raise ConnectivityError(
+            report.describe(),
+            unenergized_nodes=tuple(n for n, _ in report.unenergized),
+            islands=report.islands,
+            reconnectable=report.reconnectable,
+        )
+
+
+def _same_device(a: torch.device, b: torch.device) -> bool:
+    """Device equality with an unindexed spec matching any index of its type.
+
+    A tensor's device always carries an index (``cuda:0``) while a caller-supplied
+    ``torch.device("cuda")`` does not; strict ``==`` would reject that pair even
+    though they resolve to the same accelerator.
+    """
+    if a.type != b.type:
+        return False
+    return a.index is None or b.index is None or a.index == b.index
+
+
+def _branch_states_batched(branch_states: Optional[dict]) -> bool:
+    """``True`` iff any state carries a leading scenario dim."""
+    return bool(branch_states) and any(
+        isinstance(v, Tensor) and v.ndim >= 1 and v.numel() > 1
+        for v in branch_states.values()
+    )
+
+
+def _check_connectivity_with_states(grid: Grid, branch_states: dict) -> None:
+    """Per-scenario connectivity for masked branch states (raises on any dead row).
+
+    The static grid is condensed once: rows are merged over every conducting
+    branch NOT listed in ``branch_states`` (union-find, as in
+    :func:`pgml.topology.connectivity_report`), giving ``C`` static components of
+    which some hold a source. Each masked branch is then a component-level edge
+    that conducts where its state is non-zero, so per-scenario energization is a
+    boolean propagation over the tiny condensed graph — vectorized over the whole
+    scenario batch ``[B, C]`` instead of a per-scenario python search.
+    """
+    from pgml.topology import _UnionFind, _branch_rows, _conducting
+
+    uf = _UnionFind()
+    for node in grid.nodes:
+        for ph in node.phases:
+            uf.find((int(node.id), ph))
+    masked_ids = set(branch_states.keys())
+    for b in grid.branches:
+        if int(b.id) in masked_ids or not _conducting(b):
+            continue
+        rows = _branch_rows(b)
+        for r in rows[1:]:
+            uf.union(rows[0], r)
+
+    roots: dict = {}
+    comp_nodes: dict[int, set] = {}
+    for node in grid.nodes:
+        for ph in node.phases:
+            root = uf.find((int(node.id), ph))
+            cid = roots.setdefault(root, len(roots))
+            comp_nodes.setdefault(cid, set()).add(int(node.id))
+    n_comp = len(roots)
+
+    energized0 = torch.zeros(n_comp, dtype=torch.bool)
+    for a in grid.appliances:
+        if isinstance(a, Source) and getattr(a, "in_service", True):
+            for ph in a.phases:
+                energized0[roots[uf.find((int(a.node), ph))]] = True
+
+    # Component-level edges of the masked branches, each carrying its state.
+    edges_u, edges_v, states = [], [], []
+    branch_by_id = {int(b.id): b for b in grid.branches}
+    for bid, sval in branch_states.items():
+        b = branch_by_id.get(int(bid))
+        if b is None:
+            raise InputError(f"branch_states references unknown branch id {bid}.")
+        comps = {roots[uf.find(r)] for r in _branch_rows(b)}
+        comps = sorted(comps)
+        s = (
+            sval.detach().reshape(-1)
+            if isinstance(sval, Tensor)
+            else torch.tensor([float(sval)])
+        )
+        for other in comps[1:]:
+            edges_u.append(comps[0])
+            edges_v.append(other)
+            states.append(s)
+
+    b_size = max((int(s.numel()) for s in states), default=1)
+    energized = energized0.expand(b_size, n_comp).clone()  # [B, C]
+    if edges_u:
+        # A masked branch whose terminals share one static component adds no
+        # edge — the component graph already contains it.
+        active = torch.stack(
+            [(s != 0).expand(b_size).clone() for s in states], dim=-1
+        )  # [B, E]
+        u_idx = torch.tensor(edges_u, dtype=torch.int64)
+        v_idx = torch.tensor(edges_v, dtype=torch.int64)
+        for _ in range(len(edges_u) + 1):
+            e_u = energized.index_select(1, u_idx)  # [B, E]
+            e_v = energized.index_select(1, v_idx)
+            # Boolean OR-accumulate along the component axis (int add + clamp:
+            # duplicate edge targets accumulate, then saturate to a bool).
+            new = energized.to(torch.int32)
+            new.index_add_(1, u_idx, (e_v & active).to(torch.int32))
+            new.index_add_(1, v_idx, (e_u & active).to(torch.int32))
+            new = new.clamp_(max=1).bool()
+            if bool((new == energized).all()):
+                break
+            energized = new
+
+    dead = ~energized  # [B, C]
+    if not bool(dead.any()):
+        return
+    dead_scen = dead.any(dim=1)  # [B]
+    scen_idx = torch.nonzero(dead_scen).reshape(-1).tolist()
+    worst = int(torch.nonzero(dead_scen).reshape(-1)[0])
+    dead_nodes = sorted(
+        {
+            n
+            for c in torch.nonzero(dead[worst]).reshape(-1).tolist()
+            for n in comp_nodes[c]
+        }
+    )
+    shown = ", ".join(str(i) for i in scen_idx[:10])
+    more = "" if len(scen_idx) <= 10 else f", … (+{len(scen_idx) - 10} more)"
+    node_str = ", ".join(str(n) for n in dead_nodes[:12]) + (
+        "" if len(dead_nodes) <= 12 else ", …"
+    )
+    raise ConnectivityError(
+        f"branch_states disconnect part of the grid in {len(scen_idx)} of {b_size} "
+        f"scenario(s) (indices [{shown}{more}]); e.g. scenario {worst} leaves "
+        f"node(s) {node_str} with no path to a source. Keep every scenario's "
+        "non-zero states spanning the grid (a state of exactly 0 opens the "
+        'branch), drop the offending scenarios, or pass on_disconnected="ignore" '
+        "and filter via converged_mask.",
+        unenergized_nodes=tuple(dead_nodes),
+    )
+
+
+def _apply_scalar_states(grid: Grid, branch_states: dict) -> Grid:
+    """A grid copy whose static flags realize UNBATCHED ``branch_states`` (0 = open).
+
+    Used only for the pre-solve connectivity REPORT of a single masked
+    configuration, so the rich :func:`pgml.topology.connectivity_report`
+    diagnostics (islands, reconnect hints) apply unchanged.
+    """
+    conducting = {}
+    for bid, sval in branch_states.items():
+        s = (
+            float(sval.detach().reshape(()).item())
+            if isinstance(sval, Tensor)
+            else float(sval)
+        )
+        conducting[int(bid)] = s != 0.0
+    branches = []
+    for b in grid.branches:
+        if int(b.id) in conducting:
+            on = conducting[int(b.id)]
+            update = {"in_service": on}
+            if hasattr(b, "closed"):  # a Switch: the state replaces closed too
+                update = {"in_service": True, "closed": on} if on else update
+            b = b.model_copy(update=update)
+        branches.append(b)
+    return grid.model_copy(update={"branches": branches})
+
+
+def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
+    """Scatter a sub-grid solution back to the full grid with 0 V on dropped rows.
+
+    The ``on_disconnected="zero"`` reassembly: ``res`` was solved on
+    :func:`pgml.topology.energized_subgrid`; every full-grid row absent from the
+    sub-grid is a de-energized conductor and reports 0 V. Out-of-place
+    ``index_copy`` so gradients keep flowing into the solved rows.
+    """
+    full_index = node_phase_index(grid)
+    sub_index = res.index
+    rows = torch.as_tensor(
+        [
+            full_index.row(sub_index.node_id_of(r), sub_index.phase_of(r))
+            for r in range(sub_index.size)
+        ],
+        dtype=torch.int64,
+        device=res.v.device,
+    )
+    v_full = torch.zeros(
+        (*res.v.shape[:-1], full_index.size), dtype=res.v.dtype, device=res.v.device
+    ).index_copy(-1, rows, res.v)
+    return PowerFlowResult(
+        v=v_full,
+        index=full_index,
+        iterations=res.iterations,
+        residual=res.residual,
+        converged=res.converged,
+        diagnostics=res.diagnostics,
+        converged_mask=res.converged_mask,
+        failed_states=res.failed_states,
+    )
 
 
 def _resolve_failed_states(mask: Optional[Tensor]) -> tuple[Optional[Tensor], tuple]:
@@ -311,6 +525,7 @@ def _grid_param_leaves(
     param_overrides: Optional[dict],
     v_fixed: Optional[Tensor],
     operating_point: Optional[dict] = None,
+    branch_states: Optional[dict] = None,
 ) -> list[Tensor]:
     """All distinct autograd leaves the residual depends on (deterministic order).
 
@@ -320,7 +535,8 @@ def _grid_param_leaves(
     ``operating_point`` entries (per-appliance ``p_w``/``q_var``, possibly batched)
     enter the residual exactly like grid fields, so their leaves are collected too: a
     differentiable operating point — e.g. the output of a neural network — receives
-    gradients through the IFT backward.
+    gradients through the IFT backward. The same holds for ``branch_states``
+    (continuous switch / topology states).
     """
     out: list[Tensor] = []
     seen: set = set()
@@ -335,6 +551,10 @@ def _grid_param_leaves(
             _collect_leaves(val, out, seen)
     if operating_point is not None:
         _collect_leaves(operating_point, out, seen)
+    if branch_states is not None:
+        # Continuous switch/topology states are parameters like any other: their
+        # leaves receive gradients through the same IFT backward.
+        _collect_leaves(branch_states, out, seen)
     if v_fixed is not None and isinstance(v_fixed, Tensor) and v_fixed.requires_grad:
         _tensor_leaves(v_fixed, out, seen)
     return out
@@ -374,17 +594,51 @@ def _slack_rows_and_vref(
 # ---------------------------------------------------------------------------
 # system builders (used by both the forward fixed point and the IFT backward)
 # ---------------------------------------------------------------------------
-def _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides):
+def _apply_y(y_eff: Tensor, v: Tensor) -> Tensor:
+    """``Y @ V`` over the scenario batch, reading a SHARED ``Y`` exactly once.
+
+    When every leading dim of ``y_eff`` is singleton (one network shared by the
+    whole batch — the usual case), a broadcast ``matmul`` against ``[..., N, 1]``
+    columns degenerates into ``B`` separate matrix-vector products that re-read the
+    ``N×N`` matrix per scenario (memory-bandwidth-bound: dominant at large ``N``).
+    Folding the batch into the rows of ONE ``[B, N] @ [N, N]`` GEMM reads the
+    matrix once. A genuinely batched ``y_eff`` (per-scenario topology) keeps the
+    batched matmul — each scenario owns its matrix there. Differentiable in both.
+    """
+    n = y_eff.shape[-1]
+    if y_eff.reshape(-1, n, n).shape[0] == 1:
+        lead = torch.broadcast_shapes(v.shape[:-1], y_eff.shape[:-2])
+        v_b = v.broadcast_to(*lead, n)
+        yv = torch.matmul(v_b.reshape(-1, n), y_eff.reshape(n, n).mT)
+        return yv.reshape(*lead, n)
+    return torch.matmul(y_eff, v.unsqueeze(-1)).squeeze(-1)
+
+
+def _y_eff_and_islack(
+    grid, f0, index, dtype, device, slack, param_overrides, branch_states=None
+):
     """Effective admittance ``Y_eff`` ``[1,N,N]`` and slack current ``[1,N]`` or ``[N]``.
 
     ``slack="norton"``: ``Y_eff = Y_net + Y_srcNorton``, ``I_slack`` = source
     Norton current. ``slack="ideal"``: ``Y_eff = Y_net``, ``I_slack`` = 0 (slack
     rows pinned by the Schur solve in :func:`solve_harmonic`).
+
+    Batched ``branch_states`` promote ``Y_eff`` to per-scenario matrices; the
+    singleton frequency axis is folded away then (``[*batch, N, N]``) so every
+    leading dim is a scenario dim — the shape the fixed point, Newton, and the
+    IFT backward treat uniformly.
     """
     yb = assemble_network_ybus(
-        grid, [f0], dtype=dtype, device=device, param_overrides=param_overrides
+        grid,
+        [f0],
+        dtype=dtype,
+        device=device,
+        param_overrides=param_overrides,
+        branch_states=branch_states,
     )
-    y = yb.Y  # [1, N, N]
+    y = yb.Y  # [1, N, N] or [*batch, 1, N, N] (batched branch states)
+    if y.ndim > 3:
+        y = y.squeeze(-3)  # [*batch, N, N]
     if slack == "norton":
         cdt = _cdtype(dtype)
         rdt = _rdtype(dtype)
@@ -403,6 +657,101 @@ def _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides):
     return y, i_slack
 
 
+@dataclass(frozen=True)
+class PowerFlowSystem:
+    """Precomputed solve state for REPEATED solves of one grid (assembly + LU).
+
+    Everything about the network side of a nonlinear power flow is operating-point
+    INDEPENDENT: the node-phase index, the effective admittance, the slack rows and
+    reference, the factorization, and the grid-side parameter leaves. A chunked
+    scenario run (:func:`pgml.scenarios.run_scenarios`) or any solve-in-a-loop
+    caller therefore pays assembly + factorization once via
+    :func:`prepare_power_flow` and passes the system to every
+    :func:`solve_power_flow` call — only the injections change between calls.
+
+    The cached tensors are DETACHED and drive the (already detached) forward
+    iteration and diagnostics; when parameter gradients are requested, the IFT
+    backward rebuilds its differentiable system from the leaves as always, so
+    differentiability is unchanged. The system must come from the SAME grid,
+    slack, dtype, device, ``param_overrides`` and ``branch_states`` as the solve
+    that consumes it (validated where cheap: slack / dtype / device / size).
+    """
+
+    index: NodePhaseIndex
+    f0: float
+    slack: str
+    y_eff: Tensor  # detached [*, N, N]
+    i_slack: Tensor  # detached [1, N] (norton) or [N] (ideal)
+    fixed_rows: Optional[Tensor]
+    v_fixed: Optional[Tensor]  # detached slack reference
+    factorization: object  # FactoredSystem of y_eff
+    static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
+
+
+def prepare_power_flow(
+    grid: Grid,
+    *,
+    slack: str = "ideal",
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+    branch_states: Optional[dict] = None,
+    linear_solver: str = "auto",
+) -> PowerFlowSystem:
+    """Assemble + factor the operating-point-independent power-flow system once.
+
+    Runs the connectivity check (raising
+    :class:`~pgml.errors.ConnectivityError` like :func:`solve_power_flow` with
+    ``on_disconnected="raise"``), assembles ``Y_eff`` and the slack quantities,
+    and factors ``Y_eff`` with the selected backend
+    (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver`` as in
+    :func:`solve_power_flow`). Pass the result as ``solve_power_flow(...,
+    system=...)`` to skip that work on every subsequent call.
+    """
+    if slack not in ("ideal", "norton"):
+        raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    if branch_states is not None:
+        if _branch_states_batched(branch_states):
+            _check_connectivity_with_states(grid, branch_states)
+        else:
+            check_connectivity(_apply_scalar_states(grid, branch_states))
+    else:
+        check_connectivity(grid)
+
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    index = node_phase_index(grid)
+    f0 = float(grid.base_frequency_hz)
+    leaves = _grid_param_leaves(grid, param_overrides, None, None, branch_states)
+    if device is None:
+        device = leaves[0].device if leaves else torch.device("cpu")
+
+    fixed_rows, v_fixed = (
+        _slack_rows_and_vref(grid, index, rdt, cdt, device)
+        if slack == "ideal"
+        else (None, None)
+    )
+    with torch.no_grad():
+        y_eff, i_slack = _y_eff_and_islack(
+            grid, f0, index, dtype, device, slack, param_overrides, branch_states
+        )
+        factor_backend = (
+            linear_solver if linear_solver in ("dense", "sparse") else "auto"
+        )
+        fac = lu_factor_system(y_eff, fixed_rows=fixed_rows, backend=factor_backend)
+    return PowerFlowSystem(
+        index=index,
+        f0=f0,
+        slack=slack,
+        y_eff=y_eff,
+        i_slack=i_slack,
+        fixed_rows=fixed_rows,
+        v_fixed=v_fixed.detach() if v_fixed is not None else None,
+        factorization=fac,
+        static_leaves=tuple(leaves),
+    )
+
+
 def solve_power_flow(
     grid: Grid,
     *,
@@ -416,7 +765,10 @@ def solve_power_flow(
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
     criticality: str = "auto",
-    linear_solver: str = "dense",
+    linear_solver: str = "auto",
+    on_disconnected: str = "raise",
+    branch_states: Optional[dict] = None,
+    system: Optional[PowerFlowSystem] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -459,10 +811,62 @@ def solve_power_flow(
         also on a converged solve (a voltage-collapse MARGIN naming the weakest bus);
         ``"never"`` to skip it.
     linear_solver:
-        Inner linear solve for ``method="newton"``: ``"dense"`` (default, the explicit
-        ``[2N, 2N]`` Jacobian + direct solve) or ``"matrix_free"`` (Jacobian-free
-        Newton-Krylov — GMRES on finite-difference Jacobian-vector products, ``O(N)``
-        memory for large grids). Ignored by ``method="current_injection"``.
+        The inner linear-solve backend.
+
+        For ``method="current_injection"`` this selects the factorization of the
+        constant ``Y_eff`` (:func:`pgml.solver.harmonic.lu_factor_system`):
+        ``"auto"`` (default) uses the scipy SuperLU SPARSE factorization on CPU
+        systems of ≥ ~500 rows — a power-grid ``Y`` has O(N) nonzeros, so sparse is
+        ~O(N) where dense LU is O(N³) — and the batched dense torch LU everywhere
+        else (CUDA is always dense); ``"dense"`` / ``"sparse"`` force the choice
+        (``"matrix_free"`` is treated as ``"auto"`` here).
+
+        For ``method="newton"``: ``"dense"`` (the explicit ``[2N, 2N]`` Jacobian +
+        direct solve; ``"auto"`` resolves to this) or ``"matrix_free"``
+        (Jacobian-free Newton-Krylov — GMRES on finite-difference Jacobian-vector
+        products, ``O(N)`` memory for large grids). ``"sparse"`` raises — Newton's
+        Jacobian is built dense.
+    on_disconnected:
+        What to do when the pre-solve connectivity check finds (node, phase) rows
+        with no galvanic path to an in-service source (an open switch or
+        out-of-service branch on the only path, or no source at all):
+
+        - ``"raise"`` (default) — raise :class:`~pgml.errors.ConnectivityError`
+          naming the disconnected nodes, the separating open / out-of-service
+          branches, and the concrete fixes.
+        - ``"zero"`` — solve the energized sub-grid
+          (:func:`pgml.topology.energized_subgrid`) and report 0 V on the
+          disconnected rows (a de-energized conductor carries no voltage); the
+          result keeps the FULL grid's row layout. Diagnostics describe the
+          energized sub-system.
+        - ``"ignore"`` — skip the check (the historical behavior: a disconnected
+          area surfaces as a singular factorization or non-convergence).
+
+        With ``branch_states``, ``"raise"`` checks every scenario's effective
+        topology (vectorized over the batch); ``"zero"`` is unsupported there (a
+        per-scenario topology has no single energized sub-grid).
+    branch_states:
+        Optional topology / switch-state batching ``{branch_id: state}``. A listed
+        branch is always stamped and its admittance scaled by the state — a float,
+        0-d tensor, or ``[*batch]`` scenario tensor: ``0`` = open, ``1`` = in
+        service, intermediate = continuous (differentiable — gradients flow to
+        state leaves through the IFT, enabling gradient-based topology search).
+        The state OVERRIDES the branch's static ``in_service`` / ``closed`` flags.
+        A batched state solves every switch configuration in ONE batched call
+        (one assembly, per-scenario ``Y``); it broadcasts against a batched
+        ``operating_point`` by the usual rules (align, or use extra leading dims
+        for a cartesian sweep). ``method="newton"`` supports batched states OR a
+        batched operating point, not both at once.
+    system:
+        Optional :class:`PowerFlowSystem` from :func:`prepare_power_flow` — the
+        operating-point-independent solve state (index, ``Y_eff``, slack rows,
+        factorization, grid leaves) computed ONCE and reused across repeated
+        solves of the SAME grid / slack / dtype / device / overrides / states
+        (e.g. the chunk loop of :func:`pgml.scenarios.run_scenarios`). Skips
+        assembly, factorization, the connectivity check (prepare ran it), and
+        the grid leaf walk; the IFT backward still rebuilds differentiably, so
+        gradients are unchanged. The ``current_injection`` forward benefits;
+        Newton reuses the cached leaves only.
 
     Returns
     -------
@@ -481,10 +885,67 @@ def solve_power_flow(
         raise InputError(
             f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
         )
-    if linear_solver not in ("dense", "matrix_free"):
+    if linear_solver not in ("auto", "dense", "sparse", "matrix_free"):
         raise InputError(
-            f"Unsupported linear_solver {linear_solver!r} (use 'dense'/'matrix_free')."
+            f"Unsupported linear_solver {linear_solver!r} "
+            "(use 'auto'/'dense'/'sparse'/'matrix_free')."
         )
+    if method == "newton" and linear_solver == "sparse":
+        raise InputError(
+            "method='newton' supports linear_solver 'auto'/'dense'/'matrix_free' "
+            "(its Jacobian is built dense); 'sparse' selects the fixed-point "
+            "factorization backend of method='current_injection'."
+        )
+    # Newton's inner solve: 'auto' resolves to the proven dense Jacobian path.
+    newton_solver = "dense" if linear_solver == "auto" else linear_solver
+    # Fixed-point factorization backend: 'matrix_free' has no meaning there.
+    factor_backend = linear_solver if linear_solver in ("dense", "sparse") else "auto"
+    if on_disconnected not in ("raise", "zero", "ignore"):
+        raise InputError(
+            f"Unsupported on_disconnected {on_disconnected!r} "
+            "(use 'raise'/'zero'/'ignore')."
+        )
+
+    if branch_states is not None and on_disconnected == "zero":
+        raise InputError(
+            'on_disconnected="zero" is unsupported with branch_states: a '
+            "per-scenario topology has no single energized sub-grid. Use "
+            '"raise" (per-scenario check) or "ignore".'
+        )
+    if system is None and on_disconnected != "ignore":
+        if branch_states is not None:
+            if _branch_states_batched(branch_states):
+                _check_connectivity_with_states(grid, branch_states)
+            else:
+                check_connectivity(_apply_scalar_states(grid, branch_states))
+        elif on_disconnected == "raise":
+            check_connectivity(grid)
+        else:
+            sub, dropped = energized_subgrid(grid)
+            if dropped:
+                _log.warning(
+                    "solve_power_flow: %d disconnected node(s) %s solved as 0 V "
+                    '(on_disconnected="zero"); the energized sub-grid carries the '
+                    "solution.",
+                    len(dropped),
+                    list(dropped[:10]),
+                )
+                sub_res = solve_power_flow(
+                    sub,
+                    slack=slack,
+                    method=method,
+                    tol=tol,
+                    max_iter=max_iter,
+                    dtype=dtype,
+                    device=device,
+                    operating_point=operating_point,
+                    param_overrides=param_overrides,
+                    symmetry=symmetry,
+                    criticality=criticality,
+                    linear_solver=linear_solver,
+                    on_disconnected="ignore",
+                )
+                return _expand_zeroed_result(grid, sub_res)
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
@@ -502,38 +963,85 @@ def solve_power_flow(
     log_modeling_summary(grid, asymmetric=asymmetric)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
-    leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
+    if (
+        method == "newton"
+        and _branch_states_batched(branch_states)
+        and _operating_point_batch_size(operating_point) > 1
+    ):
+        raise InputError(
+            "method='newton' does not combine a batched operating_point with "
+            "batched branch_states (its per-scenario slicing covers the operating "
+            "point only); batch one of the two, or use method='current_injection'."
+        )
+
+    if system is not None:
+        # The grid-side leaves were walked once in prepare_power_flow; only the
+        # per-call operating point can add new ones.
+        leaves = list(system.static_leaves)
+        seen = {id(t) for t in leaves}
+        if operating_point is not None:
+            _collect_leaves(operating_point, leaves, seen)
+    else:
+        leaves = _grid_param_leaves(
+            grid, param_overrides, None, operating_point, branch_states
+        )
     if device is None:
-        device = leaves[0].device if leaves else torch.device("cpu")
+        device = (
+            system.y_eff.device
+            if system is not None
+            else (leaves[0].device if leaves else torch.device("cpu"))
+        )
 
     # Slack rows are constant indices; the reference VOLTAGE is recomputed fresh
     # from the (possibly tensor) u_ref/u_angle on every residual eval so the
     # graph is not reused across gradcheck's multiple backward passes.
+    if system is not None and (
+        system.slack != slack
+        or system.index.size != n
+        or system.y_eff.dtype != cdt
+        or not _same_device(system.y_eff.device, torch.device(device))
+    ):
+        raise InputError(
+            "The provided PowerFlowSystem does not match this solve "
+            f"(system: slack={system.slack!r}, N={system.index.size}, "
+            f"dtype={system.y_eff.dtype}, device={system.y_eff.device}; solve: "
+            f"slack={slack!r}, N={n}, dtype={cdt}, device={device}). Prepare it "
+            "with the same grid and arguments."
+        )
+
     def v_fixed_fn():
         if slack != "ideal":
             return None
         _, vf = _slack_rows_and_vref(grid, index, rdt, cdt, device)
         return vf
 
-    fixed_rows = (
-        _slack_rows_and_vref(grid, index, rdt, cdt, device)[0]
-        if slack == "ideal"
-        else None
-    )
-    v_fixed = v_fixed_fn()
-    # v_fixed may be / contain a differentiable leaf (u_ref/u_angle as tensors).
-    leaves = _grid_param_leaves(grid, param_overrides, v_fixed, operating_point)
+    if system is not None:
+        fixed_rows, v_fixed = system.fixed_rows, system.v_fixed
+    else:
+        fixed_rows = (
+            _slack_rows_and_vref(grid, index, rdt, cdt, device)[0]
+            if slack == "ideal"
+            else None
+        )
+        v_fixed = v_fixed_fn()
+    # NOTE: v_fixed is derived exclusively from the grid's source fields
+    # (u_ref/u_angle), whose leaves the grid walk above already collected —
+    # no second leaf walk is needed.
 
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
-        return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
+        return _y_eff_and_islack(
+            grid, f0, index, dtype, device, slack, param_overrides, branch_states
+        )
 
     def make_residual_complex(op):
         """Build ``F_c(V) = Y_eff @ V + I_device(V) - I_slack`` for an operating point.
 
         A factory (not a single closure) so the batched-Newton path can build a
         per-scenario residual from a sliced ``op`` while the full-batch ``op`` residual
-        drives the diagnostics and the IFT backward.
+        drives the IFT backward. Fully DIFFERENTIABLE w.r.t. the parameter leaves
+        (rebuilds the injection resolution on every call) — the ``dR/dθ`` half of the
+        IFT. The iteration-facing counterpart is :func:`make_fast_residual_complex`.
         """
 
         def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
@@ -548,14 +1056,49 @@ def solve_power_flow(
                 param_overrides=param_overrides,
                 symmetry=sym_resolved,
             ).squeeze(-2)  # [*b, N]
-            yv = torch.matmul(y_eff, v_cmplx.unsqueeze(-1)).squeeze(-1)  # [*b, N]
-            return yv + i_dev - i_slack
+            return _apply_y(y_eff, v_cmplx) + i_dev - i_slack
 
         return residual_complex
 
+    def make_fast_residual_complex(op):
+        """Plan-based residual for the ITERATION paths (``dR/dV`` only).
+
+        Resolves the operating point ONCE into an :class:`InjectionPlan` (detached)
+        and evaluates the residual with pure tensor ops. Correct wherever only the
+        dependence on ``V`` matters — the no-grad forward iterations, Newton's line
+        search, and the state Jacobian ``J = dR/dx`` (the plan's power tensors are
+        constants of that differentiation). The parameter gradients ``dR/dθ`` use
+        :func:`make_residual_complex` instead.
+        """
+        with torch.no_grad():
+            plan = build_injection_plan(
+                grid,
+                index,
+                [f0],
+                dtype=dtype,
+                device=device,
+                operating_point=op,
+                param_overrides=param_overrides,
+                symmetry=sym_resolved,
+            )
+
+        def residual_complex(v_cmplx: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
+            i_dev = injections_from_plan(plan, v_cmplx).squeeze(-2)  # [*b, N]
+            return _apply_y(y_eff, v_cmplx) + i_dev - i_slack
+
+        residual_complex.plan = plan
+        return residual_complex
+
     residual_complex = make_residual_complex(operating_point)
+    fast_residual_complex = make_fast_residual_complex(operating_point)
     real_res = _make_real_residual(
-        build_system, residual_complex, fixed_rows, v_fixed_fn, n, cdt
+        build_system,
+        residual_complex,
+        fixed_rows,
+        v_fixed_fn,
+        n,
+        cdt,
+        state_residual_complex=fast_residual_complex,
     )
 
     # One-time warning when the absolute `tol` is below what the working precision can
@@ -585,12 +1128,14 @@ def solve_power_flow(
         # ``examples/current_injection_convergence.py``).
         bsize = _operating_point_batch_size(operating_point)
         if bsize > 1:
-            # Newton's per-element Jacobian AND its const-Z warm start are single-grid
-            # (the residual closes over the batched op, so a per-element Jacobian would
-            # be batch-polluted). Solve each scenario with the proven single-grid Newton
-            # and stack; the SHARED IFT backward below (full op, batch-aligned) supplies
-            # batched gradients. Newton is the hard-grid / near-nose solver — for bulk
-            # batches prefer the vectorized current-injection method.
+            # A batched operating point solves SEQUENTIALLY per scenario: the
+            # per-scenario ``jacobian(vectorize=True)`` (one vectorized call per
+            # scenario) is measurably faster than a batch-native block-diagonal
+            # build — the O(B²·(2N)²) full-map Jacobian does not fit, and the O(B)
+            # column-by-column alternative costs 2N JVP evaluations per Newton
+            # step (4x slower than this loop at B=64/N=180). Newton is the
+            # hard-grid / near-nose solver — for bulk batches prefer the
+            # vectorized current-injection method.
             (
                 v_star,
                 iterations,
@@ -614,14 +1159,15 @@ def solve_power_flow(
                 v_fixed,
                 v_fixed_fn,
                 build_system,
-                make_residual_complex,
+                make_fast_residual_complex,
                 bsize,
                 n,
                 rdt,
                 cdt,
                 tol,
                 max_iter,
-                linear_solver,
+                newton_solver,
+                branch_states,
             )
         else:
             v_init = _linear_const_z_init(
@@ -635,6 +1181,7 @@ def solve_power_flow(
                 param_overrides,
                 fixed_rows,
                 v_fixed,
+                branch_states,
             )
             (
                 v_star,
@@ -647,7 +1194,7 @@ def solve_power_flow(
                 converged_mask,
                 residual_vec,
             ) = _newton_forward(
-                real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver
+                real_res, v_init, n, rdt, cdt, device, tol, max_iter, newton_solver
             )
     else:
         (
@@ -662,21 +1209,19 @@ def solve_power_flow(
             residual_vec,
         ) = _current_injection_forward(
             grid,
-            f0,
             index,
             build_system,
             fixed_rows,
             v_fixed,
-            operating_point,
-            param_overrides,
-            sym_resolved,
-            dtype,
+            fast_residual_complex.plan,
             n,
             rdt,
             cdt,
             device,
             tol,
             max_iter,
+            factor_backend,
+            system,
         )
 
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
@@ -687,7 +1232,7 @@ def solve_power_flow(
         v_star,
         y_eff0,
         i_slack0,
-        residual_complex,
+        fast_residual_complex,
         real_res,
         fixed_rows,
         residual_history,
@@ -743,23 +1288,25 @@ def solve_power_flow(
 # ---------------------------------------------------------------------------
 def _current_injection_forward(
     grid,
-    f0,
     index,
     build_system,
     fixed_rows,
     v_fixed,
-    operating_point,
-    param_overrides,
-    sym_resolved,
-    dtype,
+    plan,
     n,
     rdt,
     cdt,
     device,
     tol,
     max_iter,
+    factor_backend="auto",
+    system=None,
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
+
+    ``plan`` is the precomputed :class:`~pgml.assembly.InjectionPlan`: the
+    operating point is resolved once and every iteration evaluates
+    :func:`injections_from_plan` (pure tensor ops).
 
     Returns ``(v_star, iterations, residual_norm, converged, residual_history, y_eff0,
     i_slack0, converged_mask, residual_vec)``; ``residual_norm`` is the final ``||ΔV||``
@@ -768,7 +1315,10 @@ def _current_injection_forward(
     the dtype's resolvable relative precision (0 for float64; ~1e-6 for float32).
     """
     with torch.no_grad():
-        y_eff0, i_slack0 = build_system()
+        if system is not None:
+            y_eff0, i_slack0 = system.y_eff, system.i_slack
+        else:
+            y_eff0, i_slack0 = build_system()
         lead = torch.broadcast_shapes(i_slack0.shape[:-1], y_eff0.shape[:-2])
         # Phase-aware balanced warm start: the source reference magnitude rotated by
         # the standard positive-sequence angle of each row's phase (a=0, b=-120,
@@ -835,19 +1385,13 @@ def _current_injection_forward(
         # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
         # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
-        fac = lu_factor_system(y_eff0, fixed_rows=fixed_rows)
+        fac = (
+            system.factorization
+            if system is not None
+            else lu_factor_system(y_eff0, fixed_rows=fixed_rows, backend=factor_backend)
+        )
         for _ in range(max_iter):
-            i_dev = device_current_injections(
-                grid,
-                v,
-                index,
-                [f0],
-                dtype=dtype,
-                device=device,
-                operating_point=operating_point,
-                param_overrides=param_overrides,
-                symmetry=sym_resolved,
-            ).squeeze(-2)  # [*b, N]
+            i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
             v_new = solve_factored(fac, rhs, v_fixed=v_fixed)
             # solve_factored carries Y's leading H=1; drop the singleton axis.
@@ -893,6 +1437,7 @@ def _linear_const_z_init(
     param_overrides,
     fixed_rows,
     v_fixed,
+    branch_states=None,
 ):
     """OpenDSS-style warm start: the LINEAR const-Z solution (one linear solve).
 
@@ -916,10 +1461,16 @@ def _linear_const_z_init(
             device=device,
             operating_point=operating_point,
             param_overrides=param_overrides,
+            branch_states=branch_states,
         )
     finally:
         pgml_log.setLevel(prev)
-    y_lin = yb.Y if yb.Y.ndim == 3 else yb.Y.unsqueeze(0)  # [1, N, N]
+    if yb.Y.ndim > 3:
+        y_lin = yb.Y.squeeze(-3)  # [*batch, N, N] (batched branch states)
+    elif yb.Y.ndim == 3:
+        y_lin = yb.Y  # [1, N, N]
+    else:
+        y_lin = yb.Y.unsqueeze(0)
     if slack == "norton":
         i_init = build_injections(
             grid,
@@ -1061,14 +1612,16 @@ def _newton_forward(
             if linear_solver == "matrix_free":
                 dx = _newton_dir_matrix_free(res_one, x, r, b, fd_eps)
             else:
-                dx = _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b)
-            # Backtracking on the worst-case residual infinity-norm (global robustness).
-            r0 = r.abs().amax()
-            step = 1.0
+                dx = _newton_dir_dense(res_all, x, r)
+            # PER-ELEMENT backtracking on each scenario's residual infinity-norm
+            # (global robustness): a hard scenario halves only its own step.
+            r0 = r.abs().amax(dim=-1)  # [b]
+            step = torch.ones(b, 1, dtype=rdt, device=x.device)
             for _bt in range(_NEWTON_MAX_BACKTRACK):
-                if bool(res_all(x + step * dx).abs().amax() <= r0):
+                ok = res_all(x + step * dx).abs().amax(dim=-1) <= r0  # [b]
+                if bool(ok.all()):
                     break
-                step *= 0.5
+                step = torch.where(ok.unsqueeze(-1), step, 0.5 * step)
             x = x + step * dx
             # Per-element step norm + dtype-aware threshold max(tol, floor*||x||).
             dxn = (step * dx).norm(dim=-1)  # [b]
@@ -1110,7 +1663,7 @@ def _newton_forward_sequential(
     v_fixed,
     v_fixed_fn,
     build_system,
-    make_residual_complex,
+    make_fast_residual_complex,
     bsize,
     n,
     rdt,
@@ -1118,6 +1671,7 @@ def _newton_forward_sequential(
     tol,
     max_iter,
     linear_solver,
+    branch_states=None,
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
@@ -1126,14 +1680,17 @@ def _newton_forward_sequential(
     it per scenario, running the proven single-grid forward, and stacking the detached
     ``V*`` ``[B, N]``. The IFT backward (full op, batch-aligned, block-diagonal) attaches
     batched gradients to the stacked result, so this is forward-only sequencing — the
-    differentiability is unchanged. Returns the same 9-tuple as :func:`_newton_forward`.
+    differentiability is unchanged. The per-scenario residual comes from
+    ``make_fast_residual_complex`` (one detached injection plan per slice — the
+    detached forward needs only ``dR/dx``). Returns the same 9-tuple as
+    :func:`_newton_forward`.
     """
     v_list, conv_list, res_list = [], [], []
     iterations = 0
     y_eff0 = i_slack0 = None
     for i in range(bsize):
         op_i = _slice_operating_point(operating_point, i)
-        rc_i = make_residual_complex(op_i)
+        rc_i = make_fast_residual_complex(op_i)
         rr_i = _make_real_residual(build_system, rc_i, fixed_rows, v_fixed_fn, n, cdt)
         v_init_i = _linear_const_z_init(
             grid,
@@ -1146,6 +1703,7 @@ def _newton_forward_sequential(
             param_overrides,
             fixed_rows,
             v_fixed,
+            branch_states,
         )
         v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_forward(
             rr_i, v_init_i, n, rdt, cdt, device, tol, max_iter, linear_solver
@@ -1174,31 +1732,43 @@ def _newton_forward_sequential(
     )
 
 
-def _state_jacobian_blocks(state_residual, x_flat, y_flat, is_flat, b) -> Tensor:
-    """Per-element real state Jacobian ``[B, 2N, 2N]`` — the block diagonal of ``dR/dx``.
+def _batched_state_jacobian(batched_state_res, x_flat: Tensor) -> Tensor:
+    """Block-diagonal real state Jacobian ``J = dR/dx`` ``[B, 2N, 2N]``.
 
-    The batched residual ``R[k]`` depends only on ``x[k]``, so the full Jacobian is block
-    diagonal; build each ``[2N, 2N]`` block from its own ``(x, Y, I_slack)`` in a loop.
-    This is ``O(B·(2N)²)`` memory, NOT the ``O(B²·(2N)²)`` of differentiating the batched
-    map and slicing its diagonal — the difference between fitting and OOMing at large ``B``.
+    ``batched_state_res`` maps ``x [B, 2N] -> R [B, 2N]`` where ``R[k]`` depends
+    only on ``x[k]``, so the full Jacobian is block diagonal (the off-diagonal
+    cross terms are zero). Two ways to get the blocks:
+
+    - small ``B``: differentiate the batched map once (vectorized) and slice the
+      diagonal — fast, but the intermediate is ``[B, 2N, B, 2N]`` (O(B²) memory);
+    - large ``B``: build the diagonal column-by-column with ``2N`` batched JVPs —
+      O(B) memory, using the SAME batch-aligned residual (correct for every batch
+      source, incl. batched device params / operating points).
+
+    Both avoid vmap, which does not compose with the assembly's ``index_add_``
+    scatter. Shared by the Newton forward and the IFT backward.
     """
-    blocks = []
-    for bi in range(b):
-        yr, yi = y_flat[bi].real, y_flat[bi].imag
-        ir, ii = is_flat[bi].real, is_flat[bi].imag
-        blocks.append(
-            torch.autograd.functional.jacobian(
-                lambda xb, a=yr, c=yi, d=ir, e=ii: state_residual(xb, a, c, d, e),
-                x_flat[bi],
-                vectorize=True,
-            )
-        )  # [2N, 2N]
-    return torch.stack(blocks, 0)  # [B, 2N, 2N]
+    b, twon = x_flat.shape
+    if b * b * twon * twon <= _IFT_DENSE_JAC_MAX_ELEMS:
+        jac_full = torch.autograd.functional.jacobian(
+            batched_state_res, x_flat, create_graph=False, vectorize=True
+        )  # [B, 2N, B, 2N]
+        idx_b = torch.arange(b, device=x_flat.device)
+        return jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
+    cols = []
+    for j in range(twon):
+        tangent = torch.zeros_like(x_flat)
+        tangent[:, j] = 1.0
+        _, col = torch.autograd.functional.jvp(
+            batched_state_res, x_flat, v=tangent
+        )  # [B, 2N] = J[..., j]
+        cols.append(col)
+    return torch.stack(cols, dim=-1)  # [B, 2N, 2N]
 
 
-def _newton_dir_dense(state_residual, x, r, y_flat, is_flat, b) -> Tensor:
+def _newton_dir_dense(batched_state_res, x, r) -> Tensor:
     """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element."""
-    j = _state_jacobian_blocks(state_residual, x, y_flat, is_flat, b)  # [b, 2N, 2N]
+    j = _batched_state_jacobian(batched_state_res, x)  # [b, 2N, 2N]
     return torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
 
 
@@ -1239,6 +1809,7 @@ def _make_real_residual(
     v_fixed_fn,
     n: int,
     cdt: torch.dtype,
+    state_residual_complex=None,
 ):
     """Return a closure ``R(x) -> [*b, 2N]`` real residual with slack pinning.
 
@@ -1246,7 +1817,19 @@ def _make_real_residual(
     ``Re/Im(V - V_fixed)``. The complex system tensors come from ``build_system``
     and the slack reference from ``v_fixed_fn`` (recomputed each call) so they
     stay differentiable w.r.t. the parameter leaves and do not reuse a freed graph.
+
+    ``state_residual_complex`` (optional) is a faster complex residual used ONLY by
+    the attached ``state_residual`` — the fixed-system form the Newton iterations,
+    the state Jacobian ``J = dR/dx``, and the criticality analysis evaluate. Those
+    differentiate w.r.t. ``x`` alone, so a plan-based residual with detached
+    parameter tensors is exact there; the full ``real_residual`` keeps the
+    differentiable ``residual_complex`` for the ``dR/dθ`` vjp.
     """
+    state_rc = (
+        state_residual_complex
+        if state_residual_complex is not None
+        else residual_complex
+    )
 
     def _pin_and_split(fc: Tensor, v: Tensor, x: Tensor) -> Tensor:
         v_fixed = v_fixed_fn() if v_fixed_fn is not None else None
@@ -1283,7 +1866,7 @@ def _make_real_residual(
         v = torch.complex(v_re, v_im).to(cdt)
         y_eff = torch.complex(y_re, y_im).to(cdt)
         i_slack = torch.complex(islack_re, islack_im).to(cdt)
-        fc = residual_complex(v, y_eff, i_slack)
+        fc = state_rc(v, y_eff, i_slack)
         return _pin_and_split(fc, v, x)
 
     real_residual.state_residual = state_residual
@@ -1364,22 +1947,7 @@ class _IFTPowerFlow(torch.autograd.Function):
                 xb, y_flat.real, y_flat.imag, islack_flat.real, islack_flat.imag
             )  # [B, 2N]
 
-        if b * b * twon * twon <= _IFT_DENSE_JAC_MAX_ELEMS:
-            jac_full = torch.autograd.functional.jacobian(
-                batched_state_res, x_flat, create_graph=False, vectorize=True
-            )  # [B, 2N, B, 2N]
-            idx_b = torch.arange(b, device=x_flat.device)
-            j_batched = jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
-        else:
-            cols = []
-            for j in range(twon):
-                tangent = torch.zeros_like(x_flat)
-                tangent[:, j] = 1.0
-                _, col = torch.autograd.functional.jvp(
-                    batched_state_res, x_flat, v=tangent
-                )  # [B, 2N] = J[..., j]
-                cols.append(col)
-            j_batched = torch.stack(cols, dim=-1)  # [B, 2N, 2N]
+        j_batched = _batched_state_jacobian(batched_state_res, x_flat)  # [B, 2N, 2N]
         # Adjoint: J^T λ = grad_x  ->  λ = J^{-T} grad_x  (batched solve).
         lam_flat = torch.linalg.solve(
             j_batched.transpose(-1, -2), gx_flat.unsqueeze(-1)
@@ -1763,6 +2331,7 @@ def loadability_limit(
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    check_connectivity(grid)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)
     index = node_phase_index(grid)
     n = index.size
@@ -1788,21 +2357,24 @@ def loadability_limit(
     def build_system():
         return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
 
+    # One detached injection plan serves every λ step (loadability is a detached
+    # diagnostic; λ scales the plan's currents in the residual, not the plan).
+    with torch.no_grad():
+        plan = build_injection_plan(
+            grid,
+            index,
+            [f0],
+            dtype=dtype,
+            device=device,
+            operating_point=operating_point,
+            param_overrides=param_overrides,
+            symmetry=sym_resolved,
+        )
+
     def make_real_res(lam: float):
         def rc(v: Tensor, y: Tensor, islack: Tensor) -> Tensor:
-            i_dev = device_current_injections(
-                grid,
-                v,
-                index,
-                [f0],
-                dtype=dtype,
-                device=device,
-                operating_point=operating_point,
-                param_overrides=param_overrides,
-                symmetry=sym_resolved,
-            ).squeeze(-2)
-            yv = torch.matmul(y, v.unsqueeze(-1)).squeeze(-1)
-            return yv + lam * i_dev - islack
+            i_dev = injections_from_plan(plan, v).squeeze(-2)
+            return _apply_y(y, v) + lam * i_dev - islack
 
         return _make_real_residual(build_system, rc, fixed_rows, v_fixed_fn, n, cdt)
 
@@ -1978,6 +2550,9 @@ def _nose_criticality(
 
 
 __all__ = [
+    "check_connectivity",
+    "prepare_power_flow",
+    "PowerFlowSystem",
     "solve_power_flow",
     "PowerFlowResult",
     "ConvergenceDiagnostics",

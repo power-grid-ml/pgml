@@ -44,6 +44,7 @@ scenario dims. No ``.item()/.detach()/.numpy()`` on the tape; honors device/dtyp
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Sequence
@@ -69,7 +70,14 @@ from pgml.schemas.grid_schema import (
 )
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
-from .power_flow import PowerFlowResult, solve_power_flow
+from .power_flow import (
+    PowerFlowResult,
+    _expand_zeroed_result,
+    check_connectivity,
+    solve_power_flow,
+)
+
+_log = logging.getLogger("pgml")
 
 
 @dataclass(frozen=True)
@@ -171,6 +179,8 @@ def solve_harmonic_flow(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     symmetry: Optional[str] = None,
+    on_disconnected: str = "raise",
+    branch_states: Optional[dict] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -218,6 +228,19 @@ def solve_harmonic_flow(
         ``"asymmetric"`` (``None`` -> config). Resolved ONCE here and threaded into
         the fundamental :func:`solve_power_flow` (single log) and the harmonic
         injection power resolution.
+    on_disconnected:
+        Pre-solve connectivity handling, as in :func:`solve_power_flow`:
+        ``"raise"`` (default) raises :class:`~pgml.errors.ConnectivityError` when a
+        (node, phase) row has no path to an in-service source; ``"zero"`` solves the
+        energized sub-grid and reports 0 V on the disconnected rows at every order
+        (full-grid row layout preserved); ``"ignore"`` skips the check.
+    branch_states:
+        Optional topology / switch-state batching ``{branch_id: state}``, as in
+        :func:`solve_power_flow`: the state (float / 0-d / ``[*batch]`` tensor,
+        0 = open) OVERRIDES the branch's static flags and scales its stamp at the
+        fundamental AND every harmonic order, so one batched call solves every
+        switch configuration end to end. ``on_disconnected="zero"`` is unsupported
+        with states (the fundamental solve enforces this).
 
     Returns
     -------
@@ -234,6 +257,51 @@ def solve_harmonic_flow(
     orders = [int(h) for h in harmonic_orders]
     if not orders:
         raise InputError("harmonic_orders must be non-empty.")
+    if on_disconnected not in ("raise", "zero", "ignore"):
+        raise InputError(
+            f"Unsupported on_disconnected {on_disconnected!r} "
+            "(use 'raise'/'zero'/'ignore')."
+        )
+    if on_disconnected == "raise":
+        if branch_states is None:
+            check_connectivity(grid)
+        # With branch_states the (possibly per-scenario) check runs inside the
+        # fundamental solve_power_flow call below.
+    elif on_disconnected == "zero":
+        if branch_states is not None:
+            raise InputError(
+                'on_disconnected="zero" is unsupported with branch_states: a '
+                "per-scenario topology has no single energized sub-grid. Use "
+                '"raise" or "ignore".'
+            )
+        from pgml.topology import energized_subgrid
+
+        sub, dropped = energized_subgrid(grid)
+        if dropped:
+            _log.warning(
+                "solve_harmonic_flow: %d disconnected node(s) %s solved as 0 V "
+                '(on_disconnected="zero"); the energized sub-grid carries the '
+                "solution.",
+                len(dropped),
+                list(dropped[:10]),
+            )
+            sub_res = solve_harmonic_flow(
+                sub,
+                orders,
+                slack=slack,
+                method=method,
+                operating_point=operating_point,
+                harmonic_injection=harmonic_injection,
+                node_sources=node_sources,
+                include_load_shunt=include_load_shunt,
+                tol=tol,
+                max_iter=max_iter,
+                dtype=dtype,
+                device=device,
+                symmetry=symmetry,
+                on_disconnected="ignore",
+            )
+            return _expand_zeroed_harmonic_result(grid, sub_res)
 
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
@@ -244,7 +312,8 @@ def solve_harmonic_flow(
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
-    # 1. Fundamental nonlinear power flow (order 1).
+    # 1. Fundamental nonlinear power flow (order 1). Connectivity was already
+    # handled above, so the inner solve skips the (redundant) check.
     pf = solve_power_flow(
         grid,
         slack=slack,
@@ -255,6 +324,8 @@ def solve_harmonic_flow(
         dtype=dtype,
         device=device,
         symmetry=sym_resolved,
+        on_disconnected=("ignore" if branch_states is None else on_disconnected),
+        branch_states=branch_states,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -274,6 +345,7 @@ def solve_harmonic_flow(
             symmetry=sym_resolved,
             dtype=dtype,
             device=device,
+            branch_states=branch_states,
         )
         # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
         # case — the batch varies injections, not the network), factor each order ONCE
@@ -296,6 +368,36 @@ def solve_harmonic_flow(
     return HarmonicFlowResult(v=v, frequencies_hz=frequencies_hz, index=index, pf=pf)
 
 
+def _expand_zeroed_harmonic_result(
+    grid: Grid, res: HarmonicFlowResult
+) -> HarmonicFlowResult:
+    """Scatter a sub-grid harmonic solution back to the full grid (0 V dead rows).
+
+    The ``on_disconnected="zero"`` reassembly at every order: rows absent from the
+    energized sub-grid report 0 V in ``v`` and in the embedded fundamental
+    :class:`PowerFlowResult`. Out-of-place ``index_copy`` (gradients preserved).
+    """
+    full_index = node_phase_index(grid)
+    sub_index = res.index
+    rows = torch.as_tensor(
+        [
+            full_index.row(sub_index.node_id_of(r), sub_index.phase_of(r))
+            for r in range(sub_index.size)
+        ],
+        dtype=torch.int64,
+        device=res.v.device,
+    )
+    v_full = torch.zeros(
+        (*res.v.shape[:-1], full_index.size), dtype=res.v.dtype, device=res.v.device
+    ).index_copy(-1, rows, res.v)
+    return HarmonicFlowResult(
+        v=v_full,
+        frequencies_hz=res.frequencies_hz,
+        index=full_index,
+        pf=_expand_zeroed_result(grid, res.pf),
+    )
+
+
 def assemble_harmonic_system(
     grid: Grid,
     harmonic_orders,
@@ -307,6 +409,7 @@ def assemble_harmonic_system(
     symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
+    branch_states: Optional[dict] = None,
 ) -> tuple[Tensor, Tensor, NodePhaseIndex]:
     """Assemble the per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders ``h > 1``.
 
@@ -355,12 +458,18 @@ def assemble_harmonic_system(
     dtype, device:
         Complex dtype and device for the assembled system (``device=None`` ->
         ``v1.device``). Honoured throughout; gradients flow on the live tape.
+    branch_states:
+        Optional topology / switch-state mask ``{branch_id: state}`` (see
+        :func:`pgml.assembly.assemble_ybus`) — MUST match the states the
+        fundamental ``v1`` was solved with. A batched state promotes ``Y`` to
+        ``[*batch, Hh, N, N]``.
 
     Returns
     -------
     Y:
         Complex ``[Hh, N, N]`` (one slice per requested order) — or ``[*batch, Hh,
-        N, N]`` if a BATCHED voltage ``node_source`` promotes it.
+        N, N]`` if a BATCHED voltage ``node_source`` or batched ``branch_states``
+        promotes it.
     I:
         Complex ``[*batch, Hh, N]`` harmonic nodal current injection.
     index:
@@ -386,7 +495,9 @@ def assemble_harmonic_system(
 
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
-    yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
+    yh = assemble_network_ybus(
+        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+    ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
     yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
@@ -415,6 +526,7 @@ def assemble_harmonic_ybus(
     *,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
+    branch_states: Optional[dict] = None,
 ) -> tuple[Tensor, NodePhaseIndex]:
     """The harmonic system MATRIX ``Y(h)`` for orders ``h > 1`` — no injection RHS assembled.
 
@@ -438,11 +550,16 @@ def assemble_harmonic_ybus(
     dtype, device:
         Complex dtype and device for the assembled matrix (``device=None`` -> CPU). Honoured
         throughout; gradients flow w.r.t. the network parameters on the live tape.
+    branch_states:
+        Optional topology / switch-state mask ``{branch_id: state}`` (see
+        :func:`pgml.assembly.assemble_ybus`); a batched state promotes ``Y`` to
+        ``[*batch, Hh, N, N]``.
 
     Returns
     -------
     Y:
-        Complex ``[Hh, N, N]`` (one slice per requested order).
+        Complex ``[Hh, N, N]`` (one slice per requested order; batched
+        ``branch_states`` prepend their scenario dims).
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
     """
@@ -462,7 +579,9 @@ def assemble_harmonic_ybus(
         device = torch.device("cpu")
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
-    yh = assemble_network_ybus(grid, freqs, dtype=dtype, device=device).Y
+    yh = assemble_network_ybus(
+        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+    ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
     yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
@@ -710,50 +829,54 @@ def _harmonic_injections(
                 )
             )
 
-    cols: list[Tensor] = []
-    for h in harm_orders:
-        contribs = []  # (m_c, rows, i_h_elem [*batch, n_elem])
-        for m_c, rows, i1_mag, i1_ang, mag1_e, ang1_e, elem_spectra in entries:
-            n_elem = mag1_e.shape[-1]
-            mag_h_e, ph_h_e = elem_spectra.get(
-                h,
-                (
-                    torch.zeros(n_elem, dtype=rdt, device=device),
-                    torch.zeros(n_elem, dtype=rdt, device=device),
-                ),
-            )
-            # Safe ratio mag_h/mag1: an element with NO spectrum has mag1 == 0 (and
-            # mag_h == 0) -> it injects nothing; avoid the 0/0 NaN with a guarded
-            # divide (the where keeps the gradient finite on the live elements).
-            safe1 = torch.where(mag1_e == 0, torch.ones_like(mag1_e), mag1_e)
-            ratio = torch.where(
-                mag1_e == 0, torch.zeros_like(mag_h_e), mag_h_e / safe1
-            )  # [*batch, n_elem]
-            ang_h = ph_h_e * (math.pi / 180.0)
-            mag = ratio * i1_mag  # [*batch, n_elem]
-            phase = ang_h + float(h) * (i1_ang - ang1_e)  # [*batch, n_elem]
-            contribs.append((m_c, rows, torch.polar(mag, phase)))
+    hh = len(harm_orders)
+    if not entries:
+        return torch.zeros((hh, n), dtype=cdt, device=device)
 
-        bshape = (
-            torch.broadcast_shapes(*[c.shape[:-1] for _, _, c in contribs])
-            if contribs
-            else ()
+    # ONE vectorized evaluation per device: the spectra coefficients are stacked
+    # over the order axis ([Hh, n_elem], python dict lookups only), so the ratio /
+    # phase / polar math and the incidence contraction run for every order at once
+    # and the nodal scatter is a single index_add per device — instead of tape ops
+    # per (device × order), which dominated multi-order assemblies.
+    h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
+    zero_e = None
+    parts = []  # (rows [n_used], i_used [*batch, Hh, n_used])
+    for m_c, rows, i1_mag, i1_ang, mag1_e, ang1_e, elem_spectra in entries:
+        n_elem = mag1_e.shape[-1]
+        if zero_e is None or zero_e.shape[-1] != n_elem:
+            zero_e = torch.zeros(n_elem, dtype=rdt, device=device)
+        pairs = [elem_spectra.get(h, (zero_e, zero_e)) for h in harm_orders]
+        cshape = torch.broadcast_shapes(*[t.shape for p in pairs for t in p])
+        mag_h = torch.stack([p[0].broadcast_to(cshape) for p in pairs], dim=-2)
+        ph_h = torch.stack([p[1].broadcast_to(cshape) for p in pairs], dim=-2)
+        # mag_h / ph_h: [*cbatch, Hh, n_elem]; i1 terms gain the order axis at -2.
+        # Safe ratio mag_h/mag1: an element with NO spectrum has mag1 == 0 (and
+        # mag_h == 0) -> it injects nothing; avoid the 0/0 NaN with a guarded
+        # divide (the where keeps the gradient finite on the live elements).
+        mag1 = mag1_e.unsqueeze(-2)
+        safe1 = torch.where(mag1 == 0, torch.ones_like(mag1), mag1)
+        ratio = torch.where(
+            mag1 == 0, torch.zeros_like(mag_h), mag_h / safe1
+        )  # [*batch, Hh, n_elem]
+        mag = ratio * i1_mag.unsqueeze(-2)
+        phase = ph_h * (math.pi / 180.0) + h_vec[:, None] * (
+            i1_ang.unsqueeze(-2) - ang1_e.unsqueeze(-2)
         )
-        col = torch.zeros((*bshape, n), dtype=cdt, device=device)
-        for m_c, rows, i_h_elem in contribs:
-            # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).
-            i_used = torch.einsum("eu,...e->...u", m_c, i_h_elem)  # [*batch, n_used]
-            # `broadcast_to` returns a VIEW; a non-contiguous complex tensor can fail
-            # the CUDA index_add backend, so materialise it (defensive, matches
-            # ybus._scatter_injection). `.contiguous()` is autograd-safe.
-            i_used = i_used.broadcast_to(*bshape, rows.shape[0]).contiguous()
-            # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add).
-            col = col.index_add(-1, rows, -i_used)
-        cols.append(col)
+        i_h_elem = torch.polar(mag, phase)  # [*batch, Hh, n_elem]
+        # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).
+        i_used = torch.einsum("eu,...e->...u", m_c, i_h_elem)  # [*batch, Hh, n_used]
+        parts.append((rows, i_used))
 
-    bshape = torch.broadcast_shapes(*[c.shape[:-1] for c in cols])
-    cols = [c.broadcast_to(*bshape, n) for c in cols]
-    return torch.stack(cols, dim=-2)  # [*batch, Hh, N]
+    bshape = torch.broadcast_shapes(*[p.shape[:-2] for _, p in parts])
+    out = torch.zeros((*bshape, hh, n), dtype=cdt, device=device)
+    for rows, i_used in parts:
+        # `broadcast_to` returns a VIEW; a non-contiguous complex tensor can fail
+        # the CUDA index_add backend, so materialise it (defensive, matches
+        # ybus._scatter_injection). `.contiguous()` is autograd-safe.
+        i_used = i_used.broadcast_to(*bshape, hh, rows.shape[0]).contiguous()
+        # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add).
+        out = out.index_add(-1, rows, -i_used)
+    return out  # [*batch, Hh, N]
 
 
 # ---------------------------------------------------------------------------

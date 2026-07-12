@@ -86,8 +86,22 @@ def const_z_shunt_admittance(
         Complex ``[P]`` per-phase shunt admittance (diagonal stamp values).
     """
     rdt = torch.float64 if dtype in (torch.float64, torch.complex128) else torch.float32
-    p = sign * torch.as_tensor(p_per_phase, dtype=rdt, device=device)
-    q = sign * torch.as_tensor(q_per_phase, dtype=rdt, device=device)
+
+    def _stack(per_phase) -> Tensor:
+        # A per-phase entry may be a python float OR a (possibly scenario-batched)
+        # tensor; stack along the trailing phase axis, broadcasting any leading
+        # batch dims to a common shape (graph-preserving for tensor leaves).
+        ts = [
+            x.to(dtype=rdt, device=device)
+            if isinstance(x, Tensor)
+            else torch.as_tensor(x, dtype=rdt, device=device)
+            for x in per_phase
+        ]
+        lead = torch.broadcast_shapes(*[t.shape for t in ts])
+        return torch.stack([t.broadcast_to(lead) for t in ts], dim=-1)
+
+    p = sign * _stack(p_per_phase)
+    q = sign * _stack(q_per_phase)
     u2 = u_ln_v * u_ln_v
     # y = conj(P + jQ) / |U|^2 = (P - jQ) / |U|^2
     cdt = torch.complex128 if rdt == torch.float64 else torch.complex64

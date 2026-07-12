@@ -136,3 +136,22 @@ margin, the critical bus, and the limiting load.
 Scenario throughput versus batch size — the dense batched solve amortizes per-scenario cost
 as the batch grows.
 ```
+
+### Sparse vs dense factorization
+
+**File:** `examples/pgml/benchmark_sparse.py`
+
+Sweeps synthetic radial MV feeders (`pgml.grids.synthetic_feeder`) across system sizes and
+times both `solve_power_flow` factorization backends — the batched dense `torch` LU and the
+scipy SuperLU sparse factorization — for factorization time, back-substitution time (single
+RHS and a batched scenario), and end-to-end wall time. On a CUDA host the dense rows are also
+measured on the GPU, since the sparse-CPU advantage must be checked against the dense-GPU
+baseline rather than assumed. The observed CPU crossover calibrates the row-count threshold
+behind `linear_solver="auto"` (see the "Solve performance" section of
+{doc}`api/solver`).
+
+```{literalinclude} ../../examples/pgml/benchmark_sparse.py
+:language: python
+:lines: 1-30
+:caption: examples/pgml/benchmark_sparse.py (header)
+```

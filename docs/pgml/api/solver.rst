@@ -27,6 +27,13 @@ The solver package provides the following entry points:
   grid-constant (assembled once, reused across the batch) and differentiable
   w.r.t. the network parameters, so the same call powers a learned
   grid-parameter calibration.
+- :func:`~pgml.solver.check_connectivity` — the pre-solve structural gate:
+  raises :class:`~pgml.errors.ConnectivityError` when part of the grid has no
+  galvanic path to an in-service source, before any factorization is attempted.
+- :func:`~pgml.solver.prepare_power_flow` — assembles and factors the
+  operating-point-independent part of a nonlinear solve once, returning a
+  :class:`~pgml.solver.PowerFlowSystem` that repeated
+  :func:`~pgml.solver.solve_power_flow` calls on the same grid can reuse.
 
 .. rubric:: Differentiability
 
@@ -52,6 +59,127 @@ Both :func:`~pgml.solver.solve_power_flow` and
 ``None`` reads the config key ``calculation.symmetry`` (default ``"auto"``).
 For the semantics of each mode, see the "Symmetric vs asymmetric calculation"
 section on the :doc:`assembly` page.
+
+Connectivity checking
+---------------------
+
+Every solve entry point runs a pre-solve structural check by default: a
+``(node, phase)`` row with no galvanic path to an in-service
+:class:`~pgml.schemas.grid_schema.Source` — an open switch or an
+out-of-service line/transformer on the only path, or no source at all — makes
+the nodal system singular there, so the solve is refused up front with the
+concrete disconnected nodes and fixes named, instead of surfacing later as an
+opaque singular-matrix or non-convergence failure. The ``on_disconnected``
+keyword of :func:`~pgml.solver.solve_power_flow` and
+:func:`~pgml.solver.solve_harmonic_flow` controls the response:
+
+- ``"raise"`` (default) — raise :class:`~pgml.errors.ConnectivityError`, whose
+  message names the disconnected nodes, the separating branches, and how to
+  reconnect them.
+- ``"zero"`` — solve the energized sub-grid
+  (:func:`pgml.topology.energized_subgrid`) and report 0 V on the disconnected
+  rows; the result keeps the full grid's row layout. A node with only some
+  phases unenergized cannot be split this way and still raises
+  :class:`~pgml.errors.ConnectivityError`.
+- ``"ignore"`` — skip the check (the historical behavior: a disconnected area
+  surfaces as a singular factorization or a non-convergence).
+
+:func:`~pgml.solver.check_connectivity` exposes the same gate directly (raises
+:class:`~pgml.errors.ConnectivityError` or returns ``None``), and
+:func:`pgml.topology.connectivity_report` returns the full structured report
+(islands, reconnect hints) for callers that want to inspect or display it
+before deciding what to do — see :doc:`topology`.
+
+With ``branch_states`` (below), ``"raise"`` checks every scenario's effective
+topology in one vectorized pass; ``"zero"`` is unsupported there, since a
+per-scenario topology has no single energized sub-grid.
+
+Topology / switch-state batching (``branch_states``)
+------------------------------------------------------
+
+``branch_states={branch_id: state}`` lets a solve treat a branch's in-service
+status as a continuous, batchable, differentiable quantity rather than a fixed
+schema flag. Every listed branch is always stamped and its primitive
+admittance block scaled by ``state`` — a python float, a 0-d tensor, or a
+``[*batch]`` scenario tensor in ``[0, 1]``: ``0`` opens the branch, ``1`` puts
+it fully in service, and intermediate values scale the admittance
+continuously. The state OVERRIDES the branch's static ``in_service`` /
+``closed`` flags.
+
+Two things follow from this:
+
+- **Switch-state batching.** A ``[*batch]`` state solves every switch
+  configuration of interest in ONE batched call — one assembly, one
+  per-scenario ``Y`` — instead of looping python-side over configurations. It
+  broadcasts against a batched ``operating_point`` by the usual rules.
+- **Differentiable topology.** Because the state is a tensor on the autograd
+  tape, gradients flow to it through the same implicit-function-theorem
+  adjoint that differentiates network parameters — a continuous relaxation of
+  a switch state is a valid gradient-descent variable for topology search or
+  reconfiguration studies, not just a discrete flag.
+
+``branch_states`` is accepted by :func:`~pgml.solver.solve_power_flow`,
+:func:`~pgml.solver.solve_harmonic_flow`,
+:func:`~pgml.solver.assemble_harmonic_system`,
+:func:`~pgml.solver.assemble_harmonic_ybus`, and the underlying assemblers
+(:func:`~pgml.assembly.assemble_ybus`, :func:`~pgml.assembly.assemble_network_ybus`,
+:func:`~pgml.assembly.branch_currents`) — see the "Topology / switch-state
+masking" section of :doc:`assembly` for the assembly-level mechanics.
+:func:`~pgml.grids.synthetic_feeder`'s ``tie_switches`` argument builds the
+canonical normally-open tie-switch scenario for this study (see :doc:`grids`).
+
+``method="newton"`` accepts either a batched ``operating_point`` or batched
+``branch_states``, not both at once (its per-scenario slicing covers the
+operating point only); ``method="current_injection"`` batches both freely.
+
+Solve performance: factorization backend and system reuse
+-------------------------------------------------------------
+
+Two independent knobs speed up repeated or large-scale solves without
+changing any result:
+
+**``linear_solver``** selects the inner linear-solve backend of
+:func:`~pgml.solver.solve_power_flow` (and, via ``system=``, of
+:func:`~pgml.solver.prepare_power_flow`). For
+``method="current_injection"`` this picks the factorization of the constant
+``Y_eff``: ``"auto"`` (default) uses a SciPy SuperLU SPARSE factorization on
+CPU systems of roughly 500 or more rows — a power-grid ``Y`` has ``O(N)``
+nonzeros, so sparse factorization is close to ``O(N)`` where dense LU is
+``O(N³)`` — and falls back to the batched dense ``torch`` LU everywhere else
+(CUDA is always dense). ``"dense"`` / ``"sparse"`` force the choice. The
+sparse backend is fully differentiable via the linear-solve adjoint, so
+switching backends never changes which quantities carry gradients. For
+``method="newton"``, ``"dense"`` builds the explicit Jacobian and solves it
+directly (what ``"auto"`` resolves to); ``"matrix_free"`` runs a
+Jacobian-free Newton-Krylov solve (GMRES on finite-difference Jacobian-vector
+products), trading iteration count for ``O(N)`` memory on very large grids.
+``examples/pgml/benchmark_sparse.py`` sweeps :func:`~pgml.grids.synthetic_feeder`
+across sizes and reports the sparse/dense crossover on CPU (and the dense-GPU
+baseline it must be checked against) — see :doc:`/pgml/examples`.
+
+**``system``** lets repeated solves of the SAME grid skip the
+operating-point-independent work entirely. Everything about the network side
+of a nonlinear power flow — the node-phase index, ``Y_eff``, the slack rows
+and reference, the factorization, and the grid-parameter leaves — does not
+depend on the operating point, so :func:`~pgml.solver.prepare_power_flow`
+computes it once into a :class:`~pgml.solver.PowerFlowSystem`, and passing
+``solve_power_flow(..., system=that_system)`` reuses it across every call that
+only varies the operating point (the pattern
+:func:`pgml.scenarios.run_scenarios` uses internally for its chunked scenario
+loop)::
+
+    from pgml.solver import prepare_power_flow, solve_power_flow
+
+    system = prepare_power_flow(grid, slack="ideal", linear_solver="auto")
+    for op in operating_points:
+        result = solve_power_flow(grid, slack="ideal", operating_point=op,
+                                   system=system)
+
+The reused system must come from the SAME grid, ``slack``, ``dtype``,
+``device``, ``param_overrides``, and ``branch_states`` as the solve that
+consumes it (validated where cheap). Reuse is a FORWARD-only optimization: the
+IFT backward always rebuilds its differentiable system from the parameter
+leaves, so gradients are byte-identical to a solve without ``system``.
 
 Per-phase / connection-aware harmonic injection
 -----------------------------------------------

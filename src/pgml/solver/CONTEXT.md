@@ -329,3 +329,48 @@ gradcheck of `V(h)` w.r.t. a per-element injection magnitude (a python list of l
 tensors) on WYE AND DELTA, plus the `mag1==0` dead-element guard (finite + zero grad);
 `tests/gpu/test_asymmetric_parity.py` CPU-vs-CUDA `solve_harmonic_flow` parity for a
 DELTA-spectrum and a WYE `spectrum_per_phase` grid (skips without CUDA).
+
+# =====================================================================
+# Solve-performance & structural-check surface (rev 2)
+# =====================================================================
+Extensions shipped together; every entry is differentiable + GPU-ready unless
+stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.py`,
+`tests/reference/test_prepared_system.py`, and the differentiability suite.
+
+- `check_connectivity(grid) -> None` — raises `pgml.errors.ConnectivityError`
+  when any (node, phase) row has no galvanic path to an in-service Source
+  (open switch / out-of-service branch / no source), naming islands and fixes.
+  Runs by DEFAULT at every solve entry (`on_disconnected="raise"`); `"zero"`
+  solves `pgml.topology.energized_subgrid` and scatters back 0 V on dead rows
+  (full row layout kept); `"ignore"` skips. Report: `pgml.topology.connectivity_report`.
+- `solve_power_flow(..., linear_solver="auto"|"dense"|"sparse"|"matrix_free")`
+  — for `current_injection` this selects the `Y_eff` factorization backend
+  (`harmonic.lu_factor_system(backend=...)`): `"auto"` = scipy SuperLU sparse on
+  CPU ≥ ~500 rows (`_SPARSE_MIN_ROWS`), dense batched torch LU otherwise and
+  ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"`
+  raises. The sparse backend is differentiable via the linear-solve adjoint
+  (`_SparseSolveFn`: one trans='H' solve + batch-folded `-λ·conj(V)ᵀ`).
+- `solve_power_flow(..., branch_states={branch_id: state})` (also on
+  `solve_harmonic_flow`, `assemble_harmonic_system`, `assemble_harmonic_ybus`,
+  and the assemblers) — topology / switch-state batching by admittance masking:
+  state ∈ [0,1] (float / 0-d / `[*batch]` tensor) scales the branch's primitive
+  stamp and OVERRIDES `in_service`/`closed`; batched states solve every switch
+  configuration in one call and broadcast against a batched `operating_point`;
+  continuous states are IFT-differentiable topology parameters. Per-scenario
+  connectivity is pre-checked (vectorized condensed-graph propagation).
+- `prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
+  branch_states, linear_solver) -> PowerFlowSystem` +
+  `solve_power_flow(..., system=...)` — assembly + slack rows + factorization +
+  grid-leaf walk once, reused across repeated solves (the `run_scenarios` chunk
+  loop shares one system). Forward-only reuse: the IFT backward always rebuilds
+  differentiably, so gradients are unchanged.
+- Internal fast paths (no API): `assembly.build_injection_plan` /
+  `injections_from_plan` resolve the operating point once per solve (the
+  V-independent tensors) and make every iteration pure tensor ops; residuals
+  apply a batch-shared `Y` as one GEMM (`_apply_y`).
+- INVARIANT (do not swap): the IFT backward's `dR/dθ` vjp must use the
+  DIFFERENTIABLE residual (`make_residual_complex`, re-resolves from the
+  parameter leaves each eval); the iteration / state-Jacobian / diagnostics
+  paths use the detached plan residual (`make_fast_residual_complex`). Using
+  the detached one for `dR/dθ` silently zeroes parameter gradients; using the
+  differentiable one in the loop rebuilds python resolution per iteration.

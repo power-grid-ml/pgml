@@ -74,7 +74,14 @@ state = pgml.simulate(grid, cfg, device="cuda", dtype="complex64")
 When the high-level facade is not enough:
 
 - {mod}`pgml.solver` — raw `solve_harmonic_flow` / `solve_power_flow` for
-  scenarios where you want to manage tensors directly (minimal overhead).
+  scenarios where you want to manage tensors directly (minimal overhead). Both
+  run a pre-solve connectivity check by default (`on_disconnected="raise"`
+  raises {class}`~pgml.errors.ConnectivityError`; `"zero"` solves the
+  energized sub-grid; `"ignore"` skips it), accept `branch_states` for
+  differentiable topology / switch-state batching, and `solve_power_flow`
+  accepts `linear_solver="auto"` (sparse on large CPU systems, dense on GPU)
+  and a `system=` handle from `prepare_power_flow` to reuse one factorization
+  across repeated solves of the same grid. See {doc}`api/solver`.
 - {mod}`pgml.scenarios` — `run_scenarios` / `run_node_injection_sweep` for
   reproducible batched training-data generation.
 - {mod}`pgml.assembly` — `assemble_ybus` / `device_current_injections` /

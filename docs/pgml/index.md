@@ -65,11 +65,21 @@ figures.
   `distance_from_slack` — the graph features a training process needs, without pulling in
   matplotlib/plotly/networkx). `pgml.evaluation.topology` adds the one networkx view
   (`grid_graph`) used by the plotting stack. The PyTorch-Geometric `Data` / `Batch` builder
-  is a `pgl` concern built on these.
+  is a `pgl` concern built on these. `pgml.topology.connectivity_report` /
+  `energized_subgrid` back the pre-solve connectivity check (`pgml.errors.ConnectivityError`)
+  and the solver's `on_disconnected` handling.
 - **Reference grids** — `pgml.grids`: the canonical IEEE-33 / CIGRE LV benchmark builders
   (pandapower → `Grid`, with synthesized Carson geometry and converter harmonic spectra),
   plus `add_pv_systems` and `se_benchmark_scenario_config` for the state-estimation
-  benchmark recipe. Requires the `convert` extra (pandapower).
+  benchmark recipe (requires the `convert` extra, pandapower), and
+  `synthetic_feeder` — a schema-only synthetic radial MV feeder of any size, with no
+  external dependency, for solver-scaling and switch-state-batching studies.
+- **Multi-grid batching** — `pgml.multigrid.merge_grids`: disjoint-unions an ensemble of
+  grids into one solvable `Grid` (block-diagonal `Y` for free, no solver changes needed),
+  returning a `MergedGrid` that translates per-member `operating_point` / `branch_states`
+  into merged ids and slices any solved `[..., N_total]` state back into per-member views
+  with `split()`. Merging shares the members' own parameter tensors, so gradients through a
+  merged solve reach the original grids' leaves.
 
 ## Two hard constraints
 
