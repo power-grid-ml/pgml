@@ -242,3 +242,46 @@ def test_non_clock_shift_rejected_three_phase_exact_single_phase():
     vg = resolve_vector_group(t, n_phases=1)
     assert vg.shift_exact_deg == pytest.approx(7.5)
     assert vg.clock == 0  # nearest clock, used only for parity/grouping
+
+
+@pytest.mark.parametrize(
+    "fc,tc,clock",
+    [
+        (WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 5),  # Dyn5
+        (WindingConnection.WYE_GROUNDED, WindingConnection.DELTA, 5),  # YNd5
+        (WindingConnection.WYE, WindingConnection.ZIGZAG_GROUNDED, 5),  # Yzn5
+        (WindingConnection.WYE_GROUNDED, WindingConnection.WYE_GROUNDED, 0),  # YNyn0
+    ],
+)
+def test_single_phase_stamp_matches_three_phase_positive_sequence(fc, tc, clock):
+    """The SAME schema values solve identically in both phase modes.
+
+    ``series_*`` is TO-coil-referred by contract; the single-phase scalar pi
+    applies its own coil→line referral (``y_LL = 3·y_coil`` for a delta TO
+    winding), so the assembled 2×2 single-phase block must equal the
+    positive-sequence projection of the 3-phase incidence block. YNd5 is the
+    case that catches a missing referral (delta on the TO side).
+    """
+    from pgml.assembly import assemble_ybus
+    from pgml.schemas.grid_schema import Grid, Node
+
+    def _grid(phases):
+        xfmr = _transformer(fc, tc, clock * 30.0)
+        xfmr = xfmr.model_copy(update={"from_phases": phases, "to_phases": phases})
+        return Grid(
+            base_frequency_hz=50.0,
+            nodes=[
+                Node(id=1, u_rated_v=U_FROM, phases=phases),
+                Node(id=2, u_rated_v=U_TO, phases=phases),
+            ],
+            branches=[xfmr],
+            appliances=[],
+        )
+
+    y1 = assemble_ybus(_grid((Phase.A,)), [50.0], dtype=torch.complex128).Y[0]
+    y3 = assemble_ybus(_grid(ABC), [50.0], dtype=torch.complex128).Y[0]
+    quads3 = _project(y3, _V_POS)
+    assert complex(y1[0, 0]) == pytest.approx(quads3["ff"], rel=1e-12)
+    assert complex(y1[0, 1]) == pytest.approx(quads3["ft"], rel=1e-12)
+    assert complex(y1[1, 0]) == pytest.approx(quads3["tf"], rel=1e-12)
+    assert complex(y1[1, 1]) == pytest.approx(quads3["tt"], rel=1e-12)

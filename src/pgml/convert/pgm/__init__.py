@@ -30,7 +30,11 @@ symmetric-component identity (zero-sequence from line ``r0/x0/c0`` fields when
 present, else from ``pgml.defaults``); sources become balanced 3-phase
 Thevenins (angles offset by 0 / −120 / +120 deg); ``asym_load`` entries are
 captured with per-phase P/Q and connection ``WYE`` (power-grid-model models
-all loads wye; no connection field is available).
+all loads wye; no connection field is available); ``transformer`` two-winding
+units convert with full vector-group support (see the converter module
+docstring's "Transformer convention" section for the pinned clock/tap sign
+conventions and the to-side-coil referral, including the phase-mode-dependent
+delta coil factor).
 
 id_map format
 -------------
@@ -39,6 +43,7 @@ A dict with string keys for each component type that was converted::
     {
         "node":            {pgm_id: Node.id, ...},
         "line":            {pgm_id: Line.id, ...},
+        "transformer":     {pgm_id: Transformer.id, ...},
         "sym_load":        {pgm_id: Load.id, ...},
         "asym_load":       {pgm_id: Load.id, ...},  # THREE_PHASE only
         "source":          {pgm_id: Source.id, ...},

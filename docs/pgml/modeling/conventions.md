@@ -99,7 +99,7 @@ This is the headline cross-tool difference.
 |---|---|---|---|
 | **pgml** | `series_resistance_ohm`, `series_inductance_h` | **TO / LV coil** | stored directly |
 | **pandapower** | `vk_percent`, `vkr_percent`, `sn_mva` | **LV side** ✅ | `Z_base_LV=vn_lv_v²/sn_va`; `R=vkr%·Z_base_LV`, `\|Z\|=vk%·Z_base_LV`, `X=√(\|Z\|²−R²)`, `L=X/2πf₀` |
-| **pgm** | `uk`, `pk`, `sn`, `u2` | **to-side (LV)** ✅ | `R=pk·u2²/sn²`, `\|Z\|=uk·u2²/sn`, `X=√(\|Z\|²−R²)` *(transformer path not yet implemented in the converter)* |
+| **pgm** | `uk`, `pk`, `sn`, `u2` | **to-side (LV)** ✅ | `R=pk·u2_eff²/sn²`, `\|Z\|=uk·u2_eff²/sn`, `X=√(\|Z\|²−R²)`, `u2_eff`=tap-adjusted to-side voltage; stored TO-coil-referred (`3x` for a DELTA-to winding, unchanged otherwise) in BOTH phase modes — the single-phase scalar pi applies its own `y_LL=3·y_coil` referral in assembly, see `src/pgml/convert/pgm/CONTEXT.md` |
 | **OpenDSS** | per-winding `%R`, inter-winding `XHL` | **percent, i.e. base-invariant, on the standard L-L base** — `XHL` documented "on the kVA base of winding 1"; `%R` per winding on its own kV/kVA base | `to_grid` recovers `R_ll=(%R_wdg1+%R_wdg2)/100·Z_base_LV`, `X_ll=XHL%/100·Z_base_LV`, `Z_base_LV=kV_lv²·1000/kVA` (requires both windings to share one kVA rating), then multiplies by **3 if the LV winding is DELTA** (its natural coil impedance base is `3·Z_base_LV` — a delta coil is rated at the L-L voltage with 1/3 the per-phase kVA, see the [transformer model](transformer.md) and `src/pgml/convert/opendss/CONTEXT.md`) to get the actual TO-coil-referred `R_lv`/`X_lv` pgml stores; the oracle direction back-calculates the same way (divides by the same factor first), see below |
 
 **Decision & rationale.** pgml refers the leakage admittance to the **TO/LV coil**, the
@@ -131,6 +131,12 @@ terminal (`magnetizing_conductance_s`, `magnetizing_inductance_h`); the pandapow
 converter computes `G_m=pfe_w/u_hv²`, `B_m` from `i0%`/`sn` on the HV base. pandapower
 internally keeps it on the LV base split into the pi-shunt — physically equivalent after
 the turns ratio, but the raw numbers differ, so do not compare them without re-referring.
+The pgm converter refers `i0`/`p0` (defined by pgm on the to-side `u2`, per
+`transformer.hpp`) to the HV/from terminal the same way, by the square nameplate ratio —
+but pgm's OWN branch stamp (`calc_param_y_sym`) instead splits the magnetizing admittance
+HALF onto its `Y_tt` and HALF (through the tap) onto `Y_ff`, a genuinely different topology
+from pgml's HV-only shunt; the residual is small (~1.5e-4 pu for a realistic ~0.5% `i0`,
+machine precision at `i0=p0=0`) and documented in `tests/reference/test_pgm_transformer.py`.
 
 ---
 
@@ -154,9 +160,11 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
   (correct for the CIGRE LV Dyn1 units, wrong for Yyn/Yzn/etc. — the `vector_group` string
   is recorded in `Provenance`, not parsed).
 - Tap-changer position (`tap_pos`/`tap_step`) is **not read**; off-nominal ratio stays 1.0.
-- pgm transformers are **not converted at all** yet; when added, the `clock` sign must be
-  pinned against a known case (pgm's `clock·30` is the to-side shift; confirm it maps to
-  pgml's "positive ⇒ LV lags" before trusting it).
+- pgm transformer conversion is pinned against the installed power-grid-model C++ source
+  (`transformer.hpp`): `clock*30` is IDENTICAL to pgml's "positive ⇒ LV lags" (verified by
+  a live `PowerGridModel.calculate_power_flow` solve, no sign flip), and `tap_side`
+  (0=from, else=to, matching pgm's own default) selects which nameplate voltage the tap
+  volts are added to (`tests/reference/test_pgm_transformer.py`).
 - pandapower stores `shift_degree` as a positive clock·30; verify it stores Dyn11 as 330
   (or −30) and not 30 before relying on `clock_transpose` for a non-Dyn1 group.
 - The OpenDSS converter (`convert.opendss.to_grid`) converts two-winding `Transformer`
@@ -205,8 +213,9 @@ reduces exactly to the classical off-nominal-tap pi (see the [transformer model]
 All four agree (consumer reference for loads, generator reference for generators); the
 converters pass P/Q through unchanged. ZIP behaviour: pgm `LoadGenType`
 (`const_power/const_impedance/const_current`) maps to pgml's `LoadModel`; pandapower
-`const_z_percent`/`const_i_percent` map to pgml `ZipCoefficients`. (Converter coverage:
-pandapower/pgm `sym_gen`/`sgen`/`gen` are **not yet** converted.)
+`const_z_percent`/`const_i_percent` map to pgml `ZipCoefficients`. (Converter coverage: pgm
+`sym_gen` converts (`Generator`, generation-positive); pandapower `sgen`/`gen` and pgm
+`asym_gen` are **not yet** converted.)
 
 ---
 
@@ -326,9 +335,14 @@ under-converts. The core model supports each; only the converter intake is missi
   units, `RegControl` regulators, tap-changer control, `XfmrCode`/frequency-correction
   curves, `Yy6`/`Dd6` (no explicit clock parameter beyond `LeadLag`), and an explicit
   non-zero (floating or impedance-grounded) neutral node.
-- **pgm converter:** no `transformer`, no `sym_gen`/`asym_gen`; `source.z01_ratio` and line
-  `tan0` ignored; pgm stores no `f0`, so the caller must pass the correct
-  `base_frequency_hz` (a 50/60 Hz mismatch silently scales every L and C).
+- **pgm converter:** `transformer` converts (two-winding, full vector-group support
+  including zigzag — see §2/§3 rows above and `src/pgml/convert/pgm/CONTEXT.md`); `sym_gen`
+  converts (`Generator`, generation-positive); NOT read/converted: `asym_gen`,
+  `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `link`; transformer
+  `uk_min`/`uk_max`/`pk_min`/`pk_max` (tap-dependent short-circuit parameters) and
+  `i0_zero_sequence`/`p0_zero_sequence` ignored; `source.z01_ratio` and line `tan0` ignored;
+  pgm stores no `f0`, so the caller must pass the correct `base_frequency_hz` (a 50/60 Hz
+  mismatch silently scales every L and C).
 - **pandapower converter:** transformer connection hard-coded to Dyn (`DELTA`/
   `WYE_GROUNDED`); `tap_pos`/`tap_step` not read; `sgen`/`gen` not converted; source
   zero-sequence (`r0x0_max`) not read.

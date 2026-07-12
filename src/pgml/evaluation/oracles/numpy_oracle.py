@@ -111,7 +111,11 @@ def _stamp_transformer_numpy(
 
     if p == 1:
         # Single-phase equivalent: nominal ratio = u_from/u_to (LL/LL), folded
-        # together with the off-nominal tap and the clock phase shift.
+        # together with the off-nominal tap and the clock phase shift. The
+        # stored leakage is TO-coil-referred; the scalar pi consumes the
+        # line-to-line equivalent (y_LL = 3·y_coil for a delta TO winding).
+        vg1 = resolve_vector_group(b, n_phases=1)
+        y_se = (3.0 if vg1.to_side.kind == "delta" else 1.0) * y_se
         shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
         t = (u_from / u_to) * tap_mag * cmath.exp(1j * shift_rad)
         abs_t2 = abs(t) ** 2

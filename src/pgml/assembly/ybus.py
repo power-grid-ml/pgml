@@ -1206,7 +1206,13 @@ def _transformer_block_groups(
         y_se = torch.stack(yse_list, dim=1)  # [H,K]
         ratio = torch.stack(ratio_list, dim=0)  # [K]
         if p == 1:
-            block = _scalar_tap_blocks(y_se, ratio)  # [H,K,2,2]
+            # The schema stores the leakage referred to the TO-side COIL; the
+            # scalar pi consumes the line-to-line equivalent. They coincide for
+            # a wye / zigzag TO winding; a delta TO coil carries 3x the
+            # line-to-line impedance (y_LL = 3·y_coil) — the same identity the
+            # 3-phase incidence realises through Mᵀ M.
+            k_ll = 3.0 if vg0.to_side.kind == "delta" else 1.0
+            block = _scalar_tap_blocks(k_ll * y_se, ratio)  # [H,K,2,2]
         else:
             n_block = block_incidence(vg0, p, rdt, device)  # [2P,2P]
             block = winding_leakage_block(y_se, ratio, n_block)  # [H,K,2P,2P]
