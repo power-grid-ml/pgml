@@ -5,9 +5,7 @@ Converts a pandapower network (`pandapowerNet`) to our schema `Grid`.
 ## Public API
 
 ```python
-from pgml.convert.pandapower import to_grid, PhaseMode, ensure_numpy_compat
-
-ensure_numpy_compat()  # restore numpy.Inf/in1d etc. before the FIRST `import pandapower`
+from pgml.convert.pandapower import to_grid, PhaseMode
 
 import pandapower as pp
 import pandapower.networks as pn

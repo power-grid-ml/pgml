@@ -21,9 +21,6 @@ from pgml.evaluation.data import LabeledMatrix, VoltageProfile, row_labels
 from pgml.evaluation.topology import distance_from_slack
 
 
-from pgml.convert.pandapower import ensure_numpy_compat as _numpy_shim
-
-
 def pandapower_ybus(
     net, grid, id_map: dict, index, *, label: str = "pandapower"
 ) -> LabeledMatrix:
@@ -32,7 +29,6 @@ def pandapower_ybus(
     This is the PURE NETWORK admittance (lines + explicit shunts, no const-Z load /
     source Norton shunts) — compare it to our ``assemble_network_ybus``.
     """
-    _numpy_shim()
     y_pu = net._ppc["internal"]["Ybus"].toarray()
     base_mva = float(net._ppc["baseMVA"])
     # MATPOWER mixed per-unit: each bus carries its own voltage base (ppc bus

@@ -146,24 +146,17 @@ Convert a `pandapower <https://www.pandapower.org/>`_ network to a
 
 .. note::
 
-   ``pandapower`` is mocked in the docs build (numpy 2.x incompatibility).
+   ``pandapower`` is mocked in the docs build.
    The public API (``to_grid``) is documented from the source directly.
 
-pandapower 2.14 — the newest release installable alongside this package — still reads
-``np.Inf`` / ``np.in1d``, both removed in numpy 2.0. Call
-:func:`~pgml.convert.pandapower.ensure_numpy_compat` once, before importing or running
-pandapower, to restore the numpy-1.x aliases it needs::
+Usage::
 
-    from pgml.convert.pandapower import ensure_numpy_compat, to_grid
+    from pgml.convert.pandapower import to_grid
 
-    ensure_numpy_compat()    # numpy 2.x compat shim; idempotent
     import pandapower.networks as pn
 
     net = pn.case33bw()
     grid, id_map = to_grid(net)
-
-Every builder in :mod:`pgml.grids` calls this shim internally, so callers of
-:func:`~pgml.grids.ieee33_geometry_grid` and friends never need to call it directly.
 
 .. automodule:: pgml.convert.pandapower
    :members:

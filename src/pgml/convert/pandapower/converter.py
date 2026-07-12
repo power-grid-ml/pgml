@@ -257,9 +257,11 @@ def _tap_ratio_magnitude(row: Any) -> float:
     (``ratio_magnitude = 1 / (1 + delta)``).
 
     Any of ``tap_pos``/``tap_neutral``/``tap_step_percent``/``tap_side`` missing (NaN
-    or absent) means no tap-changer is configured -> returns 1.0. An ideal
-    phase-shifter tap (``tap_step_degree`` nonzero, or ``tap_phase_shifter`` True) is
-    not modelled by the schema's real-valued ``ratio_magnitude`` and raises.
+    or absent) means no tap-changer is configured -> returns 1.0. Only a plain
+    ratio changer is modelled by the schema's real-valued ``ratio_magnitude``:
+    an ideal / angle-shifting tap raises, whether declared through pandapower 3's
+    ``tap_changer_type`` column (anything but ``"Ratio"``), the legacy
+    ``tap_phase_shifter`` boolean, or a nonzero ``tap_step_degree``.
     """
     step_deg = _opt_float(row, "tap_step_degree")
     if step_deg is not None and abs(step_deg) > 1.0e-9:
@@ -267,6 +269,18 @@ def _tap_ratio_magnitude(row: Any) -> float:
             f"pandapower trafo: tap_step_degree={step_deg} (an ideal phase-shifter "
             "tap) is not supported; only a real-valued off-nominal tap ratio is "
             "modelled."
+        )
+    changer_type = row.get("tap_changer_type", None) if hasattr(row, "get") else None
+    if isinstance(changer_type, float) and math.isnan(changer_type):
+        changer_type = None
+    if changer_type is not None and str(changer_type).strip().lower() not in (
+        "",
+        "none",
+        "ratio",
+    ):
+        raise ConversionError(
+            f"pandapower trafo: tap_changer_type={changer_type!r} is not supported; "
+            "only a real-valued off-nominal ratio tap ('Ratio') is modelled."
         )
     phase_shifter = (
         row.get("tap_phase_shifter", False) if hasattr(row, "get") else False

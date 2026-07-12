@@ -158,13 +158,6 @@ The assembly's `phase_voltage_magnitude` returns `u_rated_v` unchanged for
 pandapower's const-Z reference.
 
 ### numpy 2.x compatibility
-pandapower 2.14 uses removed numpy aliases. Apply before importing:
-```python
-from pgml.convert.pandapower import ensure_numpy_compat
-
-ensure_numpy_compat()
-```
-
 ### Validated on
 IEEE 33-bus Baran & Wu (`pandapower.networks.case33bw()`), 60 Hz, 33 buses,
 32 in-service lines + 5 tie-lines (out of service), 32 loads, 1 slack.
@@ -177,7 +170,7 @@ All three reference oracles pass on the single-phase positive-sequence IEEE33:
   after accounting for load shunts. `test_ieee33_opendss.py`.
 - power-grid-model (results, 2nd oracle): node V within ~2e-10 pu. `test_ieee33_pgm.py`.
 Comparison is apples-to-apples: loads set to CONSTANT IMPEDANCE on the reference
-side (pp `const_z_percent=100`, pgm `const_impedance`) so both solve the same
+side (pp `const_z_p_percent=const_z_q_percent=100`, pgm `const_impedance`) so both solve the same
 linear system; the source is an ideal slack (`solve_harmonic(fixed_rows, v_fixed)`).
 
 ## NONLINEAR power-flow oracle status (`solve_power_flow`, const-power)

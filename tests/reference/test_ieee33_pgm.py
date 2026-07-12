@@ -439,7 +439,8 @@ class TestPgmGridMatchesPandapowerGrid:
         from pgml.convert.pandapower import to_grid as pp_to_grid
 
         net = pn.case33bw()
-        net.load["const_z_percent"] = 100.0
+        net.load["const_z_p_percent"] = 100.0
+        net.load["const_z_q_percent"] = 100.0
         net.load["const_i_percent"] = 0.0
         pp.runpp(net, numba=False)
         assert net.converged

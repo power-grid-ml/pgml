@@ -570,7 +570,7 @@ def test_inconsistent_vector_group_and_shift_raises():
 # ---------------------------------------------------------------------------
 # 11. Asymmetric (best-effort): runpp_3ph vs THREE_PHASE for Dyn and Yzn
 # ---------------------------------------------------------------------------
-# pandapower 2.14's runpp_3ph DOES support 'Dyn'/'Yzn' vector groups (its own
+# pandapower's runpp_3ph DOES support 'Dyn'/'Yzn' vector groups (its own
 # zero-sequence transformer model requires the BARE letter form, no clock
 # digit -- see _parse_vector_group's clock=None path), given zero-sequence
 # columns (vk0_percent, vkr0_percent, mag0_percent, mag0_rx, si0_hv_partial)
@@ -636,12 +636,18 @@ def _build_asym_net(vector_group: str, mag0_percent: float):
 def test_asymmetric_dyn_runpp_3ph():
     """Dyn (clock 5, 150 deg), unbalanced load: per-phase voltages vs runpp_3ph.
 
-    Achieved ~2.4e-5 pu / ~1.3e-3 deg -- the same order as the SINGLE_PHASE_
-    EQUIV/pandapower agreement, plausibly from pandapower's own zero-sequence
-    T-equivalent split (`si0_hv_partial`) vs pgml's topology-only Z0=Z1 model
-    (a small, expected structural difference, not investigated further here).
+    ``mag0_percent`` is set very large so pandapower's zero-sequence magnetizing
+    shunt vanishes: pgml deliberately models NO zero-sequence magnetizing branch
+    (the zero-sequence path is topology-only with the leakage value), and
+    pandapower 3 honours ``mag0_percent`` in its Dyn zero-sequence network — a
+    finite value (e.g. the pandapower default 10) shunts real zero-sequence
+    current and shifts the loaded-phase voltage by ~1e-3 pu, which is a
+    modeling-scope difference, not a conversion error. With the shunt removed
+    the two zero-sequence models coincide (vk0 = vk here) and the agreement is
+    ~2e-7 pu; a balanced load agrees to ~1e-13 pu regardless (positive sequence
+    is exact).
     """
-    net = _build_asym_net("Dyn", mag0_percent=100.0)
+    net = _build_asym_net("Dyn", mag0_percent=1.0e6)
     pp.runpp_3ph(net, max_iteration=200)  # raises LoadflowNotConverged on failure
 
     grid, id_map = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
@@ -670,50 +676,47 @@ def test_asymmetric_dyn_runpp_3ph():
             )
 
 
-def test_asymmetric_yzn_runpp_3ph_definitional_gap():
-    """Yzn (zigzag) is SKIPPED as a quantitative oracle -- pandapower 2.14's own
-    runpp_3ph zero-sequence zigzag model does not correspond to a simple
-    vk0=vk mapping, and is numerically fragile in this version.
+def test_asymmetric_yzn_runpp_3ph():
+    """Yzn (zigzag, clock 5), unbalanced load: per-phase voltages vs runpp_3ph.
 
-    Findings (reported, not papered over):
-    - pandapower's own Newton-Raphson for THIS Yzn network only converges for
-      mag0_percent <~ 80% (90%/99%/100% all fail to converge after 100-200
-      iterations); Dyn has no such restriction (100% converges cleanly). This
-      is a pandapower-2.14-implementation numerical fragility specific to its
-      zigzag zero-sequence branch construction, not a pgml issue.
-    - even at the highest reliably-converging value (mag0_percent=70, the
-      closest available to the "vk0=vk, mag0 high" comparability recipe), the
-      LV-side per-phase voltages disagree by up to ~0.24 pu / ~15 deg from
-      pgml's THREE_PHASE Yzn5 solve -- two orders of magnitude worse than the
-      Dyn case. This indicates `mag0_percent`/`si0_hv_partial` play a
-      STRUCTURALLY different role in pandapower's zero-sequence zigzag model
-      (most likely: representing the zigzag's own low-impedance
-      zero-sequence self-path directly, not a magnetizing-branch ratio) than
-      a "Z0=Z1-via-topology" mapping can reproduce.
-    - pgml's OWN positive-sequence zigzag model is independently pinned exact
-      by test_transformer_clock_matrix.py (machine precision); this gap is
-      specifically about the ZERO-sequence value convention for a zigzag
-      winding, which the schema documents as unimplemented
-      (`TransformerZeroSeq` exists but its VALUE is not consumed -- "the
-      zero-seq PATH comes from the topology and its VALUE equals the
-      positive-sequence leakage").
+    The two zero-sequence zigzag models are built differently and do NOT admit
+    an exact correspondence: pgml's zigzag ground path is topology-derived with
+    the positive-sequence leakage VALUE (the `TransformerZeroSeq` override is
+    not consumed), while pandapower parameterises the zigzag ground path
+    through ``mag0_percent``/``si0_hv_partial`` — the gap does not vanish as
+    ``mag0`` grows (the ground path itself would disappear; the load flow stops
+    converging beyond ~3000), so ``mag0_percent`` is structurally part of the
+    path, not a removable magnetizing shunt. Empirical correspondence sweep
+    (max per-phase |dvm| on the zigzag bus): mag0=10 -> 2.2e-3, 30 -> 1.9e-3,
+    100 -> 6.6e-4 (minimum, used here), 300 -> 5.2e-3, 1000 -> 2.3e-2. The
+    tolerance guards that floor; balanced quantities and the positive-sequence
+    zigzag model are pinned exactly elsewhere
+    (test_transformer_clock_matrix.py, the Yzn5 grid-matrix case).
     """
-    net = _build_asym_net("Yzn", mag0_percent=70.0)
-    try:
-        pp.runpp_3ph(net, max_iteration=200)
-    except Exception as exc:  # pandapower 2.14 zigzag zero-seq is fragile
-        pytest.skip(f"pandapower runpp_3ph did not converge for Yzn: {exc}")
+    net = _build_asym_net("Yzn", mag0_percent=100.0)
+    pp.runpp_3ph(net, max_iteration=200)
 
     grid, id_map = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
     result = solve_power_flow(
         grid, slack="ideal", tol=1e-12, max_iter=200, dtype=torch.complex128
     )
     assert result.converged
+    v = result.v.reshape(-1)
 
-    pytest.skip(
-        "pandapower's Yzn zero-sequence model (mag0_percent/si0_hv_partial) does "
-        "not correspond to pgml's Z0=Z1-via-topology assumption for a zigzag "
-        "winding -- observed LV-side disagreement up to ~0.24 pu / ~15 deg even "
-        "at the highest reliably-converging mag0_percent (70%); a genuine, "
-        "unresolved definitional gap (see docstring), not a regression to guard."
-    )
+    atol_vm, atol_va = 2.0e-3, 2.0e-1
+    for pp_idx in (0, 1):
+        node_id = id_map["bus"][pp_idx]
+        u_base = float(net.bus.at[pp_idx, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
+        for ph, label in ((Phase.A, "a"), (Phase.B, "b"), (Phase.C, "c")):
+            r = result.index.row(node_id, ph)
+            vc = v[r]
+            vm = float(vc.abs()) / u_base
+            va = math.degrees(math.atan2(float(vc.imag), float(vc.real)))
+            vm_ref = float(net.res_bus_3ph.at[pp_idx, f"vm_{label}_pu"])
+            va_ref = float(net.res_bus_3ph.at[pp_idx, f"va_{label}_degree"])
+            assert abs(vm - vm_ref) < atol_vm, (
+                f"bus {pp_idx} phase {label}: vm ours={vm:.6f} pp={vm_ref:.6f}"
+            )
+            assert abs(_angle_diff_deg(va, va_ref)) < atol_va, (
+                f"bus {pp_idx} phase {label}: va ours={va:.4f} pp={va_ref:.4f}"
+            )

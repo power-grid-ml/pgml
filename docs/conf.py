@@ -139,8 +139,9 @@ add_module_names = False
 
 # ---------------------------------------------------------------------------
 # Mock heavy/optional dependencies so the docs build does NOT need the full
-# runtime stack.  Only `pandapower` is broken in the docs environment (numpy
-# incompatibility); all other heavy deps install cleanly alongside Sphinx.
+# runtime stack. `pandapower` imports cleanly but is heavyweight and unneeded
+# for autodoc (only its converter's docstrings are published); all other heavy
+# deps install alongside Sphinx.
 # ---------------------------------------------------------------------------
 autodoc_mock_imports = [
     "pandapower",
