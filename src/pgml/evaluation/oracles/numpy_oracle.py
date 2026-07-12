@@ -129,8 +129,10 @@ def _stamp_transformer_numpy(
         # Phase-domain: winding-incidence primitive Nᵀ Y_winding N.
         import torch as _torch
 
-        vg = resolve_vector_group(b)
-        # Coil turns ratio: delta → LL voltage, wye → LN voltage = u/√3.
+        vg = resolve_vector_group(b, n_phases=p)
+
+        # Coil turns ratio: delta → LL voltage, wye/zigzag → LN voltage = u/√3
+        # (mirrors pgml.assembly._transformer.nominal_turns_ratio).
         sqrt3 = math.sqrt(3.0)
         coil_from = u_from if vg.from_side.kind == "delta" else u_from / sqrt3
         coil_to = u_to if vg.to_side.kind == "delta" else u_to / sqrt3

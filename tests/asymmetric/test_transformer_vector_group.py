@@ -236,11 +236,27 @@ class TestClockSix:
 
 
 class TestUnsupportedGroups:
-    def test_unsupported_delta_wye_clock_raises(self) -> None:
-        """A delta-wye clock other than 1/11 is rejected (not yet modelled)."""
-        grid = _grid(WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 150.0)
-        with pytest.raises(NotImplementedError):
+    def test_parity_inconsistent_clock_raises(self) -> None:
+        """A clock whose parity contradicts the winding pairing is rejected."""
+        grid = _grid(WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 60.0)
+        with pytest.raises(NotImplementedError, match="clock 2 is inconsistent"):
             assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+
+    def test_dyn5_coupling_carries_150_deg(self) -> None:
+        """Dyn5 (the German LV std type clock) assembles with a 150° coupling.
+
+        The positive-sequence coupling is ``−y_se·e^{jθ}/n``; referencing its
+        phase against the leakage admittance ``y_se`` isolates the clock angle.
+        """
+        grid = _grid(WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 150.0)
+        coupling = _coupling_block(grid)
+        v_pos = np.array(
+            [1.0, cmath.exp(-2j * math.pi / 3), cmath.exp(2j * math.pi / 3)]
+        )
+        lam = complex(v_pos.conj() @ coupling @ v_pos / 3.0)
+        y_se = 1.0 / complex(R_LV, 2.0 * math.pi * F0 * L_LV)
+        shift = math.degrees(cmath.phase(-lam / y_se)) % 360.0
+        assert shift == pytest.approx(150.0, abs=1e-9)
 
     def test_finite_grounding_impedance_raises(self) -> None:
         """A nonzero neutral grounding impedance is rejected, not ignored."""

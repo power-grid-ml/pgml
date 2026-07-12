@@ -1144,12 +1144,12 @@ def _transformer_block_groups(
     by_key: dict[tuple, list] = {}
     vgs: dict[int, object] = {}
     for t in xfmrs:
-        vg = resolve_vector_group(t)
+        vg = resolve_vector_group(t, n_phases=len(t.from_phases))
         vgs[id(t)] = vg
         by_key.setdefault(_xfmr_group_key(vg, len(t.from_phases)), []).append(t)
 
     two_pi_f = (2.0 * torch.pi) * f  # [H]
-    for (_fk, _tk, _ct, _clock, p), group in by_key.items():
+    for (_fk, _tk, _clock, p), group in by_key.items():
         vg0 = vgs[id(group[0])]
         eye_p = torch.eye(p, dtype=cdt, device=device)
 
@@ -1179,9 +1179,11 @@ def _transformer_block_groups(
             u_to = torch.as_tensor(t.u_rated_to_v, dtype=rdt, device=device)
             if p == 1:
                 # Single-phase / positive-sequence equivalent: the vector group is
-                # folded into a complex line-to-line ratio (magnitude n_LL, clock
-                # phase shift), the textbook off-nominal-tap pi.
-                theta = math.radians(vg.shift_deg)
+                # folded into a complex line-to-line ratio (magnitude n_LL, exact
+                # phase shift), the textbook off-nominal-tap pi. The exact shift
+                # honours arbitrary phase-shifter angles that no 3-phase winding
+                # topology can realise.
+                theta = math.radians(vg.shift_exact_deg)
                 rot = torch.complex(
                     torch.as_tensor(math.cos(theta), dtype=rdt, device=device),
                     torch.as_tensor(math.sin(theta), dtype=rdt, device=device),

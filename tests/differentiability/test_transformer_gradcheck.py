@@ -29,8 +29,13 @@ from pgml.solver import solve_harmonic
 ABC = (Phase.A, Phase.B, Phase.C)
 
 
-def _dyn_grid(phases) -> Grid:
-    """HV source -> Dyn transformer -> LV node with a const-Z load."""
+def _dyn_grid(
+    phases,
+    from_connection=WindingConnection.DELTA,
+    to_connection=WindingConnection.WYE_GROUNDED,
+    shift_deg=30.0,
+) -> Grid:
+    """HV source -> transformer (given vector group) -> LV node with a const-Z load."""
     n = len(phases)
     src = Source(
         id=10,
@@ -50,11 +55,11 @@ def _dyn_grid(phases) -> Grid:
         s_rated_va=0.4e6,
         u_rated_from_v=20_000.0,
         u_rated_to_v=400.0,
-        from_connection=WindingConnection.DELTA,
-        to_connection=WindingConnection.WYE_GROUNDED,
+        from_connection=from_connection,
+        to_connection=to_connection,
         series_resistance_ohm=0.01,
         series_inductance_h=1.0e-4,
-        tap=ComplexTap(ratio_magnitude=1.0, shift_deg=30.0),
+        tap=ComplexTap(ratio_magnitude=1.0, shift_deg=shift_deg),
     )
     load = Load(id=30, node=2, phases=phases, p_nom_w=9.0e3, q_nom_var=2.0e3)
     nodes = [
@@ -75,8 +80,8 @@ def _voltages(grid, overrides):
     return solve_harmonic(yb.Y, i).reshape(-1)
 
 
-def _run(phases):
-    grid = _dyn_grid(phases)
+def _run(phases, **vector_group):
+    grid = _dyn_grid(phases, **vector_group)
     r = torch.tensor(0.01, dtype=torch.float64, requires_grad=True)
     ell = torch.tensor(1.0e-4, dtype=torch.float64, requires_grad=True)
     tap = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
@@ -100,3 +105,19 @@ def test_gradcheck_transformer_three_phase_incidence():
 def test_gradcheck_transformer_single_phase_scalar():
     """Single-phase / positive-sequence scalar-tap path: grad w.r.t. R, L, tap."""
     _run((Phase.A,))
+
+
+def test_gradcheck_transformer_dyn5():
+    """Permuted-clock incidence (Dyn5, the German LV std-type group)."""
+    _run(ABC, shift_deg=150.0)
+
+
+def test_gradcheck_transformer_yzn5():
+    """Zigzag LV winding (Yzn5): the limb-difference incidence stays constant
+    topology, so gradients flow through y and τ unchanged."""
+    _run(
+        ABC,
+        from_connection=WindingConnection.WYE,
+        to_connection=WindingConnection.ZIGZAG_GROUNDED,
+        shift_deg=150.0,
+    )
