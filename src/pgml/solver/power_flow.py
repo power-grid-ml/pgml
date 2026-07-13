@@ -81,8 +81,8 @@ from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 _log = logging.getLogger("pgml")
 
 
-def _rel_convergence_floor(rdt: torch.dtype) -> float:
-    """Smallest relative update ``||ΔV|| / ||V||`` the dtype can resolve.
+def _rel_convergence_floor(rdt: torch.dtype, backend: str = "dense") -> float:
+    """Smallest relative update ``||ΔV|| / ||V||`` the dtype (and backend) can resolve.
 
     The fixed-point / Newton update stops shrinking once it reaches the rounding
     noise of the working precision. ``float64`` has ample headroom (eps ~2e-16), so
@@ -90,8 +90,18 @@ def _rel_convergence_floor(rdt: torch.dtype) -> float:
     (eps ~1.2e-7) cannot resolve an update below ~1e-6 of the voltage scale, so a
     tighter absolute ``tol`` is physically unreachable; the floor caps the
     achievable tolerance and is reported via a one-time warning.
+
+    The floor is also a property of the linear-algebra ``backend``: SuperLU's
+    single-precision back-substitution (different pivoting/ordering than the dense
+    torch LU) leaves per-iterate rounding noise measured at ~2e-6 relative, so
+    marginal scenarios oscillate just above the dense-calibrated floor without ever
+    crossing it (measured: batched IEEE-33 at complex64 plateaus flat at 2.0e-6 for
+    ~0.2 % of scenarios, floor-accurate but running to ``max_iter``). The sparse
+    float32 floor is therefore 4e-6 (2x headroom over the measured plateau).
     """
-    return 0.0 if rdt == torch.float64 else 1.0e-6
+    if rdt == torch.float64:
+        return 0.0
+    return 4.0e-6 if backend == "sparse" else 1.0e-6
 
 
 def _operating_point_batch_size(operating_point: Optional[dict]) -> int:
@@ -1312,7 +1322,9 @@ def _current_injection_forward(
     i_slack0, converged_mask, residual_vec)``; ``residual_norm`` is the final ``||ΔV||``
     (max over batch), while ``converged_mask`` / ``residual_vec`` are PER scenario.
     Convergence is per element on ``||ΔV|| < max(tol, floor·||V||)`` where ``floor`` is
-    the dtype's resolvable relative precision (0 for float64; ~1e-6 for float32).
+    the resolvable relative precision of the dtype AND linear-algebra backend
+    (0 for float64; 1e-6 for float32 dense, 4e-6 for float32 sparse SuperLU —
+    see :func:`_rel_convergence_floor`).
     """
     with torch.no_grad():
         if system is not None:
@@ -1375,7 +1387,6 @@ def _current_injection_forward(
         v_row = torch.polar(row_mag, row_ang).to(cdt)
         v = v_row.expand(*lead, n).clone()
 
-        floor = _rel_convergence_floor(rdt)
         residual_norm = torch.zeros((), dtype=rdt, device=device)
         residual_vec = torch.zeros((), dtype=rdt, device=device)
         converged_mask = torch.zeros((), dtype=torch.bool, device=device)
@@ -1390,6 +1401,9 @@ def _current_injection_forward(
             if system is not None
             else lu_factor_system(y_eff0, fixed_rows=fixed_rows, backend=factor_backend)
         )
+        # The achievable update floor depends on the RESOLVED backend (SuperLU's
+        # single-precision back-substitution is noisier than the dense torch LU).
+        floor = _rel_convergence_floor(rdt, fac.backend)
         for _ in range(max_iter):
             i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
