@@ -158,7 +158,12 @@ back-substitution 50×. Large multi-RHS batches split across up to 8 threads (Su
 back-substitution releases the GIL and is deterministic under concurrent solves; 256 RHS
 at 4800 rows 267 → 52 ms). Confirmed on an RTX A2000: at complex128, CPU-sparse beats
 GPU-dense at every size ≥ 300 rows — the complex64 data-generation path is where the GPU
-wins. Open follow-ups: a sparse/matrix-free IFT backward + Newton Jacobian for very large
+wins. The complex64 convergence floor is BACKEND-aware (`_rel_convergence_floor`):
+SuperLU's single-precision back-substitution leaves ~2e-6 relative per-iterate noise
+(vs ~1e-6 dense), so marginal scenarios of a large batch used to oscillate to max_iter
+under the dense-calibrated floor (voltages floor-accurate, flag + runtime wrong); sparse
+float32 floor = 4e-6, guarded by
+`tests/reference/test_sparse_solver.py::test_sparse_complex64_batch_converges_at_backend_floor`. Open follow-ups: a sparse/matrix-free IFT backward + Newton Jacobian for very large
 N (both are still dense `[2N, 2N]`); sparse-direct assembly (COO from the stamps,
 skipping the dense `Y`) once grids exceed a few thousand rows.
 
@@ -274,6 +279,24 @@ more physical than they are. Items already tracked as open work above are refere
   documented Deri assumptions. Carson shunt `C` is physically correct but not bit-exact
   to OpenDSS's `capradius` convention (irrelevant for c=0 feeders). The
   `geometry.sequence.two_conductor_*` helpers are diagnostic-only (not differentiable).
+- **Zero-sequence line impedance at harmonics — LUMPED R/L lines only.** pgml has BOTH
+  line models: lines WITH `conductor_geometry` compute Z(h) from first principles
+  (Carson/Deri incl. frequency-dependent earth return — bit-exact vs OpenDSS at every
+  order, 50–750 Hz), and that path is the authoritative answer to the earth-return
+  question. This entry concerns lines WITHOUT geometry (lumped R/L matrices, e.g. from
+  pandapower): their stored values embed the earth return AT f0, so extrapolating Z0 to
+  h·f0 is an ASSUMPTION in every tool. OpenDSS reconstructs Z0(f) through its `Rg`/`Xg`
+  parameters (Deri from the base-frequency values; can yield negative X0 — CIGRE LV
+  cable at 150 Hz: 0.131−0.086j Ω vs plain-scaled 0.023+0.026j Ω), for matrix- and
+  sequence-specified lines alike. pgml's plain phase model scales X∝h, R const
+  (identical to OpenDSS with `Rg=Xg=0`, the metallic-return convention; native triplen
+  |V3| parity then ~1e-6 pu — `tests/reference/test_native_harmonics_opendss.py`);
+  `geometry.sequence.zero_sequence_harmonic_z` instead adds a monotone Carson
+  earth-resistance growth — deliberately NOT OpenDSS's Deri reconstruction (which is
+  non-monotone and can be non-physical for cables). With OpenDSS defaults on
+  sym-component lines the two extrapolations differ by up to ~0.3 pu at LV triplen
+  voltages — a modeling-assumption divergence, not a solver error; supply conductor
+  geometry when the zero-sequence earth return matters.
 - **EN 50160 table.** Orders 1–25 are the standard's (amended A2:2019) values; orders
   26–49 are a manual flat extension (marked in `data/standards/en50160.yaml`).
 - **Scenario sampling.** All pre-solve sampling executes on CPU (`SobolEngine` is

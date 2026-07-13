@@ -110,3 +110,65 @@ def test_sparse_backend_rejects_cuda():
     y = (torch.eye(8, dtype=torch.complex128) * 2.0).cuda()
     with pytest.raises(InputError, match="CPU"):
         lu_factor_system(y, backend="sparse")
+
+
+def test_sparse_complex64_batch_converges_at_backend_floor():
+    """A large complex64 scenario batch terminates under the sparse backend.
+
+    SuperLU's single-precision back-substitution leaves ~2e-6 relative rounding
+    noise per iterate — above the dense-calibrated 1e-6 float32 floor — so
+    marginal scenarios of a large batch used to oscillate to ``max_iter`` and
+    come back flagged unconverged although their voltages sit at the
+    single-precision floor. The backend-aware floor
+    (:func:`pgml.solver.power_flow._rel_convergence_floor`) must let the batch
+    terminate like the dense backend does, with the full mask converged and
+    floor-level accuracy against the double-precision dense reference.
+    """
+    pp = pytest.importorskip("pandapower")
+    import numpy as np
+    import pandapower.networks as pn
+
+    from pgml.convert.pandapower import to_grid
+    from pgml.schemas import Load
+
+    net = pn.case33bw()
+    pp.runpp(net, numba=False)
+    grid, _ = to_grid(net)
+    loads = [a for a in grid.appliances if isinstance(a, Load) and a.in_service]
+    scen = np.random.default_rng(0).uniform(0.8, 1.2, size=(5000, len(loads)))
+
+    def op_for(rdt):
+        s = torch.tensor(scen, dtype=rdt)
+        return {
+            ld.id: {
+                "p_w": float(ld.p_nom_w) * s[:, i],
+                "q_var": float(getattr(ld, "q_nom_var", 0.0) or 0.0) * s[:, i],
+            }
+            for i, ld in enumerate(loads)
+        }
+
+    r64 = solve_power_flow(
+        grid,
+        slack="ideal",
+        operating_point=op_for(torch.float32),
+        dtype=torch.complex64,
+        linear_solver="sparse",
+    )
+    assert bool(r64.converged_mask.all()), (
+        f"{int((~r64.converged_mask).sum())} scenarios flagged unconverged "
+        f"after {r64.iterations} iterations"
+    )
+    assert r64.iterations <= 20, (
+        f"sparse complex64 batch took {r64.iterations} iterations "
+        "(floor not terminating the fixed point)"
+    )
+
+    ref = solve_power_flow(
+        grid,
+        slack="ideal",
+        operating_point=op_for(torch.float64),
+        dtype=torch.complex128,
+        linear_solver="dense",
+    )
+    rel = ((r64.v.abs().to(torch.float64) - ref.v.abs()).abs() / ref.v.abs()).max()
+    assert float(rel) < 5e-5, f"relative |V| error {float(rel):.2e} above c64 floor"
