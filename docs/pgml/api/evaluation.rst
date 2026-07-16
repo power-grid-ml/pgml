@@ -18,14 +18,21 @@ implementations.
   and builder functions that consume solver results, including the shared row-building
   primitive :func:`~pgml.evaluation.harmonic_profile_from_array` (a plain complex
   ``[H, N]`` array in, a :class:`~pgml.evaluation.HarmonicProfile` out — the solver-result
-  path here and the ML estimator/dataset path in ``pgl.evaluation`` both delegate to it).
+  path here and the ML estimator/dataset path in ``pgl.evaluation`` both delegate to it)
+  and :func:`~pgml.evaluation.node_numbering` (the zero-based display numbering used by
+  :func:`~pgml.evaluation.plot_grid_graph` and, optionally, by
+  :func:`~pgml.evaluation.data.row_labels`).
 - **oracles** — lazy adapters for pandapower, OpenDSS, and standalone oracle functions,
   plus the reference-grid builders re-exported from :mod:`pgml.grids`; all emit the same
   containers.
 - **ybus_plots** — Y-bus heatmaps side-by-side and a difference heatmap.
 - **profiles** — voltage-drop diagram and harmonic magnitude/angle plot.
 - **harmonic3d** — interactive 3D harmonic surface plot (Plotly → HTML).
-- **graph_plots** — topology graph coloured by a per-node value.
+- **graph_plots** — topology graph coloured by a per-node value
+  (:func:`~pgml.evaluation.plot_grid_graph`), the shared node-placement helper
+  :func:`~pgml.evaluation.graph_layout`, and :func:`~pgml.evaluation.load_node_positions`
+  for reading explicit (e.g. geographic) coordinates from a JSON file. See
+  `Node positions and numbering`_ below.
 - **style** — shared styling: the high-quality :func:`~pgml.evaluation.save_figure` /
   :func:`~pgml.evaluation.save_html` save helpers and
   :func:`~pgml.evaluation.style.positive_log_norm`, the shared positive-data ``LogNorm``
@@ -62,6 +69,44 @@ continues to encode the harmonic order::
 
 When ``dash_map`` is ``None`` (default), the original binary behaviour applies:
 labels in ``reference_labels`` are dashed, all others solid.
+
+Node positions and numbering
+------------------------------
+
+Grid ``Node.id`` values are unique integers allocated from one counter shared by every
+element class in a :class:`~pgml.schemas.grid_schema.Grid` (nodes, branches,
+appliances), so they are 1-based and carry no positional meaning. Every place a grid is
+DISPLAYED — a graph drawing or a row label — instead numbers nodes zero-based by their
+position in ``grid.nodes``, which for a converted grid matches the source tool's own
+bus order (e.g. pandapower bus ``0..N-1``). :func:`~pgml.evaluation.node_numbering`
+computes this mapping once; :func:`~pgml.evaluation.plot_grid_graph`'s ``with_labels``
+and :func:`~pgml.evaluation.data.row_labels`'s ``numbering`` argument both use it so a
+plotted node number always means the same thing as the corresponding heatmap row label.
+
+:func:`~pgml.evaluation.graph_layout` is the single source of node placement for every
+grid-graph figure — it returns ``{node_id: (x, y)}`` either from an automatic layout
+(``"spring"`` or ``"kamada"``) or from explicit ``positions`` (e.g. geographic
+coordinates). Pass the SAME returned mapping to :func:`~pgml.evaluation.plot_grid_graph`
+and to anything drawn on top of it (sensor markers, annotations) so every layer aligns::
+
+    from pgml.evaluation import graph_layout, plot_grid_graph
+
+    pos = graph_layout(grid, positions=None)          # deterministic spring layout
+    fig, ax = plot_grid_graph(grid, node_values=values, positions=pos)
+    ax.scatter(*zip(*(pos[nid] for nid in sensor_node_ids)), marker="*", zorder=5)
+
+``positions`` keys resolve, in order, as an exact node NAME, else a zero-based node
+NUMBER, else a node ID; every grid node must be covered or ``graph_layout`` raises (a
+partial layout would silently misplace the rest of the graph). An already
+node-id-keyed, fully-covering dict passes through unchanged (idempotent).
+:func:`~pgml.evaluation.load_node_positions` reads such a mapping from a JSON file (keys
+as strings) — the CIGRE LV benchmark's node coordinates ship as
+``examples/configs/cigre_lv_geo.json``, keyed by its zero-based bus numbers::
+
+    from pgml.evaluation import load_node_positions
+
+    pos = load_node_positions("examples/configs/cigre_lv_geo.json", grid)
+    fig, ax = plot_grid_graph(grid, node_values=values, positions=pos)
 
 Reference builders and oracle functions
 ----------------------------------------

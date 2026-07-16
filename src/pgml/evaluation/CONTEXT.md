@@ -66,8 +66,20 @@ from the canonical `pgml.evaluation.oracles` path.
   Carries MULTIPLE models (and orders — `h{order} · {label}` groups) at once. For
   heavily-overlapping models. The matplotlib `plot_harmonic_profile` also takes `alpha`
   to keep overlaps legible in the static SVG.
-- `plot_grid_graph(grid, *, node_values=None, layout="spring"|"kamada", ...) -> (fig,
-  ax)` — topology colored by a per-node value; slack outlined.
+- `plot_grid_graph(grid, *, node_values=None, layout="spring"|"kamada", positions=None,
+  ...) -> (fig, ax)` — topology colored by a per-node value; slack outlined;
+  `with_labels` writes zero-based display numbers (`node_numbering`, = position in
+  `grid.nodes` = the source tool's bus index for a converted grid — node IDS are 1-based
+  global identifiers, not a numbering).
+- `graph_layout(grid, *, layout="spring", positions=None) -> {node_id: (x, y)}` — the
+  single source of node placement; pass the SAME dict to `plot_grid_graph` and to any
+  overlay on top so all layers align. Explicit `positions` keys resolve name → zero-based
+  node number → id (idempotent for an id-keyed dict); every node must be covered.
+- `load_node_positions(path, grid) -> {node_id: (x, y)}` — read a position JSON (e.g.
+  `examples/configs/cigre_lv_geo.json`, keyed by the CIGRE LV zero-based bus numbers).
+- `node_numbering(grid) -> {node_id: int}` (in `data.py`) — the zero-based display
+  numbering above; `row_labels(index, *, numbering=None)` uses it for `<node>·<phase>`
+  tick labels.
 
 ## Oracle subpackage (`pgml.evaluation.oracles`)
 Canonical home for all reference-library adapters and grid builders.

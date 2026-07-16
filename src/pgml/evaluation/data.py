@@ -69,11 +69,30 @@ class LabeledMatrix:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-def row_labels(index) -> list[str]:
-    """``"<node>·<phase>"`` label per row of a :class:`NodePhaseIndex`."""
+def node_numbering(grid) -> dict[int, int]:
+    """Zero-based display number per node id: the node's position in ``grid.nodes``.
+
+    Node ``id`` values are unique integer identifiers allocated from one counter across
+    ALL element classes of a grid (nodes, branches, appliances), so they are 1-based and
+    carry no positional meaning. For display, plots number nodes by their position in
+    ``grid.nodes`` instead — for a converted grid this is the source tool's own bus order
+    (e.g. pandapower bus 0..N-1), matching the zero-based numbering diagrams of the
+    benchmark grids use.
+    """
+    return {int(node.id): i for i, node in enumerate(grid.nodes)}
+
+
+def row_labels(index, *, numbering: Optional[dict] = None) -> list[str]:
+    """``"<node>·<phase>"`` label per row of a :class:`NodePhaseIndex`.
+
+    ``numbering`` optionally maps node ids to display numbers (see
+    :func:`node_numbering`); without it the raw node ids are shown.
+    """
     phase_names = ("a", "b", "c", "n")
     nids = to_numpy(index.node_ids).astype(int)
     pcs = to_numpy(index.phase_codes).astype(int)
+    if numbering is not None:
+        nids = [numbering.get(int(n), int(n)) for n in nids]
     return [f"{int(nid)}·{phase_names[int(pc)]}" for nid, pc in zip(nids, pcs)]
 
 

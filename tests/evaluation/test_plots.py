@@ -310,3 +310,49 @@ def test_distance_does_not_traverse_open_switch():
     assert dist_closed[3] == 0.1  # reachable through the closed switch (0 length)
     dist_open = distance_from_slack(_switch_grid(switch_closed=False))
     assert dist_open[3] == float("inf")  # unreachable across the open switch
+
+
+# ---------------------------------------------------------------------------
+# graph layout / explicit node positions
+# ---------------------------------------------------------------------------
+def test_graph_layout_resolves_numbers_names_and_ids(tmp_path):
+    """Explicit positions resolve zero-based node numbers, names, and ids to node ids."""
+    import json
+
+    from pgml.evaluation import graph_layout, load_node_positions, node_numbering
+
+    grid = single_phase_chain()  # node ids 1, 2, 3 (no names)
+    ids = [int(n.id) for n in grid.nodes]
+    assert node_numbering(grid) == {ids[0]: 0, ids[1]: 1, ids[2]: 2}
+
+    # zero-based node numbers (the JSON convention, string keys as json.load yields)
+    by_number = {"0": (0.0, 0.0), "1": (1.0, 0.0), "2": (2.0, 0.0)}
+    pos = graph_layout(grid, positions=by_number)
+    assert set(pos) == set(ids)
+    assert pos[ids[2]] == (2.0, 0.0)
+
+    # an already-resolved id-keyed layout passes through unchanged (idempotent)
+    assert graph_layout(grid, positions=pos) == pos
+
+    # a JSON file round-trips through load_node_positions
+    p = tmp_path / "geo.json"
+    p.write_text(json.dumps({k: list(v) for k, v in by_number.items()}))
+    assert load_node_positions(p, grid) == pos
+
+    # missing nodes are an error, not a silent partial layout
+    with pytest.raises(ValueError, match="miss"):
+        graph_layout(grid, positions={"0": (0.0, 0.0)})
+    with pytest.raises(ValueError, match="matches no node"):
+        graph_layout(grid, positions={"0": (0, 0), "1": (1, 0), "99": (9, 9)})
+
+
+def test_plot_grid_graph_accepts_explicit_positions(tmp_path):
+    """plot_grid_graph draws at the given coordinates (overlays can reuse them)."""
+    from pgml.evaluation import graph_layout, plot_grid_graph
+
+    grid = single_phase_chain()
+    pos = graph_layout(grid, positions={"0": (0, 0), "1": (1, 0), "2": (2, 0)})
+    fig, ax = plot_grid_graph(grid, positions=pos, with_labels=True)
+    save_figure(fig, tmp_path / "graph_geo.png")
+    assert (tmp_path / "graph_geo.png").exists()
+    plt.close("all")
