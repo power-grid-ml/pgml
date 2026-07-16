@@ -96,24 +96,29 @@ class Selector(_Base):
     """Selects which appliances a parameter varies.
 
     ``ids`` (specific), ``consumer_type`` (e.g. ``"pv"``), both None = ALL of the
-    given component kind. Filters combine (AND).
+    given component kind. Filters combine (AND). ``component="source"`` targets the
+    slack :class:`~pgml.schemas.grid_schema.Source` appliances (for the ``"u_ref"``
+    field); a source has no ``consumer_type`` (setting it matches nothing).
     """
 
-    component: Literal["load", "generator"] = "load"
+    component: Literal["load", "generator", "source"] = "load"
     ids: Optional[list[int]] = None
     consumer_type: Optional[str] = None
 
     def resolve(self, grid) -> list[int]:
-        from pgml.schemas.grid_schema import Generator, Load
+        from pgml.schemas.grid_schema import Generator, Load, Source
 
-        cls = Load if self.component == "load" else Generator
+        cls = {"load": Load, "generator": Generator, "source": Source}[self.component]
         out: list[int] = []
         for a in grid.appliances:
             if not isinstance(a, cls) or not a.in_service:
                 continue
             if self.ids is not None and a.id not in self.ids:
                 continue
-            if self.consumer_type is not None and a.consumer_type != self.consumer_type:
+            # A Source carries no consumer_type; a consumer_type filter matches none.
+            if self.consumer_type is not None and (
+                getattr(a, "consumer_type", None) != self.consumer_type
+            ):
                 continue
             out.append(a.id)
         return out
@@ -154,10 +159,15 @@ class ParameterSpec(_Base):
 
     - ``field``: a POWER field — ``"p"`` / ``"q"`` (one) or ``"pq"`` (both, same
       factor — vary apparent power at constant power factor; ``pq`` requires
-      ``mode="scale"``) — or a HARMONIC field — ``"h_mag"`` (per-order injection
-      magnitude relative to the fundamental) / ``"h_phase"`` (per-order phase in
-      degrees). Harmonic fields require ``orders`` and feed
-      ``solve_harmonic_flow(harmonic_injection=...)`` instead of an operating point.
+      ``mode="scale"``) — the SLACK-VOLTAGE field ``"u_ref"`` (a per-scenario scale on
+      the :class:`~pgml.schemas.grid_schema.Source` reference voltage
+      ``u_ref_v``; requires ``selector.component="source"`` and ``mode="scale"``, and
+      supports neither per-phase ``symmetry`` nor harmonic options) — or a HARMONIC
+      field — ``"h_mag"`` (per-order injection magnitude relative to the fundamental) /
+      ``"h_phase"`` (per-order phase in degrees). Harmonic fields require ``orders`` and
+      feed ``solve_harmonic_flow(harmonic_injection=...)`` instead of an operating point.
+      ``u_ref`` writes a per-source ``u_ref_scale`` operating-point entry that the
+      ideal-slack solve multiplies onto ``u_ref_v`` (a batched fundamental boundary).
     - ``mode``: ``"scale"`` (multiply the nominal P/Q or the stored per-order spectrum
       magnitude) or ``"absolute"`` (the sampled value IS the W / var / pu / degrees).
     - ``per``: ``"each"`` (every matched component varies independently — one sampling
@@ -184,7 +194,7 @@ class ParameterSpec(_Base):
     name: str
     selector: Selector
     distribution: Distribution
-    field: Literal["p", "q", "pq", "h_mag", "h_phase"] = "pq"
+    field: Literal["p", "q", "pq", "u_ref", "h_mag", "h_phase"] = "pq"
     mode: Literal["scale", "absolute"] = "scale"
     per: Literal["each", "shared"] = "each"
     correlation: Optional[Correlation] = None
@@ -197,8 +207,33 @@ class ParameterSpec(_Base):
     def is_harmonic(self) -> bool:
         return self.field in ("h_mag", "h_phase")
 
+    @property
+    def is_source_voltage(self) -> bool:
+        return self.field == "u_ref"
+
     @model_validator(mode="after")
     def _check(self) -> "ParameterSpec":
+        # The slack-voltage field targets a Source only; it multiplies u_ref_v, so it is
+        # scale-only and carries no per-phase / harmonic structure. Every other field
+        # targets an injecting Load/Generator, so it may NOT select a source.
+        if self.is_source_voltage:
+            if self.selector.component != "source":
+                raise ValueError("field='u_ref' requires selector.component='source'.")
+            if self.mode != "scale":
+                raise ValueError(
+                    "field='u_ref' requires mode='scale' (it multiplies u_ref_v)."
+                )
+            if self.symmetry != "balanced":
+                raise ValueError(
+                    "field='u_ref' does not support per-phase symmetry "
+                    "(the source reference scales all phases together)."
+                )
+            if self.orders is not None or self.harmonic_reference is not None:
+                raise ValueError(
+                    "field='u_ref' takes no `orders` / `harmonic_reference`."
+                )
+        elif self.selector.component == "source":
+            raise ValueError("selector.component='source' supports only field='u_ref'.")
         if self.field == "pq" and self.mode != "scale":
             raise ValueError(
                 "field='pq' requires mode='scale' (constant power factor)."
@@ -423,8 +458,20 @@ class CoherentSpectrumConfig(_Base):
     realistically — so a state estimator can attribute the pattern to the node.
 
     The result voltages are ``[B, T, H, N]`` (B = ``n_scenarios`` sequences, T = steps);
-    per-step timestamps are recorded as ``samples["time_s"]``. Fundamental P/Q stays
-    nominal (the fingerprint models the harmonic spectrum, not the fundamental load).
+    per-step timestamps are recorded as ``samples["time_s"]``.
+
+    ``parameters`` / ``factors`` add a FUNDAMENTAL operating-point variation on top of the
+    harmonic fingerprint: the same :class:`ParameterSpec` / :class:`LatentFactor` machinery
+    as :class:`ScenarioConfig`, but drawn ONCE PER SCENARIO (shape ``[B]``, held constant
+    across the ``T`` steps and broadcast in the solve). So a coherent sequence may vary the
+    load level, PV output, and the slack voltage (``field="u_ref"``) per scenario while the
+    per-step spectrum keeps its device fingerprint. Harmonic ``ParameterSpec`` fields
+    (``h_mag`` / ``h_phase``) are REJECTED here — the fingerprint machinery owns the
+    harmonics; ``parameters`` shapes only the fundamental. The draws are sampled on a unit
+    cube seeded from a stream DISTINCT from the fingerprint RNG, so the realized
+    ``harmonic_injection`` is byte-identical with and without ``parameters``. When
+    ``parameters`` is empty (the default) the fundamental P/Q stays nominal and the source
+    at ``u_ref_v`` — the original fingerprint-only behavior.
     """
 
     name: str = "harmonics"
@@ -447,11 +494,21 @@ class CoherentSpectrumConfig(_Base):
     dwell: float = Field(default=0.9, ge=0.0, le=1.0)  # P(stay in mode) per step
     step_size_s: float = Field(default=1.0, gt=0.0)
     resample_modes_per_scenario: bool = False
+    # Per-scenario fundamental operating-point variation (constant across the T steps).
+    parameters: list[ParameterSpec] = Field(default_factory=list)
+    factors: list[LatentFactor] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check(self) -> "CoherentSpectrumConfig":
         if any(o < 2 for o in self.orders):
             raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
+        for spec in self.parameters:
+            if spec.is_harmonic:
+                raise ValueError(
+                    f"CoherentSpectrumConfig.parameters spec {spec.name!r} is harmonic "
+                    f"(field={spec.field!r}); the fingerprint owns the harmonic spectrum. "
+                    "parameters may vary only the fundamental (p/q/pq/u_ref)."
+                )
         return self
 
 

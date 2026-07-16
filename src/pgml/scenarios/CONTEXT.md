@@ -11,11 +11,18 @@ verified `batched == loop-of-individual`).
 - Distributions (closed-form `icdf(u)` for QMC; `u in [0,1]`): `Uniform(low,high)`,
   `Normal(loc,scale)`, `LogNormal(loc,scale)`, `LogUniform(low,high)`, `Constant(value)`.
   Discriminated union `Distribution` (field `kind`).
-- `Selector(component="load"|"generator", ids=None, consumer_type=None)` ->
-  `.resolve(grid) -> [ids]` (None+None = all of that kind; filters AND).
-- `ParameterSpec(name, selector, distribution, field="p"|"q"|"pq", mode="scale"|"absolute",
+- `Selector(component="load"|"generator"|"source", ids=None, consumer_type=None)` ->
+  `.resolve(grid) -> [ids]` (None+None = all of that kind; filters AND). `component="source"`
+  targets the slack Source(s) (for the `u_ref` field; a source has no `consumer_type`).
+- `ParameterSpec(name, selector, distribution, field="p"|"q"|"pq"|"u_ref", mode="scale"|"absolute",
   per="each"|"shared", correlation=None, symmetry="balanced"|"independent"|"small_imbalance",
   imbalance=0.0)`. `pq` varies P&Q by the same factor (scale only).
+  - SOURCE-VOLTAGE field `field="u_ref"` (requires `selector.component="source"`, `mode="scale"`
+    only, `symmetry="balanced"`, no harmonic options; `per`/`correlation` as usual): writes a
+    per-source `operating_point[source_id] = {"u_ref_scale": Tensor[B]}` — a per-scenario
+    multiplier the ideal-slack solve applies to the Source's `u_ref_v` (a BATCHED fundamental
+    boundary; the network side stays operating-point-independent). Recorded in `samples` like
+    any power draw. `is_source_voltage` flags it.
   - `correlation=Correlation(factor, rho)` couples matched components through a shared
     `LatentFactor` (single-factor Gaussian copula; rho=0 == `per="each"`, rho=1 ==
     `per="shared"`; supersedes `per`). Marginal distribution preserved.
@@ -43,10 +50,22 @@ verified `batched == loop-of-individual`).
   (AR(1) `ar1_rho` jitter), clamped to EN 50160. `harmonic_injection` is `[B,T]` per
   (device, order); `samples` records `<name>_mode [B,n_dev,T]` (attribution label),
   `<name>_mag`/`<name>_phase [B,n_dev,n_ord,T]`, `<name>_device_ids`, `time_s [T]`.
+  - `parameters=[ParameterSpec,...]` + `factors=[LatentFactor,...]` add a FUNDAMENTAL
+    operating-point variation on top of the fingerprint: the SAME `ScenarioConfig` machinery
+    (Sobol cube / copula / per-phase symmetry / source `u_ref` scale), drawn ONCE PER SCENARIO
+    (`[B]`, constant across the T steps — the solve broadcasts the `[B]` fundamental against
+    the `[B,T]` injection). Harmonic fields (`h_mag`/`h_phase`) are REJECTED (the fingerprint
+    owns harmonics). The `[B]` operating point + the raw `[B,...]` draws land in
+    `operating_point` / `samples`. The op cube is seeded from a stream DISTINCT from the
+    fingerprint RNG, so the realized `harmonic_injection` is byte-identical with/without
+    `parameters` (reproducible reconstruction via `pgl.data.physics._reconstruct_sampled`);
+    empty `parameters` (default) = the original fingerprint-only behavior (P/Q nominal,
+    source at `u_ref_v`).
 - `ScenarioConfig(n_samples, seed=0, method="sobol"|"lhs"|"independent", parameters=[...],
   factors=[LatentFactor(...)])`. A spec's `correlation.factor` must name a declared factor.
 - `sample(grid, config) -> SampledScenarios(operating_point, samples, n_samples, config)`
-  where `operating_point = {id: {"p_w": Tensor[B], "q_var": Tensor[B]}}` and
+  where `operating_point = {id: {"p_w": Tensor[B], "q_var": Tensor[B]}}` (a Source id entry
+  instead carries `{"u_ref_scale": Tensor[B]}`) and
   `samples = {param_name: Tensor[B, d]}` (raw realized values; ML input record).
 - CARTESIAN sweep (pgm-style, deterministic): `CartesianAxis(name, selector, values=[...],
   field, mode)`, `CartesianConfig(axes=[...])` -> `cartesian_sample(grid, config) ->

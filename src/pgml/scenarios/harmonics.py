@@ -27,11 +27,22 @@ from torch import Tensor
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 
-from .config import CoherentSpectrumConfig, Selector, SpectrumSweepConfig
+from .config import (
+    CoherentSpectrumConfig,
+    ScenarioConfig,
+    Selector,
+    SpectrumSweepConfig,
+)
 from .en50160 import en50160_limit
-from .sampler import SampledScenarios
+from .sampler import SampledScenarios, sample
 
 _F64 = torch.float64
+
+# The coherent operating-point unit cube is drawn on a stream DISTINCT from the
+# fingerprint RNG (which is seeded from ``config.seed``): a fixed derived offset keeps
+# the two independent, so the realized ``harmonic_injection`` is byte-identical with and
+# without ``config.parameters`` (reproducible reconstruction from config + seed).
+_OP_CUBE_SEED_OFFSET = 0x9E3779B9  # 2654435769; golden-ratio mix
 
 
 def _markov_path(
@@ -61,6 +72,34 @@ def _ar1(shape: tuple, rho: float, gen: torch.Generator) -> Tensor:
     return e
 
 
+def _sample_operating_specs(
+    grid: Grid, config: CoherentSpectrumConfig, b: int
+) -> tuple[dict, dict]:
+    """Draw the coherent config's fundamental operating-point specs, once per scenario.
+
+    Reuses the :class:`ScenarioConfig` sampler (Sobol unit cube, copula correlation,
+    per-phase symmetry, and the source ``u_ref`` scale) with ``n_samples = b`` on a seed
+    DERIVED from ``config.seed`` (a stream distinct from the fingerprint RNG, so the
+    harmonic injection is unchanged). Returns ``(operating_point, samples)`` — the ``[B]``
+    per-scenario operating point (constant across the ``T`` steps; the harmonic solve
+    aligns the fundamental voltage against the ``[B, T]`` injection) and the raw ``[B, ...]``
+    draws recorded in ``samples`` exactly as :class:`ScenarioConfig` records them. Empty
+    when the config has no ``parameters``.
+    """
+    if not config.parameters:
+        return {}, {}
+    op_seed = (int(config.seed) + _OP_CUBE_SEED_OFFSET) & 0x7FFFFFFF
+    inner = ScenarioConfig(
+        n_samples=b,
+        seed=op_seed,
+        method="sobol",
+        parameters=list(config.parameters),
+        factors=list(config.factors),
+    )
+    drawn = sample(grid, inner)
+    return drawn.operating_point, drawn.samples
+
+
 def sample_coherent_spectra(
     grid: Grid, config: CoherentSpectrumConfig
 ) -> SampledScenarios:
@@ -82,7 +121,11 @@ def sample_coherent_spectra(
     Returns
     -------
     SampledScenarios
-        ``operating_point`` is empty (fundamental P/Q stays nominal).
+        ``operating_point`` is empty when ``config.parameters`` is empty (fundamental P/Q
+        stays nominal, source at ``u_ref_v``); otherwise it carries the per-scenario
+        fundamental draws as ``[B]`` tensors (constant across the ``T`` steps — the
+        harmonic solve broadcasts the ``[B]`` fundamental against the ``[B, T]`` injection),
+        incl. a per-source ``u_ref_scale`` for the slack.
         ``harmonic_injection`` maps
         ``{device_id: {order: (mag[B, T], phase[B, T])}}`` — pass directly to
         ``solve_harmonic_flow``.
@@ -175,8 +218,14 @@ def sample_coherent_spectra(
         f"{nm}_device_ids": torch.tensor(ids, dtype=torch.long),
         "time_s": torch.arange(t, dtype=_F64) * config.step_size_s,  # [T]
     }
+
+    # Optional per-scenario fundamental operating point (load / PV / slack-voltage specs).
+    # Drawn on a separate stream (above) so the harmonic fingerprint is untouched.
+    operating_point, op_samples = _sample_operating_specs(grid, config, b)
+    samples.update(op_samples)
+
     return SampledScenarios(
-        operating_point={},
+        operating_point=operating_point,
         samples=samples,
         n_samples=b,
         config=config,

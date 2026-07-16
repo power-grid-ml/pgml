@@ -331,9 +331,15 @@ def solve_harmonic_flow(
     if device is None:
         device = v1.device
 
-    # 2./3. Harmonic orders (> 1), batched.
+    # 2./3. Harmonic orders (> 1), batched. A per-scenario operating point makes v1
+    # ``[B, N]`` while a node-coherent harmonic injection carries a DEEPER ``[B, T]`` batch.
+    # ``assemble_harmonic_system`` keeps v1 in step with the (same-batch) operating point
+    # when it forms each device's fundamental current, then broadcasts THAT current across
+    # the injection's extra step axis. Only the ORDER-1 slice returned to the caller needs
+    # its batch rank lifted to the injection's, so it stacks against the ``[B, T, N]``
+    # harmonic slices (a no-op for the snapshot / nominal cases).
     harm = [h for h in orders if h != 1]
-    v_by_order: dict[int, Tensor] = {1: v1}
+    v_by_order: dict[int, Tensor] = {1: _align_v1_batch_rank(v1, harmonic_injection)}
     if harm:
         yh, ih, _ = assemble_harmonic_system(
             grid,
@@ -708,6 +714,56 @@ def _device_element_spectra(
     }
 
 
+def _injection_batch_rank(harmonic_injection: Optional[dict]) -> int:
+    """The deepest leading batch rank of a ``harmonic_injection`` override (0 if none).
+
+    Each ``(magnitude, phase)`` coefficient may be a python float / 0-d tensor (scalar,
+    rank 0), a ``[B]`` tensor (snapshot, rank 1), or a ``[B, T]`` tensor (node-coherent
+    sequence, rank 2). Per-element list/tuple coefficients recurse element-wise.
+    """
+    if not harmonic_injection:
+        return 0
+
+    def rank(x) -> int:
+        if isinstance(x, (list, tuple)):
+            return max((rank(e) for e in x), default=0)
+        return x.ndim if isinstance(x, Tensor) else 0
+
+    r = 0
+    for order_map in harmonic_injection.values():
+        for coeff in order_map.values():
+            for part in coeff:
+                r = max(r, rank(part))
+    return r
+
+
+def _pad_batch_before_elem(t: Tensor, target_ndim: int) -> Tensor:
+    """Insert singleton axes just before ``t``'s trailing (element) axis up to ``target_ndim``.
+
+    ``t`` is ``[*batch, n_elem]``; padding to ``[*batch, 1, ..., 1, n_elem]`` lets a
+    per-scenario tensor broadcast against a deeper-batched one that shares the ``n_elem``
+    trailing axis. A no-op when ``t`` already has ``>= target_ndim`` dims.
+    """
+    for _ in range(max(0, target_ndim - t.ndim)):
+        t = t.unsqueeze(-2)
+    return t
+
+
+def _align_v1_batch_rank(v1: Tensor, harmonic_injection: Optional[dict]) -> Tensor:
+    """Right-pad v1's batch with singleton axes to reach the injection's batch rank.
+
+    v1 is ``[*vbatch, N]``; the injection may carry a deeper batch (a node-coherent
+    ``[B, T]`` injection over a ``[B]`` fundamental). Inserting the missing singleton
+    axes just before the N axis (``[B, N]`` -> ``[B, 1, N]``) lets the fundamental
+    broadcast across the extra (step) dims. A no-op (returns v1 unchanged) when v1's
+    batch rank already meets the injection's — the snapshot and nominal cases.
+    """
+    extra = _injection_batch_rank(harmonic_injection) - (v1.ndim - 1)
+    for _ in range(max(0, extra)):
+        v1 = v1.unsqueeze(-2)
+    return v1
+
+
 def _harmonic_injections(
     grid,
     v1,
@@ -857,10 +913,18 @@ def _harmonic_injections(
         safe1 = torch.where(mag1 == 0, torch.ones_like(mag1), mag1)
         ratio = torch.where(
             mag1 == 0, torch.zeros_like(mag_h), mag_h / safe1
-        )  # [*batch, Hh, n_elem]
-        mag = ratio * i1_mag.unsqueeze(-2)
+        )  # [*cbatch, Hh, n_elem]
+        # The device's fundamental current ``i1`` (``[*vbatch, n_elem]``) follows the
+        # operating point / v1 batch; the spectrum ratio may carry a DEEPER batch (a
+        # node-coherent ``[B, T]`` injection over a ``[B]`` fundamental). Insert the
+        # missing singleton step axes just before the element axis so the per-scenario
+        # fundamental current broadcasts across the extra step dims (a no-op when the
+        # batches already match — the snapshot / nominal cases).
+        i1_mag_b = _pad_batch_before_elem(i1_mag, mag_h.ndim - 1)
+        i1_ang_b = _pad_batch_before_elem(i1_ang, mag_h.ndim - 1)
+        mag = ratio * i1_mag_b.unsqueeze(-2)
         phase = ph_h * (math.pi / 180.0) + h_vec[:, None] * (
-            i1_ang.unsqueeze(-2) - ang1_e.unsqueeze(-2)
+            i1_ang_b.unsqueeze(-2) - ang1_e.unsqueeze(-2)
         )
         i_h_elem = torch.polar(mag, phase)  # [*batch, Hh, n_elem]
         # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).

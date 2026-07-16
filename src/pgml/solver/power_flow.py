@@ -573,14 +573,42 @@ def _grid_param_leaves(
 # ---------------------------------------------------------------------------
 # slack handling
 # ---------------------------------------------------------------------------
+def _has_uref_scale(operating_point: Optional[dict]) -> bool:
+    """True if any operating-point entry carries a per-source ``u_ref_scale``.
+
+    A source-voltage scenario spec (:class:`pgml.scenarios.ParameterSpec` with
+    ``field="u_ref"``) writes ``{source_id: {"u_ref_scale": Tensor[*b]}}`` — a
+    per-scenario multiplier on the ideal-slack reference. When present, the slack
+    reference must be recomputed per scenario rather than read from the cached
+    (operating-point-independent) prepared system.
+    """
+    if not operating_point:
+        return False
+    return any(
+        isinstance(entry, dict) and "u_ref_scale" in entry
+        for entry in operating_point.values()
+    )
+
+
 def _slack_rows_and_vref(
-    grid: Grid, index: NodePhaseIndex, rdt: torch.dtype, cdt: torch.dtype, device
+    grid: Grid,
+    index: NodePhaseIndex,
+    rdt: torch.dtype,
+    cdt: torch.dtype,
+    device,
+    operating_point: Optional[dict] = None,
 ) -> tuple[Optional[Tensor], Optional[Tensor]]:
     """Ideal-slack fixed rows + reference voltages ``u_ref∠u_angle`` at them.
 
-    Returns ``(fixed_rows[int64, S], v_fixed[complex, S])`` from in-service
+    Returns ``(fixed_rows[int64, S], v_fixed[complex, ...S])`` from in-service
     sources, or ``(None, None)`` if there is no source. ``v_fixed`` stays
     differentiable when ``u_ref``/``u_angle`` are tensors (tensor duality).
+
+    A per-source ``operating_point[source_id]["u_ref_scale"]`` (a per-scenario
+    multiplier on ``u_ref_v``) scales that source's reference magnitude while keeping
+    its angle — the batched fundamental boundary of a source-voltage scenario sweep.
+    A batched scale promotes ``v_fixed`` to ``[*batch, S]`` (the leading scenario dims
+    the Schur solve pins per row); gradients flow to the scale leaf via the residual.
     """
     sources = [a for a in grid.appliances if isinstance(a, Source) and a.in_service]
     if not sources:
@@ -593,11 +621,24 @@ def _slack_rows_and_vref(
             math.pi / 180.0
         )
         vth = torch.polar(u_ref, ang).to(cdt)  # [P]
+        scale = None
+        if operating_point is not None:
+            entry = operating_point.get(s.id)
+            if isinstance(entry, dict) and "u_ref_scale" in entry:
+                # as_tensor keeps the autograd history (tensor duality), so gradients
+                # flow to a differentiable u_ref_scale; complex cast scales magnitude only.
+                scale = torch.as_tensor(
+                    entry["u_ref_scale"], dtype=rdt, device=device
+                ).to(cdt)
         for j, ph in enumerate(s.phases):
             rows.append(index.row(s.node, ph))
-            vref.append(vth[j])
+            vref.append(vth[j] if scale is None else vth[j] * scale)
     fixed_rows = torch.as_tensor(rows, dtype=torch.int64, device=device)
-    v_fixed = torch.stack(vref, 0)  # [S]
+    # A scaled source contributes a ``[*batch]`` entry; broadcast every entry to the
+    # common leading shape and stack on a new LAST axis -> ``[*batch, S]`` (``[S]`` when
+    # no scale is batched, matching the historical shape).
+    vref = list(torch.broadcast_tensors(*vref)) if len(vref) > 1 else vref
+    v_fixed = torch.stack(vref, dim=-1)  # [*batch, S]
     return fixed_rows, v_fixed
 
 
@@ -1022,11 +1063,22 @@ def solve_power_flow(
     def v_fixed_fn():
         if slack != "ideal":
             return None
-        _, vf = _slack_rows_and_vref(grid, index, rdt, cdt, device)
+        # Recomputed fresh each residual eval (so the graph is not reused across
+        # gradcheck's backward passes) and incorporates any per-scenario source
+        # u_ref scale from the operating point (the batched slack boundary).
+        _, vf = _slack_rows_and_vref(grid, index, rdt, cdt, device, operating_point)
         return vf
 
     if system is not None:
-        fixed_rows, v_fixed = system.fixed_rows, system.v_fixed
+        # The prepared system caches the operating-point-INDEPENDENT slack reference.
+        # A per-scenario u_ref scale is operating-point data, so recompute the (batched)
+        # reference here when present; otherwise reuse the cached detached value.
+        fixed_rows = system.fixed_rows
+        v_fixed = (
+            v_fixed_fn()
+            if (slack == "ideal" and _has_uref_scale(operating_point))
+            else system.v_fixed
+        )
     else:
         fixed_rows = (
             _slack_rows_and_vref(grid, index, rdt, cdt, device)[0]
@@ -1034,9 +1086,9 @@ def solve_power_flow(
             else None
         )
         v_fixed = v_fixed_fn()
-    # NOTE: v_fixed is derived exclusively from the grid's source fields
-    # (u_ref/u_angle), whose leaves the grid walk above already collected —
-    # no second leaf walk is needed.
+    # NOTE: v_fixed is derived from the grid's source fields (u_ref/u_angle) and the
+    # operating point's u_ref_scale, whose leaves the grid + operating-point walk above
+    # already collected — no second leaf walk is needed.
 
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
@@ -1355,11 +1407,15 @@ def _current_injection_forward(
         row_ang = phase_angle[phase_codes]  # [N]
 
         # Resolve the (rows, |v_fixed|) used for both the per-row seed and the
-        # balanced default. ``v_fixed`` is the ideal-slack reference; for norton (no
-        # fixed rows) fall back to the source reference magnitudes directly.
+        # balanced default. The UN-SCALED source reference (``sl_vref``, always ``[S]``)
+        # is used here: the warm start only needs a ballpark magnitude per row, and a
+        # per-scenario ``u_ref`` scale would give a batched ``v_fixed`` that the ``[N]``
+        # seed scatter cannot consume (the actual per-scenario slack is pinned by
+        # ``solve_factored(v_fixed=...)`` below). For norton (no fixed rows) this is the
+        # source reference magnitude directly.
         sl_rows, sl_vref = _slack_rows_and_vref(grid, index, rdt, cdt, device)
         ref_rows = fixed_rows if (fixed_rows is not None) else sl_rows
-        ref_v = v_fixed if (v_fixed is not None) else sl_vref
+        ref_v = sl_vref
 
         # Balanced default magnitude for non-source rows: the source Phase-A
         # reference magnitude where available, else the first reference magnitude,
@@ -1705,7 +1761,17 @@ def _newton_forward_sequential(
     for i in range(bsize):
         op_i = _slice_operating_point(operating_point, i)
         rc_i = make_fast_residual_complex(op_i)
-        rr_i = _make_real_residual(build_system, rc_i, fixed_rows, v_fixed_fn, n, cdt)
+
+        # Per-scenario slack reference: a source ``u_ref`` scale makes ``v_fixed``
+        # per-scenario, so the residual + warm start use THIS scenario's slice (not the
+        # full-batch ``v_fixed`` / ``v_fixed_fn``). Reduces to the shared reference when
+        # no scale is present.
+        def _vfixed_i(op=op_i):
+            if slack != "ideal":
+                return None
+            return _slack_rows_and_vref(grid, index, rdt, cdt, device, op)[1]
+
+        rr_i = _make_real_residual(build_system, rc_i, fixed_rows, _vfixed_i, n, cdt)
         v_init_i = _linear_const_z_init(
             grid,
             f0,
@@ -1716,7 +1782,7 @@ def _newton_forward_sequential(
             op_i,
             param_overrides,
             fixed_rows,
-            v_fixed,
+            _vfixed_i(),
             branch_states,
         )
         v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_forward(

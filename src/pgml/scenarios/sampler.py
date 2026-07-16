@@ -28,7 +28,7 @@ import torch
 from torch import Tensor
 
 from pgml.errors import InputError
-from pgml.schemas.grid_schema import Generator, Grid, Load, StaticSpectrum
+from pgml.schemas.grid_schema import Generator, Grid, Load, Source, StaticSpectrum
 
 from .config import (
     CartesianConfig,
@@ -202,7 +202,10 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     if not config.parameters:
         raise InputError("ScenarioConfig has no parameters / sampling dimensions.")
 
-    by_id = {a.id: a for a in grid.appliances if isinstance(a, (Load, Generator))}
+    # Load/Generator carry a nominal P/Q; a Source is selectable too (its u_ref scale).
+    by_id = {
+        a.id: a for a in grid.appliances if isinstance(a, (Load, Generator, Source))
+    }
     declared = {f.name for f in config.factors}
 
     dim = 0
@@ -440,14 +443,14 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
 
         if spec.symmetry == "balanced":
             for j, cid in enumerate(lay.ids):
+                entry = operating_point.setdefault(cid, {})
+                if spec.is_source_voltage:
+                    # The slack-voltage scale is the sampled value itself (mode='scale'):
+                    # the ideal-slack solve multiplies it onto the Source's u_ref_v.
+                    entry["u_ref_scale"] = write_vals[:, j]
+                    continue
                 rec = nominal[cid]
-                _apply(
-                    operating_point.setdefault(cid, {}),
-                    spec,
-                    write_vals[:, j],
-                    rec.p_total,
-                    rec.q_total,
-                )
+                _apply(entry, spec, write_vals[:, j], rec.p_total, rec.q_total)
         else:  # small_imbalance: balanced base * (1 + small per-phase perturbation)
             pcol = 0
             for j, cid in enumerate(lay.ids):

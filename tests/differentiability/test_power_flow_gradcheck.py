@@ -149,6 +149,24 @@ def test_gradcheck_batched_scenarios():
     assert torch.autograd.gradcheck(fn, (p, q), eps=1e-2, atol=1e-4, rtol=1e-3)
 
 
+def test_gradcheck_source_uref_scale_operating_point():
+    """The per-scenario source ``u_ref_scale`` (a batched ideal-slack boundary threaded
+    through the operating point) is differentiable end to end; v is ``[S, N]``."""
+    scale = torch.tensor([0.95, 1.0, 1.05], dtype=torch.float64, requires_grad=True)
+
+    def fn(scale):
+        return solve_power_flow(
+            _two_bus([[1e-3]], [[1e-6]], 2000.0, 500.0),
+            slack="ideal",
+            operating_point={10: {"u_ref_scale": scale}},
+            dtype=CDT,
+        ).v
+
+    out = fn(scale)
+    assert out.shape == (3, 2)
+    assert torch.autograd.gradcheck(fn, (scale,), eps=1e-4, atol=1e-4, rtol=1e-3)
+
+
 def test_backward_jvp_fallback_matches_dense(monkeypatch):
     """The O(B) column-by-column JVP state Jacobian (used past the memory threshold)
     yields the SAME gradient as the dense [B,2N,B,2N] path — incl. batched device
