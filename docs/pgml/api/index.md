@@ -35,11 +35,11 @@ paths
 
 | Package | Purpose |
 |---------|---------|
-| {mod}`pgml.schemas` | Frozen data contracts: `Grid`, `Node`, `Branch`, `ResultSet`, `Scenario` |
+| {mod}`pgml.schemas` | Frozen data contracts: `Grid`, `Node`, `Branch`, `ResultSet`, `Scenario`, plus inert installed-instrumentation metadata (`MeasurementDevice`) |
 | {mod}`pgml.assembly` | Differentiable, batched, per-frequency Y-bus assembly; `branch_currents` / `BranchCurrent`; `branch_states` topology masking |
 | {mod}`pgml.solver` | Complex batched linear solve and nonlinear power-flow; pre-solve connectivity checking, switch-state batching, sparse/dense factorization, and system reuse |
 | {mod}`pgml.geometry` | Differentiable Carson/Deri line constants (geometry → Z(h)/Yc(h)) |
-| {mod}`pgml.topology` | Dependency-free slack anchor, branch edges, electrical distance from slack, and the pre-solve connectivity report |
+| {mod}`pgml.topology` | Dependency-free slack anchor(s) (multi-source), branch edges, nearest-slack electrical distance, and the pre-solve connectivity report |
 | {mod}`pgml.scenarios` | Reproducible config-driven batched scenario sampling |
 | {mod}`pgml.evaluation` | Comparison plots (references vs our solve) |
 | {mod}`pgml.convert` | Converters from pandapower / power-grid-model / OpenDSS |
