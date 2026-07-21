@@ -19,6 +19,7 @@ from pgml.topology import (
     branch_edges,
     distance_from_slack,
     slack_node_id,
+    slack_node_ids,
 )
 
 from ._util import to_float
@@ -58,6 +59,7 @@ def grid_graph(grid: Grid, *, weight: str = "km") -> nx.Graph:
 __all__ = [
     "ProfileEdge",
     "slack_node_id",
+    "slack_node_ids",
     "branch_edges",
     "grid_graph",
     "distance_from_slack",

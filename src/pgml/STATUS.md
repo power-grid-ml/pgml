@@ -42,6 +42,12 @@ Phases 0–3 done; phase 4 (batched sampling) done bar scale/topology. The subpa
   `batched == loop`, differentiable through the batch.
 - **Evaluation** — paper-ready + interactive comparison plots (refs-vs-ours); the reference
   oracles live in the OPTIONAL `pgml.evaluation.oracles` (`oracles` extra).
+- **Measurement instrumentation** (schema rev 0.0.3) — `MeasurementDevice` on the `Grid`
+  (node-anchored meter + CT channels on incident branches, accuracy class, averaging
+  intervals, acquisition `connection` JSON), attached via `Grid.attach_measurement_devices`;
+  inert metadata consumed by `pgl` (sensor placement, future noise model) and the external
+  acquisition service. Multi-slack topology helpers (`slack_node_ids`, nearest-slack
+  distances) landed with it.
 - **Cross-tool conventions** pinned in `docs/pgml/modeling/conventions.md` (base voltage
   L-L/L-N, transformer TO/LV referral vs OpenDSS, earth return) — read before touching
   converters, the slack, or transformers.

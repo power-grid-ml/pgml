@@ -3,11 +3,12 @@
 Core, dependency-free helpers over the :class:`~pgml.schemas.grid_schema.Grid`
 contract (plain python + stdlib, no torch / networkx / plotting):
 
-- :func:`slack_node_id` — the reference bus (first in-service :class:`Source`).
+- :func:`slack_node_ids` / :func:`slack_node_id` — the reference buses (nodes of
+  the in-service :class:`Source` appliances; the singular form is the first).
 - :func:`branch_edges` — the drawable branch interconnections (closed switches
   kept, open switches dropped — they carry no current and define no path).
-- :func:`distance_from_slack` — shortest-path line distance from the slack along
-  the branch graph (Dijkstra), the x-axis of the profile plots and a node
+- :func:`distance_from_slack` — shortest-path line distance to the nearest slack
+  along the branch graph (Dijkstra), the x-axis of the profile plots and a node
   feature of the ML layer.
 - :func:`connectivity_report` / :func:`energized_subgrid` — the pre-solve
   connectivity check: which (node, phase) rows have a galvanic path to an
@@ -25,7 +26,7 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional, Union
 
 from pgml.errors import ConnectivityError
 from pgml.schemas.grid_schema import Grid, Line, Phase, ShuntReactor, Source, Switch
@@ -73,19 +74,32 @@ def _is_drawable(b, *, include_open_switches: bool) -> bool:
     return int(b.from_node) != int(b.to_node)
 
 
-def slack_node_id(grid: Grid) -> int:
-    """Node id of the first in-service :class:`Source` (the slack/reference bus)."""
-    src = next(
-        (
-            a
-            for a in grid.appliances
-            if isinstance(a, Source) and getattr(a, "in_service", True)
-        ),
-        None,
-    )
-    if src is None:
+def slack_node_ids(grid: Grid) -> list[int]:
+    """Node ids of ALL in-service :class:`Source` appliances (the slack buses).
+
+    Appliance order, de-duplicated. A grid may carry several sources (multiple
+    feeding transformers / external network equivalents); consumers that anchor
+    to "the" slack should handle every entry — distances and observability are
+    relative to the NEAREST slack. Raises when no in-service source exists.
+    """
+    ids: list[int] = []
+    for a in grid.appliances:
+        if isinstance(a, Source) and getattr(a, "in_service", True):
+            nid = int(a.node)
+            if nid not in ids:
+                ids.append(nid)
+    if not ids:
         raise ValueError("Grid has no in-service Source to anchor distances to.")
-    return int(src.node)
+    return ids
+
+
+def slack_node_id(grid: Grid) -> int:
+    """Node id of the first in-service :class:`Source` (the primary slack bus).
+
+    Single-slack convenience over :func:`slack_node_ids` — multi-slack-aware
+    consumers should use the plural form.
+    """
+    return slack_node_ids(grid)[0]
 
 
 def branch_edges(
@@ -122,21 +136,32 @@ def _line_adjacency(grid: Grid) -> dict[int, dict[int, float]]:
     return adj
 
 
-def distance_from_slack(grid: Grid, slack: Optional[int] = None) -> dict[int, float]:
-    """Map ``node_id -> shortest-path line distance (km)`` from the slack bus.
+def distance_from_slack(
+    grid: Grid, slack: Optional[Union[int, Iterable[int]]] = None
+) -> dict[int, float]:
+    """Map ``node_id -> shortest-path line distance (km)`` to the nearest slack bus.
 
     Dijkstra over the in-service branch graph (open switches excluded; switches /
     transformers / generic branches contribute zero length). Disconnected nodes
-    map to ``inf``. ``slack`` defaults to :func:`slack_node_id`.
+    map to ``inf``. ``slack`` is a single node id, an iterable of node ids, or
+    ``None`` (default: every node in :func:`slack_node_ids` — the distance to the
+    NEAREST slack, identical to the single-slack result on a one-source grid).
     """
     if slack is None:
-        slack = slack_node_id(grid)
+        sources = slack_node_ids(grid)
+    else:
+        try:
+            sources = [int(slack)]  # a single node id
+        except TypeError:
+            sources = [int(s) for s in slack]
     adj = _line_adjacency(grid)
     dist = {nid: float("inf") for nid in adj}
-    if int(slack) not in dist:
-        raise ValueError(f"slack node {slack} is not a node of the grid.")
-    dist[int(slack)] = 0.0
-    heap: list[tuple[float, int]] = [(0.0, int(slack))]
+    for s in sources:
+        if s not in dist:
+            raise ValueError(f"slack node {s} is not a node of the grid.")
+        dist[s] = 0.0
+    heap: list[tuple[float, int]] = [(0.0, s) for s in sources]
+    heapq.heapify(heap)
     done: set[int] = set()
     while heap:
         d, u = heapq.heappop(heap)
@@ -432,6 +457,7 @@ def energized_subgrid(grid: Grid) -> tuple[Grid, tuple[int, ...]]:
 __all__ = [
     "ProfileEdge",
     "slack_node_id",
+    "slack_node_ids",
     "branch_edges",
     "distance_from_slack",
     "ConnectivityReport",
