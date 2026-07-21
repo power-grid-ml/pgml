@@ -42,7 +42,7 @@ from .profiles import (
     plot_voltage_profile,
 )
 from .style import save_figure, save_html
-from .topology import distance_from_slack, grid_graph, slack_node_id
+from .topology import distance_from_slack, grid_graph, slack_node_id, slack_node_ids
 from .ybus_plots import plot_ybus_difference, plot_ybus_heatmaps
 
 __all__ = [
@@ -60,6 +60,7 @@ __all__ = [
     "distance_from_slack",
     "grid_graph",
     "slack_node_id",
+    "slack_node_ids",
     "graph_layout",
     "load_node_positions",
     # plots

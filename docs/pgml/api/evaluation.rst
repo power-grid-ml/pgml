@@ -10,9 +10,9 @@ implementations.
 .. rubric:: Sub-modules
 
 - **topology** — re-exports the dependency-free :mod:`pgml.topology` (``slack_node_id``,
-  ``branch_edges``, ``distance_from_slack`` — the x-axis of voltage/harmonic profiles) and
-  adds the one helper that genuinely needs networkx: ``grid_graph``, the topology-graph
-  layout used by :func:`~pgml.evaluation.plot_grid_graph`.
+  ``slack_node_ids``, ``branch_edges``, ``distance_from_slack`` — the x-axis of
+  voltage/harmonic profiles) and adds the one helper that genuinely needs networkx:
+  ``grid_graph``, the topology-graph layout used by :func:`~pgml.evaluation.plot_grid_graph`.
 - **data** — framework-agnostic plot containers (:class:`~pgml.evaluation.VoltageProfile`,
   :class:`~pgml.evaluation.HarmonicProfile`, :class:`~pgml.evaluation.LabeledMatrix`)
   and builder functions that consume solver results, including the shared row-building

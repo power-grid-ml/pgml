@@ -2,7 +2,7 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
-`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.2"`) stamps the contract version
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.3"`) stamps the contract version
 into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
 minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
 while the library is < 1.0.0); bump the patch/minor on any contract change.
@@ -28,6 +28,25 @@ while the library is < 1.0.0); bump the patch/minor on any contract change.
     `ConsumerType` enum (str-enum; `"pv"` etc. still validate; ML categorical, no physics).
     Control is honored by the NONLINEAR solve (`device_current_injections`); the linear
     const-Z assembler uses the base P/Q.
+  - Measurement instrumentation (rev 0.0.3): `Grid.measurement_devices:
+    list[MeasurementDevice]` — INERT metadata (never on the autograd tape, plain floats
+    only; nothing here enters assembly or the solver). A `MeasurementDevice` is
+    node-anchored (a meter cabinet at a bus): voltage at `node`/`phases`, currents per
+    `CurrentChannel` (branch id + optional phases; terminal inferred from the device's
+    node, explicit only for self-loops) on INCIDENT branches, `measured_quantities`
+    (`MeasuredQuantity` str-enum voltage/current/power), capability
+    (`max_harmonic_order`, `max_current_channels`), identity (`manufacturer`, `model`),
+    acquisition (`supported_averaging_intervals_s`, `averaging_interval_s` — membership
+    validated), `accuracy_class` (categorical; keys the ML noise model, no numeric
+    interpretation in pgml), `connection` (free-form JSON with a `kind` discriminator,
+    interpreted by the external acquisition service only). Cross-references (node/branch
+    existence, incidence, phase subsets, unique ids) validate in `Grid._integrity`.
+    Attach devices to an existing (e.g. converted) grid via
+    `Grid.attach_measurement_devices(devices)` — atomic: a rejected attach restores the
+    previous list (a plain field assignment would keep the bad value on a model-validator
+    failure). Slack designation stays Source-based: `pgml.topology.slack_node_ids` (all
+    in-service Sources; `slack_node_id` = first). Consumers: `pgl.data.MeasurementModel
+    .from_grid` (sensor set + slack coverage), future devicecom acquisition.
 - `result_schema.py` — output: ResultSet, SolverDiagnostics, NodeResult (v_re/v_im),
   BranchResult (i_from_*, i_to_*), InjectionResult (`injection_kind` covers
   load/generator/storage/source/shunt); optional per-phase P/Q/S;

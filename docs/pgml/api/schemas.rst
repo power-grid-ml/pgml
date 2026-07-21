@@ -55,6 +55,52 @@ differentiable leaves.  Use ``method="newton"`` in
 :func:`~pgml.solver.solve_harmonic_flow` when stiff Volt-VAr / Volt-Watt loops
 cause the current-injection fixed point to oscillate.
 
+Measurement instrumentation
+----------------------------
+
+:attr:`~pgml.schemas.grid_schema.Grid.measurement_devices` carries the installed
+metering hardware as INERT metadata — plain floats, never on the autograd tape and
+never consumed by assembly or the solver. A
+:class:`~pgml.schemas.grid_schema.MeasurementDevice` is node-anchored (a meter cabinet
+at a bus): it measures voltage at its ``node`` and, per
+:class:`~pgml.schemas.grid_schema.CurrentChannel`, current on branches incident to
+that node — the physical picture is a CT clamped onto a feeder, with the metered
+terminal inferred from the device's own node. ``measured_quantities``
+(:class:`~pgml.schemas.grid_schema.MeasuredQuantity`: voltage / current / power)
+states what the device records; ``max_harmonic_order`` / ``max_current_channels``
+state its capability; ``manufacturer`` / ``model`` its identity;
+``supported_averaging_intervals_s`` / ``averaging_interval_s`` its acquisition
+timing.
+
+``accuracy_class`` (e.g. ``"0.2S"`` per IEC 62053, ``"A"`` / ``"S"`` per
+IEC 61000-4-30) is categorical — pgml attaches no numeric interpretation to it; it
+is the intended key for a future measurement-noise model in the ML layer
+(:mod:`pgl`). ``connection`` is free-form JSON describing how to reach the physical
+instrument (e.g. a Modbus TCP host/port); it is interpreted by the external
+acquisition service, never by pgml.
+
+The intended authoring flow attaches devices to an already-converted grid (e.g. a
+DSO network plan) via
+:meth:`~pgml.schemas.grid_schema.Grid.attach_measurement_devices`, which re-runs the
+grid's cross-reference validation (node/branch existence, incidence, phase subsets)
+atomically — a rejected attach restores the previous device list rather than
+leaving the grid half-updated::
+
+    from pgml.schemas import CurrentChannel, MeasurementDevice
+
+    grid = grid.attach_measurement_devices([
+        MeasurementDevice(
+            id=0, node=4, accuracy_class="0.5S",
+            measured_quantities=("voltage", "current"),
+            current_channels=[CurrentChannel(branch=7)],
+        ),
+    ])
+
+Slack designation is unrelated to instrumentation and stays ``Source``-based
+(:func:`pgml.topology.slack_node_ids`); ``pgl.data.MeasurementModel.from_grid``
+derives the ML sensor set — and whether the slack is fully metered — from the
+attached devices.
+
 .. automodule:: pgml.schemas
    :members:
    :show-inheritance:
