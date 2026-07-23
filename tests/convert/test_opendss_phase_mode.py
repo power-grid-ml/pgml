@@ -353,13 +353,30 @@ class TestBusConnectionParsing:
 def _build_four_wire_circuit() -> None:
     """Build a 2-bus circuit whose line carries an explicit 4th (neutral) wire.
 
-    The neutral is grounded at the source through a small reactor so the DSS
-    solve converges; the reactor is not a converted element (only its effect on
-    ``YNodeOrder`` matters here — it makes ``src.4`` a real system node).
+    The neutral is grounded at the source through a small reactor -- since
+    ``Reactor`` now converts to a :class:`~pgml.schemas.grid_schema.ShuntAppliance`
+    (a series R+X branch to OpenDSS's own universal ground reference is
+    electrically identical to a shunt admittance there), this reactor is
+    itself part of the converted grid and anchors the neutral rail's absolute
+    voltage in pgml exactly as it does in the live DSS solve. The load ties
+    its return explicitly to the 4th (neutral) conductor (``bus1=b1.1.2.3.4``)
+    -- pgml's WYE incidence always routes a load's return through the node's
+    ``Phase.N`` row when the node carries one, which is exactly what this
+    explicit tie means; see ``test_grounded_load_on_neutral_carrying_node_warns``
+    for the (out-of-scope, warned) case where the load grounds implicitly
+    despite the node carrying a neutral.
     """
     dss.Text.Command("Clear")
+    # DSS's own factory default base frequency is 60 Hz; without explicitly
+    # reasserting it here (a documented engine gotcha -- see
+    # `src/pgml/convert/opendss/CONTEXT.md` and `_dss_clear()` in
+    # `tests/reference/test_opendss_transformer.py`), a `frequency=50` circuit
+    # solves to a degenerate ALL-ZERO voltage state (still reports
+    # `Converged() == True`) on this opendssdirect version.
+    dss.Text.Command("Set DefaultBaseFrequency=50")
     dss.Text.Command(
-        "New Circuit.four_wire_test basekv=0.4 pu=1.0 phases=3 bus1=src frequency=50"
+        "New Circuit.four_wire_test basekv=0.4 pu=1.0 phases=3 bus1=src "
+        "frequency=50 r1=1e-9 x1=1e-9 r0=1e-9 x0=1e-9"
     )
     dss.Text.Command(
         "New Line.l4w phases=4 bus1=src.1.2.3.4 bus2=b1.1.2.3.4 "
@@ -369,10 +386,15 @@ def _build_four_wire_circuit() -> None:
     )
     dss.Text.Command("New Reactor.ngnd phases=1 bus1=src.4.0 R=0.01 X=0.01")
     dss.Text.Command(
-        "New Load.wye3ph phases=3 bus1=b1.1.2.3 kv=0.4 kw=10 kvar=3 model=1"
+        "New Load.wye3ph phases=3 bus1=b1.1.2.3.4 kv=0.4 kw=10 kvar=3 model=1"
     )
     dss.Text.Command("Set voltagebases=[0.4]")
     dss.Text.Command("Calcvoltagebases")
+    # DSS's own default solve tolerance (1e-4) is far looser than pgml's
+    # nonlinear solve below; tighten it so the voltage-parity comparison
+    # isolates the CONVERSION, not DSS's own residual.
+    dss.Text.Command("Set Tolerance=1e-13")
+    dss.Text.Command("Set maxiterations=1000")
     dss.Text.Command("Solve")
     assert dss.Solution.Converged(), "DSS four-wire test circuit did not converge"
 
@@ -405,3 +427,87 @@ class TestFourWire:
         line = next(b for b in self._grid.branches if isinstance(b, Line))
         r = line.series_resistance_ohm_per_m
         assert len(r) == 4 and all(len(row) == 4 for row in r)
+
+    def test_voltage_parity_vs_live_opendss(self) -> None:
+        """Every (bus, phase incl. N) voltage matches the live DSS solve.
+
+        The grounding ``Reactor`` (now converted to a ``ShuntAppliance``) and
+        the load's explicit neutral tie (``.4``) together anchor the neutral
+        rail's absolute voltage the same way OpenDSS itself does; without the
+        Reactor conversion the neutral would float relative to true ground
+        and this comparison would fail.
+        """
+        result = solve_power_flow(
+            self._grid, slack="ideal", tol=1e-12, max_iter=300, dtype=torch.complex128
+        )
+        assert result.converged, (
+            f"solve_power_flow did not converge (residual={float(result.residual):.3e})"
+        )
+        for name in ("src", "b1"):
+            node = next(n for n in self._grid.nodes if n.name == name)
+            dss.Circuit.SetActiveBus(name)
+            dss_va = dss.Bus.puVmagAngle()
+            kvbase_ln_kv = dss.Bus.kVBase()
+            for k, phase in enumerate((Phase.A, Phase.B, Phase.C, Phase.N)):
+                row = result.index.row(node.id, phase)
+                v_val = complex(result.v.reshape(-1)[row].item())
+                vm_pu_ours = abs(v_val) / (kvbase_ln_kv * 1_000.0)
+                vm_pu_ref = dss_va[2 * k]
+                assert abs(vm_pu_ours - vm_pu_ref) < 1.0e-6, (
+                    f"bus {name} phase {phase}: |V| mismatch ours={vm_pu_ours:.8f} "
+                    f"dss={vm_pu_ref:.8f}"
+                )
+
+
+def _build_grounded_load_on_neutral_carrying_bus() -> None:
+    """Same 4-wire feeder, but the load grounds IMPLICITLY (no ``.4`` tie).
+
+    The load's own bus string (``b1.1.2.3``, exactly ``Phases=3`` suffixes)
+    means "return to true ground" in OpenDSS -- but bus ``b1`` ALSO carries a
+    ``Phase.N`` row (from the line's explicit 4th conductor), which pgml's
+    node-level WYE/neutral routing cannot distinguish from "return through
+    the shared neutral". This is the schema gap
+    ``_warn_if_grounded_despite_neutral`` documents.
+    """
+    dss.Text.Command("Clear")
+    dss.Text.Command("Set DefaultBaseFrequency=50")
+    dss.Text.Command(
+        "New Circuit.grounded_on_neutral_bus basekv=0.4 pu=1.0 phases=3 bus1=src "
+        "frequency=50"
+    )
+    dss.Text.Command(
+        "New Line.l4w phases=4 bus1=src.1.2.3.4 bus2=b1.1.2.3.4 "
+        "rmatrix=[0.2 | 0.05 0.2 | 0.05 0.05 0.2 | 0.05 0.05 0.05 0.25] "
+        "xmatrix=[0.4 | 0.1 0.4 | 0.1 0.1 0.4 | 0.1 0.1 0.1 0.45] "
+        "length=1 units=km"
+    )
+    dss.Text.Command("New Reactor.ngnd phases=1 bus1=src.4.0 R=0.01 X=0.01")
+    dss.Text.Command(
+        "New Load.wye3ph phases=3 bus1=b1.1.2.3 kv=0.4 kw=10 kvar=3 model=1"
+    )
+    dss.Text.Command("Set voltagebases=[0.4]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Solve")
+    assert dss.Solution.Converged(), (
+        "DSS grounded-on-neutral-bus circuit did not converge"
+    )
+
+
+def test_grounded_load_on_neutral_carrying_node_warns(caplog) -> None:
+    """A WYE load grounded despite its node carrying Phase.N logs a WARNING.
+
+    pgml cannot express "this appliance is grounded despite the node's
+    neutral" (the WYE/neutral routing decision is per-NODE, not per-appliance,
+    in ``assembly._incidence``) -- the converter surfaces this as a loud
+    warning instead of silently mis-wiring the load, per
+    ``_warn_if_grounded_despite_neutral``.
+    """
+    _build_grounded_load_on_neutral_carrying_bus()
+    with caplog.at_level("WARNING", logger="pgml"):
+        to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
+    assert any(
+        "miswired" in r.message.lower() or "grounded despite" in r.message.lower()
+        for r in caplog.records
+    ), "expected a 'grounded despite a neutral' warning; got " + str(
+        [r.message for r in caplog.records]
+    )

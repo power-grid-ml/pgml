@@ -228,6 +228,45 @@ same closed-form the pandapower converter uses (HV-referred). NOT read: 3-windin
 `RegControl` regulators, `XfmrCode`/frequency-correction curves. See
 `src/pgml/convert/opendss/CONTEXT.md` and `tests/reference/test_opendss_transformer.py`.
 
+## OpenDSS converter — element scope extension (Line/Load/Capacitor/Reactor/Generator/PVSystem/Storage)
+`convert.opendss.to_grid` also converts: **Line** — a phase-permuted terminal
+(`bus1=a.1.2.3 bus2=b.3.2.1`) carries an independent `to_phases` (the
+assembly's series-branch stamp already indexes the two terminals
+independently, matching Transformer); the `SINGLE_PHASE_EQUIV` reduction of a
+coupled multi-phase line now uses the POSITIVE-SEQUENCE `Z1 = Z_self -
+Z_mutual` (and `C1 = C_self - C_mutual`) rather than the bare self entry (a
+genuinely 1-phase line is unaffected — byte-identical). **Load/Generator/
+Storage/PVSystem** bus parsing now reads `CktElement.NodeOrder()` (DSS's own
+resolved conductor/return assignment) instead of re-parsing the bus string,
+fixing a bug where every bus-string suffix (including an explicit neutral
+tie) was read as a phase conductor; a WYE appliance solidly grounded on a bus
+that ALSO carries a `Phase.N` row from another element triggers a WARNING (a
+schema gap — pgml's WYE/neutral routing is per-NODE, not per-appliance, so
+"grounded despite the node's neutral" cannot be expressed). **Load** also
+maps `Loads.Model()` (1/2/5/8) to `LoadModel`/`ZipCoefficients` (models
+3/4/6/7 fall back to `CONST_POWER` with a warning; the ZIPV low-voltage
+cutoff is not modeled). **Capacitor/Reactor** convert to `ShuntAppliance`
+(WYE, solidly grounded only — DELTA and an explicitly coupled Reactor
+Rmatrix/Xmatrix are out of scope and warned/skipped); a Reactor's series
+R+X converts to the equivalent shunt admittance `Y=1/(R+jX)` (exact at
+the fundamental only — the schema's `ShuntReactor`/`ShuntAppliance` have no
+inductance field, so a genuinely inductive reactor's harmonic frequency
+trend is not modeled). **Generator/PVSystem** convert via
+`build_generator` (generation-positive; PVSystem's present `kW`/`kvar`
+already reflect OpenDSS's own Pmpp/irradiance/pf derating).
+**Storage** converts directly to `Storage` (signed, discharge-positive —
+DSS's own `kW` sign under `state=CHARGING`/`DISCHARGING` already matches)
+plus its inert energy-state fields. Every other unhandled DSS element class
+(`Isource`, `Monitor`, `EnergyMeter`, `RegControl`, ...) is enumerated
+generically from `Circuit.AllElementNames()` and triggers a
+`warn_dropped_elements` WARNING; a non-negligible Vsource `R1`/`X1` warns
+that the default `slack="ideal"` ignores it (`slack="norton"` reproduces it).
+See `src/pgml/convert/opendss/CONTEXT.md` for the full field-mapping tables
+and `tests/reference/test_opendss_line_phase_permutation.py`,
+`tests/reference/test_opendss_load_model.py`,
+`tests/convert/test_opendss_shunt_and_der_elements.py`, and the strengthened
+`tests/convert/test_opendss_phase_mode.py` for the oracle/coverage tests.
+
 ## Cross-converter conventions (voltage base, slack, frequency)
 
 > The authoritative cross-tool convention record (base voltage L-L/L-N, transformer
