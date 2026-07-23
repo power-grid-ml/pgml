@@ -361,8 +361,10 @@ def apply_load_profiles(
     Each profiled device's base P/Q (its ``operating_point`` entry if present, else its
     nominal ``p_nom_w`` / ``q_nom_var``) is multiplied by the device's profile factor,
     so the totals gain the step axis (``p_w`` / ``q_var`` become ``[B, T]``; a per-phase
-    base keeps its structure, each phase scaled by the same factor). Non-profiled
-    entries (e.g. a Source ``u_ref_scale``) pass through untouched.
+    base keeps its structure, each phase scaled by the same factor). A batched Source
+    ``u_ref_scale`` (``[B]``, per-scenario) is promoted to ``[B, 1]`` so the slack
+    reference broadcasts against the per-step ``[B, T]`` state (the scale stays constant
+    over the sequence); other non-profiled entries pass through untouched.
 
     Parameters
     ----------
@@ -404,6 +406,16 @@ def apply_load_profiles(
             new["p_w"] = _mul(entry.get("p_w", appliance.p_nom_w), fac)
             new["q_var"] = _mul(entry.get("q_var", appliance.q_nom_var), fac)
         op[cid] = new
+
+    # A per-scenario source-voltage scale is [B]; the profiled state batch is [B, T].
+    # Promote to [B, 1] so the ideal-slack reference broadcasts across the steps
+    # (torch aligns trailing dims — a bare [B] would pair with T, not B).
+    for entry in op.values():
+        scale = entry.get("u_ref_scale")
+        if scale is not None:
+            t = torch.as_tensor(scale)
+            if t.ndim == 1:
+                entry["u_ref_scale"] = t.unsqueeze(-1)
 
     samples = {
         f"{nm}_profile_factor": draw.factor,  # [B, n_dev, T]

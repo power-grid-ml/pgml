@@ -320,3 +320,64 @@ def test_profiled_solve_is_differentiable(grid3):
     assert (
         r.grad is not None and torch.isfinite(r.grad).all() and r.grad.abs().sum() > 0
     )
+
+
+def test_profiled_solve_with_source_uref_scale(grid3):
+    """A per-scenario source u_ref draw broadcasts against the per-step [B, T] state."""
+    cfg = _ccfg(
+        orders=[3, 5],
+        n_steps=4,
+        n_scenarios=3,
+        seed=5,
+        step_size_s=3600.0,
+        profile=LoadProfileConfig(),
+        start_time="2024-03-10T00:00:00",
+        parameters=[
+            ParameterSpec(
+                name="pq",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.7, high=1.3),
+                field="pq",
+                mode="scale",
+            ),
+            ParameterSpec(
+                name="slack",
+                selector=Selector(component="source"),
+                distribution=Uniform(low=0.95, high=1.05),
+                field="u_ref",
+                mode="scale",
+            ),
+        ],
+    )
+    res = run_scenarios(grid3, cfg, dtype=CDT)
+    assert res.v.shape == (3, 4, 3, 3)
+    scale = res.sampled.operating_point[1]["u_ref_scale"]
+    assert tuple(scale.shape) == (3, 1)  # [B, 1]: constant over the sequence
+    # the slack row magnitude follows its scenario's scale at every step
+    from pgml.schemas.grid_schema import Phase
+
+    slack_row = res.index.row(1, Phase.A)
+    v_slack = res.v[:, :, 0, slack_row].abs()  # [B, T] at the fundamental
+    expected = 230.0 * scale.to(v_slack.dtype)
+    torch.testing.assert_close(v_slack, expected.expand_as(v_slack))
+    # per-step loop parity (mixed entry shapes: [B,T] power, [B,1] scale)
+    op, inj = res.sampled.operating_point, res.sampled.harmonic_injection
+    for b in range(3):
+        for t in (0, 3):
+            op1 = {}
+            for c, e in op.items():
+                op1[c] = {
+                    k: (v[b, t] if v.shape[-1] == 4 else v[b, 0]) for k, v in e.items()
+                }
+            inj1 = {
+                c: {o: (mp[0][b, t], mp[1][b, t]) for o, mp in od.items()}
+                for c, od in inj.items()
+            }
+            r1 = solve_harmonic_flow(
+                grid3,
+                [1, 3, 5],
+                operating_point=op1,
+                harmonic_injection=inj1,
+                dtype=CDT,
+            )
+            torch.testing.assert_close(res.v[b, t], r1.v, rtol=1e-7, atol=1e-9)
