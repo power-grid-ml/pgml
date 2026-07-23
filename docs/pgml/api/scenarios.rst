@@ -333,6 +333,87 @@ orders, N nodes)::
 ``{device_id: {order: (mag[B, T], phase[B, T])}}``; this is passed directly to
 ``solve_harmonic_flow`` by :func:`~pgml.scenarios.run_scenarios`.
 
+Time-varying fundamental (``LoadProfileConfig``)
+---------------------------------------------------
+
+By default the fundamental P/Q of a :class:`~pgml.scenarios.CoherentSpectrumConfig`
+sequence is **constant** across its ``T`` steps — only the harmonic fingerprint varies.
+Setting ``profile`` to a :class:`~pgml.scenarios.LoadProfileConfig` makes the fundamental
+itself **time-varying**: every matched device's per-scenario base P/Q is multiplied by a
+synthetic profile factor composed on four time scales (seasonal, weekly, daily,
+short-term AR(1)), class-aware by ``consumer_type`` — a household evening peak, an
+office business-hours plateau, an EV late-evening charging peak, a near-flat industrial
+plateau, and a dedicated solar bell for ``"pv"`` that is zero at night with a
+seasonally-widening daylight window. ``start_time`` (ISO 8601) is **required** with
+``profile`` — the daily / weekly / seasonal phases need an absolute anchor::
+
+    from pgml.scenarios import CoherentSpectrumConfig, LoadProfileConfig, run_scenarios
+
+    cfg = CoherentSpectrumConfig(
+        selector=Selector(component="load"),
+        orders=[3, 5, 7, 11, 13],
+        n_steps=48,               # two days at hourly resolution
+        n_scenarios=32,
+        step_size_s=3600.0,
+        seed=42,
+        profile=LoadProfileConfig(),          # defaults: daily_amplitude=1.0, ...
+        start_time="2024-06-21T00:00:00",     # ISO 8601, anchors the daily/seasonal phase
+    )
+    result = run_scenarios(grid, cfg)
+    # result.v  shape [32, 48, 6, N]  — the fundamental now moves step to step
+    # result.sampled.samples["time_unix_s"]  shape [48]  (absolute epoch seconds)
+
+Because the harmonic injection magnitude is defined **relative to** each device's own
+fundamental current, a profile-scaled fundamental already scales the absolute harmonic
+current at solve time — no extra coupling is needed. The profile draws on an RNG stream
+distinct from the fingerprint bank, the Markov path, the AR(1) jitter, and the
+operating-point cube, so ``profile=None`` (the default) is byte-identical to the
+fingerprint-only behavior.
+
+**Correlation model.** Two per-scenario shared latents make devices co-vary within a
+scenario: a ``behavioral`` latent scales the daily-amplitude of every non-``pv`` device
+together (a busy day lifts everyone's swing), and a ``cloudiness`` latent scales every
+``pv`` device's output together (an overcast day dims all panels). Each device then draws
+idiosyncratic per-scenario values on top — an overall level, an amplitude jitter, and a
+daily phase offset — plus a per-step AR(1) short-term term.
+
+**Sample record keys** added when ``profile`` is set (``name`` defaults to
+``"harmonics"``, matching the fingerprint's own name):
+
+- ``"<name>_profile_factor"`` — ``[B, n_dev, T]`` the realized multiplicative profile
+  factor per profiled device per step (ML ground truth for profile attribution).
+- ``"<name>_profile_device_ids"`` — ``[n_dev]`` the profiled device IDs.
+- ``"time_unix_s"`` — ``[T]`` absolute epoch seconds (``start_time`` + ``k * step_size_s``);
+  distinct from the always-present relative ``"time_s"``.
+
+A per-scenario source ``u_ref_scale`` (from ``CoherentSpectrumConfig.parameters``, ``[B]``)
+is automatically promoted to ``[B, 1]`` so the slack reference broadcasts against the
+per-step ``[B, T]`` state — the scale itself stays constant over the sequence, only the
+broadcast shape changes.
+
+:func:`~pgml.scenarios.load_profile_factors` (draws the raw per-device, per-step factors
+as a ``ProfileDraw`` — ``factor[B, n_dev, T]`` / ``device_ids[n_dev]`` / ``time_unix_s[T]``)
+and :func:`~pgml.scenarios.apply_load_profiles` (lifts an operating point to the per-step
+``[B, T]`` form) are the two functions :func:`~pgml.scenarios.sample_coherent_spectra`
+calls internally when ``profile`` is set; call them directly to inspect the realized
+profile factors before solving.
+
+**Differentiability.** A profiled ``[B, T]`` operating-point batch solves and
+differentiates like any other batch: the implicit-function-theorem backward pass builds
+its state Jacobian over a single flattened scenario axis by collapsing the plan's
+``[B, T]`` power to ``[B*T]`` internally, so gradients w.r.t. grid parameters flow through
+a profiled sequence exactly as they do through a constant-fundamental one (verified
+against a per-step-loop gradient and finite differences). A cartesian *states × operating
+point* batch remains forward-only, as before.
+
+.. note::
+
+   The profile generator lives in ``pgml.scenarios.profiles``; only
+   :func:`~pgml.scenarios.load_profile_factors` and
+   :func:`~pgml.scenarios.apply_load_profiles` are re-exported at the
+   :mod:`pgml.scenarios` package level (documented here alongside
+   :class:`~pgml.scenarios.CoherentSpectrumConfig`, the surface that uses them).
+
 Per-node harmonic "error"-source sweep (``run_node_injection_sweep``)
 -----------------------------------------------------------------------
 

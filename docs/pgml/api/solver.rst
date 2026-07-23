@@ -220,6 +220,30 @@ single appliance.  See the "Per-phase / connection-aware harmonic injection"
 section of the :doc:`/pgml/concepts` page for usage examples and the full override
 convention.
 
+Fundamental-current anchor (``S_eff``)
+-----------------------------------------
+
+Every device's harmonic spectrum scales from the ELEMENT (terminal) current it actually
+draws at the converged fundamental voltage, not from its nameplate power. Per element,
+``I1_elem = sign * conj(S_eff) / conj(V_term)`` (load convention, ``sign`` +1 load / -1
+generator), where ``S_eff`` is the model-consistent power the device draws at that
+voltage — identical to what the nonlinear fundamental solve itself resolves
+(``device_current_injections``):
+
+- **Inverter-controlled device** (``Load``/``Generator``/``Storage`` with a ``control``)
+  — the control-resolved ``(P, Q)`` at the converged terminal voltage.
+- **Voltage-dependent load model** (``load_model`` other than the const-power default)
+  — the ZIP-scaled power ``S_eff = S0 * (z*r^2 + i*r + p)`` at ``r = |V_term| / V0``, the
+  same law :func:`~pgml.assembly.device_current_injections` applies.
+- **Const-power default** — the base operating point, unscaled.
+
+Every order's magnitude and angle then follow the usual spectrum convention relative to
+this ``I1_elem`` (see "Per-node harmonic source" below). Anchoring to the ACTUAL drawn
+current rather than the nameplate power is what makes a ``CONST_IMPEDANCE`` /
+``CONST_CURRENT`` / ``ZIP`` load's harmonic spectrum agree with an independent reference
+engine's per-model fundamental-current scaling — see the OpenDSS scenario oracle's
+matched-mode parity figures in :doc:`evaluation`.
+
 Per-node harmonic source (``node_sources``)
 --------------------------------------------
 
