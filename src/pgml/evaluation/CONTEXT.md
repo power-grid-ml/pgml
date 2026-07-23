@@ -132,12 +132,14 @@ Requires `opendssdirect` (imported lazily). Unlike `oracles.opendss_oracle` abov
 overwrites transformer/source contributions with pgml's own stamps to isolate one model
 component), this exports a GENUINE, independent OpenDSS circuit — own `Vsource`/`Line`
 (Rmatrix/Xmatrix/Cmatrix)/`Transformer` (native windings/conn/tap/clock, reusing
-`opendss_oracle`'s vetted clock-realisation helpers)/`Load`/`Generator`/`Capacitor`/
-`Reactor` — then translates a `SampledScenarios` batch into per-scenario `Edit` commands +
-native DSS `Spectrum` objects and solves `Solve` (snap) + `Solve mode=harmonics` per order.
-The scenario oracle for numeric cross-validation AND an independent `pgl` test-set
-generator (see `docs/pgml/modeling/references/opendss/harmonics.md` for the harmonic
-injection convention this reproduces bit-for-bit).
+`opendss_oracle`'s vetted clock-realisation helpers; a 1-phase/positive-sequence-equivalent
+unit exports too, as a plain-ratio device)/`Load` (EVERY injection appliance — Load,
+Generator, Storage — exports as a native `Load`, negated for the generation-type ones; see
+"Coverage note" below)/`Capacitor`/`Reactor` — then translates a `SampledScenarios` batch
+into per-scenario `Edit` commands + native DSS `Spectrum` objects and solves `Solve` (snap)
++ `Solve mode=harmonics` per order. The scenario oracle for numeric cross-validation AND an
+independent `pgl` test-set generator (see `docs/pgml/modeling/references/opendss/harmonics.md`
+for the harmonic injection convention this reproduces bit-for-bit).
 - `ExportedCircuit(grid, mode, busname, node_order, rowmap, index, loads, generators,
   sources, spectra)` — a live-circuit handle; `spectra` starts empty, populated by
   `run_opendss_scenarios` once it knows the requested orders.
@@ -145,24 +147,37 @@ injection convention this reproduces bit-for-bit).
   ExportedCircuit` — builds the circuit, solves an initial nominal snapshot (validates +
   captures the stable DSS row order), raises `pgml.errors.ConversionError` for any
   unsupported grid feature (conductor-geometry lines — use `opendss_oracle`'s geometry
-  path instead; unresolved `type_ref`; a non-diagonal/unbalanced `Source`; zigzag or
-  non-3-phase `Transformer` windings; an impedance-grounded transformer neutral or an
+  path instead; unresolved `type_ref`; a non-diagonal/unbalanced `Source`; zigzag windings;
+  a NONZERO exact phase shift on a 1-phase transformer — OpenDSS has no delta/LeadLag
+  mechanism at `phases=1` (verified live: `conn=delta` collapses to a degenerate
+  near-zero-voltage result there), so only a zero-shift 1-phase unit is representable, even
+  though pgml's own `p==1` stamp DOES apply the exact vector-group shift; a non-3-phase
+  transformer winding count other than 1; an impedance-grounded transformer neutral or an
   explicit `zero_sequence` override — NOT yet consumed by `pgml.assembly`, so faithfully
   exporting them would silently diverge; a per-phase override on a DELTA appliance).
-  `mode="matched"` sets `NeglectLoadY=Yes` (REQUIRED for physical equivalence — pgml's
-  harmonic solver has no load-shunt model at all, `include_load_shunt` is hard-`False`)
-  and `Rg=Xg=0` on every line (pgml's non-geometry harmonic line models carry no earth
-  term). `mode="default"` leaves OpenDSS's own defaults.
+  `mode="matched"` sets: `NeglectLoadY=Yes` (REQUIRED for physical equivalence — pgml's
+  harmonic solver has no load-shunt model at all, `include_load_shunt` is hard-`False`);
+  `Rg=Xg=0` on every LINE-LIKE element including `Switch` (a sequence-form `r1/x1/r0/x0`
+  Line under the hood — it picks up OpenDSS's earth-return default exactly like an
+  `r1/x1`-defined Line; verified live, a switch-only repro alone desynced a comparison by
+  ~0.4%); a tight `Set Tolerance=1e-10`/`Set MaxIterations=100` snap solve (OpenDSS's
+  default `1e-4` tolerance is loose enough to show up, growing with system size/loading);
+  and `Vminpu=0.0001 Vmaxpu=10000` on every `Load` (OpenDSS's default `0.95`/`1.05` band
+  CLIPS the constant-power/current/ZIP law outside it — pgml's laws have none — measured
+  live: a bus at 0.919 pu, an everyday LV drop, made a default-banded load deliver 6.8%
+  less than nameplate). `mode="default"` leaves OpenDSS's own defaults for all of these.
 - `run_opendss_scenarios(grid, sampled, *, harmonic_orders, mode="matched"|"default",
   dtype=complex128) -> pgml.scenarios.ScenarioResult` — exports once, attaches one native
-  `Spectrum` per device carrying a harmonic injection, then per scenario (× per STEP for a
-  node-coherent batch, detected via `sampled.samples["time_s"]`) edits the operating point
-  (`kW`/`kvar`, per-phase where the appliance was split, `Vsource.pu` for a source
-  `u_ref_scale`) and each device's `Spectrum` `%mag`(`=magnitude_pu*100`)/`angle`
-  (`=phase_deg`, direct — the order-1 entry is the same self-relative reference pgml's own
-  `arg(I_h)=ang_h+h*(arg(I1)-ang_1)` formula uses), then solves snap (order 1) + one
-  `Solve mode=harmonics` per remaining order. `v` is `[B,H,N]` / `[B,T,H,N]`, aligned to
-  `node_phase_index` rows exactly like `run_scenarios`'s own output.
+  `Spectrum` per device carrying a harmonic injection, then per scenario × per STEP (node-
+  coherent batch, detected via `sampled.samples["time_s"]`; `Vsource`/load `Edit`s happen
+  once per step too, so a `LoadProfileConfig`-lifted PER-STEP `[B, T]` operating point is
+  sliced by step, not just by scenario) edits the operating point (`kW`/`kvar`, per-phase
+  where the appliance was split, `Vsource.pu` for a source `u_ref_scale`) and each device's
+  `Spectrum` `%mag`(`=magnitude_pu*100`)/`angle`(`=phase_deg`, direct — the order-1 entry is
+  the same self-relative reference pgml's own `arg(I_h)=ang_h+h*(arg(I1)-ang_1)` formula
+  uses), then solves snap (order 1) + one `Solve mode=harmonics` per remaining order. `v` is
+  `[B,H,N]` / `[B,T,H,N]`, aligned to `node_phase_index` rows exactly like `run_scenarios`'s
+  own output.
 - `write_opendss_dataset(grid, sampled, path, *, harmonic_orders, mode="matched",
   layout="wide", dtype=complex128) -> Path` — `run_opendss_scenarios` +
   `pgml.scenarios.write_dataset`, then stamps `meta.json` with `engine="opendss"`,
@@ -178,21 +193,36 @@ injection convention this reproduces bit-for-bit).
   finite-impedance Thevenin source, so comparing against pgml's ideal-slack solve on a
   grid with a non-negligible source impedance reports a spurious ~1e-3 relative "error"
   that is actually two different slack models (measured on `pgml.grids.synthetic_feeder`).
-  Optionally writes `opendss_comparison.json`/`.csv` to `out_dir`. Measured on
-  `synthetic_feeder` (4-node, 3 WYE loads, `mode="matched"`): relative error ~3e-10
-  (fundamental) / ~1.5e-8 (injected harmonics h=3,5) — near machine precision.
-  `mode="default"` diverges as designed, NOT a bug: the TRIPLEN order is dominated by
-  OpenDSS's imperial-calibrated earth-return `Rg`/`Xg` (tens-to-hundreds of percent on a
-  3-wire feeder, see `docs/pgml/modeling/conventions.md` §8); the non-triplen order by
-  OpenDSS's default load Norton shunt absent from pgml's harmonic model (~0.4-0.5%).
+  Optionally writes `opendss_comparison.json`/`.csv` to `out_dir`. Measured `mode="matched"`
+  (2026-07 comparison campaign, `feeder12`/`feeder8`/CIGRE-LV-3ph/devices-with-Generator-
+  Storage-Shunt-Switch-ZIP-CONST_CURRENT cases, snapshot + coherent + coherent-with-profile,
+  light/nominal/heavy load, high THD, asymmetric): ~1e-9 to ~1e-6 relative on every case
+  EXCEPT a documented, bounded model gap (below). `mode="default"` diverges as designed, NOT
+  a bug: the TRIPLEN order is dominated by OpenDSS's imperial-calibrated earth-return
+  `Rg`/`Xg` (up to ~4x relative on the CIGRE LV benchmark's 3-wire, no-neutral feeders, see
+  `docs/pgml/modeling/conventions.md` §8); the non-triplen order by OpenDSS's default load
+  Norton shunt, absent from pgml's harmonic model.
 
-Coverage note: `Storage` exports as a DSS `Generator` (its snapshot behaviour is identical
-to `Generator`'s per the schema; no `pgml.scenarios` selector targets storage either, so
-neither engine dispatches it per-scenario). `ShuntAppliance`/`ShuntReactor` export as a
-`Capacitor` (C) + a diagonal-`Rmatrix` `Reactor` (G); implemented but not independently
-oracle-tested by `tests/reference/test_scenario_oracle_opendss.py` (the primary test grid,
-`synthetic_feeder`, carries neither). See that test file + this module's docstring for the
-full refusal list.
+Documented IRREDUCIBLE model gap (not an exporter bug — the exported circuit is faithful,
+but pgml's OWN `pgml.solver.harmonic_flow` formula does not match OpenDSS's physics for
+these two load models): a `CONST_CURRENT`/`ZIP` load's harmonic injection reference current
+is `I1_elem = sign*conj(S0_elem)/conj(V_term)` — a CONSTANT-POWER-style current REGARDLESS
+of `load_model` (confirmed by reading the solver source). When the solved fundamental
+voltage deviates from rated (an everyday LV drop), a `CONST_CURRENT`/`ZIP` load carrying a
+harmonic spectrum shows a matched-mode error proportional to that deviation — measured
+~0.3-0.8% relative at the injected harmonics (h=1 and every `CONST_POWER`-only case stay at
+the ~1e-9 to 1e-6 floor). Bounded and pinned in
+`tests/reference/test_scenario_oracle_opendss.py`.
+
+Coverage note (`_ApplianceExport.dss_class` is ALWAYS `"Load"` now): a genuine DSS
+`Generator` element stamps its own linearized PQ admittance into the harmonics-mode linear
+system REGARDLESS of `NeglectLoadY`/`Model`/`Xdpp` (verified empirically: no combination
+zeroes it, unlike a `Load`), so `Generator`/`Storage` export as a negative-kW `Load` instead
+(the OpenDSS negative-load generation idiom), which DOES become a true pure current source
+under `NeglectLoadY=Yes` (post-solve `YPrim` ~1e-12 vs ~0.0375 S for a genuine `Generator`
+on the same nameplate). `ShuntAppliance`/`ShuntReactor` export as a `Capacitor` (C) + a
+diagonal-`Rmatrix` `Reactor` (G). See the module docstring + the test file for the full
+refusal list and every measured figure above.
 
 ## Compatibility shim (`pgml.evaluation.oracles`)
 Re-exports all of `pgml.evaluation.oracles`; kept for backward compatibility with

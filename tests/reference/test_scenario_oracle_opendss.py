@@ -49,14 +49,20 @@ from pgml.scenarios import (
     sample_coherent_spectra,
 )
 from pgml.schemas.grid_schema import (
+    ComplexTap,
+    Generator,
     Grid,
     Load,
     LoadModel,
     Node,
     Phase,
+    ShuntAppliance,
     Source,
+    Storage,
+    Switch,
     Transformer,
     WindingConnection,
+    ZipCoefficients,
 )
 
 pytestmark = pytest.mark.opendss
@@ -370,3 +376,301 @@ def test_default_mode_report_generated_and_diverges_as_documented():
         assert stats["ref_rms_v"] > 0.0  # the report is populated, not vacuous
     # the fundamental is mode-independent (NeglectLoadY/Rg/Xg only affect harmonics mode)
     assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
+
+
+# ---------------------------------------------------------------------------
+# Devices: Generator/Storage/ShuntAppliance/Switch (tight) + ZIP/CONST_CURRENT
+# (a documented, bounded, irreducible divergence -- see the module docstring)
+# ---------------------------------------------------------------------------
+_ABC = (Phase.A, Phase.B, Phase.C)
+
+
+def _devices_grid() -> Grid:
+    """A 3-phase feeder with a closed Switch, a Capacitor+Reactor ShuntAppliance, a
+    PV Generator, and a Storage unit -- everything the campaign found clean once
+    exported as a negative-kW Load with Vminpu/Vmaxpu unbounded (see the module
+    docstring's "Exporter coverage")."""
+    diag = lambda v: [[v if i == j else 0.0 for j in range(3)] for i in range(3)]  # noqa: E731
+    nodes = [Node(id=i, u_rated_v=400.0, phases=_ABC) for i in range(3)]
+    src = Source(
+        id=1,
+        node=0,
+        phases=_ABC,
+        u_ref_v=[230.94] * 3,
+        u_angle_deg=[0.0, -120.0, 120.0],
+        resistance_ohm=diag(0.05),
+        inductance_h=diag(1.0e-4),
+    )
+    sw = Switch(
+        id=2,
+        from_node=0,
+        to_node=1,
+        from_phases=_ABC,
+        to_phases=_ABC,
+        closed=True,
+        resistance_ohm=1.0e-4,
+        inductance_h=0.0,
+    )
+    ln = Switch(  # a second closed switch further downstream (exercise more than one)
+        id=3,
+        from_node=1,
+        to_node=2,
+        from_phases=_ABC,
+        to_phases=_ABC,
+        closed=True,
+        resistance_ohm=2.0e-4,
+        inductance_h=0.0,
+    )
+    ld = Load(id=4, node=2, phases=_ABC, p_nom_w=50.0e3, q_nom_var=15.0e3)
+    gen = Generator(
+        id=5,
+        node=2,
+        phases=_ABC,
+        p_nom_w=20.0e3,
+        q_nom_var=0.0,
+        consumer_type="pv",
+    )
+    storage = Storage(id=6, node=2, phases=_ABC, p_nom_w=10.0e3, q_nom_var=2.0e3)
+    shunt = ShuntAppliance(
+        id=7,
+        node=2,
+        phases=_ABC,
+        conductance_s=(1.0e-6,) * 3,
+        capacitance_f=(2.0e-6,) * 3,
+    )
+    return Grid(
+        nodes=nodes, branches=[sw, ln], appliances=[src, ld, gen, storage, shunt]
+    )
+
+
+@pytest.mark.slow
+def test_devices_switch_generator_storage_shunt_matched_tight():
+    """Switch/Generator/Storage/ShuntAppliance all agree with pgml near machine precision."""
+    grid = _devices_grid()
+    orders = [3, 5]
+    cfg = ScenarioConfig(
+        n_samples=3,
+        seed=1,
+        parameters=[
+            ParameterSpec(
+                name="load_pq",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.7, high=1.3),
+                field="pq",
+                mode="scale",
+            ),
+            ParameterSpec(
+                name="gen_pq",
+                selector=Selector(component="generator"),
+                distribution=Uniform(low=0.5, high=1.0),
+                field="pq",
+                mode="scale",
+            ),
+            ParameterSpec(
+                name="h_mag",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.2, high=0.6),
+                field="h_mag",
+                mode="absolute",
+                orders=orders,
+                harmonic_reference="iec61000-3-2",
+            ),
+            ParameterSpec(
+                name="h_phase",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=-180.0, high=180.0),
+                field="h_phase",
+                mode="absolute",
+                orders=orders,
+            ),
+        ],
+    )
+    sampled = sample(grid, cfg)
+    report = compare_to_pgml(
+        grid, sampled, harmonic_orders=[1, *orders], mode="matched"
+    )
+    assert report["opendss_converged"] and report["pgml_converged"]
+    for h, stats in report["per_order"].items():
+        assert stats["rel_max"] < _MATCHED_REL_TOL, (
+            f"order {h}: devices-grid matched-mode error {stats['rel_max']:.3e} exceeds "
+            f"{_MATCHED_REL_TOL:.0e}."
+        )
+
+
+# A generous, MEASURED bound for the documented CONST_CURRENT/ZIP harmonic-reference-
+# current gap (module docstring): ~0.3-0.8% observed. Pinned at 2% -- tight enough to
+# catch a regression that makes it materially worse, loose enough not to flake on the
+# expected, bounded divergence.
+_DOCUMENTED_DIVERGENCE_BOUND = 2.0e-2
+
+
+@pytest.mark.slow
+def test_const_current_zip_harmonic_documented_divergence():
+    """A CONST_CURRENT/ZIP load with harmonic content shows a BOUNDED, documented
+    matched-mode divergence (module docstring) -- not machine precision, but not
+    unbounded either. The fundamental (h=1, unaffected by the harmonic I1 reference
+    formula) stays at the usual tight floor."""
+    grid = _devices_grid()
+    grid = grid.model_copy(deep=True)
+    for i, a in enumerate(grid.appliances):
+        if isinstance(a, Load):
+            grid.appliances[i] = a.model_copy(
+                update={
+                    "load_model": LoadModel.ZIP,
+                    "zip_coefficients": ZipCoefficients(
+                        z_p=0.3, i_p=0.3, p_p=0.4, z_q=0.3, i_q=0.3, p_q=0.4
+                    ),
+                }
+            )
+    orders = [3, 5]
+    cfg = ScenarioConfig(
+        n_samples=3,
+        seed=1,
+        parameters=[
+            ParameterSpec(
+                name="load_pq",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.7, high=1.3),
+                field="pq",
+                mode="scale",
+            ),
+            ParameterSpec(
+                name="h_mag",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.2, high=0.6),
+                field="h_mag",
+                mode="absolute",
+                orders=orders,
+                harmonic_reference="iec61000-3-2",
+            ),
+            ParameterSpec(
+                name="h_phase",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=-180.0, high=180.0),
+                field="h_phase",
+                mode="absolute",
+                orders=orders,
+            ),
+        ],
+    )
+    sampled = sample(grid, cfg)
+    report = compare_to_pgml(
+        grid, sampled, harmonic_orders=[1, *orders], mode="matched"
+    )
+    assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL  # h=1 unaffected
+    for h in orders:
+        rel = report["per_order"][h]["rel_max"]
+        assert rel < _DOCUMENTED_DIVERGENCE_BOUND, (
+            f"order {h}: ZIP/CONST_CURRENT harmonic divergence {rel:.3e} exceeds the "
+            f"documented bound {_DOCUMENTED_DIVERGENCE_BOUND:.0e} -- investigate as a "
+            "regression, not the known formula gap."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Coherent batch with a LoadProfileConfig (per-step [B, T] operating point)
+# ---------------------------------------------------------------------------
+@pytest.mark.slow
+def test_coherent_with_load_profile_matched_tight():
+    """A per-STEP ``[B, T]`` operating point (LoadProfileConfig) agrees with pgml."""
+    from pgml.scenarios import LoadProfileConfig
+
+    grid = _grid()
+    cfg = CoherentSpectrumConfig(
+        selector=Selector(component="load"),
+        orders=[3, 5],
+        n_steps=3,
+        n_scenarios=2,
+        seed=7,
+        step_size_s=3600.0,
+        profile=LoadProfileConfig(),
+        start_time="2026-06-01T00:00:00",
+    )
+    sampled = sample_coherent_spectra(grid, cfg)
+    op = sampled.operating_point
+    assert any(
+        hasattr(v.get("p_w"), "ndim") and v["p_w"].ndim == 2 for v in op.values()
+    ), "the profile should lift the operating point to a per-step [B, T] shape"
+
+    report = compare_to_pgml(grid, sampled, harmonic_orders=[1, 3, 5], mode="matched")
+    assert report["opendss_converged"] and report["pgml_converged"]
+    for h, stats in report["per_order"].items():
+        assert stats["rel_max"] < _MATCHED_REL_TOL, (
+            f"order {h}: coherent-with-profile matched-mode error {stats['rel_max']:.3e} "
+            f"exceeds {_MATCHED_REL_TOL:.0e} -- the per-step [B, T] operating point "
+            "slicing must index by step, not just by scenario."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Single-phase (positive-sequence equivalent) transformer
+# ---------------------------------------------------------------------------
+def _single_phase_transformer_grid(shift_deg: float) -> Grid:
+    abc = (Phase.A,)
+    nodes = [
+        Node(id=0, u_rated_v=20000.0, phases=abc),
+        Node(id=1, u_rated_v=400.0, phases=abc),
+    ]
+    src = Source(
+        id=1,
+        node=0,
+        phases=abc,
+        u_ref_v=[20000.0],
+        u_angle_deg=[0.0],
+        resistance_ohm=[[0.05]],
+        inductance_h=[[1.0e-4]],
+    )
+    # A DELTA/WYE_GROUNDED pairing needs an ODD clock (each shifting winding contributes
+    # +-30 deg); a zero shift therefore uses a matching WYE_GROUNDED/WYE_GROUNDED (Yy0)
+    # pairing instead (pgml's own vector-group parity check rejects clock=0 on a Dyn
+    # pairing regardless of phase count).
+    from_conn = (
+        WindingConnection.WYE_GROUNDED if shift_deg == 0.0 else WindingConnection.DELTA
+    )
+    t = Transformer(
+        id=2,
+        from_node=0,
+        to_node=1,
+        from_phases=abc,
+        to_phases=abc,
+        s_rated_va=5.0e5,
+        u_rated_from_v=20000.0,
+        u_rated_to_v=400.0,
+        from_connection=from_conn,
+        to_connection=WindingConnection.WYE_GROUNDED,
+        series_resistance_ohm=0.0032,
+        series_inductance_h=4.07e-5,
+        tap=ComplexTap(ratio_magnitude=1.0, shift_deg=shift_deg),
+    )
+    ld = Load(id=3, node=1, phases=abc, p_nom_w=1.0e5, q_nom_var=3.0e4)
+    return Grid(nodes=nodes, branches=[t], appliances=[src, ld])
+
+
+@pytest.mark.slow
+def test_single_phase_transformer_zero_shift_matched_tight():
+    """A zero-shift (plain ratio) 1-phase transformer -- the IEEE-33-style case."""
+    grid = _single_phase_transformer_grid(shift_deg=0.0)
+    cfg = ScenarioConfig(
+        n_samples=3,
+        seed=1,
+        parameters=[
+            ParameterSpec(
+                name="load_pq",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.7, high=1.3),
+                field="pq",
+                mode="scale",
+            ),
+        ],
+    )
+    sampled = sample(grid, cfg)
+    report = compare_to_pgml(grid, sampled, harmonic_orders=[1], mode="matched")
+    assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
+
+
+def test_single_phase_transformer_nonzero_shift_refuses():
+    """A NONZERO-shift 1-phase transformer is refused -- OpenDSS has no delta/LeadLag
+    mechanism at phases=1 (see the module docstring's refusal list)."""
+    grid = _single_phase_transformer_grid(shift_deg=30.0)
+    with pytest.raises(ConversionError, match="phases=1"):
+        export_grid_to_opendss(grid)
