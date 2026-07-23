@@ -34,20 +34,44 @@ verified `batched == loop-of-individual`).
     required iff `small_imbalance`.
   - HARMONIC fields `field="h_mag"|"h_phase"` + `orders=[...]` (>=2): write a batched
     `harmonic_injection` instead of an operating point. `h_mag` magnitude = sampled value ×
-    per-order EN 50160 limit (`harmonic_reference="en50160"`, distribution in [0,1]), ×
-    stored spectrum mag (`mode="scale"`), or absolute pu. `h_phase` sets the phase (deg,
-    `mode="absolute"`). Per-device injection is seeded from the stored `StaticSpectrum` so
-    unspecified orders survive. Harmonic fields reject `correlation`/per-phase `symmetry`.
+    a per-order reference fraction (`harmonic_reference`, distribution in [0,1]) ×, or ×
+    stored spectrum mag (`mode="scale"`), or absolute pu. `harmonic_reference`:
+    `"iec61000-3-2"` = IEC 61000-3-2 appliance CURRENT-emission fraction (PER DEVICE, from
+    nominal P + node L-N voltage + `emission_class`; the physically correct current
+    fingerprint reference); `"en50160"` = DIN EN 50160 supply-VOLTAGE compatibility level
+    (a background-distortion SHAPE, NOT an emission model — kept for compatibility);
+    `None` = absolute pu. `emission_class="A"|"B"|"C"|"D"|"auto"` (valid only with the IEC
+    reference; `"auto"` resolves per device from `consumer_type`+P). `h_phase` sets the
+    phase (deg, `mode="absolute"`). Per-device injection is seeded from the stored
+    `StaticSpectrum` so unspecified orders survive. Harmonic fields reject
+    `correlation`/per-phase `symmetry`.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
-- EN 50160 per-order limits: `en50160_limits() -> {order: max_pu}`, `en50160_limit(order)`
-  (loads the packaged `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env override).
+- EN 50160 per-order VOLTAGE limits: `en50160_limits() -> {order: max_pu}`,
+  `en50160_limit(order)` (loads `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env
+  override). These are supply-voltage compatibility levels, NOT an appliance emission model.
+- IEC 61000-3-2 appliance CURRENT-emission limits (`iec61000_3_2.py`; packaged
+  `pgml/data/standards/iec61000_3_2.yaml`, `PGML_IEC61000_3_2` env override). The default
+  reference for device current fingerprints. `iec61000_3_2_limits(class=None) -> dict` (full
+  table or one class's `{unit, limits, ...}`; Class B expanded to 1.5×A);
+  `iec61000_3_2_fraction(order, *, emission_class, p_w, u_ln_v, power_factor=1.0) -> float`
+  (limit → fraction of `I1 = p_w/(u_ln_v·pf)`; Class A/B amps/I1, Class C percent [h3 ×λ],
+  Class D mA/W·p_w/1000/I1 [P cancels]; clamped ≤1.0; absent order → 0.0);
+  `resolve_emission_class(consumer_type, p_w) -> "A"|"B"|"C"|"D"` (auto map: office(IT)≤600W
+  → D else A; everything else incl. household/EV/PV → A; lighting → C, no enum member yet);
+  `iec61000_3_2_device_caps(grid, ids, orders, *, emission_class="auto") -> {id:{order:frac}}`
+  (per-device caps; PER-PHASE current = total P/phase count; off the autograd tape).
 - NODE-COHERENT harmonic "fingerprints" (temporal sequences):
   `CoherentSpectrumConfig(selector, orders, n_steps T, n_scenarios B, n_modes=2, seed,
-  mag_distribution, harmonic_reference="en50160", phase_distribution, jitter_mag, ar1_rho,
-  dwell, step_size_s, resample_modes_per_scenario)` ->
+  mag_distribution, harmonic_reference="iec61000-3-2", emission_class="auto",
+  phase_distribution, jitter_mag, ar1_rho, dwell, step_size_s,
+  resample_modes_per_scenario, mode_bank_seed=None)` ->
   `sample_coherent_spectra(grid, config) -> SampledScenarios`. Each device draws `n_modes`
   base spectra (fingerprint); over T steps it STICKS to a mode (Markov `dwell`) and WANDERS
-  (AR(1) `ar1_rho` jitter), clamped to EN 50160. `harmonic_injection` is `[B,T]` per
+  (AR(1) `ar1_rho` jitter), clamped to the per-order emission reference (IEC 61000-3-2
+  PER-DEVICE cap by default; `en50160`/`None` optional). `mode_bank_seed` seeds ONLY the
+  fingerprint (mode) bank: `None` draws it from the `seed` stream (byte-identical to today);
+  an explicit value pins a DISTINCT bank (held-out unseen-fingerprint test set) while every
+  other setting is shared. `harmonic_injection` is `[B,T]` per
   (device, order); `samples` records `<name>_mode [B,n_dev,T]` (attribution label),
   `<name>_mag`/`<name>_phase [B,n_dev,n_ord,T]`, `<name>_device_ids`, `time_s [T]`.
   - `parameters=[ParameterSpec,...]` + `factors=[LatentFactor,...]` add a FUNDAMENTAL

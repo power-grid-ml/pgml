@@ -41,6 +41,12 @@ from .config import (
 )
 from .en50160 import en50160_limit, en50160_limits
 from .harmonics import sample_coherent_spectra, spectrum_sweep
+from .iec61000_3_2 import (
+    iec61000_3_2_device_caps,
+    iec61000_3_2_fraction,
+    iec61000_3_2_limits,
+    resolve_emission_class,
+)
 from .node_injection import run_node_injection_sweep
 from .persistence import LoadedDataset, read_dataset, write_dataset
 from .perturbation import perturbation_sweep
@@ -108,6 +114,10 @@ __all__ = [
     "run_node_injection_sweep",
     "en50160_limits",
     "en50160_limit",
+    "iec61000_3_2_limits",
+    "iec61000_3_2_fraction",
+    "iec61000_3_2_device_caps",
+    "resolve_emission_class",
     "write_dataset",
     "read_dataset",
     "LoadedDataset",

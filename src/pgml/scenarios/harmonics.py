@@ -4,7 +4,8 @@ Builds a ``[B, T]`` batch of harmonic injections in which every device keeps a s
 recognisable per-node signature that varies realistically step to step — the training
 signal a harmonic state estimator needs to attribute a pattern to a node. Each device
 draws ``n_modes`` base spectra (operating "states"); over ``T`` steps it sticks to a
-mode (Markov dwell) and wanders around it (AR(1) jitter), clamped to DIN EN 50160.
+mode (Markov dwell) and wanders around it (AR(1) jitter), clamped to the per-order
+emission reference (IEC 61000-3-2 by default; DIN EN 50160 or none optionally).
 
 The output is a :class:`~pgml.scenarios.sampler.SampledScenarios` whose
 ``harmonic_injection`` carries ``[B, T]``-shaped per-(device, order) tensors; feeding it
@@ -34,6 +35,7 @@ from .config import (
     SpectrumSweepConfig,
 )
 from .en50160 import en50160_limit
+from .iec61000_3_2 import iec61000_3_2_device_caps
 from .sampler import SampledScenarios, sample
 
 _F64 = torch.float64
@@ -115,8 +117,8 @@ def sample_coherent_spectra(
         The reference grid.  Only the appliances matched by ``config.selector`` are
         varied; all others keep their nominal spectra.
     config : CoherentSpectrumConfig
-        Fully specified sampling config (mode count, temporal structure, EN 50160
-        clamping, etc.).  Validated on construction.
+        Fully specified sampling config (mode count, temporal structure, emission
+        reference + clamping, etc.).  Validated on construction.
 
     Returns
     -------
@@ -164,24 +166,52 @@ def sample_coherent_spectra(
     n_dev, n_ord = len(ids), len(config.orders)
     n_modes, b, t = config.n_modes, config.n_scenarios, config.n_steps
     gen = torch.Generator().manual_seed(config.seed)
+    # The per-device fingerprint (mode) bank draws from its own generator when
+    # `mode_bank_seed` is set (a distinct signature bank for a held-out test set);
+    # `None` draws it from `gen`, byte-identical to a config without the field -- the
+    # bank is the first consumption of the `seed` stream (the Markov path + AR(1) jitter
+    # follow). With `mode_bank_seed` set, the path + jitter no longer consume the bank
+    # draws, so they are a distinct (statistically identical) realization of `seed`.
+    bank_gen = (
+        gen
+        if config.mode_bank_seed is None
+        else torch.Generator().manual_seed(int(config.mode_bank_seed))
+    )
 
-    # 1. per-order EN 50160 limits (also the upper clamp), or 1.0 (absolute pu).
-    en50160 = config.harmonic_reference == "en50160"
-    limits = torch.tensor(
-        [en50160_limit(o) if en50160 else 1.0 for o in config.orders], dtype=_F64
-    )  # [n_ord]
+    # 1. per-order emission caps (also the upper clamp). IEC 61000-3-2 is PER DEVICE
+    #    (each device's nominal P + node voltage): shape [n_dev, n_ord, 1]. EN 50160 is
+    #    a global per-order voltage-compatibility level; None is absolute pu (cap 1.0):
+    #    shape [n_ord, 1]. The trailing 1 broadcasts over the mode axis (base multiply)
+    #    and the T axis (clamp).
+    ref = config.harmonic_reference
+    clamp_to_cap = ref is not None
+    if ref == "iec61000-3-2":
+        cap_map = iec61000_3_2_device_caps(
+            grid, ids, config.orders, emission_class=config.emission_class
+        )
+        caps = torch.tensor(
+            [[cap_map[cid][o] for o in config.orders] for cid in ids], dtype=_F64
+        ).reshape(n_dev, n_ord, 1)
+    else:
+        caps = torch.tensor(
+            [en50160_limit(o) if ref == "en50160" else 1.0 for o in config.orders],
+            dtype=_F64,
+        ).reshape(n_ord, 1)
 
-    # 2. base mode spectra (the fingerprints): magnitude (fraction of limit) + phase.
+    # 2. base mode spectra (the fingerprints): magnitude (fraction of cap) + phase.
     mode_shape = (
         (b, n_dev, n_ord, n_modes)
         if config.resample_modes_per_scenario
         else (n_dev, n_ord, n_modes)
     )
-    base_mag = config.mag_distribution.icdf(
-        torch.rand(mode_shape, generator=gen, dtype=_F64)
-    ) * limits.reshape(-1, 1)  # [..., n_ord, n_modes], broadcast limit over modes
+    base_mag = (
+        config.mag_distribution.icdf(
+            torch.rand(mode_shape, generator=bank_gen, dtype=_F64)
+        )
+        * caps
+    )  # [..., n_ord, n_modes], cap broadcasts over modes (and devices for [n_ord, 1])
     base_phase = config.phase_distribution.icdf(
-        torch.rand(mode_shape, generator=gen, dtype=_F64)
+        torch.rand(mode_shape, generator=bank_gen, dtype=_F64)
     )
 
     # 3. Markov mode path + gather each step's base spectrum -> [B, n_dev, n_ord, T].
@@ -194,12 +224,12 @@ def sample_coherent_spectra(
     sel_mag = torch.gather(bm, -1, idx)  # [B, n_dev, n_ord, T]
     sel_phase = torch.gather(bp, -1, idx)
 
-    # 4. AR(1) jitter around the selected base, clamped to [0, limit] / wrapped phase.
+    # 4. AR(1) jitter around the selected base, clamped to [0, cap] / wrapped phase.
     e_mag = _ar1((b, n_dev, n_ord, t), config.ar1_rho, gen)
     e_phase = _ar1((b, n_dev, n_ord, t), config.ar1_rho, gen)
     mag = (sel_mag * (1.0 + config.jitter_mag * e_mag)).clamp(min=0.0)
-    if en50160:
-        mag = torch.minimum(mag, limits.reshape(1, 1, n_ord, 1))
+    if clamp_to_cap:
+        mag = torch.minimum(mag, caps)  # caps' trailing 1 broadcasts over the T axis
     phase = sel_phase + config.jitter_phase_deg * e_phase  # degrees
 
     # 5. assemble harmonic_injection {id: {order: (mag[B,T], phase[B,T])}}.

@@ -40,6 +40,7 @@ from .config import (
     SpectrumSweepConfig,
 )
 from .en50160 import en50160_limit
+from .iec61000_3_2 import iec61000_3_2_device_caps
 
 # A built batch may originate from a random/QMC config or a cartesian config.
 _AnyConfig = "ScenarioConfig | CartesianConfig"
@@ -351,9 +352,10 @@ def _harmonic_injections(
 
     Each device's injection is seeded from its stored ``StaticSpectrum`` (so orders the
     config does not vary survive), then ``h_mag`` / ``h_phase`` specs overwrite their
-    orders. ``h_mag`` magnitude is the sampled value times the per-order EN 50160 limit
-    (``harmonic_reference="en50160"``), the stored magnitude (``mode="scale"``), or the
-    sampled value directly (absolute pu).
+    orders. ``h_mag`` magnitude is the sampled value times a per-order reference limit
+    (``harmonic_reference="iec61000-3-2"`` -- a PER-DEVICE IEC 61000-3-2 current-emission
+    fraction; ``"en50160"`` -- the per-order DIN EN 50160 voltage-compatibility level),
+    the stored magnitude (``mode="scale"``), or the sampled value directly (absolute pu).
     """
     by_id = {a.id: a for a in grid.appliances if isinstance(a, (Load, Generator))}
     # building store: {id: {order: [mag, phase]}}, seeded from stored spectra.
@@ -377,6 +379,15 @@ def _harmonic_injections(
         block = u[:, lay.off : lay.off + lay.dim]  # [B, n_eff * n_orders]
         vals = spec.distribution.icdf(block).reshape(-1, lay.n_eff, n_orders)
         samples[spec.name] = vals  # [B, n_eff, n_orders]
+        # IEC 61000-3-2 caps are PER DEVICE (from nominal P + node voltage); build once
+        # per spec. EN 50160 caps are global per-order (looked up inline below).
+        iec_caps = (
+            iec61000_3_2_device_caps(
+                grid, lay.ids, spec.orders, emission_class=spec.emission_class
+            )
+            if spec.harmonic_reference == "iec61000-3-2"
+            else {}
+        )
         for j, cid in enumerate(lay.ids):
             comp = vals[:, j if spec.per == "each" else 0, :]  # [B, n_orders]
             dev, stored = _dev(cid), _stored(cid)
@@ -385,6 +396,8 @@ def _harmonic_injections(
                 slot = dev.setdefault(order, [0.0, 0.0])
                 if spec.field == "h_phase":
                     slot[1] = v
+                elif spec.harmonic_reference == "iec61000-3-2":
+                    slot[0] = v * iec_caps[cid][order]
                 elif spec.harmonic_reference == "en50160":
                     slot[0] = v * en50160_limit(order)
                 elif spec.mode == "scale":

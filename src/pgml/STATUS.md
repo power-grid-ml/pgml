@@ -37,8 +37,9 @@ Phases 0–3 done; phase 4 (batched sampling) done bar scale/topology. The subpa
 - **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C),
   **bit-exact vs OpenDSS** (incl. triplen, via feeding the same geometry to both engines);
   plus analytic `positive_sequence` / `sequence_aware` harmonic line models for R/X feeders.
-- **Scenarios** — reproducible QMC/cartesian batched sampling, correlated / per-phase, EN50160
-  harmonic spectra, per-node perturbation/injection sweeps, parquet persistence;
+- **Scenarios** — reproducible QMC/cartesian batched sampling, correlated / per-phase,
+  IEC 61000-3-2 device current-emission spectra (default) or EN 50160 voltage-compat
+  shaping, per-node perturbation/injection sweeps, parquet persistence;
   `batched == loop`, differentiable through the batch.
 - **Evaluation** — paper-ready + interactive comparison plots (refs-vs-ours); the reference
   oracles live in the OPTIONAL `pgml.evaluation.oracles` (`oracles` extra).
@@ -311,7 +312,19 @@ more physical than they are. Items already tracked as open work above are refere
   voltages — a modeling-assumption divergence, not a solver error; supply conductor
   geometry when the zero-sequence earth return matters.
 - **EN 50160 table.** Orders 1–25 are the standard's (amended A2:2019) values; orders
-  26–49 are a manual flat extension (marked in `data/standards/en50160.yaml`).
+  26–49 are a manual flat extension (marked in `data/standards/en50160.yaml`). These are
+  supply-VOLTAGE compatibility levels — appropriate for source/background distortion
+  (`Source.spectrum`, `NodeHarmonicSource(kind="voltage")`), NOT an appliance
+  current-emission model. Device current fingerprints (`ParameterSpec` `h_mag`,
+  `CoherentSpectrumConfig`) default to the **IEC 61000-3-2** current-emission limits
+  (`data/standards/iec61000_3_2.yaml`, per-device by class/nominal-P/voltage); `en50160`
+  stays selectable there for background-distortion-shaped experiments.
+- **IEC 61000-3-2 table.** Class A absolute amps (odd 3–39, even 2–10), B = 1.5×A,
+  C percent-of-fundamental (h3 = 30·λ), D mA/W (P≤600 W IT/electronics). Formula-derived
+  tail orders are pre-evaluated in the YAML. `emission_class="auto"` maps `consumer_type`
+  → class (a modeling approximation: the standard classifies individual ≤16 A/phase
+  equipment, not aggregate LV loads; only `office`≤600 W currently auto-resolves to D,
+  everything else to A — no lighting `consumer_type` exists yet for Class C).
 - **Scenario sampling.** All pre-solve sampling executes on CPU (`SobolEngine` is
   CPU-only); tensors are promoted to the solve device afterwards. Deliberate — the
   sampled tensors are tiny next to the `[B,H,N,N]` solve.

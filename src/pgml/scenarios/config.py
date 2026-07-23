@@ -185,10 +185,21 @@ class ParameterSpec(_Base):
     - ``imbalance``: fractional std of the per-phase perturbation; required (> 0) iff
       ``symmetry="small_imbalance"``.
     - ``orders``: harmonic orders varied by a harmonic field (e.g. ``[3, 5, 7]``).
-    - ``harmonic_reference``: ``"en50160"`` makes an ``h_mag`` distribution a FRACTION
-      of the per-order DIN EN 50160 limit (so use a ``[0, 1]`` distribution); ``None``
-      treats the sampled value as an absolute pu magnitude (or a ``scale`` of the
-      stored spectrum).
+    - ``harmonic_reference``: reference standard that turns an ``h_mag`` distribution
+      into a FRACTION of a per-order limit (so use a ``[0, 1]`` distribution).
+
+      * ``"iec61000-3-2"`` -- the IEC 61000-3-2 appliance harmonic-CURRENT emission
+        limits: the physically correct per-device reference for a device current
+        fingerprint (the limit is per-device, from its nominal power, node voltage and
+        ``emission_class``).
+      * ``"en50160"`` -- a DIN EN 50160 voltage-compatibility-level-SHAPED spectrum.
+        These are supply VOLTAGE compatibility levels, NOT an appliance emission model;
+        kept for background-distortion-shaped experiments and backward compatibility.
+      * ``None`` -- the sampled value is an absolute pu magnitude (or a ``scale`` of the
+        stored spectrum).
+    - ``emission_class``: IEC 61000-3-2 equipment class ``"A"``/``"B"``/``"C"``/``"D"``,
+      or ``"auto"`` (default) to resolve it per device from its ``consumer_type`` and
+      nominal power. Valid only with ``harmonic_reference="iec61000-3-2"``.
     """
 
     name: str
@@ -201,7 +212,8 @@ class ParameterSpec(_Base):
     symmetry: Literal["balanced", "independent", "small_imbalance"] = "balanced"
     imbalance: float = Field(default=0.0, ge=0.0)
     orders: Optional[list[int]] = None
-    harmonic_reference: Optional[Literal["en50160"]] = None
+    harmonic_reference: Optional[Literal["en50160", "iec61000-3-2"]] = None
+    emission_class: Literal["A", "B", "C", "D", "auto"] = "auto"
 
     @property
     def is_harmonic(self) -> bool:
@@ -269,6 +281,10 @@ class ParameterSpec(_Base):
                 raise ValueError(
                     "`orders` / `harmonic_reference` are only valid for harmonic fields."
                 )
+        if self.emission_class != "auto" and self.harmonic_reference != "iec61000-3-2":
+            raise ValueError(
+                "emission_class is only valid with harmonic_reference='iec61000-3-2'."
+            )
         return self
 
 
@@ -453,12 +469,30 @@ class CoherentSpectrumConfig(_Base):
     appliance operating states like a washing machine heating vs spinning), drawn once
     (or per scenario). Over ``n_steps`` consecutive steps it STICKS to a mode (Markov
     dwell ``dwell``) and WANDERS around it (AR(1) jitter with stickiness ``ar1_rho``),
-    clamped to the DIN EN 50160 per-order limit. This yields a ``[B, T]`` batch of
-    harmonic injections in which each node keeps a recognisable signature that varies
-    realistically — so a state estimator can attribute the pattern to the node.
+    clamped to the per-order emission reference (``harmonic_reference``). This yields a
+    ``[B, T]`` batch of harmonic injections in which each node keeps a recognisable
+    signature that varies realistically — so a state estimator can attribute the pattern
+    to the node.
 
     The result voltages are ``[B, T, H, N]`` (B = ``n_scenarios`` sequences, T = steps);
     per-step timestamps are recorded as ``samples["time_s"]``.
+
+    ``harmonic_reference`` selects the per-order magnitude reference (and the upper
+    clamp): the default ``"iec61000-3-2"`` is the IEC 61000-3-2 appliance harmonic
+    CURRENT-emission standard — the physically correct per-device reference for a device
+    current fingerprint, keyed by ``emission_class`` (``"auto"`` resolves per device from
+    its ``consumer_type`` and nominal power). ``"en50160"`` instead SHAPES the fingerprint
+    by the DIN EN 50160 supply-VOLTAGE compatibility levels (kept for
+    background-distortion-shaped experiments and backward compatibility; it is NOT an
+    appliance emission model). ``None`` treats magnitudes as absolute pu (clamped to 1.0).
+
+    Held-out test set recipe: reproducibility hangs on both ``seed`` (the temporal
+    Markov + AR(1) stream) and ``mode_bank_seed`` (the per-device fingerprint bank). For
+    an unseen-FINGERPRINT test set, give a DISTINCT ``mode_bank_seed`` (a different
+    device signature bank while every other setting is shared); combine it with a
+    distinct ``seed`` for an entirely independent temporal realization too. Leaving
+    ``mode_bank_seed=None`` draws the bank from the ``seed`` stream (the default,
+    byte-identical to a config with no ``mode_bank_seed`` set).
 
     ``parameters`` / ``factors`` add a FUNDAMENTAL operating-point variation on top of the
     harmonic fingerprint: the same :class:`ParameterSpec` / :class:`LatentFactor` machinery
@@ -484,7 +518,8 @@ class CoherentSpectrumConfig(_Base):
     mag_distribution: Distribution = Field(
         default_factory=lambda: Uniform(low=0.0, high=1.0)
     )
-    harmonic_reference: Optional[Literal["en50160"]] = "en50160"
+    harmonic_reference: Optional[Literal["en50160", "iec61000-3-2"]] = "iec61000-3-2"
+    emission_class: Literal["A", "B", "C", "D", "auto"] = "auto"
     phase_distribution: Distribution = Field(
         default_factory=lambda: Uniform(low=-180.0, high=180.0)
     )
@@ -494,6 +529,8 @@ class CoherentSpectrumConfig(_Base):
     dwell: float = Field(default=0.9, ge=0.0, le=1.0)  # P(stay in mode) per step
     step_size_s: float = Field(default=1.0, gt=0.0)
     resample_modes_per_scenario: bool = False
+    # Seeds ONLY the per-device fingerprint (mode) bank; None draws it from `seed`.
+    mode_bank_seed: Optional[int] = None
     # Per-scenario fundamental operating-point variation (constant across the T steps).
     parameters: list[ParameterSpec] = Field(default_factory=list)
     factors: list[LatentFactor] = Field(default_factory=list)
@@ -502,6 +539,10 @@ class CoherentSpectrumConfig(_Base):
     def _check(self) -> "CoherentSpectrumConfig":
         if any(o < 2 for o in self.orders):
             raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
+        if self.emission_class != "auto" and self.harmonic_reference != "iec61000-3-2":
+            raise ValueError(
+                "emission_class is only valid with harmonic_reference='iec61000-3-2'."
+            )
         for spec in self.parameters:
             if spec.is_harmonic:
                 raise ValueError(
