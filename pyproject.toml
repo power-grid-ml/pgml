@@ -93,9 +93,3 @@ markers = [
     "opendss: runs a live OpenDSS solve via opendssdirect (slower, oracle tests)",
     "slow: long-running test",
 ]
-# pandapower 2.x imports the deprecated `numpy.core` namespace on NumPy 2; silence the
-# resulting DeprecationWarning noise (it is third-party and not actionable here).
-filterwarnings = [
-    "ignore:numpy.core.umath is deprecated:DeprecationWarning",
-    "ignore:numpy.core.multiarray is deprecated:DeprecationWarning",
-]
