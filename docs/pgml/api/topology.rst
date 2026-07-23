@@ -24,6 +24,10 @@ the plotting stack:
 - :func:`~pgml.topology.energized_subgrid` — the energized part of a grid plus the
   ids of the dropped (dead) nodes; the reduction behind
   ``solve_power_flow(..., on_disconnected="zero")``.
+- :func:`~pgml.topology.layout_fingerprint` / :func:`~pgml.topology.network_fingerprint`
+  — stable hashes of a grid's row layout and network identity; the check a prepared
+  :class:`~pgml.solver.PowerFlowSystem` and a ``pgl`` checkpoint use to refuse a
+  silently-relabeled or structurally-changed grid.
 
 The networkx graph view (:func:`pgml.evaluation.topology.grid_graph`) stays in the
 evaluation package with the plotting stack; :mod:`pgml.evaluation.topology` re-exports
@@ -87,6 +91,34 @@ all of its phases) cannot be split this way and raises
 :func:`~pgml.solver.solve_power_flow` and
 :func:`~pgml.solver.solve_harmonic_flow` run by default; see the "Connectivity
 checking" section of :doc:`solver` for the ``on_disconnected`` modes.
+
+Grid identity fingerprints
+---------------------------
+
+:func:`~pgml.topology.layout_fingerprint` and :func:`~pgml.topology.network_fingerprint`
+are stable SHA-256 hashes of a grid's structural identity, used wherever a cached
+tensor or a trained model needs to detect that the grid underneath it has changed:
+
+- :func:`~pgml.topology.layout_fingerprint` covers exactly what fixes the compact
+  node-phase row layout (:func:`pgml.assembly.node_phase_index`) of every solved or
+  persisted ``[..., N]`` tensor: the base frequency, each node's id and ``phases``
+  tuple in grid order, and the slack anchoring (:func:`~pgml.topology.slack_node_ids`).
+  Two grids with the same layout fingerprint index their voltage rows identically —
+  a ``pgl`` checkpoint embeds this hash and
+  :meth:`~pgl.train.SEModule.from_checkpoint` refuses a grid with a different one
+  (relabeled or reordered nodes, a changed slack, or a different base frequency).
+- :func:`~pgml.topology.network_fingerprint` extends the layout fingerprint with
+  everything a prepared power-flow system bakes into the effective admittance: every
+  branch and its physical parameters, every :class:`~pgml.schemas.grid_schema.Source`
+  and shunt appliance, and each injection appliance's IDENTITY (id, kind, node,
+  phases, connection, in-service) — but deliberately NOT its nameplate P/Q, which
+  stays per-call operating-point data. Tensor-valued parameters hash by their
+  detached VALUE, so editing an impedance changes the fingerprint even though the
+  topology is unchanged. A :class:`~pgml.solver.PowerFlowSystem` records the network
+  fingerprint of the grid it was prepared from; :func:`~pgml.solver.solve_power_flow`
+  rejects a ``system=`` whose grid has since diverged structurally or parametrically,
+  instead of silently reusing a stale factorization (see :doc:`solver`'s "Solve
+  performance" section).
 
 .. automodule:: pgml.topology
    :members:

@@ -68,7 +68,10 @@ figures.
   (`grid_graph`) used by the plotting stack. The PyTorch-Geometric `Data` / `Batch` builder
   is a `pgl` concern built on these. `pgml.topology.connectivity_report` /
   `energized_subgrid` back the pre-solve connectivity check (`pgml.errors.ConnectivityError`)
-  and the solver's `on_disconnected` handling.
+  and the solver's `on_disconnected` handling. `pgml.topology.layout_fingerprint` /
+  `network_fingerprint` are stable identity hashes of a grid's row layout and network
+  structure — the check a `pgl` checkpoint and a reused `PowerFlowSystem` use to refuse a
+  silently relabeled or structurally changed grid.
 - **Reference grids** — `pgml.grids`: the canonical IEEE-33 / CIGRE LV benchmark builders
   (pandapower → `Grid`, with synthesized Carson geometry and converter harmonic spectra),
   plus `add_pv_systems` and `se_benchmark_scenario_config` for the state-estimation

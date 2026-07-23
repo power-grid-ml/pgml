@@ -177,9 +177,18 @@ loop)::
 
 The reused system must come from the SAME grid, ``slack``, ``dtype``,
 ``device``, ``param_overrides``, and ``branch_states`` as the solve that
-consumes it (validated where cheap). Reuse is a FORWARD-only optimization: the
-IFT backward always rebuilds its differentiable system from the parameter
-leaves, so gradients are byte-identical to a solve without ``system``.
+consumes it. ``slack`` / ``dtype`` / ``device`` / size are validated cheaply on
+every call; :func:`~pgml.solver.prepare_power_flow` additionally records the
+grid's :func:`~pgml.topology.network_fingerprint` (every node, branch, source,
+shunt and their parameter values) at prepare time, and
+:func:`~pgml.solver.solve_power_flow` recomputes and compares it on each reuse —
+a same-size grid whose topology or impedances have since changed is REJECTED
+with :class:`~pgml.errors.InputError` instead of silently solving with the
+stale factorization. ``param_overrides`` / ``branch_states`` equality remains
+the caller's own contract (not fingerprinted). Reuse is a FORWARD-only
+optimization: the IFT backward always rebuilds its differentiable system from
+the parameter leaves, so gradients are byte-identical to a solve without
+``system``.
 
 Per-phase / connection-aware harmonic injection
 -----------------------------------------------

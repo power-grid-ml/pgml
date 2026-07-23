@@ -343,11 +343,25 @@ modelled yet (tracked as open work in `src/pgml/STATUS.md`, "frequency-dependent
 These are places a source convention is **not yet** read, so a foreign network silently
 under-converts. The core model supports each; only the converter intake is missing.
 
-- **OpenDSS converter:** `Transformer` elements convert (two-winding, solidly grounded
-  wye or delta windings, `LeadLag`-derived clock 0/1/11); NOT read/converted: 3-winding
-  units, `RegControl` regulators, tap-changer control, `XfmrCode`/frequency-correction
-  curves, `Yy6`/`Dd6` (no explicit clock parameter beyond `LeadLag`), and an explicit
-  non-zero (floating or impedance-grounded) neutral node.
+- **OpenDSS converter:** converts `Transformer` (two-winding, solidly grounded wye or
+  delta windings; the clock is reachable for every value of the pairing's correct
+  parity — via `LeadLag` combined with the source's cyclic winding-bus rotation, not
+  just clock 0/1/11 — EXCEPT the polarity-flip clocks `{2, 6, 10}`, which need a
+  reversed winding no bus permutation can express), `Line` (n×n matrices from the
+  native R/X/C matrix API, per-terminal phase-permuted `to_phases`), `Load` (models
+  1/2/5/8 → `LoadModel`/`ZipCoefficients`; models 3/4/6/7 fall back to `CONST_POWER`
+  with a warning), `Capacitor`/`Reactor` (→ `ShuntAppliance`, solidly-grounded WYE and
+  uncoupled only — DELTA and an explicitly coupled `Rmatrix`/`Xmatrix` are skipped
+  with a warning), and `Generator`/`PVSystem`/`Storage` (generation-positive /
+  signed discharge-positive, plus `Storage`'s inert energy-state fields); NOT
+  read/converted: 3-winding transformer units, `RegControl` regulators, tap-changer
+  control, `XfmrCode`/frequency-correction curves, and an explicit non-zero
+  (floating or impedance-grounded) neutral node (raises). Every other DSS element
+  class (`Isource`, `Monitor`, `EnergyMeter`, `CapControl`, `InvControl`,
+  `StorageController`, `Relay`, `Recloser`, `Fuse`, `Sensor`, …) is enumerated
+  generically and triggers a `warn_dropped_elements` warning naming the kind and
+  count — nothing vanishes silently; a non-negligible Vsource `R1`/`X1` under the
+  default `slack="ideal"` likewise warns (it is ignored unless `slack="norton"`).
 - **pgm converter:** `transformer` converts (two-winding, full vector-group support
   including zigzag — see §2/§3 rows above and `src/pgml/convert/pgm/CONTEXT.md`); `sym_gen`
   converts (`Generator`, generation-positive); NOT read/converted: `asym_gen`,
@@ -359,7 +373,16 @@ under-converts. The core model supports each; only the converter intake is missi
 - **pandapower converter:** `transformer` converts (two-winding, vector-group +
   tap-changer aware — see §2/§3 rows above and
   `src/pgml/convert/pandapower/CONTEXT.md`); `sgen`/`asymmetric_load` convert
-  (per-element `scaling` honored); NOT read/converted: `gen` (PV/voltage-controlled
+  (per-element `scaling` honored); `line`/`trafo` honor the `parallel` column
+  (identical parallel systems — divides the series impedance, multiplies the shunt
+  admittance and rated power; `parallel==1` stays byte-identical); bus-bus `switch`
+  (`et='b'`) converts to a near-ideal `Switch`, and an OPEN bus-line/bus-transformer
+  `switch` (`et='l'`/`'t'`) takes the whole line/transformer out of service (an
+  accepted approximation — pandapower itself keeps the still-connected terminal
+  energized via an internal auxiliary bus, so this drops that terminal's shunt too);
+  `load` maps the four-column `const_z_p_percent`/`const_i_p_percent`/
+  `const_z_q_percent`/`const_i_q_percent` onto `ZipCoefficients` (all-zero, the
+  pandapower default, stays byte-identical). NOT read/converted: `gen` (PV/voltage-controlled
   buses), `shunt`, `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`,
   `motor`, `asymmetric_sgen`; an ideal phase-shifter tap
   (`tap_step_degree`/`tap_phase_shifter`) is not modelled and raises; source
