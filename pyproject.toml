@@ -34,12 +34,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-convert = ["pandapower>=2.14,<3", "power-grid-model>=1.13,<2"]
+convert = ["pandapower>=3.5,<4", "power-grid-model>=1.13,<2"]
 scenarios = ["polars>=1.39,<2", "pyarrow>=20", "duckdb>=1.5,<2"]
 ml = ["lightning>=2.6,<3", "torch-geometric", "mlflow>=3.10,<4"]
 viz = ["matplotlib>=3.11,<4", "plotly>=5,<7", "networkx>=3.6,<4"]
 opendss = ["opendssdirect-py>=0.9.4,<0.10"]
-oracles = ["pandapower>=2.14,<3", "power-grid-model>=1.13,<2", "opendssdirect-py>=0.9.4,<0.10"]
+oracles = ["pandapower>=3.5,<4", "power-grid-model>=1.13,<2", "opendssdirect-py>=0.9.4,<0.10"]
 # `pgl` (power-grid-learn): the learning framework — training (lightning) + graph models
 # (torch-geometric) + tracking (mlflow), plus the data path (scenarios) and the CIGRE LV
 # grid (convert). torch is intentionally inherited (conda-provided on the CUDA clusters).

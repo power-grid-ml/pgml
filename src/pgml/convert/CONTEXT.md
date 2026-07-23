@@ -196,9 +196,19 @@ applied THE SAME WAY REGARDLESS OF `phase_mode` — assembly's own
 `_transformer_block_groups` undoes the factor internally for the single-phase
 scalar stamp too; a phase-mode-conditional version of this factor is WRONG, see
 `src/pgml/convert/pandapower/CONTEXT.md` and the pinned oracle test
-`tests/reference/test_pandapower_grid_matrix.py`). `load`/`sgen`/`asymmetric_load`
-P/Q are scaled by the per-element `scaling` column (NaN-safe, default 1.0 —
-pandapower's own `runpp` convention). See `docs/pgml/modeling/transformer.md` and
+`tests/reference/test_pandapower_grid_matrix.py`). A line/trafo's `parallel`
+count (identical parallel systems) divides the series impedance and multiplies
+the shunt admittance (line C/G, trafo magnetizing) and the rated power
+(`s_rated_va`); `parallel==1` is byte-identical to before. An OPEN bus-line/
+bus-transformer switch (`et='l'`/`'t'`) takes the whole line/trafo out of
+service (an accepted approximation — the still-connected terminal's shunt is
+dropped too, unlike pandapower's own auxiliary-bus model); bus-bus (`et='b'`)
+switches are unaffected. `load`/`sgen`/`asymmetric_load` P/Q are scaled by the
+per-element `scaling` column (NaN-safe, default 1.0 — pandapower's own `runpp`
+convention); `load` additionally maps `const_z_p_percent`/`const_i_p_percent`/
+`const_z_q_percent`/`const_i_q_percent` onto `ZipCoefficients` (all-zero, the
+pandapower default, stays byte-identical with no `zip_coefficients`/
+`load_model` set). See `docs/pgml/modeling/transformer.md` and
 `src/pgml/convert/pandapower/CONTEXT.md` for the full field-mapping table.
 
 ## OpenDSS converter — transformer element coverage

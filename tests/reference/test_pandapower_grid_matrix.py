@@ -9,13 +9,13 @@ slack="ideal")``, the same pattern as ``test_ieee33_power_flow_pandapower.py``
 / ``test_cigre_lv_pandapower.py``), and compared bus-by-bus (voltage magnitude
 AND angle) against ``net.res_bus``.
 
-Achieved tolerances split into two families, both explained and pinned here
+Achieved tolerances split into three families, all explained and pinned here
 (NOT loosened blindly):
 
-- **No magnetizing branch** (``pfe_kw == i0_percent == 0``, e.g. every CIGRE
-  trafo): agreement is limited only by the nonlinear solver's own iteration
-  tolerance -- ~1e-7 pu / ~1e-6 deg, approaching ``case33bw``'s trafo-free
-  ~1e-9 pu / ~1e-7 deg control.
+- **No magnetizing branch, no open bus-line/bus-transformer switch**
+  (``pfe_kw == i0_percent == 0``, e.g. every CIGRE trafo): agreement is limited
+  only by the nonlinear solver's own iteration tolerance -- ~1e-7 pu / ~1e-6
+  deg, approaching ``case33bw``'s trafo-free ~1e-9 pu / ~1e-7 deg control.
 - **A magnetizing (no-load) branch is present** (``pfe_kw>0`` or
   ``i0_percent>0``, e.g. every Kerber std type and ``mv_oberrhein``): a real,
   ~1e-5 pu / ~1e-2 deg residual appears. Root-caused here (not guessed) by
@@ -29,6 +29,22 @@ Achieved tolerances split into two families, both explained and pinned here
   This is the SAME phenomenon already documented for the OpenDSS oracle
   (``src/pgml/convert/opendss/CONTEXT.md``, ``test_opendss_transformer.py``)
   -- pandapower's magnetizing branch has the identical T-vs-pi placement gap.
+- **An open bus-line/bus-transformer switch is present** (``et='l'``/``'t'``,
+  e.g. the tie/sectionalizing switches ``create_cigre_network_mv`` and
+  ``mv_oberrhein`` use to operate a meshed ring radially): the converter's
+  accepted approximation (``_open_switch_targets``) takes the WHOLE line/
+  trafo out of service, dropping the shunt admittance (line charging) at the
+  STILL-connected terminal too, unlike pandapower's own solver (which keeps
+  that terminal energized via an internal auxiliary bus). Root-caused by
+  comparing a live ``runpp`` on the untouched net against the SAME net with
+  those lines forced ``in_service=False`` for pandapower itself: the two
+  differ by ~2.9e-4 pu / ~6.9e-3 deg on ``create_cigre_network_mv`` and
+  ~8.9e-4 pu / ~1.4e-2 deg on ``mv_oberrhein`` -- almost the ENTIRE residual
+  seen against pandapower's untouched ``runpp`` in
+  ``test_cigre_mv_shift30_fallback``/``test_mv_oberrhein_ynd5_delta_referral_
+  and_taps`` below, confirming the gap is the switch approximation, not the
+  vector-group/tap/magnetizing conversion (which those same two tests already
+  validate independently via the tighter families above).
 
 ``mv_oberrhein`` additionally exposed a genuine, unrelated converter gap: the
 per-element ``scaling`` column (``net.load.scaling``, ``net.sgen.scaling``) was
@@ -67,7 +83,14 @@ import torch
 from pgml.assembly import assemble_network_ybus
 from pgml.convert.pandapower import PhaseMode, to_grid
 from pgml.errors import ConversionError
-from pgml.schemas.grid_schema import Phase, Transformer, WindingConnection
+from pgml.schemas.grid_schema import (
+    Line,
+    Load,
+    LoadModel,
+    Phase,
+    Transformer,
+    WindingConnection,
+)
 from pgml.solver import solve_power_flow
 
 
@@ -80,27 +103,6 @@ def _angle_diff_deg(a: float, b: float) -> float:
     if diff > 180.0:
         diff -= 360.0
     return diff
-
-
-def _open_line_switches_to_out_of_service(net) -> None:
-    """Mirror an OPEN bus-line (``et='l'``) switch as ``line.in_service=False``.
-
-    The pandapower converter (section 4) converts only bus-bus (``et='b'``)
-    switches; a bus-LINE switch (the tie/sectionalizing switches
-    ``mv_oberrhein`` and ``create_cigre_network_mv`` use to operate a meshed
-    ring radially) is not read at all. An OPEN one disconnects its line
-    entirely (current cannot flow past an open end), so it is electrically
-    identical to ``in_service=False`` on that line -- applied here to BOTH
-    engines before solving so the comparison is topology-identical. This is a
-    test-harness workaround for a converter scope gap, not a converter fix
-    (bus-line switches are a distinct, unrelated piece of work).
-    """
-    sw = net.switch
-    if not len(sw):
-        return
-    open_l = sw[(sw["et"] == "l") & (~sw["closed"])]
-    for _, row in open_l.iterrows():
-        net.line.at[int(row["element"]), "in_service"] = False
 
 
 def _assert_matches_pandapower(
@@ -176,11 +178,15 @@ def test_cigre_lv_dyn1():
 def test_cigre_mv_shift30_fallback():
     """CIGRE MV: no vector_group anywhere -> odd-clock (shift=30) Dyn fallback.
 
-    Achieves near machine precision (no magnetizing branch, no tap changer).
+    No magnetizing branch, no tap changer -- the vector-group/tap conversion
+    itself is exact. The achieved ~2.9e-4 pu / ~6.9e-3 deg residual is entirely
+    the open-bus-line-switch approximation (see the module docstring's third
+    tolerance family): the net's 3 tie switches are converted, not worked
+    around in the test harness, exercising the production
+    ``_open_switch_targets`` path directly.
     """
     net = pn.create_cigre_network_mv(with_der=False)
-    _open_line_switches_to_out_of_service(net)
-    _assert_matches_pandapower(net, atol_vm=1e-8, atol_va=1e-6)
+    _assert_matches_pandapower(net, atol_vm=4e-4, atol_va=8e-3)
 
 
 def test_cigre_mv_fallback_is_dyn():
@@ -262,12 +268,15 @@ def test_mv_oberrhein_ynd5_delta_referral_and_taps():
     with a non-default ``scaling`` (0.0 by default in this net; converted
     correctly after the ``_scaling_factor`` fix -- see module docstring).
 
-    Achieved ~5.1e-6 pu / ~3.7e-3 deg (the magnetizing-branch family
-    tolerance, see module docstring -- this trafo has pfe_kw=29, i0=0.071%).
+    Also exercises the 6 open bus-line switches converted through the
+    production ``_open_switch_targets`` path (no test-harness workaround): the
+    achieved ~8.9e-4 pu / ~1.7e-2 deg combines the magnetizing-branch family
+    residual (~5e-6 pu / ~3.7e-3 deg, see module docstring) with the switch-
+    approximation family residual (~8.9e-4 pu / ~1.4e-2 deg on this net,
+    measured in isolation -- see module docstring's third tolerance family).
     """
     net = pn.mv_oberrhein()
-    _open_line_switches_to_out_of_service(net)
-    _assert_matches_pandapower(net, atol_vm=1e-5, atol_va=5e-3)
+    _assert_matches_pandapower(net, atol_vm=1.2e-3, atol_va=2e-2)
 
 
 def test_mv_oberrhein_delta_lv_referral_factor_applied_in_both_phase_modes():
@@ -720,3 +729,194 @@ def test_asymmetric_yzn_runpp_3ph():
             assert abs(_angle_diff_deg(va, va_ref)) < atol_va, (
                 f"bus {pp_idx} phase {label}: va ours={va:.4f} pp={va_ref:.4f}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 12. `parallel` (identical parallel systems) on a line AND a transformer
+# ---------------------------------------------------------------------------
+def _build_parallel_net(parallel: int, *, pfe_kw: float = 0.0, i0_percent: float = 0.0):
+    """A 3-bus net with one line and one two-winding trafo, both ``parallel``."""
+    net = pp.create_empty_network(f_hz=50.0)
+    b0 = pp.create_bus(net, vn_kv=20.0, name="hv")
+    b1 = pp.create_bus(net, vn_kv=20.0, name="mid")
+    b2 = pp.create_bus(net, vn_kv=0.4, name="lv")
+    pp.create_ext_grid(net, bus=b0, vm_pu=1.0, va_degree=0.0)
+    pp.create_line_from_parameters(
+        net,
+        from_bus=b0,
+        to_bus=b1,
+        length_km=1.5,
+        r_ohm_per_km=0.32,
+        x_ohm_per_km=0.35,
+        c_nf_per_km=230.0,
+        g_us_per_km=0.5,
+        max_i_ka=0.4,
+        parallel=parallel,
+    )
+    pp.create_transformer_from_parameters(
+        net,
+        hv_bus=b1,
+        lv_bus=b2,
+        sn_mva=0.25,
+        vn_hv_kv=20.0,
+        vn_lv_kv=0.4,
+        vk_percent=4.0,
+        vkr_percent=1.0,
+        pfe_kw=pfe_kw,
+        i0_percent=i0_percent,
+        shift_degree=150.0,
+        vector_group="Dyn",
+        parallel=parallel,
+    )
+    pp.create_load(net, bus=b2, p_mw=0.15, q_mvar=0.05)
+    return net
+
+
+def test_parallel_line_and_transformer_matches_pandapower():
+    """``parallel=2`` on both the line and the trafo (no magnetizing branch, so
+    agreement is limited only by the nonlinear solver's own iteration
+    tolerance -- the same "no magnetizing branch" family as
+    ``test_case33bw_control_no_transformer``)."""
+    _assert_matches_pandapower(_build_parallel_net(2), atol_vm=1e-6, atol_va=1e-5)
+
+
+def test_parallel_scales_series_impedance_and_shunt_admittance():
+    """``parallel`` divides the series impedance and multiplies the shunt
+    admittance (line C/G, trafo magnetizing conductance/inductance) and the
+    trafo's rated power -- pandapower's own ``build_branch`` convention
+    (``_calc_r_x_from_dataframe``/``_calc_y_from_dataframe``), checked here as
+    an exact closed-form relation between a ``parallel=1`` and a ``parallel=3``
+    conversion of the SAME single-unit parameters (a magnetizing branch is
+    present -- ``pfe_kw=0.5``, ``i0_percent=1.0`` -- chosen so ``q_nl_sq>0``
+    and ``magnetizing_inductance_h`` is not ``None``)."""
+    grid1, _ = to_grid(_build_parallel_net(1, pfe_kw=0.5, i0_percent=1.0))
+    grid3, _ = to_grid(_build_parallel_net(3, pfe_kw=0.5, i0_percent=1.0))
+
+    line1 = next(b for b in grid1.branches if isinstance(b, Line))
+    line3 = next(b for b in grid3.branches if isinstance(b, Line))
+    assert line3.series_resistance_ohm_per_m[0][0] == pytest.approx(
+        line1.series_resistance_ohm_per_m[0][0] / 3.0
+    )
+    assert line3.series_inductance_h_per_m[0][0] == pytest.approx(
+        line1.series_inductance_h_per_m[0][0] / 3.0
+    )
+    assert line3.shunt_capacitance_f_per_m[0][0] == pytest.approx(
+        line1.shunt_capacitance_f_per_m[0][0] * 3.0
+    )
+    assert line3.shunt_conductance_s_per_m[0][0] == pytest.approx(
+        line1.shunt_conductance_s_per_m[0][0] * 3.0
+    )
+
+    trafo1 = next(b for b in grid1.branches if isinstance(b, Transformer))
+    trafo3 = next(b for b in grid3.branches if isinstance(b, Transformer))
+    assert trafo3.series_resistance_ohm == pytest.approx(
+        trafo1.series_resistance_ohm / 3.0
+    )
+    assert trafo3.series_inductance_h == pytest.approx(trafo1.series_inductance_h / 3.0)
+    assert trafo3.magnetizing_conductance_s == pytest.approx(
+        trafo1.magnetizing_conductance_s * 3.0
+    )
+    assert trafo1.magnetizing_inductance_h is not None
+    assert trafo3.magnetizing_inductance_h == pytest.approx(
+        trafo1.magnetizing_inductance_h / 3.0
+    )
+    assert trafo3.s_rated_va == pytest.approx(trafo1.s_rated_va * 3.0)
+
+
+def test_parallel_default_is_byte_identical():
+    """``parallel=1`` (pandapower's own default) reproduces the pre-``parallel``-
+    aware output exactly -- dividing/multiplying by ``1.0`` is an IEEE-754 exact
+    no-op, so every scaled field matches a hand-computed ``parallel``-naive
+    reference bit-for-bit."""
+    net = _build_parallel_net(1, pfe_kw=0.5, i0_percent=1.0)
+    grid, _ = to_grid(net)
+    line = next(b for b in grid.branches if isinstance(b, Line))
+    trafo = next(b for b in grid.branches if isinstance(b, Transformer))
+
+    r1 = float(net.line.at[0, "r_ohm_per_km"]) / 1_000.0
+    x1 = float(net.line.at[0, "x_ohm_per_km"]) / 1_000.0
+    c1 = float(net.line.at[0, "c_nf_per_km"]) * 1.0e-9 / 1_000.0
+    g1 = float(net.line.at[0, "g_us_per_km"]) * 1.0e-6 / 1_000.0
+    assert line.series_resistance_ohm_per_m[0][0] == r1
+    assert line.series_inductance_h_per_m[0][0] == x1 / (2.0 * math.pi * net.f_hz)
+    assert line.shunt_capacitance_f_per_m[0][0] == c1
+    assert line.shunt_conductance_s_per_m[0][0] == g1
+    assert trafo.s_rated_va == float(net.trafo.at[0, "sn_mva"]) * 1.0e6
+
+
+# ---------------------------------------------------------------------------
+# 13. Voltage-dependent (ZIP) loads
+# ---------------------------------------------------------------------------
+def test_mixed_zip_load_matches_pandapower():
+    """A mixed ZIP load (distinct P/Q constant-impedance/current percentages)
+    vs a live ``pp.runpp`` (``voltage_depend_loads=True``, pandapower's own
+    default): the nonlinear solve honours ``ZipCoefficients`` via
+    ``device_current_injections``, matching to near machine precision (the
+    same "no magnetizing branch" family -- there is no transformer here at
+    all)."""
+    net = pp.create_empty_network(f_hz=50.0)
+    b0 = pp.create_bus(net, vn_kv=20.0, name="hv")
+    b1 = pp.create_bus(net, vn_kv=20.0, name="lv")
+    pp.create_ext_grid(net, bus=b0, vm_pu=1.0, va_degree=0.0)
+    pp.create_line_from_parameters(
+        net,
+        from_bus=b0,
+        to_bus=b1,
+        length_km=3.0,
+        r_ohm_per_km=0.32,
+        x_ohm_per_km=0.35,
+        c_nf_per_km=230.0,
+        max_i_ka=0.4,
+    )
+    pp.create_load(
+        net,
+        bus=b1,
+        p_mw=0.4,
+        q_mvar=0.15,
+        const_z_p_percent=30.0,
+        const_i_p_percent=20.0,
+        const_z_q_percent=50.0,
+        const_i_q_percent=10.0,
+    )
+    _assert_matches_pandapower(net, atol_vm=1e-8, atol_va=1e-6, tol=1e-12)
+
+
+def test_mixed_zip_load_coefficients_mapped_correctly():
+    """``const_z_p_percent``/``const_i_p_percent``/``const_z_q_percent``/
+    ``const_i_q_percent`` map onto ``ZipCoefficients`` independently for P and Q
+    (pandapower 3's own per-load ZIP model, NOT a single shared P/Q percentage
+    pair -- see ``pandapower.build_bus._calc_pq_elements_and_add_on_ppc``)."""
+    net = pp.create_empty_network(f_hz=50.0)
+    b0 = pp.create_bus(net, vn_kv=20.0)
+    pp.create_ext_grid(net, bus=b0)
+    pp.create_load(
+        net,
+        bus=b0,
+        p_mw=0.4,
+        q_mvar=0.15,
+        const_z_p_percent=30.0,
+        const_i_p_percent=20.0,
+        const_z_q_percent=50.0,
+        const_i_q_percent=10.0,
+    )
+    grid, _ = to_grid(net)
+    load = next(a for a in grid.appliances if isinstance(a, Load))
+    zc = load.zip_coefficients
+    assert zc is not None
+    assert (zc.z_p, zc.i_p, zc.p_p) == pytest.approx((0.30, 0.20, 0.50))
+    assert (zc.z_q, zc.i_q, zc.p_q) == pytest.approx((0.50, 0.10, 0.40))
+
+
+def test_zero_zip_percentages_stay_byte_identical():
+    """All four percentages at zero (pandapower's own default -- a pure
+    constant-power load) converts with NO ``zip_coefficients``/``load_model``
+    set, so a plain load's :class:`~pgml.schemas.grid_schema.Load` is unchanged
+    from before ZIP support was added."""
+    net = pp.create_empty_network(f_hz=50.0)
+    b0 = pp.create_bus(net, vn_kv=20.0)
+    pp.create_ext_grid(net, bus=b0)
+    pp.create_load(net, bus=b0, p_mw=0.4, q_mvar=0.15)
+    grid, _ = to_grid(net)
+    load = next(a for a in grid.appliances if isinstance(a, Load))
+    assert load.zip_coefficients is None
+    assert load.load_model == LoadModel.CONST_POWER
