@@ -175,3 +175,31 @@ def test_complex_sample_column_raises(tmp_path):
         _write_samples(
             {"z": torch.ones(4, dtype=torch.complex128)}, 4, tmp_path, "zstd"
         )
+
+
+def test_convergence_metadata_round_trips(grid3, tmp_path):
+    """Failed scenarios must stay identifiable after persistence."""
+    from dataclasses import replace
+
+    res = run_scenarios(grid3, _cfg(n=4))
+    tainted = replace(res, converged=False, failed_states=(1, 3))
+    write_dataset(tainted, tmp_path)
+    L = read_dataset(tmp_path)
+    assert L.converged is False
+    assert L.failed_scenarios == (1, 3)
+    assert L.meta["failed_scenarios"] == [1, 3]
+
+
+def test_legacy_dataset_without_convergence_metadata(grid3, tmp_path):
+    """A meta.json lacking convergence keys reads as unknown, not as valid."""
+    import json
+
+    res = run_scenarios(grid3, _cfg(n=4))
+    write_dataset(res, tmp_path)
+    meta_path = tmp_path / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    del meta["converged"], meta["failed_scenarios"]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    L = read_dataset(tmp_path)
+    assert L.converged is None
+    assert L.failed_scenarios == ()

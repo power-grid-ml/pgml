@@ -74,7 +74,7 @@ from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources
 from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, Source
-from pgml.topology import connectivity_report, energized_subgrid
+from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 
@@ -435,6 +435,10 @@ class LoadabilityResult:
     singular vector is the voltage-collapse mode (the weakest buses), and the LEFT
     singular vector gives the margin's sensitivity to each load (which apparent-power
     injection most reduces the margin).
+
+    When every ramp step up to ``lambda_max`` converges, no nose exists inside the
+    ramp: ``capped=True`` and ``breaking_lambda`` (= ``lambda_max``) is only a LOWER
+    BOUND on the true loadability — raise ``lambda_max`` to find the nose.
     """
 
     breaking_lambda: float  # λ* at the nose (load multiplier of the nameplate load)
@@ -443,6 +447,7 @@ class LoadabilityResult:
         float  # λ* − 1 (headroom above nameplate; negative = infeasible at nameplate)
     )
     nose_voltage_min_pu: float  # lowest |V|/V_LN at the nose
+    capped: bool = False  # ramp reached lambda_max without a nose; λ* is a LOWER BOUND
     critical_nodes: list[dict] = field(default_factory=list)  # voltage-collapse mode
     limiting_loads: list[dict] = field(
         default_factory=list
@@ -725,7 +730,11 @@ class PowerFlowSystem:
     backward rebuilds its differentiable system from the leaves as always, so
     differentiability is unchanged. The system must come from the SAME grid,
     slack, dtype, device, ``param_overrides`` and ``branch_states`` as the solve
-    that consumes it (validated where cheap: slack / dtype / device / size).
+    that consumes it. Validated per solve: slack / dtype / device / size and the
+    grid's :func:`~pgml.topology.network_fingerprint` (nodes, branches, sources,
+    shunts and their parameter values) — a same-size grid with changed topology or
+    impedances is rejected instead of silently reusing the stale factorization.
+    ``param_overrides`` / ``branch_states`` equality remains the caller's contract.
     """
 
     index: NodePhaseIndex
@@ -737,6 +746,7 @@ class PowerFlowSystem:
     v_fixed: Optional[Tensor]  # detached slack reference
     factorization: object  # FactoredSystem of y_eff
     static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
+    network_fp: str = ""  # network_fingerprint(grid) at prepare time
 
 
 def prepare_power_flow(
@@ -800,6 +810,7 @@ def prepare_power_flow(
         v_fixed=v_fixed.detach() if v_fixed is not None else None,
         factorization=fac,
         static_leaves=tuple(leaves),
+        network_fp=network_fingerprint(grid),
     )
 
 
@@ -1058,6 +1069,17 @@ def solve_power_flow(
             f"dtype={system.y_eff.dtype}, device={system.y_eff.device}; solve: "
             f"slack={slack!r}, N={n}, dtype={cdt}, device={device}). Prepare it "
             "with the same grid and arguments."
+        )
+    if (
+        system is not None
+        and system.network_fp
+        and system.network_fp != network_fingerprint(grid)
+    ):
+        raise InputError(
+            "The provided PowerFlowSystem was prepared from a different network: the "
+            "grid's nodes/branches/sources/shunts (topology or parameter values) have "
+            "changed since prepare_power_flow, so the cached admittance and "
+            "factorization are stale. Re-prepare the system for this grid."
         )
 
     def v_fixed_fn():
@@ -2470,6 +2492,7 @@ def loadability_limit(
             if v_good.ndim >= 2 and v_good.shape[-2] == 1:
                 v_good = v_good.squeeze(-2)
         lam_good, trace, total_iters = 0.0, [0.0], 0
+        nose_found = False
         lam = lambda_step
         while lam <= lambda_max + 1e-12:
             vk, it, _, conv, _, _, _, _, _ = _newton_forward(
@@ -2481,6 +2504,7 @@ def loadability_limit(
                 trace.append(round(lam, 6))
                 lam += lambda_step
                 continue
+            nose_found = True
             lo, hi = lam_good, lam  # bisect the feasibility boundary
             while hi - lo > bisect_tol:
                 mid = 0.5 * (lo + hi)
@@ -2517,6 +2541,7 @@ def loadability_limit(
         feasible=lam_good >= 1.0,
         margin=lam_good - 1.0,
         nose_voltage_min_pu=crit["nose_vmin_pu"],
+        capped=not nose_found,
         critical_nodes=crit["critical_nodes"],
         limiting_loads=crit["limiting_loads"],
         min_singular_value=crit["sigma_min"],

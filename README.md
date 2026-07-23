@@ -3,9 +3,9 @@
 **Differentiable, GPU-ready, vectorized harmonic power-flow + ML for power grids.**
 
 `pgml` is a single PyTorch library that (1) generates/loads power grids, (2) simulates
-**harmonic power quality in steady state** (harmonic power flow, harmonics 1–50 plus
-interharmonics), and (3) supports **machine learning on the simulated data** (graph-based
-state estimation). The defining requirement is **end-to-end differentiability**:
+**harmonic power quality in steady state** (harmonic power flow at integer harmonic
+orders, typically 1–50), and (3) supports **machine learning on the simulated data**
+(graph-based state estimation). The defining requirement is **end-to-end differentiability**:
 gradients flow from grid parameters — down to line geometry — through Y-bus assembly and
 the complex solve to the outputs, so the same code is a forward simulator, a
 differentiable physics engine for ML, and an inverse / parameter-recovery tool.

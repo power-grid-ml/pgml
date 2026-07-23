@@ -80,6 +80,30 @@ from .power_flow import (
 _log = logging.getLogger("pgml")
 
 
+def _integer_orders(harmonic_orders: Sequence) -> list[int]:
+    """Validate + normalize harmonic orders to a non-empty list of integers.
+
+    The harmonic machinery (spectra keyed by integer order, the per-order
+    assembly) is defined for INTEGER multiples of the fundamental only. A
+    non-integer order (an interharmonic, e.g. ``2.4``) would otherwise silently
+    truncate to the wrong frequency, so it is rejected. Integral floats
+    (``3.0``) are accepted and normalized.
+    """
+    orders: list[int] = []
+    for h in harmonic_orders:
+        hf = float(h)
+        if hf != int(hf):
+            raise InputError(
+                f"harmonic order {h!r} is not an integer multiple of the "
+                "fundamental. Interharmonics are not supported: spectra and the "
+                "per-order harmonic assembly are defined for integer orders only."
+            )
+        orders.append(int(hf))
+    if not orders:
+        raise InputError("harmonic_orders must be non-empty.")
+    return orders
+
+
 @dataclass(frozen=True)
 class HarmonicFlowResult:
     """Per-order harmonic power-flow solution.
@@ -254,9 +278,7 @@ def solve_harmonic_flow(
             "(pure current-source / NeglectLoadY model)."
         )
 
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -482,9 +504,7 @@ def assemble_harmonic_system(
         The compact :class:`NodePhaseIndex` describing the row layout of ``v1`` /
         ``Y`` / ``I``.
     """
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
             "assemble_harmonic_system assembles the LINEAR harmonic orders h > 1; "
@@ -569,9 +589,7 @@ def assemble_harmonic_ybus(
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
     """
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
             "assemble_harmonic_ybus assembles the LINEAR harmonic orders h > 1; order 1 is "

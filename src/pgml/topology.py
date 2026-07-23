@@ -24,12 +24,21 @@ No differentiable quantities pass through this module.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 from dataclasses import dataclass
 from typing import Iterable, Optional, Union
 
 from pgml.errors import ConnectivityError
-from pgml.schemas.grid_schema import Grid, Line, Phase, ShuntReactor, Source, Switch
+from pgml.schemas.grid_schema import (
+    Grid,
+    InjectionAppliance,
+    Line,
+    Phase,
+    ShuntReactor,
+    Source,
+    Switch,
+)
 
 
 @dataclass(frozen=True)
@@ -454,6 +463,60 @@ def energized_subgrid(grid: Grid) -> tuple[Grid, tuple[int, ...]]:
     return sub, tuple(sorted(dropped))
 
 
+def layout_fingerprint(grid: Grid) -> str:
+    """Stable hash of the grid's ROW-LAYOUT identity (the tensor contract).
+
+    Covers exactly what fixes the compact node-phase row layout of every solved /
+    persisted tensor: the base frequency, the nodes in ``grid.nodes`` list order with
+    each node's ``phases`` tuple (the :func:`pgml.assembly.node_phase_index` ordering),
+    and the slack anchoring (in-service :class:`Source` node ids). Two grids with the
+    same layout fingerprint index their ``[..., N]`` voltage rows identically — the
+    check datasets, model checkpoints and streaming inference use to refuse
+    silently-relabeled tensors. Parameter values are deliberately excluded.
+    """
+    h = hashlib.sha256()
+    h.update(f"f0={float(grid.base_frequency_hz)!r}".encode())
+    for node in grid.nodes:
+        phases = ",".join(p.value for p in node.phases)
+        h.update(f"|n:{int(node.id)}:{phases}".encode())
+    h.update(f"|slack:{slack_node_ids(grid)}".encode())
+    return h.hexdigest()
+
+
+def network_fingerprint(grid: Grid) -> str:
+    """Stable hash of the operating-point-INDEPENDENT network side of a grid.
+
+    Covers everything a prepared power-flow system bakes into the effective
+    admittance and slack quantities: the layout (see :func:`layout_fingerprint`),
+    every branch and its physical parameters, every :class:`Source` (reference +
+    Thevenin) and shunt appliance, and each injection appliance's IDENTITY (id, kind,
+    node, phases, connection, in-service) — but NOT its nameplate P/Q, which stays
+    per-call operating-point data. Used to reject a stale
+    :class:`~pgml.solver.PowerFlowSystem` when the grid it was prepared from has
+    structurally changed. Tensor-valued parameters hash by VALUE (detached), so a
+    same-structure grid with edited impedances is also rejected.
+    """
+    h = hashlib.sha256()
+    h.update(layout_fingerprint(grid).encode())
+    for b in grid.branches:
+        h.update(b"|b:")
+        h.update(b.model_dump_json().encode())
+    for a in grid.appliances:
+        if isinstance(a, InjectionAppliance):
+            phases = ",".join(p.value for p in a.phases)
+            conn = getattr(a, "connection", None)
+            ident = (
+                f"|i:{a.component}:{int(a.id)}:{int(a.node)}:{phases}:"
+                f"{conn.value if conn is not None else None}:"
+                f"{getattr(a, 'in_service', True)}"
+            )
+            h.update(ident.encode())
+        else:
+            h.update(b"|a:")
+            h.update(a.model_dump_json().encode())
+    return h.hexdigest()
+
+
 __all__ = [
     "ProfileEdge",
     "slack_node_id",
@@ -464,4 +527,6 @@ __all__ = [
     "ReconnectHint",
     "connectivity_report",
     "energized_subgrid",
+    "layout_fingerprint",
+    "network_fingerprint",
 ]

@@ -250,6 +250,13 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
   the matrix-free GMRES near the nose; batched continuation (currently single-grid).
 - **Deferred (no priority)**: appliance-state harmonic mixture — a node fingerprint as a sum
   of per-appliance state spectra (state→spectrum library keyed by `consumer_type`).
+- **Deferred (no priority) — time-domain simulation.** The steady-state frequency-domain
+  scope is deliberate: integer harmonic orders only (non-integer orders now raise —
+  spectra and the per-order assembly are integer-keyed). Interharmonics, flicker and
+  transient phenomena belong to a future TIME-DOMAIN companion path (differentiable
+  waveform-level simulation, e.g. trapezoidal integration over the same Grid contract),
+  which would subsume interharmonic support rather than bolting fractional orders onto
+  the phasor solver.
 
 ## Known modeling gaps (physics NOT currently modeled — keep this list honest)
 
