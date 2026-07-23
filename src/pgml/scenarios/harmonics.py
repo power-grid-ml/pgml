@@ -36,6 +36,7 @@ from .config import (
 )
 from .en50160 import en50160_limit
 from .iec61000_3_2 import iec61000_3_2_device_caps
+from .profiles import apply_load_profiles
 from .sampler import SampledScenarios, sample
 
 _F64 = torch.float64
@@ -127,7 +128,9 @@ def sample_coherent_spectra(
         stays nominal, source at ``u_ref_v``); otherwise it carries the per-scenario
         fundamental draws as ``[B]`` tensors (constant across the ``T`` steps — the
         harmonic solve broadcasts the ``[B]`` fundamental against the ``[B, T]`` injection),
-        incl. a per-source ``u_ref_scale`` for the slack.
+        incl. a per-source ``u_ref_scale`` for the slack. When ``config.profile`` is set
+        the P/Q totals instead carry the step axis (``[B, T]``), a TIME-VARYING
+        fundamental aligned with the ``[B, T]`` injection.
         ``harmonic_injection`` maps
         ``{device_id: {order: (mag[B, T], phase[B, T])}}`` — pass directly to
         ``solve_harmonic_flow``.
@@ -142,7 +145,17 @@ def sample_coherent_spectra(
           (before jitter; shape ``[n_dev, n_ord, n_modes]`` or
           ``[B, n_dev, n_ord, n_modes]`` when ``resample_modes_per_scenario=True``).
         - ``"<name>_device_ids"`` ``[n_dev]`` — matched device IDs in selector order.
-        - ``"time_s"`` ``[T]`` — step timestamps in seconds.
+        - ``"time_s"`` ``[T]`` — step timestamps in seconds (relative to the start).
+
+        When ``config.profile`` is set the fundamental P/Q is TIME-VARYING (per step),
+        so ``operating_point`` carries the step axis (``[B, T]``) and ``samples`` also
+        records the ground-truth profile:
+
+        - ``"<name>_profile_factor"`` ``[B, n_dev, T]`` — the realized multiplicative
+          profile factor per profiled device per step (ML ground truth).
+        - ``"<name>_profile_device_ids"`` ``[n_dev]`` — the profiled device IDs.
+        - ``"time_unix_s"`` ``[T]`` — absolute per-step timestamps (epoch seconds,
+          derived from ``config.start_time`` + ``k * step_size_s``).
 
         Pass this :class:`SampledScenarios` to :func:`~pgml.scenarios.run_scenarios`
         (or directly to ``solve_harmonic_flow``) to obtain ``v[B, T, H, N]``.
@@ -253,6 +266,19 @@ def sample_coherent_spectra(
     # Drawn on a separate stream (above) so the harmonic fingerprint is untouched.
     operating_point, op_samples = _sample_operating_specs(grid, config, b)
     samples.update(op_samples)
+
+    # Optional TIME-VARYING fundamental profile: lift the per-scenario operating point
+    # to a per-step [B, T] one (seasonal / weekly / daily / short-term, class-aware).
+    # Drawn on yet another distinct stream, so the harmonic fingerprint + the raw
+    # parameter draws stay byte-identical to a run without a profile. The harmonic
+    # injection magnitude is RELATIVE to each device's fundamental current, so a
+    # profile-scaled fundamental already scales the absolute harmonic current at the
+    # solve — no extra coupling here.
+    if config.profile is not None:
+        operating_point, profile_samples = apply_load_profiles(
+            grid, config, operating_point
+        )
+        samples.update(profile_samples)
 
     return SampledScenarios(
         operating_point=operating_point,

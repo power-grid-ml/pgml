@@ -384,7 +384,11 @@ def read_dataset(path) -> LoadedDataset:
             samples[name] = torch.from_numpy(np.array(arr)).reshape(b, *shape).to(tdt)
     for name, rec in meta["shared_samples"].items():
         tdt = getattr(torch, rec["dtype"].replace("torch.", ""))
-        samples[name] = torch.tensor(rec["data"]).to(tdt)
+        # Build AT the recorded dtype: torch.tensor infers float32 for a python-float
+        # list, which would truncate a large-magnitude float64 shared sample (e.g.
+        # ``time_unix_s`` epoch seconds ~1.7e9) before the cast. The JSON decimals are
+        # exact float64, so constructing at float64 restores them bit-for-bit.
+        samples[name] = torch.tensor(rec["data"], dtype=tdt)
 
     freqs = (
         torch.tensor(meta["frequencies_hz"], dtype=torch.float64)

@@ -71,7 +71,7 @@ from pgml.assembly import (
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
-from pgml.assembly.ybus import _stamp_sources
+from pgml.assembly.ybus import _stamp_sources, flatten_plan_batch
 from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, Source
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
@@ -1956,22 +1956,31 @@ def _make_real_residual(
         return _pin_and_split(fc, v, x)
 
     def state_residual(
-        x: Tensor, y_re: Tensor, y_im: Tensor, islack_re: Tensor, islack_im: Tensor
+        x: Tensor,
+        y_re: Tensor,
+        y_im: Tensor,
+        islack_re: Tensor,
+        islack_im: Tensor,
+        *,
+        rc=None,
     ) -> Tensor:
         """Real residual at FIXED (real-split) system tensors — for the state Jacobian.
 
         ``jacrev`` rejects complex inputs, so the (constant) system tensors are
         passed as real/imag pairs and recombined here. Only ``x`` is differentiated.
+        ``rc`` overrides the complex state residual (the IFT backward passes a
+        flattened-plan variant when the state batch is collapsed to one dim).
         """
         v_re = x[..., :n]
         v_im = x[..., n:]
         v = torch.complex(v_re, v_im).to(cdt)
         y_eff = torch.complex(y_re, y_im).to(cdt)
         i_slack = torch.complex(islack_re, islack_im).to(cdt)
-        fc = state_rc(v, y_eff, i_slack)
+        fc = (rc if rc is not None else state_rc)(v, y_eff, i_slack)
         return _pin_and_split(fc, v, x)
 
     real_residual.state_residual = state_residual
+    real_residual.state_rc = state_rc
     real_residual.build_system = build_system
     return real_residual
 
@@ -2044,9 +2053,31 @@ class _IFTPowerFlow(torch.autograd.Function):
         #     EVERY batch source, incl. batched device params / operating points).
         # Both avoid vmap, which does not compose with the assembly's index_add_ scatter.
 
+        # The state Jacobian runs over a SINGLE flattened [B*T] scenario axis, but a
+        # per-step (profiled) operating point gives the plan a [B, T] power batch. Flatten
+        # that plan's power to match so each flattened row keeps its own scenario power
+        # (a no-op for a scalar / already-1-D operating-point batch — the plan broadcasts).
+        rc_flat = None
+        state_rc = getattr(real_res, "state_rc", None)
+        plan = getattr(state_rc, "plan", None)
+        if plan is not None and len(lead) > 1:
+            flat_plan = flatten_plan_batch(plan, lead)
+
+            def rc_flat(v, y_eff, i_slack, _p=flat_plan):
+                return (
+                    _apply_y(y_eff, v)
+                    + injections_from_plan(_p, v).squeeze(-2)
+                    - i_slack
+                )
+
         def batched_state_res(xb):
             return state_residual(
-                xb, y_flat.real, y_flat.imag, islack_flat.real, islack_flat.imag
+                xb,
+                y_flat.real,
+                y_flat.imag,
+                islack_flat.real,
+                islack_flat.imag,
+                rc=rc_flat,
             )  # [B, 2N]
 
         j_batched = _batched_state_jacobian(batched_state_res, x_flat)  # [B, 2N, 2N]

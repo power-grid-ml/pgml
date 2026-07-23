@@ -40,7 +40,14 @@ Phases 0–3 done; phase 4 (batched sampling) done bar scale/topology. The subpa
 - **Scenarios** — reproducible QMC/cartesian batched sampling, correlated / per-phase,
   IEC 61000-3-2 device current-emission spectra (default) or EN 50160 voltage-compat
   shaping, per-node perturbation/injection sweeps, parquet persistence;
-  `batched == loop`, differentiable through the batch.
+  `batched == loop`, differentiable through the batch. Node-coherent harmonic sequences
+  carry an OPTIONAL TIME-VARYING fundamental (`CoherentSpectrumConfig.profile`,
+  `LoadProfileConfig`): a class-aware multi-scale (seasonal/weekly/daily/short-term)
+  synthetic load-profile generator anchored to an absolute `start_time`, so the P/Q
+  operating point becomes per-step `[B,T]` (aligned with the `[B,T]` injection) instead of
+  constant over the sequence — `[B,T]` batched solve == per-step loop, differentiable
+  (verified against a per-step-loop gradient + finite differences), `profile=None`
+  byte-identical to the fingerprint-only output.
 - **Evaluation** — paper-ready + interactive comparison plots (refs-vs-ours); the reference
   oracles live in the OPTIONAL `pgml.evaluation.oracles` (`oracles` extra).
 - **Measurement instrumentation** (schema rev 0.0.3) — `MeasurementDevice` on the `Grid`
@@ -223,7 +230,11 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
   annotations on the public API + a gate on the non-duck-typed modules (errors, simulation,
   solver signatures, config). Don't fight the deliberate `Any` of the float/tensor duality.
 - **Harmonic flow**: batch-dim mismatch guard (operating_point vs harmonic_injection);
-  vectorize the device×order python loop in `harmonic_flow._harmonic_injections`.
+  vectorize the device×order python loop in `harmonic_flow._harmonic_injections`. (A genuine
+  2-D `[B,T]` operating-point batch — the time-varying coherent profile — now solves and
+  differentiates: the IFT backward flattens the plan's `[B,T]` power to the `[B*T]` state
+  axis via `assembly.ybus.flatten_plan_batch`. A cartesian *states × op* batch stays a
+  forward-only capability — its backward was never supported.)
 - **Criticality on a batch**: the single-grid IFT-Jacobian criticality SVD is skipped for a
   batched solve (`b>1`, logged). A per-element batched criticality would need per-scenario
   operating-point slicing (and a `criticality` knob on `solve_harmonic_flow`).
@@ -249,8 +260,16 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
   `capradius` (irrelevant for c=0 feeders) — match it if a c≠0 feeder is added.
 - **Continuation/Newton polish**: a true arc-length predictor-corrector; a preconditioner for
   the matrix-free GMRES near the nose; batched continuation (currently single-grid).
-- **Deferred (no priority)**: appliance-state harmonic mixture — a node fingerprint as a sum
-  of per-appliance state spectra (state→spectrum library keyed by `consumer_type`).
+- **Deferred — appliance-mixture harmonic aggregation.** The IEC 61000-3-2 reference is a
+  per-appliance (≤16 A equipment) emission standard, while pgml devices are AGGREGATED
+  household/consumer loads; the current sampler therefore uses the per-order limits as a
+  cap-and-shape (fraction-of-limit sampling), not as an emission model of the aggregate.
+  The physical upgrade is a bottom-up mixture aggregator: per `consumer_type`, compose a
+  household from an appliance library (per-IEC-class spectra + power ranges), draw
+  per-appliance states and random phase angles, and vector-sum the currents into the
+  aggregate fingerprint — diversity and phase cancellation then emerge instead of being
+  implied by the sampled fraction. Subsumes the earlier appliance-state mixture idea
+  (state→spectrum library keyed by `consumer_type`).
 - **Deferred (no priority) — time-domain simulation.** The steady-state frequency-domain
   scope is deliberate: integer harmonic orders only (non-integer orders now raise —
   spectra and the per-order assembly are integer-keyed). Interharmonics, flicker and

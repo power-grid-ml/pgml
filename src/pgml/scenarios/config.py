@@ -460,6 +460,96 @@ class NodeInjectionSweepConfig(_Base):
 
 
 # =============================================================================
+# Time-varying fundamental load profiles (multi-scale synthetic recurrence)
+# =============================================================================
+class LoadProfileConfig(_Base):
+    """Multi-scale synthetic load-profile generator for a coherent step sequence.
+
+    Turns the constant per-scenario fundamental of a
+    :class:`CoherentSpectrumConfig` into a per-STEP time series: every matched
+    device gets a multiplicative factor composed on four time scales,
+
+        ``factor(t) = f_seasonal(t) * f_weekly(t) * f_daily(t) * f_short(t)``,
+
+    applied to the device's per-scenario base ``P`` and ``Q`` TOGETHER (constant
+    power factor, the ``field="pq"`` semantics). The base is the device's sampled
+    per-scenario operating point (from ``CoherentSpectrumConfig.parameters``) if it
+    has one, else its nominal ``p_nom_w`` / ``q_nom_var``. Gradients still flow to a
+    tensor-valued base (the factor is a plain, off-tape multiplier).
+
+    The daily SHAPE is class-aware, keyed by each device's ``consumer_type``
+    (household evening peak, office/commercial business hours, EV evening charging,
+    a flat industrial plateau, and a neutral default). ``pv`` is special: a solar
+    bell that is ZERO at night, with a daylight window and amplitude that widen in
+    summer (the seasonal modulation folds into the daily bell, not ``f_seasonal``).
+    The concrete shapes live in :mod:`pgml.scenarios.profiles`; this config sets
+    their amplitudes and the stochastic ranges.
+
+    Correlation model (per-scenario co-variation)
+    ---------------------------------------------
+    Two per-scenario SHARED latents make devices co-vary within a scenario:
+
+    - a ``behavioral`` latent scales the DAILY AMPLITUDE of every non-``pv`` device
+      (a busy day lifts everyone's daily swing together), coupling strength
+      ``behavioral_coupling``;
+    - a ``cloudiness`` latent scales every ``pv`` device's output together
+      (an overcast day dims all panels), coupling strength ``cloud_coupling``.
+
+    On top of the shared latents each device draws IDIOSYNCRATIC per-scenario values:
+    an overall level (``level_min`` .. ``level_max``), an amplitude multiplier
+    (``amplitude_jitter_min`` .. ``amplitude_jitter_max``), a daily phase offset
+    (``+/- phase_offset_hours``, so devices do not all peak at the same instant), and
+    a per-step AR(1) short-term term (``short_rho`` stickiness, ``short_sigma``
+    std). The composed factor is clamped to be non-negative.
+
+    The generator draws on an RNG stream DERIVED from ``CoherentSpectrumConfig.seed``
+    with its own offset, DISTINCT from the fingerprint / Markov / AR(1) jitter and the
+    operating-point cube — so enabling a profile leaves the harmonic fingerprint and
+    the raw parameter draws byte-identical.
+    """
+
+    # Devices to profile: None = every in-service Load and Generator in the grid.
+    selector: Optional[Selector] = None
+
+    # Overall daily-shape depth (per-class base depths live in ``profiles``).
+    daily_amplitude: float = Field(default=1.0, ge=0.0)
+
+    # Per-scenario, per-device idiosyncratic draws.
+    level_min: float = Field(default=0.85, gt=0.0)
+    level_max: float = Field(default=1.15, gt=0.0)
+    amplitude_jitter_min: float = Field(default=0.8, ge=0.0)
+    amplitude_jitter_max: float = Field(default=1.2, ge=0.0)
+    phase_offset_hours: float = Field(default=1.0, ge=0.0)
+
+    # Per-scenario SHARED latents (co-variation across devices).
+    behavioral_coupling: float = Field(default=0.3, ge=0.0)  # non-pv daily amplitude
+    cloud_coupling: float = Field(default=0.5, ge=0.0)  # pv output
+
+    # Weekly weekday/weekend contrast (consumption; pv is unaffected).
+    weekend_contrast: float = Field(default=0.15)
+
+    # Seasonal modulation (annual sinusoid). ``*_peak_doy`` is a day-of-year phase.
+    seasonal_amplitude: float = Field(default=0.15, ge=0.0)  # consumption swing
+    seasonal_peak_doy: float = Field(default=15.0)  # consumption peaks in winter
+    pv_seasonal_amplitude: float = Field(default=0.4, ge=0.0)  # pv output swing
+    pv_seasonal_peak_doy: float = Field(default=172.0)  # summer solstice
+    pv_daylight_hours: float = Field(default=12.0, gt=0.0)  # mean day length
+    pv_daylight_swing: float = Field(default=4.0, ge=0.0)  # +/- seasonal day-length
+
+    # Short-term stochastic term (AR(1), per device per step).
+    short_rho: float = Field(default=0.9, ge=0.0, le=1.0)
+    short_sigma: float = Field(default=0.05, ge=0.0)
+
+    @model_validator(mode="after")
+    def _check(self) -> "LoadProfileConfig":
+        if self.level_max < self.level_min:
+            raise ValueError("level_max must be >= level_min.")
+        if self.amplitude_jitter_max < self.amplitude_jitter_min:
+            raise ValueError("amplitude_jitter_max must be >= amplitude_jitter_min.")
+        return self
+
+
+# =============================================================================
 # Node-coherent harmonic "fingerprint" sampling (temporal sequences)
 # =============================================================================
 class CoherentSpectrumConfig(_Base):
@@ -506,6 +596,21 @@ class CoherentSpectrumConfig(_Base):
     ``harmonic_injection`` is byte-identical with and without ``parameters``. When
     ``parameters`` is empty (the default) the fundamental P/Q stays nominal and the source
     at ``u_ref_v`` — the original fingerprint-only behavior.
+
+    ``profile`` (a :class:`LoadProfileConfig`) makes the fundamental P/Q TIME-VARYING
+    across the ``T`` steps instead of constant: each device's per-scenario base P/Q (from
+    ``parameters`` if set, else nominal) is multiplied by a multi-scale synthetic
+    profile factor (seasonal / weekly / daily / short-term, class-aware by
+    ``consumer_type``). The operating point then carries the step axis (``[B, T]``),
+    aligned with the ``[B, T]`` harmonic injection, so the solve yields ``[B, T, H, N]``
+    with a moving fundamental. ``start_time`` (ISO 8601) is REQUIRED when ``profile`` is
+    set — the daily / weekly / seasonal phases need an absolute anchor. Because the
+    harmonic injection magnitude is RELATIVE to the device's fundamental current, a
+    profile-scaled fundamental already scales the absolute harmonic current; no extra
+    coupling is applied. ``profile=None`` (the default) leaves the fundamental constant
+    over the sequence — byte-identical to the fingerprint-only behavior. The profile is
+    drawn on an RNG stream distinct from the fingerprint, Markov path, AR(1) jitter, and
+    the operating-point cube, so enabling it leaves the harmonic fingerprint unchanged.
     """
 
     name: str = "harmonics"
@@ -534,6 +639,11 @@ class CoherentSpectrumConfig(_Base):
     # Per-scenario fundamental operating-point variation (constant across the T steps).
     parameters: list[ParameterSpec] = Field(default_factory=list)
     factors: list[LatentFactor] = Field(default_factory=list)
+    # Time-varying fundamental profile (per-step P/Q). Requires ``start_time``.
+    profile: Optional[LoadProfileConfig] = None
+    # Absolute anchor for the profile's daily / weekly / seasonal phases (ISO 8601).
+    # A naive (timezone-less) timestamp is interpreted as UTC.
+    start_time: Optional[str] = None
 
     @model_validator(mode="after")
     def _check(self) -> "CoherentSpectrumConfig":
@@ -550,6 +660,21 @@ class CoherentSpectrumConfig(_Base):
                     f"(field={spec.field!r}); the fingerprint owns the harmonic spectrum. "
                     "parameters may vary only the fundamental (p/q/pq/u_ref)."
                 )
+        if self.profile is not None and self.start_time is None:
+            raise ValueError(
+                "CoherentSpectrumConfig.profile requires start_time (ISO 8601): the "
+                "daily / weekly / seasonal phases need an absolute anchor."
+            )
+        if self.start_time is not None:
+            from datetime import datetime
+
+            try:
+                datetime.fromisoformat(self.start_time)
+            except ValueError as exc:
+                raise ValueError(
+                    f"start_time {self.start_time!r} is not a valid ISO 8601 "
+                    "timestamp (e.g. '2024-06-21T00:00:00')."
+                ) from exc
         return self
 
 
@@ -568,6 +693,7 @@ __all__ = [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "LoadProfileConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",

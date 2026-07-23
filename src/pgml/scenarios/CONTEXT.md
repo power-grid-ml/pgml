@@ -85,6 +85,27 @@ verified `batched == loop-of-individual`).
     `parameters` (reproducible reconstruction via `pgl.data.physics._reconstruct_sampled`);
     empty `parameters` (default) = the original fingerprint-only behavior (P/Q nominal,
     source at `u_ref_v`).
+  - `profile=LoadProfileConfig(...)` + `start_time` (ISO 8601, REQUIRED with `profile`) make
+    the fundamental P/Q TIME-VARYING over the T steps instead of `[B]`-constant: each
+    profiled device's per-scenario base P/Q (from `parameters` if set, else nominal) is
+    multiplied by a multi-scale synthetic factor `f_seasonal·f_weekly·f_daily·f_short`,
+    class-aware by `consumer_type` (household/office/restaurant/ev/industrial presets +
+    a `pv` solar bell that is ZERO at night with a seasonally-widening daylight window).
+    The operating-point totals then gain the step axis (`[B,T]`, aligned with the `[B,T]`
+    injection) → `run_scenarios` yields `[B,T,H,N]` with a moving fundamental. `samples`
+    additionally records `<name>_profile_factor [B,n_dev,T]` (ground truth), `<name>_profile_device_ids
+    [n_dev]`, and `time_unix_s [T]` (absolute epoch seconds; the relative `time_s` stays).
+    Harmonic magnitudes are RELATIVE to the fundamental current, so the profile already
+    scales the absolute harmonic current (no extra coupling). The profile draws on a stream
+    DISTINCT from the fingerprint, Markov, jitter, and op-cube streams, so `profile=None`
+    (default) is byte-identical to the fingerprint-only output. See `profiles.py` for the
+    preset shapes + correlation model (a per-scenario shared `behavioral` latent scales all
+    non-pv daily amplitudes; a shared `cloudiness` latent scales all pv output; per device an
+    idiosyncratic level / amplitude / daily phase-offset draw + an AR(1) short-term term).
+  - `load_profile_factors(grid, config) -> ProfileDraw(factor[B,n_dev,T], device_ids[n_dev],
+    time_unix_s[T])` and `apply_load_profiles(grid, config, operating_point) ->
+    (operating_point[B,T], samples)` are the profile generator + operating-point lift
+    (`pgml.scenarios.profiles`); `sample_coherent_spectra` calls them when `profile` is set.
 - `ScenarioConfig(n_samples, seed=0, method="sobol"|"lhs"|"independent", parameters=[...],
   factors=[LatentFactor(...)])`. A spec's `correlation.factor` must name a declared factor.
 - `sample(grid, config) -> SampledScenarios(operating_point, samples, n_samples, config)`
@@ -180,9 +201,12 @@ verified `batched == loop-of-individual`).
   recovery) — extends `perturbation_sweep` with a branch-aware selector + matrix ground truth.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
 - Beta / scipy-backed distributions (no closed-form icdf).
-- **Long-term temporal-pattern simulation mode** — `CoherentSpectrumConfig` models only
-  short/medium-term dynamics (Markov mode dwell + AR(1) jitter over `T` steps). A long-horizon
-  generator with DIURNAL / WEEKLY / SEASONAL device recurrence (e.g. an EV charger active daily,
-  appliances on occupancy schedules) would let temporal state-estimation models (pgl) learn
-  long-range patterns. Needs a device on/off schedule / occupancy process layered on the
-  fingerprint, and longer sequences. Couples to the pgl temporal model's context length.
+- **Long-term temporal-pattern simulation mode** — the FUNDAMENTAL P/Q recurrence is now
+  covered by `CoherentSpectrumConfig.profile` (`LoadProfileConfig`): a diurnal / weekly /
+  seasonal multi-scale generator over an absolute `start_time`, class-aware by
+  `consumer_type` (incl. a `pv` solar bell). Remaining: the HARMONIC fingerprint itself is
+  still short/medium-term only (Markov mode dwell + AR(1) jitter over `T`) — a discrete
+  device on/off schedule / occupancy process that also switches the FINGERPRINT mode on the
+  same diurnal clock (an EV charger's harmonic signature appearing only while it charges)
+  would tie the harmonic attribution to the profile. Couples to the pgl temporal model's
+  context length.

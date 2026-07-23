@@ -28,6 +28,7 @@ from .config import (
     Correlation,
     Distribution,
     LatentFactor,
+    LoadProfileConfig,
     LogNormal,
     LogUniform,
     NodeInjectionSweepConfig,
@@ -41,6 +42,7 @@ from .config import (
 )
 from .en50160 import en50160_limit, en50160_limits
 from .harmonics import sample_coherent_spectra, spectrum_sweep
+from .profiles import apply_load_profiles, load_profile_factors
 from .iec61000_3_2 import (
     iec61000_3_2_device_caps,
     iec61000_3_2_fraction,
@@ -75,6 +77,7 @@ for _name in [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "LoadProfileConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -102,6 +105,7 @@ __all__ = [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "LoadProfileConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -110,6 +114,8 @@ __all__ = [
     "cartesian_sample",
     "sample_coherent_spectra",
     "spectrum_sweep",
+    "load_profile_factors",
+    "apply_load_profiles",
     "perturbation_sweep",
     "run_node_injection_sweep",
     "en50160_limits",

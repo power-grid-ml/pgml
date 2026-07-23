@@ -1754,6 +1754,69 @@ def build_injection_plan(
     )
 
 
+def flatten_plan_batch(
+    plan: InjectionPlan, batch_shape: Sequence[int]
+) -> InjectionPlan:
+    """A copy of ``plan`` with each group's power leading batch flattened to one dim.
+
+    The plan captures the operating point with its natural batch (e.g. a per-step
+    profiled operating point is ``[B, T]``). The IFT backward builds a block-diagonal
+    state Jacobian over a SINGLE flattened ``[B*T]`` scenario axis, so it evaluates the
+    residual with a collapsed 1-D batch; this returns a plan whose power tensors have
+    their leading ``batch_shape`` dims collapsed to ``prod(batch_shape)`` to match,
+    while any BROADCAST (size-1) leading dims a group carries are preserved. A no-op
+    for a group whose leading batch is scalar / already 1-D. The power tensors are
+    detached constants of that differentiation, so the reshape is autograd-safe.
+    """
+    bshape = tuple(int(s) for s in batch_shape)
+    ndim = len(bshape)
+    flat = math.prod(bshape) if bshape else 1
+
+    def _flat(power: Tensor, tail_ndim: int) -> Tensor:
+        lead = tuple(power.shape[:-tail_ndim])
+        # Only collapse a leading batch that MATCHES the flattened scenario batch
+        # exactly (the operating-point batch); a broadcast placeholder or a smaller
+        # rank is left to broadcast as-is.
+        if lead == bshape and ndim > 1:
+            return power.reshape(flat, *power.shape[-tail_ndim:])
+        return power
+
+    uncontrolled = tuple(
+        _UncontrolledGroupPlan(
+            m_c=g.m_c,
+            rows=g.rows,
+            flat_rows=g.flat_rows,
+            n_used=g.n_used,
+            p_pp=_flat(g.p_pp, 3),
+            q_pp=_flat(g.q_pp, 3),
+            v0=g.v0,
+            zip_p=g.zip_p,
+            zip_q=g.zip_q,
+        )
+        for g in plan.uncontrolled
+    )
+    controlled = tuple(
+        _ControlledAppliancePlan(
+            control=c.control,
+            sign=c.sign,
+            v0=c.v0,
+            p_avail=_flat(c.p_avail, 1),
+            m_c=c.m_c,
+            arow=c.arow,
+            n_used=c.n_used,
+        )
+        for c in plan.controlled
+    )
+    return InjectionPlan(
+        h=plan.h,
+        n=plan.n,
+        cdt=plan.cdt,
+        device=plan.device,
+        uncontrolled=uncontrolled,
+        controlled=controlled,
+    )
+
+
 def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
     """Evaluate ``I_device(V)`` from a precomputed :class:`InjectionPlan`.
 
