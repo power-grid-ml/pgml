@@ -203,15 +203,12 @@ for the harmonic injection convention this reproduces bit-for-bit).
   `docs/pgml/modeling/conventions.md` §8); the non-triplen order by OpenDSS's default load
   Norton shunt, absent from pgml's harmonic model.
 
-Documented IRREDUCIBLE model gap (not an exporter bug — the exported circuit is faithful,
-but pgml's OWN `pgml.solver.harmonic_flow` formula does not match OpenDSS's physics for
-these two load models): a `CONST_CURRENT`/`ZIP` load's harmonic injection reference current
-is `I1_elem = sign*conj(S0_elem)/conj(V_term)` — a CONSTANT-POWER-style current REGARDLESS
-of `load_model` (confirmed by reading the solver source). When the solved fundamental
-voltage deviates from rated (an everyday LV drop), a `CONST_CURRENT`/`ZIP` load carrying a
-harmonic spectrum shows a matched-mode error proportional to that deviation — measured
-~0.3-0.8% relative at the injected harmonics (h=1 and every `CONST_POWER`-only case stay at
-the ~1e-9 to 1e-6 floor). Bounded and pinned in
+Voltage-dependent load models agree at the tight matched-mode floor:
+`pgml.solver.harmonic_flow` anchors each device's harmonic spectrum to its
+MODEL-CONSISTENT fundamental current (control-resolved / ZIP-scaled `S_eff` at the
+converged terminal voltage — the same power the nonlinear fundamental solve draws), so
+`CONST_IMPEDANCE`/`CONST_CURRENT`/`ZIP` loads match OpenDSS's per-model
+fundamental-current scaling; pinned tight in
 `tests/reference/test_scenario_oracle_opendss.py`.
 
 Coverage note (`_ApplianceExport.dss_class` is ALWAYS `"Load"` now): a genuine DSS

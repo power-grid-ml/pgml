@@ -119,21 +119,12 @@ Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
 - Any other branch/appliance schema type (there are none left uncovered today; a future
   schema addition would raise here rather than silently vanish).
 
-Documented IRREDUCIBLE model difference (not an exporter bug, not refused — the exported
-circuit is faithful, but pgml's OWN harmonic solver formula does not fully match OpenDSS's
-physics for these two load models): a ``CONST_CURRENT`` or ``ZIP`` load's harmonic injection
-reference current is computed by ``pgml.solver.harmonic_flow`` as ``I1_elem =
-sign*conj(S0_elem)/conj(V_term)`` — a CONSTANT-POWER-style current at the SOLVED terminal
-voltage — REGARDLESS of ``load_model`` (confirmed by reading the solver source; this is not
-something ``pgml.evaluation.oracles`` can fix without editing the core solver). OpenDSS, in
-contrast, scales each element's OWN model-consistent fundamental current. When the solved
-fundamental voltage deviates meaningfully from rated (an everyday few-percent LV voltage
-drop), the two references differ by roughly that same deviation, and a load with BOTH a
-non-CONST_POWER model AND a harmonic spectrum shows a proportional harmonic-only voltage
-error. Measured (matched mode, ``tests/reference/test_scenario_oracle_opendss.py``'s devices
-grid, ~1% voltage deviation from rated at the affected loads): relative error ~0.3-0.8% at
-every injected harmonic order, while the FUNDAMENTAL (h=1, unaffected by this formula) and
-every CONST_POWER-only case remain at the usual ~1e-9 to 1e-6 floor.
+Voltage-dependent load models agree at the tight matched-mode floor:
+``pgml.solver.harmonic_flow`` anchors each device's spectrum to its MODEL-CONSISTENT
+fundamental current (the ZIP-scaled / control-resolved ``S_eff`` at the converged
+terminal voltage — the same power the nonlinear fundamental solve draws), matching
+OpenDSS's per-model fundamental-current scaling for ``CONST_IMPEDANCE`` /
+``CONST_CURRENT`` / ``ZIP`` loads alongside the const-power default.
 
 ``opendssdirect`` is imported lazily (inside functions), so this module is importable
 without the package installed, matching the rest of ``pgml.evaluation.oracles``.

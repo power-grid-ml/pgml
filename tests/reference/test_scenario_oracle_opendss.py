@@ -497,19 +497,12 @@ def test_devices_switch_generator_storage_shunt_matched_tight():
         )
 
 
-# A generous, MEASURED bound for the documented CONST_CURRENT/ZIP harmonic-reference-
-# current gap (module docstring): ~0.3-0.8% observed. Pinned at 2% -- tight enough to
-# catch a regression that makes it materially worse, loose enough not to flake on the
-# expected, bounded divergence.
-_DOCUMENTED_DIVERGENCE_BOUND = 2.0e-2
-
-
 @pytest.mark.slow
-def test_const_current_zip_harmonic_documented_divergence():
-    """A CONST_CURRENT/ZIP load with harmonic content shows a BOUNDED, documented
-    matched-mode divergence (module docstring) -- not machine precision, but not
-    unbounded either. The fundamental (h=1, unaffected by the harmonic I1 reference
-    formula) stays at the usual tight floor."""
+def test_const_current_zip_harmonic_matched_tight():
+    """ZIP-model loads with harmonic content agree at the tight matched-mode floor:
+    the solver anchors each device's spectrum to its MODEL-CONSISTENT fundamental
+    current (S_eff at the converged voltage), matching OpenDSS's per-model
+    fundamental current."""
     grid = _devices_grid()
     grid = grid.model_copy(deep=True)
     for i, a in enumerate(grid.appliances):
@@ -557,14 +550,9 @@ def test_const_current_zip_harmonic_documented_divergence():
     report = compare_to_pgml(
         grid, sampled, harmonic_orders=[1, *orders], mode="matched"
     )
-    assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL  # h=1 unaffected
+    assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
     for h in orders:
-        rel = report["per_order"][h]["rel_max"]
-        assert rel < _DOCUMENTED_DIVERGENCE_BOUND, (
-            f"order {h}: ZIP/CONST_CURRENT harmonic divergence {rel:.3e} exceeds the "
-            f"documented bound {_DOCUMENTED_DIVERGENCE_BOUND:.0e} -- investigate as a "
-            "regression, not the known formula gap."
-        )
+        assert report["per_order"][h]["rel_max"] < _MATCHED_REL_TOL
 
 
 # ---------------------------------------------------------------------------
