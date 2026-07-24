@@ -234,6 +234,16 @@ def to_grid(
       consistent with the pandapower/pgm converters and the assembly const-Z
       shunt formula. OpenDSS ``kVBase()`` returns L-N, recovered to L-L by the
       sqrt(3) factor.
+    - A WYE ``Load``/``Generator``/``PVSystem``/``Storage`` reads its OWN resolved
+      return conductor (``CktElement.NodeOrder()``) and carries it over as
+      :attr:`~pgml.schemas.grid_schema.InjectionAppliance.return_path`
+      (``"ground"``/``"neutral"``/``"auto"``) rather than applying one shared
+      node-level rule, so two elements on the same four-wire bus can return
+      differently, exactly as OpenDSS resolved them.
+    - ``Capacitor``/``Reactor`` convert to a
+      :class:`~pgml.schemas.grid_schema.ShuntAppliance`, WYE (solidly grounded) by
+      default or DELTA when the DSS element is delta-connected (per-leg G/C from
+      OpenDSS's own resolved per-leg ``Cuf``/``R``/``X``).
     """
     f0_hz: float = float(dss.Solution.Frequency())
     two_pi_f0 = 2.0 * math.pi * f0_hz

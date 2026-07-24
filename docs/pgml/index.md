@@ -60,6 +60,9 @@ figures.
   params → $Y(h)$ → $V$. Plus the `pgml.errors` hierarchy.
 - **Scenarios / data** — `pgml.scenarios`: `ScenarioConfig` / `CoherentSpectrumConfig` /
   `run_scenarios` (batched solve), `write_dataset` / `read_dataset` (parquet I/O).
+  `CoherentSpectrumConfig.composition` (`CompositionConfig`) turns an aggregated load into
+  a statistical device-class mix whose per-step activity drives both the fundamental power
+  and the injected spectrum jointly, with per-class attribution recorded as ground truth.
 - **Topology** — `pgml.assembly.node_phase_index` (the row layout), branch parameters, and
   `pgml.topology` (dependency-free: `slack_node_ids` / `slack_node_id`, `branch_edges`,
   `distance_from_slack` — nearest-slack distance, multi-source-ready — the graph features

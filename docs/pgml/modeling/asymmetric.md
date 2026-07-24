@@ -130,6 +130,26 @@ and a WYE load returns into it — the genuine 4-wire case, Kron-reducible later
 node-elimination is wanted). With no `Phase.N` row, WYE returns to ground and the
 solve matches PGM/pandapower/OpenDSS-default exactly. No separate neutral solver.
 
+**Per-appliance return-path override.** The node-level rule above is a *default*, not
+a hard constraint: a 4-wire bus in the field routinely mixes a solidly-grounded element
+with a neutral-returning one on the SAME `Phase.N`-carrying node (e.g. OpenDSS's
+`bus1=b1.1.2.3` — three phase conductors, no fourth — next to `bus1=b1.1.2.3.4` — an
+explicit neutral tie — on one shared bus). Every `InjectionAppliance` (`Load`,
+`Generator`, `Storage`) carries `return_path` (`"auto"` / `"neutral"` / `"ground"`,
+default `"auto"` = the node-level rule) so this per-element choice is representable
+directly, rather than forcing every WYE appliance on a neutral-carrying node into the
+same return. `"ground"` pins the return to true ground even though the node has a
+`Phase.N` row; `"neutral"` requires the node to carry one (raises otherwise). A
+grounded and a neutral-returning appliance on the same node therefore stamp with
+*different* incidence matrices (`M = I_n` vs `M = [I_n | -1]`) even though they share a
+node and a connection — assembly groups appliances by `(connection, phase count,
+effective neutral return)`, with `return_path` folded into that key. The OpenDSS
+converter (`pgml.convert.opendss.to_grid`) reproduces this per-element choice exactly
+from each element's own resolved return conductor (`CktElement.NodeOrder()`), rather
+than approximating every WYE element on a bus by one shared node-level rule. Meaningless
+for DELTA (no neutral to return through); a non-`"auto"` value on a DELTA appliance
+raises.
+
 ## 5. Per-phase harmonic injection (OpenDSS, our harmonic oracle)
 
 A `Load` carries exactly one `Spectrum`; one complex multiplier `Mult =

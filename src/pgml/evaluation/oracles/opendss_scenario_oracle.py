@@ -797,10 +797,23 @@ def _export_injection_appliance(
         )
         / 1000.0
     )
+    # WYE return conductor: mirror the assembly rule (_incidence) — an appliance
+    # returns through the node's explicit neutral when return_path="neutral", or
+    # "auto" on a Phase.N-carrying node; "ground" (or a node without Phase.N)
+    # keeps DSS's implicit ground (a 1-conductor load pads terminal 2 to node 0).
+    return_path = getattr(a, "return_path", "auto")
+    node_has_n = Phase.N in node.phases
+    if return_path == "neutral" and not node_has_n:
+        raise ConversionError(
+            f"appliance {a.id}: return_path='neutral' but node {node_id} carries "
+            "no Phase.N conductor."
+        )
+    neutral_return = node_has_n and return_path in ("auto", "neutral")
+    n_suffix = f".{_PHASE_SUFFIX[Phase.N]}" if neutral_return else ""
     elements = {}
     for k, ph in enumerate(phases):
         name = f"{name_prefix}{a.id}_{ph.value}"
-        bus = f"{busname[node_id]}.{_PHASE_SUFFIX[ph]}"
+        bus = f"{busname[node_id]}.{_PHASE_SUFFIX[ph]}{n_suffix}"
         _emit_pq_element(
             dss,
             name,

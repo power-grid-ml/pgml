@@ -764,3 +764,98 @@ def test_single_phase_transformer_nonzero_shift_refuses():
     grid = _single_phase_transformer_grid(shift_deg=30.0)
     with pytest.raises(ConversionError, match="phases=1"):
         export_grid_to_opendss(grid)
+
+
+def test_four_wire_return_path_matched_tight():
+    """WYE loads on a 4-wire (ABCN) feeder export with their return conductor:
+    an "auto"/"neutral" appliance becomes a phase-to-neutral DSS load, a
+    "ground" appliance keeps DSS's implicit ground — both match pgml."""
+    abcn = (Phase.A, Phase.B, Phase.C, Phase.N)
+    abc = (Phase.A, Phase.B, Phase.C)
+    from pgml.schemas.grid_schema import Line
+
+    def mat(diag, off):
+        return [[diag if i == j else off for j in range(4)] for i in range(4)]
+
+    nodes = [
+        Node(id=0, u_rated_v=400.0, phases=abcn),
+        Node(id=1, u_rated_v=400.0, phases=abcn),
+    ]
+    line = Line(
+        id=10,
+        from_node=0,
+        to_node=1,
+        from_phases=abcn,
+        to_phases=abcn,
+        length_m=300.0,
+        series_resistance_ohm_per_m=mat(4.0e-4, 5.0e-5),
+        series_inductance_h_per_m=mat(9.0e-7, 3.0e-7),
+        shunt_capacitance_f_per_m=mat(0.0, 0.0),
+    )
+    src = Source(
+        id=1,
+        node=0,
+        phases=abc,
+        u_ref_v=[400.0 / 1.7320508] * 3,
+        u_angle_deg=[0.0, -120.0, 120.0],
+        resistance_ohm=[[0.05 if i == j else 0.0 for j in range(3)] for i in range(3)],
+        inductance_h=[[3.0e-4 if i == j else 0.0 for j in range(3)] for i in range(3)],
+    )
+    ld_neutral = Load(
+        id=20, node=1, phases=(Phase.A,), p_nom_w=8.0e3, q_nom_var=1.5e3
+    )  # auto -> neutral return on an ABCN node
+    ld_ground = Load(
+        id=21,
+        node=1,
+        phases=(Phase.B,),
+        p_nom_w=6.0e3,
+        q_nom_var=1.0e3,
+        return_path="ground",
+    )
+    # Station neutral grounding: without a ground reference the floating neutral
+    # subsystem is singular (a real 4-wire feeder grounds N at the transformer).
+    n_ground = ShuntAppliance(
+        id=2, node=0, phases=(Phase.N,), conductance_s=(1.0e4,), capacitance_f=(0.0,)
+    )
+    grid = Grid(
+        nodes=nodes, branches=[line], appliances=[src, ld_neutral, ld_ground, n_ground]
+    )
+
+    cfg = ScenarioConfig(
+        n_samples=3,
+        seed=2,
+        parameters=[
+            ParameterSpec(
+                name="load_scale",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.6, high=1.4),
+                field="pq",
+                mode="scale",
+                per="each",
+            ),
+            ParameterSpec(
+                name="h_mag",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.1, high=0.4),
+                field="h_mag",
+                mode="absolute",
+                orders=[3, 5],
+                per="each",
+            ),
+            ParameterSpec(
+                name="h_phase",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=-90.0, high=90.0),
+                field="h_phase",
+                mode="absolute",
+                orders=[3, 5],
+                per="each",
+            ),
+        ],
+    )
+    sampled = sample(grid, cfg)
+    report = compare_to_pgml(
+        grid, sampled, harmonic_orders=[1, 3, 5], mode="matched", symmetry="asymmetric"
+    )
+    for h, st in report["per_order"].items():
+        assert st["rel_max"] < _MATCHED_REL_TOL, (h, st)

@@ -46,7 +46,7 @@ Pass the same string to both functions to keep a multi-call workflow consistent:
 WYE/DELTA connection and neutral modeling
 ------------------------------------------
 
-Each Load/Generator can carry an explicit ``connection`` field
+Each Load/Generator/Storage can carry an explicit ``connection`` field
 (:class:`~pgml.schemas.grid_schema.WindingConnection`).  When omitted, the
 config keys ``appliance.load.default_connection`` (multi-phase) and
 ``appliance.load.single_phase_connection`` (1-phase) are used (default
@@ -67,6 +67,37 @@ voltage ``V_0`` is the line-to-line rated voltage.
    connection-aware **harmonic injection** are fully modelled, both in the Y-bus
    assembly and in :func:`~pgml.solver.solve_harmonic_flow`. A DELTA connection
    requires at least two phases (a single-phase DELTA raises ``ModelingError``).
+
+**Per-appliance return-path override.** The node-level WYE return rule above is the
+*default* (``return_path="auto"``); each
+:class:`~pgml.schemas.grid_schema.InjectionAppliance` may override it individually via
+:attr:`~pgml.schemas.grid_schema.InjectionAppliance.return_path`
+(``"auto"`` / ``"neutral"`` / ``"ground"``). ``"ground"`` forces ``M = I_n`` even on a
+neutral-carrying node; ``"neutral"`` forces the ``[I_n | -1]`` 4-wire form and raises
+``ModelingError`` if the node has no ``Phase.N``; a non-``"auto"`` value on a DELTA
+appliance also raises. The internal ``group_appliances`` helper
+(:mod:`pgml.assembly`'s underscore ``_incidence`` module) folds ``return_path`` into its
+grouping key (``(connection, n_phases, has_neutral_return)``), so a grounded and a
+neutral-returning WYE appliance sharing one node land in two different groups with
+different incidence matrices — see the schema field for the full decision table
+(:doc:`schemas`).
+
+Shunt appliances (WYE / DELTA)
+---------------------------------
+
+:class:`~pgml.schemas.grid_schema.ShuntAppliance` (a fixed linear ``G + jB`` shunt) is
+stamped per its :attr:`~pgml.schemas.grid_schema.ShuntAppliance.connection`:
+
+- **WYE** (default) — each phase's admittance connects to ground; the historical diagonal
+  stamp.
+- **DELTA** — element ``k`` connects phase ``k`` to phase ``(k + 1) mod n`` (cyclic,
+  ``n >= 2``), stamped ``Mᵀ·diag(y)·M`` with the same cyclic incidence
+  (``cyclic_delta_incidence``, an internal ``_incidence`` helper) the DELTA
+  load/generator path uses.
+
+Both are frequency-correct at every harmonic order (``B(h) = 2πh f0 C``) and differentiable
+w.r.t. ``G`` / ``C`` — the incidence ``M`` is a constant topology matrix, never on the
+autograd tape.
 
 Topology / switch-state masking
 ---------------------------------

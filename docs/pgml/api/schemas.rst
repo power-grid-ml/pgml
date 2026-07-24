@@ -55,6 +55,37 @@ differentiable leaves.  Use ``method="newton"`` in
 :func:`~pgml.solver.solve_harmonic_flow` when stiff Volt-VAr / Volt-Watt loops
 cause the current-injection fixed point to oscillate.
 
+WYE return-path override and delta shunts
+-------------------------------------------
+
+Every :class:`~pgml.schemas.grid_schema.InjectionAppliance`
+(:class:`~pgml.schemas.grid_schema.Load`, :class:`~pgml.schemas.grid_schema.Generator`,
+:class:`~pgml.schemas.grid_schema.Storage`) carries
+:attr:`~pgml.schemas.grid_schema.InjectionAppliance.return_path`
+(``"auto"`` / ``"neutral"`` / ``"ground"``, default ``"auto"``) — a per-appliance override
+of the WYE return-conductor decision that is otherwise made at the NODE level (return
+through ``Phase.N`` whenever the node carries one, else ground). ``"ground"`` pins a WYE
+appliance's return to true ground even on a neutral-carrying node — the OpenDSS
+``bus1=b1.1.2.3`` idiom on a 4-wire bus, where one element ties to ground while a sibling
+element on the same bus explicitly returns through ``.4``. ``"neutral"`` requires the host
+node to carry ``Phase.N`` (assembly raises otherwise). ``return_path`` is meaningful for WYE
+only — a non-``"auto"`` value on a DELTA-connected appliance raises. Because a grounded and
+a neutral-returning WYE appliance on the SAME node need different incidence matrices,
+:mod:`pgml.assembly` groups appliances by ``(connection, phase count, effective neutral
+return)``, folding ``return_path`` into that grouping key — see the "WYE/DELTA connection
+and neutral modeling" section of :doc:`assembly`. The default ``"auto"`` reproduces the
+historical node-level rule byte-for-byte.
+
+:class:`~pgml.schemas.grid_schema.ShuntAppliance` carries a
+:attr:`~pgml.schemas.grid_schema.ShuntAppliance.connection`
+(:class:`~pgml.schemas.grid_schema.WindingConnection`, default ``WYE``): the default WYE
+bank connects each phase's ``G + jB`` to ground (the historical stamp); ``DELTA`` connects
+element ``k`` between phase ``k`` and phase ``k + 1`` (cyclic over the appliance's own
+phases, at least two phases required) — a delta capacitor or reactor bank. Zigzag is
+rejected. This is the schema surface behind the OpenDSS converter's DELTA
+``Capacitor`` / ``Reactor`` conversion (:doc:`convert`) and the assembly delta-shunt stamp
+(:doc:`assembly`).
+
 Measurement instrumentation
 ----------------------------
 

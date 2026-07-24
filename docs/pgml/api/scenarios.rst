@@ -41,6 +41,14 @@ controls how the sample is applied:
   ``"shared"`` (one sample broadcast to all matched components).  Ignored when
   ``correlation`` is set.
 
+:class:`~pgml.scenarios.Selector`'s ``component`` targets ``"load"`` (default),
+``"generator"``, ``"storage"``, or ``"source"`` (the slack, for a ``field="u_ref"``
+spec).  ``"storage"`` varies the SIGNED :class:`~pgml.schemas.grid_schema.Storage`
+setpoint — positive discharging/injecting, negative charging, the same sign
+convention a :class:`~pgml.schemas.grid_schema.Generator` uses — so a ``[low, high]``
+distribution spanning zero sweeps both charge and discharge in one
+:class:`~pgml.scenarios.ParameterSpec`.
+
 Correlated sampling
 -------------------
 
@@ -413,6 +421,157 @@ point* batch remains forward-only, as before.
    :func:`~pgml.scenarios.apply_load_profiles` are re-exported at the
    :mod:`pgml.scenarios` package level (documented here alongside
    :class:`~pgml.scenarios.CoherentSpectrumConfig`, the surface that uses them).
+
+Statistical device-class composition
+----------------------------------------
+
+The profile and fingerprint machinery above move an aggregated load's fundamental and
+harmonic spectrum as two SEPARATE signals — a profile scales the fundamental, a
+fingerprint wanders around a base spectrum — coupled only through the harmonic
+convention (magnitude is a fraction of the fundamental current). Real aggregated
+loads (a household, an office) are a mix of many devices whose OWN activity moves
+both signals TOGETHER: a washing machine coming on draws more power AND changes the
+spectrum in the same instant, and a state estimator that could learn to attribute an
+observed spectrum to a device mix needs data where that joint structure is present.
+:class:`~pgml.scenarios.CompositionConfig` (set on
+:attr:`~pgml.scenarios.CoherentSpectrumConfig.composition`) builds exactly that: each
+covered aggregated load becomes a SUM of statistical member devices, and the summed
+current is what the solver injects.
+
+**What it deliberately is NOT.** The device-class library
+(:func:`~pgml.scenarios.default_device_classes`) is plausible statistical coverage,
+not an appliance catalog — per-order magnitude ranges are LOOSELY IEC 61000-3-2-shaped
+(odd-dominated, decreasing with order) rather than measured nameplate spectra, and a
+class stands in for a whole family of similar devices (an "SMPS-electronics" class
+covers laptop chargers, LED drivers, TVs alike), not a single named appliance. The goal
+is diverse, physically-plausible training data with a KNOWN, recoverable ground truth —
+not a faithful digital twin of any one device.
+
+**The generation model** (per covered load, off the autograd tape, ``float64``, CPU,
+seeded — see the module docstring of ``pgml.scenarios.composition`` for the full
+derivation):
+
+1. **Roster** (drawn once, persisted) — a set of member devices per
+   :class:`~pgml.scenarios.ClassCount` in the matching
+   :class:`~pgml.scenarios.ConsumerComposition` rule, each with a rated power, a sign,
+   per-order rated harmonic magnitude/phase, a load-dependence exponent/slope, a mean
+   loading, activity stickiness, and (multi-state classes) a small set of
+   :class:`~pgml.scenarios.DeviceState` power/spectrum states.  With
+   :attr:`~pgml.scenarios.CompositionConfig.scale_to_nominal` (default) the roster's
+   share-weighted installed capacity is rescaled to the load's own ``p_nom_w``, so the
+   composition's total nameplate stays meaningful across grids of different scale.
+2. **Activity** ``a_d(t)`` — a diurnal availability rate (one of the profile daily
+   shapes, keyed by :attr:`~pgml.scenarios.DeviceClassSpec.activity_preset`) scaled by
+   a per-scenario shared latent (``behavioral`` for consumption classes, ``cloud`` for
+   PV — the SAME correlation mechanism the profile generator uses).  A switching class
+   (:attr:`~pgml.scenarios.DeviceClassSpec.discrete_activity` ``True``, the default)
+   realizes this as an on/off Markov chain whose stationary occupancy tracks the rate;
+   a continuously-modulated class (PV, a background base load) uses the rate directly
+   as a fractional availability.
+3. **Loading** ``lam_d(t)`` — an AR(1)-smoothed fluctuation around the member's mean
+   loading (single-state classes) or the current :class:`~pgml.scenarios.DeviceState`'s
+   ``power_fraction`` (multi-state classes: e.g. a heat-pump / white-goods class that
+   jumps between a near-linear HEATING state and a harmonic-rich INVERTER state on its
+   own Markov dwell).
+4. **Contribution** — power ``P_d = a_d · lam_d · P_rated · sign`` and a harmonic
+   current phasor whose magnitude and phase follow the SAME load-dependence laws as the
+   composed spectrum sampling above: ``mag_h(lam) = mag_h_rated · lam ** gamma_h`` and
+   ``ang_h(lam) = ang_h0 + s_h · (lam - 1)``, with ``gamma_h`` / ``s_h`` drawn per
+   member per order from :attr:`~pgml.scenarios.DeviceClassSpec.gamma` /
+   :attr:`~pgml.scenarios.DeviceClassSpec.phase_slope_deg`.  Per load, the members'
+   powers and harmonic phasors are SUMMED; the aggregate magnitude is normalized to the
+   solver's injection convention (a fraction of the aggregate fundamental current,
+   capped at :attr:`~pgml.scenarios.CompositionConfig.max_injection_pu` — a physically
+   real residual-THD blow-up near a net-zero fundamental, e.g. PV nearly cancelling
+   load, not a numerical artifact) and the phase relative to the aggregate fundamental
+   direction.  The aggregate power ``P_agg`` may go net-negative under enough PV — the
+   Load then injects, exactly as a real net-metered feeder would.
+
+**Config surface** (:mod:`pgml.scenarios`, all serializable pydantic models):
+
+- :class:`~pgml.scenarios.DeviceClassSpec` — one statistical device class: ``name``,
+  ``sign`` (``+1`` consuming, ``-1`` injecting), ``rated_power_w`` range,
+  ``power_factor``, per-order ``harmonic_magnitude`` / ``harmonic_phase_deg`` ranges,
+  ``gamma`` / ``phase_slope_deg`` load-dependence ranges, ``activity_preset`` +
+  ``discrete_activity`` + ``on_off_dwell``, ``loading_min`` / ``loading_mean`` /
+  ``loading_jitter`` / ``loading_rho``, and optional ``states``
+  (:class:`~pgml.scenarios.DeviceState`: ``power_fraction``, ``spectrum_scale``,
+  ``weight``) + ``state_dwell`` for a multi-state class.
+- :class:`~pgml.scenarios.ClassCount` — how many instances of one class an aggregated
+  load contains (``class_name``, ``count`` range, ``power_share`` for capacity
+  rescaling).
+- :class:`~pgml.scenarios.ConsumerComposition` — a composition rule: matches a load by
+  ``load_ids`` (per-appliance override), else ``consumer_type``, else is the fallback
+  for any load no other rule claims; lists its ``classes``
+  (:class:`~pgml.scenarios.ClassCount` entries).
+- :class:`~pgml.scenarios.CompositionConfig` — ``selector`` (default: every in-service
+  load), ``classes`` (default :func:`~pgml.scenarios.default_device_classes`, six
+  built-in classes — a harmonic-free linear base load, SMPS electronics, an EV charger,
+  a PV inverter, a multi-state inverter drive, and a resistive heater),
+  ``compositions`` (default :func:`~pgml.scenarios.default_compositions`, one rule per
+  common ``consumer_type`` — ``"household"``, ``"office"``, ``"restaurant"``,
+  ``"heat_pump"``, ``"ev_charging"``, ``"pv"``, plus a fallback), ``scale_to_nominal``,
+  ``max_injection_pu``, ``behavioral_coupling`` / ``cloud_coupling`` (cross-device
+  correlation strength), and ``roster_seed`` (optional, distinct from ``seed`` — a
+  held-out device-composition bank, the same recipe as
+  :attr:`~pgml.scenarios.CoherentSpectrumConfig.mode_bank_seed` above).
+
+**Enabling it.** Set ``composition`` on a
+:class:`~pgml.scenarios.CoherentSpectrumConfig` (``start_time`` is REQUIRED — the
+activity model is diurnal and needs an absolute anchor, same as ``profile``)::
+
+    from pgml.scenarios import (
+        CoherentSpectrumConfig, CompositionConfig, Selector, run_scenarios
+    )
+
+    cfg = CoherentSpectrumConfig(
+        selector=Selector(component="load"),
+        orders=[3, 5, 7, 9, 11, 13],
+        n_steps=96,                 # a day at 15-minute resolution
+        n_scenarios=64,
+        step_size_s=900.0,
+        seed=42,
+        composition=CompositionConfig(),         # defaults: the 6-class library
+        start_time="2024-06-21T00:00:00",        # ISO 8601, anchors the activity model
+    )
+    result = run_scenarios(grid, cfg)
+    # result.v  shape [64, 96, 7, N]
+
+A load covered by the composition (matched by ``composition.selector`` AND claimed by a
+:class:`~pgml.scenarios.ConsumerComposition` rule) draws its fundamental P/Q and its
+harmonic injection ENTIRELY from the composition — it SUPERSEDES the mode-bank
+fingerprint and any ``parameters`` / ``profile`` targeting that same load. A load
+outside ``composition.selector``, or with no matching rule, is untouched and keeps the
+ordinary fingerprint / profile behavior.  The mixed ``[B]`` (fingerprint-only devices)
+and ``[B, T]`` (composed devices) operating point is unified to ``[B, T]`` so the whole
+batch shares one leading step axis.
+
+**Sample record keys** written to ``sampled.samples`` (``name`` defaults to
+``"harmonics"``, matching :attr:`~pgml.scenarios.CoherentSpectrumConfig.name`) — the
+per-class attribution ground truth, ordered along ``n_class`` as
+``config.composition.class_names()``:
+
+- ``"<name>_class_p_w"`` — ``[B, n_agg, n_class, T]`` signed per-class active-power
+  contribution (the primary attribution label — which class drew how much power, when).
+- ``"<name>_class_active"`` — ``[B, n_agg, n_class, T]`` (int64) active member count per
+  class per step.
+- ``"<name>_cap_binding"`` — ``[B, n_agg, n_ord, T]`` where
+  ``max_injection_pu`` clipped the relative magnitude (a diagnostic on the residual-THD
+  floor, not an error).
+- ``"<name>_agg_ids"`` — ``[n_agg]`` the covered load ids, in aggregation order.
+- ``"<name>_roster_p_rated"`` — ``[n_agg, n_class, max_count]`` the per-member rated
+  powers (a zero-padded sidecar; ``max_count`` = the largest member count drawn for any
+  one (load, class) pair).
+
+:func:`~pgml.scenarios.sample_device_composition` and
+:func:`~pgml.scenarios.resolve_composed_ids` are the underlying functions
+:func:`~pgml.scenarios.sample_coherent_spectra` calls when ``composition`` is set — call
+them directly to inspect the drawn roster and realized attribution before solving.  The
+composition draws on roster + temporal RNG streams distinct from the fingerprint,
+operating-point cube, and profile streams, so ``composition=None`` (the default)
+reproduces the fingerprint-only output byte-for-byte.  ``pgl.data.CompositionLabels`` /
+``pgl.data.DataSource.composition_labels()`` expose these same attribution samples on
+the ML side — see :doc:`/pgl/api/data`.
 
 Per-node harmonic "error"-source sweep (``run_node_injection_sweep``)
 -----------------------------------------------------------------------

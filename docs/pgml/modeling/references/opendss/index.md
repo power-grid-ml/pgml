@@ -43,16 +43,25 @@ harmonic-flow oracle. Phase-domain, full per-phase. Not differentiable.
   `LoadModel`/`ZipCoefficients` (1=const-power kept as `(None, None)` for a
   byte-identical default; 2=const-Z; 5=const-current; 8=ZIPV custom coefficients);
   models 3/4/6/7 (asymmetric P-vs-Q voltage dependence) fall back to `CONST_POWER`
-  with a warning naming the model.
+  with a warning naming the model. A WYE load/generator/PVSystem/Storage's
+  return conductor -- OpenDSS's own resolved choice, read from
+  `CktElement.NodeOrder()` -- carries over per-element into the schema's
+  `InjectionAppliance.return_path` (`"ground"` when solidly grounded despite the
+  bus also carrying an explicit neutral tie elsewhere, `"neutral"` for an explicit
+  `.4`-style tie, `"auto"` otherwise), so two elements on the SAME four-wire bus can
+  return differently, matching OpenDSS exactly instead of one shared node-level rule.
 - Line: symmetric components (R1/X1/R0/X0/C1/C0) OR Rmatrix/Xmatrix/Cmatrix OR
   geometry (Carson). Matrices take precedence. `to_grid` reads the native n×n
   matrices directly (`THREE_PHASE`) and reduces a coupled multi-phase line to
   `Z1 = Z_self - Z_mutual` under `SINGLE_PHASE_EQUIV` (not the bare self entry); a
   phase-permuted terminal (`bus1=a.1.2.3 bus2=b.3.2.1`) carries an independent
   `to_phases`.
-- Other converted elements: `Capacitor`/`Reactor` -> `ShuntAppliance` (solidly
-  grounded WYE, uncoupled only -- a Reactor's series R+X converts to the equivalent
-  shunt admittance `Y=1/(R+jX)`, exact at the fundamental only); `Generator`/
+- Other converted elements: `Capacitor`/`Reactor` -> `ShuntAppliance`, WYE (solidly
+  grounded, uncoupled -- a Reactor's series R+X converts to the equivalent shunt
+  admittance `Y=1/(R+jX)`, exact at the fundamental only) OR DELTA (`conn=delta`
+  -> `ShuntAppliance.connection=DELTA`, per-leg G/C read from OpenDSS's own resolved
+  per-leg `Cuf`/`R`/`X`; an unbalanced per-leg value has no representation and is
+  refused when exported back by the scenario oracle); `Generator`/
   `PVSystem`/`Storage` -> generation-positive / signed discharge-positive appliances
   (`PVSystem`/`Storage` read OpenDSS's PRESENT solved kW/kvar, already derated).
   Every other DSS element class (`Isource`, `Monitor`, `EnergyMeter`, `RegControl`,

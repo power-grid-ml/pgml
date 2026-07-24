@@ -350,10 +350,13 @@ under-converts. The core model supports each; only the converter intake is missi
   reversed winding no bus permutation can express), `Line` (n×n matrices from the
   native R/X/C matrix API, per-terminal phase-permuted `to_phases`), `Load` (models
   1/2/5/8 → `LoadModel`/`ZipCoefficients`; models 3/4/6/7 fall back to `CONST_POWER`
-  with a warning), `Capacitor`/`Reactor` (→ `ShuntAppliance`, solidly-grounded WYE and
-  uncoupled only — DELTA and an explicitly coupled `Rmatrix`/`Xmatrix` are skipped
-  with a warning), and `Generator`/`PVSystem`/`Storage` (generation-positive /
-  signed discharge-positive, plus `Storage`'s inert energy-state fields); NOT
+  with a warning; each WYE element's own resolved return conductor carries over as
+  `InjectionAppliance.return_path`), `Capacitor`/`Reactor` (→ `ShuntAppliance`,
+  solidly-grounded WYE OR delta-connected, per-leg G/C from OpenDSS's own resolved
+  values — an explicitly coupled `Rmatrix`/`Xmatrix` reactor and a non-grounded/2-bus
+  terminal-2 reference are still skipped with a warning), and `Generator`/`PVSystem`/
+  `Storage` (generation-positive / signed discharge-positive, plus `Storage`'s inert
+  energy-state fields); NOT
   read/converted: 3-winding transformer units, `RegControl` regulators, tap-changer
   control, `XfmrCode`/frequency-correction curves, and an explicit non-zero
   (floating or impedance-grounded) neutral node (raises). Every other DSS element
