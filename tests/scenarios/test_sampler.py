@@ -199,3 +199,38 @@ def test_tensor_nominal_gradient_flows(grid3):
     p_col.sum().backward()
     assert p_leaf.grad is not None
     assert float(p_leaf.grad.abs()) > 0.0
+
+
+def test_storage_selector_sweeps_signed_setpoint(grid3):
+    """component='storage' varies the SIGNED storage setpoint across the batch."""
+    from pgml.scenarios import run_scenarios
+    from pgml.schemas.grid_schema import Phase, Storage
+
+    g = grid3.model_copy(deep=True)
+    g.appliances.append(
+        Storage(id=30, node=3, phases=(Phase.A,), p_nom_w=500.0, q_nom_var=0.0)
+    )
+    cfg = ScenarioConfig(
+        n_samples=8,
+        seed=4,
+        parameters=[
+            ParameterSpec(
+                name="storage_p",
+                selector=Selector(component="storage"),
+                distribution=Uniform(low=-800.0, high=800.0),
+                field="p",
+                mode="absolute",
+            )
+        ],
+    )
+    s = sample(g, cfg)
+    p = s.operating_point[30]["p_w"]
+    assert p.shape == (8,)
+    assert float(p.min()) < 0.0 < float(p.max())  # charge AND discharge drawn
+    res = run_scenarios(g, cfg, calculation="power_flow", dtype=torch.complex128)
+    assert res.converged
+    # the storage bus voltage responds to the signed setpoint (injection raises it)
+    row = res.index.row(3, Phase.A)
+    vmag = res.v[:, row].abs()
+    order = torch.argsort(p)
+    assert float(vmag[order[-1]]) > float(vmag[order[0]])

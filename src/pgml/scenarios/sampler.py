@@ -28,7 +28,12 @@ import torch
 from torch import Tensor
 
 from pgml.errors import InputError
-from pgml.schemas.grid_schema import Generator, Grid, Load, Source, StaticSpectrum
+from pgml.schemas.grid_schema import (
+    Grid,
+    InjectionAppliance,
+    Source,
+    StaticSpectrum,
+)
 
 from .config import (
     CartesianConfig,
@@ -203,9 +208,9 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     if not config.parameters:
         raise InputError("ScenarioConfig has no parameters / sampling dimensions.")
 
-    # Load/Generator carry a nominal P/Q; a Source is selectable too (its u_ref scale).
+    # Load/Generator/Storage carry a nominal P/Q; a Source is selectable too (u_ref).
     by_id = {
-        a.id: a for a in grid.appliances if isinstance(a, (Load, Generator, Source))
+        a.id: a for a in grid.appliances if isinstance(a, (InjectionAppliance, Source))
     }
     declared = {f.name for f in config.factors}
 
@@ -293,10 +298,10 @@ def _scalar_passthrough(x):
 
 
 def _nominal(grid: Grid) -> dict:
-    """``{id: _Nominal}`` for every in-service Load/Generator (totals + per-phase)."""
+    """``{id: _Nominal}`` per in-service injection appliance (totals + per-phase)."""
     out: dict[int, _Nominal] = {}
     for a in grid.appliances:
-        if not isinstance(a, (Load, Generator)):
+        if not isinstance(a, InjectionAppliance):
             continue
         n = len(a.phases)
         p_total = _scalar_passthrough(a.p_nom_w)
@@ -357,7 +362,7 @@ def _harmonic_injections(
     fraction; ``"en50160"`` -- the per-order DIN EN 50160 voltage-compatibility level),
     the stored magnitude (``mode="scale"``), or the sampled value directly (absolute pu).
     """
-    by_id = {a.id: a for a in grid.appliances if isinstance(a, (Load, Generator))}
+    by_id = {a.id: a for a in grid.appliances if isinstance(a, InjectionAppliance)}
     # building store: {id: {order: [mag, phase]}}, seeded from stored spectra.
     built: dict[int, dict] = {}
     # pristine stored spectra (never mutated; `mode="scale"` references these).

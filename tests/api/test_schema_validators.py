@@ -16,7 +16,7 @@ ABC = (Phase.A, Phase.B, Phase.C)
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == "0.0.4"
+    assert SCHEMA_VERSION == "0.0.5"
 
 
 def test_shunt_reactor_rejects_mis_sized_matrix():

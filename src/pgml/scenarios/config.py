@@ -99,16 +99,24 @@ class Selector(_Base):
     given component kind. Filters combine (AND). ``component="source"`` targets the
     slack :class:`~pgml.schemas.grid_schema.Source` appliances (for the ``"u_ref"``
     field); a source has no ``consumer_type`` (setting it matches nothing).
+    ``component="storage"`` varies the SIGNED storage setpoint (positive =
+    discharging/injecting, negative = charging — the schema's generator-consistent
+    convention), so a ``[low, high]`` band spanning zero sweeps charge and discharge.
     """
 
-    component: Literal["load", "generator", "source"] = "load"
+    component: Literal["load", "generator", "storage", "source"] = "load"
     ids: Optional[list[int]] = None
     consumer_type: Optional[str] = None
 
     def resolve(self, grid) -> list[int]:
-        from pgml.schemas.grid_schema import Generator, Load, Source
+        from pgml.schemas.grid_schema import Generator, Load, Source, Storage
 
-        cls = {"load": Load, "generator": Generator, "source": Source}[self.component]
+        cls = {
+            "load": Load,
+            "generator": Generator,
+            "storage": Storage,
+            "source": Source,
+        }[self.component]
         out: list[int] = []
         for a in grid.appliances:
             if not isinstance(a, cls) or not a.in_service:

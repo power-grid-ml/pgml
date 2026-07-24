@@ -939,6 +939,18 @@ class InjectionAppliance(ApplianceBase):
     :class:`Generator` / :class:`Storage`.
     """
 
+    return_path: Literal["auto", "neutral", "ground"] = Field(
+        default="auto",
+        description="Return-conductor choice of a WYE-connected appliance on a node "
+        "that carries an explicit neutral (Phase.N): 'auto' (default) returns through "
+        "the neutral whenever the node has one (the historical node-level rule), "
+        "'neutral' requires it (assembly raises when the node has no Phase.N), "
+        "'ground' pins the return to ground even on a neutral-carrying node (an "
+        "OpenDSS `.1.2.3` load on a four-wire bus). Meaningful for WYE only — "
+        "assembly rejects a non-'auto' value on a DELTA-connected appliance. On a "
+        "node without Phase.N every value behaves as ground.",
+    )
+
 
 class Source(ApplianceBase):
     """Slack / external network equivalent: per-phase Thevenin voltage behind a
@@ -1577,6 +1589,27 @@ class ShuntAppliance(ApplianceBase):
     capacitance_f: Vec = si_field(
         "Per-phase shunt capacitance C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
     )
+    connection: WindingConnection = Field(
+        default=WindingConnection.WYE,
+        description="WYE (default): each element G/C connects its phase to ground "
+        "(the historical behavior). DELTA: element k connects phase k to phase k+1 "
+        "(cyclic over the appliance's phases; requires >= 2 phases) — a delta "
+        "capacitor bank. Zigzag is rejected.",
+    )
+
+    @model_validator(mode="after")
+    def _check_connection(self) -> "ShuntAppliance":
+        if self.connection in (
+            WindingConnection.ZIGZAG,
+            WindingConnection.ZIGZAG_GROUNDED,
+        ):
+            raise ValueError("ShuntAppliance does not support zigzag connections.")
+        if self.connection is WindingConnection.DELTA and len(self.phases) < 2:
+            raise ValueError(
+                "connection=DELTA requires at least 2 phases (a delta branch is a "
+                "phase-to-phase element)."
+            )
+        return self
 
 
 Appliance = Annotated[
