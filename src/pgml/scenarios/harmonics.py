@@ -28,6 +28,11 @@ from torch import Tensor
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 
+from .composition import (
+    lift_operating_point_to_bt,
+    resolve_composed_ids,
+    sample_device_composition,
+)
 from .config import (
     CoherentSpectrumConfig,
     ScenarioConfig,
@@ -171,96 +176,116 @@ def sample_coherent_spectra(
     are made; the realized tensors can feed the solver's autograd tape.
     """
     ids = config.selector.resolve(grid)
-    if not ids:
+    nm = config.name
+    n_ord = len(config.orders)
+    n_modes, b, t = config.n_modes, config.n_scenarios, config.n_steps
+
+    # A statistical device composition (if set) SUPERSEDES the mode-bank fingerprint for
+    # the loads it covers: those ids are dropped from the fingerprint device set and
+    # filled from the composition instead. Composition-free runs keep `fp_ids == ids`
+    # (byte-identical).
+    comp = config.composition
+    composed_ids = resolve_composed_ids(grid, comp) if comp is not None else []
+    composed_set = set(composed_ids)
+    fp_ids = [i for i in ids if i not in composed_set]
+    if not fp_ids and not composed_ids:
         raise InputError(
             "CoherentSpectrumConfig selector matched no in-service components."
         )
-    nm = config.name
-    n_dev, n_ord = len(ids), len(config.orders)
-    n_modes, b, t = config.n_modes, config.n_scenarios, config.n_steps
-    gen = torch.Generator().manual_seed(config.seed)
-    # The per-device fingerprint (mode) bank draws from its own generator when
-    # `mode_bank_seed` is set (a distinct signature bank for a held-out test set);
-    # `None` draws it from `gen`, byte-identical to a config without the field -- the
-    # bank is the first consumption of the `seed` stream (the Markov path + AR(1) jitter
-    # follow). With `mode_bank_seed` set, the path + jitter no longer consume the bank
-    # draws, so they are a distinct (statistically identical) realization of `seed`.
-    bank_gen = (
-        gen
-        if config.mode_bank_seed is None
-        else torch.Generator().manual_seed(int(config.mode_bank_seed))
-    )
 
-    # 1. per-order emission caps (also the upper clamp). IEC 61000-3-2 is PER DEVICE
-    #    (each device's nominal P + node voltage): shape [n_dev, n_ord, 1]. EN 50160 is
-    #    a global per-order voltage-compatibility level; None is absolute pu (cap 1.0):
-    #    shape [n_ord, 1]. The trailing 1 broadcasts over the mode axis (base multiply)
-    #    and the T axis (clamp).
-    ref = config.harmonic_reference
-    clamp_to_cap = ref is not None
-    if ref == "iec61000-3-2":
-        cap_map = iec61000_3_2_device_caps(
-            grid, ids, config.orders, emission_class=config.emission_class
+    samples: dict = {"time_s": torch.arange(t, dtype=_F64) * config.step_size_s}  # [T]
+    harmonic_injection: dict = {}
+
+    if fp_ids:
+        n_dev = len(fp_ids)
+        gen = torch.Generator().manual_seed(config.seed)
+        # The per-device fingerprint (mode) bank draws from its own generator when
+        # `mode_bank_seed` is set (a distinct signature bank for a held-out test set);
+        # `None` draws it from `gen`, byte-identical to a config without the field -- the
+        # bank is the first consumption of the `seed` stream (the Markov path + AR(1)
+        # jitter follow). With `mode_bank_seed` set, the path + jitter no longer consume
+        # the bank draws, so they are a distinct (statistically identical) realization.
+        bank_gen = (
+            gen
+            if config.mode_bank_seed is None
+            else torch.Generator().manual_seed(int(config.mode_bank_seed))
         )
-        caps = torch.tensor(
-            [[cap_map[cid][o] for o in config.orders] for cid in ids], dtype=_F64
-        ).reshape(n_dev, n_ord, 1)
-    else:
-        caps = torch.tensor(
-            [en50160_limit(o) if ref == "en50160" else 1.0 for o in config.orders],
-            dtype=_F64,
-        ).reshape(n_ord, 1)
 
-    # 2. base mode spectra (the fingerprints): magnitude (fraction of cap) + phase.
-    mode_shape = (
-        (b, n_dev, n_ord, n_modes)
-        if config.resample_modes_per_scenario
-        else (n_dev, n_ord, n_modes)
-    )
-    base_mag = (
-        config.mag_distribution.icdf(
+        # 1. per-order emission caps (also the upper clamp). IEC 61000-3-2 is PER DEVICE
+        #    (each device's nominal P + node voltage): shape [n_dev, n_ord, 1]. EN 50160
+        #    is a global per-order voltage-compatibility level; None is absolute pu (cap
+        #    1.0): shape [n_ord, 1]. The trailing 1 broadcasts over the mode axis (base
+        #    multiply) and the T axis (clamp).
+        ref = config.harmonic_reference
+        clamp_to_cap = ref is not None
+        if ref == "iec61000-3-2":
+            cap_map = iec61000_3_2_device_caps(
+                grid, fp_ids, config.orders, emission_class=config.emission_class
+            )
+            caps = torch.tensor(
+                [[cap_map[cid][o] for o in config.orders] for cid in fp_ids],
+                dtype=_F64,
+            ).reshape(n_dev, n_ord, 1)
+        else:
+            caps = torch.tensor(
+                [en50160_limit(o) if ref == "en50160" else 1.0 for o in config.orders],
+                dtype=_F64,
+            ).reshape(n_ord, 1)
+
+        # 2. base mode spectra (the fingerprints): magnitude (fraction of cap) + phase.
+        mode_shape = (
+            (b, n_dev, n_ord, n_modes)
+            if config.resample_modes_per_scenario
+            else (n_dev, n_ord, n_modes)
+        )
+        base_mag = (
+            config.mag_distribution.icdf(
+                torch.rand(mode_shape, generator=bank_gen, dtype=_F64)
+            )
+            * caps
+        )  # [..., n_ord, n_modes], cap broadcasts over modes (+ devices for [n_ord, 1])
+        base_phase = config.phase_distribution.icdf(
             torch.rand(mode_shape, generator=bank_gen, dtype=_F64)
         )
-        * caps
-    )  # [..., n_ord, n_modes], cap broadcasts over modes (and devices for [n_ord, 1])
-    base_phase = config.phase_distribution.icdf(
-        torch.rand(mode_shape, generator=bank_gen, dtype=_F64)
-    )
 
-    # 3. Markov mode path + gather each step's base spectrum -> [B, n_dev, n_ord, T].
-    path = _markov_path(b, n_dev, t, n_modes, config.dwell, gen)
-    idx = path.unsqueeze(2).expand(b, n_dev, n_ord, t)  # [B, n_dev, n_ord, T]
-    bm = base_mag if config.resample_modes_per_scenario else base_mag.unsqueeze(0)
-    bp = base_phase if config.resample_modes_per_scenario else base_phase.unsqueeze(0)
-    bm = bm.expand(b, n_dev, n_ord, n_modes).contiguous()
-    bp = bp.expand(b, n_dev, n_ord, n_modes).contiguous()
-    sel_mag = torch.gather(bm, -1, idx)  # [B, n_dev, n_ord, T]
-    sel_phase = torch.gather(bp, -1, idx)
+        # 3. Markov mode path + gather each step's base spectrum -> [B, n_dev, n_ord, T].
+        path = _markov_path(b, n_dev, t, n_modes, config.dwell, gen)
+        idx = path.unsqueeze(2).expand(b, n_dev, n_ord, t)  # [B, n_dev, n_ord, T]
+        bm = base_mag if config.resample_modes_per_scenario else base_mag.unsqueeze(0)
+        bp = (
+            base_phase
+            if config.resample_modes_per_scenario
+            else base_phase.unsqueeze(0)
+        )
+        bm = bm.expand(b, n_dev, n_ord, n_modes).contiguous()
+        bp = bp.expand(b, n_dev, n_ord, n_modes).contiguous()
+        sel_mag = torch.gather(bm, -1, idx)  # [B, n_dev, n_ord, T]
+        sel_phase = torch.gather(bp, -1, idx)
 
-    # 4. AR(1) jitter around the selected base, clamped to [0, cap] / wrapped phase.
-    e_mag = _ar1((b, n_dev, n_ord, t), config.ar1_rho, gen)
-    e_phase = _ar1((b, n_dev, n_ord, t), config.ar1_rho, gen)
-    mag = (sel_mag * (1.0 + config.jitter_mag * e_mag)).clamp(min=0.0)
-    if clamp_to_cap:
-        mag = torch.minimum(mag, caps)  # caps' trailing 1 broadcasts over the T axis
-    phase = sel_phase + config.jitter_phase_deg * e_phase  # degrees
+        # 4. AR(1) jitter around the selected base, clamped to [0, cap] / wrapped phase.
+        e_mag = _ar1((b, n_dev, n_ord, t), config.ar1_rho, gen)
+        e_phase = _ar1((b, n_dev, n_ord, t), config.ar1_rho, gen)
+        mag = (sel_mag * (1.0 + config.jitter_mag * e_mag)).clamp(min=0.0)
+        if clamp_to_cap:
+            mag = torch.minimum(mag, caps)  # caps' trailing 1 broadcasts over T
+        phase = sel_phase + config.jitter_phase_deg * e_phase  # degrees
 
-    # 5. assemble harmonic_injection {id: {order: (mag[B,T], phase[B,T])}}.
-    harmonic_injection: dict = {}
-    for d, cid in enumerate(ids):
-        harmonic_injection[cid] = {
-            order: (mag[:, d, o, :], phase[:, d, o, :])
-            for o, order in enumerate(config.orders)
-        }
+        # 5. assemble harmonic_injection {id: {order: (mag[B,T], phase[B,T])}}.
+        for d, cid in enumerate(fp_ids):
+            harmonic_injection[cid] = {
+                order: (mag[:, d, o, :], phase[:, d, o, :])
+                for o, order in enumerate(config.orders)
+            }
 
-    samples = {
-        f"{nm}_mode": path,  # [B, n_dev, T]
-        f"{nm}_mag": mag,  # [B, n_dev, n_ord, T]
-        f"{nm}_phase": phase,  # [B, n_dev, n_ord, T]
-        f"{nm}_mode_base_mag": base_mag,  # fingerprints
-        f"{nm}_device_ids": torch.tensor(ids, dtype=torch.long),
-        "time_s": torch.arange(t, dtype=_F64) * config.step_size_s,  # [T]
-    }
+        samples.update(
+            {
+                f"{nm}_mode": path,  # [B, n_dev, T]
+                f"{nm}_mag": mag,  # [B, n_dev, n_ord, T]
+                f"{nm}_phase": phase,  # [B, n_dev, n_ord, T]
+                f"{nm}_mode_base_mag": base_mag,  # fingerprints
+                f"{nm}_device_ids": torch.tensor(fp_ids, dtype=torch.long),
+            }
+        )
 
     # Optional per-scenario fundamental operating point (load / PV / slack-voltage specs).
     # Drawn on a separate stream (above) so the harmonic fingerprint is untouched.
@@ -279,6 +304,18 @@ def sample_coherent_spectra(
             grid, config, operating_point
         )
         samples.update(profile_samples)
+
+    # Statistical device composition: OVERRIDE the composed loads' fundamental (a per-step
+    # [B, T] aggregate) and harmonic injection (the summed member spectrum). Drawn on
+    # streams distinct from the fingerprint / op-cube / profile. The mixed [B]/[B, T]
+    # operating point is unified to [B, T] so every device shares one leading batch.
+    if comp is not None:
+        draw = sample_device_composition(grid, config)
+        if draw.operating_point:
+            operating_point = lift_operating_point_to_bt(operating_point, b, t)
+            operating_point.update(draw.operating_point)
+            harmonic_injection.update(draw.harmonic_injection)
+            samples.update(draw.samples)
 
     return SampledScenarios(
         operating_point=operating_point,

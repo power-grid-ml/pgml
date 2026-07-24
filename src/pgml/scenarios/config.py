@@ -558,6 +558,451 @@ class LoadProfileConfig(_Base):
 
 
 # =============================================================================
+# Statistical device-class composition of aggregated loads
+# =============================================================================
+#: Diurnal activity-rate presets a device class may follow. They REFERENCE the
+#: class-aware daily shapes in :mod:`pgml.scenarios.profiles` (household evening,
+#: office hours, EV evening, restaurant lunch/dinner, industrial plateau, the ``pv``
+#: solar bell) plus a ``"flat"`` constant availability.
+ActivityPreset = Literal[
+    "household", "office", "ev", "restaurant", "industrial", "pv", "flat"
+]
+
+
+class DeviceState(_Base):
+    """One operating state of a MULTI-STATE device class.
+
+    Captures the washing-machine / white-goods pattern where the SAME appliance draws
+    very different current AND injects a very different spectrum depending on its cycle
+    phase — e.g. a high-power, near-linear resistive HEATING state versus a low-power,
+    harmonic-rich INVERTER-driven spinning state. The device jumps between its states on
+    a Markov chain (dwell ``DeviceClassSpec.state_dwell``); the stationary probability of
+    a state is proportional to its ``weight``.
+
+    - ``power_fraction`` — the state's loading as a fraction of the device's rated power
+      (drives BOTH the drawn power and, through the ``gamma`` law, the harmonic
+      magnitude).
+    - ``spectrum_scale`` — an ADDITIONAL multiplier on the device's per-order harmonic
+      magnitudes in this state, capturing the qualitative spectral change that is NOT a
+      function of power magnitude alone (heating ≈ clean, inverter ≈ rich).
+    """
+
+    name: str = "state"
+    power_fraction: float = Field(gt=0.0, le=1.0)
+    spectrum_scale: float = Field(default=1.0, ge=0.0)
+    weight: float = Field(default=1.0, gt=0.0)
+
+
+class DeviceClassSpec(_Base):
+    """A STATISTICAL device class — a distribution over one appliance's behaviour.
+
+    The goal is NOT an accurate appliance model but plausible statistical coverage: an
+    aggregated load is composed of several members drawn from these classes (see
+    :class:`ConsumerComposition`), and a state estimator learns to attribute an observed
+    aggregate spectrum to a class mix. Every range below is drawn PER MEMBER (once, at
+    roster build); the temporal draws (activity, loading, state) then evolve per step.
+
+    The per-order harmonic magnitude ranges are FRACTIONS of the device's OWN fundamental
+    current at rated load and are only LOOSELY bounded by the IEC 61000-3-2 emission
+    shape (odd-dominated, decreasing with order) — they are a modelling convenience for
+    generating diverse training data, NOT the standard's per-appliance limits.
+
+    Load dependence (the measured reality that a device's harmonic signature depends on
+    how hard it is driven):
+
+    - magnitude ``mag_h(lam) = mag_h_rated * lam ** gamma_h`` with ``gamma_h`` drawn per
+      member per order from ``gamma`` (``gamma = 0`` → constant ratio; ``gamma < 0`` →
+      the THD FRACTION falls as load rises while the absolute harmonic current still
+      grows — the measured EV-charger / PV-inverter behaviour);
+    - phase ``ang_h(lam) = ang_h0 + s_h * (lam - 1)`` with ``s_h`` [deg] drawn per member
+      per order from ``phase_slope_deg``.
+
+    Activity: ``activity_preset`` is a diurnal availability shape (see
+    :data:`ActivityPreset`). ``discrete_activity`` selects how it is realised — a
+    switching appliance (``True``, the default) follows a two-state on/off Markov chain
+    whose target occupancy tracks the diurnal rate (stickiness drawn from
+    ``on_off_dwell``); a continuously-modulated device (``False``, e.g. a PV inverter
+    tracking irradiance, a background base load tracking occupancy) uses the diurnal rate
+    itself as a fractional availability in ``[0, 1]``.
+    """
+
+    name: str
+    #: ``+1`` consuming (Load-like), ``-1`` injecting (PV-like).
+    sign: Literal[1, -1] = 1
+    #: Rated active power per instance ``[low, high]`` in watts (magnitude).
+    rated_power_w: tuple[float, float]
+    #: Fundamental displacement power factor ``lambda`` (``Q = P * tan(acos(pf))``).
+    power_factor: float = Field(default=1.0, gt=0.0, le=1.0)
+
+    #: Per-order harmonic magnitude ranges at RATED load, as a FRACTION of the device's
+    #: own fundamental current: ``{order: [low, high]}`` (orders >= 2; absent = no
+    #: emission at that order). Bounded loosely by the IEC 61000-3-2 shape.
+    harmonic_magnitude: dict[int, tuple[float, float]] = Field(default_factory=dict)
+    #: Per-order harmonic phase ranges [deg] at rated load: ``{order: [low, high]}``.
+    harmonic_phase_deg: dict[int, tuple[float, float]] = Field(default_factory=dict)
+    #: Range for the per-order magnitude load-dependence exponent ``gamma_h``.
+    gamma: tuple[float, float] = (0.0, 0.0)
+    #: Range for the per-order phase load-dependence slope ``s_h`` [deg per unit load].
+    phase_slope_deg: tuple[float, float] = (0.0, 0.0)
+
+    #: Diurnal availability shape.
+    activity_preset: ActivityPreset = "flat"
+    #: ``True`` → a switching appliance (on/off Markov); ``False`` → continuous
+    #: availability equal to the diurnal rate (PV irradiance, background base load).
+    discrete_activity: bool = True
+    #: Range for the on/off Markov stickiness (per-step probability of persisting).
+    on_off_dwell: tuple[float, float] = (0.85, 0.98)
+
+    #: Loading floor ``lam_min`` (the per-step loading is clamped to ``[lam_min, 1]``).
+    loading_min: float = Field(default=0.2, gt=0.0, le=1.0)
+    #: Range for the per-member mean loading (single-state classes).
+    loading_mean: tuple[float, float] = (0.6, 1.0)
+    #: Fractional std of the AR(1) per-step loading jitter.
+    loading_jitter: float = Field(default=0.05, ge=0.0)
+    #: AR(1) stickiness of the per-step loading jitter.
+    loading_rho: float = Field(default=0.85, ge=0.0, le=1.0)
+
+    #: Optional multi-state operation (empty = single-state, continuous loading).
+    states: list[DeviceState] = Field(default_factory=list)
+    #: Range for the multi-state Markov dwell (per-step probability of staying in state).
+    state_dwell: tuple[float, float] = (0.85, 0.97)
+
+    @model_validator(mode="after")
+    def _check(self) -> "DeviceClassSpec":
+        lo, hi = self.rated_power_w
+        if lo <= 0.0 or hi < lo:
+            raise ValueError(
+                f"class {self.name!r} rated_power_w must be 0 < low <= high."
+            )
+        for field_name in ("harmonic_magnitude", "harmonic_phase_deg"):
+            for order in getattr(self, field_name):
+                if order < 2:
+                    raise ValueError(
+                        f"class {self.name!r} {field_name} orders must be >= 2."
+                    )
+        if not (
+            self.loading_min <= self.loading_mean[0] <= self.loading_mean[1] <= 1.0
+        ):
+            raise ValueError(
+                f"class {self.name!r} requires loading_min <= loading_mean[0] "
+                "<= loading_mean[1] <= 1."
+            )
+        for lo_, hi_ in (
+            self.gamma,
+            self.phase_slope_deg,
+            self.on_off_dwell,
+            self.state_dwell,
+        ):
+            if hi_ < lo_:
+                raise ValueError(f"class {self.name!r} has a range with high < low.")
+        return self
+
+
+class ClassCount(_Base):
+    """How many instances of a device class an aggregated load contains.
+
+    ``count`` is an inclusive ``[min, max]`` integer range; ``power_share`` weights this
+    class's instances when :class:`CompositionConfig` scales the roster to the load's
+    nominal power (a larger share claims a larger slice of the nameplate).
+    """
+
+    class_name: str
+    count: tuple[int, int] = (1, 1)
+    power_share: float = Field(default=1.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def _check(self) -> "ClassCount":
+        lo, hi = self.count
+        if lo < 0 or hi < lo:
+            raise ValueError(
+                f"ClassCount {self.class_name!r} count must be 0 <= min <= max."
+            )
+        return self
+
+
+class ConsumerComposition(_Base):
+    """A composition rule: the device-class roster of one consumer character.
+
+    A rule matches an aggregated load by explicit ``load_ids`` (a per-appliance override
+    — e.g. a public charging station is just an EV charger) if given, else by
+    ``consumer_type`` (matched against the load's own ``consumer_type``); a rule with
+    both ``load_ids`` and ``consumer_type`` unset is the fallback for any load no other
+    rule claims. ``classes`` lists the device classes and their instance counts.
+    """
+
+    consumer_type: Optional[str] = None
+    load_ids: Optional[list[int]] = None
+    classes: list[ClassCount] = Field(min_length=1)
+
+
+def default_device_classes() -> list[DeviceClassSpec]:
+    """The built-in statistical device-class library (every range user-overridable).
+
+    Six plausible LV device characters: a harmonic-free linear base load, an
+    SMPS-electronics class (3rd/5th-dominated), an EV charger and a PV inverter (both
+    with the measured falling-THD-fraction-with-load behaviour, ``gamma < 0``; PV
+    injecting), a multi-state inverter drive (white goods / heat pump: a near-linear
+    heating state vs a harmonic-rich inverter state), and a thermostatic resistive
+    heater. Magnitudes are loosely IEC 61000-3-2-shaped plausibility, NOT appliance
+    models.
+    """
+    return [
+        DeviceClassSpec(
+            name="base_linear",
+            sign=1,
+            rated_power_w=(150.0, 1500.0),
+            activity_preset="household",
+            discrete_activity=False,
+            loading_min=0.3,
+            loading_mean=(0.6, 1.0),
+        ),
+        DeviceClassSpec(
+            name="electronics_smps",
+            sign=1,
+            rated_power_w=(20.0, 400.0),
+            harmonic_magnitude={
+                3: (0.5, 0.85),
+                5: (0.25, 0.6),
+                7: (0.1, 0.4),
+                9: (0.05, 0.25),
+                11: (0.03, 0.15),
+                13: (0.02, 0.1),
+            },
+            harmonic_phase_deg={
+                3: (-30.0, 30.0),
+                5: (-60.0, 60.0),
+                7: (-90.0, 90.0),
+                9: (-120.0, 120.0),
+                11: (-150.0, 150.0),
+                13: (-180.0, 180.0),
+            },
+            gamma=(-0.2, 0.1),
+            phase_slope_deg=(-20.0, 20.0),
+            activity_preset="household",
+            on_off_dwell=(0.5, 0.8),
+            loading_min=0.1,
+            loading_mean=(0.3, 0.9),
+        ),
+        DeviceClassSpec(
+            name="ev_charger",
+            sign=1,
+            rated_power_w=(3700.0, 11000.0),
+            harmonic_magnitude={
+                3: (0.01, 0.05),
+                5: (0.02, 0.08),
+                7: (0.01, 0.05),
+                9: (0.005, 0.03),
+                11: (0.005, 0.02),
+            },
+            harmonic_phase_deg={
+                3: (-40.0, 40.0),
+                5: (-40.0, 40.0),
+                7: (-60.0, 60.0),
+                9: (-90.0, 90.0),
+                11: (-120.0, 120.0),
+            },
+            gamma=(-1.6, -0.7),
+            phase_slope_deg=(-15.0, 15.0),
+            activity_preset="ev",
+            on_off_dwell=(0.6, 0.82),
+            loading_min=0.2,
+            loading_mean=(0.7, 1.0),
+        ),
+        DeviceClassSpec(
+            name="pv_inverter",
+            sign=-1,
+            rated_power_w=(1000.0, 8000.0),
+            harmonic_magnitude={
+                3: (0.01, 0.04),
+                5: (0.02, 0.07),
+                7: (0.01, 0.05),
+                9: (0.005, 0.03),
+            },
+            harmonic_phase_deg={
+                3: (-60.0, 60.0),
+                5: (-60.0, 60.0),
+                7: (-90.0, 90.0),
+                9: (-120.0, 120.0),
+            },
+            gamma=(-1.3, -0.6),
+            phase_slope_deg=(-25.0, 25.0),
+            activity_preset="pv",
+            discrete_activity=False,
+            loading_min=0.05,
+            loading_mean=(0.5, 1.0),
+        ),
+        DeviceClassSpec(
+            name="inverter_drive",
+            sign=1,
+            rated_power_w=(500.0, 3000.0),
+            harmonic_magnitude={
+                3: (0.08, 0.25),
+                5: (0.15, 0.45),
+                7: (0.08, 0.3),
+                9: (0.03, 0.15),
+                11: (0.02, 0.1),
+            },
+            harmonic_phase_deg={
+                3: (-45.0, 45.0),
+                5: (-60.0, 60.0),
+                7: (-90.0, 90.0),
+                9: (-120.0, 120.0),
+                11: (-150.0, 150.0),
+            },
+            gamma=(-0.4, 0.2),
+            phase_slope_deg=(-30.0, 30.0),
+            activity_preset="household",
+            on_off_dwell=(0.6, 0.85),
+            loading_min=0.15,
+            loading_mean=(0.4, 1.0),
+            states=[
+                DeviceState(
+                    name="heating", power_fraction=0.95, spectrum_scale=0.2, weight=0.5
+                ),
+                DeviceState(
+                    name="inverter", power_fraction=0.35, spectrum_scale=1.6, weight=0.5
+                ),
+            ],
+            state_dwell=(0.85, 0.97),
+        ),
+        DeviceClassSpec(
+            name="resistive_heating",
+            sign=1,
+            rated_power_w=(500.0, 3000.0),
+            activity_preset="flat",
+            on_off_dwell=(0.5, 0.75),
+            loading_min=0.9,
+            loading_mean=(0.95, 1.0),
+            loading_jitter=0.02,
+        ),
+    ]
+
+
+def default_compositions() -> list[ConsumerComposition]:
+    """The built-in per-``consumer_type`` composition rules (over the default library).
+
+    Every count / share is user-overridable. The rule with no ``consumer_type`` /
+    ``load_ids`` is the fallback for any unmatched load.
+    """
+
+    def cc(name: str, lo: int, hi: int, share: float = 1.0) -> ClassCount:
+        return ClassCount(class_name=name, count=(lo, hi), power_share=share)
+
+    return [
+        ConsumerComposition(
+            consumer_type="household",
+            classes=[
+                cc("base_linear", 1, 1, 3.0),
+                cc("electronics_smps", 1, 3, 1.0),
+                cc("resistive_heating", 0, 1, 2.0),
+                cc("inverter_drive", 0, 1, 1.5),
+                cc("ev_charger", 0, 1, 1.0),
+                cc("pv_inverter", 0, 1, 1.0),
+            ],
+        ),
+        ConsumerComposition(
+            consumer_type="office",
+            classes=[
+                cc("base_linear", 1, 1, 4.0),
+                cc("electronics_smps", 3, 10, 1.5),
+                cc("inverter_drive", 0, 2, 2.0),
+            ],
+        ),
+        ConsumerComposition(
+            consumer_type="restaurant",
+            classes=[
+                cc("base_linear", 1, 1, 3.0),
+                cc("inverter_drive", 1, 3, 2.0),
+                cc("electronics_smps", 1, 4, 1.0),
+            ],
+        ),
+        ConsumerComposition(
+            consumer_type="heat_pump",
+            classes=[cc("base_linear", 1, 1, 1.0), cc("inverter_drive", 1, 2, 3.0)],
+        ),
+        ConsumerComposition(
+            consumer_type="ev_charging",
+            classes=[cc("base_linear", 0, 1, 0.5), cc("ev_charger", 1, 2, 1.0)],
+        ),
+        ConsumerComposition(
+            consumer_type="pv",
+            classes=[cc("pv_inverter", 1, 1, 1.0)],
+        ),
+        ConsumerComposition(
+            classes=[cc("base_linear", 1, 1, 3.0), cc("electronics_smps", 1, 2, 1.0)],
+        ),
+    ]
+
+
+class CompositionConfig(_Base):
+    """Statistical device-class composition of aggregated loads.
+
+    Set on :class:`CoherentSpectrumConfig`. When present it SUPERSEDES the mode-bank
+    fingerprint machinery for the loads it covers: each such load becomes a sum of
+    statistical member devices (drawn from ``classes`` per the matching
+    :class:`ConsumerComposition` in ``compositions``), whose per-step activity drives
+    BOTH the drawn fundamental power AND the injected harmonic spectrum — so the dataset
+    carries a consistent load-to-spectrum mapping a model can learn from (and, in the
+    best case, use to attribute an observed spectrum to a device mix / an error source).
+
+    A load covered by the composition draws its fundamental P/Q and its harmonic
+    injection ENTIRELY from the composition; any ``parameters`` / ``profile`` targeting
+    the same load is superseded. Loads NOT covered (no matching rule, or outside
+    ``selector``) keep the fingerprint / profile behaviour.
+
+    Roster: per covered load a device roster is drawn once (seeded, persisted). With
+    ``scale_to_nominal`` the members' rated powers are rescaled so their share-weighted
+    installed capacity equals the load's ``p_nom_w`` (keeping the nameplate meaningful
+    across grids); otherwise the class rated ranges are absolute. Cross-device
+    correlation reuses the profile latents: one ``behavioral`` latent scales every
+    consumption activity together, one ``cloud`` latent scales every PV together.
+
+    Guard: near a net-zero aggregate fundamental (e.g. PV cancelling load) the RELATIVE
+    harmonic magnitude explodes (a physically real residual-THD effect); it is capped at
+    ``max_injection_pu`` and the binding is recorded in the samples.
+    """
+
+    #: Loads to compose. ``None`` = every in-service Load. A load covered here but
+    #: without a matching rule in ``compositions`` falls through to the fingerprint.
+    selector: Optional[Selector] = None
+    #: The device-class library.
+    classes: list[DeviceClassSpec] = Field(default_factory=default_device_classes)
+    #: The per-consumer-type composition rules.
+    compositions: list[ConsumerComposition] = Field(
+        default_factory=default_compositions
+    )
+    #: Rescale each roster's share-weighted installed capacity to the load's ``p_nom_w``.
+    scale_to_nominal: bool = True
+    #: Cap on the aggregate harmonic magnitude [pu of the aggregate fundamental current].
+    max_injection_pu: float = Field(default=3.0, gt=0.0)
+    #: Cross-device correlation strengths (shared per-scenario latents).
+    behavioral_coupling: float = Field(default=0.3, ge=0.0)
+    cloud_coupling: float = Field(default=0.5, ge=0.0)
+    #: Optional distinct seed for the roster + temporal draws (a held-out composition
+    #: bank). ``None`` derives both streams from ``CoherentSpectrumConfig.seed``.
+    roster_seed: Optional[int] = None
+
+    def class_names(self) -> list[str]:
+        """Ordered device-class names (the ``n_class`` axis of the recorded samples)."""
+        return [c.name for c in self.classes]
+
+    @model_validator(mode="after")
+    def _check(self) -> "CompositionConfig":
+        names = [c.name for c in self.classes]
+        if len(names) != len(set(names)):
+            raise ValueError("CompositionConfig class names must be unique.")
+        known = set(names)
+        for rule in self.compositions:
+            for cc in rule.classes:
+                if cc.class_name not in known:
+                    raise ValueError(
+                        f"ConsumerComposition references unknown class "
+                        f"{cc.class_name!r} (not in classes)."
+                    )
+        return self
+
+
+# =============================================================================
 # Node-coherent harmonic "fingerprint" sampling (temporal sequences)
 # =============================================================================
 class CoherentSpectrumConfig(_Base):
@@ -649,6 +1094,9 @@ class CoherentSpectrumConfig(_Base):
     factors: list[LatentFactor] = Field(default_factory=list)
     # Time-varying fundamental profile (per-step P/Q). Requires ``start_time``.
     profile: Optional[LoadProfileConfig] = None
+    # Statistical device-class composition of aggregated loads (supersedes the
+    # fingerprint + fundamental for the loads it covers). Requires ``start_time``.
+    composition: Optional[CompositionConfig] = None
     # Absolute anchor for the profile's daily / weekly / seasonal phases (ISO 8601).
     # A naive (timezone-less) timestamp is interpreted as UTC.
     start_time: Optional[str] = None
@@ -672,6 +1120,12 @@ class CoherentSpectrumConfig(_Base):
             raise ValueError(
                 "CoherentSpectrumConfig.profile requires start_time (ISO 8601): the "
                 "daily / weekly / seasonal phases need an absolute anchor."
+            )
+        if self.composition is not None and self.start_time is None:
+            raise ValueError(
+                "CoherentSpectrumConfig.composition requires start_time (ISO 8601): "
+                "the device activity model is temporal (diurnal activity rates need an "
+                "absolute anchor)."
             )
         if self.start_time is not None:
             from datetime import datetime
@@ -702,6 +1156,13 @@ __all__ = [
     "CartesianConfig",
     "CoherentSpectrumConfig",
     "LoadProfileConfig",
+    "DeviceState",
+    "DeviceClassSpec",
+    "ClassCount",
+    "ConsumerComposition",
+    "CompositionConfig",
+    "default_device_classes",
+    "default_compositions",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",

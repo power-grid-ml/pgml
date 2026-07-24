@@ -20,12 +20,22 @@ See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
 
 from __future__ import annotations
 
+from .composition import (
+    CompositionDraw,
+    resolve_composed_ids,
+    sample_device_composition,
+)
 from .config import (
     CartesianAxis,
     CartesianConfig,
+    ClassCount,
     CoherentSpectrumConfig,
+    CompositionConfig,
     Constant,
+    ConsumerComposition,
     Correlation,
+    DeviceClassSpec,
+    DeviceState,
     Distribution,
     LatentFactor,
     LoadProfileConfig,
@@ -39,6 +49,8 @@ from .config import (
     Selector,
     SpectrumSweepConfig,
     Uniform,
+    default_compositions,
+    default_device_classes,
 )
 from .en50160 import en50160_limit, en50160_limits
 from .harmonics import sample_coherent_spectra, spectrum_sweep
@@ -78,6 +90,11 @@ for _name in [
     "CartesianConfig",
     "CoherentSpectrumConfig",
     "LoadProfileConfig",
+    "DeviceState",
+    "DeviceClassSpec",
+    "ClassCount",
+    "ConsumerComposition",
+    "CompositionConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -89,6 +106,7 @@ SampledScenarios.__module__ = __name__
 ScenarioResult.__module__ = __name__
 LoadedDataset.__module__ = __name__
 StorageDispatchResult.__module__ = __name__
+CompositionDraw.__module__ = __name__
 
 __all__ = [
     "Uniform",
@@ -106,6 +124,14 @@ __all__ = [
     "CartesianConfig",
     "CoherentSpectrumConfig",
     "LoadProfileConfig",
+    "DeviceState",
+    "DeviceClassSpec",
+    "ClassCount",
+    "ConsumerComposition",
+    "CompositionConfig",
+    "CompositionDraw",
+    "default_device_classes",
+    "default_compositions",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -114,6 +140,8 @@ __all__ = [
     "cartesian_sample",
     "sample_coherent_spectra",
     "spectrum_sweep",
+    "sample_device_composition",
+    "resolve_composed_ids",
     "load_profile_factors",
     "apply_load_profiles",
     "perturbation_sweep",

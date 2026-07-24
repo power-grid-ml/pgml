@@ -106,6 +106,46 @@ verified `batched == loop-of-individual`).
     time_unix_s[T])` and `apply_load_profiles(grid, config, operating_point) ->
     (operating_point[B,T], samples)` are the profile generator + operating-point lift
     (`pgml.scenarios.profiles`); `sample_coherent_spectra` calls them when `profile` is set.
+  - `composition=CompositionConfig(...)` + `start_time` (REQUIRED — the activity model is
+    temporal) makes the covered aggregated loads a SUM of statistical member devices whose
+    per-step activity drives BOTH the fundamental power AND the injected spectrum (a
+    consistent load-to-spectrum mapping). It SUPERSEDES the mode-bank fingerprint + the
+    fundamental for the loads it covers (those ids are dropped from the fingerprint device
+    set; their operating point + injection come from the composition; any `parameters`/
+    `profile` on them is superseded). Loads with no matching rule (or outside the
+    composition selector) stay on the fingerprint. The mixed `[B]`/`[B,T]` operating point
+    is unified to `[B,T]`. Config surface (`pgml.scenarios.config`): `DeviceState(name,
+    power_fraction, spectrum_scale=1, weight=1)`; `DeviceClassSpec(name, sign=±1,
+    rated_power_w=[lo,hi], power_factor=1, harmonic_magnitude={order:[lo,hi]} (FRACTION of
+    the device's own fundamental current, loosely IEC 61000-3-2-shaped — NOT the standard's
+    limits), harmonic_phase_deg={order:[lo,hi]}, gamma=[lo,hi] (mag∝lam**gamma, drawn per
+    member per order), phase_slope_deg=[lo,hi] (ang=ang0+s·(lam−1)), activity_preset
+    ("household"|"office"|"ev"|"restaurant"|"industrial"|"pv"|"flat"; reuses the profile
+    daily shapes), discrete_activity=True (on/off Markov) | False (continuous rate, e.g. PV/
+    base load), on_off_dwell=[lo,hi], loading_min, loading_mean=[lo,hi], loading_jitter,
+    loading_rho, states=[DeviceState,...] (multi-state: heating vs inverter), state_dwell)`;
+    `ClassCount(class_name, count=[min,max], power_share=1)`; `ConsumerComposition(
+    consumer_type=None, load_ids=None, classes=[ClassCount,...])` (rule match: load_ids >
+    consumer_type > fallback); `CompositionConfig(selector=None (all loads), classes=[...]
+    (=default_device_classes()), compositions=[...] (=default_compositions()),
+    scale_to_nominal=True (share-weighted installed capacity → load p_nom_w),
+    max_injection_pu=3.0 (cap the residual-THD blow-up near a net-zero fundamental),
+    behavioral_coupling=0.3, cloud_coupling=0.5, roster_seed=None (a held-out roster bank);
+    `.class_names()`)`. `default_device_classes()` = 6 built-ins (base_linear,
+    electronics_smps, ev_charger, pv_inverter, inverter_drive [multi-state], resistive_heating).
+  - `sample_device_composition(grid, config) -> CompositionDraw(operating_point[B,T],
+    harmonic_injection {id:{order:(mag[B,T],phase[B,T])}}, samples, composed_ids)` and
+    `resolve_composed_ids(grid, comp) -> [id]` (`pgml.scenarios.composition`);
+    `sample_coherent_spectra` calls them when `composition` is set. The composition draws on
+    roster + temporal streams DISTINCT from the fingerprint/op-cube/profile, so
+    `composition=None` is byte-identical. Attribution `samples` (fixed shapes; `name` =
+    `config.name`): `<name>_class_p_w [B,n_agg,n_class,T]` (signed per-class power),
+    `<name>_class_active [B,n_agg,n_class,T]` int64 (active member count), `<name>_cap_binding
+    [B,n_agg,n_ord,T]` (where the cap bound), `<name>_agg_ids [n_agg]`, `<name>_roster_p_rated
+    [n_agg,n_class,max_count]` (per-member rated powers). The `n_class` axis is ordered as
+    `config.composition.classes` — names via `config.composition.class_names()` (they live in
+    the config, not a sample tensor, since samples are tensor-only). `P_agg` may go
+    net-negative under PV (the Load then injects).
 - `ScenarioConfig(n_samples, seed=0, method="sobol"|"lhs"|"independent", parameters=[...],
   factors=[LatentFactor(...)])`. A spec's `correlation.factor` must name a declared factor.
 - `sample(grid, config) -> SampledScenarios(operating_point, samples, n_samples, config)`

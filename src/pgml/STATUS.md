@@ -47,7 +47,12 @@ Phases 0–3 done; phase 4 (batched sampling) done bar scale/topology. The subpa
   operating point becomes per-step `[B,T]` (aligned with the `[B,T]` injection) instead of
   constant over the sequence — `[B,T]` batched solve == per-step loop, differentiable
   (verified against a per-step-loop gradient + finite differences), `profile=None`
-  byte-identical to the fingerprint-only output.
+  byte-identical to the fingerprint-only output. A `CoherentSpectrumConfig.composition`
+  (`CompositionConfig`) instead composes each covered load from statistical device classes
+  whose per-step activity drives BOTH the fundamental power AND the vector-summed harmonic
+  injection (a consistent load-to-spectrum mapping), recording per-class attribution
+  ground truth; it supersedes the fingerprint for those loads and is byte-identical when
+  unset.
 - **Evaluation** — paper-ready + interactive comparison plots (refs-vs-ours); the reference
   oracles live in the OPTIONAL `pgml.evaluation.oracles` (`oracles` extra).
 - **Measurement instrumentation** (schema rev 0.0.3) — `MeasurementDevice` on the `Grid`
@@ -260,16 +265,24 @@ validate the resonance vs OpenDSS. Reuse the `FrequencyParam`/`CurveParam` machi
   `capradius` (irrelevant for c=0 feeders) — match it if a c≠0 feeder is added.
 - **Continuation/Newton polish**: a true arc-length predictor-corrector; a preconditioner for
   the matrix-free GMRES near the nose; batched continuation (currently single-grid).
-- **Deferred — appliance-mixture harmonic aggregation.** The IEC 61000-3-2 reference is a
-  per-appliance (≤16 A equipment) emission standard, while pgml devices are AGGREGATED
-  household/consumer loads; the current sampler therefore uses the per-order limits as a
-  cap-and-shape (fraction-of-limit sampling), not as an emission model of the aggregate.
-  The physical upgrade is a bottom-up mixture aggregator: per `consumer_type`, compose a
-  household from an appliance library (per-IEC-class spectra + power ranges), draw
-  per-appliance states and random phase angles, and vector-sum the currents into the
-  aggregate fingerprint — diversity and phase cancellation then emerge instead of being
-  implied by the sampled fraction. Subsumes the earlier appliance-state mixture idea
-  (state→spectrum library keyed by `consumer_type`).
+- **Statistical device-class composition — IMPLEMENTED** (`scenarios.composition`,
+  `CoherentSpectrumConfig.composition`). An aggregated load becomes a SUM of statistical
+  member devices drawn from a device-class library (`DeviceClassSpec` + per-`consumer_type`
+  `ConsumerComposition` rosters); each member's per-step activity (a diurnal rate ×
+  Markov/continuous availability, AR(1) loading, multi-state operation) drives BOTH the
+  drawn power AND an absolute harmonic phasor current, and the members' currents are
+  VECTOR-SUMMED per load — so diversity and phase cancellation EMERGE instead of being
+  implied by a sampled fraction. The load-to-spectrum mapping is consistent (magnitude
+  `mag_h∝lam**gamma_h`, phase `ang_h=ang_h0+s_h·(lam−1)`; multi-state heating-vs-inverter
+  spectra), so a model can learn to estimate load from observed harmonics / attribute an
+  error source. Supersedes the mode-bank fingerprint + fundamental for covered loads;
+  records per-class attribution ground truth. This is the STATISTICAL level (plausible
+  distributions, NOT accurate appliance models — magnitudes are only loosely IEC
+  61000-3-2-shaped). Remaining open: PER-PHASE member placement (a member currently lands
+  on the load's total, split downstream by the symmetry rule — no per-phase device
+  assignment), a class power-factor / reactive-shape richer than the single `power_factor`,
+  and coupling the fingerprint MODE to the same activity clock (an EV's harmonic mode
+  appearing only while charging) — see the temporal-pattern note below.
 - **Deferred (no priority) — time-domain simulation.** The steady-state frequency-domain
   scope is deliberate: integer harmonic orders only (non-integer orders now raise —
   spectra and the per-order assembly are integer-keyed). Interharmonics, flicker and
