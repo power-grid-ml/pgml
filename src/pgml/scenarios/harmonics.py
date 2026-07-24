@@ -316,6 +316,15 @@ def sample_coherent_spectra(
             operating_point.update(draw.operating_point)
             harmonic_injection.update(draw.harmonic_injection)
             samples.update(draw.samples)
+        if "time_unix_s" not in samples:
+            # A composed sequence is anchored to absolute time (activity presets are
+            # clock-driven); stamp the step axis like the profile path does, so the
+            # dataset carries its own time axis instead of consumers re-deriving it.
+            from .profiles import _time_axis
+
+            samples["time_unix_s"] = _time_axis(
+                config.start_time, config.step_size_s, t
+            )[0]
 
     return SampledScenarios(
         operating_point=operating_point,
