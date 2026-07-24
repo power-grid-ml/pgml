@@ -837,28 +837,27 @@ def to_grid(
             # the total equally.  Genuine per-phase imbalance in OpenDSS is
             # expressed via separate 1-phase Load objects (which naturally end
             # up on distinct phase rows through their bus suffix).
+            load_obj = build_load(
+                id=load_id,
+                name=load_name,
+                node=bus_name_to_node_id[load_bus_name],
+                mode=phase_mode,
+                p_total_w=p_w,
+                q_total_var=q_var,
+                connection=conn,
+                native_phases=native_load_phases,
+                load_model=load_model,
+                zip_coefficients=zip_coefficients,
+            )
             if not is_delta:
-                _warn_if_grounded_despite_neutral(
-                    kind="Load",
-                    name=load_name,
+                rp = _resolve_wye_return_path(
                     bus_name=load_bus_name,
                     bus_phases=bus_phases,
                     explicit_return=explicit_return,
                 )
-            appliances.append(
-                build_load(
-                    id=load_id,
-                    name=load_name,
-                    node=bus_name_to_node_id[load_bus_name],
-                    mode=phase_mode,
-                    p_total_w=p_w,
-                    q_total_var=q_var,
-                    connection=conn,
-                    native_phases=native_load_phases,
-                    load_model=load_model,
-                    zip_coefficients=zip_coefficients,
-                )
-            )
+                if rp != "auto":
+                    load_obj.return_path = rp
+            appliances.append(load_obj)
 
         ret = dss.Loads.Next()
 
@@ -867,13 +866,12 @@ def to_grid(
     # ---------------------------------------------------------------------- #
     # OpenDSS's `Capacitor` is a 2-terminal element whose 2nd terminal defaults
     # to the SAME bus, every conductor tied to the universal ground reference
-    # (node 0) -- exactly pgml's `ShuntAppliance` (a per-phase-to-GROUND shunt
-    # anchored at one node). A DELTA capacitor collapses to a SINGLE terminal
-    # in OpenDSS (phase-to-phase legs, no neutral point at all) and cannot be
-    # expressed by `ShuntAppliance`; `_grounded_shunt_phases` returns `None`
-    # for that case (and for any genuine 2-bus / non-grounded terminal-2
-    # reference), and the element is skipped with a warning rather than
-    # silently misrepresented.
+    # (node 0) -- exactly pgml's WYE `ShuntAppliance` (a per-phase-to-GROUND shunt
+    # anchored at one node). A DELTA capacitor collapses to a SINGLE terminal in
+    # OpenDSS (phase-to-phase legs, no ground return): it converts to a DELTA
+    # `ShuntAppliance` whose per-leg capacitance is OpenDSS's own resolved `Cuf`
+    # (per-leg for a delta bank, verified live). A non-grounded / genuine 2-bus
+    # terminal-2 reference is still skipped with a warning (unrepresentable).
     ret = dss.Capacitors.First()
     while ret:
         cap_name = dss.Capacitors.Name().lower()
@@ -885,17 +883,32 @@ def to_grid(
             ret = dss.Capacitors.Next()
             continue
 
-        phase_list = _grounded_shunt_phases(dss, n_phases)
-        if phase_list is None:
-            _logger.warning(
-                "OpenDSS Capacitor '%s' is not a solidly-grounded WYE shunt "
-                "(delta-connected, or a non-grounded/2-bus terminal-2 "
-                "reference) -- pgml's ShuntAppliance models a phase-to-ground "
-                "shunt only; this element is NOT converted.",
-                cap_name,
-            )
-            ret = dss.Capacitors.Next()
-            continue
+        is_delta = _dss_query(dss, "Capacitor", cap_name, "conn").lower() == "delta"
+        if is_delta:
+            phase_list = _shunt_phase_conductors(dss, n_phases)
+            connection = WindingConnection.DELTA
+            if phase_list is None or len(phase_list) < 2:
+                _logger.warning(
+                    "OpenDSS Capacitor '%s' is DELTA-connected but does not present "
+                    "the expected >=2 phase-to-phase legs -- this element is NOT "
+                    "converted.",
+                    cap_name,
+                )
+                ret = dss.Capacitors.Next()
+                continue
+        else:
+            phase_list = _grounded_shunt_phases(dss, n_phases)
+            connection = WindingConnection.WYE
+            if phase_list is None:
+                _logger.warning(
+                    "OpenDSS Capacitor '%s' is not a solidly-grounded WYE shunt "
+                    "(a non-grounded/2-bus terminal-2 reference) -- pgml's "
+                    "ShuntAppliance models a phase-to-ground or phase-to-phase "
+                    "shunt only; this element is NOT converted.",
+                    cap_name,
+                )
+                ret = dss.Capacitors.Next()
+                continue
 
         dss.Text.Command(f"? Capacitor.{cap_name}.Cuf")
         cuf_per_step = _parse_dss_float_array(dss.Text.Result())
@@ -913,6 +926,7 @@ def to_grid(
                 native_phases=tuple(phase_list),
                 conductance_s=0.0,
                 capacitance_f=c_per_phase_f,
+                connection=connection,
             )
         )
         ret = dss.Capacitors.Next()
@@ -950,17 +964,32 @@ def to_grid(
             ret = dss.Reactors.Next()
             continue
 
-        phase_list = _grounded_shunt_phases(dss, n_phases)
-        if phase_list is None:
-            _logger.warning(
-                "OpenDSS Reactor '%s' is not a solidly-grounded WYE shunt "
-                "(delta-connected, or a non-grounded/2-bus terminal-2 "
-                "reference) -- pgml's ShuntAppliance models a phase-to-ground "
-                "shunt only; this element is NOT converted.",
-                reactor_name,
-            )
-            ret = dss.Reactors.Next()
-            continue
+        is_delta = _dss_query(dss, "Reactor", reactor_name, "conn").lower() == "delta"
+        if is_delta:
+            phase_list = _shunt_phase_conductors(dss, n_phases)
+            connection = WindingConnection.DELTA
+            if phase_list is None or len(phase_list) < 2:
+                _logger.warning(
+                    "OpenDSS Reactor '%s' is DELTA-connected but does not present "
+                    "the expected >=2 phase-to-phase legs -- this element is NOT "
+                    "converted.",
+                    reactor_name,
+                )
+                ret = dss.Reactors.Next()
+                continue
+        else:
+            phase_list = _grounded_shunt_phases(dss, n_phases)
+            connection = WindingConnection.WYE
+            if phase_list is None:
+                _logger.warning(
+                    "OpenDSS Reactor '%s' is not a solidly-grounded WYE shunt "
+                    "(a non-grounded/2-bus terminal-2 reference) -- pgml's "
+                    "ShuntAppliance models a phase-to-ground or phase-to-phase "
+                    "shunt only; this element is NOT converted.",
+                    reactor_name,
+                )
+                ret = dss.Reactors.Next()
+                continue
 
         r_ohm = float(dss.Reactors.R())
         x_ohm = float(dss.Reactors.X())
@@ -997,6 +1026,7 @@ def to_grid(
                 native_phases=tuple(phase_list),
                 conductance_s=g_scalar,
                 capacitance_f=c_scalar,
+                connection=connection,
             )
         )
         ret = dss.Reactors.Next()
@@ -1036,26 +1066,25 @@ def to_grid(
 
         gen_id = _id.next()
         id_map["generator"][gen_name] = gen_id
+        gen_obj = build_generator(
+            id=gen_id,
+            name=gen_name,
+            node=bus_name_to_node_id[gen_bus_name],
+            mode=phase_mode,
+            p_total_w=p_w,
+            q_total_var=q_var,
+            connection=conn,
+            native_phases=tuple(gen_phases),
+        )
         if phase_mode is PhaseMode.THREE_PHASE and not is_delta:
-            _warn_if_grounded_despite_neutral(
-                kind="Generator",
-                name=gen_name,
+            rp = _resolve_wye_return_path(
                 bus_name=gen_bus_name,
                 bus_phases=bus_phases,
                 explicit_return=explicit_return,
             )
-        appliances.append(
-            build_generator(
-                id=gen_id,
-                name=gen_name,
-                node=bus_name_to_node_id[gen_bus_name],
-                mode=phase_mode,
-                p_total_w=p_w,
-                q_total_var=q_var,
-                connection=conn,
-                native_phases=tuple(gen_phases),
-            )
-        )
+            if rp != "auto":
+                gen_obj.return_path = rp
+        appliances.append(gen_obj)
         ret = dss.Generators.Next()
 
     # ---------------------------------------------------------------------- #
@@ -1091,27 +1120,26 @@ def to_grid(
 
         pv_id = _id.next()
         id_map["pvsystem"][pv_name] = pv_id
+        pv_obj = build_generator(
+            id=pv_id,
+            name=pv_name,
+            node=bus_name_to_node_id[pv_bus_name],
+            mode=phase_mode,
+            p_total_w=p_w,
+            q_total_var=q_var,
+            connection=conn,
+            native_phases=tuple(pv_phases),
+            consumer_type=ConsumerType.PV,
+        )
         if phase_mode is PhaseMode.THREE_PHASE and not is_delta:
-            _warn_if_grounded_despite_neutral(
-                kind="PVSystem",
-                name=pv_name,
+            rp = _resolve_wye_return_path(
                 bus_name=pv_bus_name,
                 bus_phases=bus_phases,
                 explicit_return=explicit_return,
             )
-        appliances.append(
-            build_generator(
-                id=pv_id,
-                name=pv_name,
-                node=bus_name_to_node_id[pv_bus_name],
-                mode=phase_mode,
-                p_total_w=p_w,
-                q_total_var=q_var,
-                connection=conn,
-                native_phases=tuple(pv_phases),
-                consumer_type=ConsumerType.PV,
-            )
-        )
+            if rp != "auto":
+                pv_obj.return_path = rp
+        appliances.append(pv_obj)
         ret = dss.PVsystems.Next()
 
     # ---------------------------------------------------------------------- #
@@ -1159,14 +1187,6 @@ def to_grid(
 
         bat_id = _id.next()
         id_map["storage"][bat_name] = bat_id
-        if phase_mode is PhaseMode.THREE_PHASE and not is_delta:
-            _warn_if_grounded_despite_neutral(
-                kind="Storage",
-                name=bat_name,
-                bus_name=bat_bus_name,
-                bus_phases=bus_phases,
-                explicit_return=explicit_return,
-            )
 
         storage_kwargs: dict[str, Any] = {
             "id": bat_id,
@@ -1190,6 +1210,14 @@ def to_grid(
         else:
             storage_kwargs["phases"] = phases_for(phase_mode, native=tuple(bat_phases))
             storage_kwargs["connection"] = conn
+            if not is_delta:
+                rp = _resolve_wye_return_path(
+                    bus_name=bat_bus_name,
+                    bus_phases=bus_phases,
+                    explicit_return=explicit_return,
+                )
+                if rp != "auto":
+                    storage_kwargs["return_path"] = rp
 
         appliances.append(Storage(**storage_kwargs))
         ret = dss.Storages.Next()
@@ -1459,10 +1487,11 @@ def _parse_appliance_bus_connection(
     returns to solid GROUND (node 0, whether via an explicit ``.0`` or
     OpenDSS's own default), or the :class:`Phase` the return conductor is
     tied to (e.g. ``Phase.N`` for a ``.4`` suffix) when it is NOT simply
-    ground -- the case pgml's node-level (not appliance-level) WYE/neutral
-    routing (`assembly._incidence`) can miswire when the node ALSO carries a
-    ``Phase.N`` row from another element (see
-    :func:`_warn_if_grounded_despite_neutral`).
+    ground. :func:`_resolve_wye_return_path` turns this into the appliance's
+    :attr:`~pgml.schemas.grid_schema.InjectionAppliance.return_path` so pgml's
+    per-node WYE/neutral routing faithfully reproduces OpenDSS's per-element
+    return-conductor choice even when the node ALSO carries a ``Phase.N`` row
+    from another element.
     """
     bus_name = dss.CktElement.BusNames()[0].split(".")[0].lower()
     node_order = [int(n) for n in dss.CktElement.NodeOrder()]
@@ -1476,49 +1505,36 @@ def _parse_appliance_bus_connection(
     return bus_name, phases, explicit_return
 
 
-def _warn_if_grounded_despite_neutral(
+def _resolve_wye_return_path(
     *,
-    kind: str,
-    name: str,
     bus_name: str,
     bus_phases: dict[str, list[Phase]],
     explicit_return: Optional[Phase],
-) -> None:
-    """Warn about a schema gap: a solidly-grounded WYE appliance on a bus that
-    ALSO carries a ``Phase.N`` row (from another element's explicit neutral
-    conductor).
+) -> str:
+    """Return the WYE ``return_path`` (``InjectionAppliance.return_path``) faithful to
+    OpenDSS's own per-element return-conductor choice.
 
-    pgml's WYE/neutral routing is a property of the NODE, not the individual
-    appliance (``assembly._incidence.group_appliances``: a WYE appliance
-    returns through the node's ``Phase.N`` row whenever the node carries one,
-    ELSE to ground) -- there is no schema field to express "this particular
-    appliance is grounded despite the node's neutral being present elsewhere".
-    When that mismatch is detected, the converted appliance's return path
-    will be WIRED THROUGH THE SHARED NEUTRAL rather than to true ground,
-    diverging from the source OpenDSS circuit (which keeps this appliance's
-    own return solidly grounded regardless of what other conductors exist at
-    the bus). Only relevant when the appliance is NOT already explicitly
-    tied to a real (non-ground) conductor (``explicit_return is not None``,
-    e.g. an explicit ``.4`` neutral tie, which IS what pgml's routing
-    reproduces) and is WYE (a DELTA appliance has no neutral concept).
+    OpenDSS resolves each WYE PC element's return conductor independently: a
+    ``.1.2.3.4`` suffix ties the return to the bus's 4th (``Phase.N``) conductor,
+    while ``.1.2.3`` (or an explicit ``.0``) returns to TRUE GROUND. pgml's WYE
+    incidence is a NODE property (``assembly._incidence.group_appliances``: return
+    through the node's ``Phase.N`` row whenever the node carries one), so the
+    per-appliance ``return_path`` reproduces OpenDSS's per-element decision even on a
+    bus that carries a ``Phase.N`` row from another element:
+
+    - an explicit ``Phase.N`` tie (``.4``) -> ``'neutral'`` (require the neutral);
+    - solidly grounded (no explicit tie) on a node that ALSO carries ``Phase.N``
+      -> ``'ground'`` (the return stays at true ground despite the shared neutral —
+      previously an inexpressible, warned mismatch);
+    - otherwise (a 3-wire node, or a non-neutral explicit conductor) -> ``'auto'``,
+      which reduces to ground when the node has no ``Phase.N`` and matches pgml's
+      historical node-level routing when it does.
     """
-    if explicit_return is not None:
-        return
-    if Phase.N not in bus_phases.get(bus_name, []):
-        return
-    _logger.warning(
-        "OpenDSS %s '%s' is a WYE appliance solidly grounded (no explicit "
-        "neutral tie) at bus '%s', but that bus ALSO carries a Phase.N row "
-        "(from another element's explicit neutral conductor). pgml's WYE "
-        "incidence always routes a load's return current through the node's "
-        "Phase.N row when the node carries one -- it cannot express "
-        '"grounded despite a neutral being present" per appliance -- so '
-        "this appliance's return path will be MISWIRED (through the shared "
-        "neutral instead of true ground) relative to the source circuit.",
-        kind,
-        name,
-        bus_name,
-    )
+    if explicit_return == Phase.N:
+        return "neutral"
+    if explicit_return is None and Phase.N in bus_phases.get(bus_name, []):
+        return "ground"
+    return "auto"
 
 
 def _grounded_shunt_phases(dss: Any, n_phases: int) -> Optional[list[Phase]]:
@@ -1551,6 +1567,23 @@ def _grounded_shunt_phases(dss: Any, n_phases: int) -> Optional[list[Phase]]:
     return [_phase_num_to_enum(c) for c in from_conductors]
 
 
+def _shunt_phase_conductors(dss: Any, n_phases: int) -> Optional[list[Phase]]:
+    """Phase list of a single-terminal (DELTA) shunt bank from ``NodeOrder()``.
+
+    A DELTA-connected OpenDSS ``Capacitor``/``Reactor`` collapses to ONE terminal
+    (phase-to-phase legs, no ground return): ``NodeOrder()`` is exactly the
+    ``n_phases`` phase conductors. Returns ``None`` when that assumption does not
+    hold (e.g. a stray ground reference among the phase conductors).
+    """
+    node_order = [int(n) for n in dss.CktElement.NodeOrder()]
+    if len(node_order) < n_phases:
+        return None
+    conductors = node_order[:n_phases]
+    if any(c == 0 for c in conductors):
+        return None
+    return [_phase_num_to_enum(c) for c in conductors]
+
+
 def _build_shunt_appliance(
     *,
     id: int,
@@ -1560,6 +1593,7 @@ def _build_shunt_appliance(
     native_phases: tuple[Phase, ...],
     conductance_s: float,
     capacitance_f: float,
+    connection: WindingConnection = WindingConnection.WYE,
 ) -> ShuntAppliance:
     """Build a :class:`~pgml.schemas.grid_schema.ShuntAppliance`, mode-resolved.
 
@@ -1567,14 +1601,28 @@ def _build_shunt_appliance(
     with the SAME per-phase ``conductance_s``/``capacitance_f`` scalar (a
     Capacitor/Reactor bank is uncoupled and uniform across phases, so its
     positive-sequence-equivalent value is simply that per-phase value, not a
-    sum or a self-minus-mutual reduction). Under ``THREE_PHASE`` the value is
-    repeated across every phase the element actually carries (including
-    ``Phase.N`` for a grounding-reactor-style neutral-to-ground shunt).
+    sum or a self-minus-mutual reduction). A DELTA bank has no single-phase
+    representation, so it folds to the positive-sequence WYE equivalent (a
+    balanced delta of per-leg admittance ``y`` presents ``3·y`` per phase).
+    Under ``THREE_PHASE`` the (balanced) per-leg value is repeated across every
+    phase the element carries; ``connection`` (WYE default, or DELTA for a
+    phase-to-phase bank) sets the topology.
     """
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         phases = phases_for(mode)
-    else:
-        phases = phases_for(mode, native=native_phases)
+        if connection is WindingConnection.DELTA:
+            # Positive-sequence equivalent of a balanced delta bank: Y_wye = 3·Y_leg.
+            conductance_s = conductance_s * 3.0
+            capacitance_f = capacitance_f * 3.0
+        return ShuntAppliance(
+            id=id,
+            name=name,
+            node=node,
+            phases=phases,
+            conductance_s=[conductance_s] * len(phases),
+            capacitance_f=[capacitance_f] * len(phases),
+        )
+    phases = phases_for(mode, native=native_phases)
     n = len(phases)
     return ShuntAppliance(
         id=id,
@@ -1583,6 +1631,7 @@ def _build_shunt_appliance(
         phases=phases,
         conductance_s=[conductance_s] * n,
         capacitance_f=[capacitance_f] * n,
+        connection=connection,
     )
 
 

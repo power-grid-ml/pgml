@@ -556,6 +556,108 @@ def test_const_current_zip_harmonic_matched_tight():
 
 
 # ---------------------------------------------------------------------------
+# DELTA ShuntAppliance bank: pgml delta bank -> DSS matches pgml (both ways)
+# ---------------------------------------------------------------------------
+def _delta_shunt_grid() -> Grid:
+    """A 2-node feeder with a balanced 3-phase DELTA capacitor bank at the load bus."""
+    nodes = [Node(id=i, u_rated_v=400.0, phases=_ABC) for i in range(2)]
+    src = Source(
+        id=1,
+        node=0,
+        phases=_ABC,
+        u_ref_v=[230.94] * 3,
+        u_angle_deg=[0.0, -120.0, 120.0],
+        resistance_ohm=[[0.05 if i == j else 0.0 for j in range(3)] for i in range(3)],
+        inductance_h=[[1.0e-4 if i == j else 0.0 for j in range(3)] for i in range(3)],
+    )
+    from pgml.schemas.grid_schema import Line
+
+    ln = Line(
+        id=2,
+        from_node=0,
+        to_node=1,
+        from_phases=_ABC,
+        to_phases=_ABC,
+        length_m=100.0,
+        series_resistance_ohm_per_m=[
+            [1.0e-3 if i == j else 0.0 for j in range(3)] for i in range(3)
+        ],
+        series_inductance_h_per_m=[
+            [1.0e-6 if i == j else 0.0 for j in range(3)] for i in range(3)
+        ],
+        shunt_capacitance_f_per_m=[[0.0] * 3 for _ in range(3)],
+    )
+    ld = Load(id=3, node=1, phases=_ABC, p_nom_w=40.0e3, q_nom_var=10.0e3)
+    shunt = ShuntAppliance(
+        id=4,
+        node=1,
+        phases=_ABC,
+        conductance_s=(0.0,) * 3,
+        capacitance_f=(2.0e-5,) * 3,  # balanced delta capacitor leg
+        connection=WindingConnection.DELTA,
+    )
+    return Grid(nodes=nodes, branches=[ln], appliances=[src, ld, shunt])
+
+
+@pytest.mark.slow
+def test_delta_shunt_bank_matched_tight():
+    """A pgml DELTA :class:`ShuntAppliance` exports to a ``conn=delta`` DSS Capacitor
+    and the exported circuit agrees with pgml near machine precision."""
+    grid = _delta_shunt_grid()
+    orders = [3, 5]
+    cfg = ScenarioConfig(
+        n_samples=3,
+        seed=2,
+        parameters=[
+            ParameterSpec(
+                name="load_pq",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.7, high=1.3),
+                field="pq",
+                mode="scale",
+            ),
+            ParameterSpec(
+                name="h_mag",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.2, high=0.6),
+                field="h_mag",
+                mode="absolute",
+                orders=orders,
+                harmonic_reference="iec61000-3-2",
+            ),
+            ParameterSpec(
+                name="h_phase",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=-180.0, high=180.0),
+                field="h_phase",
+                mode="absolute",
+                orders=orders,
+            ),
+        ],
+    )
+    sampled = sample(grid, cfg)
+    report = compare_to_pgml(
+        grid, sampled, harmonic_orders=[1, *orders], mode="matched"
+    )
+    assert report["opendss_converged"] and report["pgml_converged"]
+    for h, stats in report["per_order"].items():
+        assert stats["rel_max"] < _MATCHED_REL_TOL, (
+            f"order {h}: delta-shunt matched-mode error {stats['rel_max']:.3e} exceeds "
+            f"{_MATCHED_REL_TOL:.0e}."
+        )
+
+
+def test_delta_shunt_export_emits_delta_capacitor():
+    """The exporter writes a ``conn=delta`` Capacitor for a DELTA ShuntAppliance
+    (a wye export would carry a different admittance and fail the parity above)."""
+    export_grid_to_opendss(_delta_shunt_grid())
+    # export_grid_to_opendss builds into the module-global opendssdirect engine.
+    assert any("sha4" in n.lower() for n in dss.Capacitors.AllNames())
+    dss.Text.Command("? Capacitor.sha4c.conn")
+    assert dss.Text.Result().strip().lower() == "delta"
+
+
+# ---------------------------------------------------------------------------
 # Coherent batch with a LoadProfileConfig (per-step [B, T] operating point)
 # ---------------------------------------------------------------------------
 @pytest.mark.slow

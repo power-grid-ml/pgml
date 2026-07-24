@@ -79,8 +79,10 @@ why a genuine DSS ``Generator`` element cannot be used here; a WYE appliance is 
 ONE single-phase ``Load`` PER PHASE, enabling per-phase P/Q scenario overrides a single
 balanced multi-phase element cannot express; a DELTA appliance exports as one multi-phase
 element and supports only a balanced total P/Q scenario override), ``ShuntAppliance``/
-``ShuntReactor`` (a ``Capacitor`` for the C part + a diagonal-``Rmatrix`` ``Reactor`` for the
-G part).
+``ShuntReactor`` (WYE: a ``Capacitor`` for the C part + a diagonal-``Rmatrix`` ``Reactor``
+for the G part; DELTA ``ShuntAppliance``: a ``conn=delta`` ``Capacitor`` (per-leg ``Cuf``) +
+a ``conn=delta`` scalar-``R`` ``Reactor`` — an UNBALANCED delta bank is refused, OpenDSS's
+Capacitor/Reactor banks being balanced per leg).
 
 Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
 - ``Line.conductor_geometry`` — out of scope for this exporter; the EXISTING geometry
@@ -827,20 +829,61 @@ def _export_injection_appliance(
 # ShuntAppliance / ShuntReactor -> Capacitor (+ Reactor for the G part)
 # ---------------------------------------------------------------------------
 def _export_shunt(
-    dss, name: str, bus: str, phases, conductance_s, capacitance_f, node, f0: float
+    dss,
+    name: str,
+    bus: str,
+    phases,
+    conductance_s,
+    capacitance_f,
+    node,
+    f0: float,
+    *,
+    connection: WindingConnection = WindingConnection.WYE,
 ) -> None:
     from pgml.assembly._params import phase_voltage_magnitude
 
     n = len(phases)
     g = [to_float(x) for x in conductance_s]
     c = [to_float(x) for x in capacitance_f]
+    bus_str = f"{bus}.{_bus_conductor_str(phases)}"
+
+    if connection is WindingConnection.DELTA:
+        # OpenDSS's Capacitor/Reactor banks are BALANCED per leg (a single Cuf / R
+        # applies to every phase-to-phase leg), and the leg value is used directly
+        # (verified live: Cuf == per-leg C, R == 1/(per-leg G)); an unbalanced delta
+        # bank has no single-element representation.
+        if any(abs(x - c[0]) > 1e-15 * max(1.0, abs(c[0])) for x in c) or any(
+            abs(x - g[0]) > 1e-15 * max(1.0, abs(g[0])) for x in g
+        ):
+            raise ConversionError(
+                f"shunt {name}: an UNBALANCED DELTA ShuntAppliance (unequal per-leg "
+                "G/C) has no single balanced-bank OpenDSS representation; only a "
+                "balanced delta bank is exported."
+            )
+        kv_ll = (
+            phase_voltage_magnitude(
+                to_float(node.u_rated_v), len(node.phases), line_to_line=True
+            )
+            / 1000.0
+        )
+        if abs(c[0]) > 1e-15:
+            dss.Text.Command(
+                f"New Capacitor.{name}c phases={n} bus1={bus_str} kV={kv_ll:.10g} "
+                f"Cuf=[{c[0] * 1.0e6:.10g}] conn=delta"
+            )
+        if abs(g[0]) > 1e-15:
+            dss.Text.Command(
+                f"New Reactor.{name}r phases={n} bus1={bus_str} "
+                f"R={1.0 / g[0]:.10g} X=0 conn=delta"
+            )
+        return
+
     kv_ln = (
         phase_voltage_magnitude(
             to_float(node.u_rated_v), len(node.phases), line_to_line=False
         )
         / 1000.0
     )
-    bus_str = f"{bus}.{_bus_conductor_str(phases)}"
     if any(abs(x) > 1e-15 for x in c):
         cuf_str = " ".join(f"{x * 1.0e6:.10g}" for x in c)
         dss.Text.Command(
@@ -1032,6 +1075,7 @@ def export_grid_to_opendss(
                 a.capacitance_f,
                 node,
                 f0,
+                connection=a.connection,
             )
         else:
             raise ConversionError(

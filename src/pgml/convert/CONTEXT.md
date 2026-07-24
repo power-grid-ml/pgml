@@ -239,14 +239,17 @@ genuinely 1-phase line is unaffected — byte-identical). **Load/Generator/
 Storage/PVSystem** bus parsing now reads `CktElement.NodeOrder()` (DSS's own
 resolved conductor/return assignment) instead of re-parsing the bus string,
 fixing a bug where every bus-string suffix (including an explicit neutral
-tie) was read as a phase conductor; a WYE appliance solidly grounded on a bus
-that ALSO carries a `Phase.N` row from another element triggers a WARNING (a
-schema gap — pgml's WYE/neutral routing is per-NODE, not per-appliance, so
-"grounded despite the node's neutral" cannot be expressed). **Load** also
+tie) was read as a phase conductor; each WYE appliance's return conductor sets
+its `InjectionAppliance.return_path` (`_resolve_wye_return_path`: explicit
+`.4` neutral tie → `"neutral"`, solidly grounded on a `Phase.N`-carrying bus →
+`"ground"`, else `"auto"`), so pgml reproduces OpenDSS's per-element return
+routing even on a shared 4-wire bus (the previously-inexpressible
+grounded-despite-neutral case is now exact, no warning). **Load** also
 maps `Loads.Model()` (1/2/5/8) to `LoadModel`/`ZipCoefficients` (models
 3/4/6/7 fall back to `CONST_POWER` with a warning; the ZIPV low-voltage
 cutoff is not modeled). **Capacitor/Reactor** convert to `ShuntAppliance`
-(WYE, solidly grounded only — DELTA and an explicitly coupled Reactor
+(WYE solidly-grounded, or DELTA phase-to-phase bank via `? conn`; a
+non-grounded 2-bus terminal-2 reference and an explicitly coupled Reactor
 Rmatrix/Xmatrix are out of scope and warned/skipped); a Reactor's series
 R+X converts to the equivalent shunt admittance `Y=1/(R+jX)` (exact at
 the fundamental only — the schema's `ShuntReactor`/`ShuntAppliance` have no

@@ -9,8 +9,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+import pgml.errors as errors
 from pgml.assembly._incidence import (
     build_incidence,
+    cyclic_delta_incidence,
     group_appliances,
     used_rows,
 )
@@ -127,3 +129,108 @@ def test_delta_n2_raises():
     node_map = {nd.id: nd for nd in grid.nodes}
     with pytest.raises(NotImplementedError, match="open/2-phase delta"):
         group_appliances([grid.appliances[0]], node_map)
+
+
+# --- return_path: WYE return-conductor override ------------------------------
+def test_return_path_auto_matches_historical_neutral_on_4wire():
+    """'auto' (default) on a 4-wire node keeps the historical neutral-return rule."""
+    grp, _ = _grp(_grid(ABCN, Load(id=1, node=1, phases=ABC, p_nom_w=3000.0)))
+    assert grp.has_neutral_return is True
+    assert grp.n_used == 4
+
+
+def test_return_path_ground_on_4wire_is_identity():
+    """'ground' pins the return to ground even when the node carries Phase.N."""
+    grp, _ = _grp(
+        _grid(
+            ABCN, Load(id=1, node=1, phases=ABC, p_nom_w=3000.0, return_path="ground")
+        )
+    )
+    assert grp.has_neutral_return is False
+    assert grp.n_used == 3
+    m = build_incidence(grp, RDT, DEV)
+    assert m.shape == (3, 3)
+    assert torch.allclose(m, torch.eye(3, dtype=RDT))
+
+
+def test_return_path_neutral_on_4wire_uses_neutral():
+    grp, _ = _grp(
+        _grid(
+            ABCN, Load(id=1, node=1, phases=ABC, p_nom_w=3000.0, return_path="neutral")
+        )
+    )
+    assert grp.has_neutral_return is True
+    assert grp.n_used == 4
+
+
+def test_return_path_neutral_without_node_neutral_raises():
+    """'neutral' on a 3-wire node (no Phase.N) is a modeling error."""
+    grid = _grid(
+        ABC, Load(id=1, node=1, phases=ABC, p_nom_w=3000.0, return_path="neutral")
+    )
+    node_map = {nd.id: nd for nd in grid.nodes}
+    with pytest.raises(errors.ModelingError, match="requires the host node"):
+        group_appliances([grid.appliances[0]], node_map)
+
+
+def test_return_path_nonauto_on_delta_raises():
+    grid = _grid(
+        ABC,
+        Load(
+            id=1,
+            node=1,
+            phases=ABC,
+            p_nom_w=3000.0,
+            connection=WindingConnection.DELTA,
+            return_path="ground",
+        ),
+    )
+    node_map = {nd.id: nd for nd in grid.nodes}
+    with pytest.raises(errors.ModelingError, match="WYE connection only"):
+        group_appliances([grid.appliances[0]], node_map)
+
+
+def test_grounded_and_neutral_wye_split_into_two_groups():
+    """A grounded and a neutral-returning WYE load on the SAME 4-wire node need
+    different incidence matrices -> distinct groups."""
+    grid = Grid(
+        nodes=[Node(id=1, u_rated_v=400.0, phases=ABCN)],
+        appliances=[
+            Load(id=1, node=1, phases=ABC, p_nom_w=3000.0, return_path="ground"),
+            Load(id=2, node=1, phases=ABC, p_nom_w=2000.0, return_path="neutral"),
+        ],
+    )
+    node_map = {nd.id: nd for nd in grid.nodes}
+    groups = group_appliances(list(grid.appliances), node_map)
+    assert len(groups) == 2
+    assert {g.has_neutral_return for g in groups} == {True, False}
+
+
+# --- cyclic delta incidence (shunt bank generalisation) ----------------------
+def test_cyclic_delta_incidence_n3_matches_build_incidence():
+    grp, _ = _grp(
+        _grid(
+            ABC,
+            Load(
+                id=1,
+                node=1,
+                phases=ABC,
+                p_nom_w=3000.0,
+                connection=WindingConnection.DELTA,
+            ),
+        )
+    )
+    assert torch.allclose(
+        cyclic_delta_incidence(3, RDT, DEV), build_incidence(grp, RDT, DEV)
+    )
+
+
+def test_cyclic_delta_incidence_n2_is_phase_to_phase():
+    """A 2-leg delta collapses to one phase-to-phase branch: M^T diag(y) M is the
+    2x2 [[y0+y1, -(y0+y1)], [-(y0+y1), y0+y1]] stamp."""
+    m = cyclic_delta_incidence(2, RDT, DEV).to(torch.complex128)
+    y = torch.tensor([1.0j, 3.0j], dtype=torch.complex128)
+    block = torch.einsum("ei,e,ej->ij", m, y, m)
+    ytot = y.sum()
+    expected = torch.tensor([[ytot, -ytot], [-ytot, ytot]], dtype=torch.complex128)
+    assert torch.allclose(block, expected)

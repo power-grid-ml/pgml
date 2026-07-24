@@ -48,7 +48,12 @@ from pgml.schemas.grid_schema import (
 )
 
 from ._control import resolve_injection_power
-from ._incidence import build_incidence, group_appliances, used_rows
+from ._incidence import (
+    build_incidence,
+    cyclic_delta_incidence,
+    group_appliances,
+    used_rows,
+)
 from ._transformer import (
     block_incidence,
     group_key as _xfmr_group_key,
@@ -979,27 +984,64 @@ def _shunt_reactor_block_groups(
 
 
 def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides):
+    """Stamp every in-service :class:`ShuntAppliance` (fixed linear shunt).
+
+    WYE (default): each per-phase ``y = G + jB`` connects its phase to ground (the
+    historical diagonal stamp). DELTA: element ``k`` connects phase ``k`` to phase
+    ``(k+1) % n`` cyclic with ``y_k = G_k + j·2π f C_k``, stamped ``M^T diag(y) M``
+    via the same :func:`cyclic_delta_incidence` convention the DELTA load uses (``+y``
+    on both leg diagonals, ``-y`` off-diagonal). Both are frequency-correct at every
+    harmonic order and differentiable w.r.t. ``G``/``C`` (the incidence ``M`` is a
+    topology constant).
+    """
     shunts = [
         a for a in grid.appliances if isinstance(a, ShuntAppliance) and a.in_service
     ]
     if not shunts:
         return y
-    by_p: dict[int, list] = {}
+    by_key: dict[tuple, list] = {}
     for sh in shunts:
-        by_p.setdefault(len(sh.phases), []).append(sh)
-    for p, group in by_p.items():
-        g_list, c_list = [], []
-        for sh in group:
-            g_list.append(
-                torch.diag(torch.as_tensor(sh.conductance_s, dtype=rdt, device=device))
-            )
-            c_list.append(
-                torch.diag(torch.as_tensor(sh.capacitance_f, dtype=rdt, device=device))
-            )
-        g = torch.stack(g_list, 0)
-        c = torch.stack(c_list, 0)
-        block = shunt_admittance_matrix(g, c, f, cdt)
+        by_key.setdefault((sh.connection, len(sh.phases)), []).append(sh)
+    for (conn, p), group in by_key.items():
         rows, cols = _shunt_node_indices(group, index, device, terminal="node")
+        if conn == WindingConnection.DELTA:
+            m_c = cyclic_delta_incidence(p, rdt, device).to(cdt)  # [p, p]
+            g = torch.stack(
+                [
+                    torch.as_tensor(sh.conductance_s, dtype=rdt, device=device)
+                    for sh in group
+                ],
+                0,
+            )  # [K, p]
+            c = torch.stack(
+                [
+                    torch.as_tensor(sh.capacitance_f, dtype=rdt, device=device)
+                    for sh in group
+                ],
+                0,
+            )  # [K, p]
+            two_pi_f = (2.0 * torch.pi) * f  # [H]
+            b = two_pi_f[:, None, None] * c[None]  # [H, K, p] (B = 2*pi*f*C)
+            g_b = g[None].expand_as(b)  # [H, K, p]
+            y_elem = torch.complex(g_b.to(rdt), b.to(rdt)).to(cdt)  # [H, K, p]
+            # Y_block = M^T diag(y_elem) M  -> [H, K, p, p].
+            block = torch.einsum("ei,hke,ej->hkij", m_c, y_elem, m_c)
+        else:  # WYE (phase-to-ground) — historical diagonal stamp
+            g_list, c_list = [], []
+            for sh in group:
+                g_list.append(
+                    torch.diag(
+                        torch.as_tensor(sh.conductance_s, dtype=rdt, device=device)
+                    )
+                )
+                c_list.append(
+                    torch.diag(
+                        torch.as_tensor(sh.capacitance_f, dtype=rdt, device=device)
+                    )
+                )
+            g = torch.stack(g_list, 0)
+            c = torch.stack(c_list, 0)
+            block = shunt_admittance_matrix(g, c, f, cdt)
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 

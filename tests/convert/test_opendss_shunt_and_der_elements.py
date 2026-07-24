@@ -5,12 +5,13 @@ Vsource-impedance-under-ideal-slack warning.
 Covers the element-scope extension of ``pgml.convert.opendss.to_grid``:
 
 - Capacitor: WYE (solidly grounded) converts to a per-phase
-  :class:`~pgml.schemas.grid_schema.ShuntAppliance`; DELTA is out of scope
-  (warned, not converted); a multi-step bank sums its ACTIVE steps.
+  :class:`~pgml.schemas.grid_schema.ShuntAppliance`; DELTA converts to a
+  phase-to-phase (``connection=DELTA``) bank; a multi-step bank sums its ACTIVE
+  steps; a non-grounded 2-bus terminal-2 reference is out of scope (warned).
 - Reactor: the same WYE-shunt path (admittance ``Y=1/(R+jX)``), including the
   "grounding reactor" idiom (a single-conductor reactor tying a neutral
-  conductor to ground); DELTA and an explicitly coupled Rmatrix/Xmatrix are
-  out of scope (warned, not converted).
+  conductor to ground), and a DELTA phase-to-phase bank; an explicitly coupled
+  Rmatrix/Xmatrix is out of scope (warned, not converted).
 - Generator/PVSystem/Storage: generation-positive (Storage: signed,
   discharge-positive) PQ injection, connection, and (Storage) the inert
   energy-state fields.
@@ -110,8 +111,8 @@ class TestCapacitorWye:
         assert "cap1" in self._id_map["capacitor"]
 
 
-class TestCapacitorDeltaSkipped:
-    def test_delta_capacitor_not_converted_and_warns(self, caplog) -> None:
+class TestCapacitorDelta:
+    def test_delta_capacitor_converts_to_delta_shunt(self, caplog) -> None:
         _build_base_circuit()
         dss.Text.Command(
             f"New Capacitor.cap2 phases=3 bus1=b1 kv={_BASEKV} kvar=5 conn=delta"
@@ -119,11 +120,57 @@ class TestCapacitorDeltaSkipped:
         _finish_and_solve()
         with caplog.at_level("WARNING", logger="pgml"):
             grid, id_map = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
-        assert "cap2" not in id_map["capacitor"]
-        assert any(
-            "cap2" in r.message and "not converted" in r.message.lower()
-            for r in caplog.records
-        )
+        assert "cap2" in id_map["capacitor"]
+        shunts = [a for a in grid.appliances if isinstance(a, ShuntAppliance)]
+        assert len(shunts) == 1
+        cap = shunts[0]
+        assert cap.connection == WindingConnection.DELTA
+        assert cap.phases == (Phase.A, Phase.B, Phase.C)
+        # Per-leg C == OpenDSS's own resolved Cuf (read directly).
+        dss.Text.Command("? Capacitor.cap2.Cuf")
+        cuf = float(dss.Text.Result().strip().strip("[]").split()[0])
+        for c in cap.capacitance_f:
+            assert c == pytest.approx(cuf * 1.0e-6, rel=1e-9)
+        assert not any("cap2" in r.message for r in caplog.records)
+
+
+def test_delta_capacitor_voltage_parity_vs_live_opendss() -> None:
+    """A DSS delta capacitor bank converts and pgml matches the live DSS solve.
+
+    Exercises the DSS-delta-bank -> pgml direction end to end (the cyclic
+    ``M^T diag(y) M`` delta stamp vs OpenDSS's own delta capacitor primitive)."""
+    _build_base_circuit()
+    dss.Text.Command(
+        f"New Capacitor.capd phases=3 bus1=b1 kv={_BASEKV} kvar=30 conn=delta"
+    )
+    dss.Text.Command(f"Set voltagebases=[{_BASEKV}]")
+    dss.Text.Command("Calcvoltagebases")
+    dss.Text.Command("Set Tolerance=1e-13")
+    dss.Text.Command("Set maxiterations=1000")
+    dss.Text.Command("Solve")
+    assert dss.Solution.Converged()
+
+    grid, _ = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
+    shunt = next(a for a in grid.appliances if isinstance(a, ShuntAppliance))
+    assert shunt.connection == WindingConnection.DELTA
+
+    result = solve_power_flow(
+        grid, slack="ideal", tol=1e-12, max_iter=300, dtype=torch.complex128
+    )
+    assert result.converged
+    for name in ("src", "b1"):
+        node = next(n for n in grid.nodes if n.name == name)
+        dss.Circuit.SetActiveBus(name)
+        dss_va = dss.Bus.puVmagAngle()
+        kvbase_ln_kv = dss.Bus.kVBase()
+        for k, phase in enumerate((Phase.A, Phase.B, Phase.C)):
+            row = result.index.row(node.id, phase)
+            v_val = complex(result.v.reshape(-1)[row].item())
+            vm_pu_ours = abs(v_val) / (kvbase_ln_kv * 1_000.0)
+            assert abs(vm_pu_ours - dss_va[2 * k]) < 1.0e-6, (
+                f"bus {name} phase {phase}: |V| mismatch ours={vm_pu_ours:.8f} "
+                f"dss={dss_va[2 * k]:.8f}"
+            )
 
 
 class TestCapacitorMultiStep:
@@ -220,7 +267,7 @@ class TestGroundingReactorPattern:
 
 
 class TestReactorDeltaAndCoupledSkipped:
-    def test_delta_reactor_not_converted_and_warns(self, caplog) -> None:
+    def test_delta_reactor_converts_to_delta_shunt(self, caplog) -> None:
         _build_base_circuit()
         dss.Text.Command(
             f"New Reactor.reac2 phases=3 bus1=b1 kv={_BASEKV} kvar=5 conn=delta"
@@ -228,8 +275,15 @@ class TestReactorDeltaAndCoupledSkipped:
         _finish_and_solve()
         with caplog.at_level("WARNING", logger="pgml"):
             grid, id_map = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
-        assert "reac2" not in id_map["reactor"]
-        assert any("reac2" in r.message for r in caplog.records)
+        assert "reac2" in id_map["reactor"]
+        reac = next(
+            a
+            for a in grid.appliances
+            if isinstance(a, ShuntAppliance) and a.id == id_map["reactor"]["reac2"]
+        )
+        assert reac.connection == WindingConnection.DELTA
+        assert reac.phases == (Phase.A, Phase.B, Phase.C)
+        assert not any("reac2" in r.message for r in caplog.records)
 
     def test_coupled_reactor_not_converted_and_warns(self, caplog) -> None:
         _build_base_circuit()

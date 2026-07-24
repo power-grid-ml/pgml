@@ -66,9 +66,9 @@ for the `u_rated_v` fix below (which does not change the IEEE 33-bus numbers).
 | Line        | `Line`                  | 1- or multi-phase; n×n R/X/C from matrix API; `to_phases` carries a phase-permuted terminal independently of `from_phases` |
 | Transformer | `Transformer`           | Two-winding only; see below                |
 | Vsource     | `Source`                | R1/X1 via text commands; `thevenin_from_z`; warns if non-negligible (see below) |
-| Load        | `Load`                  | kW/kvar total; `IsDelta()` -> `connection`; `Loads.Model()` -> `LoadModel`/`ZipCoefficients` |
-| Capacitor   | `ShuntAppliance`        | WYE (solidly grounded) only; see below     |
-| Reactor     | `ShuntAppliance`        | WYE (solidly grounded), uncoupled only; see below |
+| Load        | `Load`                  | kW/kvar total; `IsDelta()` -> `connection`; `Loads.Model()` -> `LoadModel`/`ZipCoefficients`; WYE `return_path` from the return conductor (see below) |
+| Capacitor   | `ShuntAppliance`        | WYE (solidly grounded) or DELTA (phase-to-phase bank); see below |
+| Reactor     | `ShuntAppliance`        | WYE (solidly grounded, uncoupled) or DELTA (phase-to-phase bank); see below |
 | Generator   | `Generator`             | generation-positive; `build_generator`     |
 | PVSystem    | `Generator`             | `consumer_type=ConsumerType.PV`; present kW/kvar output |
 | Storage     | `Storage`               | signed, discharge-positive; energy-state fields (inert) |
@@ -139,18 +139,20 @@ pattern); NOT needed for Line (a line's `Phases=` already IS its total
 conductor count, no auto-appended return) or Vsource (a genuine 2-terminal
 element, `NumConductors == n_phases` on its own first terminal).
 
-**The neutral-routing schema gap.** pgml's WYE/neutral routing
-(`assembly._incidence.group_appliances`) is a property of the NODE, not the
-individual appliance: a WYE appliance returns through the node's `Phase.N`
-row whenever the node carries one, else to ground -- there is no schema field
-to say "this appliance is grounded despite the node's neutral being present
-elsewhere". `_warn_if_grounded_despite_neutral` detects the mismatch (a WYE
-appliance with no explicit non-ground return conductor, on a bus that ALSO
-carries `Phase.N` from another element) and logs a WARNING naming the
-appliance and bus; it does NOT change how the appliance converts (the
-resulting return path is genuinely miswired relative to the source circuit,
-a documented limitation, not a bug this converter can silently paper over).
-See `tests/convert/test_opendss_phase_mode.py::test_grounded_load_on_neutral_carrying_node_warns`.
+**WYE return-conductor routing (`return_path`).** pgml's WYE/neutral routing
+(`assembly._incidence.group_appliances`) is a property of the NODE, but the schema's
+`InjectionAppliance.return_path` overrides it per appliance, so the converter
+reproduces OpenDSS's own per-element return-conductor choice exactly.
+`_resolve_wye_return_path(bus_name, bus_phases, explicit_return)` maps
+`CktElement.NodeOrder()`'s return conductor to a `return_path`: an explicit `Phase.N`
+tie (`.4`) -> `"neutral"`; a solidly grounded appliance (no explicit tie) on a bus that
+ALSO carries `Phase.N` from another element -> `"ground"` (return stays at true ground
+despite the shared neutral — previously an inexpressible, warned mismatch); otherwise
+`"auto"` (reduces to ground on a 3-wire node). Threaded into `build_load`/
+`build_generator`/`Storage` for WYE appliances only (DELTA has no neutral). See
+`tests/convert/test_opendss_phase_mode.py` (`test_grounded_load_on_neutral_carrying_node_uses_return_path_ground`,
+`test_four_wire_mixed_return_paths_convert_and_match_opendss` — live parity for a
+4-wire bus carrying BOTH a grounded and a neutral-returning load).
 
 **Load model (`Loads.Model()` -> `LoadModel`/`ZipCoefficients`,
 `_resolve_load_model`).**
@@ -180,25 +182,28 @@ dedicated inductive-reactor primitive. `ShuntAppliance` (per-phase G/C `Vec`,
 node-anchored) is the better fit for both a Capacitor bank and an uncoupled
 shunt Reactor.
 
-**Scope (`_grounded_shunt_phases`).** Both DSS elements are 2-terminal
-branches whose 2nd terminal defaults to the SAME bus, every conductor tied to
-node 0 -- OpenDSS's UNIVERSAL (never bus-scoped) ground reference, so
-checking every terminal-2 conductor is 0 is sufficient regardless of which
-bus name expresses it (this also covers the "grounding reactor" idiom,
-`bus1=busname.k.0` phases=1, which OpenDSS resolves into `bus1=busname.k` /
-an auto-generated `bus2=busname.0` because no `bus2=` was given). A DELTA
-element collapses to `NumTerminals()==1` in OpenDSS (phase-to-phase legs, no
-neutral point at all) and is NOT converted (warned instead) since
-`ShuntAppliance` has no delta concept; likewise an explicit coupled
-Reactor `Rmatrix`/`Xmatrix` (off-diagonal) is out of scope (only the scalar
-`R()`/`X()` diagonal path converts) and is warned/skipped.
+**Scope (`_grounded_shunt_phases` / `_shunt_phase_conductors`).** A WYE (grounded)
+element is a 2-terminal branch whose 2nd terminal defaults to the SAME bus, every
+conductor tied to node 0 -- OpenDSS's UNIVERSAL (never bus-scoped) ground reference, so
+checking every terminal-2 conductor is 0 is sufficient regardless of which bus name
+expresses it (`_grounded_shunt_phases`; this also covers the "grounding reactor" idiom,
+`bus1=busname.k.0` phases=1, which OpenDSS resolves into `bus1=busname.k` / an
+auto-generated `bus2=busname.0`). A DELTA element (`? Class.name.conn == "delta"`)
+collapses to `NumTerminals()==1` (phase-to-phase legs) and converts to a DELTA
+`ShuntAppliance` whose per-leg G/C is read from the single terminal's phase conductors
+(`_shunt_phase_conductors`). A non-grounded 2-bus terminal-2 reference is still
+warned/skipped, and an explicit coupled Reactor `Rmatrix`/`Xmatrix` (off-diagonal) is
+out of scope (only the scalar `R()`/`X()` diagonal path converts). Under
+`SINGLE_PHASE_EQUIV` a DELTA bank folds to the positive-sequence WYE equivalent
+(`Y_wye = 3·Y_leg`).
 
 **Capacitor.** `Cuf` (read via text query, µF PER STEP) summed over the
-ACTIVE steps (`Capacitors.States()`) gives the total per-phase capacitance;
-`conductance_s=0`. Reading `Cuf` directly (rather than re-deriving from
-`kv`/`kvar`) sidesteps any base-frequency-dependent unit subtlety in that
-formula (DSS resolves `Cuf` itself, consistent with whatever frequency it
-used internally).
+ACTIVE steps (`Capacitors.States()`) gives the capacitance; `conductance_s=0`.
+For a WYE bank this is the per-phase C, for a DELTA bank the per-leg C —
+verified live: OpenDSS's own resolved `Cuf` is the leg capacitance for a
+delta bank (a delta bank's `Cuf` is exactly `1/3` of the wye bank's for the
+same `kvar`/`kV`). Reading `Cuf` directly (rather than re-deriving from
+`kv`/`kvar`) sidesteps any base-frequency-dependent unit subtlety.
 
 **Reactor.** `R()`/`X()` (Ω, resolved by DSS regardless of whether the
 element was specified via `R=`/`X=` or `kV=`/`kvar=`) give the per-phase
@@ -543,11 +548,14 @@ reduction: `tests/reference/test_opendss_line_phase_permutation.py`.
 Load model conversion (Model=2/5/8 live-oracle voltage parity, the ZIPV
 cutoff warning, and the 3/4/6/7 fallback): `tests/reference/test_opendss_load_model.py`.
 Four-wire (explicit neutral conductor) voltage parity, including the
-grounding-`Reactor`-as-`ShuntAppliance` anchoring the neutral rail, and the
-neutral-routing schema-gap warning: `tests/convert/test_opendss_phase_mode.py`
+grounding-`Reactor`-as-`ShuntAppliance` anchoring the neutral rail, and the WYE
+`return_path` routing (grounded, neutral, and a BOTH-kinds 4-wire bus):
+`tests/convert/test_opendss_phase_mode.py`
 (`TestFourWire.test_voltage_parity_vs_live_opendss`,
-`test_grounded_load_on_neutral_carrying_node_warns`).
-Capacitor/Reactor/Generator/PVSystem/Storage field conversion, the
-delta/coupled-reactor out-of-scope warnings, the generic dropped-element
-warning (`Isource`/`Monitor`/`EnergyMeter`), and the Vsource-impedance
-warning: `tests/convert/test_opendss_shunt_and_der_elements.py`.
+`test_grounded_load_on_neutral_carrying_node_uses_return_path_ground`,
+`test_four_wire_mixed_return_paths_convert_and_match_opendss`).
+Capacitor/Reactor/Generator/PVSystem/Storage field conversion, the DELTA
+capacitor/reactor conversion (+ live voltage parity) and the coupled-reactor
+out-of-scope warning, the generic dropped-element warning
+(`Isource`/`Monitor`/`EnergyMeter`), and the Vsource-impedance warning:
+`tests/convert/test_opendss_shunt_and_der_elements.py`.
