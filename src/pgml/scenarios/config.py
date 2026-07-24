@@ -921,6 +921,15 @@ def default_compositions() -> list[ConsumerComposition]:
             classes=[cc("base_linear", 1, 1, 1.0), cc("inverter_drive", 1, 2, 3.0)],
         ),
         ConsumerComposition(
+            consumer_type="workshop",
+            classes=[
+                cc("base_linear", 1, 1, 3.0),
+                cc("inverter_drive", 1, 3, 2.5),
+                cc("electronics_smps", 1, 4, 1.0),
+                cc("resistive_heating", 0, 1, 1.0),
+            ],
+        ),
+        ConsumerComposition(
             consumer_type="ev_charging",
             classes=[cc("base_linear", 0, 1, 0.5), cc("ev_charger", 1, 2, 1.0)],
         ),
