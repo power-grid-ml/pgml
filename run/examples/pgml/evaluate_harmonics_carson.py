@@ -7,7 +7,7 @@ paper-ready / interactive figures via ``pgml.evaluation``.
 
 Run::
 
-    pixi run -e cpu python examples/pgml/evaluate_harmonics_carson.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/evaluate_harmonics_carson.py [out_dir]
 
 Per feeder (default ``evaluation_output/carson/<feeder>/``):
 - ``ybus_h5.svg``          — pgml Y(5·f0) vs OpenDSS SystemY(5·f0) (|Y|, log).
@@ -44,8 +44,8 @@ CDT = torch.complex128
 ORDERS_3D = [5, 7, 11, 13]
 
 
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
+# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
+# under run/examples/evaluation_output/ rather than the repository root.
 _OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 

@@ -105,7 +105,7 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     on `‖R‖∞`, converge on `‖Δx‖ < tol`. WARM START = the LINEAR const-Z solution
     (`_linear_const_z_init` → one `assemble_ybus` solve; OpenDSS-style). Quadratic, and
     converges where the fixed point oscillates (near the loadability nose — see
-    `examples/current_injection_convergence.py`). Same `PowerFlowResult` + diagnostics +
+    `run/examples/current_injection_convergence.py`). Same `PowerFlowResult` + diagnostics +
     IFT gradients (gradcheck-verified). `linear_solver="dense"` (per-element `[2N,2N]`
     Jacobian + direct solve; no `[B,2N,B,2N]` blowup) or `"matrix_free"` (Jacobian-free
     Newton-Krylov: GMRES on finite-difference `J·v`, `O(N)` memory for large grids).

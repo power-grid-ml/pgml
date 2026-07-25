@@ -161,7 +161,7 @@ def _index_2d(y: Tensor, rows: Tensor, cols: Tensor) -> Tensor:
 # sparse direct factorization scales ~O(N) on radial/meshed feeders where the dense
 # LU is O(N^3). Below this row count the dense factorization's lower constant wins;
 # from ~600 rows the sparse backend wins every metric on CPU (measured with
-# ``examples/pgml/benchmark_sparse.py`` on an i7-12700: at 600 rows factor 3.7x /
+# ``run/examples/pgml/benchmark_sparse.py`` on an i7-12700: at 600 rows factor 3.7x /
 # single-RHS 7x faster, batched back-substitution equal; at 4800 rows factor >4x,
 # single-RHS 50x, 256-RHS 4x, end-to-end nonlinear solve 3x). CUDA stays dense:
 # torch has no batched sparse direct solve, and dense batched LU is what GPUs are

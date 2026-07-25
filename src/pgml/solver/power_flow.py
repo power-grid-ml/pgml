@@ -1209,7 +1209,7 @@ def solve_power_flow(
         # full const-P / ZIP residual. Newton's quadratic convergence and far larger
         # convergence region reach solutions the current-injection fixed point cannot
         # (e.g. near the loadability nose — see
-        # ``examples/current_injection_convergence.py``).
+        # ``run/examples/current_injection_convergence.py``).
         bsize = _operating_point_batch_size(operating_point)
         if bsize > 1:
             # A batched operating point solves SEQUENTIALLY per scenario: the

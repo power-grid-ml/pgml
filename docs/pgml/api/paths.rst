@@ -9,7 +9,7 @@ single directory the user owns and keeps out of version control.  Keeping reprod
 experiment artifacts separate from the source also lets a run be relocated (e.g. to fast
 cluster scratch) by pointing one environment variable elsewhere.
 
-The root is ``$PGML_EXPERIMENTS`` when set, else ``./experiments`` relative to the current
+The root is ``$PGML_EXPERIMENTS`` when set, else ``./data`` relative to the current
 working directory.
 
 Usage::

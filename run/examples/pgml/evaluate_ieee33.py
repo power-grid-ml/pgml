@@ -2,7 +2,7 @@
 
 Run::
 
-    pixi run -e cpu python examples/pgml/evaluate_ieee33.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/evaluate_ieee33.py [out_dir]
 
 Produces (default ``evaluation_output/``):
 - ``ybus_heatmaps.svg``       — our full Y vs pandapower network Y vs OpenDSS SystemY.
@@ -58,8 +58,8 @@ CONVERTER_SPECTRUM = [
 HARMONIC_ORDERS_3D = [5, 7, 9, 11, 13]
 
 
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
+# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
+# under run/examples/evaluation_output/ rather than the repository root.
 _OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 

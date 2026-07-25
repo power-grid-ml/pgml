@@ -76,7 +76,7 @@ from the canonical `pgml.evaluation.oracles` path.
   overlay on top so all layers align. Explicit `positions` keys resolve name → zero-based
   node number → id (idempotent for an id-keyed dict); every node must be covered.
 - `load_node_positions(path, grid) -> {node_id: (x, y)}` — read a position JSON (e.g.
-  `examples/configs/cigre_lv_geo.json`, keyed by the CIGRE LV zero-based bus numbers).
+  `run/configs/cigre_lv_geo.json`, keyed by the CIGRE LV zero-based bus numbers).
 - `node_numbering(grid) -> {node_id: int}` (in `data.py`) — the zero-based display
   numbering above; `row_labels(index, *, numbering=None)` uses it for `<node>·<phase>`
   tick labels.
@@ -235,5 +235,5 @@ existing importers.  New code should import from `pgml.evaluation.oracles` direc
 - pu = `|V|` / line-to-neutral base (`assembly._params.phase_voltage_magnitude`).
 - pandapower internal Ybus / OpenDSS SystemY exclude const-Z load shunts; the cleanest
   "most similar" Y-bus difference is OUR `assemble_network_ybus` vs `pandapower_ybus`.
-- Demo: `examples/evaluate_ieee33.py` regenerates the IEEE-33 figure set.
+- Demo: `run/examples/evaluate_ieee33.py` regenerates the IEEE-33 figure set.
 - Matplotlib backend: tests/headless use `Agg` (set in `tests/evaluation/conftest.py`).

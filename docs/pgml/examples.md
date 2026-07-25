@@ -1,11 +1,11 @@
 # Examples
 
-The `examples/` directory contains end-to-end scripts. Each is self-contained and produces
+The `run/examples/` directory contains end-to-end scripts. Each is self-contained and produces
 paper-ready (SVG/PNG, ≥300 DPI) and interactive (Plotly HTML) figures under an output
 directory. Run any example with:
 
 ```bash
-pixi run -e cpu python examples/<script>.py [out_dir]
+pixi run -e cpu python run/examples/<script>.py [out_dir]
 ```
 
 The figures below are produced by these scripts; they are the evidence behind the
@@ -16,7 +16,7 @@ The figures below are produced by these scripts; they are the evidence behind th
 
 ## Comparing libraries: IEEE 33-bus
 
-**File:** `examples/evaluate_ieee33.py`
+**File:** `run/examples/evaluate_ieee33.py`
 
 Regenerates the full IEEE 33-bus evaluation, comparing pgml's differentiable solver to
 **pandapower** and **OpenDSS**. The assembled Y-bus matches both reference tools to
@@ -51,10 +51,10 @@ Outputs (default `evaluation_output/`):
 | `harmonic_default_vs_naive_h5.svg` | Pairwise h=5 comparison |
 | `grid_voltage_map.svg` | Topology coloured by voltage pu |
 
-```{literalinclude} ../../examples/pgml/evaluate_ieee33.py
+```{literalinclude} ../../run/examples/pgml/evaluate_ieee33.py
 :language: python
 :lines: 1-30
-:caption: examples/pgml/evaluate_ieee33.py (header)
+:caption: run/examples/pgml/evaluate_ieee33.py (header)
 ```
 
 ---
@@ -66,7 +66,7 @@ results. Two examples make the differences explicit.
 
 ### Carson geometry vs OpenDSS
 
-**File:** `examples/evaluate_harmonics_carson.py`
+**File:** `run/examples/pgml/evaluate_harmonics_carson.py`
 
 Synthesizes single-conductor Carson geometry that reproduces each line's R/X, runs the pgml
 harmonic flow, and compares to OpenDSS's line model on the *same* geometry — validating that
@@ -74,7 +74,7 @@ the Carson/Deri path is **bit-exact** with OpenDSS.
 
 ### Naive vs sequence-aware
 
-**File:** `examples/evaluate_line_sequence_harmonics.py`
+**File:** `run/examples/pgml/evaluate_line_sequence_harmonics.py`
 
 Contrasts the naive "X ∝ h" scaling, the corrected positive-sequence model, the
 single-conductor Carson model, and a live OpenDSS profile. See the
@@ -87,17 +87,17 @@ single-conductor Carson model, and a live OpenDSS profile. See the
 IEEE-33 at the 5th harmonic: the config-default line model versus the naive "X ∝ h" model.
 ```
 
-```{literalinclude} ../../examples/pgml/evaluate_harmonics_carson.py
+```{literalinclude} ../../run/examples/pgml/evaluate_harmonics_carson.py
 :language: python
 :lines: 1-25
-:caption: examples/pgml/evaluate_harmonics_carson.py (header)
+:caption: run/examples/pgml/evaluate_harmonics_carson.py (header)
 ```
 
 ---
 
 ## Scenarios: batched harmonic studies
 
-**Files:** `examples/scenario_randomized.py`, `examples/scenario_node_injection_sweep.py`
+**Files:** `run/examples/pgml/scenario_randomized.py`, `run/examples/pgml/scenario_node_injection_sweep.py`
 
 Reproducible quasi-Monte-Carlo / cartesian sampling produces batches of operating points,
 solved together, for studying how harmonic disturbances spread across a feeder and for
@@ -115,8 +115,8 @@ LV.
 
 ## Solver behaviour and scale
 
-**Files:** `examples/loadability_continuation.py`,
-`examples/current_injection_convergence.py`, `examples/benchmark_speed.py`
+**Files:** `run/examples/pgml/loadability_continuation.py`,
+`run/examples/pgml/current_injection_convergence.py`, `run/examples/pgml/benchmark_speed.py`
 
 The power-flow solvers expose actionable diagnostics near the loadability limit, and the
 batched solve amortizes well on a GPU.
@@ -139,7 +139,7 @@ as the batch grows.
 
 ### Sparse vs dense factorization
 
-**File:** `examples/pgml/benchmark_sparse.py`
+**File:** `run/examples/pgml/benchmark_sparse.py`
 
 Sweeps synthetic radial MV feeders (`pgml.grids.synthetic_feeder`) across system sizes and
 times both `solve_power_flow` factorization backends — the batched dense `torch` LU and the
@@ -150,8 +150,8 @@ baseline rather than assumed. The observed CPU crossover calibrates the row-coun
 behind `linear_solver="auto"` (see the "Solve performance" section of
 {doc}`api/solver`).
 
-```{literalinclude} ../../examples/pgml/benchmark_sparse.py
+```{literalinclude} ../../run/examples/pgml/benchmark_sparse.py
 :language: python
 :lines: 1-30
-:caption: examples/pgml/benchmark_sparse.py (header)
+:caption: run/examples/pgml/benchmark_sparse.py (header)
 ```

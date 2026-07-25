@@ -101,11 +101,11 @@ partial layout would silently misplace the rest of the graph). An already
 node-id-keyed, fully-covering dict passes through unchanged (idempotent).
 :func:`~pgml.evaluation.load_node_positions` reads such a mapping from a JSON file (keys
 as strings) — the CIGRE LV benchmark's node coordinates ship as
-``examples/configs/cigre_lv_geo.json``, keyed by its zero-based bus numbers::
+``run/configs/cigre_lv_geo.json``, keyed by its zero-based bus numbers::
 
     from pgml.evaluation import load_node_positions
 
-    pos = load_node_positions("examples/configs/cigre_lv_geo.json", grid)
+    pos = load_node_positions("run/configs/cigre_lv_geo.json", grid)
     fig, ax = plot_grid_graph(grid, node_values=values, positions=pos)
 
 Reference builders and oracle functions

@@ -1,7 +1,7 @@
-# examples/configs — run-config templates
+# run/configs — run-config templates
 
 Starting points for the per-package, serializable run configs. Copy one into your
-[experiments root](../../experiments/README.md) (or anywhere outside the repo), edit, and
+[experiments root](../../data/README.md) (or anywhere outside the repo), edit, and
 point the tooling at it. Each config + its `seed` reproduces a run.
 
 | Template | Schema | Used by |

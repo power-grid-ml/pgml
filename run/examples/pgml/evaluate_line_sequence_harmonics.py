@@ -27,7 +27,7 @@ etc.), so defaults are explicit and documented (`pgml.defaults`), never hidden.
 
 Run::
 
-    pixi run -e cpu python examples/pgml/evaluate_line_sequence_harmonics.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/evaluate_line_sequence_harmonics.py [out_dir]
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ ORDERS = [1, 5, 7, 11, 13, 17, 25]
 
 
 # --- (1) sequence R/X vs harmonic ------------------------------------------
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
+# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
+# under run/examples/evaluation_output/ rather than the repository root.
 _OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 

@@ -40,8 +40,10 @@ never as an import.
 | **pgd** | dashboard — FastAPI backend + web SPA over simulation, state estimation, and live measurements (DuckDB/parquet aggregation, one-line diagram, grid editing) | active | `src/pgd/CONTEXT.md`, `src/pgd/STATUS.md` |
 
 **Deployment.** The training clusters provide conda only (no pixi) and a recent CUDA
-toolkit; torch comes from conda and the packages pip-install on top (`deploy/environment.yml`).
-Quick iteration on a local dev GPU; large-batch runs on the cluster.
+toolkit; torch comes from conda and the packages pip-install on top (`run/cluster/environment.yml`).
+Quick iteration on a local dev GPU; large-batch runs on the cluster. SLURM jobs + the local
+orchestrator live in `run/cluster/` (see `run/cluster/README.md`); fetched results land in the
+untracked `data/results/`.
 
 ## Why all-PyTorch
 
@@ -79,7 +81,7 @@ The pgml package map (subpackage-by-subpackage, with each interface ledger) is i
 | Published human docs (concepts, modeling decisions, API reference) | `docs/` (`docs/index.md`) |
 | Modeling decisions (conventions, transformer, line model, DER, asymmetric) | `docs/pgml/modeling/` |
 | Cross-tool conventions + reference-library briefs | `docs/pgml/modeling/conventions.md`, `docs/pgml/modeling/references/` |
-| **Configuration** (three buckets, see below) | `src/pgml/data/CONTEXT.md`, `examples/configs/`, `experiments/README.md` |
+| **Configuration** (three buckets, see below) | `src/pgml/data/CONTEXT.md`, `run/configs/`, `data/README.md` |
 
 ## Configuration: three buckets (divided per package)
 
@@ -92,10 +94,10 @@ Don't conflate "config". There are three kinds, each owned per package:
 2. **Run-config schemas** — serializable pydantic contracts; one config + `seed` reproduces a
    run. Per package: `pgml.scenarios.config` (data generation), `pgl.config` (training),
    `pgg.config` (generation, future). Inspect with `python -m <module> --json-schema|--example`;
-   templates in `examples/configs/`.
+   templates in `run/configs/`.
 3. **Run-config instances + outputs** — the user's own YAML + datasets/checkpoints/tracking.
    Never tracked here; live under the **experiments root** (`PGML_EXPERIMENTS`, default
-   `./experiments`; `pgml.experiments_root()`).
+   `./data`; `pgml.experiments_root()`).
 
 ## Frozen-contract rule
 

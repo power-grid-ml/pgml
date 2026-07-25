@@ -153,7 +153,7 @@ switching backends never changes which quantities carry gradients. For
 directly (what ``"auto"`` resolves to); ``"matrix_free"`` runs a
 Jacobian-free Newton-Krylov solve (GMRES on finite-difference Jacobian-vector
 products), trading iteration count for ``O(N)`` memory on very large grids.
-``examples/pgml/benchmark_sparse.py`` sweeps :func:`~pgml.grids.synthetic_feeder`
+``run/examples/pgml/benchmark_sparse.py`` sweeps :func:`~pgml.grids.synthetic_feeder`
 across sizes and reports the sparse/dense crossover on CPU (and the dense-GPU
 baseline it must be checked against) — see :doc:`/pgml/examples`.
 

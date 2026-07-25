@@ -41,7 +41,7 @@ Development uses [pixi](https://pixi.sh) (conda-based, pinned environments):
 
 ```bash
 pixi run -e cpu pytest -q          # run the test suite (CPU)
-pixi run -e cpu python examples/evaluate_ieee33.py
+pixi run -e cpu python run/examples/pgml/evaluate_ieee33.py
 ```
 
 The package is also standard PEP 621 (`pyproject.toml`). Core install plus optional

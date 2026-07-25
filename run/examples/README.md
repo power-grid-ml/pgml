@@ -11,8 +11,8 @@ Runnable, documented studies, organised per package:
 Run any example from the repository root with `pixi`:
 
 ```bash
-pixi run -e cpu python examples/pgml/<script>.py [out_dir]   # or -e default on a GPU host
-pixi run       python examples/pgl/<script>.py  [out_dir]
+pixi run -e cpu python run/examples/pgml/<script>.py [out_dir]   # or -e default on a GPU host
+pixi run       python run/examples/pgl/<script>.py  [out_dir]
 ```
 
 Each script's module docstring is the authoritative "what / how / outputs" reference; the
@@ -20,11 +20,11 @@ per-package README is the map.
 
 ## Output locations
 
-Outputs default to **`examples/evaluation_output/<name>/`** — anchored to the `examples/`
+Outputs default to **`run/examples/evaluation_output/<name>/`** — anchored to the `run/examples/`
 tree via each script's own path, so a run writes there regardless of the current working
 directory (it never pollutes the repository root). The `pgl` examples honour
 `$PGML_EXPERIMENTS/<name>/` when that variable is set (the cluster experiments root).
-`examples/evaluation_output/` is gitignored.
+`run/examples/evaluation_output/` is gitignored.
 
 ## Shared config templates
 

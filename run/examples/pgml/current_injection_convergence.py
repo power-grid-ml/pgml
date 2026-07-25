@@ -15,7 +15,7 @@ convergence region is SMALLER than the feasible region. This is the well-known w
 Gauss / current-injection iterations versus Newton, and is exactly why the convergence
 diagnostics report "did not settle" and point to the Newton solver
 (``solve_power_flow(method="newton")``) and the ``loadability_limit`` continuation —
-see ``ConvergenceDiagnostics`` and ``examples/loadability_continuation.py``.
+see ``ConvergenceDiagnostics`` and ``run/examples/loadability_continuation.py``.
 
 The grid is a textbook 2-bus radial — a stiff source ``E`` behind a series line ``R+jX``
 feeding a const-P load — for which the P-V nose is known in CLOSED FORM, so the solver's
@@ -35,7 +35,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/pgml/current_injection_convergence.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/current_injection_convergence.py [out_dir]
 
 Outputs (default ``evaluation_output/current_injection/``): ``residual_vs_iter.svg``,
 ``voltage_vs_iter.svg``, ``pv_nose.svg``, and a printed convergence table. Tune the source
@@ -70,8 +70,8 @@ _Z = complex(R_OHM, X_OHM)
 _TAN_PHI = math.tan(math.acos(POWER_FACTOR)) if POWER_FACTOR < 1.0 else 0.0
 
 
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
+# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
+# under run/examples/evaluation_output/ rather than the repository root.
 _OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 

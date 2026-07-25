@@ -4,7 +4,7 @@ WHAT THIS DEMONSTRATES
 ----------------------
 "Inject a harmonic ERROR at one node at a time, and measure how it spreads through the
 whole grid." The error is a per-node **Thévenin voltage source** carrying a voltage
-spectrum (read from ``examples/spectra/VoltageSag40ms.csv``), of a user-set strength
+spectrum (read from ``run/examples/spectra/VoltageSag40ms.csv``), of a user-set strength
 ``SOURCE_POWER_VA`` (short-circuit power), applied only at harmonics so the fundamental
 power flow is untouched — the model documented in ``docs/pgml/modeling/error-injection.md``.
 (Set ``KIND="current"`` for a Norton current source instead.)
@@ -29,7 +29,7 @@ RUN
 ---
 ::
 
-    pixi run -e cpu python examples/pgml/scenario_node_injection_sweep.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/scenario_node_injection_sweep.py [out_dir]
 
 Outputs (default ``evaluation_output/scenario1/``): ``spread_h11.csv`` (m x i, per-unit),
 ``spread_h11.npz`` (per-unit magnitude + raw real/imag volts + the ``|V1|`` base),
@@ -62,8 +62,8 @@ SOURCE_POWER_VA = 1.0e5  # error-source strength S_sc (short-circuit power); tun
 KIND = "voltage"  # "voltage" (Thévenin) or "current" (Norton)
 
 
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
+# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
+# under run/examples/evaluation_output/ rather than the repository root.
 _OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
 
 
