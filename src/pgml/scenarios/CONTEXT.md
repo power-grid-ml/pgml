@@ -34,20 +34,44 @@ verified `batched == loop-of-individual`).
     required iff `small_imbalance`.
   - HARMONIC fields `field="h_mag"|"h_phase"` + `orders=[...]` (>=2): write a batched
     `harmonic_injection` instead of an operating point. `h_mag` magnitude = sampled value ×
-    per-order EN 50160 limit (`harmonic_reference="en50160"`, distribution in [0,1]), ×
-    stored spectrum mag (`mode="scale"`), or absolute pu. `h_phase` sets the phase (deg,
-    `mode="absolute"`). Per-device injection is seeded from the stored `StaticSpectrum` so
-    unspecified orders survive. Harmonic fields reject `correlation`/per-phase `symmetry`.
+    a per-order reference fraction (`harmonic_reference`, distribution in [0,1]) ×, or ×
+    stored spectrum mag (`mode="scale"`), or absolute pu. `harmonic_reference`:
+    `"iec61000-3-2"` = IEC 61000-3-2 appliance CURRENT-emission fraction (PER DEVICE, from
+    nominal P + node L-N voltage + `emission_class`; the physically correct current
+    fingerprint reference); `"en50160"` = DIN EN 50160 supply-VOLTAGE compatibility level
+    (a background-distortion SHAPE, NOT an emission model — kept for compatibility);
+    `None` = absolute pu. `emission_class="A"|"B"|"C"|"D"|"auto"` (valid only with the IEC
+    reference; `"auto"` resolves per device from `consumer_type`+P). `h_phase` sets the
+    phase (deg, `mode="absolute"`). Per-device injection is seeded from the stored
+    `StaticSpectrum` so unspecified orders survive. Harmonic fields reject
+    `correlation`/per-phase `symmetry`.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
-- EN 50160 per-order limits: `en50160_limits() -> {order: max_pu}`, `en50160_limit(order)`
-  (loads the packaged `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env override).
+- EN 50160 per-order VOLTAGE limits: `en50160_limits() -> {order: max_pu}`,
+  `en50160_limit(order)` (loads `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env
+  override). These are supply-voltage compatibility levels, NOT an appliance emission model.
+- IEC 61000-3-2 appliance CURRENT-emission limits (`iec61000_3_2.py`; packaged
+  `pgml/data/standards/iec61000_3_2.yaml`, `PGML_IEC61000_3_2` env override). The default
+  reference for device current fingerprints. `iec61000_3_2_limits(class=None) -> dict` (full
+  table or one class's `{unit, limits, ...}`; Class B expanded to 1.5×A);
+  `iec61000_3_2_fraction(order, *, emission_class, p_w, u_ln_v, power_factor=1.0) -> float`
+  (limit → fraction of `I1 = p_w/(u_ln_v·pf)`; Class A/B amps/I1, Class C percent [h3 ×λ],
+  Class D mA/W·p_w/1000/I1 [P cancels]; clamped ≤1.0; absent order → 0.0);
+  `resolve_emission_class(consumer_type, p_w) -> "A"|"B"|"C"|"D"` (auto map: office(IT)≤600W
+  → D else A; everything else incl. household/EV/PV → A; lighting → C, no enum member yet);
+  `iec61000_3_2_device_caps(grid, ids, orders, *, emission_class="auto") -> {id:{order:frac}}`
+  (per-device caps; PER-PHASE current = total P/phase count; off the autograd tape).
 - NODE-COHERENT harmonic "fingerprints" (temporal sequences):
   `CoherentSpectrumConfig(selector, orders, n_steps T, n_scenarios B, n_modes=2, seed,
-  mag_distribution, harmonic_reference="en50160", phase_distribution, jitter_mag, ar1_rho,
-  dwell, step_size_s, resample_modes_per_scenario)` ->
+  mag_distribution, harmonic_reference="iec61000-3-2", emission_class="auto",
+  phase_distribution, jitter_mag, ar1_rho, dwell, step_size_s,
+  resample_modes_per_scenario, mode_bank_seed=None)` ->
   `sample_coherent_spectra(grid, config) -> SampledScenarios`. Each device draws `n_modes`
   base spectra (fingerprint); over T steps it STICKS to a mode (Markov `dwell`) and WANDERS
-  (AR(1) `ar1_rho` jitter), clamped to EN 50160. `harmonic_injection` is `[B,T]` per
+  (AR(1) `ar1_rho` jitter), clamped to the per-order emission reference (IEC 61000-3-2
+  PER-DEVICE cap by default; `en50160`/`None` optional). `mode_bank_seed` seeds ONLY the
+  fingerprint (mode) bank: `None` draws it from the `seed` stream (byte-identical to today);
+  an explicit value pins a DISTINCT bank (held-out unseen-fingerprint test set) while every
+  other setting is shared. `harmonic_injection` is `[B,T]` per
   (device, order); `samples` records `<name>_mode [B,n_dev,T]` (attribution label),
   `<name>_mag`/`<name>_phase [B,n_dev,n_ord,T]`, `<name>_device_ids`, `time_s [T]`.
   - `parameters=[ParameterSpec,...]` + `factors=[LatentFactor,...]` add a FUNDAMENTAL
@@ -61,6 +85,67 @@ verified `batched == loop-of-individual`).
     `parameters` (reproducible reconstruction via `pgl.data.physics._reconstruct_sampled`);
     empty `parameters` (default) = the original fingerprint-only behavior (P/Q nominal,
     source at `u_ref_v`).
+  - `profile=LoadProfileConfig(...)` + `start_time` (ISO 8601, REQUIRED with `profile`) make
+    the fundamental P/Q TIME-VARYING over the T steps instead of `[B]`-constant: each
+    profiled device's per-scenario base P/Q (from `parameters` if set, else nominal) is
+    multiplied by a multi-scale synthetic factor `f_seasonal·f_weekly·f_daily·f_short`,
+    class-aware by `consumer_type` (household/office/restaurant/ev/industrial presets +
+    a `pv` solar bell that is ZERO at night with a seasonally-widening daylight window).
+    The operating-point totals then gain the step axis (`[B,T]`, aligned with the `[B,T]`
+    injection) → `run_scenarios` yields `[B,T,H,N]` with a moving fundamental. `samples`
+    additionally records `<name>_profile_factor [B,n_dev,T]` (ground truth), `<name>_profile_device_ids
+    [n_dev]`, and `time_unix_s [T]` (absolute epoch seconds; the relative `time_s` stays).
+    Harmonic magnitudes are RELATIVE to the fundamental current, so the profile already
+    scales the absolute harmonic current (no extra coupling). The profile draws on a stream
+    DISTINCT from the fingerprint, Markov, jitter, and op-cube streams, so `profile=None`
+    (default) is byte-identical to the fingerprint-only output. See `profiles.py` for the
+    preset shapes + correlation model (a per-scenario shared `behavioral` latent scales all
+    non-pv daily amplitudes; a shared `cloudiness` latent scales all pv output; per device an
+    idiosyncratic level / amplitude / daily phase-offset draw + an AR(1) short-term term).
+  - `load_profile_factors(grid, config) -> ProfileDraw(factor[B,n_dev,T], device_ids[n_dev],
+    time_unix_s[T])` and `apply_load_profiles(grid, config, operating_point) ->
+    (operating_point[B,T], samples)` are the profile generator + operating-point lift
+    (`pgml.scenarios.profiles`); `sample_coherent_spectra` calls them when `profile` is set.
+  - `composition=CompositionConfig(...)` + `start_time` (REQUIRED — the activity model is
+    temporal) makes the covered aggregated loads a SUM of statistical member devices whose
+    per-step activity drives BOTH the fundamental power AND the injected spectrum (a
+    consistent load-to-spectrum mapping). It SUPERSEDES the mode-bank fingerprint + the
+    fundamental for the loads it covers (those ids are dropped from the fingerprint device
+    set; their operating point + injection come from the composition; any `parameters`/
+    `profile` on them is superseded). Loads with no matching rule (or outside the
+    composition selector) stay on the fingerprint. The mixed `[B]`/`[B,T]` operating point
+    is unified to `[B,T]`. Config surface (`pgml.scenarios.config`): `DeviceState(name,
+    power_fraction, spectrum_scale=1, weight=1)`; `DeviceClassSpec(name, sign=±1,
+    rated_power_w=[lo,hi], power_factor=1, harmonic_magnitude={order:[lo,hi]} (FRACTION of
+    the device's own fundamental current, loosely IEC 61000-3-2-shaped — NOT the standard's
+    limits), harmonic_phase_deg={order:[lo,hi]}, gamma=[lo,hi] (mag∝lam**gamma, drawn per
+    member per order), phase_slope_deg=[lo,hi] (ang=ang0+s·(lam−1)), activity_preset
+    ("household"|"office"|"ev"|"restaurant"|"industrial"|"pv"|"flat"; reuses the profile
+    daily shapes), discrete_activity=True (on/off Markov) | False (continuous rate, e.g. PV/
+    base load), on_off_dwell=[lo,hi], loading_min, loading_mean=[lo,hi], loading_jitter,
+    loading_rho, states=[DeviceState,...] (multi-state: heating vs inverter), state_dwell)`;
+    `ClassCount(class_name, count=[min,max], power_share=1)`; `ConsumerComposition(
+    consumer_type=None, load_ids=None, classes=[ClassCount,...])` (rule match: load_ids >
+    consumer_type > fallback); `CompositionConfig(selector=None (all loads), classes=[...]
+    (=default_device_classes()), compositions=[...] (=default_compositions()),
+    scale_to_nominal=True (share-weighted installed capacity → load p_nom_w),
+    max_injection_pu=3.0 (cap the residual-THD blow-up near a net-zero fundamental),
+    behavioral_coupling=0.3, cloud_coupling=0.5, roster_seed=None (a held-out roster bank);
+    `.class_names()`)`. `default_device_classes()` = 6 built-ins (base_linear,
+    electronics_smps, ev_charger, pv_inverter, inverter_drive [multi-state], resistive_heating).
+  - `sample_device_composition(grid, config) -> CompositionDraw(operating_point[B,T],
+    harmonic_injection {id:{order:(mag[B,T],phase[B,T])}}, samples, composed_ids)` and
+    `resolve_composed_ids(grid, comp) -> [id]` (`pgml.scenarios.composition`);
+    `sample_coherent_spectra` calls them when `composition` is set. The composition draws on
+    roster + temporal streams DISTINCT from the fingerprint/op-cube/profile, so
+    `composition=None` is byte-identical. Attribution `samples` (fixed shapes; `name` =
+    `config.name`): `<name>_class_p_w [B,n_agg,n_class,T]` (signed per-class power),
+    `<name>_class_active [B,n_agg,n_class,T]` int64 (active member count), `<name>_cap_binding
+    [B,n_agg,n_ord,T]` (where the cap bound), `<name>_agg_ids [n_agg]`, `<name>_roster_p_rated
+    [n_agg,n_class,max_count]` (per-member rated powers). The `n_class` axis is ordered as
+    `config.composition.classes` — names via `config.composition.class_names()` (they live in
+    the config, not a sample tensor, since samples are tensor-only). `P_agg` may go
+    net-negative under PV (the Load then injects).
 - `ScenarioConfig(n_samples, seed=0, method="sobol"|"lhs"|"independent", parameters=[...],
   factors=[LatentFactor(...)])`. A spec's `correlation.factor` must name a declared factor.
 - `sample(grid, config) -> SampledScenarios(operating_point, samples, n_samples, config)`
@@ -156,9 +241,12 @@ verified `batched == loop-of-individual`).
   recovery) — extends `perturbation_sweep` with a branch-aware selector + matrix ground truth.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
 - Beta / scipy-backed distributions (no closed-form icdf).
-- **Long-term temporal-pattern simulation mode** — `CoherentSpectrumConfig` models only
-  short/medium-term dynamics (Markov mode dwell + AR(1) jitter over `T` steps). A long-horizon
-  generator with DIURNAL / WEEKLY / SEASONAL device recurrence (e.g. an EV charger active daily,
-  appliances on occupancy schedules) would let temporal state-estimation models (pgl) learn
-  long-range patterns. Needs a device on/off schedule / occupancy process layered on the
-  fingerprint, and longer sequences. Couples to the pgl temporal model's context length.
+- **Long-term temporal-pattern simulation mode** — the FUNDAMENTAL P/Q recurrence is now
+  covered by `CoherentSpectrumConfig.profile` (`LoadProfileConfig`): a diurnal / weekly /
+  seasonal multi-scale generator over an absolute `start_time`, class-aware by
+  `consumer_type` (incl. a `pv` solar bell). Remaining: the HARMONIC fingerprint itself is
+  still short/medium-term only (Markov mode dwell + AR(1) jitter over `T`) — a discrete
+  device on/off schedule / occupancy process that also switches the FINGERPRINT mode on the
+  same diurnal clock (an EV charger's harmonic signature appearing only while it charges)
+  would tie the harmonic attribution to the profile. Couples to the pgl temporal model's
+  context length.

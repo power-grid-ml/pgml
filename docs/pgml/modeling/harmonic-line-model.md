@@ -263,7 +263,7 @@ enter a balanced feeder), pgml's default **agrees** (`Z1(h) = R1 + j·X1·(f/f0)
 divergence is a property of the *reference setup*, not of the pgml model.
 
 ## Comparison to OpenDSS (honest scope)
-`examples/evaluate_line_sequence_harmonics.py` overlays, on
+`run/examples/evaluate_line_sequence_harmonics.py` overlays, on
 IEEE-33: the corrected positive-sequence model, the naive model, the single-conductor
 Carson model (== OpenDSS **1-phase** `LineGeometry`, which we still match bit-exact on the
 SAME geometry), and the live OpenDSS profile from that geometry.
@@ -301,6 +301,6 @@ naive curve (verified in `test_carson_sequence.py`), which the pgml default repr
   the sequence-aware assembly paths.
 * `tests/gpu/test_device_parity.py` — CPU/CUDA parity of the positive-sequence model, the
   sequence-aware model, their assembly paths, and the Carson geometry assembly path.
-* `examples/evaluate_line_sequence_harmonics.py` — `seq_xr_vs_harmonic.svg` (R/X vs h,
+* `run/examples/evaluate_line_sequence_harmonics.py` — `seq_xr_vs_harmonic.svg` (R/X vs h,
   pos vs zero seq), `gmr_floor.svg` (single- vs two-conductor synthesis), `feeder_h13.svg`
   (feeder profile, corrected vs naive vs single-conductor Carson vs OpenDSS).

@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from pgml.assembly import (
+    assemble_network_ybus,
     assemble_ybus,
     device_current_injections,
     node_phase_index,
@@ -27,6 +28,7 @@ from pgml.schemas.grid_schema import (
     LoadModel,
     Node,
     Phase,
+    ShuntAppliance,
     WindingConnection,
 )
 
@@ -197,3 +199,98 @@ def test_wye_neutral_returns_into_n_row():
     assert np.allclose(i_dev.numpy(), i_expected, atol=1e-9)
     # Sanity: nodal currents sum to zero (no current to ground via N path).
     assert abs(i_dev.numpy().sum()) < 1e-9
+
+
+# --- (d) return_path: grounded vs neutral-returning loads on ONE 4-wire bus ---
+def _single_phase_load(load_id, return_path):
+    return Load(
+        id=load_id,
+        node=1,
+        phases=(Phase.A,),
+        p_nom_w=2000.0 + 500.0 * load_id,
+        q_nom_var=400.0,
+        load_model=LoadModel.CONST_IMPEDANCE,
+        return_path=return_path,
+    )
+
+
+def _injections(appliances, v, index):
+    grid = Grid(
+        nodes=[Node(id=1, u_rated_v=400.0, phases=ABCN)], appliances=list(appliances)
+    )
+    return device_current_injections(grid, v, index, [50.0], dtype=CDT).squeeze(-2)
+
+
+def test_return_path_neutral_current_is_neutral_load_only():
+    """On a 4-wire bus carrying a GROUNDED and a NEUTRAL-returning WYE load, the
+    neutral-conductor current equals the neutral-returning load's current only; the
+    grounded load's return is absent from the neutral (it goes to ground)."""
+    # A grid with the node fixed so both single-phase loads share row layout.
+    index = node_phase_index(
+        Grid(nodes=[Node(id=1, u_rated_v=400.0, phases=ABCN)], appliances=[])
+    )
+    a_row = index.row(1, Phase.A)
+    n_row = index.row(1, Phase.N)
+
+    u_ln = 400.0 / math.sqrt(3.0)
+    v = torch.zeros(index.size, dtype=CDT)
+    v[a_row] = u_ln + 0j
+    v[index.row(1, Phase.B)] = u_ln * np.exp(-2j * np.pi / 3)
+    v[index.row(1, Phase.C)] = u_ln * np.exp(2j * np.pi / 3)
+    v[n_row] = 5.0 + 2.0j  # a live neutral so the return current is non-trivial
+
+    ground = _single_phase_load(1, "ground")
+    neutral = _single_phase_load(2, "neutral")
+
+    i_ground = _injections([ground], v, index)
+    i_neutral = _injections([neutral], v, index)
+    i_both = _injections([ground, neutral], v, index)
+
+    # Grounded load contributes nothing to the neutral conductor.
+    assert abs(i_ground[n_row].item()) < 1e-9
+    # The neutral current is the neutral-returning load's current only.
+    assert torch.allclose(i_both[n_row], i_neutral[n_row], atol=1e-9)
+    # Kirchhoff for a single-phase neutral-returning load: I_N = -I_A.
+    assert torch.allclose(i_neutral[n_row], -i_neutral[a_row], atol=1e-9)
+    # Both loads still contribute to the phase-A row (superposition).
+    assert torch.allclose(i_both[a_row], i_ground[a_row] + i_neutral[a_row], atol=1e-9)
+
+
+# --- (e) DELTA shunt appliance: cyclic phase-to-phase bank -------------------
+def test_delta_shunt_yblock_and_frequency_scaling():
+    """A DELTA :class:`ShuntAppliance` stamps ``M^T diag(G + jB) M`` with the cyclic
+    incidence, frequency-correct (``B = 2*pi*f*C``) at every harmonic order."""
+    g = (1.0e-6, 2.0e-6, 0.5e-6)
+    c = (3.0e-6, 1.0e-6, 2.0e-6)
+    grid = Grid(
+        nodes=[Node(id=1, u_rated_v=400.0, phases=ABC)],
+        appliances=[
+            ShuntAppliance(
+                id=1,
+                node=1,
+                phases=ABC,
+                conductance_s=g,
+                capacitance_f=c,
+                connection=WindingConnection.DELTA,
+            )
+        ],
+    )
+    m = np.array([[1.0, -1.0, 0.0], [0.0, 1.0, -1.0], [-1.0, 0.0, 1.0]])
+    for f0 in (50.0, 150.0):  # h=1 and h=3
+        yb = assemble_network_ybus(grid, f0, dtype=CDT)
+        block = _node_block(yb.Y, yb.index, 1).numpy()
+        y_np = np.array(g) + 1j * (2.0 * np.pi * f0) * np.array(c)
+        expected = m.T @ np.diag(y_np) @ m
+        assert np.allclose(block, expected, atol=1e-18)
+    # A balanced WYE bank (default) still stamps the diagonal (no cross-coupling).
+    wye = Grid(
+        nodes=[Node(id=1, u_rated_v=400.0, phases=ABC)],
+        appliances=[
+            ShuntAppliance(id=1, node=1, phases=ABC, conductance_s=g, capacitance_f=c)
+        ],
+    )
+    block = _node_block(
+        assemble_network_ybus(wye, 50.0, dtype=CDT).Y, node_phase_index(wye), 1
+    ).numpy()
+    y_np = np.array(g) + 1j * (2.0 * np.pi * 50.0) * np.array(c)
+    assert np.allclose(block, np.diag(y_np), atol=1e-18)

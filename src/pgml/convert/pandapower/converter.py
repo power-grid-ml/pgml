@@ -43,6 +43,37 @@ Slack voltage phasor stored in id_map
 ``id_map["slack_v_complex"]`` holds the complex slack phasor (in V, LL) as a
 Python complex number so the test can pass it directly to ``solve_harmonic``.
 
+``parallel`` (identical parallel systems)
+------------------------------------------
+A line/two-winding-transformer's ``parallel`` count (pandapower's number of
+electrically identical systems in parallel) divides the series impedance and
+multiplies the shunt admittance (line C/G, transformer magnetizing conductance/
+susceptance) and the rated power (``s_rated_va``), mirroring
+``pandapower.build_branch``'s own convention exactly (``_parallel_count``).
+``parallel==1`` (pandapower's own default) reproduces the pre-``parallel``-aware
+output byte-for-byte. ``trafo3w`` is not converted at all (see below), so its own
+``parallel`` column is moot.
+
+Bus-line / bus-transformer switches (``et='l'``/``'t'``)
+------------------------------------------------------------
+An OPEN ``et='l'``/``'t'`` switch (``net.switch``) converts its line/transformer
+as out-of-service (``_open_switch_targets``): the accepted approximation is that
+the WHOLE element drops, not just the switched terminal, so the still-connected
+terminal's shunt admittance is lost too (pandapower's own solver instead keeps
+that terminal energized via an internal auxiliary bus -- a finer-grained model
+this converter does not replicate). A closed switch, or no switch at all, changes
+nothing. Bus-bus (``et='b'``) switches are unaffected (still a near-ideal
+``Switch`` branch).
+
+Voltage-dependent (ZIP) loads
+-----------------------------
+``net.load``'s ``const_z_p_percent``/``const_i_p_percent``/``const_z_q_percent``/
+``const_i_q_percent`` columns map onto ``ZipCoefficients`` (``_zip_coefficients``),
+honoured by pandapower's own ``runpp`` whenever ``voltage_depend_loads=True`` (the
+default). All four at zero (pandapower's own default) converts with NO
+``zip_coefficients``/``load_model`` set, so a plain constant-power load stays
+byte-identical to the pre-ZIP-aware output.
+
 Only in-service elements are converted.
 """
 
@@ -74,6 +105,7 @@ from pgml.schemas.grid_schema import (
     Switch,
     Transformer,
     WindingConnection,
+    ZipCoefficients,
 )
 
 _logger = logging.getLogger("pgml")
@@ -229,6 +261,77 @@ def _scaling_factor(row: Any) -> float:
     ``sgen.scaling=0.0``)."""
     f = _opt_float(row, "scaling")
     return 1.0 if f is None else f
+
+
+def _parallel_count(row: Any) -> float:
+    """Read ``row['parallel']`` NaN-safely (missing/None/NaN -> 1.0, pandapower's own
+    default number of identical parallel systems). pandapower's own build stage
+    divides the series impedance by this count and multiplies the shunt admittance
+    (line C/G, transformer magnetizing conductance/susceptance) and the rated power
+    by it (see ``pandapower.build_branch``); the converter mirrors that exactly so
+    a ``parallel>1`` line/transformer solves identically to ``parallel`` electrically
+    identical copies wired in parallel."""
+    f = _opt_float(row, "parallel")
+    return 1.0 if f is None else f
+
+
+def _open_switch_targets(net: Any) -> tuple[set[int], set[int]]:
+    """Return ``(open_line_pp_indices, open_trafo_pp_indices)`` from ``net.switch``.
+
+    A bus-line (``et='l'``) or bus-transformer (``et='t'``) switch is a per-terminal
+    connectivity control: when OPEN it disconnects its element from that one bus.
+    The converter's accepted approximation treats ANY open line/trafo switch as
+    taking the WHOLE element out of service (equivalent to ``in_service=False`` on
+    that line/trafo) -- this also drops the shunt admittance (line charging,
+    transformer magnetizing) at the STILL-connected terminal, unlike pandapower's
+    own solver, which keeps that terminal energized via an internal auxiliary bus
+    (a finer-grained model this converter does not replicate). A closed switch (or
+    no switch at all) changes nothing; bus-bus (``et='b'``) switches are handled
+    separately (section 4, below).
+    """
+    open_lines: set[int] = set()
+    open_trafos: set[int] = set()
+    sw = getattr(net, "switch", None)
+    if sw is None or not len(sw):
+        return open_lines, open_trafos
+    for _, row in sw.iterrows():
+        if bool(row.get("closed", True)):
+            continue
+        et = str(row.get("et", ""))
+        if et not in ("l", "t"):
+            continue
+        element = int(row["element"])
+        (open_lines if et == "l" else open_trafos).add(element)
+    return open_lines, open_trafos
+
+
+def _zip_coefficients(row: Any) -> Optional[ZipCoefficients]:
+    """Build :class:`~pgml.schemas.grid_schema.ZipCoefficients` from a ``net.load``
+    row's ``const_z_p_percent``/``const_i_p_percent``/``const_z_q_percent``/
+    ``const_i_q_percent`` columns (NaN-safe, default 0.0 -- pandapower's own default,
+    a pure constant-power load). The four percentages independently fraction P and
+    Q into constant-impedance/constant-current/constant-power shares (``p_* = 1 -
+    z_* - i_*``), matching pandapower's own per-load ZIP model exactly (``runpp``'s
+    ``voltage_depend_loads=True`` default; see ``pandapower.build_bus
+    ._calc_pq_elements_and_add_on_ppc``). Returns ``None`` when all four percentages
+    are zero so a plain constant-power load stays byte-identical (no
+    ``zip_coefficients``/``load_model`` stamped)."""
+    z_p_pct = _opt_float(row, "const_z_p_percent") or 0.0
+    i_p_pct = _opt_float(row, "const_i_p_percent") or 0.0
+    z_q_pct = _opt_float(row, "const_z_q_percent") or 0.0
+    i_q_pct = _opt_float(row, "const_i_q_percent") or 0.0
+    if z_p_pct == 0.0 and i_p_pct == 0.0 and z_q_pct == 0.0 and i_q_pct == 0.0:
+        return None
+    z_p, i_p = z_p_pct / 100.0, i_p_pct / 100.0
+    z_q, i_q = z_q_pct / 100.0, i_q_pct / 100.0
+    return ZipCoefficients(
+        z_p=z_p,
+        i_p=i_p,
+        p_p=1.0 - z_p - i_p,
+        z_q=z_q,
+        i_q=i_q,
+        p_q=1.0 - z_q - i_q,
+    )
 
 
 def _opt_float(row: Any, column: str) -> Optional[float]:
@@ -398,9 +501,19 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # 2. Lines                                                             #
     # ------------------------------------------------------------------ #
+    # `open_line_switches`/`open_trafo_switches` (section 4's `_open_switch_targets`,
+    # computed once up front so both element loops can see it): a line/trafo with
+    # ANY open bus-element switch converts as out-of-service, same as
+    # `in_service=False` -- see `_open_switch_targets`'s docstring for the accepted
+    # approximation this implies (the still-connected terminal's shunt is dropped
+    # with it).
+    open_line_switches, open_trafo_switches = _open_switch_targets(net)
+
     branches: list = []
     for pp_idx, row in net.line.iterrows():
         if not bool(row.get("in_service", True)):
+            continue
+        if pp_idx in open_line_switches:
             continue
         from_bus = int(row["from_bus"])
         to_bus = int(row["to_bus"])
@@ -413,17 +526,34 @@ def to_grid(
 
         length_m = float(row["length_km"]) * 1_000.0
 
-        # Per-length positive-sequence SI parameters (1/m)
-        r1 = float(row["r_ohm_per_km"]) / 1_000.0  # Ohm/m
-        x1 = float(row["x_ohm_per_km"]) / 1_000.0  # Ohm/m (=2*pi*f0*L per m)
-        c1 = float(row.get("c_nf_per_km", 0.0) or 0.0) * 1.0e-9 / 1_000.0  # F/m
-        g1 = float(row.get("g_us_per_km", 0.0) or 0.0) * 1.0e-6 / 1_000.0  # S/m
+        # `parallel` identical systems: series impedance divides by the count,
+        # shunt admittance (C/G) multiplies by it (pandapower.build_branch's own
+        # convention -- see `_parallel_count`).
+        parallel = _parallel_count(row)
 
-        # Native zero-sequence columns (THREE_PHASE only; else config defaults).
+        # Per-length positive-sequence SI parameters (1/m)
+        r1 = float(row["r_ohm_per_km"]) / 1_000.0 / parallel  # Ohm/m
+        x1 = float(row["x_ohm_per_km"]) / 1_000.0 / parallel  # Ohm/m (=2*pi*f0*L per m)
+        c1 = (
+            float(row.get("c_nf_per_km", 0.0) or 0.0) * 1.0e-9 / 1_000.0 * parallel
+        )  # F/m
+        g1 = (
+            float(row.get("g_us_per_km", 0.0) or 0.0) * 1.0e-6 / 1_000.0 * parallel
+        )  # S/m
+
+        # Native zero-sequence columns (THREE_PHASE only; else config defaults);
+        # the same parallel factor applies (pandapower's own pd2ppc_zero mirrors
+        # the positive-sequence r_ohm_per_km/x_ohm_per_km/c_nf_per_km convention).
         r0 = _opt_per_km(row, "r0_ohm_per_km", 1_000.0)
         x0 = _opt_per_km(row, "x0_ohm_per_km", 1_000.0)
         c0_nf = _opt_per_km(row, "c0_nf_per_km", None)
         c0 = c0_nf * 1.0e-12 if c0_nf is not None else None
+        if r0 is not None:
+            r0 /= parallel
+        if x0 is not None:
+            x0 /= parallel
+        if c0 is not None:
+            c0 *= parallel
 
         branches.append(
             build_line_from_sequence(
@@ -513,6 +643,8 @@ def to_grid(
         for pp_idx, row in net.trafo.iterrows():
             if not bool(row.get("in_service", True)):
                 continue
+            if pp_idx in open_trafo_switches:
+                continue
             hv_bus = int(row["hv_bus"])
             lv_bus = int(row["lv_bus"])
             if hv_bus not in id_map["bus"] or lv_bus not in id_map["bus"]:
@@ -521,7 +653,7 @@ def to_grid(
             trafo_id = _id.next()
             id_map["trafo"][pp_idx] = trafo_id
 
-            sn_va = float(row["sn_mva"]) * 1.0e6  # VA
+            sn_va = float(row["sn_mva"]) * 1.0e6  # VA (single-unit rating)
             vn_hv_v = float(row["vn_hv_kv"]) * 1.0e3  # V
             vn_lv_v = float(row["vn_lv_kv"]) * 1.0e3  # V
             vk_pct = float(row["vk_percent"])
@@ -529,6 +661,14 @@ def to_grid(
             pfe_w = float(row.get("pfe_kw", 0.0) or 0.0) * 1.0e3  # W
             i0_pct = float(row.get("i0_percent", 0.0) or 0.0)
             shift_deg = float(row.get("shift_degree", 0.0) or 0.0)
+
+            # `parallel` identical units: the leakage impedance is computed from
+            # the SINGLE-unit `sn_mva` (pandapower's own convention, see
+            # `_calc_r_x_from_dataframe`), then the RESULT divides by the count;
+            # the magnetizing admittance (conductance/susceptance) and the rated
+            # power multiply by it (`_calc_y_from_dataframe`) -- see
+            # `_parallel_count`.
+            parallel = _parallel_count(row)
 
             from_connection, to_connection = _resolve_transformer_connections(
                 net, row, shift_deg
@@ -548,14 +688,19 @@ def to_grid(
             # for both phase modes (the p==1 scalar stamp via the `k_ll` factor
             # in `_transformer_block_groups`, the p==3 stamp via the
             # winding-incidence transform), so the converter applies it
-            # unconditionally, regardless of `phase_mode`.
+            # unconditionally, regardless of `phase_mode`. The `parallel` divide
+            # is applied last (order-independent relative to the coil factor).
             coil_factor = 3.0 if to_connection is WindingConnection.DELTA else 1.0
-            r_sc = coil_factor * r_ll
-            l_sc = coil_factor * l_ll
+            r_sc = coil_factor * r_ll / parallel
+            l_sc = coil_factor * l_ll / parallel
 
-            # Magnetizing branch (referred to HV side; added to the HV diagonal)
+            # Magnetizing branch (referred to HV side; added to the HV diagonal).
+            # `parallel` identical units contribute `parallel` times the single-
+            # unit admittance: conductance multiplies directly; the equivalent
+            # inductance (stored field) divides so its susceptance
+            # (1/(2*pi*f0*L)) multiplies by `parallel` too.
             if pfe_w > 0.0:
-                g_m = pfe_w / (vn_hv_v**2)
+                g_m = pfe_w / (vn_hv_v**2) * parallel
             else:
                 g_m = 0.0
 
@@ -567,7 +712,7 @@ def to_grid(
                 if q_nl_sq > 0.0:
                     b_m = math.sqrt(q_nl_sq) / (vn_hv_v**2)
                     if b_m > 0.0:
-                        l_m = 1.0 / (two_pi_f0 * b_m)
+                        l_m = 1.0 / (two_pi_f0 * b_m * parallel)
 
             tap_ratio = _tap_ratio_magnitude(row)
 
@@ -580,7 +725,7 @@ def to_grid(
                     to_node=id_map["bus"][lv_bus],  # to   = LV side
                     from_phases=tx_phases,
                     to_phases=tx_phases,
-                    s_rated_va=sn_va,
+                    s_rated_va=sn_va * parallel,
                     u_rated_from_v=vn_hv_v,
                     u_rated_to_v=vn_lv_v,
                     from_connection=from_connection,
@@ -597,12 +742,15 @@ def to_grid(
             )
 
     # ------------------------------------------------------------------ #
-    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch)      #
+    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).      #
+    #    Bus-line/bus-transformer switches (et='l'/'t') were already        #
+    #    resolved up front (`_open_switch_targets`, used by sections 2/3):  #
+    #    an OPEN one takes the whole line/trafo out of service.             #
     # ------------------------------------------------------------------ #
     if hasattr(net, "switch") and len(net.switch):
         for pp_idx, row in net.switch.iterrows():
             if str(row.get("et", "")) != "b":
-                continue  # only bus-bus switches
+                continue  # only bus-bus switches (l/t handled up front)
             if not bool(row.get("closed", True)):
                 continue  # open switch: no branch
             bus_from = int(row["bus"])
@@ -674,6 +822,13 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # 6. Loads (balanced net.load)                                         #
     # ------------------------------------------------------------------ #
+    # Voltage-dependent (ZIP) fractions: `const_z_p_percent`/`const_i_p_percent`/
+    # `const_z_q_percent`/`const_i_q_percent` (`_zip_coefficients`) map onto
+    # `ZipCoefficients`, honoured by pandapower's own `runpp` whenever
+    # `voltage_depend_loads=True` (the default). A load with all four percentages
+    # at zero (pandapower's own default -- a pure constant-power load) converts
+    # with NO `zip_coefficients`/`load_model` set, so it stays byte-identical to
+    # the pre-existing output.
     for pp_idx, row in net.load.iterrows():
         if not bool(row.get("in_service", True)):
             continue
@@ -698,6 +853,7 @@ def to_grid(
                 mode=phase_mode,
                 p_total_w=p_w,
                 q_total_var=q_var,
+                zip_coefficients=_zip_coefficients(row),
             )
         )
 

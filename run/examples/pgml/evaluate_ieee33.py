@@ -2,9 +2,9 @@
 
 Run::
 
-    pixi run -e cpu python examples/pgml/evaluate_ieee33.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/evaluate_ieee33.py [out_dir]
 
-Produces (default ``evaluation_output/``):
+Produces (default ``data/pgml/evaluation_output/``):
 - ``ybus_heatmaps.svg``       — our full Y vs pandapower network Y vs OpenDSS SystemY.
 - ``ybus_difference.svg``     — |ΔY| of the two most-similar versions (our network Y
                                 vs pandapower network Y) — near floating-point zero.
@@ -58,9 +58,9 @@ CONVERTER_SPECTRUM = [
 HARMONIC_ORDERS_3D = [5, 7, 9, 11, 13]
 
 
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def _build_dss_passive(net) -> None:

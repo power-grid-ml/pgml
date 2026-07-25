@@ -195,8 +195,9 @@ def test_coherent_stickiness_matches_dwell(grid3):
 
 
 def test_coherent_en50160_clamp(grid3):
+    # harmonic_reference is opt-in now (the default is IEC 61000-3-2); pin EN 50160.
     s = sample_coherent_spectra(
-        grid3, _ccfg(jitter_mag=0.5)
+        grid3, _ccfg(harmonic_reference="en50160", jitter_mag=0.5)
     )  # large jitter exercises clamp
     for order in (3, 5, 7):
         mag, _ = s.harmonic_injection[10][order]

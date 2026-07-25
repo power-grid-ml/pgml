@@ -2,10 +2,16 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
-`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.3"`) stamps the contract version
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.5"`) stamps the contract version
 into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
 minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
-while the library is < 1.0.0); bump the patch/minor on any contract change.
+while the library is < 1.0.0); bump the patch/minor on any contract change. (Rev 0.0.4: the
+dataset sidecar `meta.json` additionally records per-run convergence — `converged` +
+`failed_scenarios` — a persistence-contract addition; the three schema modules are unchanged.
+Rev 0.0.5: `InjectionAppliance.return_path` — "auto"/"neutral"/"ground" WYE return-conductor
+override, default "auto" = the historical node-level rule; `ShuntAppliance.connection` —
+WYE (default, phase-to-ground) or DELTA (cyclic phase-to-phase bank), zigzag rejected.
+Both defaults are backward-compatible; assembly enforces the semantics.)
 
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),

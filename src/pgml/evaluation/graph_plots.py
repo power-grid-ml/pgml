@@ -90,7 +90,7 @@ def load_node_positions(path, grid: Grid) -> dict:
     """Read a node-position JSON -> ``{node_id: (x, y)}`` via :func:`graph_layout` key rules.
 
     The file maps node names, zero-based node numbers, or node ids to ``[x, y]`` pairs
-    (e.g. ``examples/configs/cigre_lv_geo.json``, keyed by the CIGRE LV benchmark's
+    (e.g. ``run/configs/cigre_lv_geo.json``, keyed by the CIGRE LV benchmark's
     zero-based bus numbers). Every grid node must be covered.
     """
     import json

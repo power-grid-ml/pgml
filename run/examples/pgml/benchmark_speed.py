@@ -43,16 +43,16 @@ RUN
 ::
 
     # CPU-only host (this machine):
-    pixi run -e cpu python examples/pgml/benchmark_speed.py [out_dir]
+    pixi run -e cpu python run/examples/pgml/benchmark_speed.py [out_dir]
 
     # CUDA host (the GPU copy; the default pixi environment ships pytorch-gpu and also
     # runs the CPU series, so this single command yields the CPU-vs-GPU figures):
-    pixi run python examples/pgml/benchmark_speed.py [out_dir]
+    pixi run python run/examples/pgml/benchmark_speed.py [out_dir]
 
     # Faster, smaller sweep while iterating:
-    pixi run -e cpu python examples/pgml/benchmark_speed.py --quick
+    pixi run -e cpu python run/examples/pgml/benchmark_speed.py --quick
 
-Outputs (default ``evaluation_output/benchmark/``): ``results_<device>.json`` (raw
+Outputs (default ``data/pgml/evaluation_output/benchmark/``): ``results_<device>.json`` (raw
 numbers + host metadata), ``benchmark_summary.csv`` (flat table of every timed run),
 ``solver_comparison.svg`` (current-injection vs Newton), ``loadflow_vs_harmonic.svg``
 (per-scenario cost at the largest batch), ``throughput_vs_batch.svg`` (the scaling
@@ -102,9 +102,9 @@ SEED = 0
 # ---------------------------------------------------------------------------
 # grids
 # ---------------------------------------------------------------------------
-# Example outputs are anchored at examples/ (not the cwd), so a run writes
-# under examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def add_pv_systems(grid, *, fraction: float = 0.5) -> int:

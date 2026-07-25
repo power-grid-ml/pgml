@@ -46,8 +46,9 @@ Module: `pgml.assembly`
   - `YBus` (frozen dataclass): `Y: Tensor` complex `[*batch, H, N, N]`,
     `index: NodePhaseIndex`, `frequencies_hz: Tensor[H]`.
   - Contains every PASSIVE / Norton-shunt contribution: line series+shunt, switch,
-    generic branch, shunt reactor, transformer stamp, ShuntAppliance, source
-    Thévenin shunt `Y_s`, and the M1 const-Z load/gen shunt admittance.
+    generic branch, shunt reactor, transformer stamp, ShuntAppliance (WYE
+    phase-to-ground diagonal, or DELTA cyclic phase-to-phase `M^T diag(G+jB) M` bank),
+    source Thévenin shunt `Y_s`, and the M1 const-Z load/gen shunt admittance.
   - Unbatched squeeze to `[N,N]` ONLY when `frequencies_hz` is a bare python scalar
     and H==1; a length-1 list/tensor keeps the `[H,N,N]` (== `[1,N,N]`) shape.
   - `param_overrides` (ADDED, optional — see assumption note): `{(kind, id, field):
@@ -205,9 +206,21 @@ to element ("terminal") voltages `V_term = M @ V_used`; nodal admittance block =
 - DELTA, n==3: `M = [[1,-1,0],[0,1,-1],[-1,0,1]]` (circulant; element k between phase_k
   and phase_{(k+1)%3}; per-phase value k -> delta branch k). V0 = L-L (`u_rated`).
 - DELTA, n!=3: raises `NotImplementedError` (open/2-phase delta not modeled).
+- WYE return conductor override (`InjectionAppliance.return_path`): the 4-wire neutral
+  decision is per-appliance. `"auto"` (default) = the node-level rule above (neutral iff
+  the node carries `Phase.N`) — BYTE-IDENTICAL to the historical behaviour; `"ground"`
+  pins the return to ground even on a `Phase.N`-carrying node (`M = I_n`); `"neutral"`
+  requires `Phase.N` (raises `ModelingError` otherwise). `return_path` folds into
+  `has_neutral_return` and hence the grouping key, so a grounded and a neutral-returning
+  WYE appliance on the SAME node land in DIFFERENT groups with different `M`. A non-`"auto"`
+  value on a DELTA appliance raises `ModelingError` (fail loud).
 Public helpers: `group_appliances(appliances, node_map) -> list[IncidenceGroup]`
-(groups by `(connection, n_phases, has_neutral_return)`), `build_incidence(grp, rdt,
-device) -> M`, `used_rows(grp, index, device) -> [K, n_used]`. `phase_voltage_magnitude`
+(groups by `(connection, n_phases, has_neutral_return)`; `has_neutral_return` now
+incorporates `return_path`), `build_incidence(grp, rdt, device) -> M`,
+`cyclic_delta_incidence(n, rdt, device) -> M [n,n]` (the general cyclic DELTA incidence —
+`M[k,k]=1`, `M[k,(k+1)%n]=-1` — shared by the DELTA load `build_incidence` and the DELTA
+`ShuntAppliance` stamp; `n==3` is the historical circulant), `used_rows(grp, index,
+device) -> [K, n_used]`. `phase_voltage_magnitude`
 gained a `line_to_line: bool` arg (DELTA ⇒ True; `n_phases>=3` covers 4-wire ABCN).
 `resolve_operating_power` gained an `asymmetric: bool` arg (False ⇒ ignore per-phase,
 split totals equally). Its symmetric branch returns n INDEPENDENT entries

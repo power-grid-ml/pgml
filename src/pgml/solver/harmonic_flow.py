@@ -19,12 +19,17 @@ Model (matches OpenDSS ``Solve mode=harmonics`` — see
 1. Solve the nonlinear fundamental power flow (:func:`solve_power_flow`). Order 1 of
    the result is this solution.
 2. From the converged fundamental voltage, each Load/Generator's per-ELEMENT
-   FUNDAMENTAL current is ``I1_elem = sign * conj(S0_elem) / conj(V_term)`` (load
-   convention, ``sign`` +1 load / -1 gen, consistent with the const-Z stamp). The
-   ELEMENT (terminal) voltage ``V_term = M @ V_used`` uses the SAME connection
-   incidence ``M`` the load flow uses (``pgml.assembly._incidence``): WYE-ground
-   ``M = I``, WYE-neutral ``[I|-1]`` (terminal = ``V_phase - V_N``), DELTA-3
-   circulant (terminal = L-L difference).
+   FUNDAMENTAL current is ``I1_elem = sign * conj(S_eff) / conj(V_term)`` (load
+   convention, ``sign`` +1 load / -1 gen), where ``S_eff`` is the power the device
+   ACTUALLY draws at the converged voltage: the control-resolved (P, Q) for an
+   inverter-controlled device, the ZIP-scaled ``S0*(z*r^2 + i*r + p)`` at
+   ``r = |V_term|/V0`` for a voltage-dependent ``load_model``, and the base
+   operating point for the const-power default — identical to the nonlinear
+   fundamental solve's ``device_current_injections``. The ELEMENT (terminal)
+   voltage ``V_term = M @ V_used`` uses the SAME connection incidence ``M`` the
+   load flow uses (``pgml.assembly._incidence``): WYE-ground ``M = I``,
+   WYE-neutral ``[I|-1]`` (terminal = ``V_phase - V_N``), DELTA-3 circulant
+   (terminal = L-L difference).
 3. For each harmonic order ``h > 1`` (batched over all orders): the network is
    LINEAR. ``Y(h) = assemble_network_ybus(grid, [h*f0]) + source Norton shunt``.
    Each device injects (load-terminal convention) a per-element harmonic current
@@ -64,6 +69,7 @@ from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
     Load,
+    LoadModel,
     Phase,
     StaticSpectrum,
     WindingConnection,
@@ -78,6 +84,30 @@ from .power_flow import (
 )
 
 _log = logging.getLogger("pgml")
+
+
+def _integer_orders(harmonic_orders: Sequence) -> list[int]:
+    """Validate + normalize harmonic orders to a non-empty list of integers.
+
+    The harmonic machinery (spectra keyed by integer order, the per-order
+    assembly) is defined for INTEGER multiples of the fundamental only. A
+    non-integer order (an interharmonic, e.g. ``2.4``) would otherwise silently
+    truncate to the wrong frequency, so it is rejected. Integral floats
+    (``3.0``) are accepted and normalized.
+    """
+    orders: list[int] = []
+    for h in harmonic_orders:
+        hf = float(h)
+        if hf != int(hf):
+            raise InputError(
+                f"harmonic order {h!r} is not an integer multiple of the "
+                "fundamental. Interharmonics are not supported: spectra and the "
+                "per-order harmonic assembly are defined for integer orders only."
+            )
+        orders.append(int(hf))
+    if not orders:
+        raise InputError("harmonic_orders must be non-empty.")
+    return orders
 
 
 @dataclass(frozen=True)
@@ -254,9 +284,7 @@ def solve_harmonic_flow(
             "(pure current-source / NeglectLoadY model)."
         )
 
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -482,9 +510,7 @@ def assemble_harmonic_system(
         The compact :class:`NodePhaseIndex` describing the row layout of ``v1`` /
         ``Y`` / ``I``.
     """
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
             "assemble_harmonic_system assembles the LINEAR harmonic orders h > 1; "
@@ -569,9 +595,7 @@ def assemble_harmonic_ybus(
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
     """
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
             "assemble_harmonic_ybus assembles the LINEAR harmonic orders h > 1; order 1 is "
@@ -782,8 +806,10 @@ def _harmonic_injections(
     Load/Generator has a terminal incidence ``M`` ``[n_elem, n_used]``
     (``V_term = M @ V_used``); WYE-ground ``M = I``, WYE-neutral ``[I|-1]``, DELTA-3
     circulant. The per-ELEMENT fundamental current is
-    ``I1_elem = sign*conj(S0_elem)/conj(V_term)`` (TERMINAL voltage, not the phase
-    row), then per element and order
+    ``I1_elem = sign*conj(S_eff)/conj(V_term)`` (TERMINAL voltage, not the phase
+    row; ``S_eff`` = the model-consistent power at the converged voltage —
+    control-resolved, ZIP-scaled, or the base operating point, exactly as the
+    fundamental solve draws it), then per element and order
 
         ``|I_h^e| = (mag_h^e/mag_1^e)*|I1_elem|``
         ``arg(I_h^e) = ang_h^e + h*(arg(I1_elem) - ang_1^e)``
@@ -837,8 +863,12 @@ def _harmonic_injections(
 
             # The harmonic current scales from the FUNDAMENTAL current the device
             # actually draws. For a controlled inverter that is the control-resolved
-            # (P, Q) at the converged fundamental voltage (consistent with the
-            # control-aware fundamental solve); otherwise it is the base operating point.
+            # (P, Q) at the converged fundamental voltage; for a voltage-dependent
+            # load model it is the ZIP-scaled power S_eff = S0 * (z*r^2 + i*r + p)
+            # at r = |V_term|/V0 — both exactly as the nonlinear fundamental solve
+            # resolves them (device_current_injections), so the injected spectrum is
+            # anchored to the current the device actually carries at order 1.
+            lm = getattr(a, "load_model", None)
             if getattr(a, "control", None) is not None:
                 is_delta = grp.connection == WindingConnection.DELTA
                 v0 = phase_voltage_magnitude(
@@ -853,6 +883,20 @@ def _harmonic_injections(
                 s0 = torch.complex(
                     sign * p_eff.squeeze(-2), sign * q_eff.squeeze(-2)
                 ).to(cdt)  # [*b, n_elem]
+            elif lm is not None and lm is not LoadModel.CONST_POWER:
+                from pgml.assembly.ybus import _zip_coeffs
+
+                is_delta = grp.connection == WindingConnection.DELTA
+                v0 = phase_voltage_magnitude(
+                    node_map[a.node].u_rated_v,
+                    len(node_map[a.node].phases),
+                    line_to_line=is_delta,
+                )
+                zip_p, zip_q = _zip_coeffs(a, rdt, device)  # [3] constants
+                r = torch.abs(vt) / v0  # [*vbatch, n_elem]
+                scale_p = zip_p[0] * r * r + zip_p[1] * r + zip_p[2]
+                scale_q = zip_q[0] * r * r + zip_q[1] * r + zip_q[2]
+                s0 = torch.complex(sign * p_t * scale_p, sign * q_t * scale_q).to(cdt)
             else:
                 s0 = torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
             # Guard the conj(vt) divide for a dead/disconnected terminal (vt == 0)

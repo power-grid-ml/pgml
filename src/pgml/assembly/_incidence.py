@@ -24,6 +24,16 @@ Connection cases (``n = len(appliance.phases)``):
   phase rows PLUS the node's ``Phase.N`` row, ``M = [I_n | -1]`` (``n x (n+1)``;
   element ``k`` is ``V_phase_k - V_N``). Current scatters into the phase rows AND
   the ``N`` row (the ``N`` row gets ``-sum_k i_k``, Kirchhoff).
+
+The WYE return conductor of a 4-wire (``Phase.N``-carrying) node is chosen by the
+appliance's ``return_path`` (``InjectionAppliance.return_path``): ``'auto'`` (default)
+returns through the neutral whenever the node has one (the historical node-level
+rule), ``'ground'`` pins the return to ground even on a neutral-carrying node (the
+grounded-wye ``M = I_n`` case), and ``'neutral'`` requires ``Phase.N`` (a modeling
+error otherwise). Because a grounded and a neutral-returning WYE appliance on the
+SAME node need DIFFERENT incidence matrices, ``return_path`` is folded into
+``has_neutral_return`` and hence into the grouping key. ``return_path`` is
+meaningful for WYE only — a non-``'auto'`` value on a DELTA appliance raises.
 - DELTA, ``n == 3``: ``n_elem == 3``, used rows are the 3 phase rows,
   ``M = [[1,-1,0],[0,1,-1],[-1,0,1]]`` (circulant difference; element ``k`` is
   between phase ``k`` and phase ``(k+1) % 3``). Same matrix as pandapower's
@@ -82,12 +92,40 @@ class IncidenceGroup:
 
 
 def _group_key(appliance, node_phases) -> tuple:
-    """Hashable grouping key ``(connection, n_phases, has_neutral_return)``."""
+    """Hashable grouping key ``(connection, n_phases, has_neutral_return)``.
+
+    ``has_neutral_return`` folds the WYE ``return_path`` decision into the key so a
+    GROUNDED and a NEUTRAL-returning WYE appliance on the SAME node land in different
+    groups (different incidence ``M``). Raises :class:`ModelingError` for an ill-posed
+    request: ``return_path='neutral'`` on a node without ``Phase.N``, or any
+    non-``'auto'`` ``return_path`` on a DELTA-resolved appliance.
+    """
     conn = resolve_connection(appliance)
     if conn in (WindingConnection.WYE, WindingConnection.WYE_GROUNDED):
         conn = WindingConnection.WYE
     n = len(appliance.phases)
-    has_neutral = conn == WindingConnection.WYE and Phase.N in node_phases
+    return_path = getattr(appliance, "return_path", "auto")
+    if conn == WindingConnection.DELTA:
+        if return_path != "auto":
+            raise ModelingError(
+                f"appliance {appliance.id}: return_path={return_path!r} is meaningful "
+                "for a WYE connection only; a DELTA appliance has no neutral return "
+                "(use return_path='auto')."
+            )
+        return (conn, n, False)
+    node_has_neutral = Phase.N in node_phases
+    if return_path == "ground":
+        has_neutral = False
+    elif return_path == "neutral":
+        if not node_has_neutral:
+            raise ModelingError(
+                f"appliance {appliance.id}: return_path='neutral' requires the host "
+                "node to carry Phase.N, but it does not; add a neutral conductor to "
+                "the node or use return_path='auto'/'ground'."
+            )
+        has_neutral = True
+    else:  # 'auto' (default): the historical node-level rule
+        has_neutral = node_has_neutral
     return (conn, n, has_neutral)
 
 
@@ -126,22 +164,37 @@ def group_appliances(appliances, node_map) -> list[IncidenceGroup]:
     return groups
 
 
+def cyclic_delta_incidence(n: int, rdt: torch.dtype, device) -> Tensor:
+    """Cyclic DELTA incidence ``M`` ``[n, n]`` (constant topology).
+
+    Element ``k`` is the leg between phase ``k`` and phase ``(k+1) % n``
+    (``M[k, k] = +1``, ``M[k, (k+1) % n] = -1``). The nodal admittance of per-leg
+    admittances ``y`` is ``M^T diag(y) M`` — each leg stamped ``+y`` on both of its
+    phase diagonals and ``-y`` on the off-diagonals. For ``n == 3`` this is the
+    circulant difference matrix used by the DELTA load/generator incidence; the
+    generalisation over ``n`` also serves the DELTA :class:`ShuntAppliance` bank
+    (``n >= 2``). Built with ``torch.as_tensor``-style construction (no autograd
+    through ``M``).
+    """
+    m = torch.zeros((n, n), dtype=rdt, device=device)
+    rows = torch.arange(n, device=device)
+    m[rows, rows] = 1.0
+    m[rows, (rows + 1) % n] = -1.0
+    return m
+
+
 def build_incidence(grp: IncidenceGroup, rdt: torch.dtype, device) -> Tensor:
     """Real incidence ``M`` ``[n_elem, n_used]`` for ``grp`` (constant topology).
 
     WYE-ground -> ``I_n``; WYE-neutral -> ``[I_n | -1]``; DELTA-3 -> the circulant
-    difference matrix. Built with ``torch.as_tensor`` (no autograd through ``M``).
+    difference matrix (:func:`cyclic_delta_incidence`). Built with ``torch.as_tensor``
+    (no autograd through ``M``).
     """
     n = grp.n_phases
-    eye = torch.eye(n, dtype=rdt, device=device)
     if grp.connection == WindingConnection.DELTA:
-        # element k = phase_k - phase_{(k+1)%3}; rows are elements, cols phases.
-        m = torch.zeros((3, 3), dtype=rdt, device=device)
-        rows = torch.arange(3, device=device)
-        m[rows, rows] = 1.0
-        m[rows, (rows + 1) % 3] = -1.0
-        return m
+        return cyclic_delta_incidence(n, rdt, device)
     # WYE
+    eye = torch.eye(n, dtype=rdt, device=device)
     if grp.has_neutral_return:
         neg_one = -torch.ones((n, 1), dtype=rdt, device=device)
         return torch.cat([eye, neg_one], dim=-1)  # [n, n+1]
@@ -167,5 +220,6 @@ __all__ = [
     "IncidenceGroup",
     "group_appliances",
     "build_incidence",
+    "cyclic_delta_incidence",
     "used_rows",
 ]

@@ -60,6 +60,9 @@ figures.
   params → $Y(h)$ → $V$. Plus the `pgml.errors` hierarchy.
 - **Scenarios / data** — `pgml.scenarios`: `ScenarioConfig` / `CoherentSpectrumConfig` /
   `run_scenarios` (batched solve), `write_dataset` / `read_dataset` (parquet I/O).
+  `CoherentSpectrumConfig.composition` (`CompositionConfig`) turns an aggregated load into
+  a statistical device-class mix whose per-step activity drives both the fundamental power
+  and the injected spectrum jointly, with per-class attribution recorded as ground truth.
 - **Topology** — `pgml.assembly.node_phase_index` (the row layout), branch parameters, and
   `pgml.topology` (dependency-free: `slack_node_ids` / `slack_node_id`, `branch_edges`,
   `distance_from_slack` — nearest-slack distance, multi-source-ready — the graph features
@@ -68,7 +71,10 @@ figures.
   (`grid_graph`) used by the plotting stack. The PyTorch-Geometric `Data` / `Batch` builder
   is a `pgl` concern built on these. `pgml.topology.connectivity_report` /
   `energized_subgrid` back the pre-solve connectivity check (`pgml.errors.ConnectivityError`)
-  and the solver's `on_disconnected` handling.
+  and the solver's `on_disconnected` handling. `pgml.topology.layout_fingerprint` /
+  `network_fingerprint` are stable identity hashes of a grid's row layout and network
+  structure — the check a `pgl` checkpoint and a reused `PowerFlowSystem` use to refuse a
+  silently relabeled or structurally changed grid.
 - **Reference grids** — `pgml.grids`: the canonical IEEE-33 / CIGRE LV benchmark builders
   (pandapower → `Grid`, with synthesized Carson geometry and converter harmonic spectra),
   plus `add_pv_systems` and `se_benchmark_scenario_config` for the state-estimation

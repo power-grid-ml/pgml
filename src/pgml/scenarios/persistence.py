@@ -106,6 +106,13 @@ class LoadedDataset:
         Ground-truth ``ParameterPerturbation`` rows as dicts (empty if none).
     meta:
         The full sidecar dict (config_json, seed, dims, layout, …).
+    converged:
+        ``True`` iff every scenario's solve converged; ``None`` for a dataset written
+        before convergence metadata was persisted (validity unknown).
+    failed_scenarios:
+        Scenario indices (along ``B``) whose solve did NOT converge — their stored
+        voltages are best-effort iterates, not solutions. Consumers building training
+        data must drop (or explicitly keep) these rows.
     """
 
     v: Tensor
@@ -116,6 +123,8 @@ class LoadedDataset:
     config: object
     perturbations: list
     meta: dict
+    converged: Optional[bool] = None
+    failed_scenarios: tuple[int, ...] = ()
 
 
 def _np(t: Tensor, dtype=np.float64) -> np.ndarray:
@@ -307,8 +316,19 @@ def write_dataset(
         "config_json": cfg.model_dump_json(),
         "seed": getattr(cfg, "seed", None),
         "perturbations": [p.model_dump() for p in sampled.perturbations],
+        "converged": bool(result.converged),
+        "failed_scenarios": [int(i) for i in result.failed_states],
         **sample_meta,
     }
+    if result.failed_states:
+        _log.warning(
+            "write_dataset: %d/%d scenario(s) did NOT converge %s — their voltages "
+            "are best-effort iterates. The indices are persisted in meta.json "
+            "('failed_scenarios'); filter them before training.",
+            len(result.failed_states),
+            b,
+            list(result.failed_states[:10]),
+        )
     (path / _META).write_text(json.dumps(meta), encoding="utf-8")
     return path
 
@@ -364,7 +384,11 @@ def read_dataset(path) -> LoadedDataset:
             samples[name] = torch.from_numpy(np.array(arr)).reshape(b, *shape).to(tdt)
     for name, rec in meta["shared_samples"].items():
         tdt = getattr(torch, rec["dtype"].replace("torch.", ""))
-        samples[name] = torch.tensor(rec["data"]).to(tdt)
+        # Build AT the recorded dtype: torch.tensor infers float32 for a python-float
+        # list, which would truncate a large-magnitude float64 shared sample (e.g.
+        # ``time_unix_s`` epoch seconds ~1.7e9) before the cast. The JSON decimals are
+        # exact float64, so constructing at float64 restores them bit-for-bit.
+        samples[name] = torch.tensor(rec["data"], dtype=tdt)
 
     freqs = (
         torch.tensor(meta["frequencies_hz"], dtype=torch.float64)
@@ -377,6 +401,7 @@ def read_dataset(path) -> LoadedDataset:
         if cfg_cls is not None
         else json.loads(meta["config_json"])
     )
+    converged = meta.get("converged")
     return LoadedDataset(
         v=v,
         samples=samples,
@@ -386,6 +411,8 @@ def read_dataset(path) -> LoadedDataset:
         config=config,
         perturbations=meta["perturbations"],
         meta=meta,
+        converged=bool(converged) if converged is not None else None,
+        failed_scenarios=tuple(int(i) for i in meta.get("failed_scenarios", ())),
     )
 
 

@@ -101,11 +101,11 @@ partial layout would silently misplace the rest of the graph). An already
 node-id-keyed, fully-covering dict passes through unchanged (idempotent).
 :func:`~pgml.evaluation.load_node_positions` reads such a mapping from a JSON file (keys
 as strings) — the CIGRE LV benchmark's node coordinates ship as
-``examples/configs/cigre_lv_geo.json``, keyed by its zero-based bus numbers::
+``run/configs/cigre_lv_geo.json``, keyed by its zero-based bus numbers::
 
     from pgml.evaluation import load_node_positions
 
-    pos = load_node_positions("examples/configs/cigre_lv_geo.json", grid)
+    pos = load_node_positions("run/configs/cigre_lv_geo.json", grid)
     fig, ax = plot_grid_graph(grid, node_values=values, positions=pos)
 
 Reference builders and oracle functions
@@ -175,6 +175,103 @@ The optional ``node_sources`` argument accepts the same list of
 identical physics, so the oracle remains a machine-precision parity check even
 when per-node harmonic disturbance sources are active.
 
+OpenDSS scenario oracle (independent full-circuit export)
+-----------------------------------------------------------
+
+Unlike the live-parity adapters above (which overwrite selected OpenDSS
+elements with pgml's own stamps to isolate one model component),
+:mod:`pgml.evaluation.oracles.opendss_scenario_oracle` builds a **genuine,
+independent** OpenDSS circuit — its own ``Vsource`` / ``Line`` / ``Transformer``
+/ ``Load`` / ``Capacitor`` / ``Reactor`` elements — and runs OpenDSS's own
+physics end to end, with no pgml formula anywhere in the OpenDSS solve. It
+serves two purposes: numeric cross-validation of the whole solver against an
+independent reference, and generating an OpenDSS-solved dataset a trained
+state estimator never saw pgml produce.
+
+:func:`~pgml.evaluation.oracles.export_grid_to_opendss` builds the circuit
+once, returning an :class:`~pgml.evaluation.oracles.ExportedCircuit` handle
+that :func:`~pgml.evaluation.oracles.run_opendss_scenarios` edits and re-solves
+per scenario (and per step, for a node-coherent batch). Two assumption modes
+control how closely the exported circuit matches pgml's own reduced harmonic
+model:
+
+- ``mode="matched"`` (default) sets ``NeglectLoadY=Yes`` (pgml's harmonic
+  solver has no load Norton shunt at all), ``Rg=Xg=0`` on every line-like
+  element (pgml's non-geometry line models carry no Carson earth-return
+  correction), a tight snap-solve tolerance, and an effectively unbounded
+  ``Vminpu``/``Vmaxpu`` band on every load (pgml's load laws apply at any
+  voltage, unlike OpenDSS's default clipping band). This isolates genuine
+  numeric agreement between the two harmonic engines — measured (2026-07
+  comparison campaign) at roughly 1e-8 to 1e-9 relative voltage error on
+  single-phase feeder cases and roughly 1e-6 on the three-phase CIGRE LV
+  benchmark, with one documented, bounded exception (the triplen orders under
+  ``mode="default"``, below).
+- ``mode="default"`` leaves OpenDSS's own defaults (load Norton shunt
+  included, imperial-calibrated earth return, the default voltage-clip band)
+  — a deliberate, documented divergence characterizing how far a naive
+  "just point OpenDSS at the grid" study would drift from pgml's reduced
+  model, not a bug.
+
+::
+
+    from pgml.evaluation.oracles import (
+        export_grid_to_opendss, run_opendss_scenarios, compare_to_pgml,
+        write_opendss_dataset,
+    )
+    from pgml.scenarios import sample, ScenarioConfig
+
+    sampled = sample(grid, ScenarioConfig(n_samples=64, method="sobol", parameters=[...]))
+
+    # Numeric cross-validation: solve the SAME batch with both engines.
+    report = compare_to_pgml(grid, sampled, harmonic_orders=[1, 5, 7, 11])
+    # report["per_order"][5]  ->  {"rel_mean": ..., "rel_p95": ..., "rel_max": ..., ...}
+
+    # An independent, provenance-stamped test set for pgl.
+    write_opendss_dataset(grid, sampled, "data/opendss_testset", harmonic_orders=[1, 5, 7])
+    # meta.json gains engine="opendss", oracle_mode, opendssdirect_version, ...
+
+:func:`~pgml.evaluation.oracles.compare_to_pgml` runs
+:func:`~pgml.evaluation.oracles.run_opendss_scenarios` (the ground truth) and
+:func:`pgml.scenarios.run_scenarios` on the *identical*
+:class:`~pgml.scenarios.SampledScenarios` and reports, per harmonic order, the
+absolute and RMS-relative voltage error. Its ``slack`` argument defaults to
+``"norton"`` rather than pgml's own library default (``"ideal"``): an OpenDSS
+``Vsource`` always behaves as a finite-impedance Thévenin source, so comparing
+against pgml's ideal-slack solve on a grid with non-negligible source
+impedance would report a spurious mismatch that is really just two different
+slack models. :func:`~pgml.evaluation.oracles.write_opendss_dataset` writes
+the OpenDSS-solved result through :func:`pgml.scenarios.write_dataset`
+unchanged and stamps ``meta.json`` with ``engine="opendss"`` plus the
+OpenDSS/``opendssdirect`` version, so a dataset generated this way is never
+mistaken for a pgml-generated one and reads back through
+:func:`pgml.scenarios.read_dataset` / any ``pgl`` data source unmodified.
+
+The exporter covers every branch and appliance type in the schema (a
+``Generator``/``Storage`` exports as a negative-kW ``Load`` — a genuine
+OpenDSS ``Generator`` element stamps its own admittance into the harmonics
+solve regardless of ``NeglectLoadY``, so it cannot represent a pure current
+injection) and raises :class:`~pgml.errors.ConversionError` with a specific
+reason for grid features it does not (yet, or by design) represent —
+conductor-geometry lines (use the geometry-parity oracle above instead),
+zigzag transformer windings, a phase-coupled or unbalanced ``Source``, an
+impedance-grounded transformer neutral, and a nonzero vector-group phase
+shift on a single-phase transformer (OpenDSS has no delta/``LeadLag``
+mechanism at ``phases=1``). See the module docstring for the complete
+coverage and refusal list.
+
 .. automodule:: pgml.evaluation
+   :members:
+   :show-inheritance:
+
+Oracle subpackage reference
+------------------------------
+
+:mod:`pgml.evaluation.oracles` is documented separately below (a package-level
+``automodule``, the same pattern used for ``pgl``'s multi-submodule re-exporting
+packages — see e.g. :doc:`/pgl/api/data`): unlike :mod:`pgml.evaluation` itself, it
+requires the ``oracles`` extra (``pandapower``/``opendssdirect``) and is never imported
+by the plotting side.
+
+.. automodule:: pgml.evaluation.oracles
    :members:
    :show-inheritance:

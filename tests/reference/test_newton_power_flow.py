@@ -192,12 +192,27 @@ class TestLoadabilityContinuation:
             dtype=CDT,
         )
         assert res.feasible
+        assert not res.capped  # a genuine nose was found inside the ramp
         assert res.breaking_lambda == pytest.approx(1.25, abs=0.05)
         assert res.margin == pytest.approx(0.25, abs=0.05)
         # the load bus is the collapse point AND the limiting injection
         assert res.critical_nodes[0]["node_id"] == 2
         assert res.limiting_loads[0]["appliance_id"] == 30
         assert res.limiting_loads[0]["responsibility"] == pytest.approx(1.0)
+
+    def test_capped_ramp_reports_lower_bound(self) -> None:
+        # load = 0.1 * nose -> the true nose sits at λ* = 10, far past lambda_max:
+        # every ramp step converges, so the result is a censored LOWER BOUND.
+        res = loadability_limit(
+            _two_bus(0.1 * _nose_power()),
+            slack="ideal",
+            lambda_max=2.0,
+            lambda_step=0.5,
+            dtype=CDT,
+        )
+        assert res.capped
+        assert res.feasible
+        assert res.breaking_lambda == pytest.approx(2.0)
 
     def test_infeasible_load_past_nose(self) -> None:
         # load = 1.2 * nose  ->  infeasible: it breaks at λ* = 1/1.2 ≈ 0.833 < 1.

@@ -209,3 +209,20 @@ def test_differentiable_through_batch(grid3):
     assert (
         r.grad is not None and torch.isfinite(r.grad).all() and r.grad.abs().sum() > 0
     )
+
+
+def test_scenario_failures_map_step_indices_to_scenarios():
+    """Coherent [B, T] convergence masks flatten over B*T; failed indices must
+    come back as SCENARIO indices (deduplicated), not step indices."""
+    from pgml.scenarios.run import _scenario_failures
+
+    v_coherent = torch.zeros(4, 3, 2, 5, dtype=CDT)  # [B=4, T=3, H, N]
+    # steps 0..2 -> scenario 0; steps 3..5 -> scenario 1; step 11 -> scenario 3
+    assert _scenario_failures((0, 2, 4, 11), v_coherent, True) == (0, 1, 3)
+    # a single-scenario sequence [T, H, N]: any failed step fails scenario 0
+    v_single = torch.zeros(3, 2, 5, dtype=CDT)
+    assert _scenario_failures((1,), v_single, True) == (0,)
+    assert _scenario_failures((), v_single, True) == ()
+    # non-coherent runs pass through untouched
+    v_flat = torch.zeros(4, 5, dtype=CDT)
+    assert _scenario_failures((1, 3), v_flat, False) == (1, 3)
