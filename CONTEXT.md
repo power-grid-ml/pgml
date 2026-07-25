@@ -43,7 +43,7 @@ never as an import.
 toolkit; torch comes from conda and the packages pip-install on top (`run/cluster/environment.yml`).
 Quick iteration on a local dev GPU; large-batch runs on the cluster. SLURM jobs + the local
 orchestrator live in `run/cluster/` (see `run/cluster/README.md`); fetched results land in the
-untracked `data/results/`.
+untracked `data/pgl/`.
 
 ## Why all-PyTorch
 

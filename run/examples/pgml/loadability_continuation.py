@@ -28,7 +28,7 @@ RUN
 
     pixi run -e cpu python run/examples/pgml/loadability_continuation.py [out_dir]
 
-Outputs (default ``evaluation_output/loadability/``): ``pv_nose.svg`` (P-V curve),
+Outputs (default ``data/pgml/evaluation_output/loadability/``): ``pv_nose.svg`` (P-V curve),
 ``voltage_profile_nose.svg`` (critical bus highlighted), ``limiting_loads.svg`` (bar
 chart), and a printed summary.
 """
@@ -50,9 +50,9 @@ from pgml.solver import loadability_limit, solve_power_flow
 CDT = torch.complex128
 
 
-# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
-# under run/examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def scale_loads(grid, lam: float):

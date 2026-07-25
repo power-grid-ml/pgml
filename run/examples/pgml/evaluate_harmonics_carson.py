@@ -9,7 +9,7 @@ Run::
 
     pixi run -e cpu python run/examples/pgml/evaluate_harmonics_carson.py [out_dir]
 
-Per feeder (default ``evaluation_output/carson/<feeder>/``):
+Per feeder (default ``data/pgml/evaluation_output/carson/<feeder>/``):
 - ``ybus_h5.svg``          — pgml Y(5·f0) vs OpenDSS SystemY(5·f0) (|Y|, log).
 - ``ybus_h5_diff.svg``     — |ΔY| of the two (near floating-point zero).
 - ``harmonic_h5.svg``      — h=5 magnitude/angle profile, pgml vs OpenDSS.
@@ -44,9 +44,9 @@ CDT = torch.complex128
 ORDERS_3D = [5, 7, 11, 13]
 
 
-# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
-# under run/examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def _pgml_harmonic_y_labeled(grid, index, h, label):

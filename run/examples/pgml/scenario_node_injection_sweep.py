@@ -31,7 +31,7 @@ RUN
 
     pixi run -e cpu python run/examples/pgml/scenario_node_injection_sweep.py [out_dir]
 
-Outputs (default ``evaluation_output/scenario1/``): ``spread_h11.csv`` (m x i, per-unit),
+Outputs (default ``data/pgml/evaluation_output/scenario1/``): ``spread_h11.csv`` (m x i, per-unit),
 ``spread_h11.npz`` (per-unit magnitude + raw real/imag volts + the ``|V1|`` base),
 ``spread_h11.svg`` (heatmap), ``compare_h11.csv`` (pgml | opendss | Δ, per-unit, for a
 representative injection), ``compare_h11.svg`` (overlay), and a printed parity + timing
@@ -62,9 +62,9 @@ SOURCE_POWER_VA = 1.0e5  # error-source strength S_sc (short-circuit power); tun
 KIND = "voltage"  # "voltage" (Thévenin) or "current" (Norton)
 
 
-# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
-# under run/examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def read_spectrum_csv(path: Path) -> dict:

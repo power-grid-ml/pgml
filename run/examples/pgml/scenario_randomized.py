@@ -24,7 +24,7 @@ RUN
 
     pixi run -e cpu python run/examples/pgml/scenario_randomized.py [out_dir]
 
-Outputs (default ``evaluation_output/scenario2/``): ``symmetric/`` & ``asymmetric/``
+Outputs (default ``data/pgml/evaluation_output/scenario2/``): ``symmetric/`` & ``asymmetric/``
 parquet+CSV datasets, ``fundamental_phases.svg``, ``harmonics_3d.html``, and a printed
 timing + OpenDSS parity summary.
 """
@@ -63,9 +63,9 @@ N_SAMPLES = 16
 SEED = 0
 
 
-# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
-# under run/examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def build_config() -> ScenarioConfig:

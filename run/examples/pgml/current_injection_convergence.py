@@ -37,7 +37,7 @@ RUN
 
     pixi run -e cpu python run/examples/pgml/current_injection_convergence.py [out_dir]
 
-Outputs (default ``evaluation_output/current_injection/``): ``residual_vs_iter.svg``,
+Outputs (default ``data/pgml/evaluation_output/current_injection/``): ``residual_vs_iter.svg``,
 ``voltage_vs_iter.svg``, ``pv_nose.svg``, and a printed convergence table. Tune the source
 voltage / line ``R``, ``X`` / power factor at the top.
 """
@@ -70,9 +70,9 @@ _Z = complex(R_OHM, X_OHM)
 _TAN_PHI = math.tan(math.acos(POWER_FACTOR)) if POWER_FACTOR < 1.0 else 0.0
 
 
-# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
-# under run/examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def build_two_bus(p_w: float, q_var: float) -> Grid:

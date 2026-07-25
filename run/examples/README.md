@@ -20,11 +20,11 @@ per-package README is the map.
 
 ## Output locations
 
-Outputs default to **`run/examples/evaluation_output/<name>/`** — anchored to the `run/examples/`
-tree via each script's own path, so a run writes there regardless of the current working
-directory (it never pollutes the repository root). The `pgl` examples honour
-`$PGML_EXPERIMENTS/<name>/` when that variable is set (the cluster experiments root).
-`run/examples/evaluation_output/` is gitignored.
+Outputs go to the untracked **`data/`** root, per package — `data/pgml/evaluation_output/<name>/`
+for the `pgml` examples, `data/pgl/<name>/` for the `pgl` examples — anchored to the
+repository root via each script's own path, so a run writes there regardless of the
+current working directory. The `pgl` examples honour `$PGML_EXPERIMENTS/<name>/` when that
+variable is set (the cluster run dir).
 
 ## Shared config templates
 

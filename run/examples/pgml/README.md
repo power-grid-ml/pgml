@@ -4,8 +4,9 @@ Runnable, documented studies on real benchmark grids for the **power-grid-ml** (
 core — the differentiable, GPU-ready harmonic power-flow engine. Each script's module
 docstring is the authoritative "what / how / outputs" reference; this file is the map.
 
-Run from the repository root. Outputs are written under `run/examples/evaluation_output/<name>/`
-(anchored to the `run/examples/` tree, so they never land in the repository root):
+Run from the repository root. Outputs are written under `data/pgml/evaluation_output/<name>/`
+(the untracked data root, anchored to the repository root so they never land in the source
+tree):
 
 ```bash
 pixi run -e cpu python run/examples/pgml/<script>.py [out_dir]

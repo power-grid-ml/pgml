@@ -75,9 +75,9 @@ ORDERS = [1, 5, 7, 11, 13, 17, 25]
 
 
 # --- (1) sequence R/X vs harmonic ------------------------------------------
-# Example outputs are anchored at run/examples/ (not the cwd), so a run writes
-# under run/examples/evaluation_output/ rather than the repository root.
-_OUT = Path(__file__).resolve().parent.parent / "evaluation_output"
+# Example outputs are anchored at the repository root (not the cwd), so a run writes
+# under the untracked data root at data/pgml/evaluation_output/.
+_OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
 
 
 def _three_phase_geometry_z(freqs):

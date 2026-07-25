@@ -37,7 +37,7 @@ zero).
 Nonlinear power-flow voltage profile (per-unit vs distance), pgml versus pandapower.
 ```
 
-Outputs (default `evaluation_output/`):
+Outputs (default `data/pgml/evaluation_output/`):
 
 | File | Description |
 |------|-------------|
