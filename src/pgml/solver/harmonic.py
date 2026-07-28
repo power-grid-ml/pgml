@@ -87,6 +87,151 @@ def solve_harmonic(
     return v
 
 
+def solve_anchored(
+    y_bus: Tensor,
+    i_inj: Tensor,
+    *,
+    row_weight: Optional[Tensor] = None,
+    row_target: Optional[Tensor] = None,
+    op: Optional[Tensor] = None,
+    op_weight: Optional[Tensor] = None,
+    op_target: Optional[Tensor] = None,
+    fixed_rows: Optional[Tensor] = None,
+    v_fixed: Optional[Tensor] = None,
+) -> Tensor:
+    r"""Measurement-anchored (over-determined) network solve, batched and differentiable.
+
+    Solves, per right-hand side, the weighted least squares
+
+    .. math::
+        \min_V \; \lVert Y V - I \rVert^2
+            + \sum_r w^{\text{row}}_r \, \lvert V_r - t^{\text{row}}_r \rvert^2
+            + \sum_k w^{\text{op}}_k \, \lvert (\mathrm{op}\,V)_k - t^{\text{op}}_k \rvert^2
+
+    subject to ``V[fixed_rows] = v_fixed`` (optional hard Dirichlet slack). The primary term is
+    the ordinary nodal law ``Y V = I``; the two anchor terms softly pull node values
+    (``row_*`` — e.g. measured bus voltages) and a linear functional of the state (``op_*`` —
+    e.g. ``op`` = the branch-current map, anchoring measured branch currents) toward
+    measurements. With no anchors this is exactly :func:`solve_harmonic` (Norton, or ideal
+    slack when ``fixed_rows`` is given).
+
+    The solve is a REDUCED-correction Cholesky-style solve that reuses ONE factorization of the
+    (shared) operator ``Y``: with ``V = V_0 + Y^{-1} r`` and ``V_0 = Y^{-1} I`` the physics term
+    becomes ``\lVert r \rVert^2`` and the anchors a small system in ``r`` whose matrix
+    ``G = I + \sum w\,(A Y^{-1})^H (A Y^{-1})`` is Hermitian positive-definite (eigenvalues
+    ``\ge 1``) — so it is well-conditioned regardless of ``Y``'s conditioning, and ``Y`` is
+    never re-factorized per sample. Preserves the accuracy of the direct solve (no normal-
+    equations squaring of ``\kappa(Y)``).
+
+    Parameters
+    ----------
+    y_bus:
+        Complex ``[N, N]`` — the SHARED network operator (one system; loop externally over
+        harmonic orders / topologies, each with its own anchors).
+    i_inj:
+        Complex ``[*batch, N]`` (or ``[N]``) right-hand side.
+    row_weight, row_target:
+        ``[*batch, N]`` real weights ``\ge 0`` (``0`` = row not anchored) and ``[*batch, N]``
+        complex targets for the node anchors. ``row_target`` defaults to ``0``.
+    op, op_weight, op_target:
+        ``op`` is a complex ``[K, N]`` linear operator (grid-constant, e.g. the branch-current
+        map); ``op_weight`` ``[*batch, K]`` real weights and ``op_target`` ``[*batch, K]``
+        complex targets anchor ``op·V`` toward the target. All three must be given together.
+    fixed_rows, v_fixed:
+        Optional hard Dirichlet slack, identical contract to :func:`solve_harmonic`.
+
+    Returns
+    -------
+    Tensor
+        Complex node voltages ``[*batch, N]`` (``[N]`` if ``i_inj`` was 1-D).
+    """
+    if y_bus.ndim != 2:
+        raise InputError(
+            "solve_anchored takes a single shared operator y_bus [N, N] (the reduced solve "
+            "reuses one factorization); loop externally over any harmonic/topology axis."
+        )
+    has_row = row_weight is not None
+    has_op = op is not None and op_weight is not None
+    if not has_row and not has_op:
+        # no anchors -> the plain solve; add an explicit system axis so a batched RHS against
+        # the single [N, N] operator broadcasts correctly (solve_harmonic's 2-D path folds a
+        # batched RHS into one vector otherwise).
+        v = solve_harmonic(
+            y_bus.unsqueeze(0), i_inj, fixed_rows=fixed_rows, v_fixed=v_fixed
+        )
+        return v.squeeze(0) if i_inj.ndim == 1 else v
+
+    dtype, dev, n = y_bus.dtype, y_bus.device, y_bus.shape[-1]
+    unbatched = i_inj.ndim == 1
+    i = i_inj.reshape(1, -1) if unbatched else i_inj  # [*b, N]
+
+    # free / fixed partition (slack held exactly, anchored softly among the free rows)
+    if fixed_rows is not None:
+        fixed_rows = fixed_rows.to(device=dev, dtype=torch.int64)
+        keep = torch.ones(n, dtype=torch.bool, device=dev).index_fill(
+            0, fixed_rows, False
+        )
+        free = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+    else:
+        free = torch.arange(n, device=dev)
+    f = int(free.numel())
+
+    # Z = Y_ff^{-1} — the single shared factorization the whole batch reuses.
+    y_ff = _index_2d(y_bus, free, free)  # [F, F]
+    z = torch.linalg.solve(y_ff, torch.eye(f, dtype=dtype, device=dev))  # [F, F]
+
+    i_free = i.index_select(-1, free)  # [*b, F]
+    if fixed_rows is not None:
+        y_fs = _index_2d(y_bus, free, fixed_rows)  # [F, S]
+        vf = v_fixed.to(dtype=dtype, device=dev)
+        vf = vf.broadcast_to(*i_free.shape[:-1], fixed_rows.numel())  # [*b, S]
+        rhs_phys = i_free - torch.matmul(y_fs, vf.unsqueeze(-1)).squeeze(-1)
+    else:
+        rhs_phys = i_free
+    v0 = torch.matmul(z, rhs_phys.unsqueeze(-1)).squeeze(-1)  # [*b, F] = Y_ff^{-1} rhs
+
+    lead = rhs_phys.shape[:-1]
+    zh = z.conj().mT  # [F, F]
+    g = torch.eye(f, dtype=dtype, device=dev).expand(*lead, f, f).clone()
+    rhs_r = torch.zeros(*lead, f, dtype=dtype, device=dev)
+
+    if has_row:
+        wr = row_weight.index_select(-1, free).to(torch.float64)  # [*b, F]
+        wz = wr.unsqueeze(-1) * z  # diag(w_row) Z  [*b, F, F]
+        g = g + torch.matmul(zh, wz)  # Z^H diag(w_row) Z
+        tgt = (
+            row_target.index_select(-1, free)
+            if row_target is not None
+            else torch.zeros((), dtype=dtype, device=dev)
+        )
+        dv = wr * (v0 - tgt)  # [*b, F]
+        rhs_r = rhs_r - torch.matmul(zh, dv.unsqueeze(-1)).squeeze(-1)
+
+    if has_op:
+        op_free = op.index_select(-1, free)  # [K, F]
+        oz = torch.matmul(op_free, z)  # op_free Y_ff^{-1}  [K, F]
+        ozh = oz.conj().mT  # [F, K]
+        wo = op_weight.to(torch.float64)  # [*b, K]
+        woz = wo.unsqueeze(-1) * oz  # [*b, K, F]
+        g = g + torch.matmul(ozh, woz)
+        op_v0 = torch.matmul(op_free, v0.unsqueeze(-1)).squeeze(-1)  # [*b, K]
+        ot = op_target if op_target is not None else 0.0
+        if fixed_rows is not None:
+            op_fx = op.index_select(-1, fixed_rows)  # [K, S]
+            ot = ot - torch.matmul(op_fx, vf.unsqueeze(-1)).squeeze(-1)  # [*b, K]
+        di = wo * (op_v0 - ot)  # [*b, K]
+        rhs_r = rhs_r - torch.matmul(ozh, di.unsqueeze(-1)).squeeze(-1)
+
+    r = torch.linalg.solve(g, rhs_r.unsqueeze(-1)).squeeze(-1)  # [*b, F]
+    v_free = v0 + torch.matmul(z, r.unsqueeze(-1)).squeeze(-1)  # [*b, F]
+
+    v_full = torch.zeros(*lead, n, dtype=dtype, device=dev)
+    v_full = v_full.scatter(-1, free.expand(*lead, f), v_free)
+    if fixed_rows is not None:
+        v_full = v_full.scatter(-1, fixed_rows.expand(*lead, fixed_rows.numel()), vf)
+    return v_full.reshape(-1) if unbatched else v_full
+
+
 def _solve_norton(y: Tensor, i: Tensor) -> Tensor:
     """Dense solve ``v = Y^-1 I`` broadcasting over leading dims and H.
 
@@ -567,4 +712,10 @@ def solve_factored(
     return v_full
 
 
-__all__ = ["solve_harmonic", "lu_factor_system", "solve_factored", "FactoredSystem"]
+__all__ = [
+    "solve_harmonic",
+    "solve_anchored",
+    "lu_factor_system",
+    "solve_factored",
+    "FactoredSystem",
+]

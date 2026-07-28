@@ -16,6 +16,22 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
     `v_fixed`. `v_fixed`: complex, broadcastable to `[*batch, H, len(fixed_rows)]`
     (e.g. `[len(fixed_rows)]` constant across H/batch).
   - Gradients flow w.r.t. `y_bus`, `i_inj`, `v_fixed`. Dense `torch.linalg.solve`.
+- `solve_anchored(y_bus, i_inj, *, row_weight=None, row_target=None, op=None,
+  op_weight=None, op_target=None, fixed_rows=None, v_fixed=None) -> v` — MEASUREMENT-ANCHORED
+  (over-determined) network solve: `min_V ‖Y·V−I‖² + Σ w_r|V_r−t_r|² + Σ w_k|(op·V)_k−t_k|²`
+  s.t. `V[fixed_rows]=v_fixed`. `row_*` softly anchor node values ([*batch,N] real weight ≥0,
+  complex target) — e.g. measured bus voltages; `op` is a grid-constant complex `[K,N]` linear
+  operator (e.g. the branch-current map) whose functional `op·V` is anchored by `op_weight`
+  [*batch,K] / `op_target` [*batch,K] — e.g. measured branch currents. No anchors ⇒ identical
+  to `solve_harmonic`.
+  - `y_bus` is a SINGLE shared operator `[N,N]` (loop externally over any H/topology axis); the
+    solve REUSES ONE factorization of `Y` across the batch via the reduced correction
+    `V = V₀ + Y⁻¹r`, `V₀ = Y⁻¹I`: the anchors form a small system `G·r = …` with
+    `G = I + Σ w·(A Y⁻¹)^H(A Y⁻¹)` (Hermitian PD, eigenvalues ≥ 1 → well-conditioned regardless
+    of κ(Y); no per-sample re-factorization, no normal-equations κ²). Returns `[*batch, N]`.
+  - Gradients flow w.r.t. `y_bus`, `i_inj`, the targets and `op`. Consumers: the pgl
+    injection-decode anchoring (`pgl.physics.NetworkSolver`); reusable for a classical WLS
+    state-estimation solve.
 
 ## Slack / reference handling (both modes, both differentiable)
 1. **Norton (default, `fixed_rows=None`)**: sources are already stamped as a shunt
