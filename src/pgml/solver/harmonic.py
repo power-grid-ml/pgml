@@ -115,13 +115,17 @@ def solve_anchored(
     measurements. With no anchors this is exactly :func:`solve_harmonic` (Norton, or ideal
     slack when ``fixed_rows`` is given).
 
-    The solve is a REDUCED-correction Cholesky-style solve that reuses ONE factorization of the
-    (shared) operator ``Y``: with ``V = V_0 + Y^{-1} r`` and ``V_0 = Y^{-1} I`` the physics term
-    becomes ``\lVert r \rVert^2`` and the anchors a small system in ``r`` whose matrix
-    ``G = I + \sum w\,(A Y^{-1})^H (A Y^{-1})`` is Hermitian positive-definite (eigenvalues
-    ``\ge 1``) — so it is well-conditioned regardless of ``Y``'s conditioning, and ``Y`` is
-    never re-factorized per sample. Preserves the accuracy of the direct solve (no normal-
-    equations squaring of ``\kappa(Y)``).
+    The solve is a REDUCED-correction solve that inverts the (shared) operator ``Y`` ONCE for
+    the whole batch: with ``V = V_0 + Y^{-1} r`` and ``V_0 = Y^{-1} I`` the physics term
+    becomes ``\lVert r \rVert^2`` and the anchors a correction system in ``r`` whose matrix
+    ``G = I + \sum w\,(A Y^{-1})^H (A Y^{-1})`` is Hermitian positive-definite with
+    eigenvalues ``\ge 1``, Cholesky-factored per right-hand side. The identity floor keeps
+    that factorization stable, and the physics block never passes through normal equations
+    (no ``\kappa(Y)^2`` squaring there) — but ``\kappa(G)`` itself grows with
+    ``w \cdot \sigma_{\max}(Y^{-1})^2``, so callers should scale anchor weights relative to
+    ``Y`` (e.g. by a typical singular value, as the pgl consumer does). Anchor weights are
+    cast to the real dtype paired with ``y_bus``'s complex dtype (complex64 and complex128
+    both supported).
 
     Parameters
     ----------
@@ -162,6 +166,7 @@ def solve_anchored(
         return v.squeeze(0) if i_inj.ndim == 1 else v
 
     dtype, dev, n = y_bus.dtype, y_bus.device, y_bus.shape[-1]
+    rdt = y_bus.real.dtype if y_bus.is_complex() else y_bus.dtype
     unbatched = i_inj.ndim == 1
     i = i_inj.reshape(1, -1) if unbatched else i_inj  # [*b, N]
 
@@ -196,7 +201,7 @@ def solve_anchored(
     rhs_r = torch.zeros(*lead, f, dtype=dtype, device=dev)
 
     if has_row:
-        wr = row_weight.index_select(-1, free).to(torch.float64)  # [*b, F]
+        wr = row_weight.index_select(-1, free).to(rdt)  # [*b, F]
         wz = wr.unsqueeze(-1) * z  # diag(w_row) Z  [*b, F, F]
         g = g + torch.matmul(zh, wz)  # Z^H diag(w_row) Z
         tgt = (
@@ -211,7 +216,7 @@ def solve_anchored(
         op_free = op.index_select(-1, free)  # [K, F]
         oz = torch.matmul(op_free, z)  # op_free Y_ff^{-1}  [K, F]
         ozh = oz.conj().mT  # [F, K]
-        wo = op_weight.to(torch.float64)  # [*b, K]
+        wo = op_weight.to(rdt)  # [*b, K]
         woz = wo.unsqueeze(-1) * oz  # [*b, K, F]
         g = g + torch.matmul(ozh, woz)
         op_v0 = torch.matmul(op_free, v0.unsqueeze(-1)).squeeze(-1)  # [*b, K]
@@ -222,7 +227,9 @@ def solve_anchored(
         di = wo * (op_v0 - ot)  # [*b, K]
         rhs_r = rhs_r - torch.matmul(ozh, di.unsqueeze(-1)).squeeze(-1)
 
-    r = torch.linalg.solve(g, rhs_r.unsqueeze(-1)).squeeze(-1)  # [*b, F]
+    # G is Hermitian PD by construction (eigenvalues >= 1), so a batched Cholesky is the
+    # cheapest stable factorization for the per-right-hand-side correction system.
+    r = torch.cholesky_solve(rhs_r.unsqueeze(-1), torch.linalg.cholesky(g)).squeeze(-1)
     v_free = v0 + torch.matmul(z, r.unsqueeze(-1)).squeeze(-1)  # [*b, F]
 
     v_full = torch.zeros(*lead, n, dtype=dtype, device=dev)

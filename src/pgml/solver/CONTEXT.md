@@ -25,10 +25,14 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   [*batch,K] / `op_target` [*batch,K] — e.g. measured branch currents. No anchors ⇒ identical
   to `solve_harmonic`.
   - `y_bus` is a SINGLE shared operator `[N,N]` (loop externally over any H/topology axis); the
-    solve REUSES ONE factorization of `Y` across the batch via the reduced correction
-    `V = V₀ + Y⁻¹r`, `V₀ = Y⁻¹I`: the anchors form a small system `G·r = …` with
-    `G = I + Σ w·(A Y⁻¹)^H(A Y⁻¹)` (Hermitian PD, eigenvalues ≥ 1 → well-conditioned regardless
-    of κ(Y); no per-sample re-factorization, no normal-equations κ²). Returns `[*batch, N]`.
+    solve inverts `Y` ONCE for the whole batch via the reduced correction
+    `V = V₀ + Y⁻¹r`, `V₀ = Y⁻¹I`: the anchors form a correction system `G·r = …` with
+    `G = I + Σ w·(A Y⁻¹)^H(A Y⁻¹)` — Hermitian PD, eigenvalues ≥ 1, Cholesky-factored per
+    right-hand side. The identity floor keeps the factorization stable and the physics block
+    avoids normal-equations κ(Y)²; κ(G) itself still grows with `w·σmax(Y⁻¹)²`, so scale
+    anchor weights relative to `Y` (a typical singular value — the pgl consumer's auto-scale).
+    Anchor weights are cast to the real dtype paired with `y_bus` (complex64/128 both
+    supported). Returns `[*batch, N]`.
   - Gradients flow w.r.t. `y_bus`, `i_inj`, the targets and `op`. Consumers: the pgl
     injection-decode anchoring (`pgl.physics.NetworkSolver`); reusable for a classical WLS
     state-estimation solve.
