@@ -117,6 +117,15 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
 
 ### D. Smaller follow-ups (no decision needed)
 
+- **Per-scenario staggered composition starts**: the composed coherent generator evaluates
+  ONE absolute time window for every scenario (`composition.sample_device_composition`
+  builds a single `[T]` hour/day axis from `config.start_time`), so a dataset's diurnal
+  coverage is whatever the anchor hour provides — a midnight anchor leaves office/PV
+  activity near zero for the whole dataset. Draw a per-scenario start offset (seeded,
+  recorded in the samples sidecar) so the scenarios spread over the day; the per-step
+  `time_unix_s` becomes `[B, T]` and the `pgl` time features must consume the per-sample
+  axis. WHERE: `src/pgml/scenarios/composition.py`, `harmonics.py` (sidecar),
+  `src/pgl/time_features.py`.
 - **SolvedState mutation guard**: lazy accessors recompute from the referenced grid; the
   no-mutation-after-solve rule is currently a docstring contract only. Reuse the network
   fingerprint (the `PowerFlowSystem` guard mechanism) to detect post-solve grid mutation
