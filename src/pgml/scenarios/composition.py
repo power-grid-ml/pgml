@@ -52,7 +52,10 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from pgml.assembly._params import phase_voltage_magnitude
 from pgml.schemas.grid_schema import Grid, Load
+
+from .iec61000_3_2 import iec61000_3_2_fraction
 
 from .config import (
     CoherentSpectrumConfig,
@@ -333,10 +336,14 @@ def _build_roster(
     # sidecar: (agg_idx, class_idx) -> [p_rated, ...]
     sidecar: dict = {}
 
+    nodes_by_id = {n.id: n for n in grid.nodes}
     for a_idx, cid in enumerate(composed_ids):
         load = by_id[cid]
         rule = _rule_for_load(comp, load)
         p_nom = abs(float(load.p_nom_w))
+        node = nodes_by_id[load.node]
+        u_ln = phase_voltage_magnitude(float(node.u_rated_v), len(node.phases))
+        n_load_phases = max(1, len(load.phases))
         members: list = []  # (class_idx, cls, share, p_raw_tensor)
         weighted_total = torch.zeros((), dtype=_F64)
         for cc in rule.classes:
@@ -399,10 +406,39 @@ def _build_roster(
             if (comp.scale_to_nominal and p_nom > 0.0)
             else torch.ones((), dtype=_F64)
         )
-        for ci, _cls, share, p_raw in members:
+        # Per-member IEC 61000-3-2 emission cap, at the EFFECTIVE rated power (after
+        # scale_to_nominal): a roster's aggregate can only emit what its individual
+        # appliances are permitted to inject, keeping the composed spectra inside the
+        # same physical envelope the randomized h_mag sampling references. Applied
+        # here (not at draw time) because Class A/B absolute limits need the scaled
+        # member power. Single-phase-equivalent power (member power / load phases),
+        # matching ``iec61000_3_2_device_caps``.
+        member_start = len(mag_rated) - len(members)
+        for j, (ci, cls, share, p_raw) in enumerate(members):
             pr = alpha * share * p_raw
             p_rated.append(pr)
             sidecar.setdefault((a_idx, ci), []).append(pr)
+            if bool((mag_rated[member_start + j] > 0).any()):
+                p_phase = float(pr) / n_load_phases
+                cls_eff = cls.emission_class or (
+                    "D" if 75.0 <= p_phase <= 600.0 else "A"
+                )
+                cap = torch.tensor(
+                    [
+                        iec61000_3_2_fraction(
+                            o,
+                            emission_class=cls_eff,
+                            p_w=p_phase,
+                            u_ln_v=u_ln,
+                            power_factor=cls.power_factor,
+                        )
+                        for o in orders
+                    ],
+                    dtype=_F64,
+                )
+                mag_rated[member_start + j] = torch.minimum(
+                    mag_rated[member_start + j], cap
+                )
 
     m = len(load_idx)
     n_agg = len(composed_ids)

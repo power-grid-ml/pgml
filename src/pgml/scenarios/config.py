@@ -636,8 +636,16 @@ class DeviceClassSpec(_Base):
 
     #: Per-order harmonic magnitude ranges at RATED load, as a FRACTION of the device's
     #: own fundamental current: ``{order: [low, high]}`` (orders >= 2; absent = no
-    #: emission at that order). Bounded loosely by the IEC 61000-3-2 shape.
+    #: emission at that order). Every drawn member ratio is additionally CAPPED at the
+    #: member's IEC 61000-3-2 emission fraction (evaluated at the member's effective
+    #: rated power after ``scale_to_nominal``), so an aggregated roster can never emit
+    #: beyond what its individual appliances are permitted to inject — the same physical
+    #: envelope the randomized ``h_mag`` sampling references.
     harmonic_magnitude: dict[int, tuple[float, float]] = Field(default_factory=dict)
+    #: IEC 61000-3-2 equipment class for the member emission cap: ``"A"``/``"B"``/
+    #: ``"C"``/``"D"``, or ``None`` (default) to resolve automatically from the member's
+    #: effective per-phase power (Class D inside its 75-600 W window, else Class A).
+    emission_class: Optional[Literal["A", "B", "C", "D"]] = None
     #: Per-order harmonic phase ranges [deg] at rated load: ``{order: [low, high]}``.
     harmonic_phase_deg: dict[int, tuple[float, float]] = Field(default_factory=dict)
     #: Range for the per-order magnitude load-dependence exponent ``gamma_h``.

@@ -372,6 +372,7 @@ def test_multistate_spectrum_tracks_power_state():
     grid = _one_load_grid(p_nom=2000.0)
     drive = DeviceClassSpec(
         name="drive",
+        emission_class="D",
         sign=1,
         rated_power_w=(2000.0, 2000.0),
         harmonic_magnitude={5: (0.3, 0.3)},
@@ -427,6 +428,7 @@ def test_single_member_aggregate_follows_lam_gamma():
     g = -1.2
     cls = DeviceClassSpec(
         name="c",
+        emission_class="D",
         sign=1,
         rated_power_w=(1000.0, 1000.0),
         harmonic_magnitude={5: (0.3, 0.3)},
@@ -469,6 +471,7 @@ def test_cap_binding_recorded_on_pv_cancelling_load():
     load = DeviceClassSpec(
         name="load",
         sign=1,
+        emission_class="D",
         rated_power_w=(3000.0, 3000.0),
         harmonic_magnitude={5: (0.2, 0.2)},
         harmonic_phase_deg={5: (0.0, 0.0)},
@@ -628,3 +631,47 @@ def test_composed_solve_is_differentiable():
     res.v.abs().sum().backward()
     assert r.grad is not None and torch.isfinite(r.grad).all()
     assert float(r.grad.abs().sum()) > 0.0
+
+
+def test_member_emission_capped_at_iec_fraction():
+    """A drawn member ratio above the member's IEC 61000-3-2 emission fraction is
+    clamped to it (at the EFFECTIVE scaled power); ratios below the cap are kept."""
+    from pgml.scenarios.composition import _build_roster
+    from pgml.scenarios.iec61000_3_2 import iec61000_3_2_fraction
+
+    grid = _one_load_grid(p_nom=4000.0)
+    comp = CompositionConfig(
+        classes=[
+            DeviceClassSpec(
+                name="hot",
+                rated_power_w=(1000.0, 1000.0),
+                harmonic_magnitude={3: (0.9, 0.9)},
+            ),
+            DeviceClassSpec(
+                name="mild",
+                rated_power_w=(1000.0, 1000.0),
+                harmonic_magnitude={3: (0.01, 0.01)},
+            ),
+        ],
+        compositions=[
+            ConsumerComposition(
+                classes=[
+                    ClassCount(class_name="hot", count=(1, 1), power_share=1.0),
+                    ClassCount(class_name="mild", count=(1, 1), power_share=1.0),
+                ]
+            )
+        ],
+    )
+    ids = resolve_composed_ids(grid, comp)
+    roster = _build_roster(grid, comp, ids, [3], seed=0)
+    # scale_to_nominal: two equal-share 1 kW members scale to 2 kW each (4 kW load)
+    assert torch.allclose(roster.p_rated, torch.full((2,), 2000.0, dtype=torch.float64))
+    cap = iec61000_3_2_fraction(3, emission_class="A", p_w=2000.0, u_ln_v=230.0)
+    assert 0.0 < cap < 0.9
+    hot, mild = (
+        (0, 1)
+        if float(roster.mag_rated[0, 0]) > float(roster.mag_rated[1, 0])
+        else (1, 0)
+    )
+    assert float(roster.mag_rated[hot, 0]) == pytest.approx(cap, rel=1e-9)
+    assert float(roster.mag_rated[mild, 0]) == pytest.approx(0.01, rel=1e-9)

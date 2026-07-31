@@ -123,7 +123,11 @@ verified `batched == loop-of-individual`).
     ("household"|"office"|"ev"|"restaurant"|"industrial"|"pv"|"flat"; reuses the profile
     daily shapes), discrete_activity=True (on/off Markov) | False (continuous rate, e.g. PV/
     base load), on_off_dwell=[lo,hi], loading_min, loading_mean=[lo,hi], loading_jitter,
-    loading_rho, states=[DeviceState,...] (multi-state: heating vs inverter), state_dwell)`;
+    loading_rho, states=[DeviceState,...] (multi-state: heating vs inverter), state_dwell,
+    emission_class=None ("A"/"B"/"C"/"D" | None = auto by per-phase power))`. Every drawn
+    member harmonic ratio is CAPPED at the member's IEC 61000-3-2 emission fraction
+    (evaluated at the effective scaled power) so composed aggregates stay inside the same
+    physical envelope the randomized `h_mag` sampling references;
     `ClassCount(class_name, count=[min,max], power_share=1)`; `ConsumerComposition(
     consumer_type=None, load_ids=None, classes=[ClassCount,...])` (rule match: load_ids >
     consumer_type > fallback); `CompositionConfig(selector=None (all loads), classes=[...]
