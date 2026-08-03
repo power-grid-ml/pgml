@@ -16,6 +16,26 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
     `v_fixed`. `v_fixed`: complex, broadcastable to `[*batch, H, len(fixed_rows)]`
     (e.g. `[len(fixed_rows)]` constant across H/batch).
   - Gradients flow w.r.t. `y_bus`, `i_inj`, `v_fixed`. Dense `torch.linalg.solve`.
+- `solve_anchored(y_bus, i_inj, *, row_weight=None, row_target=None, op=None,
+  op_weight=None, op_target=None, fixed_rows=None, v_fixed=None) -> v` — MEASUREMENT-ANCHORED
+  (over-determined) network solve: `min_V ‖Y·V−I‖² + Σ w_r|V_r−t_r|² + Σ w_k|(op·V)_k−t_k|²`
+  s.t. `V[fixed_rows]=v_fixed`. `row_*` softly anchor node values ([*batch,N] real weight ≥0,
+  complex target) — e.g. measured bus voltages; `op` is a grid-constant complex `[K,N]` linear
+  operator (e.g. the branch-current map) whose functional `op·V` is anchored by `op_weight`
+  [*batch,K] / `op_target` [*batch,K] — e.g. measured branch currents. No anchors ⇒ identical
+  to `solve_harmonic`.
+  - `y_bus` is a SINGLE shared operator `[N,N]` (loop externally over any H/topology axis); the
+    solve inverts `Y` ONCE for the whole batch via the reduced correction
+    `V = V₀ + Y⁻¹r`, `V₀ = Y⁻¹I`: the anchors form a correction system `G·r = …` with
+    `G = I + Σ w·(A Y⁻¹)^H(A Y⁻¹)` — Hermitian PD, eigenvalues ≥ 1, Cholesky-factored per
+    right-hand side. The identity floor keeps the factorization stable and the physics block
+    avoids normal-equations κ(Y)²; κ(G) itself still grows with `w·σmax(Y⁻¹)²`, so scale
+    anchor weights relative to `Y` (a typical singular value — the pgl consumer's auto-scale).
+    Anchor weights are cast to the real dtype paired with `y_bus` (complex64/128 both
+    supported). Returns `[*batch, N]`.
+  - Gradients flow w.r.t. `y_bus`, `i_inj`, the targets and `op`. Consumers: the pgl
+    injection-decode anchoring (`pgl.physics.NetworkSolver`); reusable for a classical WLS
+    state-estimation solve.
 
 ## Slack / reference handling (both modes, both differentiable)
 1. **Norton (default, `fixed_rows=None`)**: sources are already stamped as a shunt
@@ -105,7 +125,7 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     on `‖R‖∞`, converge on `‖Δx‖ < tol`. WARM START = the LINEAR const-Z solution
     (`_linear_const_z_init` → one `assemble_ybus` solve; OpenDSS-style). Quadratic, and
     converges where the fixed point oscillates (near the loadability nose — see
-    `examples/current_injection_convergence.py`). Same `PowerFlowResult` + diagnostics +
+    `run/examples/current_injection_convergence.py`). Same `PowerFlowResult` + diagnostics +
     IFT gradients (gradcheck-verified). `linear_solver="dense"` (per-element `[2N,2N]`
     Jacobian + direct solve; no `[B,2N,B,2N]` blowup) or `"matrix_free"` (Jacobian-free
     Newton-Krylov: GMRES on finite-difference `J·v`, `O(N)` memory for large grids).
@@ -130,6 +150,15 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     for the residual/Jacobian/adjoint (the power flow is non-holomorphic in V).
   - `slack`: `"ideal"` (fix source-node V = `u_ref∠u_angle` via the Schur path in
     `solve_harmonic`; matches pandapower/pgm) or `"norton"` (source folded; OpenDSS).
+  - `operating_point` may carry a per-source `{source_id: {"u_ref_scale": Tensor[*b]}}`
+    entry (alongside the usual load/gen `p_w`/`q_var`/per-phase keys): a per-scenario
+    multiplier the IDEAL slack applies to the Source's `u_ref_v` (magnitude scaled, angle
+    kept) → a BATCHED `v_fixed` `[*b, S]`. The network side stays operating-point-independent
+    (a `prepare_power_flow` system reuses its cached factorization; only the slack VALUE is
+    recomputed when a scale is present), so a source-voltage scenario sweep threads the slack
+    through the operating point, NOT the grid object. Differentiable w.r.t. the scale leaf via
+    the IFT (it is collected like any operating-point leaf); the warm start uses the un-scaled
+    reference (a ballpark seed). Written by `pgml.scenarios` `ParameterSpec(field="u_ref")`.
   - Batched over leading/scenario dims (the fixed point solves the batch in one
     `solve_harmonic`; Newton loops the per-element Jacobian, so it is best for a single
     hard grid rather than a large batch).
@@ -187,6 +216,13 @@ verified empirically). New orchestration:
     `converged_mask` / `failed_states` re-expose `pf`'s (the harmonics are direct solves).
   - DIFFERENTIABLE end to end (network params, load P/Q, AND harmonic injections)
     and BATCHED over scenario dims, same conventions as `solve_power_flow`.
+  - A per-scenario `operating_point` (`[B]`) combined with a DEEPER-batched
+    `harmonic_injection` (a node-coherent `[B, T]` sequence over a `[B]` fundamental) is
+    supported: v1 stays `[B, N]` (in step with the same-batch op that forms each device's
+    fundamental current), and the per-device fundamental current is broadcast across the
+    injection's extra step axis; only the order-1 slice returned to the caller has its batch
+    rank lifted to the injection's so it stacks against the `[B, T, N]` harmonic slices. A
+    no-op for the snapshot (`[B]`/`[B]`) and nominal (empty-op) cases — byte-identical.
 
 - `assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point=None,
      harmonic_injection=None, node_sources=None, symmetry=None,

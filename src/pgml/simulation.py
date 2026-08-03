@@ -62,7 +62,8 @@ class SimulationConfig(BaseModel):
     calculation: Calculation = "harmonic"
     harmonic_orders: list[float] = Field(
         default_factory=lambda: [1, 3, 5, 7, 9, 11, 13],
-        description="Harmonic orders h = f/f0 to solve (harmonic calculation only).",
+        description="Integer harmonic orders h = f/f0 to solve (harmonic calculation "
+        "only); non-integer (interharmonic) orders are rejected.",
     )
     slack: Slack = "ideal"
     symmetry: Optional[Symmetry] = Field(
@@ -85,6 +86,12 @@ class SimulationConfig(BaseModel):
                 )
             if any(o <= 0 for o in self.harmonic_orders):
                 raise ValueError("harmonic_orders must be positive")
+            if any(float(o) != int(o) for o in self.harmonic_orders):
+                raise ValueError(
+                    "harmonic_orders must be integer multiples of the fundamental; "
+                    "interharmonics are not supported (spectra and the per-order "
+                    "assembly are defined for integer orders only)."
+                )
         return self
 
 
@@ -100,12 +107,18 @@ def _resolve_dtype(dtype) -> torch.dtype:
 
 
 class SolvedState:
-    """A complete, lazily-derived snapshot of a solved grid.
+    """A complete, lazily-derived view of a solved grid.
 
     ``v`` (the node voltage phasors, shape ``[*batch, H, N]`` complex) is eager — it is
     the direct, differentiable solve output. Currents, power flows, spectra and THD are
     derived ON ACCESS as tracked tensor operations on ``v``, so a caller that only reads
     voltages never pays for (or back-propagates through) the current/power derivation.
+
+    The state holds the grid BY REFERENCE (a parameter deep-copy would sever the
+    autograd identity of tensor-valued fields), and the lazy branch quantities are
+    recomputed from it — with the same ``param_overrides`` the solve used, so voltage
+    and currents always describe one consistent network. Do not mutate the grid's
+    parameters between solving and reading lazy accessors; re-solve instead.
 
     Tensor accessors stay on the autograd tape (for ML / parameter recovery);
     :meth:`to_result_set` produces the detached, JSON-serializable records.
@@ -124,6 +137,7 @@ class SolvedState:
         residual: float,
         dtype: torch.dtype,
         device: Optional[torch.device],
+        param_overrides: Optional[dict] = None,
     ) -> None:
         self.grid = grid
         self.config = config
@@ -135,6 +149,7 @@ class SolvedState:
         self.residual = residual
         self.dtype = dtype
         self.device = device
+        self.param_overrides = param_overrides
 
     # -- node quantities ---------------------------------------------------- #
     def node_voltages(self) -> Tensor:
@@ -172,7 +187,8 @@ class SolvedState:
     def branch_currents(self):
         """Per-branch terminal currents (list of ``BranchCurrent``); differentiable.
 
-        Lazily reuses the assembly's primitive blocks (``Y_prim @ V_terminal``).
+        Lazily reuses the assembly's primitive blocks (``Y_prim @ V_terminal``),
+        applying the same ``param_overrides`` the voltage solve used.
         """
         from .assembly import branch_currents as _branch_currents
 
@@ -183,6 +199,7 @@ class SolvedState:
             self.index,
             dtype=self.dtype,
             device=self.device,
+            param_overrides=self.param_overrides,
         )
 
     def branch_flows(self):
@@ -263,10 +280,14 @@ class SolvedState:
                     kw = {}
                     if include_power and bc.branch_id in flows:
                         sf = flows[bc.branch_id][0][h].detach()
+                        st = flows[bc.branch_id][1][h].detach()
                         kw = {
                             "p_from_w": tuple(float(x) for x in sf.real),
                             "q_from_var": tuple(float(x) for x in sf.imag),
                             "s_from_va": tuple(float(abs(x)) for x in sf),
+                            "p_to_w": tuple(float(x) for x in st.real),
+                            "q_to_var": tuple(float(x) for x in st.imag),
+                            "s_to_va": tuple(float(abs(x)) for x in st),
                         }
                     branches.append(
                         BranchResult(
@@ -342,7 +363,11 @@ def simulate(
     ``config`` (a :class:`SimulationConfig`, default = harmonic with standard orders)
     is the serializable definition of WHAT to compute; ``device`` / ``dtype`` are the
     execution concerns. Gradients flow from ``grid`` parameters through the result's
-    tensor accessors.
+    tensor accessors. ``param_overrides`` (per-parameter tensor substitution, see
+    :func:`pgml.assembly.assemble_ybus`) applies to ``calculation="power_flow"``
+    only — the state threads it into its lazy branch quantities so voltage and
+    currents describe the same overridden network; the harmonic calculation
+    rejects it.
 
     Raises :class:`~pgml.errors.ConvergenceError` if the nonlinear power flow does not
     converge (``strict=True``, the default); pass ``strict=False`` to return the
@@ -376,6 +401,13 @@ def simulate(
         )
         pf_diag = pf.diagnostics
     else:
+        if param_overrides is not None:
+            raise InputError(
+                "param_overrides is not supported for calculation='harmonic': the "
+                "harmonic solve reads parameters from the grid only. Apply the "
+                "values to the grid (float/tensor duality) or use "
+                "calculation='power_flow'."
+            )
         hf = solve_harmonic_flow(
             grid,
             config.harmonic_orders,
@@ -423,6 +455,7 @@ def simulate(
         residual=residual,
         dtype=cdt,
         device=dev,
+        param_overrides=param_overrides,
     )
 
 

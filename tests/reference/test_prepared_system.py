@@ -74,6 +74,16 @@ def test_mismatched_system_raises(grid):
         solve_power_flow(grid, slack="ideal", system=system)
 
 
+def test_system_from_different_network_rejected(grid):
+    """A same-size grid with changed parameters must not reuse the stale system."""
+    system = prepare_power_flow(grid)
+    other = grid.model_copy(deep=True)
+    line = next(b for b in other.branches if hasattr(b, "series_resistance_ohm_per_m"))
+    line.series_resistance_ohm_per_m[0][0] *= 2.0
+    with pytest.raises(InputError, match="different network"):
+        solve_power_flow(other, system=system)
+
+
 def test_prepare_runs_the_connectivity_check():
     grid = synthetic_feeder(10, n_feeders=2, tie_switches=1)
     with pytest.raises(ConnectivityError):

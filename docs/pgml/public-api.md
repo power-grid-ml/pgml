@@ -20,7 +20,9 @@ converter pipelines) but the facade below is the recommended starting point.
 REST handler or configuration file.  It carries:
 
 - `calculation` — `"harmonic"` (default) or `"power_flow"`
-- `harmonic_orders` — list of harmonic orders (default `[1, 3, 5, 7, 9, 11, 13]`)
+- `harmonic_orders` — list of INTEGER harmonic orders (default `[1, 3, 5, 7, 9, 11, 13]`);
+  a non-integer order (an interharmonic) raises — spectra and the per-order assembly are
+  defined for integer multiples of the fundamental only
 - `slack` — `"ideal"` or `"norton"`
 - `symmetry` — `None` / `"auto"` / `"symmetric"` / `"asymmetric"` (see {doc}`concepts`)
 - `operating_point` — per-appliance P/Q overrides
@@ -29,6 +31,14 @@ REST handler or configuration file.  It carries:
 **Execution concerns** (`device`, `dtype`) are passed directly to {func}`~pgml.simulation.simulate`
 as keyword arguments, not stored in the config.  This keeps the config portable and
 lets the same spec run on CPU or GPU without modification.
+
+**`param_overrides`** is a further keyword of {func}`~pgml.simulation.simulate` (not part
+of the config, since it carries live tensor leaves rather than serializable values): a
+`{(component_kind, element_id, field_name): tensor}` mapping that substitutes individual
+grid parameters for a differentiable parameter-recovery loop. It applies to
+`calculation="power_flow"` only — the returned `SolvedState`'s lazy branch accessors reuse
+the same overrides, so voltages and currents describe one consistent network — and raises
+for `calculation="harmonic"` rather than silently ignoring it.
 
 ## Quick examples
 

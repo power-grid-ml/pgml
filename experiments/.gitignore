@@ -1,7 +1,0 @@
-# Experiment inputs/outputs (datasets, checkpoints, mlruns, resolved run configs) live
-# here but are not version-controlled. The directory itself is kept (via this file and the
-# README) so the convention is discoverable; everything else is ignored. Relocate the root
-# with the PGML_EXPERIMENTS environment variable.
-*
-!.gitignore
-!README.md

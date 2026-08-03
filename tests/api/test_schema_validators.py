@@ -16,7 +16,7 @@ ABC = (Phase.A, Phase.B, Phase.C)
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == "0.0.2"
+    assert SCHEMA_VERSION == "0.0.5"
 
 
 def test_shunt_reactor_rejects_mis_sized_matrix():
@@ -71,3 +71,127 @@ def test_complex_tap_shift_deg_is_plain_float():
     assert isinstance(tap.shift_deg, float)
     coerced = ComplexTap(ratio_magnitude=1.0, shift_deg=torch.tensor(30.0))
     assert isinstance(coerced.shift_deg, float) and coerced.shift_deg == 30.0
+
+
+# =============================================================================
+# MeasurementDevice: instrumentation metadata validated at build / attach time
+# =============================================================================
+def test_measurement_device_interval_must_be_supported():
+    from pgml.schemas.grid_schema import MeasurementDevice
+
+    with pytest.raises(ValidationError, match="supported intervals"):
+        MeasurementDevice(
+            id=1,
+            node=1,
+            supported_averaging_intervals_s=[1.0, 600.0],
+            averaging_interval_s=10.0,
+        )
+    dev = MeasurementDevice(
+        id=1,
+        node=1,
+        supported_averaging_intervals_s=[1.0, 600.0],
+        averaging_interval_s=600.0,
+    )
+    assert dev.averaging_interval_s == 600.0
+
+
+def test_measurement_device_channel_capacity_and_quantities():
+    from pgml.schemas.grid_schema import CurrentChannel, MeasurementDevice
+
+    with pytest.raises(ValidationError, match="exceed"):
+        MeasurementDevice(
+            id=1,
+            node=1,
+            measured_quantities=("voltage", "current"),
+            max_current_channels=1,
+            current_channels=[CurrentChannel(branch=20), CurrentChannel(branch=21)],
+        )
+    with pytest.raises(ValidationError, match="measured_quantities"):
+        # a current channel without 'current' among the measured quantities
+        MeasurementDevice(id=1, node=1, current_channels=[CurrentChannel(branch=20)])
+    with pytest.raises(ValidationError, match="distinct"):
+        MeasurementDevice(
+            id=1,
+            node=1,
+            measured_quantities=("current",),
+            current_channels=[CurrentChannel(branch=20), CurrentChannel(branch=20)],
+        )
+
+
+def test_grid_validates_device_references():
+    from pgml.schemas.grid_schema import CurrentChannel, MeasurementDevice
+
+    from tests.fixtures.tiny_grids import single_phase_chain
+
+    grid = single_phase_chain()
+    # node 1 is incident to branch 20 only; branch 21 joins nodes 2-3
+    with pytest.raises(ValidationError, match="not incident"):
+        grid.attach_measurement_devices(
+            [
+                MeasurementDevice(
+                    id=1,
+                    node=1,
+                    measured_quantities=("voltage", "current"),
+                    current_channels=[CurrentChannel(branch=21)],
+                )
+            ]
+        )
+    with pytest.raises(ValidationError, match="missing branch"):
+        grid.attach_measurement_devices(
+            [
+                MeasurementDevice(
+                    id=1,
+                    node=1,
+                    measured_quantities=("current",),
+                    current_channels=[CurrentChannel(branch=99)],
+                )
+            ]
+        )
+    with pytest.raises(ValidationError, match="missing node"):
+        grid.attach_measurement_devices([MeasurementDevice(id=1, node=99)])
+    with pytest.raises(ValidationError, match="'from' terminal"):
+        grid.attach_measurement_devices(
+            [
+                MeasurementDevice(
+                    id=1,
+                    node=2,
+                    measured_quantities=("current",),
+                    # branch 20 is 1 -> 2: its 'from' terminal is at node 1, not 2
+                    current_channels=[CurrentChannel(branch=20, terminal="from")],
+                )
+            ]
+        )
+
+
+def test_grid_attach_is_atomic_and_roundtrips():
+    from pgml.schemas.grid_schema import CurrentChannel, Grid, MeasurementDevice
+
+    from tests.fixtures.tiny_grids import single_phase_chain
+
+    grid = single_phase_chain()
+    ok = MeasurementDevice(
+        id=1,
+        node=2,
+        measured_quantities=("voltage", "current"),
+        current_channels=[CurrentChannel(branch=20), CurrentChannel(branch=21)],
+        manufacturer="Janitza",
+        model="UMG 604",
+        accuracy_class="0.5S",
+        max_harmonic_order=50,
+        connection={"kind": "modbus_tcp", "host": "10.0.0.5", "port": 502},
+    )
+    grid.attach_measurement_devices([ok])
+    assert len(grid.measurement_devices) == 1
+
+    # a failing attach raises AND leaves the previous device list untouched
+    with pytest.raises(ValidationError):
+        grid.attach_measurement_devices([MeasurementDevice(id=2, node=99)])
+    assert [d.id for d in grid.measurement_devices] == [1]
+
+    # devices survive the JSON round-trip (dashboards / dataset provenance)
+    restored = Grid.model_validate_json(grid.model_dump_json())
+    dev = restored.measurement_devices[0]
+    assert dev.connection == {"kind": "modbus_tcp", "host": "10.0.0.5", "port": 502}
+    assert dev.accuracy_class == "0.5S"
+    with pytest.raises(ValidationError, match="unique"):
+        grid.attach_measurement_devices([ok])  # duplicate id 1

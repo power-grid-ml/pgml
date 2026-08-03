@@ -19,12 +19,17 @@ Model (matches OpenDSS ``Solve mode=harmonics`` — see
 1. Solve the nonlinear fundamental power flow (:func:`solve_power_flow`). Order 1 of
    the result is this solution.
 2. From the converged fundamental voltage, each Load/Generator's per-ELEMENT
-   FUNDAMENTAL current is ``I1_elem = sign * conj(S0_elem) / conj(V_term)`` (load
-   convention, ``sign`` +1 load / -1 gen, consistent with the const-Z stamp). The
-   ELEMENT (terminal) voltage ``V_term = M @ V_used`` uses the SAME connection
-   incidence ``M`` the load flow uses (``pgml.assembly._incidence``): WYE-ground
-   ``M = I``, WYE-neutral ``[I|-1]`` (terminal = ``V_phase - V_N``), DELTA-3
-   circulant (terminal = L-L difference).
+   FUNDAMENTAL current is ``I1_elem = sign * conj(S_eff) / conj(V_term)`` (load
+   convention, ``sign`` +1 load / -1 gen), where ``S_eff`` is the power the device
+   ACTUALLY draws at the converged voltage: the control-resolved (P, Q) for an
+   inverter-controlled device, the ZIP-scaled ``S0*(z*r^2 + i*r + p)`` at
+   ``r = |V_term|/V0`` for a voltage-dependent ``load_model``, and the base
+   operating point for the const-power default — identical to the nonlinear
+   fundamental solve's ``device_current_injections``. The ELEMENT (terminal)
+   voltage ``V_term = M @ V_used`` uses the SAME connection incidence ``M`` the
+   load flow uses (``pgml.assembly._incidence``): WYE-ground ``M = I``,
+   WYE-neutral ``[I|-1]`` (terminal = ``V_phase - V_N``), DELTA-3 circulant
+   (terminal = L-L difference).
 3. For each harmonic order ``h > 1`` (batched over all orders): the network is
    LINEAR. ``Y(h) = assemble_network_ybus(grid, [h*f0]) + source Norton shunt``.
    Each device injects (load-terminal convention) a per-element harmonic current
@@ -64,6 +69,7 @@ from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
     Load,
+    LoadModel,
     Phase,
     StaticSpectrum,
     WindingConnection,
@@ -78,6 +84,30 @@ from .power_flow import (
 )
 
 _log = logging.getLogger("pgml")
+
+
+def _integer_orders(harmonic_orders: Sequence) -> list[int]:
+    """Validate + normalize harmonic orders to a non-empty list of integers.
+
+    The harmonic machinery (spectra keyed by integer order, the per-order
+    assembly) is defined for INTEGER multiples of the fundamental only. A
+    non-integer order (an interharmonic, e.g. ``2.4``) would otherwise silently
+    truncate to the wrong frequency, so it is rejected. Integral floats
+    (``3.0``) are accepted and normalized.
+    """
+    orders: list[int] = []
+    for h in harmonic_orders:
+        hf = float(h)
+        if hf != int(hf):
+            raise InputError(
+                f"harmonic order {h!r} is not an integer multiple of the "
+                "fundamental. Interharmonics are not supported: spectra and the "
+                "per-order harmonic assembly are defined for integer orders only."
+            )
+        orders.append(int(hf))
+    if not orders:
+        raise InputError("harmonic_orders must be non-empty.")
+    return orders
 
 
 @dataclass(frozen=True)
@@ -254,9 +284,7 @@ def solve_harmonic_flow(
             "(pure current-source / NeglectLoadY model)."
         )
 
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -331,9 +359,15 @@ def solve_harmonic_flow(
     if device is None:
         device = v1.device
 
-    # 2./3. Harmonic orders (> 1), batched.
+    # 2./3. Harmonic orders (> 1), batched. A per-scenario operating point makes v1
+    # ``[B, N]`` while a node-coherent harmonic injection carries a DEEPER ``[B, T]`` batch.
+    # ``assemble_harmonic_system`` keeps v1 in step with the (same-batch) operating point
+    # when it forms each device's fundamental current, then broadcasts THAT current across
+    # the injection's extra step axis. Only the ORDER-1 slice returned to the caller needs
+    # its batch rank lifted to the injection's, so it stacks against the ``[B, T, N]``
+    # harmonic slices (a no-op for the snapshot / nominal cases).
     harm = [h for h in orders if h != 1]
-    v_by_order: dict[int, Tensor] = {1: v1}
+    v_by_order: dict[int, Tensor] = {1: _align_v1_batch_rank(v1, harmonic_injection)}
     if harm:
         yh, ih, _ = assemble_harmonic_system(
             grid,
@@ -476,9 +510,7 @@ def assemble_harmonic_system(
         The compact :class:`NodePhaseIndex` describing the row layout of ``v1`` /
         ``Y`` / ``I``.
     """
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
             "assemble_harmonic_system assembles the LINEAR harmonic orders h > 1; "
@@ -563,9 +595,7 @@ def assemble_harmonic_ybus(
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
     """
-    orders = [int(h) for h in harmonic_orders]
-    if not orders:
-        raise InputError("harmonic_orders must be non-empty.")
+    orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
             "assemble_harmonic_ybus assembles the LINEAR harmonic orders h > 1; order 1 is "
@@ -708,6 +738,56 @@ def _device_element_spectra(
     }
 
 
+def _injection_batch_rank(harmonic_injection: Optional[dict]) -> int:
+    """The deepest leading batch rank of a ``harmonic_injection`` override (0 if none).
+
+    Each ``(magnitude, phase)`` coefficient may be a python float / 0-d tensor (scalar,
+    rank 0), a ``[B]`` tensor (snapshot, rank 1), or a ``[B, T]`` tensor (node-coherent
+    sequence, rank 2). Per-element list/tuple coefficients recurse element-wise.
+    """
+    if not harmonic_injection:
+        return 0
+
+    def rank(x) -> int:
+        if isinstance(x, (list, tuple)):
+            return max((rank(e) for e in x), default=0)
+        return x.ndim if isinstance(x, Tensor) else 0
+
+    r = 0
+    for order_map in harmonic_injection.values():
+        for coeff in order_map.values():
+            for part in coeff:
+                r = max(r, rank(part))
+    return r
+
+
+def _pad_batch_before_elem(t: Tensor, target_ndim: int) -> Tensor:
+    """Insert singleton axes just before ``t``'s trailing (element) axis up to ``target_ndim``.
+
+    ``t`` is ``[*batch, n_elem]``; padding to ``[*batch, 1, ..., 1, n_elem]`` lets a
+    per-scenario tensor broadcast against a deeper-batched one that shares the ``n_elem``
+    trailing axis. A no-op when ``t`` already has ``>= target_ndim`` dims.
+    """
+    for _ in range(max(0, target_ndim - t.ndim)):
+        t = t.unsqueeze(-2)
+    return t
+
+
+def _align_v1_batch_rank(v1: Tensor, harmonic_injection: Optional[dict]) -> Tensor:
+    """Right-pad v1's batch with singleton axes to reach the injection's batch rank.
+
+    v1 is ``[*vbatch, N]``; the injection may carry a deeper batch (a node-coherent
+    ``[B, T]`` injection over a ``[B]`` fundamental). Inserting the missing singleton
+    axes just before the N axis (``[B, N]`` -> ``[B, 1, N]``) lets the fundamental
+    broadcast across the extra (step) dims. A no-op (returns v1 unchanged) when v1's
+    batch rank already meets the injection's — the snapshot and nominal cases.
+    """
+    extra = _injection_batch_rank(harmonic_injection) - (v1.ndim - 1)
+    for _ in range(max(0, extra)):
+        v1 = v1.unsqueeze(-2)
+    return v1
+
+
 def _harmonic_injections(
     grid,
     v1,
@@ -726,8 +806,10 @@ def _harmonic_injections(
     Load/Generator has a terminal incidence ``M`` ``[n_elem, n_used]``
     (``V_term = M @ V_used``); WYE-ground ``M = I``, WYE-neutral ``[I|-1]``, DELTA-3
     circulant. The per-ELEMENT fundamental current is
-    ``I1_elem = sign*conj(S0_elem)/conj(V_term)`` (TERMINAL voltage, not the phase
-    row), then per element and order
+    ``I1_elem = sign*conj(S_eff)/conj(V_term)`` (TERMINAL voltage, not the phase
+    row; ``S_eff`` = the model-consistent power at the converged voltage —
+    control-resolved, ZIP-scaled, or the base operating point, exactly as the
+    fundamental solve draws it), then per element and order
 
         ``|I_h^e| = (mag_h^e/mag_1^e)*|I1_elem|``
         ``arg(I_h^e) = ang_h^e + h*(arg(I1_elem) - ang_1^e)``
@@ -781,8 +863,12 @@ def _harmonic_injections(
 
             # The harmonic current scales from the FUNDAMENTAL current the device
             # actually draws. For a controlled inverter that is the control-resolved
-            # (P, Q) at the converged fundamental voltage (consistent with the
-            # control-aware fundamental solve); otherwise it is the base operating point.
+            # (P, Q) at the converged fundamental voltage; for a voltage-dependent
+            # load model it is the ZIP-scaled power S_eff = S0 * (z*r^2 + i*r + p)
+            # at r = |V_term|/V0 — both exactly as the nonlinear fundamental solve
+            # resolves them (device_current_injections), so the injected spectrum is
+            # anchored to the current the device actually carries at order 1.
+            lm = getattr(a, "load_model", None)
             if getattr(a, "control", None) is not None:
                 is_delta = grp.connection == WindingConnection.DELTA
                 v0 = phase_voltage_magnitude(
@@ -797,6 +883,20 @@ def _harmonic_injections(
                 s0 = torch.complex(
                     sign * p_eff.squeeze(-2), sign * q_eff.squeeze(-2)
                 ).to(cdt)  # [*b, n_elem]
+            elif lm is not None and lm is not LoadModel.CONST_POWER:
+                from pgml.assembly.ybus import _zip_coeffs
+
+                is_delta = grp.connection == WindingConnection.DELTA
+                v0 = phase_voltage_magnitude(
+                    node_map[a.node].u_rated_v,
+                    len(node_map[a.node].phases),
+                    line_to_line=is_delta,
+                )
+                zip_p, zip_q = _zip_coeffs(a, rdt, device)  # [3] constants
+                r = torch.abs(vt) / v0  # [*vbatch, n_elem]
+                scale_p = zip_p[0] * r * r + zip_p[1] * r + zip_p[2]
+                scale_q = zip_q[0] * r * r + zip_q[1] * r + zip_q[2]
+                s0 = torch.complex(sign * p_t * scale_p, sign * q_t * scale_q).to(cdt)
             else:
                 s0 = torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
             # Guard the conj(vt) divide for a dead/disconnected terminal (vt == 0)
@@ -857,10 +957,18 @@ def _harmonic_injections(
         safe1 = torch.where(mag1 == 0, torch.ones_like(mag1), mag1)
         ratio = torch.where(
             mag1 == 0, torch.zeros_like(mag_h), mag_h / safe1
-        )  # [*batch, Hh, n_elem]
-        mag = ratio * i1_mag.unsqueeze(-2)
+        )  # [*cbatch, Hh, n_elem]
+        # The device's fundamental current ``i1`` (``[*vbatch, n_elem]``) follows the
+        # operating point / v1 batch; the spectrum ratio may carry a DEEPER batch (a
+        # node-coherent ``[B, T]`` injection over a ``[B]`` fundamental). Insert the
+        # missing singleton step axes just before the element axis so the per-scenario
+        # fundamental current broadcasts across the extra step dims (a no-op when the
+        # batches already match — the snapshot / nominal cases).
+        i1_mag_b = _pad_batch_before_elem(i1_mag, mag_h.ndim - 1)
+        i1_ang_b = _pad_batch_before_elem(i1_ang, mag_h.ndim - 1)
+        mag = ratio * i1_mag_b.unsqueeze(-2)
         phase = ph_h * (math.pi / 180.0) + h_vec[:, None] * (
-            i1_ang.unsqueeze(-2) - ang1_e.unsqueeze(-2)
+            i1_ang_b.unsqueeze(-2) - ang1_e.unsqueeze(-2)
         )
         i_h_elem = torch.polar(mag, phase)  # [*batch, Hh, n_elem]
         # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).

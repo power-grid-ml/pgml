@@ -29,9 +29,10 @@ from .data import (
     harmonic_profile_from_array,
     harmonic_profiles,
     labeled_matrix,
+    node_numbering,
     voltage_profile,
 )
-from .graph_plots import plot_grid_graph
+from .graph_plots import graph_layout, load_node_positions, plot_grid_graph
 from .harmonic3d import plot_harmonic_profile_3d
 from .interactive import plot_harmonic_profile_interactive
 from .profiles import (
@@ -41,7 +42,7 @@ from .profiles import (
     plot_voltage_profile,
 )
 from .style import save_figure, save_html
-from .topology import distance_from_slack, grid_graph, slack_node_id
+from .topology import distance_from_slack, grid_graph, slack_node_id, slack_node_ids
 from .ybus_plots import plot_ybus_difference, plot_ybus_heatmaps
 
 __all__ = [
@@ -54,10 +55,14 @@ __all__ = [
     "harmonic_profile_from_array",
     "harmonic_profiles",
     "labeled_matrix",
+    "node_numbering",
     # topology
     "distance_from_slack",
     "grid_graph",
     "slack_node_id",
+    "slack_node_ids",
+    "graph_layout",
+    "load_node_positions",
     # plots
     "plot_ybus_heatmaps",
     "plot_ybus_difference",

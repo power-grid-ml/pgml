@@ -26,8 +26,8 @@ against the dense-GPU baseline, never assumed.
 The crossover observed on CPU calibrates ``_SPARSE_MIN_ROWS`` (the ``"auto"``
 backend threshold in ``pgml/solver/harmonic.py``).
 
-Run (CPU): ``pixi run -e cpu python examples/pgml/benchmark_sparse.py``
-Run (GPU): ``pixi run python examples/pgml/benchmark_sparse.py``
+Run (CPU): ``pixi run -e cpu python run/examples/pgml/benchmark_sparse.py``
+Run (GPU): ``pixi run python run/examples/pgml/benchmark_sparse.py``
 Optional args: ``--sizes 33 100 300 1000`` (nodes), ``--batch 256``, ``--json out.json``.
 """
 

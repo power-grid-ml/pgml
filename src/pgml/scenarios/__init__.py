@@ -20,14 +20,25 @@ See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
 
 from __future__ import annotations
 
+from .composition import (
+    CompositionDraw,
+    resolve_composed_ids,
+    sample_device_composition,
+)
 from .config import (
     CartesianAxis,
     CartesianConfig,
+    ClassCount,
     CoherentSpectrumConfig,
+    CompositionConfig,
     Constant,
+    ConsumerComposition,
     Correlation,
+    DeviceClassSpec,
+    DeviceState,
     Distribution,
     LatentFactor,
+    LoadProfileConfig,
     LogNormal,
     LogUniform,
     NodeInjectionSweepConfig,
@@ -38,9 +49,18 @@ from .config import (
     Selector,
     SpectrumSweepConfig,
     Uniform,
+    default_compositions,
+    default_device_classes,
 )
 from .en50160 import en50160_limit, en50160_limits
 from .harmonics import sample_coherent_spectra, spectrum_sweep
+from .profiles import apply_load_profiles, load_profile_factors
+from .iec61000_3_2 import (
+    iec61000_3_2_device_caps,
+    iec61000_3_2_fraction,
+    iec61000_3_2_limits,
+    resolve_emission_class,
+)
 from .node_injection import run_node_injection_sweep
 from .persistence import LoadedDataset, read_dataset, write_dataset
 from .perturbation import perturbation_sweep
@@ -69,6 +89,12 @@ for _name in [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "LoadProfileConfig",
+    "DeviceState",
+    "DeviceClassSpec",
+    "ClassCount",
+    "ConsumerComposition",
+    "CompositionConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -80,6 +106,7 @@ SampledScenarios.__module__ = __name__
 ScenarioResult.__module__ = __name__
 LoadedDataset.__module__ = __name__
 StorageDispatchResult.__module__ = __name__
+CompositionDraw.__module__ = __name__
 
 __all__ = [
     "Uniform",
@@ -96,6 +123,15 @@ __all__ = [
     "CartesianAxis",
     "CartesianConfig",
     "CoherentSpectrumConfig",
+    "LoadProfileConfig",
+    "DeviceState",
+    "DeviceClassSpec",
+    "ClassCount",
+    "ConsumerComposition",
+    "CompositionConfig",
+    "CompositionDraw",
+    "default_device_classes",
+    "default_compositions",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -104,10 +140,18 @@ __all__ = [
     "cartesian_sample",
     "sample_coherent_spectra",
     "spectrum_sweep",
+    "sample_device_composition",
+    "resolve_composed_ids",
+    "load_profile_factors",
+    "apply_load_profiles",
     "perturbation_sweep",
     "run_node_injection_sweep",
     "en50160_limits",
     "en50160_limit",
+    "iec61000_3_2_limits",
+    "iec61000_3_2_fraction",
+    "iec61000_3_2_device_caps",
+    "resolve_emission_class",
     "write_dataset",
     "read_dataset",
     "LoadedDataset",

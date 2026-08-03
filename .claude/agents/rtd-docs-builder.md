@@ -38,7 +38,7 @@ content within this structure; do not flatten it:
 - `docs/pgl/` and `docs/pgg/` — the learning and generation packages.
 - `docs/_static/figures/` — committed figures (SVG) embedded via the MyST `{figure}` directive.
   RTD cannot run the heavy examples, so any new result figure must be **committed** here; the
-  source examples are in `examples/`.
+  source examples are in `run/examples/`.
 
 The repo has no `references/` directory — modeling decisions are first-class docs pages now.
 `conf.py` mocks `pandapower` (NumPy-2 break) and keeps `pydantic`/`torch` real; per-subpackage

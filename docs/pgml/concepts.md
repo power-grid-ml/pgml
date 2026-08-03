@@ -120,6 +120,11 @@ DELTA and 4-wire WYE connections are fully modelled in the harmonic solver
 shunt from `HarmonicShuntModel`) and for DELTA with fewer than two phases,
 neither of which is a topology restriction.
 
+The WYE neutral-vs-ground choice above is the node-level default; each
+`InjectionAppliance` (`Load`/`Generator`/`Storage`) may override it per element via
+`return_path` (`"auto"`/`"neutral"`/`"ground"`) — see
+[the asymmetric modeling brief](modeling/asymmetric.md) §4.
+
 ## Per-phase / connection-aware harmonic injection
 
 Harmonic current sources are modelled per *element* (terminal) using the same

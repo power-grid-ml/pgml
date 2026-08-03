@@ -1,6 +1,5 @@
-frontend/node_modules/
-data/
-evaluation_output
+/paper/
+/data/
 .gemini
 
 # Byte-compiled / optimized / DLL files

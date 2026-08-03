@@ -32,9 +32,14 @@ def save_figure(
     dpi:
         Raster resolution (default 300). Ignored by vector formats.
     """
+    import matplotlib as mpl
+
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(p, dpi=dpi, bbox_inches="tight", transparent=transparent, **kwargs)
+    # Embed fonts as TrueType (fonttype 42), never Type 3: IEEE/publisher PDF
+    # checks reject Type 3 fonts, and matplotlib's default writes them.
+    with mpl.rc_context({"pdf.fonttype": 42, "ps.fonttype": 42}):
+        fig.savefig(p, dpi=dpi, bbox_inches="tight", transparent=transparent, **kwargs)
     return str(p)
 
 

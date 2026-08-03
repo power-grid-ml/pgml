@@ -81,7 +81,7 @@ any custom sparse GPU path (cuDSS/cuSOLVER) must first beat that baseline. On an
 entry-level workstation GPU (RTX A2000) the question did not even arise at double
 precision: **CPU-sparse beat GPU-dense at every size above ~300 rows** (its FP64 units run
 at 1/32 of FP32 rate), while single-precision bulk data generation remains the GPU's
-territory. `examples/pgml/benchmark_sparse.py` reproduces the comparison on any host; the
+territory. `run/examples/pgml/benchmark_sparse.py` reproduces the comparison on any host; the
 selection threshold is calibrated from it. The backends are also never mixed silently — a
 tensor is not moved between devices to reach a faster backend.
 

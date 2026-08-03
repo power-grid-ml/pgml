@@ -196,9 +196,19 @@ applied THE SAME WAY REGARDLESS OF `phase_mode` — assembly's own
 `_transformer_block_groups` undoes the factor internally for the single-phase
 scalar stamp too; a phase-mode-conditional version of this factor is WRONG, see
 `src/pgml/convert/pandapower/CONTEXT.md` and the pinned oracle test
-`tests/reference/test_pandapower_grid_matrix.py`). `load`/`sgen`/`asymmetric_load`
-P/Q are scaled by the per-element `scaling` column (NaN-safe, default 1.0 —
-pandapower's own `runpp` convention). See `docs/pgml/modeling/transformer.md` and
+`tests/reference/test_pandapower_grid_matrix.py`). A line/trafo's `parallel`
+count (identical parallel systems) divides the series impedance and multiplies
+the shunt admittance (line C/G, trafo magnetizing) and the rated power
+(`s_rated_va`); `parallel==1` is byte-identical to before. An OPEN bus-line/
+bus-transformer switch (`et='l'`/`'t'`) takes the whole line/trafo out of
+service (an accepted approximation — the still-connected terminal's shunt is
+dropped too, unlike pandapower's own auxiliary-bus model); bus-bus (`et='b'`)
+switches are unaffected. `load`/`sgen`/`asymmetric_load` P/Q are scaled by the
+per-element `scaling` column (NaN-safe, default 1.0 — pandapower's own `runpp`
+convention); `load` additionally maps `const_z_p_percent`/`const_i_p_percent`/
+`const_z_q_percent`/`const_i_q_percent` onto `ZipCoefficients` (all-zero, the
+pandapower default, stays byte-identical with no `zip_coefficients`/
+`load_model` set). See `docs/pgml/modeling/transformer.md` and
 `src/pgml/convert/pandapower/CONTEXT.md` for the full field-mapping table.
 
 ## OpenDSS converter — transformer element coverage
@@ -217,6 +227,48 @@ beyond the binary `LeadLag` toggle, so `Yy6`/`Dd6` is not detected). Magnetizing
 same closed-form the pandapower converter uses (HV-referred). NOT read: 3-winding units,
 `RegControl` regulators, `XfmrCode`/frequency-correction curves. See
 `src/pgml/convert/opendss/CONTEXT.md` and `tests/reference/test_opendss_transformer.py`.
+
+## OpenDSS converter — element scope extension (Line/Load/Capacitor/Reactor/Generator/PVSystem/Storage)
+`convert.opendss.to_grid` also converts: **Line** — a phase-permuted terminal
+(`bus1=a.1.2.3 bus2=b.3.2.1`) carries an independent `to_phases` (the
+assembly's series-branch stamp already indexes the two terminals
+independently, matching Transformer); the `SINGLE_PHASE_EQUIV` reduction of a
+coupled multi-phase line now uses the POSITIVE-SEQUENCE `Z1 = Z_self -
+Z_mutual` (and `C1 = C_self - C_mutual`) rather than the bare self entry (a
+genuinely 1-phase line is unaffected — byte-identical). **Load/Generator/
+Storage/PVSystem** bus parsing now reads `CktElement.NodeOrder()` (DSS's own
+resolved conductor/return assignment) instead of re-parsing the bus string,
+fixing a bug where every bus-string suffix (including an explicit neutral
+tie) was read as a phase conductor; each WYE appliance's return conductor sets
+its `InjectionAppliance.return_path` (`_resolve_wye_return_path`: explicit
+`.4` neutral tie → `"neutral"`, solidly grounded on a `Phase.N`-carrying bus →
+`"ground"`, else `"auto"`), so pgml reproduces OpenDSS's per-element return
+routing even on a shared 4-wire bus (the previously-inexpressible
+grounded-despite-neutral case is now exact, no warning). **Load** also
+maps `Loads.Model()` (1/2/5/8) to `LoadModel`/`ZipCoefficients` (models
+3/4/6/7 fall back to `CONST_POWER` with a warning; the ZIPV low-voltage
+cutoff is not modeled). **Capacitor/Reactor** convert to `ShuntAppliance`
+(WYE solidly-grounded, or DELTA phase-to-phase bank via `? conn`; a
+non-grounded 2-bus terminal-2 reference and an explicitly coupled Reactor
+Rmatrix/Xmatrix are out of scope and warned/skipped); a Reactor's series
+R+X converts to the equivalent shunt admittance `Y=1/(R+jX)` (exact at
+the fundamental only — the schema's `ShuntReactor`/`ShuntAppliance` have no
+inductance field, so a genuinely inductive reactor's harmonic frequency
+trend is not modeled). **Generator/PVSystem** convert via
+`build_generator` (generation-positive; PVSystem's present `kW`/`kvar`
+already reflect OpenDSS's own Pmpp/irradiance/pf derating).
+**Storage** converts directly to `Storage` (signed, discharge-positive —
+DSS's own `kW` sign under `state=CHARGING`/`DISCHARGING` already matches)
+plus its inert energy-state fields. Every other unhandled DSS element class
+(`Isource`, `Monitor`, `EnergyMeter`, `RegControl`, ...) is enumerated
+generically from `Circuit.AllElementNames()` and triggers a
+`warn_dropped_elements` WARNING; a non-negligible Vsource `R1`/`X1` warns
+that the default `slack="ideal"` ignores it (`slack="norton"` reproduces it).
+See `src/pgml/convert/opendss/CONTEXT.md` for the full field-mapping tables
+and `tests/reference/test_opendss_line_phase_permutation.py`,
+`tests/reference/test_opendss_load_model.py`,
+`tests/convert/test_opendss_shunt_and_der_elements.py`, and the strengthened
+`tests/convert/test_opendss_phase_mode.py` for the oracle/coverage tests.
 
 ## Cross-converter conventions (voltage base, slack, frequency)
 

@@ -31,7 +31,7 @@ explicit per-km parameters are present.
     "bus":              {pp_bus_idx: Node.id, ...},
     "line":             {pp_line_idx: Line.id, ...},
     "trafo":            {pp_trafo_idx: Transformer.id, ...},
-    "switch":           {pp_switch_idx: Switch.id, ...},   # et='b' bus-bus switches only
+    "switch":           {pp_switch_idx: Switch.id, ...},   # et='b' bus-bus switches only (et='l'/'t' resolve into "line"/"trafo" in-service, not their own bucket)
     "load":             {pp_load_idx: Load.id, ...},
     "asymmetric_load":  {pp_asym_idx: Load.id, ...},        # THREE_PHASE only
     "sgen":             {pp_sgen_idx: Generator.id, ...},
@@ -51,9 +51,9 @@ special-casing needed (verified on `mv_oberrhein`, which has 2).
 |---|---|---|
 | `hv_bus`/`lv_bus` | `from_node`/`to_node` | `from`=HV, `to`=LV |
 | `vn_hv_kv`/`vn_lv_kv` | `u_rated_from_v`/`u_rated_to_v` | ×1000 |
-| `sn_mva` | `s_rated_va` | ×1e6 |
-| `vk_percent`, `vkr_percent`, `sn_mva`, `vn_lv_kv` | `series_resistance_ohm`/`series_inductance_h` | `Z_base_LV=vn_lv_v²/sn_va`; `R_ll=vkr%·Z_base_LV`, `X_ll=√((vk%·Z_base_LV)²−R_ll²)`. Stored TO-COIL-referred: `3×` when `to_connection==DELTA`, unchanged otherwise — see "Delta-LV coil referral" below |
-| `pfe_kw`, `i0_percent`, `vn_hv_kv` | `magnetizing_conductance_s`/`magnetizing_inductance_h` | HV-referred; `g_m=pfe_w/u_hv²`; `l_m` from `i0%`/`sn` (`None` when the no-load apparent power ≤ real power, e.g. a MATPOWER-synthesized negative `i0_percent` — see "case118" below) |
+| `sn_mva`, `parallel` | `s_rated_va` | `sn_va·parallel` (single-unit rating × the identical-unit count) |
+| `vk_percent`, `vkr_percent`, `sn_mva`, `vn_lv_kv`, `parallel` | `series_resistance_ohm`/`series_inductance_h` | `Z_base_LV=vn_lv_v²/sn_va` (single-unit `sn_va`, pandapower's own convention); `R_ll=vkr%·Z_base_LV`, `X_ll=√((vk%·Z_base_LV)²−R_ll²)`. Stored TO-COIL-referred: `3×` when `to_connection==DELTA`, unchanged otherwise (see "Delta-LV coil referral" below), then DIVIDED by `parallel` — see "`parallel`" below |
+| `pfe_kw`, `i0_percent`, `vn_hv_kv`, `parallel` | `magnetizing_conductance_s`/`magnetizing_inductance_h` | HV-referred; `g_m=pfe_w/u_hv²·parallel`; `l_m` from `i0%`/`sn` divided by `parallel` (`None` when the no-load apparent power ≤ real power, e.g. a MATPOWER-synthesized negative `i0_percent` — see "case118" below) |
 | `vector_group` (row or `std_types['trafo'][std_type]`) + `shift_degree` | `from_connection`/`to_connection` | see "Vector-group resolution" below |
 | `tap_pos`/`tap_neutral`/`tap_step_percent`/`tap_side` | `tap.ratio_magnitude` | see "Tap changer" below |
 | `shift_degree` | `tap.shift_deg` | pass-through (pandapower's own convention: positive ⇒ LV lags HV, identical to pgml's) |
@@ -102,6 +102,52 @@ HV/LV ratio); `tap_pos=+2` on the LV side RAISES it. Any of
 tap-changer configured -> `ratio_magnitude=1.0`. `tap_step_degree` nonzero, or
 `tap_phase_shifter=True` (an ideal phase-shifter tap) is not modelled and raises
 `ConversionError`.
+
+### `parallel` — identical parallel systems (lines AND two-winding transformers)
+
+pandapower's `parallel` column (default 1) is the count of electrically identical
+systems wired in parallel; `pandapower.build_branch` divides the series impedance
+by it and multiplies the shunt admittance and rated power by it
+(`_calc_r_x_from_dataframe`/`_calc_y_from_dataframe`). The converter mirrors this
+exactly (`_parallel_count`, NaN-safe, default 1.0):
+- **Line**: `series_resistance_ohm_per_m`/`series_inductance_h_per_m` divide by
+  `parallel`; `shunt_capacitance_f_per_m`/`shunt_conductance_s_per_m` (and the
+  native zero-sequence `r0`/`x0`/`c0` when present) multiply/divide the same way.
+- **Transformer**: the coil-referred `series_resistance_ohm`/`series_inductance_h`
+  divide by `parallel` (applied AFTER the delta-LV coil factor, order-independent);
+  `magnetizing_conductance_s` multiplies by `parallel`, `magnetizing_inductance_h`
+  divides by it (so its susceptance `1/(2·pi·f0·L_m)` multiplies by `parallel`,
+  matching the conductance); `s_rated_va` multiplies by `parallel`.
+`parallel==1` (pandapower's own default) is an IEEE-754 exact no-op (`x/1.0==x`,
+`x*1.0==x`), so every other converted network stays byte-identical.
+`trafo3w`'s own `parallel` column is moot — three-winding units are not converted
+at all (see "Coverage gaps" below). See
+`tests/reference/test_pandapower_grid_matrix.py`'s
+`test_parallel_line_and_transformer_matches_pandapower` (live-oracle power-flow
+parity), `test_parallel_scales_series_impedance_and_shunt_admittance` (closed-form
+value checks), and `test_parallel_default_is_byte_identical`.
+
+### Bus-line / bus-transformer switches (`et='l'`/`'t'`) — accepted approximation
+
+An OPEN `et='l'`/`'t'` switch (`net.switch`) converts its line/transformer as
+out-of-service (`_open_switch_targets`, called once up front and consulted by
+both the line and the trafo loop): the WHOLE element drops, not just the switched
+terminal. This is an accepted approximation, not full fidelity: pandapower's own
+solver instead keeps the still-connected terminal energized via an internal
+auxiliary bus (dropping only the current path, not that terminal's shunt
+admittance), so the converter's simplification also loses the line-charging
+capacitance at that terminal. A closed switch, or no switch at all, changes
+nothing; bus-bus (`et='b'`) switches are unaffected (see the field mapping table
+below this section). Root-caused (not guessed) on `create_cigre_network_mv`/
+`mv_oberrhein`: comparing a live `runpp` on the untouched net against the SAME net
+with those lines forced `in_service=False` for pandapower itself shows a
+~2.9e-4 pu / ~6.9e-3 deg (CIGRE MV) / ~8.9e-4 pu / ~1.4e-2 deg (`mv_oberrhein`)
+difference — almost the entire residual the grid-matrix oracle tests see against
+pandapower's OWN untouched `runpp` (see
+`tests/reference/test_pandapower_grid_matrix.py`'s module docstring, third
+tolerance family, and `test_cigre_mv_shift30_fallback`/
+`test_mv_oberrhein_ynd5_delta_referral_and_taps`, which now exercise this
+production path directly rather than a test-harness workaround).
 
 ### Delta-LV coil referral — PHASE-MODE INDEPENDENT (the important gotcha)
 
@@ -153,6 +199,26 @@ ignoring this made every `mv_oberrhein` conversion wrong (61.86 MW converted ins
 of pandapower's actual 37.116 MW, plus 22.07 MW of phantom DER injection) until
 found via that grid's oracle comparison.
 
+### Voltage-dependent (ZIP) loads (`_zip_coefficients`)
+
+`net.load`'s `const_z_p_percent`/`const_i_p_percent`/`const_z_q_percent`/
+`const_i_q_percent` columns (pandapower 3's per-load ZIP model — FOUR
+independent percentages, not one shared P/Q pair; see
+`pandapower.build_bus._calc_pq_elements_and_add_on_ppc`) map onto
+`ZipCoefficients`: `z_p=const_z_p_percent/100`, `i_p=const_i_p_percent/100`,
+`p_p=1-z_p-i_p` (and the same for Q). Passed to `build_load(zip_coefficients=...)`,
+which sets `load_model=LoadModel.ZIP`. Honoured by pandapower's own `runpp`
+whenever `voltage_depend_loads=True` (the default) and by pgml's NONLINEAR solver
+(`device_current_injections`) — the linear const-Z assembler ignores it (uses base
+P/Q only), same as any other `LoadModel`. All four percentages at zero
+(pandapower's own default — a pure constant-power load) converts with NO
+`zip_coefficients`/`load_model` set, so a plain load stays byte-identical to the
+pre-ZIP-aware output. `net.asymmetric_load` has no ZIP percentage columns at all
+(unaffected). See `tests/reference/test_pandapower_grid_matrix.py`'s
+`test_mixed_zip_load_matches_pandapower` (live-oracle nonlinear-solve parity),
+`test_mixed_zip_load_coefficients_mapped_correctly`, and
+`test_zero_zip_percentages_stay_byte_identical`.
+
 ## Coverage gaps / known scope boundaries
 
 - `gen` (PV / voltage-controlled buses) and `shunt` are NOT converted
@@ -167,12 +233,13 @@ found via that grid's oracle comparison.
   via a LINEAR, exact Y-bus-stamp comparison against pandapower's own internal
   `Ybus` — see `tests/reference/test_pandapower_grid_matrix.py::
   TestCase118TransformerOnly`.
-- Bus-LINE (`et='l'`) sectionalizing/tie switches (used by `mv_oberrhein` and
-  `create_cigre_network_mv` to operate a meshed ring radially) are NOT converted;
-  only bus-BUS (`et='b'`) switches are. An open `et='l'` switch disconnects its
-  line entirely (equivalent to `line.in_service=False`) — the grid-matrix oracle
-  tests pre-resolve this in the TEST harness (not the converter) before solving
-  either engine, and document the workaround explicitly.
+- Bus-LINE/bus-transformer (`et='l'`/`'t'`) switches (used by `mv_oberrhein` and
+  `create_cigre_network_mv` to operate a meshed ring radially) ARE converted, but
+  only via the accepted out-of-service approximation described in "Bus-line /
+  bus-transformer switches" above — the still-connected terminal's shunt
+  admittance is dropped along with the element, unlike pandapower's own
+  auxiliary-bus model. Not a silent gap (`_open_switch_targets` is unconditional,
+  applied to every network), but not full fidelity either.
 - `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
   `asymmetric_sgen`: not converted (`warn_dropped_elements`).
 - ext_grid zero/negative-sequence source impedance (`r0x0_max`/`x0x_max`) is not
@@ -191,10 +258,14 @@ found via that grid's oracle comparison.
   lv-side taps, `tap_step_degree` rejection).
 - `tests/reference/test_pandapower_grid_matrix.py` — the grid-agreement matrix:
   `case33bw` (control), `case118` (Yy fallback + off-nominal taps, Y-bus-only),
-  `create_cigre_network_lv`/`_mv` (Dyn1 fallback), 3x Kerber nets (Dyn5 from
-  `std_type`), `mv_oberrhein` (YNd5 + taps + the delta-LV/scaling fixes), a
-  hand-built Yzn5 net, plus a best-effort `runpp_3ph` asymmetric comparison (Dyn
-  passes; Yzn is skipped with a documented definitional-gap reason).
+  `create_cigre_network_lv`/`_mv` (Dyn1 fallback; `_mv`'s 3 open bus-line
+  switches now exercise the production `_open_switch_targets` path directly, no
+  test-harness workaround), 3x Kerber nets (Dyn5 from `std_type`), `mv_oberrhein`
+  (YNd5 + taps + the delta-LV/scaling fixes + its 6 open bus-line switches, same
+  production path), a hand-built Yzn5 net, a hand-built `parallel` net (line AND
+  trafo, `parallel=2`/`parallel=3`), a hand-built mixed-ZIP-load net, plus a
+  best-effort `runpp_3ph` asymmetric comparison (Dyn passes; Yzn is skipped with
+  a documented definitional-gap reason).
 - `tests/reference/test_cigre_lv_full_transformer.py`,
   `test_cigre_lv_pandapower.py`, `test_ieee33_pandapower.py`,
   `test_ieee33_power_flow_pandapower.py`, `tests/convert/test_phase_mode.py` — the

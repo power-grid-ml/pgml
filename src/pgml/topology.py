@@ -3,11 +3,12 @@
 Core, dependency-free helpers over the :class:`~pgml.schemas.grid_schema.Grid`
 contract (plain python + stdlib, no torch / networkx / plotting):
 
-- :func:`slack_node_id` — the reference bus (first in-service :class:`Source`).
+- :func:`slack_node_ids` / :func:`slack_node_id` — the reference buses (nodes of
+  the in-service :class:`Source` appliances; the singular form is the first).
 - :func:`branch_edges` — the drawable branch interconnections (closed switches
   kept, open switches dropped — they carry no current and define no path).
-- :func:`distance_from_slack` — shortest-path line distance from the slack along
-  the branch graph (Dijkstra), the x-axis of the profile plots and a node
+- :func:`distance_from_slack` — shortest-path line distance to the nearest slack
+  along the branch graph (Dijkstra), the x-axis of the profile plots and a node
   feature of the ML layer.
 - :func:`connectivity_report` / :func:`energized_subgrid` — the pre-solve
   connectivity check: which (node, phase) rows have a galvanic path to an
@@ -23,12 +24,21 @@ No differentiable quantities pass through this module.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional, Union
 
 from pgml.errors import ConnectivityError
-from pgml.schemas.grid_schema import Grid, Line, Phase, ShuntReactor, Source, Switch
+from pgml.schemas.grid_schema import (
+    Grid,
+    InjectionAppliance,
+    Line,
+    Phase,
+    ShuntReactor,
+    Source,
+    Switch,
+)
 
 
 @dataclass(frozen=True)
@@ -73,19 +83,32 @@ def _is_drawable(b, *, include_open_switches: bool) -> bool:
     return int(b.from_node) != int(b.to_node)
 
 
-def slack_node_id(grid: Grid) -> int:
-    """Node id of the first in-service :class:`Source` (the slack/reference bus)."""
-    src = next(
-        (
-            a
-            for a in grid.appliances
-            if isinstance(a, Source) and getattr(a, "in_service", True)
-        ),
-        None,
-    )
-    if src is None:
+def slack_node_ids(grid: Grid) -> list[int]:
+    """Node ids of ALL in-service :class:`Source` appliances (the slack buses).
+
+    Appliance order, de-duplicated. A grid may carry several sources (multiple
+    feeding transformers / external network equivalents); consumers that anchor
+    to "the" slack should handle every entry — distances and observability are
+    relative to the NEAREST slack. Raises when no in-service source exists.
+    """
+    ids: list[int] = []
+    for a in grid.appliances:
+        if isinstance(a, Source) and getattr(a, "in_service", True):
+            nid = int(a.node)
+            if nid not in ids:
+                ids.append(nid)
+    if not ids:
         raise ValueError("Grid has no in-service Source to anchor distances to.")
-    return int(src.node)
+    return ids
+
+
+def slack_node_id(grid: Grid) -> int:
+    """Node id of the first in-service :class:`Source` (the primary slack bus).
+
+    Single-slack convenience over :func:`slack_node_ids` — multi-slack-aware
+    consumers should use the plural form.
+    """
+    return slack_node_ids(grid)[0]
 
 
 def branch_edges(
@@ -122,21 +145,32 @@ def _line_adjacency(grid: Grid) -> dict[int, dict[int, float]]:
     return adj
 
 
-def distance_from_slack(grid: Grid, slack: Optional[int] = None) -> dict[int, float]:
-    """Map ``node_id -> shortest-path line distance (km)`` from the slack bus.
+def distance_from_slack(
+    grid: Grid, slack: Optional[Union[int, Iterable[int]]] = None
+) -> dict[int, float]:
+    """Map ``node_id -> shortest-path line distance (km)`` to the nearest slack bus.
 
     Dijkstra over the in-service branch graph (open switches excluded; switches /
     transformers / generic branches contribute zero length). Disconnected nodes
-    map to ``inf``. ``slack`` defaults to :func:`slack_node_id`.
+    map to ``inf``. ``slack`` is a single node id, an iterable of node ids, or
+    ``None`` (default: every node in :func:`slack_node_ids` — the distance to the
+    NEAREST slack, identical to the single-slack result on a one-source grid).
     """
     if slack is None:
-        slack = slack_node_id(grid)
+        sources = slack_node_ids(grid)
+    else:
+        try:
+            sources = [int(slack)]  # a single node id
+        except TypeError:
+            sources = [int(s) for s in slack]
     adj = _line_adjacency(grid)
     dist = {nid: float("inf") for nid in adj}
-    if int(slack) not in dist:
-        raise ValueError(f"slack node {slack} is not a node of the grid.")
-    dist[int(slack)] = 0.0
-    heap: list[tuple[float, int]] = [(0.0, int(slack))]
+    for s in sources:
+        if s not in dist:
+            raise ValueError(f"slack node {s} is not a node of the grid.")
+        dist[s] = 0.0
+    heap: list[tuple[float, int]] = [(0.0, s) for s in sources]
+    heapq.heapify(heap)
     done: set[int] = set()
     while heap:
         d, u = heapq.heappop(heap)
@@ -429,13 +463,70 @@ def energized_subgrid(grid: Grid) -> tuple[Grid, tuple[int, ...]]:
     return sub, tuple(sorted(dropped))
 
 
+def layout_fingerprint(grid: Grid) -> str:
+    """Stable hash of the grid's ROW-LAYOUT identity (the tensor contract).
+
+    Covers exactly what fixes the compact node-phase row layout of every solved /
+    persisted tensor: the base frequency, the nodes in ``grid.nodes`` list order with
+    each node's ``phases`` tuple (the :func:`pgml.assembly.node_phase_index` ordering),
+    and the slack anchoring (in-service :class:`Source` node ids). Two grids with the
+    same layout fingerprint index their ``[..., N]`` voltage rows identically — the
+    check datasets, model checkpoints and streaming inference use to refuse
+    silently-relabeled tensors. Parameter values are deliberately excluded.
+    """
+    h = hashlib.sha256()
+    h.update(f"f0={float(grid.base_frequency_hz)!r}".encode())
+    for node in grid.nodes:
+        phases = ",".join(p.value for p in node.phases)
+        h.update(f"|n:{int(node.id)}:{phases}".encode())
+    h.update(f"|slack:{slack_node_ids(grid)}".encode())
+    return h.hexdigest()
+
+
+def network_fingerprint(grid: Grid) -> str:
+    """Stable hash of the operating-point-INDEPENDENT network side of a grid.
+
+    Covers everything a prepared power-flow system bakes into the effective
+    admittance and slack quantities: the layout (see :func:`layout_fingerprint`),
+    every branch and its physical parameters, every :class:`Source` (reference +
+    Thevenin) and shunt appliance, and each injection appliance's IDENTITY (id, kind,
+    node, phases, connection, in-service) — but NOT its nameplate P/Q, which stays
+    per-call operating-point data. Used to reject a stale
+    :class:`~pgml.solver.PowerFlowSystem` when the grid it was prepared from has
+    structurally changed. Tensor-valued parameters hash by VALUE (detached), so a
+    same-structure grid with edited impedances is also rejected.
+    """
+    h = hashlib.sha256()
+    h.update(layout_fingerprint(grid).encode())
+    for b in grid.branches:
+        h.update(b"|b:")
+        h.update(b.model_dump_json().encode())
+    for a in grid.appliances:
+        if isinstance(a, InjectionAppliance):
+            phases = ",".join(p.value for p in a.phases)
+            conn = getattr(a, "connection", None)
+            ident = (
+                f"|i:{a.component}:{int(a.id)}:{int(a.node)}:{phases}:"
+                f"{conn.value if conn is not None else None}:"
+                f"{getattr(a, 'in_service', True)}"
+            )
+            h.update(ident.encode())
+        else:
+            h.update(b"|a:")
+            h.update(a.model_dump_json().encode())
+    return h.hexdigest()
+
+
 __all__ = [
     "ProfileEdge",
     "slack_node_id",
+    "slack_node_ids",
     "branch_edges",
     "distance_from_slack",
     "ConnectivityReport",
     "ReconnectHint",
     "connectivity_report",
     "energized_subgrid",
+    "layout_fingerprint",
+    "network_fingerprint",
 ]

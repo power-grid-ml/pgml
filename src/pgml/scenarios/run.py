@@ -79,8 +79,9 @@ class ScenarioResult:
         ``True`` iff EVERY scenario converged. A batched run never raises on a failed
         scenario — its best-effort voltages are still returned in ``v``.
     failed_states:
-        Flat indices of the scenarios that did not converge (empty when all did). The
-        solver also logs an error naming them with the residual + likely cause.
+        SCENARIO indices (along the ``B`` axis of ``v``) that did not converge (empty
+        when all did). A node-coherent scenario counts as failed when ANY of its ``T``
+        steps failed. The solver also logs an error with the residual + likely cause.
     """
 
     v: Tensor
@@ -89,6 +90,24 @@ class ScenarioResult:
     frequencies_hz: Optional[Tensor] = None
     converged: bool = True
     failed_states: tuple[int, ...] = ()
+
+
+def _scenario_failures(
+    failed_flat, v_chunk: Tensor, is_coherent: bool
+) -> tuple[int, ...]:
+    """Solver-flat failed indices -> unique scenario indices along ``B``.
+
+    The node-coherent path solves a ``[B, T]`` leading batch, so the solver's
+    convergence mask flattens over ``B*T`` — a step index maps to its scenario via
+    ``// T``. Non-coherent runs have one solve per scenario (``T = 1``).
+    """
+    if is_coherent:
+        if v_chunk.ndim >= 4:
+            t = v_chunk.shape[-3]
+            return tuple(sorted({i // t for i in failed_flat}))
+        # Single-scenario sequence [T, H, N]: any failed step fails scenario 0.
+        return (0,) if failed_flat else ()
+    return tuple(failed_flat)
 
 
 def run_scenarios(
@@ -225,7 +244,7 @@ def run_scenarios(
             sampled=sampled,
             frequencies_hz=freqs,
             converged=converged,
-            failed_states=failed,
+            failed_states=_scenario_failures(failed, v, is_coherent),
         )
 
     # Stream the batch in chunks along the SCENARIO axis (a size-1 chunk loses its leading
@@ -255,7 +274,7 @@ def run_scenarios(
             v_c = v_c.to(output_device)
         v_parts.append(v_c)
         converged = converged and conv_c
-        failed.extend(start + i for i in failed_c)
+        failed.extend(start + i for i in _scenario_failures(failed_c, v_c, is_coherent))
     return ScenarioResult(
         v=torch.cat(v_parts, dim=0),
         index=index,

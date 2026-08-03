@@ -44,6 +44,13 @@ from .opendss_oracle import (
     opendss_harmonic_voltages,
     opendss_ybus,
 )
+from .opendss_scenario_oracle import (
+    ExportedCircuit,
+    compare_to_pgml,
+    export_grid_to_opendss,
+    run_opendss_scenarios,
+    write_opendss_dataset,
+)
 from .pandapower_oracle import (
     pandapower_voltage_profile,
     pandapower_ybus,
@@ -70,4 +77,10 @@ __all__ = [
     "opendss_geometry_harmonic_profiles",
     "opendss_harmonic_voltages",
     "opendss_dyn_transformer_harmonic_voltages",
+    # opendss SCENARIO oracle (independent full-circuit export + batch scenario runs)
+    "ExportedCircuit",
+    "export_grid_to_opendss",
+    "run_opendss_scenarios",
+    "write_opendss_dataset",
+    "compare_to_pgml",
 ]

@@ -286,6 +286,21 @@ class ConsumerType(str, Enum):
     OTHER = "other"
 
 
+class MeasuredQuantity(str, Enum):
+    """Electrical quantity a :class:`MeasurementDevice` records.
+
+    ``VOLTAGE`` is the node voltage at the device's bus; ``CURRENT`` is a branch
+    current through a :class:`CurrentChannel`; ``POWER`` covers active/reactive
+    power (derived from voltage and current by the instrument). Being a string
+    enum, a value compares equal to its string (``MeasuredQuantity.VOLTAGE ==
+    "voltage"``).
+    """
+
+    VOLTAGE = "voltage"
+    CURRENT = "current"
+    POWER = "power"
+
+
 # =============================================================================
 # 2. Geometry (GeoJSON-shaped fragments; CRS is grid-wide)
 # =============================================================================
@@ -923,6 +938,18 @@ class InjectionAppliance(ApplianceBase):
     consume/inject sign is positive for a :class:`Load` and negative (injecting) for a
     :class:`Generator` / :class:`Storage`.
     """
+
+    return_path: Literal["auto", "neutral", "ground"] = Field(
+        default="auto",
+        description="Return-conductor choice of a WYE-connected appliance on a node "
+        "that carries an explicit neutral (Phase.N): 'auto' (default) returns through "
+        "the neutral whenever the node has one (the historical node-level rule), "
+        "'neutral' requires it (assembly raises when the node has no Phase.N), "
+        "'ground' pins the return to ground even on a neutral-carrying node (an "
+        "OpenDSS `.1.2.3` load on a four-wire bus). Meaningful for WYE only — "
+        "assembly rejects a non-'auto' value on a DELTA-connected appliance. On a "
+        "node without Phase.N every value behaves as ground.",
+    )
 
 
 class Source(ApplianceBase):
@@ -1562,6 +1589,27 @@ class ShuntAppliance(ApplianceBase):
     capacitance_f: Vec = si_field(
         "Per-phase shunt capacitance C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
     )
+    connection: WindingConnection = Field(
+        default=WindingConnection.WYE,
+        description="WYE (default): each element G/C connects its phase to ground "
+        "(the historical behavior). DELTA: element k connects phase k to phase k+1 "
+        "(cyclic over the appliance's phases; requires >= 2 phases) — a delta "
+        "capacitor bank. Zigzag is rejected.",
+    )
+
+    @model_validator(mode="after")
+    def _check_connection(self) -> "ShuntAppliance":
+        if self.connection in (
+            WindingConnection.ZIGZAG,
+            WindingConnection.ZIGZAG_GROUNDED,
+        ):
+            raise ValueError("ShuntAppliance does not support zigzag connections.")
+        if self.connection is WindingConnection.DELTA and len(self.phases) < 2:
+            raise ValueError(
+                "connection=DELTA requires at least 2 phases (a delta branch is a "
+                "phase-to-phase element)."
+            )
+        return self
 
 
 Appliance = Annotated[
@@ -1742,7 +1790,205 @@ class TransformerImpedanceInput(GridModel):
 
 
 # =============================================================================
-# 11. Grid container
+# 11. Measurement devices (instrumentation metadata; never on the autograd tape)
+# =============================================================================
+class CurrentChannel(GridModel):
+    """One current channel (CT) of a :class:`MeasurementDevice`: a metered branch.
+
+    The measured current is the branch current at the terminal of ``branch`` that
+    connects to the device's node — the branch must be incident to that node
+    (validated at :class:`Grid` level). ``terminal`` is normally inferred from the
+    device's node; an explicit value is only needed to disambiguate a self-loop
+    branch (``from_node == to_node``).
+    """
+
+    branch: int = Field(description="Id of the metered branch.")
+    phases: Optional[tuple[Phase, ...]] = Field(
+        default=None,
+        description=(
+            "Measured phases of the branch terminal at the device's node; "
+            "``None`` = every phase of that terminal."
+        ),
+    )
+    terminal: Optional[Literal["from", "to"]] = Field(
+        default=None,
+        description=(
+            "Which branch terminal is metered. ``None`` (default) infers the "
+            "terminal touching the device's node; set explicitly only for a "
+            "self-loop branch."
+        ),
+    )
+
+    @field_validator("phases")
+    @classmethod
+    def _unique_phases(
+        cls, v: Optional[tuple[Phase, ...]]
+    ) -> Optional[tuple[Phase, ...]]:
+        if v is not None and len(set(v)) != len(v):
+            raise ValueError("CurrentChannel phases must be unique.")
+        return v
+
+
+class MeasurementDevice(GridModel):
+    """A physical measurement instrument installed at a node.
+
+    Inert instrumentation metadata: which electrical quantities are recorded
+    where (and, for currents, on which incident branches), plus the device
+    identity, acquisition settings, accuracy class and connectivity information a
+    measurement-acquisition service needs to reach the instrument. Nothing here
+    enters the admittance assembly or the solver — consumers are the ML
+    measurement models (sensor placement, noise modelling keyed by
+    ``accuracy_class``) and external acquisition services.
+
+    Voltage is measured at the device's ``node`` (on ``phases``); currents are
+    measured per :class:`CurrentChannel` on branches incident to that node —
+    the physical picture is a meter cabinet at a bus with current transformers
+    on its feeders. Devices typically ATTACH to an existing grid description
+    (e.g. a converted DSO network plan) via
+    :meth:`Grid.attach_measurement_devices`, which re-runs the grid integrity
+    validation atomically.
+
+    All fields are plain python values (no tensor duality) — instrumentation
+    metadata is never a gradient leaf.
+    """
+
+    id: int = Field(description="Unique measurement-device id within the grid.")
+    name: Optional[str] = Field(
+        default=None, description="Instance label, e.g. 'PQ meter substation A'."
+    )
+    node: int = Field(
+        description="Id of the node (bus) the device is installed at; voltage is "
+        "measured here."
+    )
+    phases: Optional[tuple[Phase, ...]] = Field(
+        default=None,
+        description="Measured phases at `node`; ``None`` = every phase of the node.",
+    )
+    in_service: bool = Field(default=True)
+    measured_quantities: tuple[MeasuredQuantity, ...] = Field(
+        default=(MeasuredQuantity.VOLTAGE,),
+        description="Quantities the device records.",
+    )
+    max_harmonic_order: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Highest harmonic order the device resolves (e.g. 50 per "
+        "IEC 61000-4-7); ``None`` = unspecified.",
+    )
+    max_current_channels: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of current channels (CTs) the hardware supports.",
+    )
+    current_channels: list[CurrentChannel] = Field(
+        default_factory=list,
+        description="The metered incident branches (at most `max_current_channels`).",
+    )
+    manufacturer: Optional[str] = Field(default=None)
+    model: Optional[str] = Field(
+        default=None,
+        description="Product / device name (`name` is the instance label).",
+    )
+    supported_averaging_intervals_s: Optional[list[float]] = si_field(
+        "Averaging intervals the device supports (e.g. [1, 10, 600] = 1 s / 10 s "
+        "/ 10 min aggregation).",
+        short="s",
+        long="second",
+        default=None,
+    )
+    averaging_interval_s: Optional[float] = si_field(
+        "Configured averaging interval; must be one of "
+        "`supported_averaging_intervals_s` when both are given.",
+        short="s",
+        long="second",
+        default=None,
+        gt=0.0,
+    )
+    accuracy_class: Optional[str] = Field(
+        default=None,
+        description="Accuracy / performance class, e.g. '0.2S', '0.5S' (IEC 62053) "
+        "or 'A', 'S' (IEC 61000-4-30). Categorical: keys the measurement-noise "
+        "model of the ML layer; pgml attaches no numeric interpretation.",
+    )
+    connection: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Structured connectivity information for the acquisition "
+        "service, free-form JSON by design (transports vary). Convention: a "
+        "'kind' discriminator, e.g. {'kind': 'modbus_tcp', 'host': '10.0.0.5', "
+        "'port': 502, 'unit_id': 1}. Interpreted by the external acquisition "
+        "service, never by pgml.",
+    )
+    tags: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("phases")
+    @classmethod
+    def _unique_phases(
+        cls, v: Optional[tuple[Phase, ...]]
+    ) -> Optional[tuple[Phase, ...]]:
+        if v is not None:
+            if not v:
+                raise ValueError("Device phases must be non-empty when given.")
+            if len(set(v)) != len(v):
+                raise ValueError("Device phases must be unique.")
+        return v
+
+    @field_validator("measured_quantities")
+    @classmethod
+    def _quantities(
+        cls, v: tuple[MeasuredQuantity, ...]
+    ) -> tuple[MeasuredQuantity, ...]:
+        if not v:
+            raise ValueError("A device must measure at least one quantity.")
+        if len(set(v)) != len(v):
+            raise ValueError("Measured quantities must be unique.")
+        return v
+
+    @field_validator("supported_averaging_intervals_s")
+    @classmethod
+    def _supported_intervals(cls, v: Optional[list[float]]) -> Optional[list[float]]:
+        if v is not None:
+            if not v:
+                raise ValueError(
+                    "Supported averaging intervals must be non-empty when given."
+                )
+            if any(t <= 0.0 for t in v):
+                raise ValueError("Averaging intervals must be positive.")
+            if len(set(v)) != len(v):
+                raise ValueError("Supported averaging intervals must be unique.")
+        return v
+
+    @model_validator(mode="after")
+    def _check(self) -> "MeasurementDevice":
+        if (
+            self.averaging_interval_s is not None
+            and self.supported_averaging_intervals_s is not None
+            and self.averaging_interval_s not in self.supported_averaging_intervals_s
+        ):
+            raise ValueError(
+                f"averaging_interval_s={self.averaging_interval_s} is not one of "
+                f"the supported intervals {self.supported_averaging_intervals_s}."
+            )
+        if (
+            self.max_current_channels is not None
+            and len(self.current_channels) > self.max_current_channels
+        ):
+            raise ValueError(
+                f"{len(self.current_channels)} current channels exceed the "
+                f"device's {self.max_current_channels} supported channels."
+            )
+        if len({c.branch for c in self.current_channels}) != len(self.current_channels):
+            raise ValueError("Current channels must meter distinct branches.")
+        if self.current_channels and (
+            MeasuredQuantity.CURRENT not in self.measured_quantities
+        ):
+            raise ValueError(
+                "Current channels require 'current' in measured_quantities."
+            )
+        return self
+
+
+# =============================================================================
+# 12. Grid container
 # =============================================================================
 class GridMetadata(GridModel):
     name: Optional[str] = Field(default=None)
@@ -1768,6 +2014,11 @@ class Grid(GridModel):
     nodes: list[Node] = Field(description="All buses.")
     branches: list[Branch] = Field(default_factory=list)
     appliances: list[Appliance] = Field(default_factory=list)
+    measurement_devices: list[MeasurementDevice] = Field(
+        default_factory=list,
+        description="Installed measurement instrumentation (inert metadata; "
+        "typically attached to a converted grid by assignment).",
+    )
     types: TypeLibrary = Field(
         default_factory=TypeLibrary, description="Standard-type catalog."
     )
@@ -1801,7 +2052,85 @@ class Grid(GridModel):
         for a in self.appliances:
             if a.node not in node_ids:
                 raise ValueError(f"Appliance {a.id} references missing node {a.node}.")
+        self._check_measurement_devices(node_ids)
         return self
+
+    def attach_measurement_devices(self, devices: "list[MeasurementDevice]") -> "Grid":
+        """Attach measurement devices to this grid, re-validating atomically.
+
+        The intended authoring flow for instrumentation: a converted grid
+        description (e.g. a DSO-provided network plan) usually arrives without
+        measurement information, and the devices are mapped to their locations
+        and attached afterwards. Appends ``devices`` to
+        ``measurement_devices`` and re-runs the grid integrity validation; on a
+        validation failure the previous device list is restored, so a rejected
+        attach never leaves the grid inconsistent (a plain field assignment
+        would — pydantic keeps the assigned value even when a model validator
+        raises). Returns ``self`` for chaining.
+        """
+        previous = list(self.measurement_devices)
+        try:
+            self.measurement_devices = [*previous, *devices]
+        except Exception:
+            self.measurement_devices = previous
+            raise
+        return self
+
+    def _check_measurement_devices(self, node_ids: set) -> None:
+        """Cross-reference integrity of the installed measurement devices."""
+        device_ids = {d.id for d in self.measurement_devices}
+        if len(device_ids) != len(self.measurement_devices):
+            raise ValueError("Measurement-device ids must be unique.")
+        nodes_by_id = {n.id: n for n in self.nodes}
+        branches_by_id = {b.id: b for b in self.branches}
+        for d in self.measurement_devices:
+            node = nodes_by_id.get(d.node)
+            if node is None:
+                raise ValueError(
+                    f"Measurement device {d.id} references missing node {d.node}."
+                )
+            if d.phases is not None and not set(d.phases) <= set(node.phases):
+                raise ValueError(
+                    f"Measurement device {d.id} measures phases {tuple(d.phases)} "
+                    f"not present at node {d.node} (phases {tuple(node.phases)})."
+                )
+            for ch in d.current_channels:
+                b = branches_by_id.get(ch.branch)
+                if b is None:
+                    raise ValueError(
+                        f"Measurement device {d.id} meters missing branch {ch.branch}."
+                    )
+                if d.node not in (b.from_node, b.to_node):
+                    raise ValueError(
+                        f"Measurement device {d.id} meters branch {ch.branch}, "
+                        f"which is not incident to its node {d.node}."
+                    )
+                if ch.terminal is None and b.from_node == b.to_node:
+                    raise ValueError(
+                        f"Measurement device {d.id}: branch {ch.branch} is a "
+                        "self-loop; the metered terminal must be set explicitly."
+                    )
+                if ch.terminal == "from" and b.from_node != d.node:
+                    raise ValueError(
+                        f"Measurement device {d.id}: branch {ch.branch} 'from' "
+                        f"terminal is at node {b.from_node}, not the device node "
+                        f"{d.node}."
+                    )
+                if ch.terminal == "to" and b.to_node != d.node:
+                    raise ValueError(
+                        f"Measurement device {d.id}: branch {ch.branch} 'to' "
+                        f"terminal is at node {b.to_node}, not the device node "
+                        f"{d.node}."
+                    )
+                terminal = ch.terminal or ("from" if b.from_node == d.node else "to")
+                terminal_phases = b.from_phases if terminal == "from" else b.to_phases
+                if ch.phases is not None and not set(ch.phases) <= set(terminal_phases):
+                    raise ValueError(
+                        f"Measurement device {d.id}: channel on branch "
+                        f"{ch.branch} measures phases {tuple(ch.phases)} not "
+                        f"present at its {terminal} terminal "
+                        f"(phases {tuple(terminal_phases)})."
+                    )
 
 
 __all__ = [
@@ -1862,6 +2191,9 @@ __all__ = [
     "Storage",
     "ShuntAppliance",
     "Appliance",
+    "MeasuredQuantity",
+    "CurrentChannel",
+    "MeasurementDevice",
     "LineType",
     "TransformerType",
     "TypeLibrary",

@@ -1,6 +1,6 @@
 # pgml ScenarioConfig — a reproducible batch of operating points for data generation.
 # One config + its 'seed' reproduces the dataset exactly. Validate/round-trip with:
-#   pixi run -e cpu python -c "import yaml; from pgml.scenarios.config import ScenarioConfig; ScenarioConfig.model_validate(yaml.safe_load(open('examples/configs/pgml_scenario.yaml')))"
+#   pixi run -e cpu python -c "import yaml; from pgml.scenarios.config import ScenarioConfig; ScenarioConfig.model_validate(yaml.safe_load(open('run/configs/pgml_scenario.yaml')))"
 # Print the JSON Schema:   python -m pgml.scenarios.config --json-schema
 # Regenerate this template: python -m pgml.scenarios.config --example
 n_samples: 256

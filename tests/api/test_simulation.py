@@ -242,3 +242,63 @@ def test_branch_current_is_differentiable():
     out = loss(r)
     out.backward()
     assert r.grad is not None and float(r.grad.abs().sum()) > 0.0
+
+
+# --------------------------------------------------------------------------- #
+# param_overrides consistency across the solved state
+# --------------------------------------------------------------------------- #
+def test_param_overrides_thread_into_branch_currents():
+    """Voltage AND lazy branch currents must describe the SAME overridden network."""
+    grid = single_phase_chain()
+    r2 = torch.tensor([[2.0e-3]], dtype=torch.float64)
+    st = simulate(
+        grid,
+        SimulationConfig(calculation="power_flow"),
+        param_overrides={("line", 20, "series_resistance_ohm_per_m"): r2},
+    )
+    # Reference: the same value physically on the grid.
+    ref_grid = grid.model_copy(deep=True)
+    line = next(b for b in ref_grid.branches if b.id == 20)
+    line.series_resistance_ohm_per_m = [[2.0e-3]]
+    ref = simulate(ref_grid, SimulationConfig(calculation="power_flow"))
+    assert torch.allclose(st.v, ref.v, atol=1e-9)
+    for a, b in zip(st.branch_currents(), ref.branch_currents()):
+        assert torch.allclose(a.i_from, b.i_from, atol=1e-9)
+        assert torch.allclose(a.i_to, b.i_to, atol=1e-9)
+
+
+def test_harmonic_simulate_rejects_param_overrides():
+    with pytest.raises(InputError, match="param_overrides"):
+        simulate(
+            single_phase_chain(),
+            SimulationConfig(calculation="harmonic", harmonic_orders=[1, 3]),
+            param_overrides={
+                ("line", 20, "series_resistance_ohm_per_m"): torch.tensor([[1.0e-3]])
+            },
+        )
+
+
+# --------------------------------------------------------------------------- #
+# interharmonic (non-integer) orders are rejected, not truncated
+# --------------------------------------------------------------------------- #
+def test_interharmonic_orders_rejected():
+    from pgml.solver import solve_harmonic_flow
+
+    with pytest.raises(ValidationError):
+        SimulationConfig(calculation="harmonic", harmonic_orders=[1, 2.5])
+    with pytest.raises(InputError, match="integer"):
+        solve_harmonic_flow(single_phase_chain(), [1, 2.5])
+    # integral floats are fine
+    assert SimulationConfig(harmonic_orders=[1.0, 3.0]).harmonic_orders == [1.0, 3.0]
+
+
+# --------------------------------------------------------------------------- #
+# receiving-end powers are serialized
+# --------------------------------------------------------------------------- #
+def test_to_result_set_includes_receiving_end_powers():
+    st = simulate(three_phase_two_bus(), SimulationConfig(calculation="power_flow"))
+    br = st.to_result_set().branches[0]
+    assert br.p_to_w is not None and br.q_to_var is not None and br.s_to_va is not None
+    # from-side plus to-side active power is the (non-negative) series loss
+    loss_w = sum(br.p_from_w) + sum(br.p_to_w)
+    assert loss_w >= -1e-9

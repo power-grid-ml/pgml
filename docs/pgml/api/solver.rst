@@ -153,7 +153,7 @@ switching backends never changes which quantities carry gradients. For
 directly (what ``"auto"`` resolves to); ``"matrix_free"`` runs a
 Jacobian-free Newton-Krylov solve (GMRES on finite-difference Jacobian-vector
 products), trading iteration count for ``O(N)`` memory on very large grids.
-``examples/pgml/benchmark_sparse.py`` sweeps :func:`~pgml.grids.synthetic_feeder`
+``run/examples/pgml/benchmark_sparse.py`` sweeps :func:`~pgml.grids.synthetic_feeder`
 across sizes and reports the sparse/dense crossover on CPU (and the dense-GPU
 baseline it must be checked against) — see :doc:`/pgml/examples`.
 
@@ -177,9 +177,18 @@ loop)::
 
 The reused system must come from the SAME grid, ``slack``, ``dtype``,
 ``device``, ``param_overrides``, and ``branch_states`` as the solve that
-consumes it (validated where cheap). Reuse is a FORWARD-only optimization: the
-IFT backward always rebuilds its differentiable system from the parameter
-leaves, so gradients are byte-identical to a solve without ``system``.
+consumes it. ``slack`` / ``dtype`` / ``device`` / size are validated cheaply on
+every call; :func:`~pgml.solver.prepare_power_flow` additionally records the
+grid's :func:`~pgml.topology.network_fingerprint` (every node, branch, source,
+shunt and their parameter values) at prepare time, and
+:func:`~pgml.solver.solve_power_flow` recomputes and compares it on each reuse —
+a same-size grid whose topology or impedances have since changed is REJECTED
+with :class:`~pgml.errors.InputError` instead of silently solving with the
+stale factorization. ``param_overrides`` / ``branch_states`` equality remains
+the caller's own contract (not fingerprinted). Reuse is a FORWARD-only
+optimization: the IFT backward always rebuilds its differentiable system from
+the parameter leaves, so gradients are byte-identical to a solve without
+``system``.
 
 Per-phase / connection-aware harmonic injection
 -----------------------------------------------
@@ -210,6 +219,30 @@ The solver sources per-element spectra from three places, in priority order:
 single appliance.  See the "Per-phase / connection-aware harmonic injection"
 section of the :doc:`/pgml/concepts` page for usage examples and the full override
 convention.
+
+Fundamental-current anchor (``S_eff``)
+-----------------------------------------
+
+Every device's harmonic spectrum scales from the ELEMENT (terminal) current it actually
+draws at the converged fundamental voltage, not from its nameplate power. Per element,
+``I1_elem = sign * conj(S_eff) / conj(V_term)`` (load convention, ``sign`` +1 load / -1
+generator), where ``S_eff`` is the model-consistent power the device draws at that
+voltage — identical to what the nonlinear fundamental solve itself resolves
+(``device_current_injections``):
+
+- **Inverter-controlled device** (``Load``/``Generator``/``Storage`` with a ``control``)
+  — the control-resolved ``(P, Q)`` at the converged terminal voltage.
+- **Voltage-dependent load model** (``load_model`` other than the const-power default)
+  — the ZIP-scaled power ``S_eff = S0 * (z*r^2 + i*r + p)`` at ``r = |V_term| / V0``, the
+  same law :func:`~pgml.assembly.device_current_injections` applies.
+- **Const-power default** — the base operating point, unscaled.
+
+Every order's magnitude and angle then follow the usual spectrum convention relative to
+this ``I1_elem`` (see "Per-node harmonic source" below). Anchoring to the ACTUAL drawn
+current rather than the nameplate power is what makes a ``CONST_IMPEDANCE`` /
+``CONST_CURRENT`` / ``ZIP`` load's harmonic spectrum agree with an independent reference
+engine's per-model fundamental-current scaling — see the OpenDSS scenario oracle's
+matched-mode parity figures in :doc:`evaluation`.
 
 Per-node harmonic source (``node_sources``)
 --------------------------------------------

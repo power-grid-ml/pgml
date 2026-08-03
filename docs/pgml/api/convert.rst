@@ -113,6 +113,20 @@ Each library exposes different asymmetric load data:
   Single-phase loads are placed on their real bus-suffix phase (e.g. ``.1``
   → ``Phase.A``).
 
+  A WYE load/generator/PVSystem/Storage additionally carries its OWN return-conductor
+  choice: OpenDSS resolves each element's return conductor independently
+  (``CktElement.NodeOrder()`` — grounded, or an explicit non-zero tie such as ``.4``),
+  and the converter maps it to
+  :attr:`~pgml.schemas.grid_schema.InjectionAppliance.return_path` per element rather
+  than applying one shared rule to every WYE element on a bus. This is what lets a
+  solidly-grounded load and a neutral-returning load coexist correctly on the SAME
+  4-wire bus — see :doc:`/pgml/modeling/asymmetric` §4.
+
+  ``Capacitor`` / ``Reactor`` elements convert to a
+  :class:`~pgml.schemas.grid_schema.ShuntAppliance` — WYE (solidly grounded) by
+  default, or DELTA (``connection=DELTA``, per-leg G/C from OpenDSS's own resolved
+  per-leg ``Cuf`` / ``R`` / ``X``) when the DSS element is delta-connected.
+
 Transformers (vector-group aware, both phase modes)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

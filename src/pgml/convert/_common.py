@@ -49,6 +49,7 @@ from pgml.schemas.grid_schema import (
     ResistanceFrequencyModel,
     Source,
     WindingConnection,
+    ZipCoefficients,
 )
 
 # Default abc phase tuple for an expanded three-phase node / branch.
@@ -320,6 +321,7 @@ def build_load(
     q_per_phase_var: Optional[tuple[float, ...]] = None,
     native_phases: Optional[tuple[Phase, ...]] = None,
     load_model: Optional[LoadModel] = None,
+    zip_coefficients: Optional[ZipCoefficients] = None,
 ) -> Load:
     """Build a :class:`~pgml.schemas.grid_schema.Load`, phase decision centralized.
 
@@ -353,7 +355,19 @@ def build_load(
         Optional :class:`~pgml.schemas.grid_schema.LoadModel`; ``None`` leaves the
         schema default (``CONST_POWER``) — used to keep the pandapower output
         byte-identical (it never set ``load_model``).
+    zip_coefficients:
+        Optional :class:`~pgml.schemas.grid_schema.ZipCoefficients` for a
+        voltage-dependent load. Setting it implies ``load_model=ZIP`` (an explicit
+        conflicting ``load_model`` raises). The nonlinear solver honors the mix;
+        the linear const-Z assembler keeps using the base P/Q.
     """
+    if zip_coefficients is not None:
+        if load_model is not None and load_model is not LoadModel.ZIP:
+            raise ValueError(
+                f"zip_coefficients conflicts with load_model={load_model!r} "
+                "(coefficients imply LoadModel.ZIP)."
+            )
+        load_model = LoadModel.ZIP
     kwargs: dict[str, Any] = {
         "id": id,
         "name": name,
@@ -363,6 +377,8 @@ def build_load(
     }
     if load_model is not None:
         kwargs["load_model"] = load_model
+    if zip_coefficients is not None:
+        kwargs["zip_coefficients"] = zip_coefficients
 
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         kwargs["phases"] = _PHASE_A
@@ -518,32 +534,44 @@ def build_line_from_matrices(
     g_matrix: Optional[list[list[float]]] = None,
     name: Optional[str] = None,
     provenance: Optional[Provenance] = None,
+    to_phases: Optional[tuple[Phase, ...]] = None,
 ) -> Line:
     """Build a :class:`~pgml.schemas.grid_schema.Line` from explicit n x n matrices.
 
     The general per-length form used by every converter; OpenDSS supplies the
     native n x n R/L/C matrices directly, while pandapower/pgm route through
-    :func:`build_line_from_sequence`. ``from_phases`` and ``to_phases`` are both
-    set to ``phases`` (a series branch shares its phase set on both ends).
+    :func:`build_line_from_sequence`. By default ``from_phases`` and ``to_phases``
+    are both set to ``phases`` (a series branch usually shares its phase set on
+    both ends); pass ``to_phases`` for a phase-transposing connection (e.g. an
+    OpenDSS line wired ``bus1=a.1 bus2=b.2``) — conductor ``k`` then lands on
+    ``phases[k]`` at the from terminal and ``to_phases[k]`` at the to terminal.
 
     Parameters
     ----------
     phases:
-        The branch phase tuple (e.g. ``(Phase.A,)`` or ``(A, B, C)``); also fixes
-        the matrix row/column order.
+        The FROM-terminal phase tuple (e.g. ``(Phase.A,)`` or ``(A, B, C)``); also
+        fixes the matrix row/column (conductor) order.
     r_matrix, l_matrix, c_matrix:
         Per-length series resistance [Ohm/m], series inductance [H/m] and shunt
         capacitance [F/m] matrices (each ``len(phases) x len(phases)``).
     g_matrix:
         Optional shunt conductance [S/m] matrix; ``None`` means zeros.
+    to_phases:
+        Optional TO-terminal phase tuple, aligned conductor-by-conductor with
+        ``phases`` (must have the same length); ``None`` reuses ``phases``.
     """
+    if to_phases is not None and len(to_phases) != len(phases):
+        raise ValueError(
+            f"to_phases must match the conductor count of phases "
+            f"({len(to_phases)} != {len(phases)})."
+        )
     return Line(
         id=id,
         name=name,
         from_node=from_node,
         to_node=to_node,
         from_phases=phases,
-        to_phases=phases,
+        to_phases=phases if to_phases is None else to_phases,
         length_m=length_m,
         series_resistance_ohm_per_m=r_matrix,
         series_inductance_h_per_m=l_matrix,

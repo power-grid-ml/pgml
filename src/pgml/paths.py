@@ -6,7 +6,7 @@ the user owns and keeps out of version control. This keeps reproducible-but-bulk
 experiment artifacts separate from the source, and lets a run be relocated (e.g. to fast
 cluster scratch) by pointing one environment variable elsewhere.
 
-The root is the ``PGML_EXPERIMENTS`` environment variable when set, else ``./experiments``
+The root is the ``PGML_EXPERIMENTS`` environment variable when set, else ``./data``
 relative to the current working directory.
 """
 
@@ -18,11 +18,11 @@ from pathlib import Path
 #: Environment variable selecting the experiments root (absolute or relative path).
 _ENV = "PGML_EXPERIMENTS"
 #: Default root when ``PGML_EXPERIMENTS`` is unset (relative to the working directory).
-_DEFAULT = "experiments"
+_DEFAULT = "data"
 
 
 def experiments_root() -> Path:
-    """Return the experiments root: ``PGML_EXPERIMENTS`` if set, else ``./experiments``.
+    """Return the experiments root: ``PGML_EXPERIMENTS`` if set, else ``./data``.
 
     The directory is NOT created here — callers that write into it create only what they
     need. Use it as the base for a run's outputs, e.g. ``experiments_root() / run_name``.

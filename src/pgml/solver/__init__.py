@@ -58,7 +58,7 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 
 from __future__ import annotations
 
-from .harmonic import solve_harmonic
+from .harmonic import solve_anchored, solve_harmonic
 from .harmonic_flow import (
     HarmonicFlowResult,
     NodeHarmonicSource,
@@ -90,6 +90,7 @@ __all__ = [
     "prepare_power_flow",
     "PowerFlowSystem",
     "solve_harmonic",
+    "solve_anchored",
     "solve_power_flow",
     "PowerFlowResult",
     "ConvergenceDiagnostics",
