@@ -199,6 +199,23 @@ results are never read as more physical than they are. Details live in `docs/pgm
   (item C). Resonance magnitudes are conservative (undamped) at load-heavy buses.
 - **Sources.** Zero-sequence source impedance = positive-sequence value (no converter
   reads `r0x0_max`/`z01_ratio`) — `docs/pgml/modeling/conventions.md` §6.
+- **ZIP loads sharing a bus with generation (cross-tool).** pandapower reduces a ZIP load's
+  coefficients onto the BUS and applies them to that bus's NET injection
+  (`_calc_pq_elements_and_add_on_ppc`), so a const-Z load and a generator on one bus cancel
+  BEFORE the voltage-dependency is applied. pgml keeps the devices distinct, which is the
+  physical model — a constant-impedance load and a constant-power inverter only cancel at
+  nominal voltage. Measured on an LV bench where each inverter mirrors its bus's load:
+  3.9e-3 pu at the affected buses (both tools agree to 5e-8 with the generation stopped). Not a converter defect; take it into account when a pandapower
+  reference is used as ground truth for a grid with co-located ZIP load and generation.
+- **Closed bus-bus switch impedance.** The pandapower converter reads `switch.z_ohm` as the
+  switch RESISTANCE (`Switch.resistance_ohm`, `inductance_h = 0`); pandapower itself splits
+  that value across R and X at its `switch_rx_ratio` (default 2, so X = z/√5). Physically a
+  closed contact is resistive, but the difference is not negligible on a low-reactance cable
+  network: on an LV cable feeder (line X ≈ 1.4 mΩ) a 1 mΩ switch contributed a 0.0125°
+  node-angle divergence from pandapower until the reference run was given a purely resistive
+  switch. Decide whether to reproduce pandapower's split when converting a net
+  whose switches carry a non-zero `z_ohm`. WHERE: `src/pgml/convert/pandapower/converter.py`
+  section 4 (bus-bus switches).
 - **Line geometry (Carson/Deri).** No conductor temperature dependence, no sub-conductor
   bundling; transposition per the documented Deri assumptions.
 - **Zero-sequence line impedance at harmonics — lumped R/L lines only.** Lines WITH
