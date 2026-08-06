@@ -211,6 +211,45 @@ states themselves — are identical between the two methods.
 Explicit opt-in only, with no `"auto"` heuristic: the win depends on `k / N`, a ratio only
 the caller (who knows how many branches its sweep switches) can judge in advance.
 
+### Where the update pays — and where it cannot
+
+The single decision criterion is the rank `k` of the difference to the base
+factorization, judged against the measured crossover `k ≈ N / 3` above. Case by case:
+
+- **Switch-state sweeps on one grid** — the shipped consumer. Each switched `P`-phase
+  branch is a rank-`≤ 2P` term, so a handful of switches keeps `k ≪ N` at any grid size.
+- **An out-of-service line** *is* an open switch for this purpose: `branch_states`
+  accepts any branch id with a scaling, and `s = 0` is exact (the correction `C` is
+  never inverted). One fixed "candidate" grid whose states open and close member lines
+  therefore sweeps *topologies over a shared node set* today. The caveat is the same
+  `k` budget: sweeping **neighbouring** topologies (a few reconfiguration moves around a
+  base) is the winning regime, while arbitrary pairs of radial trees drawn from a dense
+  candidate mesh differ in a large fraction of their edges — `k` approaches `N` and the
+  per-state assembly wins. Every state must also pass the per-scenario connectivity
+  check on its own.
+- **Different operating points on one grid need no update at all**: const-P/ZIP loads
+  live on the right-hand side as `I_device(V)`, not in `Y`, so the existing
+  factor-once-solve-many path (:func:`pgml.solver.prepare_power_flow` + a batched
+  ``operating_point``) already solves every scenario as one back-substitution against a
+  single factorization.
+- **Same node set, different edges** — a mutated grid whose edges moved or resized is a
+  rank-`≤ 2P`-per-changed-branch update of its parent's factorization. This is the
+  anticipated second consumer (evaluating mutation offspring against a cached parent
+  factorization); {func}`pgml.assembly.branch_stamp_blocks` is the seam built for it.
+- **Different node counts cannot be reached**: the base and target matrices have
+  different dimensions, which no low-rank identity bridges. Growing a system is a
+  *bordered* (block-append) factorization update — a different technique, not
+  implemented.
+
+**References.** The identity goes back to Sherman & Morrison (1950, *Ann. Math. Stat.*
+21:124) for rank-one and Woodbury (1950, Statistical Research Group Memo. Rep. 42,
+Princeton) for the block form; Hager (1989, *SIAM Review* 31:221, "Updating the inverse
+of a matrix") surveys the numerics, including the conditioning of downdates that
+motivates the base-state rule above. The pseudoinverse variant for rectangular
+least-squares systems (Güttel, Nakatsukasa, Webb & Bloor Riley, arXiv:2406.15120) does
+not apply here — the power-flow systems are square — but is the natural reference should
+a least-squares consumer (e.g. a state-estimation normal-equation update) appear.
+
 ## Ensembles of grids: the disjoint union
 
 Solving many *different* grids at once (a generated population, a multi-feeder study)

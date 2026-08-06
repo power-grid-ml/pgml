@@ -211,7 +211,13 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
   lines are skipped by `synthesize_grid_geometry`; Carson `C` is correct but not bit-exact
   to OpenDSS's `capradius` (match it if a c≠0 feeder is added).
 - **Continuation/Newton polish**: a true arc-length predictor-corrector; a GMRES
-  preconditioner near the nose; batched continuation.
+  preconditioner near the nose; batched continuation. Iwamoto's optimal multiplier
+  (Iwamoto & Tamura 1981, IEEE Trans. PAS-100:1736): the complex power-flow residual is
+  EXACTLY quadratic in `(V, conj(V))`, so the second-order Taylor term is exact and the
+  optimal Newton step length has a closed form from one extra residual evaluation per
+  iteration — an ill-conditioned/near-nose robustness upgrade (larger convergence
+  region, no divergence overshoot), not a throughput lever; adopt it with the
+  continuation work, on both the plain Newton solve and the corrector.
 - **Typing / mypy gate** (incremental): targeted annotations on the public API + a gate on
   the non-duck-typed modules; don't fight the deliberate `Any` of the float/tensor duality.
 - **Deferred (no priority) — time-domain simulation.** The steady-state frequency-domain
