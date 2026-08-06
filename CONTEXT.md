@@ -129,8 +129,9 @@ conforms to it. The full behavioral rule is in `CLAUDE.md`.
    vs OpenDSS.
 3. Full harmonic range; validate harmonic results vs OpenDSS (IEEE-33 + CIGRE LV). **Done.**
 4. Batching/scale (`pgml.scenarios`): reproducible QMC/cartesian + correlated + EN 50160 +
-   parquet. **Done** — topology/multi-grid batching and the large-scale solve remain open
-   (`src/pgml/STATUS.md`).
+   parquet. **Done** — including cross-grid batching (`pgml.multigrid.merge_grids`
+   disjoint-union solves) and switch-state batching (`branch_states`); the production
+   GPU data-generation scale decision remains open (`src/pgml/STATUS.md` §A).
 5. PyG state estimation (`pgl`) + the inverse (parameter recovery) path. **In development.**
 
 ## Commands
