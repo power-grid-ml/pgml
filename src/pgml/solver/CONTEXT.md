@@ -419,12 +419,72 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   configuration in one call and broadcast against a batched `operating_point`;
   continuous states are IFT-differentiable topology parameters. Per-scenario
   connectivity is pre-checked (vectorized condensed-graph propagation).
+- `solve_power_flow(..., branch_states_method="assemble"|"woodbury")` (also on
+  `prepare_power_flow`) — HOW a switch-state sweep reaches each state's linear
+  system. `"assemble"` (default, unchanged behaviour) assembles + factors every
+  state: `O(S·N³)` and an `[S,N,N]` matrix. `"woodbury"` assembles + factors the
+  BASE network ONCE and reaches each state through a low-rank update of that
+  factorization (`pgml.solver.lowrank`, below): `O(N²k + k³)` per state with
+  `k = Σ 2P` over the switched branches. Explicit opt-in only — `"auto"` does not
+  exist, because the win depends on `k/N`. Requires `branch_states` and
+  `method="current_injection"`; a `system=` must have been prepared with the SAME
+  method. FORWARD-only: the IFT backward rebuilds the per-state admittance
+  differentiably, so gradients (including w.r.t. the state values) are identical.
+  Measured on an i7-12700 (CPU, `run/examples/pgml/benchmark_woodbury.py`, S=8
+  states, `auto` backend = SuperLU sparse) for 1-4 switched 3-phase branches
+  (k=6…24): 3.2-3.5x at 600 rows, 4.3-6.8x at 1200, ~5.8x at 2100, ~5.4x at 3000;
+  1.7-4.4x still at k=96. Crossover ≈ `k ≈ N/3` (600 rows: 1.1x at k=192, 0.2x at
+  k=384). Voltages agree with the assemble path to ~1e-12 relative.
 - `prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
-  branch_states, linear_solver, block_rows) -> PowerFlowSystem` +
+  branch_states, branch_states_method, linear_solver, block_rows) -> PowerFlowSystem` +
   `solve_power_flow(..., system=...)` — assembly + slack rows + factorization +
   grid-leaf walk once, reused across repeated solves (the `run_scenarios` chunk
   loop shares one system). Forward-only reuse: the IFT backward always rebuilds
-  differentiably, so gradients are unchanged.
+  differentiably, so gradients are unchanged. With
+  `branch_states_method="woodbury"` the cached `y_eff` is a matrix-free
+  `LowRankOperator` and `factorization` a `LowRankUpdate`.
+
+- `harmonic.back_substitute(fac, rhs)` / `ideal_slack_rhs(fac, i_inj, v_fixed)` /
+  `scatter_slack_solution(fac, v_free, v_fixed)` — the three building blocks a
+  factored solve is made of (backend dispatch, the ideal-slack RHS correction, the
+  free+slack reassembly). `solve_factored` and the low-rank update-solve below share
+  them, so the two can never drift.
+
+## Low-rank update-solve — `pgml.solver.lowrank` (module-level public surface)
+Sherman-Morrison-Woodbury solve of `(A + U C Vᴴ) x = b` on top of a
+`FactoredSystem`. Used by the switch-state sweep above; designed to be reused by
+any "solve a MUTATED grid from the parent's factorization" consumer.
+
+- `low_rank_update(fac, u, c, *, v=None) -> LowRankUpdate` — precompute
+  `W = A⁻¹U` (`k` back-substitutions of the base factorization) and the LU of the
+  capacitance matrix `I + C VᴴW` (batched over `c`'s leading state dims), reused by
+  every later solve. `u`/`v` are complex `[N,k]` in the FULL row space (reduced to
+  the free rows internally under ideal slack); `c` is complex `[*states,k,k]`.
+- `solve_factored_updated(system, i_inj, *, u=None, c=None, v=None, v_fixed=None)
+  -> Tensor` — the updated solve; `system` is a prepared `LowRankUpdate` or a bare
+  `FactoredSystem` plus `u`/`c`. Identical contract to `solve_factored`
+  (`[*batch,N]` in / out, both slack modes, batched right-hand sides); the update's
+  effect on the slack coupling `ΔY_fs = U_f C V_sᴴ` is applied to the RHS, so a
+  switched branch incident to a slack node is exact. All three factorization
+  backends (dense / sparse / block) work — the base back-substitution is shared with
+  `solve_factored`.
+- `branch_state_terms(grid, index, branch_states, frequency_hz, *, dtype, device,
+  param_overrides, base_states=1.0) -> (u, c)` — builds `U` (a `[N,k]` row selector)
+  and `C` (block-diagonal `(s_b − base_b)·block_b`) from
+  `assembly.branch_stamp_blocks`. `base_states` is a float or `{branch_id: state}`.
+- `LowRankOperator(base, u, c, v)` — the updated matrix as a matrix-free operator
+  (`.correction(x)` = `U C Vᴴ x`, `.shape/.dtype/.device`); `_apply_y` applies it so
+  residuals and diagnostics never materialise the `[S,N,N]` per-state admittance.
+- NUMERICS (why the base matters): the identity is used in the arrangement
+  `A⁻¹ − A⁻¹U (I + C VᴴA⁻¹U)⁻¹ C VᴴA⁻¹`, which never inverts `C` — so `s = 0` (an
+  OPEN switch) is exact and `C = 0` (a branch at its base state) reproduces the base
+  solve bit-for-bit. The update AMPLIFIES the base solution's rounding by
+  `‖(I+CZ)⁻¹CZ‖` (`Z = VᴴA⁻¹U`): O(1) when it ADDS admittance, but ~`|y·z_thevenin|`
+  when it REMOVES a near-ideal switch (whose voltage drop is lost to cancellation) —
+  a 1e-4 Ω switch on an ohm-scale feeder already costs 4 digits. Therefore the sweep
+  BASE omits every switched branch it can (`_woodbury_base_states` opens each in turn
+  while `check_connectivity` passes; bridges stay in), and `low_rank_update` warns
+  when the measured amplification exceeds 1e6.
 - Internal fast paths (no API): `assembly.build_injection_plan` /
   `injections_from_plan` resolve the operating point once per solve (the
   V-independent tensors) and make every iteration pure tensor ops; residuals

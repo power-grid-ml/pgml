@@ -917,6 +917,67 @@ def _lu_solve_shared(lu: Tensor, piv: Tensor, rhs: Tensor) -> Tensor:
     return sol.permute(*inv)  # [*scenario, *fb, m]
 
 
+def back_substitute(fac: FactoredSystem, rhs: Tensor) -> Tensor:
+    """Back-substitute ``rhs`` against the factors, whichever backend holds them.
+
+    The RHS lives in the factored matrix's own space: the FULL ``N`` rows in Norton
+    mode, the FREE rows only in ideal-slack mode. ``rhs`` is ``[*scenario, *fb, m]``
+    and the result has the broadcast shape (see :func:`_lu_solve_shared`). This is
+    the single dispatch point every factored solve — plain
+    (:func:`solve_factored`) or low-rank-updated
+    (:func:`pgml.solver.lowrank.solve_factored_updated`) — goes through.
+    """
+    if fac.backend == "sparse":
+        return _SparseSolveFn.apply(fac.y_mat, rhs, fac.sparse)
+    if fac.backend == "block":
+        return fac.block.solve(rhs)
+    return _lu_solve_shared(fac.lu, fac.piv, rhs)
+
+
+def ideal_slack_rhs(
+    fac: FactoredSystem, i_inj: Tensor, v_fixed: Optional[Tensor]
+) -> tuple[Tensor, Tensor]:
+    """Free-row right-hand side ``I_free − Y_fs v_fixed`` and the broadcast ``v_fixed``.
+
+    The ideal-slack half of a factored solve that does not depend on the factors:
+    gather the free rows of the injection and subtract the slack coupling (cheap —
+    ``S`` slack columns). Returns ``(rhs [*batch, F], v_fixed [*batch, S])`` with
+    ``batch`` the broadcast of the factorization's own batch and every input's.
+    """
+    if v_fixed is None:
+        raise InputError("Ideal-slack factored solve requires `v_fixed`.")
+    sys_t = fac._fb_tensor
+    free_rows, fixed_rows, y_fs = fac.free_rows, fac.fixed_rows, fac.y_fs
+    f, s = free_rows.shape[0], fixed_rows.shape[0]
+    vf = v_fixed.to(dtype=sys_t.dtype, device=sys_t.device)
+    i_free = i_inj.index_select(-1, free_rows)  # [*ib, F]
+    batch = torch.broadcast_shapes(
+        sys_t.shape[:-2], i_free.shape[:-1], y_fs.shape[:-2], vf.shape[:-1]
+    )
+    y_fs_b = y_fs.broadcast_to(*batch, f, s)
+    vf_b = vf.broadcast_to(*batch, s)
+    rhs = i_free.broadcast_to(*batch, f) - torch.matmul(
+        y_fs_b, vf_b.unsqueeze(-1)
+    ).squeeze(-1)  # [*batch, F]
+    return rhs, vf_b
+
+
+def scatter_slack_solution(fac: FactoredSystem, v_free: Tensor, vf: Tensor) -> Tensor:
+    """Reassemble the full ``[*batch, N]`` voltage from the free solution + slack.
+
+    Out-of-place scatter (no in-place op on a tracked tensor); ``batch`` follows
+    ``v_free`` so a correction that widened the batch (e.g. a per-state low-rank
+    update over a single-scenario right-hand side) is carried through.
+    """
+    free_rows, fixed_rows = fac.free_rows, fac.fixed_rows
+    f, s = free_rows.shape[0], fixed_rows.shape[0]
+    batch = v_free.shape[:-1]
+    vf_b = vf.broadcast_to(*batch, s)
+    v_full = torch.zeros(*batch, fac.n, dtype=v_free.dtype, device=v_free.device)
+    v_full = v_full.scatter(-1, free_rows.expand(*batch, f), v_free)
+    return v_full.scatter(-1, fixed_rows.expand(*batch, s), vf_b)
+
+
 def solve_factored(
     fac: FactoredSystem, i_inj: Tensor, *, v_fixed: Optional[Tensor] = None
 ) -> Tensor:
@@ -928,41 +989,11 @@ def solve_factored(
     (:func:`_lu_solve_shared`), so the dense ``Y`` is never tiled across the batch. The
     ``"block"`` backend does the same per diagonal block, gathering / scattering each
     block's entries of the right-hand side around its own batched back-substitution."""
-    n = fac.n
-    sys_t = fac._fb_tensor
     if fac.mode == "norton":
-        if fac.backend == "sparse":
-            return _SparseSolveFn.apply(fac.y_mat, i_inj, fac.sparse)
-        if fac.backend == "block":
-            return fac.block.solve(i_inj)
-        return _lu_solve_shared(fac.lu, fac.piv, i_inj)
-
-    if v_fixed is None:
-        raise InputError("Ideal-slack factored solve requires `v_fixed`.")
-    free_rows, fixed_rows, y_fs = fac.free_rows, fac.fixed_rows, fac.y_fs
-    f, s = free_rows.shape[0], fixed_rows.shape[0]
-    vf = v_fixed.to(dtype=sys_t.dtype, device=sys_t.device)
-    i_free = i_inj.index_select(-1, free_rows)  # [*ib, F]
-    # Build the corrected RHS ``I_free - Y_fs v_fixed`` (cheap: ``S`` slack rows), then
-    # back-substitute it against the shared free-block factorization as multiple RHS.
-    batch = torch.broadcast_shapes(
-        sys_t.shape[:-2], i_free.shape[:-1], y_fs.shape[:-2], vf.shape[:-1]
-    )
-    y_fs_b = y_fs.broadcast_to(*batch, f, s)
-    vf_b = vf.broadcast_to(*batch, s)
-    rhs = i_free.broadcast_to(*batch, f) - torch.matmul(
-        y_fs_b, vf_b.unsqueeze(-1)
-    ).squeeze(-1)  # [*batch, F]
-    if fac.backend == "sparse":
-        v_free = _SparseSolveFn.apply(fac.y_mat, rhs, fac.sparse)  # [*batch, F]
-    elif fac.backend == "block":
-        v_free = fac.block.solve(rhs)  # [*batch, F]
-    else:
-        v_free = _lu_solve_shared(fac.lu, fac.piv, rhs)  # [*batch, F]
-    v_full = torch.zeros(*batch, n, dtype=sys_t.dtype, device=sys_t.device)
-    v_full = v_full.scatter(-1, free_rows.expand(*batch, f), v_free)
-    v_full = v_full.scatter(-1, fixed_rows.expand(*batch, s), vf_b)
-    return v_full
+        return back_substitute(fac, i_inj)
+    rhs, vf_b = ideal_slack_rhs(fac, i_inj, v_fixed)
+    v_free = back_substitute(fac, rhs)  # [*batch, F]
+    return scatter_slack_solution(fac, v_free, vf_b)
 
 
 __all__ = [
@@ -971,4 +1002,8 @@ __all__ = [
     "lu_factor_system",
     "solve_factored",
     "FactoredSystem",
+    # shared building blocks of a factored solve (reused by pgml.solver.lowrank)
+    "back_substitute",
+    "ideal_slack_rhs",
+    "scatter_slack_solution",
 ]

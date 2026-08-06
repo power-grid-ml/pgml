@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -77,6 +77,13 @@ from pgml.schemas.grid_schema import Grid, Source
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
+from .lowrank import (
+    LowRankOperator,
+    LowRankUpdate,
+    branch_state_terms,
+    low_rank_update,
+    solve_factored_updated,
+)
 
 _log = logging.getLogger("pgml")
 
@@ -677,7 +684,7 @@ def _slack_rows_and_vref(
 # ---------------------------------------------------------------------------
 # system builders (used by both the forward fixed point and the IFT backward)
 # ---------------------------------------------------------------------------
-def _apply_y(y_eff: Tensor, v: Tensor) -> Tensor:
+def _apply_y(y_eff, v: Tensor) -> Tensor:
     """``Y @ V`` over the scenario batch, reading a SHARED ``Y`` exactly once.
 
     When every leading dim of ``y_eff`` is singleton (one network shared by the
@@ -687,7 +694,14 @@ def _apply_y(y_eff: Tensor, v: Tensor) -> Tensor:
     Folding the batch into the rows of ONE ``[B, N] @ [N, N]`` GEMM reads the
     matrix once. A genuinely batched ``y_eff`` (per-scenario topology) keeps the
     batched matmul — each scenario owns its matrix there. Differentiable in both.
+
+    ``y_eff`` may also be a :class:`~pgml.solver.lowrank.LowRankOperator` — the
+    per-state admittance of a Woodbury switch-state sweep, applied as the shared
+    base plus each state's rank-``k`` correction instead of a materialised
+    ``[B, N, N]`` tensor.
     """
+    if isinstance(y_eff, LowRankOperator):
+        return _apply_y(y_eff.base, v) + y_eff.correction(v)
     n = y_eff.shape[-1]
     if y_eff.reshape(-1, n, n).shape[0] == 1:
         lead = torch.broadcast_shapes(v.shape[:-1], y_eff.shape[:-2])
@@ -740,6 +754,113 @@ def _y_eff_and_islack(
     return y, i_slack
 
 
+def _woodbury_base_states(grid: Grid, branch_states: dict) -> dict:
+    """The base configuration a switch-state sweep factors: OMIT what it can.
+
+    A Woodbury update that ADDS admittance is numerically benign, while one that
+    REMOVES a near-ideal switch multiplies that switch's voltage drop — two nearly
+    equal node voltages whose difference floating point barely resolves — by its
+    huge admittance, and spends the precision the fixed point needs. So the base
+    leaves every switched branch OUT (state 0) wherever the base network still
+    energizes every row: each branch is opened in turn and kept open while
+    :func:`check_connectivity` passes. A branch that is a bridge of the base
+    network stays IN it (state 1) — the sweep cannot open it either (a state of 0
+    there fails the per-scenario connectivity check), and a partial downdate of a
+    finite-impedance branch is well conditioned.
+    """
+
+    def connected(states: dict) -> bool:
+        try:
+            check_connectivity(_apply_scalar_states(grid, states))
+        except ConnectivityError:
+            return False
+        return True
+
+    ids = [int(bid) for bid in branch_states]
+    all_open = {bid: 0.0 for bid in ids}
+    if connected(all_open):
+        return all_open  # the usual sweep (normally-open ties): one check
+    base = {bid: 1.0 for bid in ids}
+    for bid in ids:
+        trial = dict(base)
+        trial[bid] = 0.0
+        if connected(trial):
+            base = trial
+    return base
+
+
+def _woodbury_pieces(
+    grid,
+    f0,
+    index,
+    dtype,
+    device,
+    slack,
+    param_overrides,
+    branch_states,
+    fixed_rows,
+    factor_backend,
+    block_rows,
+):
+    """Base admittance, slack current and the per-state low-rank update of a sweep.
+
+    The base network (:func:`_woodbury_base_states`) is assembled and factored
+    ONCE; each state is that base plus the rank-``k`` deviation of its switched
+    stamps (:func:`~pgml.solver.lowrank.branch_state_terms`). Returns the base as a
+    matrix-free :class:`~pgml.solver.lowrank.LowRankOperator` (the residual /
+    diagnostics never materialise the ``[B, N, N]`` per-state admittance) together
+    with the state-independent slack current and the prepared
+    :class:`~pgml.solver.lowrank.LowRankUpdate`.
+    """
+    base_states = _woodbury_base_states(grid, branch_states)
+    y_base, i_slack = _y_eff_and_islack(
+        grid, f0, index, dtype, device, slack, param_overrides, base_states
+    )
+    u, c = branch_state_terms(
+        grid,
+        index,
+        branch_states,
+        f0,
+        dtype=dtype,
+        device=y_base.device,
+        param_overrides=param_overrides,
+        base_states=base_states,
+    )
+    fac = lu_factor_system(
+        y_base, fixed_rows=fixed_rows, backend=factor_backend, block_rows=block_rows
+    )
+    return (
+        LowRankOperator(y_base, u, c, u),
+        i_slack,
+        low_rank_update(fac, u, c),
+    )
+
+
+def _validate_branch_states_method(
+    branch_states_method: str, branch_states, method: str = "current_injection"
+) -> bool:
+    """Resolve the switch-state solve strategy; ``True`` selects the Woodbury path."""
+    if branch_states_method not in ("assemble", "woodbury"):
+        raise InputError(
+            f"Unsupported branch_states_method {branch_states_method!r} "
+            "(use 'assemble' or 'woodbury')."
+        )
+    if branch_states_method == "assemble":
+        return False
+    if not branch_states:
+        raise InputError(
+            'branch_states_method="woodbury" needs branch_states: it solves every '
+            "state as a low-rank update of one base factorization."
+        )
+    if method != "current_injection":
+        raise InputError(
+            'branch_states_method="woodbury" applies to the current-injection '
+            f"fixed point (its inner solve is the factored one); method={method!r} "
+            "builds its own dense Jacobian per scenario."
+        )
+    return True
+
+
 @dataclass(frozen=True)
 class PowerFlowSystem:
     """Precomputed solve state for REPEATED solves of one grid (assembly + LU).
@@ -762,16 +883,22 @@ class PowerFlowSystem:
     shunts and their parameter values) — a same-size grid with changed topology or
     impedances is rejected instead of silently reusing the stale factorization.
     ``param_overrides`` / ``branch_states`` equality remains the caller's contract.
+
+    With ``branch_states_method="woodbury"`` the cached system describes the sweep's
+    BASE network instead: ``y_eff`` is a matrix-free
+    :class:`~pgml.solver.lowrank.LowRankOperator` and ``factorization`` a
+    :class:`~pgml.solver.lowrank.LowRankUpdate`, so a consuming solve must request
+    the same method.
     """
 
     index: NodePhaseIndex
     f0: float
     slack: str
-    y_eff: Tensor  # detached [*, N, N]
+    y_eff: Any  # detached [*, N, N] (a LowRankOperator on the woodbury path)
     i_slack: Tensor  # detached [1, N] (norton) or [N] (ideal)
     fixed_rows: Optional[Tensor]
     v_fixed: Optional[Tensor]  # detached slack reference
-    factorization: object  # FactoredSystem of y_eff
+    factorization: object  # FactoredSystem of y_eff (or its LowRankUpdate)
     static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
     network_fp: str = ""  # network_fingerprint(grid) at prepare time
 
@@ -784,6 +911,7 @@ def prepare_power_flow(
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    branch_states_method: str = "assemble",
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
 ) -> PowerFlowSystem:
@@ -793,14 +921,15 @@ def prepare_power_flow(
     :class:`~pgml.errors.ConnectivityError` like :func:`solve_power_flow` with
     ``on_disconnected="raise"``), assembles ``Y_eff`` and the slack quantities,
     and factors ``Y_eff`` with the selected backend
-    (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver`` and
-    ``block_rows`` as in :func:`solve_power_flow`). Pass the result as
-    ``solve_power_flow(..., system=...)`` to skip that work on every subsequent
-    call.
+    (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver``,
+    ``block_rows`` and ``branch_states_method`` as in :func:`solve_power_flow`).
+    Pass the result as ``solve_power_flow(..., system=...)`` to skip that work on
+    every subsequent call — with the SAME ``branch_states_method``.
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
     _validate_block_solver(linear_solver, block_rows)
+    use_woodbury = _validate_branch_states_method(branch_states_method, branch_states)
     if branch_states is not None:
         if _branch_states_batched(branch_states):
             _check_connectivity_with_states(grid, branch_states)
@@ -823,18 +952,33 @@ def prepare_power_flow(
         else (None, None)
     )
     with torch.no_grad():
-        y_eff, i_slack = _y_eff_and_islack(
-            grid, f0, index, dtype, device, slack, param_overrides, branch_states
-        )
         factor_backend = (
             linear_solver if linear_solver in ("dense", "sparse", "block") else "auto"
         )
-        fac = lu_factor_system(
-            y_eff,
-            fixed_rows=fixed_rows,
-            backend=factor_backend,
-            block_rows=block_rows,
-        )
+        if use_woodbury:
+            y_eff, i_slack, fac = _woodbury_pieces(
+                grid,
+                f0,
+                index,
+                dtype,
+                device,
+                slack,
+                param_overrides,
+                branch_states,
+                fixed_rows,
+                factor_backend,
+                block_rows,
+            )
+        else:
+            y_eff, i_slack = _y_eff_and_islack(
+                grid, f0, index, dtype, device, slack, param_overrides, branch_states
+            )
+            fac = lu_factor_system(
+                y_eff,
+                fixed_rows=fixed_rows,
+                backend=factor_backend,
+                block_rows=block_rows,
+            )
     return PowerFlowSystem(
         index=index,
         f0=f0,
@@ -866,6 +1010,7 @@ def solve_power_flow(
     block_rows: Optional[Sequence[Tensor]] = None,
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
+    branch_states_method: str = "assemble",
     system: Optional[PowerFlowSystem] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
@@ -968,6 +1113,24 @@ def solve_power_flow(
         ``operating_point`` by the usual rules (align, or use extra leading dims
         for a cartesian sweep). ``method="newton"`` supports batched states OR a
         batched operating point, not both at once.
+    branch_states_method:
+        How a switch-state sweep reaches each state's linear system.
+
+        - ``"assemble"`` (default) — assemble and factor the admittance of EVERY
+          state (``O(S·N³)``, one ``[S, N, N]`` matrix).
+        - ``"woodbury"`` — assemble and factor the BASE network ONCE (every
+          switched branch closed) and reach each state through a
+          Sherman-Morrison-Woodbury low-rank update of that factorization
+          (:mod:`pgml.solver.lowrank`): a switched ``P``-phase branch's stamp is a
+          rank-``≤ 2P`` term, so a state costs ``O(N²k + k³)`` with
+          ``k = Σ 2P`` over the switched branches. Wins whenever ``k ≪ N``, which
+          is the switch-sweep regime; it is an explicit opt-in (never chosen by a
+          default or an ``"auto"``) because the win depends on that ratio.
+
+        The Woodbury path changes only the FORWARD iteration: a backward pass
+        still rebuilds the per-state admittance differentiably through the IFT, so
+        gradients (including gradients w.r.t. the state values) are unchanged. It
+        requires ``branch_states`` and ``method="current_injection"``.
     system:
         Optional :class:`PowerFlowSystem` from :func:`prepare_power_flow` — the
         operating-point-independent solve state (index, ``Y_eff``, slack rows,
@@ -1008,6 +1171,18 @@ def solve_power_flow(
             "fixed-point factorization backend of method='current_injection'."
         )
     _validate_block_solver(linear_solver, block_rows, have_system=system is not None)
+    use_woodbury = _validate_branch_states_method(
+        branch_states_method, branch_states, method
+    )
+    if system is not None and use_woodbury != isinstance(
+        system.factorization, LowRankUpdate
+    ):
+        raise InputError(
+            "The provided PowerFlowSystem was prepared with a different "
+            "branch_states_method: a woodbury system caches the sweep's BASE "
+            "factorization plus its low-rank update, an assemble system the "
+            "per-state factorization. Prepare and solve with the same method."
+        )
     # Newton's inner solve: 'auto' resolves to the proven dense Jacobian path.
     newton_solver = "dense" if linear_solver == "auto" else linear_solver
     # Fixed-point factorization backend: 'matrix_free' has no meaning there.
@@ -1339,6 +1514,36 @@ def solve_power_flow(
                 real_res, v_init, n, rdt, cdt, device, tol, max_iter, newton_solver
             )
     else:
+        solve_system = system
+        if use_woodbury and solve_system is None:
+            # One base assembly + factorization for the whole sweep; each state is a
+            # low-rank update of it. Detached like every forward quantity — the IFT
+            # backward rebuilds the per-state admittance differentiably.
+            with torch.no_grad():
+                y_base, i_slack_w, upd = _woodbury_pieces(
+                    grid,
+                    f0,
+                    index,
+                    dtype,
+                    device,
+                    slack,
+                    param_overrides,
+                    branch_states,
+                    fixed_rows,
+                    factor_backend,
+                    block_rows,
+                )
+            solve_system = PowerFlowSystem(
+                index=index,
+                f0=f0,
+                slack=slack,
+                y_eff=y_base,
+                i_slack=i_slack_w,
+                fixed_rows=fixed_rows,
+                v_fixed=v_fixed.detach() if v_fixed is not None else None,
+                factorization=upd,
+                static_leaves=tuple(leaves),
+            )
         (
             v_star,
             iterations,
@@ -1363,7 +1568,7 @@ def solve_power_flow(
             tol,
             max_iter,
             factor_backend,
-            system,
+            solve_system,
             block_rows,
         )
 
@@ -1429,6 +1634,19 @@ def solve_power_flow(
 # ---------------------------------------------------------------------------
 # forward solvers (detached V*; gradients are attached by the IFT below)
 # ---------------------------------------------------------------------------
+def _factored_solve(fac, rhs: Tensor, v_fixed: Optional[Tensor]) -> Tensor:
+    """Back-substitute against a plain factorization or a low-rank-updated one.
+
+    The switch-state sweep's per-state system is the base factorization plus a
+    rank-``k`` update (:class:`~pgml.solver.lowrank.LowRankUpdate`); every other
+    path holds a plain :class:`~pgml.solver.harmonic.FactoredSystem`. Both answer
+    the same ``[*batch, N]`` contract, so the iteration is identical.
+    """
+    if isinstance(fac, LowRankUpdate):
+        return solve_factored_updated(fac, rhs, v_fixed=v_fixed)
+    return solve_factored(fac, rhs, v_fixed=v_fixed)
+
+
 def _current_injection_forward(
     grid,
     index,
@@ -1451,6 +1669,11 @@ def _current_injection_forward(
     ``plan`` is the precomputed :class:`~pgml.assembly.InjectionPlan`: the
     operating point is resolved once and every iteration evaluates
     :func:`injections_from_plan` (pure tensor ops).
+
+    A ``system`` whose factorization is a
+    :class:`~pgml.solver.lowrank.LowRankUpdate` (the Woodbury switch-state sweep)
+    runs the SAME iteration: ``y_eff0`` is then the matrix-free per-state operator
+    and each back-substitution carries the low-rank correction.
 
     Returns ``(v_star, iterations, residual_norm, converged, residual_history, y_eff0,
     i_slack0, converged_mask, residual_vec)``; ``residual_norm`` is the final ``||ΔV||``
@@ -1550,7 +1773,7 @@ def _current_injection_forward(
         for _ in range(max_iter):
             i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
-            v_new = solve_factored(fac, rhs, v_fixed=v_fixed)
+            v_new = _factored_solve(fac, rhs, v_fixed)
             # solve_factored carries Y's leading H=1; drop the singleton axis.
             if v_new.ndim >= 2 and v_new.shape[-2] == 1 and v_new.shape[-1] == n:
                 v_new = v_new.squeeze(-2)

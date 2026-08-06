@@ -1485,6 +1485,149 @@ def branch_currents(
 
 
 # ---------------------------------------------------------------------------
+# per-branch primitive stamps (the incidence structure of a branch in Y)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class BranchStampBlock:
+    """One branch's primitive admittance block and the Y rows it occupies.
+
+    A branch enters the Y-bus ONLY as ``Y[rows, rows] += block`` (the stamp the
+    assembly scatters, :func:`assemble_network_ybus`), so this pair is the complete
+    description of that branch's contribution — the structure that makes a change
+    of a single branch's admittance a LOW-RANK modification of ``Y`` (rank ≤ ``M``,
+    ``M = 2P`` for a two-terminal branch and ``P`` for a single-terminal shunt).
+
+    Attributes
+    ----------
+    branch_id:
+        Id of the source :class:`~pgml.schemas.grid_schema.BranchBase` branch.
+    kind:
+        Registered stamp kind (``"line"``, ``"switch"``, ``"transformer"``,
+        ``"generic_branch"``, ``"shunt_reactor"``).
+    block:
+        Complex ``[H, M, M]`` primitive admittance (per frequency), UNSCALED by any
+        branch state — exactly the matrix a state of 1 stamps.
+    rows:
+        int64 ``[M]`` global node-phase rows the block occupies (from-terminal rows
+        then to-terminal rows; from-terminal only for a single-terminal shunt).
+    single_terminal:
+        ``True`` for a one-terminal shunt branch (``M == P``, no TO half).
+    """
+
+    branch_id: int
+    kind: str
+    block: Tensor
+    rows: Tensor
+    single_terminal: bool
+
+
+def branch_stamp_blocks(
+    grid: Grid,
+    frequencies_hz,
+    branch_ids,
+    index: NodePhaseIndex,
+    *,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+) -> list[BranchStampBlock]:
+    """The primitive admittance stamp of each named branch, with its Y rows.
+
+    Walks the SAME branch-stamp registry as the Y-bus assembly and
+    :func:`branch_currents` (no stamp physics is re-derived) and returns, per
+    requested branch, the primitive block and the global rows it scatters into. A
+    branch is stamped regardless of its ``in_service`` / ``closed`` flags — the
+    caller decides what a state of 0 means — and the returned block is the
+    UNSCALED (state 1) primitive.
+
+    This is the structural input to a low-rank admittance update
+    (:mod:`pgml.solver.lowrank`): scaling branch ``b``'s stamp by ``s`` changes
+    ``Y`` by ``(s − 1)`` times its block on ``rows``, a rank-``≤ M`` term.
+
+    Parameters
+    ----------
+    grid:
+        Materialised :class:`~pgml.schemas.grid_schema.Grid` (``type_ref`` expanded).
+    frequencies_hz:
+        1-D real tensor / sequence of ``H`` absolute frequencies (Hz), or a scalar.
+    branch_ids:
+        Iterable of branch ids to return stamps for. Every id must name a branch of
+        ``grid`` that the registry stamps.
+    index:
+        The compact :class:`NodePhaseIndex` of the FULL grid — the row layout the
+        returned ``rows`` refer to.
+    dtype, device, param_overrides:
+        As in :func:`assemble_ybus` (``device`` defaults to the frequency tensor's,
+        else CPU; ``param_overrides`` injects differentiable parameter leaves).
+
+    Returns
+    -------
+    list[BranchStampBlock]
+        One entry per (branch, stamp group) in ``grid.branches`` order.
+        Differentiable w.r.t. the branch parameters; device/dtype follow the
+        arguments.
+    """
+    wanted = list(dict.fromkeys(int(b) for b in branch_ids))
+    known = {b.id for b in grid.branches}
+    missing = [b for b in wanted if b not in known]
+    if missing:
+        raise InputError(
+            f"branch_stamp_blocks: unknown branch id(s) {missing} (not in grid.branches)."
+        )
+    if device is None and isinstance(frequencies_hz, Tensor):
+        device = frequencies_hz.device
+    f = _as_freq_tensor(frequencies_hz, dtype, device)
+    device = f.device
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+
+    # Restrict the builders to the requested branches (a shallow view of the grid:
+    # same nodes, same catalog, fewer branches) so the stamp work is O(len(wanted))
+    # instead of O(all branches). Row indices still come from the FULL grid's index.
+    wanted_set = set(wanted)
+    sub = grid.model_copy(
+        update={"branches": [b for b in grid.branches if b.id in wanted_set]}
+    )
+    # Every requested branch is stamped, whatever its static flags say.
+    active = {bid: 1.0 for bid in wanted}
+
+    found: dict[int, BranchStampBlock] = {}
+    for stamp in _BRANCH_STAMPS:
+        for group, block, rows, cols in stamp.builder(
+            sub, f, index, cdt, rdt, device, param_overrides, active
+        ):
+            if not torch.equal(rows, cols):
+                raise InputError(
+                    f"branch_stamp_blocks: the {stamp.kind!r} stamp scatters into "
+                    "asymmetric (row != col) positions; a low-rank update needs the "
+                    "symmetric row/col mapping every registered branch stamp uses."
+                )
+            for k, b in enumerate(group):
+                if b.id in found:
+                    raise InputError(
+                        f"branch_stamp_blocks: branch {b.id} is stamped twice (as "
+                        f"{found[b.id].kind!r} and {stamp.kind!r}); a branch must "
+                        "yield exactly one primitive block for its contribution to Y "
+                        "to be a single low-rank term."
+                    )
+                found[b.id] = BranchStampBlock(
+                    branch_id=b.id,
+                    kind=stamp.kind,
+                    block=block.select(-3, k),  # [H, M, M]
+                    rows=rows[k],  # [M]
+                    single_terminal=stamp.single_terminal,
+                )
+    unstamped = [bid for bid in wanted if bid not in found]
+    if unstamped:
+        raise InputError(
+            f"branch_stamp_blocks: branch id(s) {unstamped} have no registered "
+            "primitive stamp (only Line / Transformer / Switch / GenericBranch / "
+            "ShuntReactor branches carry one)."
+        )
+    return [found[b.id] for b in grid.branches if b.id in found]
+
+
+# ---------------------------------------------------------------------------
 # current injections
 # ---------------------------------------------------------------------------
 def build_injections(
@@ -2100,10 +2243,12 @@ def _tensor_sum(per_phase, rdt: torch.dtype, device):
 __all__ = [
     "YBus",
     "BranchCurrent",
+    "BranchStampBlock",
     "InjectionPlan",
     "assemble_ybus",
     "assemble_network_ybus",
     "branch_currents",
+    "branch_stamp_blocks",
     "build_injection_plan",
     "build_injections",
     "device_current_injections",

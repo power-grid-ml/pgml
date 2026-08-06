@@ -41,7 +41,9 @@ decisions. One entry per capability:
 - **Scale / solver architecture** — factor-once-solve-many, the `InjectionPlan` fast path,
   prepared systems (`prepare_power_flow`), scenario chunk tiling, the CPU sparse (SuperLU)
   backend with backend-aware convergence floors, switch-state batching (`branch_states`
-  admittance scaling, differentiable), multi-grid disjoint-union batching
+  admittance scaling, differentiable) with the optional Woodbury LOW-RANK update-solve
+  (`branch_states_method="woodbury"` — one base factorization for the whole sweep,
+  `pgml.solver.lowrank`), multi-grid disjoint-union batching
   (`pgml.multigrid.merge_grids`) plus its BLOCK-DIAGONAL factorization backend
   (`linear_solver="block"` + `MergedGrid.block_rows()` — factors each member's diagonal
   block, equal sizes stacked into one batched LU, so an ensemble costs `O(Σ n³)` instead
@@ -49,7 +51,8 @@ decisions. One entry per capability:
   option), and pre-solve connectivity checks
   (`ConnectivityError` / `on_disconnected="zero"`). Design + measurements:
   `docs/pgml/modeling/solver-performance.md`; benchmarks:
-  `run/examples/pgml/benchmark_speed.py`, `run/examples/pgml/benchmark_sparse.py`.
+  `run/examples/pgml/benchmark_speed.py`, `run/examples/pgml/benchmark_sparse.py`,
+  `run/examples/pgml/benchmark_woodbury.py`.
 - **Convert** — pandapower / OpenDSS / power-grid-model → `Grid`, with per-terminal phase
   permutations, n_phases-aware neutrals, positive-sequence reduction (Z1 = Zself−Zmutual),
   pandapower `parallel` + line/trafo switches, ZIP load models, OpenDSS
@@ -83,9 +86,24 @@ large rework (schema changes are orchestrator-only — ask first).
 ### A. Batching / scale → production GPU training-data generation  ⚠️ decision — main gap
 
 **What.** Generate LARGE volumes of harmonic-flow training data on a GPU, reproducibly.
-The sampling layer and the dense scale wins are done (see Status + 
+The sampling layer and the dense scale wins are done (see Status +
 `docs/pgml/modeling/solver-performance.md`); what remains:
 
+- **DONE — switch-state sweeps as a low-rank update.** A sweep over `S` switch states no
+  longer costs `S` assemblies and factorizations: `branch_states_method="woodbury"`
+  factors the sweep's BASE network once and reaches every state through a
+  Sherman-Morrison-Woodbury update of that factorization (`pgml.solver.lowrank`,
+  `O(N²k + k³)` per state with `k = Σ 2P` over the switched branches). Explicit opt-in;
+  the default `"assemble"` path is unchanged. Measured on an i7-12700 (CPU, `auto`
+  backend = SuperLU sparse, `S = 8` states, `run/examples/pgml/benchmark_woodbury.py`)
+  for 1-4 switched 3-phase branches (`k = 6…24`): 3.2-3.5x at 600 rows, 4.3-6.8x at
+  1200, ~5.8x at 2100, ~5.4x at 3000; still 1.7-4.4x at `k = 96`. The crossover is
+  around `k ≈ N/3` (measured: 1.1x at `k = 192` and 0.2x at `k = 384` on 600 rows),
+  beyond which assembling per state is cheaper. Voltages agree with the assemble path
+  to ~1e-12 relative, and the memory profile changes from `[S, N, N]` to one base
+  factorization plus `[S, k, k]`.
+  The BASE omits every switched branch it can (opening one is a stable update, removing
+  a near-ideal switch from the base is not — `pgml.solver.lowrank`).
 - **GPU / memory micro-optimisations (benchmark-informed)**: a validated complex64
   data-generation fast path (generate at complex128, store complex64 — see the
   conditioning caveat under "Known modeling gaps"); retune the IFT backward's
@@ -93,12 +111,24 @@ The sampling layer and the dense scale wins are done (see Status +
   chunk-to-chunk warm starting for sorted/correlated scenario chunks;
   `torch.cuda.CUDAGraph` / `torch.compile` over the fixed-point iteration (static shapes
   per chunk — likely wins at small N).
-- **Very large N**: a sparse/matrix-free IFT backward + Newton Jacobian (both are still
-  dense `[2N, 2N]`); sparse-direct assembly (COO from the stamps, skipping the dense `Y`)
-  once grids exceed a few thousand rows. Both bound the block-diagonal ensemble path too:
-  `linear_solver="block"` removes the union-sized FACTORIZATION, while assembly, the
-  ideal-slack `Y_fs` coupling gather and the IFT backward still pay union-sized dense
-  memory — block-aware versions of those are the next step for a very large ensemble.
+- **Very large N / large unions — the designated GPU sparse-direct route: cuDSS via
+  nvmath-python.** torch has no batched sparse direct solve, so today CUDA is always
+  dense and a merged ensemble is bounded by union-sized dense memory. The intended
+  backend is NVIDIA's cuDSS through nvmath-python's sparse direct-solver API: it
+  supports complex matrices, batches uniformly over ONE sparsity pattern (exactly the
+  scenario/ensemble case — the pattern is fixed, the values vary) and separates
+  analysis / factorization / solve so the symbolic phase is paid once and reused across
+  a whole run, matching the factor-once-solve-many design. It is Beta upstream — pin and
+  re-validate before adopting. PREREQUISITE: COO/block-aware assembly, so the union's
+  dense `[N, N]` `Y` is never materialised. The union-sized dense remainders today are
+  (1) assembly itself (the stamps scatter into a dense accumulator), (2) the ideal-slack
+  `Y_fs` coupling gather, and (3) the IFT backward's dense `[2N, 2N]` Jacobian (shared
+  with Newton). `linear_solver="block"` already removes the union-sized FACTORIZATION for
+  an ensemble; these three are what still bound it.
+- **Beyond direct-factorization scale**: a GPU-resident Krylov path (block-Jacobi /
+  additive-Schwarz preconditioning, the shape GPU power-flow solvers built on iterative
+  methods take) is the fork for networks too large to factor at all — secondary at LV
+  sizes, where direct factorization wins.
 - Resolved as won't-do (measured): a batch-native Newton forward — the block-diagonal
   Jacobian build was 4× slower than the per-scenario path at B=64/N=180; bulk batches
   belong to the current-injection method.

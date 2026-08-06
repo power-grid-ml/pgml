@@ -92,6 +92,20 @@ Module: `pgml.assembly`
   (`_BRANCH_STAMPS`, see below) the assembly does: each `_*_block_groups` builder yields
   `(group, block, rows, cols)` consumed by BOTH the stamp (scatters) and `branch_currents`
   (matmuls) — assembly behaviour is BIT-IDENTICAL (oracle suite unchanged).
+- `branch_stamp_blocks(grid, frequencies_hz, branch_ids, index, *,
+     dtype=torch.complex128, device=None, param_overrides=None) -> list[BranchStampBlock]`
+  — IMPLEMENTED (`ybus.py`). The primitive admittance block + global rows of each NAMED
+  branch, from the SAME registry walk as the assembly (no stamp physics re-derived).
+  `BranchStampBlock` (frozen dataclass): `branch_id:int`, `kind:str`, `block:Tensor`
+  complex `[H,M,M]` (UNSCALED — exactly what a state of 1 stamps), `rows:Tensor` int64
+  `[M]`, `single_terminal:bool`. Every requested branch is stamped regardless of its
+  `in_service`/`closed` flags; unknown or unstamped ids raise `InputError`. The builders
+  run on a shallow grid view holding only the requested branches, so the cost is
+  O(len(branch_ids)), while `rows` index the FULL grid's `index`. This is the structural
+  input to a LOW-RANK admittance update — a branch enters `Y` only as
+  `Y[rows, rows] += block`, so scaling it by `s` changes `Y` by `(s−1)` times a rank-`≤M`
+  term (consumer: `pgml.solver.lowrank.branch_state_terms`, the Woodbury switch-state
+  sweep). Differentiable w.r.t. the branch parameters; device/dtype follow the arguments.
 - `node_phase_index(grid) -> NodePhaseIndex` (above).
 
 `operating_point` format (M1): `{appliance_id: {"p_w": float, "q_var": float}}` or
@@ -107,7 +121,7 @@ branches, `block` the primitive admittance `[H,K,M,M]` (`M=2P` two-terminal seri
 block scatters into / gathers voltage from. Builders are registered in place with the
 `@_branch_stamp(kind, *, single_terminal=False)` decorator at their definition.
 
-BOTH consumers iterate the registry, so the two paths can never drift:
+THREE consumers iterate the registry, so the paths can never drift:
 - `_stamp_network` (passive assembly, shared by `assemble_ybus` /
   `assemble_network_ybus`) scatters every yielded block (`scatter_blocks_into`).
   Scatter-add is order-independent, so the assembled Y is BIT-IDENTICAL regardless of
@@ -115,6 +129,8 @@ BOTH consumers iterate the registry, so the two paths can never drift:
 - `branch_currents` multiplies each block with the gathered terminal voltage. A
   `single_terminal` builder is emitted as `to_node=None` / empty `i_to` (no TO half);
   a two-terminal block is split `i_from = I_term[..., :P]`, `i_to = I_term[..., P:]`.
+- `branch_stamp_blocks` hands each named branch's block + rows out unchanged (the
+  low-rank update seam).
 
 Registered kinds (BRANCH-scoped only): `line`, `switch`, `generic_branch`,
 `shunt_reactor` (single-terminal), `transformer`. The registry is deliberately NOT a
@@ -126,8 +142,10 @@ To add a NEW branch kind: write a `_<kind>_block_groups` generator following the
 shared signature/yield contract (group its branches, build the primitive `[H,K,M,M]`
 block batched over branches+phases — no python loop over individual branches on the
 tape — and emit `_series_terminal_indices` / `_shunt_node_indices` for `rows`), then
-decorate it with `@_branch_stamp("<kind>", single_terminal=...)`. Both Y-bus assembly
-and `branch_currents` pick it up automatically — no edit to either dispatch.
+decorate it with `@_branch_stamp("<kind>", single_terminal=...)`. Y-bus assembly,
+`branch_currents` and `branch_stamp_blocks` pick it up automatically — no edit to any
+dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses);
+`branch_stamp_blocks` rejects an asymmetric mapping.
 
 ## Stamps (differentiable, vectorized — no Python loop over branches)
 - Per harmonic, per phase. Frequency scaling: `X = 2*pi*f*L`, `B = 2*pi*f*C`

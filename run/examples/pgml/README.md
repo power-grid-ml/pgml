@@ -32,6 +32,10 @@ pixi run -e cpu python run/examples/pgml/<script>.py [out_dir]
   which bus collapses, and which load most limits the margin.
 - **`benchmark_speed.py`** — CPU/GPU execution-speed study across every solve path and a
   batch-size sweep (auto-detects CUDA; writes one `results_<device>.json` per device).
+- **`benchmark_woodbury.py`** — switch-state sweeps: the Sherman-Morrison-Woodbury
+  low-rank update-solve (`branch_states_method="woodbury"`) vs assembling and factoring
+  every state, across system size, update rank `k` and state count — with the crossover
+  in `k` and the numerical agreement of the two paths.
 
 ## The scenario system these are built on
 

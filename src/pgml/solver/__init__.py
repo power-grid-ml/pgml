@@ -7,7 +7,8 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 - ``solve_power_flow(grid, *, slack, method, tol, max_iter, dtype, device,
   operating_point, param_overrides, symmetry=None, criticality="auto",
   linear_solver="auto", block_rows=None, on_disconnected="raise",
-  branch_states=None, system=None) -> PowerFlowResult``
+  branch_states=None, branch_states_method="assemble", system=None)
+  -> PowerFlowResult``
   Nonlinear const-P / ZIP fundamental power flow: current-injection fixed point
   forward, implicit-function-theorem backward (real-coordinate adjoint).
   ``symmetry`` selects per-phase vs balanced load modeling (``None`` -> config).
@@ -17,7 +18,10 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   :meth:`pgml.multigrid.MergedGrid.block_rows`) one sub-grid at a time — the CUDA
   path for a many-grid ensemble. ``on_disconnected`` controls the pre-solve
   connectivity check (``"raise"``/``"zero"``/``"ignore"``). ``branch_states``
-  batches switch/topology configurations by differentiable admittance masking.
+  batches switch/topology configurations by differentiable admittance masking, and
+  ``branch_states_method="woodbury"`` (opt-in) solves that whole sweep from ONE base
+  factorization through a Sherman-Morrison-Woodbury low-rank update
+  (:mod:`pgml.solver.lowrank`) instead of assembling every state.
   ``system`` reuses a :class:`PowerFlowSystem` from :func:`prepare_power_flow`
   across repeated solves of the same grid.
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, method,
@@ -36,10 +40,12 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   galvanic path to an in-service source; the pre-solve gate every entry point
   above runs by default.
 - ``prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
-  branch_states, linear_solver="auto", block_rows=None) -> PowerFlowSystem``
+  branch_states, branch_states_method="assemble", linear_solver="auto",
+  block_rows=None) -> PowerFlowSystem``
   Assembles and factors the operating-point-independent part of a nonlinear
   solve once, for reuse across repeated :func:`solve_power_flow` calls on the
-  same grid (e.g. a chunked scenario batch).
+  same grid (e.g. a chunked scenario batch). A consuming solve must request the
+  same ``branch_states_method``.
 - ``NodeHarmonicSource(node_id, phases=None, spectrum={}, source_power_va=0.0,
   kind="voltage") -> NodeHarmonicSource``
   Frozen dataclass describing a per-node harmonic "error" source
