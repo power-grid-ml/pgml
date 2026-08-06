@@ -88,10 +88,13 @@ When the high-level facade is not enough:
   run a pre-solve connectivity check by default (`on_disconnected="raise"`
   raises {class}`~pgml.errors.ConnectivityError`; `"zero"` solves the
   energized sub-grid; `"ignore"` skips it), accept `branch_states` for
-  differentiable topology / switch-state batching, and `solve_power_flow`
-  accepts `linear_solver="auto"` (sparse on large CPU systems, dense on GPU)
-  and a `system=` handle from `prepare_power_flow` to reuse one factorization
-  across repeated solves of the same grid. See {doc}`api/solver`.
+  differentiable topology / switch-state batching (with an optional
+  `branch_states_method="woodbury"` fast path over a low-rank update instead of
+  assembling every state), and `solve_power_flow`
+  accepts `linear_solver="auto"` (sparse on large CPU systems, dense on GPU;
+  `"block"` factors a `pgml.multigrid`-merged grid ensemble one member at a
+  time) and a `system=` handle from `prepare_power_flow` to reuse one
+  factorization across repeated solves of the same grid. See {doc}`api/solver`.
 - {mod}`pgml.scenarios` — `run_scenarios` / `run_node_injection_sweep` for
   reproducible batched training-data generation.
 - {mod}`pgml.assembly` — `assemble_ybus` / `device_current_injections` /

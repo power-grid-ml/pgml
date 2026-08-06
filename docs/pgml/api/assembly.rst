@@ -140,6 +140,26 @@ enabled stays fully differentiable — the composition
 ``injections_from_plan(build_injection_plan(...), v)`` is byte-identical to
 :func:`~pgml.assembly.device_current_injections`.
 
+Primitive stamp blocks (``branch_stamp_blocks``)
+----------------------------------------------------
+
+:func:`~pgml.assembly.branch_stamp_blocks` hands out one named branch's primitive
+admittance block and the global Y rows it occupies
+(:class:`~pgml.assembly.BranchStampBlock`) — the SAME branch-stamp registry walk that
+the assembly and :func:`~pgml.assembly.branch_currents` use, so no stamp physics is
+re-derived here. Because a branch only ever enters ``Y`` as ``Y[rows, rows] += block``,
+this pair is the *complete* description of what scaling that branch's admittance by
+``s`` changes: ``(s − 1) × block`` on ``rows``, a rank-``≤ M`` modification (``M = 2P``
+for a two-terminal branch, ``P`` for a single-terminal shunt). Every requested branch is
+stamped regardless of its ``in_service`` / ``closed`` flags, and the returned block is
+always the UNSCALED (state-1) primitive; the block is differentiable w.r.t. the branch's
+parameters, and device/dtype follow the arguments.
+
+This is the structural input a LOW-RANK admittance update needs — the seam
+:mod:`pgml.solver.lowrank` builds the Woodbury switch-state sweep on (see the
+"Switch-state sweeps" section of :doc:`solver`), and more generally the seam for
+solving a mutated grid from its parent's factorization.
+
 .. automodule:: pgml.assembly
    :members:
    :show-inheritance:

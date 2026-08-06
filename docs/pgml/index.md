@@ -86,7 +86,15 @@ figures.
   returning a `MergedGrid` that translates per-member `operating_point` / `branch_states`
   into merged ids and slices any solved `[..., N_total]` state back into per-member views
   with `split()`. Merging shares the members' own parameter tensors, so gradients through a
-  merged solve reach the original grids' leaves.
+  merged solve reach the original grids' leaves. `linear_solver="block"` +
+  `MergedGrid.block_rows()` factors each member's diagonal block instead of the dense
+  union — the CUDA path for a many-grid ensemble, where dense is otherwise the only
+  direct backend.
+- **Switch-state sweeps** — `branch_states_method="woodbury"` reaches a batched
+  `branch_states` sweep's every configuration through one Sherman-Morrison-Woodbury
+  low-rank update of a single base factorization instead of assembling and factoring
+  each state, a measured multiple-x speedup that grows with the sweep's state count and
+  shrinks with the number of switched branches (`pgml.solver.lowrank`).
 - **Instrumentation** — `Grid.measurement_devices`: installed metering hardware as inert
   metadata (`pgml.schemas.MeasurementDevice` — node-anchored voltage + `CurrentChannel`
   currents on incident branches, accuracy class, acquisition settings), attached to an

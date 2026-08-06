@@ -132,6 +132,41 @@ canonical normally-open tie-switch scenario for this study (see :doc:`grids`).
 ``branch_states``, not both at once (its per-scenario slicing covers the
 operating point only); ``method="current_injection"`` batches both freely.
 
+Switch-state sweeps: the low-rank update (``branch_states_method``)
+------------------------------------------------------------------------
+
+``branch_states_method`` (accepted by :func:`~pgml.solver.solve_power_flow` and
+:func:`~pgml.solver.prepare_power_flow`) selects **how** a batched ``branch_states``
+sweep reaches each state's linear system:
+
+- ``"assemble"`` (default) — assemble and factor the admittance of every state:
+  ``O(S·N³)`` work and an ``[S, N, N]`` matrix in memory.
+- ``"woodbury"`` — assemble and factor the BASE network once, then reach every state
+  through a Sherman-Morrison-Woodbury low-rank update of that single factorization
+  (:mod:`pgml.solver.lowrank`). A switched branch enters ``Y`` only on its own terminal
+  rows (:func:`~pgml.assembly.branch_stamp_blocks`), so scaling it is a rank-``≤ 2P``
+  modification (``P`` = its phase count); with ``k = Σ 2P`` summed over every switched
+  branch, a state then costs ``O(N²k + k³)`` instead of a fresh assembly and
+  factorization.
+
+Explicit opt-in only — there is no ``"auto"`` heuristic, because the win depends on
+``k / N``, which only the caller (who knows how many branches its sweep switches) can
+judge in advance. Requires ``branch_states`` and ``method="current_injection"``; a
+reused ``system=`` must have been :func:`~pgml.solver.prepare_power_flow`-d with the
+SAME ``branch_states_method``. FORWARD-only: the IFT backward always rebuilds the
+per-state admittance differentiably, so gradients — including with respect to the
+switch states themselves — are identical between the two methods.
+
+The sweep's BASE omits every switched branch it can: the downdate that would REMOVE a
+near-ideal closed switch from the base is ill-conditioned (it amplifies the base
+solution's rounding by the switch's Thévenin-impedance ratio), while ADDING admittance
+to reach a closed state is numerically benign, so the base is built without the
+switched branches wherever the grid stays connected without them. See the
+"Switch-state sweeps as a low-rank update (Woodbury)" section of
+:doc:`/pgml/modeling/solver-performance` for the measured speedup, the crossover in
+``k``, and the conditioning argument in full, and
+``run/examples/pgml/benchmark_woodbury.py`` for the reproducible benchmark.
+
 Solve performance: factorization backend and system reuse
 -------------------------------------------------------------
 
@@ -156,6 +191,21 @@ products), trading iteration count for ``O(N)`` memory on very large grids.
 ``run/examples/pgml/benchmark_sparse.py`` sweeps :func:`~pgml.grids.synthetic_feeder`
 across sizes and reports the sparse/dense crossover on CPU (and the dense-GPU
 baseline it must be checked against) — see :doc:`/pgml/examples`.
+
+A fourth choice, ``"block"``, factors a system that is *structurally* block-diagonal —
+an ensemble of independent grids disjoint-unioned by :func:`pgml.multigrid.merge_grids`
+— one member's diagonal block at a time (equal-sized members sharing one batched LU)
+instead of factoring the union as a whole. Pass the member row partition via
+``block_rows=merged.block_rows()`` (:meth:`~pgml.multigrid.MergedGrid.block_rows`); it
+costs ``O(Σ n³)`` / ``O(Σ n²)`` where a dense factorization of the union costs
+``O((Σ N)³)`` / ``O((Σ N)²)`` — the backend that makes a many-grid ensemble viable on
+CUDA, where dense is otherwise the only union option. It is never selected by
+``"auto"``: the partition is taken on trust (admittance outside the listed blocks would
+be silently ignored), and on CPU the sparse union backend already exploits the same
+block structure and stays the better choice. Unsupported with ``on_disconnected="zero"``
+(dropping dead rows re-indexes the system, invalidating a fixed partition). See
+:doc:`multigrid` and the "Ensembles of grids" section of
+:doc:`/pgml/modeling/solver-performance` for the design rationale.
 
 **``system``** lets repeated solves of the SAME grid skip the
 operating-point-independent work entirely. Everything about the network side

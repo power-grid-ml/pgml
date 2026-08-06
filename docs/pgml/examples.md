@@ -155,3 +155,25 @@ behind `linear_solver="auto"` (see the "Solve performance" section of
 :lines: 1-30
 :caption: run/examples/pgml/benchmark_sparse.py (header)
 ```
+
+### Switch-state sweeps: low-rank update (Woodbury)
+
+**File:** `run/examples/pgml/benchmark_woodbury.py`
+
+Sweeps switch-state configurations over `pgml.grids.synthetic_feeder` and times
+`solve_power_flow` under both `branch_states_method` strategies — assembling and
+factoring every state, versus factoring the base network once and reaching each state
+through the Sherman-Morrison-Woodbury low-rank update
+(`pgml.solver.lowrank`) — across system size, the number of switched branches (the
+update rank `k`), and the state count. Reports the speedup and the crossover in `k`
+alongside the maximum relative voltage difference between the two paths, so a reported
+speedup always comes with the accuracy it was measured at. See
+[Solver architecture: performance and structural checks](modeling/solver-performance.md)
+for the measured numbers and the conditioning argument behind the sweep's base-state
+choice.
+
+```{literalinclude} ../../run/examples/pgml/benchmark_woodbury.py
+:language: python
+:lines: 1-29
+:caption: run/examples/pgml/benchmark_woodbury.py (header)
+```

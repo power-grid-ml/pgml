@@ -164,6 +164,53 @@ grid, the per-scenario topologies are connectivity-checked up front (vectorised 
 batch on a condensed component graph), and a disconnecting scenario is reported by index
 rather than surfacing as a singular batch element.
 
+## Switch-state sweeps as a low-rank update (Woodbury)
+
+Admittance scaling turns a switch-state sweep into a single assembly, but the naive read
+of a batched `branch_states` still *factors* every state independently: `O(S · N³)` work
+and an `[S, N, N]` matrix, because each state is, numerically, a different matrix. A
+switched branch, however, only ever touches its own terminal rows — a branch enters `Y`
+exclusively as `Y[rows, rows] += block` ({func}`pgml.assembly.branch_stamp_blocks`
+exposes exactly that pair) — so scaling it by `s` changes `Y` by `(s − 1)` times a
+rank-`≤ 2P` term (`P` = the branch's phase count). That is precisely the shape the
+Sherman-Morrison-Woodbury identity exploits: factor the network **once** and reach every
+state through an update of that single factorization, at `O(N²k + k³)` per state with
+`k = Σ 2P` summed over the switched branches, instead of a fresh `O(N³)` assembly and
+factorization per state.
+
+`solve_power_flow(..., branch_states_method="woodbury")` implements this
+({mod}`pgml.solver.lowrank`; see the "Switch-state sweeps" section of
+{doc}`/pgml/api/solver` for the parameter contract). The update never inverts the
+per-state correction `C` directly — the arrangement
+$A^{-1} - A^{-1}U(I + CV^HA^{-1}U)^{-1}CV^HA^{-1}$ stays invertible even at `s = 0` (an
+open switch, whose naive stamp is singular), and a branch sitting at its base state
+contributes `C = 0`, which reproduces the base solve bit-for-bit.
+
+**Which base, and why it matters.** The correction reads values off the base solution and
+amplifies them by `‖(I + CZ)⁻¹CZ‖` (`Z = VᴴA⁻¹U`). Adding admittance to the base keeps
+that factor at `O(1)`; *removing* a near-ideal closed switch from the base pushes it
+toward `|y · z_thevenin|`, because the quantity the downdate multiplies is that branch's
+own voltage drop — the difference of two nearly equal node voltages, which floating point
+resolves poorly. A 1e-4 Ω switch (the converters' default contact resistance) already
+costs on the order of four digits this way, enough to stall the power-flow fixed point.
+The sweep's base therefore **omits every switched branch it can** — opened one at a time
+while the grid stays connected without it — so the update only ever *adds* admittance to
+reach a closed state, never removes one from underneath a near-ideal contact.
+
+**Measured** (`run/examples/pgml/benchmark_woodbury.py`, i7-12700 CPU, `auto` backend =
+SciPy SuperLU sparse, `S = 8` switch-configuration states): for 1–4 switched three-phase
+branches (`k = 6…24`), the Woodbury path is 3.2–3.5x faster at 600 rows, 4.3–6.8x at
+1200, ~5.8x at 2100, ~5.4x at 3000 rows — and still 1.7–4.4x at `k = 96`. The crossover
+sits around `k ≈ N / 3` (600 rows: 1.1x at `k = 192`, 0.2x at `k = 384`), beyond which
+assembling per state wins because the correction's own `O(k³)` factoring starts to
+dominate. Voltages agree with the `"assemble"` path to ~1e-12 relative. Only the forward
+solve changes: the IFT backward always rebuilds the per-state admittance differentiably
+from the parameter and state leaves, so gradients — including with respect to the switch
+states themselves — are identical between the two methods.
+
+Explicit opt-in only, with no `"auto"` heuristic: the win depends on `k / N`, a ratio only
+the caller (who knows how many branches its sweep switches) can judge in advance.
+
 ## Ensembles of grids: the disjoint union
 
 Solving many *different* grids at once (a generated population, a multi-feeder study)
