@@ -75,6 +75,9 @@ as `solve_power_flow(linear_solver=...)`):
 - **CPU, below the crossover, and CUDA always** → batched dense `torch.linalg.lu_factor` /
   `lu_solve`.
 
+A third backend, `"block"`, is available on request for a system that is *structurally*
+block diagonal — an ensemble of independent grids; see "Ensembles of grids" below.
+
 CUDA staying dense is a deliberate, benchmarked decision, not an omission. PyTorch has no
 batched sparse direct solve, GPUs are built precisely for batched dense factorizations, and
 any custom sparse GPU path (cuDSS/cuSOLVER) must first beat that baseline. On an
@@ -180,6 +183,31 @@ padded size). The union approach is the same trick PyTorch-Geometric's `Batch` u
 variable-size graphs, applied to the physics: concatenate, remember the offsets, never pad.
 Because the union shares the members' parameter objects, gradients from an ensemble solve
 land on the original grids' own tensors.
+
+On CUDA that leaves a gap, because the only union factorization there is dense: a dense LU
+of the union costs $O((\sum_k n_k)^3)$ where the members cost $O(\sum_k n_k^3)$ — a factor
+$G^2$ for $G$ equal-sized members. The **block-diagonal backend** closes it by factoring
+the diagonal blocks instead of the union:
+
+```python
+res = solve_power_flow(
+    merged.grid, linear_solver="block", block_rows=merged.block_rows()
+)
+```
+
+{meth}`pgml.multigrid.MergedGrid.block_rows` hands over the row partition; blocks of equal
+size are stacked and factored by a *single* batched `torch.linalg.lu_factor`, so the number
+of LU calls is the number of distinct member sizes rather than the number of members, and
+the stored factor shrinks from $O((\sum_k n_k)^2)$ to $O(\sum_k n_k^2)$. The right-hand
+side is gathered per block, back-substituted with the whole scenario batch folded into the
+multiple-RHS axis, and scattered back; ideal slack works exactly as elsewhere (a block's
+free rows are its own rows minus its slack rows). Everything is plain torch, so gradients
+and the adjoint solve come from the same factors, unchanged.
+
+It is an explicit opt-in — `"auto"` never selects it. The partition is taken on trust
+(admittance outside the listed blocks would be silently ignored), and on CPU the sparse
+union backend already exploits the block structure *plus* the sparsity within each block,
+so it remains the better choice there.
 
 ## What deliberately stays sequential
 

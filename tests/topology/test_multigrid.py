@@ -53,6 +53,19 @@ def test_merged_power_flow_matches_member_solves(members):
         assert torch.allclose(v_part, ref.v, atol=1e-6)
 
 
+def test_block_rows_partition_the_merged_state(members):
+    """The accessor names the same rows ``split`` slices — a full row partition."""
+    merged = merge_grids(members)
+    rows = merged.block_rows()
+    assert [int(r.numel()) for r in rows] == [3 * len(g.nodes) for g in members]
+    flat = torch.cat(rows)
+    assert flat.dtype == torch.int64
+    assert torch.equal(flat.sort().values, torch.arange(merged.n_rows))
+    res = solve_power_flow(merged.grid, linear_solver="block", block_rows=rows)
+    for part, gathered in zip(merged.split(res.v), rows):
+        assert torch.equal(part, res.v.index_select(-1, gathered))
+
+
 def test_merged_solve_with_per_member_operating_points(members):
     merged = merge_grids(members)
     g_rand = torch.Generator().manual_seed(3)

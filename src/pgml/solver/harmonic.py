@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -517,6 +517,188 @@ class _SparseSolveFn(torch.autograd.Function):
         return grad_y, grad_rhs, None
 
 
+# ---------------------------------------------------------------------------
+# block-diagonal factorization (an ensemble of independent grids in one system)
+# ---------------------------------------------------------------------------
+def _validate_block_rows(
+    block_rows: Sequence[Tensor], n: int, device: torch.device
+) -> list[Tensor]:
+    """Normalize ``block_rows`` to int64 row-index tensors and check the partition.
+
+    Every row of the ``n``-row system must appear in EXACTLY one block: the
+    block-diagonal inverse is only the inverse of the whole system when the blocks
+    are a disjoint, complete cover of the rows.
+    """
+    if block_rows is None:
+        raise InputError(
+            'backend="block" needs block_rows=[rows_of_block_0, ...]: the row '
+            "indices of each independent diagonal block. For a merged ensemble "
+            "use pgml.multigrid.MergedGrid.block_rows()."
+        )
+    blocks: list[Tensor] = []
+    for k, rows in enumerate(block_rows):
+        t = torch.as_tensor(rows, dtype=torch.int64, device=device).reshape(-1)
+        if t.numel() == 0:
+            raise InputError(
+                f"block_rows[{k}] is empty; every block needs at least one row."
+            )
+        blocks.append(t)
+    if not blocks:
+        raise InputError("block_rows is empty; give at least one block.")
+    flat = torch.cat(blocks)
+    covers = flat.numel() == n and bool(
+        torch.equal(flat.sort().values, torch.arange(n, device=device))
+    )
+    if not covers:
+        raise InputError(
+            f"block_rows must partition the {n} rows of the system exactly once: "
+            f"{len(blocks)} block(s) covering {int(flat.numel())} index/indices in "
+            f"[{int(flat.min())}, {int(flat.max())}] were given. A block-diagonal "
+            "factorization is defined only for a disjoint, complete row partition."
+        )
+    return blocks
+
+
+def _size_buckets(
+    rows: Sequence[Tensor], positions: Sequence[Tensor]
+) -> list[tuple[Tensor, Tensor]]:
+    """Stack equal-size blocks into ``[B, n]`` index matrices (input order kept).
+
+    One entry per DISTINCT block size (ascending): its ``rows`` matrix indexes the
+    matrix, its ``positions`` matrix the solved vector, and ``B`` becomes the batch
+    axis of that bucket's ``lu_factor`` / ``lu_solve``.
+    """
+    by_size: dict[int, tuple[list[Tensor], list[Tensor]]] = {}
+    for r, p in zip(rows, positions):
+        entry = by_size.setdefault(int(r.numel()), ([], []))
+        entry[0].append(r)
+        entry[1].append(p)
+    return [
+        (torch.stack(rs), torch.stack(ps)) for _, (rs, ps) in sorted(by_size.items())
+    ]
+
+
+class _BlockLU:
+    """Batched dense LU of each diagonal block of a BLOCK-DIAGONAL system.
+
+    A disjoint union of independent grids (:func:`pgml.multigrid.merge_grids`)
+    assembles to ``Y = diag(Y_1, …, Y_G)``, whose inverse is the block-diagonal
+    inverse of the members: factoring them separately costs ``O(Σ n_k³)`` where a
+    dense LU of the union costs ``O((Σ n_k)³)``. Blocks of EQUAL size are stacked
+    into one ``[*fb, B, n, n]`` tensor and factored by a SINGLE batched
+    ``torch.linalg.lu_factor``, so the number of LU calls is the number of distinct
+    member sizes — not the number of members — which is the shape a GPU wants.
+
+    Only the per-bucket factors are stored; the ``[N, N]`` factor of the union is
+    never formed. Pure torch (advanced indexing + ``lu_factor`` / ``lu_solve`` +
+    ``scatter``), so gradients flow to the factored matrix and the right-hand side,
+    device/dtype follow the input, and the ``lu_solve`` backward answers the adjoint
+    system with the SAME factors (no re-factorization).
+
+    ``blocks`` index the rows of ``y``; ``solve_blocks`` (default: ``blocks``) index
+    the same entries in the vector space the right-hand sides live in. They differ
+    on the ideal-slack path, where the blocks are gathered from the full admittance
+    but the solved vector holds only the free rows.
+    """
+
+    def __init__(
+        self,
+        y: Tensor,
+        blocks: Sequence[Tensor],
+        *,
+        solve_blocks: Optional[Sequence[Tensor]] = None,
+        m: Optional[int] = None,
+    ) -> None:
+        self.fb = tuple(y.shape[:-2])
+        self.m = int(y.shape[-1]) if m is None else int(m)
+        self.device = y.device
+        # An empty tensor carrying the factorization's leading batch / dtype /
+        # device (the block factors carry an extra bucket axis, so they cannot
+        # stand in for it).
+        self.batch_ref = y.new_empty((*self.fb, 0, 0))
+        self.buckets: list[tuple[Tensor, Tensor, Tensor]] = []
+        pairs = _size_buckets(blocks, blocks if solve_blocks is None else solve_blocks)
+        for rows, pos in pairs:
+            # [*fb, B, n, n]: gathered straight from ``y`` — no [N, N] intermediate.
+            sub = y[..., rows.unsqueeze(-1), rows.unsqueeze(-2)]
+            lu, piv = torch.linalg.lu_factor(sub)
+            self.buckets.append((pos, lu, piv))
+        self.n_blocks = sum(int(pos.shape[0]) for pos, _, _ in self.buckets)
+
+    def solve(self, rhs: Tensor) -> Tensor:
+        """Back-substitute ``rhs`` ``[*batch, m]`` against the per-block factors.
+
+        Each bucket gathers its blocks' entries out of the right-hand side, folds
+        the whole scenario batch into the multiple-RHS axis of its factorization
+        (:func:`_lu_solve_shared`, so no factor is tiled across the batch) and
+        scatters the block solutions back into the full vector. Loops over BUCKETS
+        (one iteration per distinct block size), never over blocks. Returns
+        ``[*batch, m]`` with ``batch = broadcast(fb, rhs batch)``, the same shape
+        the dense backend gives.
+        """
+        batch = torch.broadcast_shapes(self.fb, rhs.shape[:-1])
+        rhs_b = rhs.broadcast_to(*batch, self.m)
+        fb_numel = 1
+        for sz in self.fb:
+            fb_numel *= sz
+        out = torch.zeros(*batch, self.m, dtype=rhs_b.dtype, device=self.device)
+        for pos, lu, piv in self.buckets:
+            nb, blk = int(pos.shape[0]), int(pos.shape[1])
+            flat = pos.reshape(-1)
+            cols = rhs_b.index_select(-1, flat).reshape(*batch, nb, blk)
+            if fb_numel == 1:
+                # One factorization per block: every leading dim of the RHS is
+                # just another column of it.
+                sol = _lu_solve_shared(
+                    lu.reshape(nb, blk, blk), piv.reshape(nb, blk), cols
+                )
+            else:
+                # Distinct factorizations per frequency / scenario topology: the
+                # bucket axis extends the factorization's own batch.
+                sol = _lu_solve_shared(lu, piv, cols)
+            out = out.scatter(
+                -1,
+                flat.expand(*batch, nb * blk),
+                sol.reshape(*batch, nb * blk),
+            )
+        return out
+
+    @classmethod
+    def for_free_rows(
+        cls, y: Tensor, blocks: Sequence[Tensor], free_mask: Tensor, free_rows: Tensor
+    ) -> "_BlockLU":
+        """Factor the FREE-row sub-block of every block (ideal slack).
+
+        A block's free rows are its own rows minus the fixed (slack) rows it holds,
+        and the solved vector holds the free rows only — so each block's solve-space
+        index is its position within ``free_rows``. Blocks that are entirely fixed
+        contribute no equations and are dropped.
+        """
+        dev = y.device
+        n_blocks = len(blocks)
+        sizes = torch.tensor([int(b.numel()) for b in blocks], device=dev)
+        owner = torch.repeat_interleave(torch.arange(n_blocks, device=dev), sizes)
+        flat = torch.cat(blocks)
+        keep = free_mask.index_select(0, flat)
+        counts = torch.bincount(owner[keep], minlength=n_blocks).tolist()
+        kept_rows = flat[keep]
+        # Free-space position of every row (fixed rows are never looked up).
+        pos = torch.zeros(int(free_mask.numel()), dtype=torch.int64, device=dev)
+        pos = pos.index_copy(
+            0, free_rows, torch.arange(int(free_rows.numel()), device=dev)
+        )
+        rows_split = torch.split(kept_rows, counts)
+        pos_split = torch.split(pos.index_select(0, kept_rows), counts)
+        free_blocks = [r for r in rows_split if r.numel()]
+        free_pos = [p for p in pos_split if p.numel()]
+        return cls(
+            y,
+            free_blocks,
+            solve_blocks=free_pos,
+            m=int(free_rows.numel()),
+        )
+
+
 @dataclass
 class FactoredSystem:
     """A factorization of the per-frequency system, reusable across many RHS.
@@ -528,7 +710,7 @@ class FactoredSystem:
     factored matrix is the free-row block ``Y_ff`` and ``y_fs`` is kept for the RHS
     correction.
 
-    Two backends, selected in :func:`lu_factor_system`:
+    Three backends, selected in :func:`lu_factor_system`:
 
     - ``"dense"`` — batched ``torch.linalg.lu_factor`` / ``lu_solve`` (CPU + CUDA);
       differentiable through the torch ops.
@@ -536,6 +718,9 @@ class FactoredSystem:
       O(N)-nnz power-grid ``Y`` where dense LU is O(N³); differentiable through the
       adjoint :class:`_SparseSolveFn` (``y_mat`` carries the autograd graph of the
       factored matrix).
+    - ``"block"`` — one batched dense LU per diagonal block of a BLOCK-DIAGONAL
+      system (:class:`_BlockLU`, ``block`` holds the per-bucket factors), the CUDA
+      path for an ensemble of independent grids: O(Σ n_k³) instead of O((Σ n_k)³).
     """
 
     mode: str  # "norton" | "ideal"
@@ -545,22 +730,39 @@ class FactoredSystem:
     free_rows: Optional[Tensor] = None
     fixed_rows: Optional[Tensor] = None
     y_fs: Optional[Tensor] = None  # [*, F, S] for the ideal-slack RHS correction
-    backend: str = "dense"  # "dense" | "sparse"
+    backend: str = "dense"  # "dense" | "sparse" | "block"
     sparse: Optional[_SciPySparseLU] = None
     y_mat: Optional[Tensor] = None  # sparse backend: the factored matrix (autograd)
+    block: Optional[_BlockLU] = None  # block backend: the per-bucket factors
 
     @property
     def _fb_tensor(self) -> Tensor:
         """The tensor carrying the factorization's leading batch / dtype / device."""
-        return self.lu if self.backend == "dense" else self.y_mat
+        if self.backend == "dense":
+            return self.lu
+        if self.backend == "block":
+            return self.block.batch_ref
+        return self.y_mat
 
 
-def _resolve_backend(backend: str, y_bus: Tensor) -> str:
-    """Resolve ``"auto"`` by size and device (see ``_SPARSE_MIN_ROWS``)."""
-    if backend not in ("auto", "dense", "sparse"):
+def _resolve_backend(
+    backend: str, y_bus: Tensor, block_rows: Optional[Sequence[Tensor]] = None
+) -> str:
+    """Resolve ``"auto"`` by size and device (see ``_SPARSE_MIN_ROWS``).
+
+    ``"block"`` is never auto-selected: it needs the caller's row partition and is
+    only correct for a system that IS block diagonal, so it stays an explicit opt-in.
+    """
+    if backend not in ("auto", "dense", "sparse", "block"):
         raise InputError(
             f"Unsupported factorization backend {backend!r} "
-            "(use 'auto'/'dense'/'sparse')."
+            "(use 'auto'/'dense'/'sparse'/'block')."
+        )
+    if block_rows is not None and backend != "block":
+        raise InputError(
+            f"block_rows is used only by backend='block'; got {backend!r}. The "
+            "block-diagonal factorization is an explicit opt-in — 'auto' never "
+            "selects it."
         )
     if backend != "auto":
         return backend
@@ -570,7 +772,11 @@ def _resolve_backend(backend: str, y_bus: Tensor) -> str:
 
 
 def lu_factor_system(
-    y_bus: Tensor, *, fixed_rows: Optional[Tensor] = None, backend: str = "auto"
+    y_bus: Tensor,
+    *,
+    fixed_rows: Optional[Tensor] = None,
+    backend: str = "auto",
+    block_rows: Optional[Sequence[Tensor]] = None,
 ) -> FactoredSystem:
     """Factor ``Y`` (Norton) or the free block ``Y_ff`` (ideal slack) for repeated solves.
 
@@ -580,11 +786,27 @@ def lu_factor_system(
     at least ``_SPARSE_MIN_ROWS`` rows (a power-grid ``Y`` has O(N) nonzeros, so sparse
     is ~O(N) where dense LU is O(N³)) and the batched dense ``torch.linalg.lu_factor``
     everywhere else (CUDA is ALWAYS dense — torch has no batched sparse direct solve);
-    ``"dense"`` / ``"sparse"`` force the choice. Both backends are differentiable
-    (dense through the torch ops, sparse through the adjoint :class:`_SparseSolveFn`).
+    ``"dense"`` / ``"sparse"`` / ``"block"`` force the choice. Every backend is
+    differentiable (dense and block through the torch ops, sparse through the adjoint
+    :class:`_SparseSolveFn`).
+
+    ``backend="block"`` factors a BLOCK-DIAGONAL system one diagonal block at a time
+    and needs ``block_rows``: one int64 row-index tensor per block, together
+    partitioning the ``N`` rows exactly once (``pgml.multigrid.MergedGrid.block_rows()``
+    for a merged ensemble). Blocks of equal size share one batched LU, so an ensemble
+    of ``G`` grids costs ``O(Σ n_k³)`` instead of the union's ``O((Σ n_k)³)`` and the
+    factor holds ``O(Σ n_k²)`` numbers instead of ``O((Σ n_k)²)``. This is the CUDA
+    path for a many-grid ensemble; on CPU the sparse union backend exploits the same
+    structure (plus the sparsity WITHIN each block) and remains the better choice.
+    The row partition is taken on trust — any admittance OUTSIDE the listed blocks is
+    ignored by the factorization, so only pass blocks that are galvanically
+    independent. ``"auto"`` never resolves to ``"block"``.
     """
     n = y_bus.shape[-1]
-    resolved = _resolve_backend(backend, y_bus)
+    resolved = _resolve_backend(backend, y_bus, block_rows)
+    blocks = (
+        _validate_block_rows(block_rows, n, y_bus.device) if resolved == "block" else []
+    )
     if fixed_rows is None:
         if resolved == "sparse":
             return FactoredSystem(
@@ -596,6 +818,10 @@ def lu_factor_system(
                 sparse=_SciPySparseLU(y_bus),
                 y_mat=y_bus,
             )
+        if resolved == "block":
+            return FactoredSystem(
+                "norton", None, None, n, backend="block", block=_BlockLU(y_bus, blocks)
+            )
         lu, piv = torch.linalg.lu_factor(y_bus)
         return FactoredSystem("norton", lu, piv, n)
     fixed_rows = fixed_rows.to(device=y_bus.device, dtype=torch.int64)
@@ -604,8 +830,22 @@ def lu_factor_system(
         0, fixed_rows, False
     )
     free_rows = all_rows[mask]
-    y_ff = _index_2d(y_bus, free_rows, free_rows)
     y_fs = _index_2d(y_bus, free_rows, fixed_rows)
+    if resolved == "block":
+        # The free-row sub-block of each block, gathered straight from ``y_bus``:
+        # the dense free-free block [F, F] is never materialised.
+        return FactoredSystem(
+            "ideal",
+            None,
+            None,
+            n,
+            free_rows,
+            fixed_rows,
+            y_fs,
+            backend="block",
+            block=_BlockLU.for_free_rows(y_bus, blocks, mask, free_rows),
+        )
+    y_ff = _index_2d(y_bus, free_rows, free_rows)
     if resolved == "sparse":
         return FactoredSystem(
             "ideal",
@@ -685,12 +925,16 @@ def solve_factored(
     ``Y`` / slack mode; only the factorization is reused. Returns ``[*batch, N]`` (the
     leading dims broadcast ``i_inj`` against the factorization). The scenario batch is
     solved as MULTIPLE right-hand sides of the one shared factorization
-    (:func:`_lu_solve_shared`), so the dense ``Y`` is never tiled across the batch."""
+    (:func:`_lu_solve_shared`), so the dense ``Y`` is never tiled across the batch. The
+    ``"block"`` backend does the same per diagonal block, gathering / scattering each
+    block's entries of the right-hand side around its own batched back-substitution."""
     n = fac.n
     sys_t = fac._fb_tensor
     if fac.mode == "norton":
         if fac.backend == "sparse":
             return _SparseSolveFn.apply(fac.y_mat, i_inj, fac.sparse)
+        if fac.backend == "block":
+            return fac.block.solve(i_inj)
         return _lu_solve_shared(fac.lu, fac.piv, i_inj)
 
     if v_fixed is None:
@@ -711,6 +955,8 @@ def solve_factored(
     ).squeeze(-1)  # [*batch, F]
     if fac.backend == "sparse":
         v_free = _SparseSolveFn.apply(fac.y_mat, rhs, fac.sparse)  # [*batch, F]
+    elif fac.backend == "block":
+        v_free = fac.block.solve(rhs)  # [*batch, F]
     else:
         v_free = _lu_solve_shared(fac.lu, fac.piv, rhs)  # [*batch, F]
     v_full = torch.zeros(*batch, n, dtype=sys_t.dtype, device=sys_t.device)

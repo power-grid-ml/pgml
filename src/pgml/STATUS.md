@@ -42,7 +42,11 @@ decisions. One entry per capability:
   prepared systems (`prepare_power_flow`), scenario chunk tiling, the CPU sparse (SuperLU)
   backend with backend-aware convergence floors, switch-state batching (`branch_states`
   admittance scaling, differentiable), multi-grid disjoint-union batching
-  (`pgml.multigrid.merge_grids`), and pre-solve connectivity checks
+  (`pgml.multigrid.merge_grids`) plus its BLOCK-DIAGONAL factorization backend
+  (`linear_solver="block"` + `MergedGrid.block_rows()` — factors each member's diagonal
+  block, equal sizes stacked into one batched LU, so an ensemble costs `O(Σ n³)` instead
+  of the union's `O((Σ N)³)`; the CUDA path, where dense is otherwise the only union
+  option), and pre-solve connectivity checks
   (`ConnectivityError` / `on_disconnected="zero"`). Design + measurements:
   `docs/pgml/modeling/solver-performance.md`; benchmarks:
   `run/examples/pgml/benchmark_speed.py`, `run/examples/pgml/benchmark_sparse.py`.
@@ -91,7 +95,10 @@ The sampling layer and the dense scale wins are done (see Status +
   per chunk — likely wins at small N).
 - **Very large N**: a sparse/matrix-free IFT backward + Newton Jacobian (both are still
   dense `[2N, 2N]`); sparse-direct assembly (COO from the stamps, skipping the dense `Y`)
-  once grids exceed a few thousand rows.
+  once grids exceed a few thousand rows. Both bound the block-diagonal ensemble path too:
+  `linear_solver="block"` removes the union-sized FACTORIZATION, while assembly, the
+  ideal-slack `Y_fs` coupling gather and the IFT backward still pay union-sized dense
+  memory — block-aware versions of those are the next step for a very large ensemble.
 - Resolved as won't-do (measured): a batch-native Newton forward — the block-diagonal
   Jacobian build was 4× slower than the per-scenario path at B=64/N=180; bulk batches
   belong to the current-injection method.

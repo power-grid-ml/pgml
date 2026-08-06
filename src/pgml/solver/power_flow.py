@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -97,11 +97,38 @@ def _rel_convergence_floor(rdt: torch.dtype, backend: str = "dense") -> float:
     marginal scenarios oscillate just above the dense-calibrated floor without ever
     crossing it (measured: batched IEEE-33 at complex64 plateaus flat at 2.0e-6 for
     ~0.2 % of scenarios, floor-accurate but running to ``max_iter``). The sparse
-    float32 floor is therefore 4e-6 (2x headroom over the measured plateau).
+    float32 floor is therefore 4e-6 (2x headroom over the measured plateau). The
+    block backend back-substitutes with the same torch LU as the dense one and
+    shares its floor.
     """
     if rdt == torch.float64:
         return 0.0
     return 4.0e-6 if backend == "sparse" else 1.0e-6
+
+
+def _validate_block_solver(
+    linear_solver: str,
+    block_rows: Optional[Sequence[Tensor]],
+    *,
+    have_system: bool = False,
+) -> None:
+    """Guard the explicit block-diagonal opt-in (``"auto"`` never selects it).
+
+    The block backend factors each independent sub-grid of a block-diagonal system
+    on its own, which is only correct for the caller-supplied row partition — so the
+    two arguments must be given together.
+    """
+    if block_rows is not None and linear_solver != "block":
+        raise InputError(
+            "block_rows is used only by linear_solver='block' (the block-diagonal "
+            f"factorization of an independent-grid ensemble); got {linear_solver!r}."
+        )
+    if linear_solver == "block" and block_rows is None and not have_system:
+        raise InputError(
+            "linear_solver='block' needs block_rows=...: one row-index tensor per "
+            "independent sub-grid, together partitioning the node-phase rows "
+            "(pgml.multigrid.MergedGrid.block_rows() for a merged ensemble)."
+        )
 
 
 def _operating_point_batch_size(operating_point: Optional[dict]) -> int:
@@ -758,6 +785,7 @@ def prepare_power_flow(
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
     linear_solver: str = "auto",
+    block_rows: Optional[Sequence[Tensor]] = None,
 ) -> PowerFlowSystem:
     """Assemble + factor the operating-point-independent power-flow system once.
 
@@ -765,12 +793,14 @@ def prepare_power_flow(
     :class:`~pgml.errors.ConnectivityError` like :func:`solve_power_flow` with
     ``on_disconnected="raise"``), assembles ``Y_eff`` and the slack quantities,
     and factors ``Y_eff`` with the selected backend
-    (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver`` as in
-    :func:`solve_power_flow`). Pass the result as ``solve_power_flow(...,
-    system=...)`` to skip that work on every subsequent call.
+    (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver`` and
+    ``block_rows`` as in :func:`solve_power_flow`). Pass the result as
+    ``solve_power_flow(..., system=...)`` to skip that work on every subsequent
+    call.
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    _validate_block_solver(linear_solver, block_rows)
     if branch_states is not None:
         if _branch_states_batched(branch_states):
             _check_connectivity_with_states(grid, branch_states)
@@ -797,9 +827,14 @@ def prepare_power_flow(
             grid, f0, index, dtype, device, slack, param_overrides, branch_states
         )
         factor_backend = (
-            linear_solver if linear_solver in ("dense", "sparse") else "auto"
+            linear_solver if linear_solver in ("dense", "sparse", "block") else "auto"
         )
-        fac = lu_factor_system(y_eff, fixed_rows=fixed_rows, backend=factor_backend)
+        fac = lu_factor_system(
+            y_eff,
+            fixed_rows=fixed_rows,
+            backend=factor_backend,
+            block_rows=block_rows,
+        )
     return PowerFlowSystem(
         index=index,
         f0=f0,
@@ -828,6 +863,7 @@ def solve_power_flow(
     symmetry: Optional[str] = None,
     criticality: str = "auto",
     linear_solver: str = "auto",
+    block_rows: Optional[Sequence[Tensor]] = None,
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
     system: Optional[PowerFlowSystem] = None,
@@ -881,13 +917,26 @@ def solve_power_flow(
         systems of ≥ ~500 rows — a power-grid ``Y`` has O(N) nonzeros, so sparse is
         ~O(N) where dense LU is O(N³) — and the batched dense torch LU everywhere
         else (CUDA is always dense); ``"dense"`` / ``"sparse"`` force the choice
-        (``"matrix_free"`` is treated as ``"auto"`` here).
+        (``"matrix_free"`` is treated as ``"auto"`` here). ``"block"`` factors a
+        BLOCK-DIAGONAL system (an ensemble of independent grids) one sub-grid at a
+        time and requires ``block_rows``.
 
         For ``method="newton"``: ``"dense"`` (the explicit ``[2N, 2N]`` Jacobian +
         direct solve; ``"auto"`` resolves to this) or ``"matrix_free"``
         (Jacobian-free Newton-Krylov — GMRES on finite-difference Jacobian-vector
-        products, ``O(N)`` memory for large grids). ``"sparse"`` raises — Newton's
-        Jacobian is built dense.
+        products, ``O(N)`` memory for large grids). ``"sparse"`` and ``"block"``
+        raise — Newton's Jacobian is built dense.
+    block_rows:
+        Row partition for ``linear_solver="block"``: one int64 tensor of node-phase
+        row indices per independent sub-grid, together covering every row exactly
+        once (``pgml.multigrid.MergedGrid.block_rows()`` for a merged ensemble).
+        Each sub-grid's diagonal block is factored on its own — ``O(Σ n_k³)``
+        instead of the union's ``O((Σ n_k)³)``, with sub-grids of equal size sharing
+        one batched LU — which is what makes a many-grid ensemble tractable on CUDA
+        (where the union's only alternative is a dense LU of the whole thing). On
+        CPU the sparse union backend exploits the same structure and stays the
+        better choice. Unsupported with ``on_disconnected="zero"`` (dropping dead
+        rows re-indexes the system).
     on_disconnected:
         What to do when the pre-solve connectivity check finds (node, phase) rows
         with no galvanic path to an in-service source (an open switch or
@@ -947,21 +996,24 @@ def solve_power_flow(
         raise InputError(
             f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
         )
-    if linear_solver not in ("auto", "dense", "sparse", "matrix_free"):
+    if linear_solver not in ("auto", "dense", "sparse", "block", "matrix_free"):
         raise InputError(
             f"Unsupported linear_solver {linear_solver!r} "
-            "(use 'auto'/'dense'/'sparse'/'matrix_free')."
+            "(use 'auto'/'dense'/'sparse'/'block'/'matrix_free')."
         )
-    if method == "newton" and linear_solver == "sparse":
+    if method == "newton" and linear_solver in ("sparse", "block"):
         raise InputError(
             "method='newton' supports linear_solver 'auto'/'dense'/'matrix_free' "
-            "(its Jacobian is built dense); 'sparse' selects the fixed-point "
-            "factorization backend of method='current_injection'."
+            f"(its Jacobian is built dense); {linear_solver!r} selects the "
+            "fixed-point factorization backend of method='current_injection'."
         )
+    _validate_block_solver(linear_solver, block_rows, have_system=system is not None)
     # Newton's inner solve: 'auto' resolves to the proven dense Jacobian path.
     newton_solver = "dense" if linear_solver == "auto" else linear_solver
     # Fixed-point factorization backend: 'matrix_free' has no meaning there.
-    factor_backend = linear_solver if linear_solver in ("dense", "sparse") else "auto"
+    factor_backend = (
+        linear_solver if linear_solver in ("dense", "sparse", "block") else "auto"
+    )
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -973,6 +1025,12 @@ def solve_power_flow(
             'on_disconnected="zero" is unsupported with branch_states: a '
             "per-scenario topology has no single energized sub-grid. Use "
             '"raise" (per-scenario check) or "ignore".'
+        )
+    if block_rows is not None and on_disconnected == "zero":
+        raise InputError(
+            'on_disconnected="zero" is unsupported with block_rows: solving the '
+            "energized sub-grid re-indexes the node-phase rows, so the given row "
+            'partition no longer describes the system. Use "raise" or "ignore".'
         )
     if system is None and on_disconnected != "ignore":
         if branch_states is not None:
@@ -1306,6 +1364,7 @@ def solve_power_flow(
             max_iter,
             factor_backend,
             system,
+            block_rows,
         )
 
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
@@ -1385,6 +1444,7 @@ def _current_injection_forward(
     max_iter,
     factor_backend="auto",
     system=None,
+    block_rows=None,
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
@@ -1477,7 +1537,12 @@ def _current_injection_forward(
         fac = (
             system.factorization
             if system is not None
-            else lu_factor_system(y_eff0, fixed_rows=fixed_rows, backend=factor_backend)
+            else lu_factor_system(
+                y_eff0,
+                fixed_rows=fixed_rows,
+                backend=factor_backend,
+                block_rows=block_rows,
+            )
         )
         # The achievable update floor depends on the RESOLVED backend (SuperLU's
         # single-precision back-substitution is noisier than the dense torch LU).

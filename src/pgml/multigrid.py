@@ -21,6 +21,18 @@ The merged grid SHARES the members' parameter objects (and any tensor leaves the
 hold), so gradients computed through a merged solve flow back to the ORIGINAL
 grids' leaf tensors — merging is transparent to the differentiable path.
 
+On CUDA the only union factorization is a dense LU, whose ``O((Σ N)³)`` cost grows
+quadratically worse than the members' own ``O(Σ n³)``. :meth:`MergedGrid.block_rows`
+hands the solver the row partition so it factors each member's diagonal block
+instead, stacking equal-sized members into batched LUs::
+
+    res = solve_power_flow(
+        merged.grid, linear_solver="block", block_rows=merged.block_rows()
+    )
+
+so an ensemble solves at the cost of its members. On CPU the default sparse union
+backend already exploits the block structure and remains the better choice.
+
 Semantics to be aware of (documented, deliberate):
 
 - All members must share ``base_frequency_hz`` and be materialised consistently
@@ -41,6 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+import torch
 from torch import Tensor
 
 from pgml.errors import InputError
@@ -98,6 +111,35 @@ class MergedGrid:
                 f"got a tensor with last dim {v.shape[-1]}."
             )
         return tuple(v.narrow(-1, m.row_start, m.n_rows) for m in self.members)
+
+    def block_rows(
+        self, *, device: Optional[torch.device] = None
+    ) -> tuple[Tensor, ...]:
+        """Per-member node-phase row indices ``[n_rows]`` (int64), in merged order.
+
+        The row partition of the block-diagonal merged ``Y``: member ``k`` owns
+        ``[row_start, row_start + n_rows)`` — the very rows :meth:`split` slices.
+        Hand it to the block-diagonal factorization backend::
+
+            res = solve_power_flow(
+                merged.grid,
+                linear_solver="block",
+                block_rows=merged.block_rows(),
+            )
+
+        which factors each member's diagonal block instead of the union —
+        ``O(Σ n_k³)`` instead of ``O((Σ n_k)³)``, with equal-sized members sharing
+        one batched LU. That is the CUDA path for a many-member ensemble; on CPU
+        the sparse union backend (the default above ~500 rows) exploits the same
+        structure and stays the better choice. ``device`` places the index tensors
+        (default: CPU — the factorization moves them to the system's device).
+        """
+        return tuple(
+            torch.arange(
+                m.row_start, m.row_start + m.n_rows, dtype=torch.int64, device=device
+            )
+            for m in self.members
+        )
 
     def operating_point(self, per_member: Sequence[Optional[dict]]) -> Optional[dict]:
         """Merge per-member operating points (member-local appliance ids) into one.

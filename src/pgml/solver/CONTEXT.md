@@ -379,13 +379,38 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   Runs by DEFAULT at every solve entry (`on_disconnected="raise"`); `"zero"`
   solves `pgml.topology.energized_subgrid` and scatters back 0 V on dead rows
   (full row layout kept); `"ignore"` skips. Report: `pgml.topology.connectivity_report`.
-- `solve_power_flow(..., linear_solver="auto"|"dense"|"sparse"|"matrix_free")`
+- `solve_power_flow(..., linear_solver="auto"|"dense"|"sparse"|"block"|"matrix_free")`
   — for `current_injection` this selects the `Y_eff` factorization backend
   (`harmonic.lu_factor_system(backend=...)`): `"auto"` = scipy SuperLU sparse on
   CPU ≥ ~500 rows (`_SPARSE_MIN_ROWS`), dense batched torch LU otherwise and
-  ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"`
-  raises. The sparse backend is differentiable via the linear-solve adjoint
+  ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"` and
+  `"block"` raise. The sparse backend is differentiable via the linear-solve adjoint
   (`_SparseSolveFn`: one trans='H' solve + batch-folded `-λ·conj(V)ᵀ`).
+- `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
+  `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
+  `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL
+  factorization for an ensemble of independent grids
+  (`pgml.multigrid.MergedGrid.block_rows()` supplies the partition). `block_rows`
+  is one int64 row-index tensor per block, together covering the rows EXACTLY once
+  (validated; a non-partition raises). Each block's diagonal sub-matrix is gathered
+  straight from `Y` and blocks of EQUAL size are stacked into one batched
+  `torch.linalg.lu_factor` (`_BlockLU`, bucket-per-distinct-size — an internal
+  detail), so an ensemble costs `O(Σ n³)` / `O(Σ n²)` memory instead of the union's
+  `O((Σ N)³)` / `O((Σ N)²)`, and `FactoredSystem.lu` stays `None`. The solve
+  gathers each bucket's rows out of the RHS, folds the whole scenario batch into
+  its multiple-RHS axis (`_lu_solve_shared`) and scatters back; the only Python
+  loop is over buckets. Ideal slack is honored exactly as elsewhere: a block's free
+  rows are its rows minus its fixed rows, the free-free `[F,F]` block is never
+  materialised, and the `Y_fs` slack coupling stays a dense gather + matvec.
+  Differentiable (pure torch — the `lu_solve` backward answers the adjoint with the
+  same factors) and GPU-ready; supports `[N,N]`, `[H,N,N]` and per-scenario `Y`
+  (the extra factorization batch multiplies the bucket axis). `"auto"` NEVER selects
+  it — it is an explicit opt-in because the row partition is taken on trust
+  (admittance outside the listed blocks is ignored), and on CPU the sparse union
+  backend exploits the same structure and remains the better choice. Unsupported
+  with `on_disconnected="zero"` (dropping dead rows re-indexes the system).
+  `pgml.simulate(..., linear_solver=…, block_rows=…)` threads it as a call-level
+  EXECUTION kwarg (never a `SimulationConfig` field), `calculation="power_flow"` only.
 - `solve_power_flow(..., branch_states={branch_id: state})` (also on
   `solve_harmonic_flow`, `assemble_harmonic_system`, `assemble_harmonic_ybus`,
   and the assemblers) — topology / switch-state batching by admittance masking:
@@ -395,7 +420,7 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   continuous states are IFT-differentiable topology parameters. Per-scenario
   connectivity is pre-checked (vectorized condensed-graph propagation).
 - `prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
-  branch_states, linear_solver) -> PowerFlowSystem` +
+  branch_states, linear_solver, block_rows) -> PowerFlowSystem` +
   `solve_power_flow(..., system=...)` — assembly + slack rows + factorization +
   grid-leaf walk once, reused across repeated solves (the `run_scenarios` chunk
   loop shares one system). Forward-only reuse: the IFT backward always rebuilds

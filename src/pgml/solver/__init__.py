@@ -6,13 +6,16 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   Norton mode (default) and ideal-slack Schur-partition mode, both differentiable.
 - ``solve_power_flow(grid, *, slack, method, tol, max_iter, dtype, device,
   operating_point, param_overrides, symmetry=None, criticality="auto",
-  linear_solver="auto", on_disconnected="raise", branch_states=None,
-  system=None) -> PowerFlowResult``
+  linear_solver="auto", block_rows=None, on_disconnected="raise",
+  branch_states=None, system=None) -> PowerFlowResult``
   Nonlinear const-P / ZIP fundamental power flow: current-injection fixed point
   forward, implicit-function-theorem backward (real-coordinate adjoint).
   ``symmetry`` selects per-phase vs balanced load modeling (``None`` -> config).
   ``linear_solver`` picks the inner factorization backend (sparse SuperLU on
-  large CPU systems by default). ``on_disconnected`` controls the pre-solve
+  large CPU systems by default); ``linear_solver="block"`` with ``block_rows``
+  factors a BLOCK-DIAGONAL system (an ensemble of independent grids, see
+  :meth:`pgml.multigrid.MergedGrid.block_rows`) one sub-grid at a time — the CUDA
+  path for a many-grid ensemble. ``on_disconnected`` controls the pre-solve
   connectivity check (``"raise"``/``"zero"``/``"ignore"``). ``branch_states``
   batches switch/topology configurations by differentiable admittance masking.
   ``system`` reuses a :class:`PowerFlowSystem` from :func:`prepare_power_flow`
@@ -33,7 +36,7 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   galvanic path to an in-service source; the pre-solve gate every entry point
   above runs by default.
 - ``prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
-  branch_states, linear_solver="auto") -> PowerFlowSystem``
+  branch_states, linear_solver="auto", block_rows=None) -> PowerFlowSystem``
   Assembles and factors the operating-point-independent part of a nonlinear
   solve once, for reuse across repeated :func:`solve_power_flow` calls on the
   same grid (e.g. a chunked scenario batch).

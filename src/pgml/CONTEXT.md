@@ -30,7 +30,7 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | **Batched scenario sampling** (QMC/cartesian, reproducible; parquet I/O; ML training data) | `scenarios/` | `scenarios/CONTEXT.md` |
 | **Topology bookkeeping** (slack anchor, branch edges, distance-from-slack Dijkstra) — stdlib-only, safe for lean training imports | `topology.py` | — |
 | **Benchmark input grids** (IEEE-33 / CIGRE LV via pandapower; the canonical example/training feeders; `synthetic_feeder` for arbitrary-size scaling studies) | `grids.py` | — |
-| **Multi-grid batching** (disjoint-union merge of a grid ensemble into ONE solvable Grid — block-diagonal `Y` for free; per-member id maps, `operating_point`/`branch_states` translation, `split()` row views) | `multigrid.py` | — |
+| **Multi-grid batching** (disjoint-union merge of a grid ensemble into ONE solvable Grid — block-diagonal `Y` for free; per-member id maps, `operating_point`/`branch_states` translation, `split()` row views, `block_rows()` for the block-diagonal factorization backend) | `multigrid.py` | — |
 | **Evaluation plots** (Y-bus heatmaps, voltage/harmonic profiles, 3D, refs-vs-ours) + the optional reference oracles | `evaluation/` | `evaluation/CONTEXT.md` |
 | The **public API** (`simulate`, `SolvedState`, `SimulationConfig`, `ResultBundle`) | `simulation.py` | `docs/pgml/public-api.md` |
 | The **error hierarchy** (`PgmlError` → `InputError` / `ComputationError`, http_status hints; `PgmError` = deprecated alias) | `errors.py` | — |

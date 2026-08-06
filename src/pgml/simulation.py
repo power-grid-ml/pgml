@@ -357,6 +357,8 @@ def simulate(
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
     strict: bool = True,
+    linear_solver: str = "auto",
+    block_rows: Optional[Sequence[Tensor]] = None,
 ) -> SolvedState:
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
@@ -368,6 +370,13 @@ def simulate(
     only — the state threads it into its lazy branch quantities so voltage and
     currents describe the same overridden network; the harmonic calculation
     rejects it.
+
+    ``linear_solver`` / ``block_rows`` select the inner factorization backend (see
+    :func:`pgml.solver.solve_power_flow`) — execution concerns like device and dtype,
+    not part of the serializable config. ``linear_solver="block"`` with the row
+    partition of an independent-grid ensemble
+    (``pgml.multigrid.MergedGrid.block_rows()``) factors each member on its own; both
+    apply to ``calculation="power_flow"`` only.
 
     Raises :class:`~pgml.errors.ConvergenceError` if the nonlinear power flow does not
     converge (``strict=True``, the default); pass ``strict=False`` to return the
@@ -388,6 +397,8 @@ def simulate(
             operating_point=config.operating_point,
             param_overrides=param_overrides,
             symmetry=config.symmetry,
+            linear_solver=linear_solver,
+            block_rows=block_rows,
         )
         v = pf.v.unsqueeze(-2)  # [*batch, 1, N]
         freqs = torch.tensor(
@@ -407,6 +418,13 @@ def simulate(
                 "harmonic solve reads parameters from the grid only. Apply the "
                 "values to the grid (float/tensor duality) or use "
                 "calculation='power_flow'."
+            )
+        if linear_solver != "auto" or block_rows is not None:
+            raise InputError(
+                "linear_solver / block_rows apply to calculation='power_flow' only: "
+                "the harmonic calculation factors each per-order system itself. Use "
+                "calculation='power_flow', or pgml.solver.solve_harmonic_flow for "
+                "the harmonic path."
             )
         hf = solve_harmonic_flow(
             grid,
