@@ -37,6 +37,7 @@ from pgml.scenarios import (
     ParameterSpec,
     Selector,
     Uniform,
+    default_device_classes,
     read_dataset,
     resolve_composed_ids,
     run_scenarios,
@@ -170,7 +171,9 @@ def test_composition_config_json_roundtrip():
     assert back.composition is not None
     # int-keyed harmonic dicts survive the JSON string-key coercion
     smps = next(c for c in back.composition.classes if c.name == "electronics_smps")
-    assert set(smps.harmonic_magnitude) == {3, 5, 7, 9, 11, 13}
+    source = next(c for c in default_device_classes() if c.name == "electronics_smps")
+    assert set(smps.harmonic_magnitude) == set(source.harmonic_magnitude)
+    assert all(isinstance(k, int) for k in smps.harmonic_magnitude)
 
 
 # --- byte-identity + determinism -------------------------------------------
