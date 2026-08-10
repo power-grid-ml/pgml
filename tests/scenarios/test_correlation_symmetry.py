@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 from pydantic import ValidationError
@@ -130,19 +132,58 @@ def test_small_imbalance_is_close_but_distinct(grid_3ph):
     assert s.samples["l"].shape == (64, 2)  # records the component base
 
 
+def _independent_corr_cfg(rho, *, n=4096):
+    """A per-phase-independent load scale coupled to one factor."""
+    return ScenarioConfig(
+        n_samples=n,
+        seed=0,
+        method="independent",
+        factors=[LatentFactor(name="f")] if rho is not None else [],
+        parameters=[
+            ParameterSpec(
+                name="l",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.0, high=1.0),
+                field="pq",
+                mode="scale",
+                per="each",
+                symmetry="independent",
+                correlation=None if rho is None else Correlation(factor="f", rho=rho),
+            )
+        ],
+    )
+
+
+def test_correlation_couples_the_per_phase_draws(grid_3ph):
+    """A correlated ``independent`` spec keeps its marginal but stops the AGGREGATE
+    concentrating — the property that decides whether a many-load feeder's total demand
+    varies between scenarios at all.
+
+    The mean of ``n`` draws with pairwise correlation ``r`` has std
+    ``sigma * sqrt(r + (1 - r) / n)``; for uniform marginals a Gaussian copula of latent
+    ``rho`` induces ``r = (6/pi) * asin(rho/2)``. Asserting that closed form pins both the
+    coupling and the preserved marginal, which a bare "spread grew" check would not.
+    """
+    for rho in (None, 0.0, 0.6):
+        values = sample(grid_3ph, _independent_corr_cfg(rho)).samples["l"]
+        flat = values.reshape(values.shape[0], -1)  # [B, n draws]
+        n = flat.shape[1]
+        # the copula preserves the marginal whatever the coupling
+        assert float(flat.mean()) == pytest.approx(0.5, abs=0.02)
+        assert float(flat.std()) == pytest.approx(math.sqrt(1 / 12), abs=0.02)
+        # per-phase values still differ within a component
+        assert not torch.allclose(values[:, 0, 0], values[:, 0, 1])
+        r = 0.0 if rho is None else (6.0 / math.pi) * math.asin(rho / 2.0)
+        expected = math.sqrt(1 / 12) * math.sqrt(r + (1.0 - r) / n)
+        assert float(flat.mean(dim=-1).std()) == pytest.approx(expected, rel=0.12)
+
+
 # --- validators -------------------------------------------------------------
 def test_spec_validators():
     base = dict(name="l", selector=Selector(component="load"))
     with pytest.raises(ValidationError):  # pq requires scale
         ParameterSpec(
             **base, distribution=Uniform(low=0.0, high=1.0), field="pq", mode="absolute"
-        )
-    with pytest.raises(ValidationError):  # correlation + independent
-        ParameterSpec(
-            **base,
-            distribution=Uniform(low=0.0, high=1.0),
-            symmetry="independent",
-            correlation=Correlation(factor="f", rho=0.5),
         )
     with pytest.raises(ValidationError):  # small_imbalance needs imbalance > 0
         ParameterSpec(

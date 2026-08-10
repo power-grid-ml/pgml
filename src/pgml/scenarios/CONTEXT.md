@@ -25,7 +25,12 @@ verified `batched == loop-of-individual`).
     any power draw. `is_source_voltage` flags it.
   - `correlation=Correlation(factor, rho)` couples matched components through a shared
     `LatentFactor` (single-factor Gaussian copula; rho=0 == `per="each"`, rho=1 ==
-    `per="shared"`; supersedes `per`). Marginal distribution preserved.
+    `per="shared"`; supersedes `per`). Marginal distribution preserved. Composes with EVERY
+    `symmetry`: under `independent` the coupling applies per PHASE draw (that symmetry has no
+    component-level base), so a spec keeps its per-phase asymmetry and still co-moves.
+    Correlation is what keeps an AGGREGATE varying — with rho=0 the mean over `N` matched
+    components concentrates as `1/sqrt(N)`, so a few hundred independent loads leave the
+    total demand nearly constant however wide the marginal is.
   - `symmetry` (per-phase, power fields only): `balanced` writes a scalar total
     (`p_w`/`q_var`, split equally downstream); `independent` draws each phase separately;
     `small_imbalance` = balanced base × (1 + small per-phase perturbation of fractional std

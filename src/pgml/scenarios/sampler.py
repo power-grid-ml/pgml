@@ -269,17 +269,33 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     return factor_index, op_layouts, harm_layouts, dim
 
 
+def _draw(spec: ParameterSpec, u: Tensor, factor_z: dict) -> Tensor:
+    """Map unit-cube columns through the spec's marginal, mixing in its latent factor.
+
+    Without ``correlation`` this is the plain inverse CDF. With it, the columns become the
+    IDIOSYNCRATIC part of a single-factor Gaussian copula
+    (``Z = sqrt(rho)*Z_factor + sqrt(1-rho)*eps``), so every matched draw keeps the spec's
+    marginal while co-moving with the factor. Shape-agnostic in ``u``: the factor is
+    broadcast over whatever axes follow the batch, which is what lets a per-COMPONENT draw
+    and a per-PHASE draw share one implementation.
+    """
+    if spec.correlation is None:
+        return spec.distribution.icdf(u)
+    zf = factor_z[spec.correlation.factor]  # [B]
+    while zf.dim() < u.dim():
+        zf = zf.unsqueeze(-1)
+    rho = spec.correlation.rho
+    z = math.sqrt(rho) * zf + math.sqrt(1.0 - rho) * _norm_icdf(u)
+    return spec.distribution.icdf(_norm_cdf(z))
+
+
 def _component_base(
     spec: ParameterSpec, base_u: Tensor, factor_z: dict, n_comp: int
 ) -> tuple[Tensor, Tensor]:
     """Component-level values: ``(write [B, n_comp], record [B, n_comp] or [B, 1])``."""
     dist = spec.distribution
     if spec.correlation is not None:
-        zf = factor_z[spec.correlation.factor].unsqueeze(-1)  # [B, 1]
-        rho = spec.correlation.rho
-        eps = _norm_icdf(base_u)  # [B, n_comp]
-        z = math.sqrt(rho) * zf + math.sqrt(1.0 - rho) * eps
-        vals = dist.icdf(_norm_cdf(z))  # [B, n_comp], marginal preserved
+        vals = _draw(spec, base_u, factor_z)  # [B, n_comp], marginal preserved
         return vals, vals
     if spec.per == "shared":
         v = dist.icdf(base_u[:, 0]).unsqueeze(-1)  # [B, 1]
@@ -445,7 +461,9 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
                 for ph in range(nph):
                     col = phase_u[:, pcol] if spec.per == "each" else phase_u[:, ph]
                     pcol += 1 if spec.per == "each" else 0
-                    v = spec.distribution.icdf(col)  # [B]
+                    # per-PHASE draw, correlated through the spec's factor when it has one:
+                    # independent symmetry has no component-level base to couple instead.
+                    v = _draw(spec, col, factor_z)  # [B]
                     comp_rec.append(v)
                     pp_p.append(v * rec.p_pp[ph] if scale else v)
                     pp_q.append(v * rec.q_pp[ph] if scale else v)

@@ -156,6 +156,14 @@ class Correlation(_Base):
     between two components on the same factor equals ``rho``. ``rho=0`` reproduces
     ``per="each"`` (independent); ``rho=1`` reproduces ``per="shared"`` (identical).
     When set, ``correlation`` supersedes ``per``.
+
+    Under ``symmetry="independent"`` the coupling applies to every PHASE draw (that
+    symmetry has no component-level base to couple instead), so a correlated spec keeps
+    its per-phase asymmetry and still co-moves with the factor.
+
+    Correlation is what keeps an AGGREGATE quantity varying: with ``rho=0`` the mean over
+    ``N`` matched components concentrates as ``1/sqrt(N)``, so a few hundred independent
+    loads leave the total demand nearly constant however wide the marginal is.
     """
 
     factor: str
@@ -257,11 +265,6 @@ class ParameterSpec(_Base):
         if self.field == "pq" and self.mode != "scale":
             raise ValueError(
                 "field='pq' requires mode='scale' (constant power factor)."
-            )
-        if self.correlation is not None and self.symmetry == "independent":
-            raise ValueError(
-                "correlation is incompatible with symmetry='independent' (there is no "
-                "component-level value to correlate)."
             )
         if self.symmetry == "small_imbalance" and self.imbalance <= 0.0:
             raise ValueError("symmetry='small_imbalance' requires imbalance > 0.")
