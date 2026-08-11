@@ -7,6 +7,7 @@ spatial spread visible (useful for the "error spread across nodes" use case).
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, Union
 
 import matplotlib.pyplot as plt
@@ -17,6 +18,8 @@ from pgml.schemas.grid_schema import Grid
 
 from .data import node_numbering
 from .topology import grid_graph, slack_node_id
+
+_log = logging.getLogger(__name__)
 
 
 def graph_layout(
@@ -86,18 +89,35 @@ def graph_layout(
     return nx.spring_layout(g, seed=0, weight=None)
 
 
-def load_node_positions(path, grid: Grid) -> dict:
+def load_node_positions(path, grid: Grid, *, strict: bool = False) -> dict:
     """Read a node-position JSON -> ``{node_id: (x, y)}`` via :func:`graph_layout` key rules.
 
     The file maps node names, zero-based node numbers, or node ids to ``[x, y]`` pairs
     (e.g. ``run/configs/cigre_lv_geo.json``, keyed by the CIGRE LV benchmark's
     zero-based bus numbers). Every grid node must be covered.
+
+    A file that does not describe THIS grid falls back to the synthesized layout with a
+    warning rather than raising: geography is a nicety for a topology drawing, and a
+    mismatched file is a wrong-file mistake, not a reason to lose a whole figure set (or,
+    when a driver passes one by default, every run on a different grid). Pass
+    ``strict=True`` where the real coordinates are the point and a substitute would
+    mislead.
     """
     import json
     from pathlib import Path
 
     raw = json.loads(Path(path).read_text())
-    return graph_layout(grid, positions=raw)
+    try:
+        return graph_layout(grid, positions=raw)
+    except ValueError as exc:
+        if strict:
+            raise
+        _log.warning(
+            "%s does not describe this grid (%s); drawing the synthesized layout instead.",
+            path,
+            exc,
+        )
+        return graph_layout(grid)
 
 
 def _node_value_array(grid: Grid, node_values, g: nx.Graph) -> Optional[np.ndarray]:

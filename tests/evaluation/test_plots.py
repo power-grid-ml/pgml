@@ -356,3 +356,29 @@ def test_plot_grid_graph_accepts_explicit_positions(tmp_path):
     save_figure(fig, tmp_path / "graph_geo.png")
     assert (tmp_path / "graph_geo.png").exists()
     plt.close("all")
+
+
+def test_mismatched_positions_fall_back_to_a_synthesized_layout(tmp_path, caplog):
+    """A position file describing a DIFFERENT grid must not cost the whole figure set.
+
+    A hardcoded geometry follows a driver onto every grid it is run against, so the common
+    case is a wrong-file mistake rather than a broken grid — the drawing degrades to the
+    synthesized layout and says so. ``strict=True`` keeps the hard failure where the real
+    coordinates are the point.
+    """
+    import json
+    import logging
+
+    from pgml.evaluation import load_node_positions
+
+    grid = single_phase_chain()
+    path = tmp_path / "other_grid.json"
+    path.write_text(json.dumps({"39": [1.0, 2.0]}))  # no such node here
+
+    with caplog.at_level(logging.WARNING):
+        pos = load_node_positions(path, grid)
+    assert set(pos) == {int(n.id) for n in grid.nodes}  # every node placed
+    assert "synthesized layout" in caplog.text
+
+    with pytest.raises(ValueError, match="matches no node"):
+        load_node_positions(path, grid, strict=True)
