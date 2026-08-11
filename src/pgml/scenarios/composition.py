@@ -603,11 +603,18 @@ def sample_device_composition(
 
     _, hour, doy, _dow = _time_axis(config.start_time, config.step_size_s, t)  # [T]
 
-    # Per-member diurnal availability rate [M, T] (grouped by preset).
+    # Per-member diurnal availability rate [M, T] (grouped by preset), lifted by the
+    # configured duty scale: the presets describe a device's own duty cycle, which puts an
+    # aggregate at a small fraction of installed capacity — realistic for an average hour,
+    # but it never visits the loaded states an estimator most needs to get right. The scale
+    # moves the whole population up the same curve (the clamp keeps a rate a probability),
+    # leaving the diurnal SHAPE and every other draw untouched.
     rate = torch.zeros((m, t), dtype=_F64)
     for preset in set(r.preset):
         sel = torch.tensor([p == preset for p in r.preset], dtype=torch.bool)
         rate[sel] = _activity_rate(preset, hour, doy)
+    if comp.activity_scale != 1.0:
+        rate = (rate * float(comp.activity_scale)).clamp(0.0, 1.0)
 
     # Per-scenario shared latents (co-variation): behavioral for consumption, cloud PV.
     z_beh = torch.randn((b, 1), generator=gen, dtype=_F64)

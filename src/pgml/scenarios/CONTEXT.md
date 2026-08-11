@@ -139,7 +139,11 @@ verified `batched == loop-of-individual`).
     (=default_device_classes()), compositions=[...] (=default_compositions()),
     scale_to_nominal=True (share-weighted installed capacity → load p_nom_w),
     max_injection_pu=3.0 (cap the residual-THD blow-up near a net-zero fundamental),
-    behavioral_coupling=0.3, cloud_coupling=0.5, roster_seed=None (a held-out roster bank);
+    behavioral_coupling=0.3, cloud_coupling=0.5, activity_scale=1.0 (multiplier on every
+    member's diurnal availability RATE, clamped back to a probability — the class presets are
+    per-device duty cycles, so a composed aggregate sits far below installed capacity and a
+    sequence's FUNDAMENTAL barely moves; raise it to place the population in a loaded band),
+    roster_seed=None (a held-out roster bank);
     `.class_names()`)`. `default_device_classes()` = 6 built-ins (base_linear,
     electronics_smps, ev_charger, pv_inverter, inverter_drive [multi-state], resistive_heating).
   - `sample_device_composition(grid, config) -> CompositionDraw(operating_point[B,T],

@@ -1030,6 +1030,13 @@ class CompositionConfig(_Base):
     #: Cross-device correlation strengths (shared per-scenario latents).
     behavioral_coupling: float = Field(default=0.3, ge=0.0)
     cloud_coupling: float = Field(default=0.5, ge=0.0)
+    #: Multiplier on every member's diurnal availability RATE (clamped back to a
+    #: probability). The class presets are per-device duty cycles, so a composed aggregate
+    #: sits at a small fraction of installed capacity — a fair average hour, but one that
+    #: never reaches the loaded states where the voltage profile actually moves and an
+    #: estimator has something to recover. Raise it to place the population in a loaded
+    #: band; the diurnal shape, the rosters and every other draw are unchanged.
+    activity_scale: float = Field(default=1.0, gt=0.0)
     #: Optional distinct seed for the roster + temporal draws (a held-out composition
     #: bank). ``None`` derives both streams from ``CoherentSpectrumConfig.seed``.
     roster_seed: Optional[int] = None
