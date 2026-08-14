@@ -20,6 +20,7 @@ grids
 multigrid
 defaults
 paths
+provenance
 ```
 
 ---
@@ -47,3 +48,4 @@ paths
 | {mod}`pgml.multigrid` | Disjoint-union merge of a grid ensemble into one solvable `Grid` (block-diagonal `Y` for free); per-member id maps, `operating_point`/`branch_states` translation, `split()` row views |
 | {mod}`pgml.defaults` | Documented modelling defaults (shipped in the package, importlib.resources) |
 | {mod}`pgml.paths` | Experiments-root convention (`PGML_EXPERIMENTS`) |
+| {mod}`pgml.provenance` | `code_provenance` / `git_state` — the commit, dirty flag, and library versions stamped into every persisted artifact |

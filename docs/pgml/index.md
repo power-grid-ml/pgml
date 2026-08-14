@@ -63,6 +63,16 @@ figures.
   `CoherentSpectrumConfig.composition` (`CompositionConfig`) turns an aggregated load into
   a statistical device-class mix whose per-step activity drives both the fundamental power
   and the injected spectrum jointly, with per-class attribution recorded as ground truth.
+  `pgml.scenarios.presets` (`se_random_scenario_config` / `se_coherent_scenario_config`) is
+  the ONE calibrated excitation recipe every state-estimation generator builds from — the
+  single-grid workflow, the multi-grid corpus, and `pgml.grids.se_benchmark_scenario_config`
+  all delegate here, so a recipe fix reaches every one of them.
+- **Reproducibility / provenance** — `pgml.provenance.code_provenance()`: the commit, dirty
+  flag, and library versions stamped into a generated dataset's `meta.json`
+  (`pgml.scenarios.generation_provenance`), a multi-grid corpus manifest, a training
+  checkpoint, and a cluster run directory — so two artifacts written from an identical
+  config and seed can still be told apart when the code between them changed. Falls back to
+  a sync-time stamp file on a cluster mirror deployed without `.git`.
 - **Topology** — `pgml.assembly.node_phase_index` (the row layout), branch parameters, and
   `pgml.topology` (dependency-free: `slack_node_ids` / `slack_node_id`, `branch_edges`,
   `distance_from_slack` — nearest-slack distance, multi-source-ready — the graph features

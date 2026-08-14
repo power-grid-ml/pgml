@@ -230,6 +230,10 @@ special wave shape, mA per watt of active power):
   (per-device fundamental current from nominal power and the node's line-to-neutral
   voltage), the per-device clamp :func:`~pgml.scenarios.sample_coherent_spectra` applies
   by default.
+- :func:`~pgml.scenarios.iec61000_3_2_provenance` — identifies the ACTIVE table
+  (``{"source", "override", "sha256"}``); a ``PGML_IEC61000_3_2`` override silently changes
+  every generated emission fraction, so an artifact that does not record which table it used
+  cannot be compared against another one.
 
 ::
 
@@ -255,6 +259,9 @@ wheel:
   tabulated orders (cached).
 - :func:`~pgml.scenarios.en50160_limit` — returns the limit for a single order;
   raises ``KeyError`` if the order is absent.
+- :func:`~pgml.scenarios.en50160_provenance` — identifies the ACTIVE table
+  (``{"source", "override", "sha256"}``), the DIN EN 50160 counterpart of
+  :func:`~pgml.scenarios.iec61000_3_2_provenance` above.
 
 The active file is resolved in priority order: an explicit ``path`` argument, then the
 ``PGML_EN50160`` environment variable, then the packaged table.  Example::
@@ -365,7 +372,9 @@ seasonally-widening daylight window. ``start_time`` (ISO 8601) is **required** w
         step_size_s=3600.0,
         seed=42,
         profile=LoadProfileConfig(),          # defaults: daily_amplitude=1.0, ...
-        start_time="2024-06-21T00:00:00",     # ISO 8601, anchors the daily/seasonal phase
+        start_time="2024-06-21T16:00:00",     # ISO 8601, anchors the daily/seasonal phase
+                                               # (the high-activity band; see the presets
+                                               # section below for why)
     )
     result = run_scenarios(grid, cfg)
     # result.v  shape [32, 48, 6, N]  — the fundamental now moves step to step
@@ -505,16 +514,33 @@ derivation):
   for any load no other rule claims; lists its ``classes``
   (:class:`~pgml.scenarios.ClassCount` entries).
 - :class:`~pgml.scenarios.CompositionConfig` — ``selector`` (default: every in-service
-  load), ``classes`` (default :func:`~pgml.scenarios.default_device_classes`, six
+  load), ``classes`` (default :func:`~pgml.scenarios.default_device_classes`, seven
   built-in classes — a harmonic-free linear base load, SMPS electronics, an EV charger,
-  a PV inverter, a multi-state inverter drive, and a resistive heater),
-  ``compositions`` (default :func:`~pgml.scenarios.default_compositions`, one rule per
-  common ``consumer_type`` — ``"household"``, ``"office"``, ``"restaurant"``,
-  ``"heat_pump"``, ``"ev_charging"``, ``"pv"``, plus a fallback), ``scale_to_nominal``,
-  ``max_injection_pu``, ``behavioral_coupling`` / ``cloud_coupling`` (cross-device
-  correlation strength), and ``roster_seed`` (optional, distinct from ``seed`` — a
-  held-out device-composition bank, the same recipe as
-  :attr:`~pgml.scenarios.CoherentSpectrumConfig.mode_bank_seed` above).
+  a PV inverter, a multi-state inverter drive, a kW-scale inverter heat pump, and a
+  thermostatic resistive heater), ``compositions`` (default
+  :func:`~pgml.scenarios.default_compositions`, one rule per common ``consumer_type`` —
+  ``"household"``, ``"office"``, ``"restaurant"``, ``"heat_pump"``, ``"ev_charging"``,
+  ``"pv"``, plus a fallback), ``scale_to_nominal``, ``max_injection_pu``,
+  ``behavioral_coupling`` / ``cloud_coupling`` (cross-device correlation strength), and
+  ``roster_seed`` (optional, distinct from ``seed`` — a held-out device-composition bank,
+  the same recipe as :attr:`~pgml.scenarios.CoherentSpectrumConfig.mode_bank_seed` above).
+  :data:`~pgml.scenarios.DEVICE_LIBRARY_VERSION` (currently ``"2"``) stamps the roster
+  identity into a generated dataset's metadata, since the library's rates and shapes can be
+  recalibrated in place — the heat-pump class and the h13-h19 calibrated envelope arrived
+  at version ``"2"`` with no change to the config surface, so only the version records that
+  two datasets built from the same config draw from different populations.
+
+**Silent-order guard.** A device class that emits nothing at a requested harmonic order
+makes that order silent by construction — the true harmonic voltage there is zero, relative
+error metrics turn into NaN, and the corresponding model input is dead.
+:func:`~pgml.scenarios.composition_silent_orders` checks a roster against a requested order
+set and returns the orders no class in it emits at (fundamental excluded);
+:class:`~pgml.scenarios.CoherentSpectrumConfig` calls it automatically for a composed config
+and raises naming the silent orders. The same check applies, against the
+``harmonic_reference`` table instead of a roster, to the plain per-order fingerprint (no
+composition) — an order the reference does not list is equally silent. Set
+:attr:`~pgml.scenarios.CoherentSpectrumConfig.allow_silent_orders` (a tuple of orders,
+default empty) to declare a silence deliberate rather than accidental.
 
 **Enabling it.** Set ``composition`` on a
 :class:`~pgml.scenarios.CoherentSpectrumConfig` (``start_time`` is REQUIRED — the
@@ -531,8 +557,10 @@ activity model is diurnal and needs an absolute anchor, same as ``profile``)::
         n_scenarios=64,
         step_size_s=900.0,
         seed=42,
-        composition=CompositionConfig(),         # defaults: the 6-class library
-        start_time="2024-06-21T00:00:00",        # ISO 8601, anchors the activity model
+        composition=CompositionConfig(),         # defaults: the 7-class library
+        start_time="2024-06-21T16:00:00",        # ISO 8601, anchors the activity model
+                                                  # (the high-activity band, not midnight —
+                                                  # every class preset is dark at 00:00)
     )
     result = run_scenarios(grid, cfg)
     # result.v  shape [64, 96, 7, N]
@@ -572,6 +600,69 @@ operating-point cube, and profile streams, so ``composition=None`` (the default)
 reproduces the fingerprint-only output byte-for-byte.  ``pgl.data.CompositionLabels`` /
 ``pgl.data.DataSource.composition_labels()`` expose these same attribution samples on
 the ML side — see :doc:`/pgl/api/data`.
+
+Calibrated state-estimation presets
+------------------------------------
+
+:mod:`pgml.scenarios.presets` defines HOW a state-estimation dataset is excited, ONCE:
+:func:`~pgml.scenarios.se_random_scenario_config` (Task A — independent snapshots) and
+:func:`~pgml.scenarios.se_coherent_scenario_config` (Task B/C — coherent sequences) build a
+:class:`~pgml.scenarios.ScenarioConfig` / :class:`~pgml.scenarios.CoherentSpectrumConfig`
+from a single calibrated recipe, using every mechanism described above — correlated load
+sampling, per-order emission-phase diversity, PV inverter emission, node-coherent
+fingerprints, statistical device-class composition. Every generator in the suite builds
+from these two functions instead of assembling its own specs: the single-grid training
+workflow's default (no ``--scenario-config``) run, the multi-grid corpus builder
+(:mod:`pgl.data.multigrid`), and :func:`~pgml.grids.se_benchmark_scenario_config`. A recipe
+fix made here reaches all of them at once, and two datasets stamped with the same
+:data:`~pgml.scenarios.SE_PRESET_VERSION` were drawn the same way::
+
+    from pgml.scenarios import se_random_scenario_config, se_coherent_scenario_config
+
+    random_cfg = se_random_scenario_config(
+        grid, orders=[1, 3, 5, 7, 9, 11, 13], n_samples=512, seed=0,
+    )
+    coherent_cfg = se_coherent_scenario_config(
+        grid, orders=[1, 3, 5, 7, 9, 11, 13],
+        n_scenarios=64, n_steps=96, seed=0,
+    )  # start_time defaults to HIGH_ACTIVITY_START_TIME
+
+**The requested orders drive generation, not the other way round.** ``orders`` is the
+SOLVED harmonic set (order 1 = fundamental, never injected); every order above it
+automatically gets a load-emission draw, an emission-phase draw and, on a PV grid, an
+inverter emission and phase draw — so widening or narrowing the requested spectrum widens
+or narrows what is generated, with nothing configured a second time. An order the IEC
+61000-3-2 reference table does not cover raises, naming the order, rather than silently
+injecting nothing there.
+
+**The recipe, briefly** (full rationale in the module docstring of
+:mod:`pgml.scenarios.presets`):
+
+- Load level ``U(0, 1)`` of nameplate through a shared ``demand`` latent (rank correlation
+  0.5, so the feeder's aggregate actually moves instead of concentrating toward its mean),
+  a small per-phase unbalance, and a ``Normal(1.0, 0.0333)`` slack-voltage draw.
+- Harmonic emission as a fraction ``[0, 2]`` of the device's own IEC 61000-3-2
+  current-emission limit — the physically correct per-device reference, not the DIN EN
+  50160 supply-voltage compatibility levels (an order of magnitude too small read as a
+  per-device emission fraction).
+- Emission-phase diversity per (device, order), widening with order, so injections do not
+  all add coherently at a shared bus.
+- A PV inverter's own h5-dominant emission shape, calibrated against measured
+  certification and lab-rack populations (the ``PV_EMISSION_HIGH`` / ``PV_PHASE_SPAN_DEG``
+  tables in :mod:`pgml.scenarios.presets`, an internal calibration surface, not re-exported
+  at the package level).
+- Coherent sequences anchored at :data:`~pgml.scenarios.HIGH_ACTIVITY_START_TIME`
+  (``"2024-06-21T16:00:00"``) — the late-afternoon band where households ramp, EVs arrive,
+  and PV still produces — rather than midnight, which sits in the dead band of every
+  device-class activity preset and would generate a corpus that is dark almost everywhere.
+
+``se_coherent_scenario_config``'s ``mode="composed"`` (default) builds the statistical
+device-class composition described above, pointing its own per-device fingerprint at the
+grid's generators (a PV inverter, since the composition already covers the loads); pass
+``mode="fingerprint"`` for the per-device mode-bank baseline used to isolate the composed
+power/spectrum coupling. Every fundamental / correlation / spectrum knob the two functions
+accept can be overridden per call — the calibrated defaults are a starting point, not a
+locked config; see each function's own docstring for the full parameter list.
 
 Per-node harmonic "error"-source sweep (``run_node_injection_sweep``)
 -----------------------------------------------------------------------
@@ -893,6 +984,29 @@ Usage example::
     #                      written before convergence metadata was persisted
     # ds.failed_scenarios tuple of non-converged scenario indices (empty if none)
     # ds.meta      full sidecar dict
+
+Generation provenance
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Beyond the config and seed, ``meta.json`` records what a reload alone cannot reconstruct:
+``config_hash`` and :func:`~pgml.scenarios.generation_provenance`'s fields.
+
+- :func:`~pgml.scenarios.config_hash` — a 16-hex-character fingerprint of the serialized
+  config (or its pre-serialized JSON string). Two configs producing the same hash describe
+  the same batch — this is what a reuse gate (e.g. an ablation driver deciding whether to
+  regenerate a dataset) compares instead of a field-by-field diff.
+- :func:`~pgml.scenarios.generation_provenance` — everything else a generated dataset should
+  record: ``provenance`` (:func:`~pgml.provenance.code_provenance` — the commit, dirty flag,
+  and library versions; see :doc:`provenance`), ``device_library_version``
+  (:data:`~pgml.scenarios.DEVICE_LIBRARY_VERSION`), and ``standards`` (the ACTIVE EN 50160 /
+  IEC 61000-3-2 tables, via :func:`~pgml.scenarios.en50160_provenance` /
+  :func:`~pgml.scenarios.iec61000_3_2_provenance`).
+
+Two datasets written from a byte-identical config and seed can still differ numerically
+because the code changed, the shipped device library was recalibrated, or a ``PGML_*``
+environment variable silently swapped a standards table for the run — none of which the
+config or seed alone would show. :func:`~pgml.scenarios.read_dataset` needs none of these
+keys to reload a dataset; a dataset written before they existed simply lacks them.
 
 Storage dispatch and SoC integration
 --------------------------------------

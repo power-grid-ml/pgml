@@ -74,10 +74,13 @@ State-estimation benchmark
   :class:`~pgml.schemas.grid_schema.Generator` (tagged ``consumer_type="pv"``) to a
   fraction of a grid's load nodes, mirroring each host load's node/phases and rated at
   half its nameplate active power.
-- :func:`~pgml.grids.se_benchmark_scenario_config` — the canonical randomized
-  state-estimation sampling recipe: a per-phase-independent load apparent-power scale, a
-  per-load harmonic spectrum (fraction of the EN 50160 limit, orders
-  :data:`~pgml.grids.LOAD_HARMONIC_ORDERS`), and — when the grid carries PV — one shared
+- :func:`~pgml.grids.se_benchmark_scenario_config` — a thin front door onto the ONE
+  calibrated recipe every state-estimation generator in the suite shares
+  (:func:`pgml.scenarios.se_random_scenario_config`, see :doc:`scenarios`'s "Calibrated
+  state-estimation presets" section): correlated load levels through a shared latent, a
+  small per-phase unbalance, a slack-voltage draw, and a per-device IEC 61000-3-2-referenced
+  harmonic spectrum with per-order emission-phase diversity (orders
+  :data:`~pgml.grids.LOAD_HARMONIC_ORDERS`), plus — when the grid carries PV — one shared
   irradiance scale for all PV plus a per-inverter harmonic signature (orders
   :data:`~pgml.grids.PV_HARMONIC_ORDERS`)::
 
@@ -89,9 +92,11 @@ State-estimation benchmark
       add_pv_systems(grid, fraction=0.5)
       cfg = se_benchmark_scenario_config(grid, n_samples=512, seed=0)
 
-  This single recipe is the source of truth: the dataset-generation examples and the
-  ``pgl`` test fixtures both build from it, so what a state-estimation model trains on
-  cannot silently drift from what the documented benchmark generates.
+  Sharing the ONE builder (rather than each caller assembling its own specs) is what keeps
+  this benchmark, the training-workflow datasets, and the multi-grid corpus from drifting
+  apart: the dataset-generation examples and the ``pgl`` test fixtures all build from it, so
+  what a state-estimation model trains on cannot silently diverge from what the documented
+  benchmark generates.
 
 .. automodule:: pgml.grids
    :members:
