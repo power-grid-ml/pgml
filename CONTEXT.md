@@ -25,11 +25,14 @@ A change that breaks float64 `gradcheck` or the GPU device/dtype test is not don
 ## The suite (multi-package monorepo, one distribution)
 
 `pgml` is the **base** package; the others are one-way dependents that import only `pgml`'s
-public API and never its internals. `pgml` imports none of them. `pgl` and `pgg` are
-independent of each other; `pgg` may additionally import `pghub` (real-grid seeding and
-comparison), never the reverse. `pgd` imports the `pgml` and `pgl` public APIs and talks to
-the external `devicecom` measurement service (sibling repository) over the network only —
-never as an import.
+public API and never its internals. `pgml` imports none of them. `pgg` may additionally
+import `pghub` (real-grid seeding and comparison), never the reverse. `pgl` never depends on
+`pgg` for training or inference, but its multi-grid CORPUS GENERATION (`pgl.data.multigrid`)
+lazily imports the `pgg`/`pghub` public APIs to synthesize and seed grid ensembles — the
+import is deferred to generation time, so a pgl install without pgg trains on an existing
+corpus unaffected. `pgd` imports the `pgml` and `pgl` public APIs and talks to the external
+`devicecom` measurement service (sibling repository) over the network only — never as an
+import.
 
 | package | role | status | open in |
 |---|---|---|---|

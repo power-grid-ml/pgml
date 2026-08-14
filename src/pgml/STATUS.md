@@ -13,6 +13,15 @@ decisions. One entry per capability:
 - **Public API** — `pgml.simulate(grid, config) -> SolvedState` (eager voltages + lazy
   branch currents/flows/spectra/THD), `simulate_serializable`, `SimulationConfig`, the
   `pgml.errors` hierarchy (`docs/pgml/public-api.md`).
+- **Provenance + calibrated SE recipes** — `pgml.provenance.code_provenance()` stamps
+  commit/dirty/versions into every persisted artifact (dataset `meta.json`, corpus
+  manifest, checkpoints, cluster run dirs); `pgml.scenarios.presets` is the single
+  excitation recipe (IEC emission reference, phase diversity, PV h3–h19 spans, device
+  library v2) every SE dataset generator builds from. ⚠️ Datasets/corpora generated
+  BEFORE the presets (pre-2026-08-14: EN 50160-as-current-fractions fallback, silent
+  h15–h19 band, midnight coherent window) are miscalibrated — regenerate before
+  drawing conclusions from models trained on them; the missing `config_hash` /
+  `device_library_version` keys in their `meta.json` identify them.
 - **Load flow** — linear (const-Z) + nonlinear (const-P / full ZIP); current-injection
   fixed point AND Newton (matrix-free option); IFT gradients; `ConvergenceDiagnostics` +
   `loadability_limit` continuation (with a `capped` flag when no nose is found). Batched-

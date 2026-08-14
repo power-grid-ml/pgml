@@ -34,6 +34,8 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | **Evaluation plots** (Y-bus heatmaps, voltage/harmonic profiles, 3D, refs-vs-ours) + the optional reference oracles | `evaluation/` | `evaluation/CONTEXT.md` |
 | The **public API** (`simulate`, `SolvedState`, `SimulationConfig`, `ResultBundle`) | `simulation.py` | `docs/pgml/public-api.md` |
 | The **error hierarchy** (`PgmlError` → `InputError` / `ComputationError`, http_status hints; `PgmError` = deprecated alias) | `errors.py` | — |
+| **Code provenance** (`code_provenance()` / `git_state()` — the commit/dirty/version stamp every persisted artifact records; reads git or the cluster sync's `.git-provenance.json`) | `provenance.py` | — |
+| **Calibrated SE recipes** (`se_random_scenario_config` / `se_coherent_scenario_config` — the ONE excitation recipe every state-estimation dataset generator builds from; `SE_PRESET_VERSION`, `DEVICE_LIBRARY_VERSION`) | `scenarios/presets.py` | `scenarios/CONTEXT.md` |
 
 ## Frozen-contract rule
 
