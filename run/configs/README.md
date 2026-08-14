@@ -10,6 +10,7 @@ point the tooling at it. Each config + its `seed` reproduces a run.
 | `pgl_experiment.yaml` | `pgl.config.ExperimentConfig` | training (the config a driver dumps into its run directory) |
 | `pgl_se_scenario.yaml` | `ScenarioConfig` + `CoherentSpectrumConfig` | `--scenario-config` of `train_se_full_workflow.py` / `run_se_ablations.py` |
 | `pgl_multigrid_corpus.yaml` | `pgl.data.multigrid.MultiGridGenerationConfig` | `python -m pgl.data.multigrid --config …` (the multi-grid corpus) |
+| `expected_ranges.yaml` | `pgl.data.validate.load_expected_ranges` | `--reference` of `python -m pgl.data.validate` / the drivers' `--expected-ranges` (the measured-population layer of the dataset validation) |
 
 The state-estimation scenario RECIPE lives in code (`pgml.scenarios.presets`) and is what
 the drivers generate from by default. `pgl_se_scenario.yaml` is a **deviation layer**: a
