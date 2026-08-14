@@ -198,6 +198,17 @@ Key rules for harmonic :class:`~pgml.scenarios.ParameterSpec`:
 - ``correlation`` and per-phase ``symmetry`` (other than ``"balanced"``) are not
   supported for harmonic specs.
 
+**Realized-injection audit columns.** Beside the raw draw under ``samples[spec.name]``
+(which for a referenced spec is only a FRACTION of a per-device emission limit — the
+magnitude that actually reaches the solver exists only once that reference is applied),
+an ``h_mag`` spec additionally records what it REALLY injected: ``"<spec.name>_mag"`` /
+``"<spec.name>_phase"`` (``[B, n_dev, n_ord]``, per unit of each device's own fundamental
+current / degrees, i.e. exactly the values ``solve_harmonic_flow`` receives) and
+``"<spec.name>_device_ids"`` (``[n_dev]``). This is what a persisted dataset is audited
+against downstream (``pgl.data.validate``'s ``i_h_emission_pct``, preferred over
+reconstructing ``I(h) = Y(h)·V(h)`` from the state — see :doc:`/pgl/api/data`'s "Dataset
+validation gate" section).
+
 IEC 61000-3-2 appliance current-emission limits
 ---------------------------------------------------
 
@@ -590,6 +601,13 @@ per-class attribution ground truth, ordered along ``n_class`` as
 - ``"<name>_roster_p_rated"`` — ``[n_agg, n_class, max_count]`` the per-member rated
   powers (a zero-padded sidecar; ``max_count`` = the largest member count drawn for any
   one (load, class) pair).
+- ``"<name>_composed_mag"`` / ``"<name>_composed_phase"`` — ``[B, n_agg, n_ord, T]`` the
+  REALIZED aggregate spectrum itself: the member-summed injection in per unit of the
+  aggregate's own fundamental current and in degrees (the same pair
+  ``harmonic_injection`` carries), on the ``"<name>_agg_ids"`` device axis — so a written
+  composed dataset records what was actually injected, not only the per-class power split
+  above. Audited downstream as ``pgl.data.validate``'s ``i_h_emission_pct`` (see
+  :doc:`/pgl/api/data`'s "Dataset validation gate" section).
 
 :func:`~pgml.scenarios.sample_device_composition` and
 :func:`~pgml.scenarios.resolve_composed_ids` are the underlying functions
