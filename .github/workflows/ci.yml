@@ -14,9 +14,10 @@ name: CI
 # `cuda` system-requirement (the `gpu` feature), which would fail the cpu/docs jobs even
 # though those environments install fine. Bump deliberately alongside a local check.
 
+# Every branch is built on push, not only main/dev-*: a feature branch that is never opened
+# as a PR (the paper-crunch branches are worked on directly) otherwise runs no gate at all.
 on:
   push:
-    branches: [main, "dev-*"]
   pull_request:
 
 # Cancel superseded runs on the same ref to save CI minutes.
@@ -35,8 +36,10 @@ jobs:
           pixi-version: v0.66.0
           environments: cpu
           cache: true
-      - run: pixi run -e cpu ruff check src tests
-      - run: pixi run -e cpu ruff format --check src tests
+      # `run` is linted too: the drivers and study scripts under it are production logic
+      # (thousands of lines that the tests import via sys.path), not scratch files.
+      - run: pixi run -e cpu ruff check src tests run
+      - run: pixi run -e cpu ruff format --check src tests run
 
   test:
     name: Tests (CPU)
