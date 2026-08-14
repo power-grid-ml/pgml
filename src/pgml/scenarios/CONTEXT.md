@@ -96,7 +96,8 @@ verified `batched == loop-of-individual`).
   an explicit value pins a DISTINCT bank (held-out unseen-fingerprint test set) while every
   other setting is shared. `harmonic_injection` is `[B,T]` per
   (device, order); `samples` records `<name>_mode [B,n_dev,T]` (attribution label),
-  `<name>_mag`/`<name>_phase [B,n_dev,n_ord,T]`, `<name>_device_ids`, `time_s [T]`.
+  the REALIZED `<name>_mag`/`<name>_phase [B,n_dev,n_ord,T]` (audit columns, see below),
+  `<name>_device_ids`, `time_s [T]`.
   - `parameters=[ParameterSpec,...]` + `factors=[LatentFactor,...]` add a FUNDAMENTAL
     operating-point variation on top of the fingerprint: the SAME `ScenarioConfig` machinery
     (Sobol cube / copula / per-phase symmetry / source `u_ref` scale), drawn ONCE PER SCENARIO
@@ -181,7 +182,9 @@ verified `batched == loop-of-individual`).
     `config.name`): `<name>_class_p_w [B,n_agg,n_class,T]` (signed per-class power),
     `<name>_class_active [B,n_agg,n_class,T]` int64 (active member count), `<name>_cap_binding
     [B,n_agg,n_ord,T]` (where the cap bound), `<name>_agg_ids [n_agg]`, `<name>_roster_p_rated
-    [n_agg,n_class,max_count]` (per-member rated powers). The `n_class` axis is ordered as
+    [n_agg,n_class,max_count]` (per-member rated powers), plus the realized aggregate
+    spectrum `<name>_composed_mag`/`<name>_composed_phase [B,n_agg,n_ord,T]` (audit columns,
+    see below — post-cap, on the `<name>_agg_ids` axis). The `n_class` axis is ordered as
     `config.composition.classes` — names via `config.composition.class_names()` (they live in
     the config, not a sample tensor, since samples are tensor-only). `P_agg` may go
     net-negative under PV (the Load then injects).
@@ -191,6 +194,24 @@ verified `batched == loop-of-individual`).
   where `operating_point = {id: {"p_w": Tensor[B], "q_var": Tensor[B]}}` (a Source id entry
   instead carries `{"u_ref_scale": Tensor[B]}`) and
   `samples = {param_name: Tensor[B, d]}` (raw realized values; ML input record).
+- REALIZED-INJECTION AUDIT COLUMNS — ONE convention across all three generating paths, so a
+  written dataset records WHAT WAS INJECTED and not only the draw behind it (a draw is a
+  fraction of a per-device emission reference; a composed aggregate has no draw at all).
+  A block is the pair `<key>_mag` / `<key>_phase` — magnitude in per unit of the device's
+  own fundamental current, phase in degrees, i.e. exactly the `harmonic_injection` values
+  the solver receives — over a device axis given by the block's id column:
+  | path | `<key>` | shape | device axis |
+  |---|---|---|---|
+  | randomized `h_mag` spec (`sampler`) | `<spec.name>` | `[B, n_dev, n_ord]` | `<spec.name>_device_ids` |
+  | coherent fingerprint (`harmonics`) | `<config.name>` | `[B, n_dev, n_ord, T]` | `<config.name>_device_ids` |
+  | device composition (`composition`) | `<config.name>_composed` | `[B, n_agg, n_ord, T]` | `<config.name>_agg_ids` |
+  The order axis follows the writing spec's / the config's `orders`. The raw draw stays
+  under its own `<spec.name>` (it documents the DRAW; for a referenced spec the realized
+  magnitude is `draw x reference`, and the reference is per device). `<name>_mode_base_mag`
+  is the fingerprint's mode bank, NOT a realized injection. Purely additive parquet sample
+  columns: `SCHEMA_VERSION` is unaffected (it versions the `pgml.schemas` contract) and a
+  dataset written before them reads back unchanged. Consumer: `pgl.data.validate`
+  (`i_h_emission_pct`, preferred over reconstructing `I(h)=Y(h)·V(h)`).
 - CARTESIAN sweep (pgm-style, deterministic): `CartesianAxis(name, selector, values=[...],
   field, mode)`, `CartesianConfig(axes=[...])` -> `cartesian_sample(grid, config) ->
   SampledScenarios` (B = prod(len(axis.values)); each axis level applied to all matched

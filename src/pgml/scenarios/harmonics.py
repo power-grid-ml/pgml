@@ -144,8 +144,10 @@ def sample_coherent_spectra(
 
         - ``"<name>_mode"`` ``[B, n_dev, T]`` — active mode index per device per
           step; the ground-truth attribution label for ML training.
-        - ``"<name>_mag"`` / ``"<name>_phase"`` ``[B, n_dev, n_ord, T]`` — realized
-          injection magnitudes [pu] and phases [deg] after AR(1) jitter.
+        - ``"<name>_mag"`` / ``"<name>_phase"`` ``[B, n_dev, n_ord, T]`` — the REALIZED
+          injection per device and order after AR(1) jitter and the emission clamp:
+          magnitude in per unit of the device's own fundamental current, phase in
+          degrees. The device axis is ``"<name>_device_ids"``.
         - ``"<name>_mode_base_mag"`` — per-device mode fingerprint magnitudes
           (before jitter; shape ``[n_dev, n_ord, n_modes]`` or
           ``[B, n_dev, n_ord, n_modes]`` when ``resample_modes_per_scenario=True``).
@@ -161,6 +163,13 @@ def sample_coherent_spectra(
         - ``"<name>_profile_device_ids"`` ``[n_dev]`` — the profiled device IDs.
         - ``"time_unix_s"`` ``[T]`` — absolute per-step timestamps (epoch seconds,
           derived from ``config.start_time`` + ``k * step_size_s``).
+
+        When ``config.composition`` is set the covered loads leave the fingerprint device
+        set, and their class attribution plus their REALIZED aggregate spectrum
+        (``"<name>_composed_mag"`` / ``"<name>_composed_phase"`` ``[B, n_agg, n_ord, T]``
+        on the ``"<name>_agg_ids"`` device axis, same units as ``"<name>_mag"``) are
+        recorded instead — see
+        :func:`~pgml.scenarios.composition.sample_device_composition`.
 
         Pass this :class:`SampledScenarios` to :func:`~pgml.scenarios.run_scenarios`
         (or directly to ``solve_harmonic_flow``) to obtain ``v[B, T, H, N]``.

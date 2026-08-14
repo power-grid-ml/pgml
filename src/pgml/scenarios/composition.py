@@ -12,8 +12,10 @@ attribute an observed aggregate spectrum to a device mix (and, ideally, an error
 The composition is engaged from :class:`~pgml.scenarios.CoherentSpectrumConfig` via its
 ``composition`` field; :func:`sample_device_composition` produces the per-load fundamental
 operating point (``[B, T]``), the harmonic injection (``{id: {order: (mag[B, T],
-phase[B, T])}}``) and the class-attribution ground-truth samples. It SUPERSEDES the
-mode-bank fingerprint for the loads it covers.
+phase[B, T])}}``), the class-attribution ground-truth samples and the realized aggregate
+spectrum itself (``<name>_composed_mag`` / ``<name>_composed_phase``, so a written dataset
+records what was injected). It SUPERSEDES the mode-bank fingerprint for the loads it
+covers.
 
 Generation model (per covered load, off the autograd tape, ``float64``, CPU, seeded)
 ------------------------------------------------------------------------------------
@@ -573,7 +575,11 @@ def sample_device_composition(
           cap clipped the relative magnitude;
         - ``"<name>_agg_ids"`` ``[n_agg]`` (int64) — covered load ids;
         - ``"<name>_roster_p_rated"`` ``[n_agg, n_class, max_count]`` — the per-member
-          rated powers (0-padded roster sidecar).
+          rated powers (0-padded roster sidecar);
+        - ``"<name>_composed_mag"`` / ``"<name>_composed_phase"`` ``[B, n_agg, n_ord, T]``
+          — the REALIZED aggregate spectrum, i.e. the member-summed injection in per unit
+          of the aggregate's own fundamental current and in degrees (the same pair the
+          returned ``harmonic_injection`` carries), on the ``<name>_agg_ids`` device axis.
 
         The ``n_class`` axis is ordered as ``config.composition.classes`` (names via
         ``config.composition.class_names()``).
@@ -707,6 +713,12 @@ def sample_device_composition(
         f"{nm}_cap_binding": cap_binding,  # [B, n_agg, n_ord, T]
         f"{nm}_agg_ids": torch.tensor(composed_ids, dtype=torch.long),  # [n_agg]
         f"{nm}_roster_p_rated": r.roster_p_rated,  # [n_agg, n_class, max_count]
+        # The realized aggregate spectrum itself: what the member sum injected, in the
+        # same convention the fingerprint path records (per unit of the aggregate's own
+        # fundamental current / degrees), so a written dataset is auditable without
+        # re-running the roster or reconstructing I(h) = Y(h)*V(h) from the state.
+        f"{nm}_composed_mag": mag_agg,  # [B, n_agg, n_ord, T]
+        f"{nm}_composed_phase": phase_agg,  # [B, n_agg, n_ord, T]
     }
     return CompositionDraw(operating_point, harmonic_injection, samples, composed_ids)
 

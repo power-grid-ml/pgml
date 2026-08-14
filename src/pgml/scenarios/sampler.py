@@ -77,7 +77,11 @@ class SampledScenarios:
         components for ``per="each"``/correlated, else 1), ``[B, n_comp, n_phase]``
         for ``symmetry="independent"`` specs, or ``[B, n_eff, n_orders]`` for harmonic
         specs. Full per-phase / per-order detail is always in ``operating_point`` /
-        ``harmonic_injection``.
+        ``harmonic_injection``. An ``h_mag`` spec additionally records what it actually
+        injected — ``<name>_mag`` / ``<name>_phase`` ``[B, n_dev, n_orders]`` (per unit
+        of the device's own fundamental current / degrees) and ``<name>_device_ids``
+        ``[n_dev]`` — since the raw draw is only a fraction of a per-device emission
+        reference.
     n_samples:
         Batch size ``B``.
     config:
@@ -366,6 +370,64 @@ def _stored_spectrum(appliance) -> dict:
     return {}
 
 
+def _coefficient_column(value, b: int, like: Tensor) -> Tensor:
+    """One realized injection coefficient as a ``[B]`` real column.
+
+    A coefficient is either a per-scenario ``[B]`` tensor (a spec drew it) or a scalar
+    carried over from the device's stored spectrum (a float, or a 0-d array-like under
+    the schema's float/tensor duality); the scalar broadcasts across the batch. ``like``
+    supplies dtype + device, and the cast keeps the value on the autograd tape.
+    """
+    tensor = value if isinstance(value, Tensor) else torch.as_tensor(value)
+    tensor = tensor.to(dtype=like.dtype, device=like.device)
+    return tensor.expand(b) if tensor.ndim == 0 else tensor
+
+
+def _record_realized_injections(
+    built: dict, harm_layouts: list, u: Tensor, samples: dict
+) -> None:
+    """Record the REALIZED per-device injection of every ``h_mag`` spec into ``samples``.
+
+    ``samples[<spec.name>]`` holds the raw draw, which for a referenced spec is a
+    FRACTION of a per-order emission limit — the magnitude that reaches the solver only
+    exists once that per-device reference has been applied. These columns hold what was
+    actually injected, so a persisted dataset is auditable without re-deriving the
+    reference table it was generated against:
+
+    - ``"<spec>_mag"`` ``[B, n_dev, n_ord]`` — magnitude in per unit of the device's own
+      fundamental current (post-reference, the value the solver scales ``|I_1|`` by);
+    - ``"<spec>_phase"`` ``[B, n_dev, n_ord]`` — the phase in degrees that goes with it
+      (an ``h_phase`` spec's draw where one covers the device and order, otherwise the
+      angle seeded from the device's stored spectrum);
+    - ``"<spec>_device_ids"`` ``[n_dev]`` — the device ids of the middle axis.
+
+    The device axis is the spec's full matched set even for ``per="shared"``: one shared
+    draw still realizes as a different magnitude per device, because the emission
+    reference is per device.
+    """
+    b = u.shape[0]
+    for lay in harm_layouts:
+        spec = lay.spec
+        if spec.field != "h_mag":
+            continue
+        mags, phases = [], []
+        for cid in lay.ids:
+            dev = built[cid]
+            mags.append(
+                torch.stack(
+                    [_coefficient_column(dev[o][0], b, u) for o in spec.orders], dim=-1
+                )
+            )
+            phases.append(
+                torch.stack(
+                    [_coefficient_column(dev[o][1], b, u) for o in spec.orders], dim=-1
+                )
+            )
+        samples[f"{spec.name}_mag"] = torch.stack(mags, dim=1)  # [B, n_dev, n_ord]
+        samples[f"{spec.name}_phase"] = torch.stack(phases, dim=1)
+        samples[f"{spec.name}_device_ids"] = torch.tensor(lay.ids, dtype=torch.long)
+
+
 def _harmonic_injections(
     grid: Grid, harm_layouts: list, u: Tensor, samples: dict
 ) -> dict:
@@ -377,6 +439,9 @@ def _harmonic_injections(
     (``harmonic_reference="iec61000-3-2"`` -- a PER-DEVICE IEC 61000-3-2 current-emission
     fraction; ``"en50160"`` -- the per-order DIN EN 50160 voltage-compatibility level),
     the stored magnitude (``mode="scale"``), or the sampled value directly (absolute pu).
+
+    ``samples`` records both the raw draw (``<spec.name>``) and the realized
+    post-reference injection (:func:`_record_realized_injections`).
     """
     by_id = {a.id: a for a in grid.appliances if isinstance(a, InjectionAppliance)}
     # building store: {id: {order: [mag, phase]}}, seeded from stored spectra.
@@ -432,6 +497,9 @@ def _harmonic_injections(
                 else:
                     slot[0] = v
 
+    # After every spec has written: the realized (post-reference) magnitude and the
+    # phase it pairs with, per device and order.
+    _record_realized_injections(built, harm_layouts, u, samples)
     return {cid: {o: tuple(mp) for o, mp in d.items()} for cid, d in built.items()}
 
 
