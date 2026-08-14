@@ -153,11 +153,12 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
-#: Harmonic orders :func:`se_benchmark_scenario_config` randomizes for general LV loads
-#: (the odd orders up to 13, including the triplen 3/9).
+#: Harmonic orders :func:`se_benchmark_scenario_config` injects by default (the odd
+#: orders up to 13, including the triplen 3/9); pass ``orders`` for a wider range.
 LOAD_HARMONIC_ORDERS = [3, 5, 7, 9, 11, 13]
-#: Harmonic orders :func:`se_benchmark_scenario_config` randomizes for PV inverters
-#: (the non-triplen 5/7/11/13 — a typical inverter switching signature).
+#: The non-triplen orders 5/7/11/13 — a typical inverter switching signature. Kept as a
+#: named order set for spectrum sweeps; the benchmark recipe injects the same orders into
+#: loads and inverters and distinguishes them by their per-order MAGNITUDES instead.
 PV_HARMONIC_ORDERS = [5, 7, 11, 13]
 
 
@@ -306,67 +307,37 @@ def synthetic_feeder(
     )
 
 
-def se_benchmark_scenario_config(grid, *, n_samples: int, seed: int):
+def se_benchmark_scenario_config(grid, *, n_samples: int, seed: int, orders=None):
     """The canonical randomized state-estimation benchmark sampling recipe.
 
-    Sobol over: a per-phase-independent load apparent-power scale (asymmetric
-    demand), a per-load harmonic current spectrum as a fraction of the EN 50160
-    limit, and — when the grid carries PV (:func:`add_pv_systems`) — one SHARED
-    irradiance scale for all PV plus a per-inverter harmonic signature. The
-    single source of the recipe: the dataset-generation example and the pgl test
-    fixtures both build from here, so what the tests train on cannot silently
-    drift from what the documented benchmark generates.
-    """
-    from pgml.schemas.grid_schema import Generator
-    from pgml.scenarios import ParameterSpec, ScenarioConfig, Selector, Uniform
+    A thin front door onto :func:`pgml.scenarios.se_random_scenario_config`, which holds
+    the calibrated recipe (correlated load levels, per-phase unbalance, a slack-voltage
+    draw, IEC 61000-3-2-referenced emission with per-order phase diversity, and the PV
+    inverter signature on a grid built by :func:`add_pv_systems`). Sharing that one
+    builder is what keeps the benchmark, the workflow datasets and the multi-grid corpus
+    from drifting apart.
 
-    has_pv = any(isinstance(a, Generator) for a in grid.appliances)
-    params = [
-        # Loads: per-phase-independent apparent-power scale -> asymmetric demand.
-        ParameterSpec(
-            name="load_scale",
-            selector=Selector(component="load"),
-            distribution=Uniform(low=0.3, high=1.0),
-            field="pq",
-            mode="scale",
-            per="each",
-            symmetry="independent",
-        ),
-        # Loads: per-load harmonic current spectrum (fraction of the EN 50160 limit).
-        ParameterSpec(
-            name="load_spectrum",
-            selector=Selector(component="load"),
-            distribution=Uniform(low=0.0, high=1.0),
-            field="h_mag",
-            orders=LOAD_HARMONIC_ORDERS,
-            harmonic_reference="en50160",
-            per="each",
-        ),
-    ]
-    if has_pv:
-        params += [
-            # PV: ONE shared irradiance factor scales every PV together (per="shared").
-            ParameterSpec(
-                name="pv_scale",
-                selector=Selector(component="generator", consumer_type="pv"),
-                distribution=Uniform(low=0.0, high=1.0),
-                field="pq",
-                mode="scale",
-                per="shared",
-            ),
-            # PV: per-inverter harmonic signature (each inverter independent).
-            ParameterSpec(
-                name="pv_spectrum",
-                selector=Selector(component="generator", consumer_type="pv"),
-                distribution=Uniform(low=0.0, high=1.0),
-                field="h_mag",
-                orders=PV_HARMONIC_ORDERS,
-                harmonic_reference="en50160",
-                per="each",
-            ),
-        ]
-    return ScenarioConfig(
-        n_samples=n_samples, seed=seed, method="sobol", parameters=params
+    Parameters
+    ----------
+    grid:
+        The benchmark grid (read for its appliance mix).
+    n_samples, seed:
+        Batch size and sampling seed.
+    orders:
+        Injected harmonic orders; ``None`` uses :data:`LOAD_HARMONIC_ORDERS`.
+
+    Returns
+    -------
+    pgml.scenarios.ScenarioConfig
+        The sampling template.
+    """
+    from pgml.scenarios import se_random_scenario_config
+
+    return se_random_scenario_config(
+        grid,
+        orders=LOAD_HARMONIC_ORDERS if orders is None else orders,
+        n_samples=n_samples,
+        seed=seed,
     )
 
 

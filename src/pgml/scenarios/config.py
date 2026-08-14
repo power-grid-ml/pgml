@@ -746,22 +746,42 @@ class ConsumerComposition(_Base):
     classes: list[ClassCount] = Field(min_length=1)
 
 
+#: Version of the built-in device-class library and its composition rules. Bumped
+#: whenever a range changes the drawn population, and recorded in the metadata of every
+#: dataset generated from it — two datasets written from identical configs and seeds can
+#: otherwise differ numerically with nothing to show why.
+DEVICE_LIBRARY_VERSION = "2"
+
+
 def default_device_classes() -> list[DeviceClassSpec]:
     """The built-in statistical device-class library (every range user-overridable).
 
-    Six plausible LV device characters: a harmonic-free linear base load, an
+    Seven plausible LV device characters: a harmonic-free linear base load, an
     SMPS-electronics class (3rd/5th-dominated), an EV charger and a PV inverter (both
     with the measured falling-THD-fraction-with-load behaviour, ``gamma < 0``; PV
-    injecting), a multi-state inverter drive (white goods / heat pump: a near-linear
-    heating state vs a harmonic-rich inverter state), and a thermostatic resistive
-    heater. Magnitudes are loosely IEC 61000-3-2-shaped plausibility, NOT appliance
-    models.
+    injecting), a multi-state inverter drive (white goods: a near-linear heating state vs
+    a harmonic-rich inverter state), a kW-scale inverter heat pump, and a thermostatic
+    resistive heater. Magnitudes are loosely IEC 61000-3-2-shaped plausibility, NOT
+    appliance models.
+
+    The roster is balanced so that an observed aggregate spectrum is INFORMATIVE about
+    the drawn power: the power share sits on the kW-scale nonlinear classes (EV charging,
+    inverter heat pumps, drives) rather than on spectrally silent linear ones, the EV
+    load-dependence exponent is flat enough that its ABSOLUTE emission tracks its
+    loading, and the class power factors are spread so the composed fundamental-current
+    angles scatter like a real device population.
+
+    Per-order magnitudes up to h11 follow the measured band of that class; h13 and above
+    continue with the declining envelope of the certification-workbook populations, and
+    the emission phase saturates at the full circle from h13, where measured populations
+    show no preferred angle.
     """
     return [
         DeviceClassSpec(
             name="base_linear",
             sign=1,
             rated_power_w=(150.0, 1500.0),
+            power_factor=0.97,
             activity_preset="household",
             discrete_activity=False,
             loading_min=0.3,
@@ -771,6 +791,8 @@ def default_device_classes() -> list[DeviceClassSpec]:
             name="electronics_smps",
             sign=1,
             rated_power_w=(20.0, 400.0),
+            power_factor=0.97,
+            emission_class="D",
             harmonic_magnitude={
                 3: (0.5, 0.85),
                 5: (0.25, 0.6),
@@ -804,11 +826,12 @@ def default_device_classes() -> list[DeviceClassSpec]:
             name="ev_charger",
             sign=1,
             rated_power_w=(3700.0, 11000.0),
+            power_factor=0.98,
             harmonic_magnitude={
-                3: (0.01, 0.05),
-                5: (0.02, 0.08),
-                7: (0.01, 0.05),
-                9: (0.005, 0.03),
+                3: (0.02, 0.08),
+                5: (0.03, 0.1),
+                7: (0.02, 0.06),
+                9: (0.01, 0.04),
                 11: (0.005, 0.025),
                 13: (0.005, 0.025),
                 15: (0.003, 0.016),
@@ -826,7 +849,11 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-1.6, -0.7),
+            # Near-flat load dependence: the ABSOLUTE harmonic current of a charging
+            # session tracks the drawn power, so the emission carries fundamental
+            # information. A steeply negative exponent makes the harmonic current almost
+            # loading-independent and the spectrum uninformative about P.
+            gamma=(-0.8, -0.2),
             phase_slope_deg=(-15.0, 15.0),
             activity_preset="ev",
             on_off_dwell=(0.6, 0.82),
@@ -870,12 +897,13 @@ def default_device_classes() -> list[DeviceClassSpec]:
             name="inverter_drive",
             sign=1,
             rated_power_w=(500.0, 3000.0),
+            power_factor=0.92,
             harmonic_magnitude={
-                3: (0.08, 0.25),
-                5: (0.15, 0.45),
-                7: (0.08, 0.3),
-                9: (0.03, 0.15),
-                11: (0.02, 0.1),
+                3: (0.08, 0.3),
+                5: (0.15, 0.5),
+                7: (0.08, 0.35),
+                9: (0.03, 0.18),
+                11: (0.02, 0.12),
                 13: (0.015, 0.08),
                 15: (0.01, 0.05),
                 17: (0.008, 0.04),
@@ -909,6 +937,44 @@ def default_device_classes() -> list[DeviceClassSpec]:
             state_dwell=(0.85, 0.97),
         ),
         DeviceClassSpec(
+            # kW-scale inverter-driven compressor: a LARGE consumer whose spectrum is
+            # both distinctive (h5/h7-dominant) and power-tracking — the class that lets
+            # a model infer significant fundamental power from an observed pattern.
+            name="heat_pump_inverter",
+            sign=1,
+            rated_power_w=(2000.0, 12000.0),
+            power_factor=0.95,
+            harmonic_magnitude={
+                3: (0.05, 0.15),
+                5: (0.1, 0.3),
+                7: (0.05, 0.2),
+                9: (0.02, 0.08),
+                11: (0.01, 0.05),
+                13: (0.008, 0.035),
+                15: (0.005, 0.025),
+                17: (0.004, 0.02),
+                19: (0.003, 0.015),
+            },
+            harmonic_phase_deg={
+                3: (-45.0, 45.0),
+                5: (-60.0, 60.0),
+                7: (-90.0, 90.0),
+                9: (-120.0, 120.0),
+                11: (-150.0, 150.0),
+                13: (-180.0, 180.0),
+                15: (-180.0, 180.0),
+                17: (-180.0, 180.0),
+                19: (-180.0, 180.0),
+            },
+            gamma=(-0.5, 0.0),
+            phase_slope_deg=(-20.0, 20.0),
+            activity_preset="flat",
+            on_off_dwell=(0.9, 0.98),
+            loading_min=0.3,
+            loading_mean=(0.5, 0.95),
+            loading_jitter=0.08,
+        ),
+        DeviceClassSpec(
             name="resistive_heating",
             sign=1,
             rated_power_w=(500.0, 3000.0),
@@ -924,6 +990,11 @@ def default_device_classes() -> list[DeviceClassSpec]:
 def default_compositions() -> list[ConsumerComposition]:
     """The built-in per-``consumer_type`` composition rules (over the default library).
 
+    The power shares put the nameplate on the classes that EMIT — a roster whose power
+    sits on the spectrally silent linear classes produces an aggregate spectrum that
+    reveals device activity but almost nothing about the drawn power, which is the
+    quantity a state estimator has to recover.
+
     Every count / share is user-overridable. The rule with no ``consumer_type`` /
     ``load_ids`` is the fallback for any unmatched load.
     """
@@ -935,41 +1006,45 @@ def default_compositions() -> list[ConsumerComposition]:
         ConsumerComposition(
             consumer_type="household",
             classes=[
-                cc("base_linear", 1, 1, 3.0),
+                cc("base_linear", 1, 1, 1.5),
                 cc("electronics_smps", 1, 3, 1.0),
-                cc("resistive_heating", 0, 1, 2.0),
-                cc("inverter_drive", 0, 1, 1.5),
-                cc("ev_charger", 0, 1, 1.0),
+                cc("resistive_heating", 0, 1, 1.0),
+                cc("ev_charger", 0, 1, 2.0),
+                cc("heat_pump_inverter", 0, 1, 2.0),
                 cc("pv_inverter", 0, 1, 1.0),
             ],
         ),
         ConsumerComposition(
             consumer_type="office",
             classes=[
-                cc("base_linear", 1, 1, 4.0),
-                cc("electronics_smps", 3, 10, 1.5),
-                cc("inverter_drive", 0, 2, 2.0),
+                cc("base_linear", 1, 1, 2.0),
+                cc("electronics_smps", 3, 10, 2.0),
+                cc("inverter_drive", 1, 3, 2.5),
+                cc("heat_pump_inverter", 0, 2, 1.5),
             ],
         ),
         ConsumerComposition(
             consumer_type="restaurant",
             classes=[
-                cc("base_linear", 1, 1, 3.0),
-                cc("inverter_drive", 1, 3, 2.0),
+                cc("base_linear", 1, 1, 2.0),
+                cc("inverter_drive", 1, 3, 2.5),
                 cc("electronics_smps", 1, 4, 1.0),
             ],
         ),
         ConsumerComposition(
             consumer_type="heat_pump",
-            classes=[cc("base_linear", 1, 1, 1.0), cc("inverter_drive", 1, 2, 3.0)],
+            classes=[
+                cc("base_linear", 1, 1, 1.0),
+                cc("heat_pump_inverter", 1, 2, 3.0),
+            ],
         ),
         ConsumerComposition(
             consumer_type="workshop",
             classes=[
-                cc("base_linear", 1, 1, 3.0),
-                cc("inverter_drive", 1, 3, 2.5),
+                cc("base_linear", 1, 1, 1.5),
+                cc("inverter_drive", 2, 4, 3.0),
                 cc("electronics_smps", 1, 4, 1.0),
-                cc("resistive_heating", 0, 1, 1.0),
+                cc("resistive_heating", 0, 1, 0.5),
             ],
         ),
         ConsumerComposition(
@@ -981,9 +1056,32 @@ def default_compositions() -> list[ConsumerComposition]:
             classes=[cc("pv_inverter", 1, 1, 1.0)],
         ),
         ConsumerComposition(
-            classes=[cc("base_linear", 1, 1, 3.0), cc("electronics_smps", 1, 2, 1.0)],
+            classes=[
+                cc("base_linear", 1, 1, 2.0),
+                cc("electronics_smps", 1, 2, 1.0),
+                cc("inverter_drive", 0, 1, 1.0),
+            ],
         ),
     ]
+
+
+def composition_silent_orders(
+    classes: list[DeviceClassSpec], orders: list[int]
+) -> list[int]:
+    """Requested orders NO class in a device roster emits at (sorted, fundamental excluded).
+
+    A roster that stops short of the solved harmonic range makes those orders silent:
+    the true harmonic voltage there is zero, relative metrics turn into NaN and the
+    corresponding feature width is dead. Checking the roster against the requested orders
+    is the one-line guard that catches it before hours of generation.
+    """
+    emitting = {
+        int(order)
+        for cls in classes
+        for order, (_low, high) in cls.harmonic_magnitude.items()
+        if float(high) > 0.0
+    }
+    return [o for o in sorted({int(o) for o in orders}) if o > 1 and o not in emitting]
 
 
 class CompositionConfig(_Base):
@@ -1159,11 +1257,16 @@ class CoherentSpectrumConfig(_Base):
     # Absolute anchor for the profile's daily / weekly / seasonal phases (ISO 8601).
     # A naive (timezone-less) timestamp is interpreted as UTC.
     start_time: Optional[str] = None
+    #: Orders deliberately left WITHOUT emission — the escape hatch of the silent-order
+    #: guard below (e.g. the even orders of an odd-only device roster). Declaring them
+    #: makes the intent explicit; leaving an order silent by accident raises.
+    allow_silent_orders: tuple[int, ...] = ()
 
     @model_validator(mode="after")
     def _check(self) -> "CoherentSpectrumConfig":
         if any(o < 2 for o in self.orders):
             raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
+        self._check_emission_covers_orders()
         if self.emission_class != "auto" and self.harmonic_reference != "iec61000-3-2":
             raise ValueError(
                 "emission_class is only valid with harmonic_reference='iec61000-3-2'."
@@ -1198,6 +1301,56 @@ class CoherentSpectrumConfig(_Base):
                 ) from exc
         return self
 
+    def _check_emission_covers_orders(self) -> None:
+        """Reject a spectrum source that is silent at a requested order.
+
+        With a ``composition`` the source is the device roster: an order no class emits
+        at carries no injection at all. Without one the source is the fingerprint bank,
+        whose magnitudes are fractions of the ``harmonic_reference`` limit, so an order
+        the reference table does not list is equally silent. Both cases produce a dataset
+        whose top orders hold nothing but numerical noise; ``allow_silent_orders``
+        declares the ones that are meant to stay quiet.
+        """
+        allowed = {int(o) for o in self.allow_silent_orders}
+        if self.composition is not None:
+            silent = [
+                o
+                for o in composition_silent_orders(
+                    self.composition.classes, list(self.orders)
+                )
+                if o not in allowed
+            ]
+            if silent:
+                raise ValueError(
+                    f"no device class emits at order(s) {silent}: the composed loads "
+                    "would inject nothing there while the run solves for them. Extend "
+                    "the classes' harmonic_magnitude, drop the orders, or list them in "
+                    "allow_silent_orders to declare the silence deliberate."
+                )
+            return
+        if self.harmonic_reference is None:
+            return
+        if self.harmonic_reference == "en50160":
+            from .en50160 import en50160_limits
+
+            referenced = {o for o, limit in en50160_limits().items() if limit > 0.0}
+        else:
+            from .iec61000_3_2 import iec61000_3_2_limits
+
+            referenced = set(iec61000_3_2_limits("A")["limits"])
+        silent = [
+            int(o)
+            for o in sorted(self.orders)
+            if o not in referenced and o not in allowed
+        ]
+        if silent:
+            raise ValueError(
+                f"the {self.harmonic_reference} reference has no limit at order(s) "
+                f"{silent}, so the fingerprint would inject nothing there. Drop the "
+                "orders, choose another harmonic_reference, or list them in "
+                "allow_silent_orders."
+            )
+
 
 __all__ = [
     "Uniform",
@@ -1220,6 +1373,8 @@ __all__ = [
     "ClassCount",
     "ConsumerComposition",
     "CompositionConfig",
+    "DEVICE_LIBRARY_VERSION",
+    "composition_silent_orders",
     "default_device_classes",
     "default_compositions",
     "Perturbation",

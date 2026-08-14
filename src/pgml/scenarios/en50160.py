@@ -59,6 +59,32 @@ def _load(source: str) -> dict:
     return {int(k): float(v) for k, v in table.items()}
 
 
+def _read(source: str) -> str:
+    """Raw text of the active limits file (packaged resource or filesystem path)."""
+    if source == _PACKAGED:
+        return (files("pgml") / _PACKAGE_DATA).read_text(encoding="utf-8")
+    return Path(source).read_text(encoding="utf-8")
+
+
+def en50160_provenance(path: Optional[str] = None) -> dict:
+    """Identify the DIN EN 50160 table a run actually used.
+
+    An environment override silently replaces the limits every generated magnitude is
+    referenced to, so an artifact that does not record WHICH table it used cannot be
+    compared with another one. Returns ``{"source": "<packaged>" | <path>, "override":
+    bool, "sha256": <content hash>}``; the hash is of the file's bytes, so a table edited
+    in place is still distinguishable.
+    """
+    import hashlib
+
+    source = _source(path)
+    return {
+        "source": source,
+        "override": source != _PACKAGED,
+        "sha256": hashlib.sha256(_read(source).encode("utf-8")).hexdigest(),
+    }
+
+
 def en50160_limits(path: Optional[str] = None) -> dict:
     """Return ``{order: max_magnitude_pu}`` from the DIN EN 50160 table (cached).
 
@@ -127,4 +153,4 @@ def en50160_limit(order: int, path: Optional[str] = None) -> float:
     return table[order]
 
 
-__all__ = ["en50160_limits", "en50160_limit"]
+__all__ = ["en50160_limits", "en50160_limit", "en50160_provenance"]

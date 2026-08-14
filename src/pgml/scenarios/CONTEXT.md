@@ -51,9 +51,26 @@ verified `batched == loop-of-individual`).
     `StaticSpectrum` so unspecified orders survive. Harmonic fields reject
     `correlation`/per-phase `symmetry`.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
+- CALIBRATED SE RECIPE (`presets.py`) — the ONE source every state-estimation generator
+  builds from (the pgl workflow's three tasks, the multi-grid corpus, `pgml.grids
+  .se_benchmark_scenario_config`); a fix here reaches all of them.
+  `se_random_scenario_config(grid, *, orders, n_samples, seed, method="sobol",
+  load_scale=(0,1), load_correlation=0.5, imbalance=0.15, spectrum_fraction=(0,2),
+  pv_scale=(0,1), pv_correlation=None, slack_voltage_std=0.0333) -> ScenarioConfig` and
+  `se_coherent_scenario_config(grid, *, orders, n_scenarios, n_steps, seed,
+  mode="composed"|"fingerprint", name, step_size_s=900, start_time=HIGH_ACTIVITY_START_TIME,
+  n_modes=2, dwell=0.9, mode_bank_seed=None, fingerprint_fraction=(0,1), activity_scale=1.0,
+  behavioral_coupling=0.3, cloud_coupling=0.5, composition=None, profile=None, + the same
+  fundamental knobs) -> CoherentSpectrumConfig`. `orders` is the SOLVED set (order 1 is not
+  injected; a fundamental-only set yields the operating-point specs alone, a coherent one
+  raises); every injected order gets a load magnitude + phase draw and, on a PV grid, an
+  inverter magnitude + phase draw, so ANY requested order set flows through. An order
+  outside the IEC 61000-3-2 table raises. `SE_PRESET_VERSION`, `HIGH_ACTIVITY_START_TIME`
+  ("2024-06-21T16:00:00"), `LOAD_PHASE_SPAN_DEG`, `PV_EMISSION_HIGH`, `PV_PHASE_SPAN_DEG`.
 - EN 50160 per-order VOLTAGE limits: `en50160_limits() -> {order: max_pu}`,
   `en50160_limit(order)` (loads `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env
   override). These are supply-voltage compatibility levels, NOT an appliance emission model.
+  `en50160_provenance() -> {source, override, sha256}` identifies the ACTIVE table.
 - IEC 61000-3-2 appliance CURRENT-emission limits (`iec61000_3_2.py`; packaged
   `pgml/data/standards/iec61000_3_2.yaml`, `PGML_IEC61000_3_2` env override). The default
   reference for device current fingerprints. `iec61000_3_2_limits(class=None) -> dict` (full
@@ -64,7 +81,8 @@ verified `batched == loop-of-individual`).
   `resolve_emission_class(consumer_type, p_w) -> "A"|"B"|"C"|"D"` (auto map: office(IT)≤600W
   → D else A; everything else incl. household/EV/PV → A; lighting → C, no enum member yet);
   `iec61000_3_2_device_caps(grid, ids, orders, *, emission_class="auto") -> {id:{order:frac}}`
-  (per-device caps; PER-PHASE current = total P/phase count; off the autograd tape).
+  (per-device caps; PER-PHASE current = total P/phase count; off the autograd tape);
+  `iec61000_3_2_provenance() -> {source, override, sha256}` (the ACTIVE table's identity).
 - NODE-COHERENT harmonic "fingerprints" (temporal sequences):
   `CoherentSpectrumConfig(selector, orders, n_steps T, n_scenarios B, n_modes=2, seed,
   mag_distribution, harmonic_reference="iec61000-3-2", emission_class="auto",
@@ -144,8 +162,16 @@ verified `batched == loop-of-individual`).
     per-device duty cycles, so a composed aggregate sits far below installed capacity and a
     sequence's FUNDAMENTAL barely moves; raise it to place the population in a loaded band),
     roster_seed=None (a held-out roster bank);
-    `.class_names()`)`. `default_device_classes()` = 6 built-ins (base_linear,
-    electronics_smps, ev_charger, pv_inverter, inverter_drive [multi-state], resistive_heating).
+    `.class_names()`)`. `default_device_classes()` = 7 built-ins (base_linear,
+    electronics_smps, ev_charger, pv_inverter, inverter_drive [multi-state],
+    heat_pump_inverter, resistive_heating), balanced so the emission is INFORMATIVE about the
+    drawn power (power share on the kW-scale nonlinear classes, EV load-dependence flat
+    enough that its absolute emission tracks loading, spread power factors) and covering the
+    odd orders through h19; `DEVICE_LIBRARY_VERSION` stamps the roster into dataset metadata.
+    SILENT-ORDER GUARD: `CoherentSpectrumConfig` rejects a requested order no class in the
+    roster emits at (and, without a composition, an order the `harmonic_reference` table does
+    not list); `allow_silent_orders=(...)` declares deliberate silence.
+    `composition_silent_orders(classes, orders) -> [order]` is the check itself.
   - `sample_device_composition(grid, config) -> CompositionDraw(operating_point[B,T],
     harmonic_injection {id:{order:(mag[B,T],phase[B,T])}}, samples, composed_ids)` and
     `resolve_composed_ids(grid, comp) -> [id]` (`pgml.scenarios.composition`);
@@ -223,6 +249,13 @@ verified `batched == loop-of-individual`).
   wide is the fast tensor cache, long the analysis/interchange table. `also_csv=True` writes
   a tidy `voltages.csv` (long layout, regardless of `layout`) alongside the parquet for manual
   inspection. Result I/O (detached).
+  GENERATION PROVENANCE in `meta.json` — `config_hash` (`config_hash(config_or_json) -> str`,
+  a 16-hex fingerprint of the serialized config: equal hash ⇒ same batch, so it is what a
+  reuse gate compares), plus `generation_provenance()`: `provenance` (`pgml.provenance
+  .code_provenance()` — commit, dirty flag, versions), `device_library_version`, and
+  `standards` (the ACTIVE EN 50160 / IEC 61000-3-2 tables with `override` + content hash; a
+  `PGML_*` env override silently changes every generated magnitude). `read_dataset` needs
+  none of them — a dataset written before they existed simply lacks the keys.
 
 ## Storage dispatch / state of charge (`storage.py`)
 - `integrate_soc(requested_power_w[*,T], dt_s, *, energy_capacity_wh, soc0, soc_min,

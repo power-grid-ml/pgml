@@ -342,9 +342,33 @@ def iec61000_3_2_device_caps(
     return caps
 
 
+def iec61000_3_2_provenance(path: Optional[str] = None) -> dict:
+    """Identify the IEC 61000-3-2 table a run actually used.
+
+    The emission reference of every generated device spectrum. An environment override
+    replaces it silently, so an artifact records ``{"source": "<packaged>" | <path>,
+    "override": bool, "sha256": <content hash>}`` — the hash covers a table edited in
+    place, which the path alone would not show.
+    """
+    import hashlib
+
+    source = _source(path)
+    text = (
+        (files("pgml") / _PACKAGE_DATA).read_text(encoding="utf-8")
+        if source == _PACKAGED
+        else Path(source).read_text(encoding="utf-8")
+    )
+    return {
+        "source": source,
+        "override": source != _PACKAGED,
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
 __all__ = [
     "iec61000_3_2_limits",
     "iec61000_3_2_fraction",
     "resolve_emission_class",
     "iec61000_3_2_device_caps",
+    "iec61000_3_2_provenance",
 ]

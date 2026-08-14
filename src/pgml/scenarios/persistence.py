@@ -20,6 +20,7 @@ This is result I/O, not the differentiable core: tensors are detached and moved 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -105,7 +106,10 @@ class LoadedDataset:
     perturbations:
         Ground-truth ``ParameterPerturbation`` rows as dicts (empty if none).
     meta:
-        The full sidecar dict (config_json, seed, dims, layout, …).
+        The full sidecar dict (config_json, seed, dims, layout, …), including the
+        generation provenance (``config_hash``, ``provenance``,
+        ``device_library_version``, ``standards``). A dataset written before those were
+        stamped simply lacks the keys — reading is unaffected.
     converged:
         ``True`` iff every scenario's solve converged; ``None`` for a dataset written
         before convergence metadata was persisted (validity unknown).
@@ -231,6 +235,54 @@ def _write_samples(samples: dict, b: int, path: Path, comp: str) -> dict:
     return {"sample_shapes": shapes, "sample_dtypes": dtypes, "shared_samples": shared}
 
 
+#: Length of the printable config fingerprint. 16 hex digits (64 bits) make an
+#: accidental collision between two configs of one study impossible in practice while
+#: staying short enough to read off a log line.
+_HASH_CHARS = 16
+
+
+def config_hash(config) -> str:
+    """Stable short fingerprint of a scenario configuration.
+
+    ``config`` is a pydantic scenario config (or its already-serialized JSON string).
+    Two configs producing the same fingerprint describe the same batch — which is what
+    makes a previously generated dataset reusable — and any changed field, including the
+    seed and the sample count, changes it. Recorded in ``meta.json`` as ``config_hash``.
+
+    Returns
+    -------
+    str
+        16 lower-case hex characters.
+    """
+    payload = config if isinstance(config, str) else config.model_dump_json()
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_HASH_CHARS]
+
+
+def generation_provenance() -> dict:
+    """Everything a generated dataset should record beyond its config and seed.
+
+    Two datasets written from a byte-identical config and seed can still differ
+    numerically — because the code changed, because the shipped device library was
+    recalibrated, or because a ``PGML_*`` environment override replaced a standards
+    table. Returns a JSON-ready dict with the code provenance (commit + dirty flag +
+    versions), the device-library version, and the active EN 50160 / IEC 61000-3-2
+    tables with their content hashes.
+    """
+    from ..provenance import code_provenance
+    from .config import DEVICE_LIBRARY_VERSION
+    from .en50160 import en50160_provenance
+    from .iec61000_3_2 import iec61000_3_2_provenance
+
+    return {
+        "provenance": code_provenance(),
+        "device_library_version": DEVICE_LIBRARY_VERSION,
+        "standards": {
+            "en50160": en50160_provenance(),
+            "iec61000_3_2": iec61000_3_2_provenance(),
+        },
+    }
+
+
 def write_dataset(
     result: ScenarioResult,
     path,
@@ -296,6 +348,7 @@ def write_dataset(
         _pgml_version = pgml.__version__
     except Exception:  # pragma: no cover - defensive
         _pgml_version = None
+    config_json = cfg.model_dump_json()
     meta = {
         "schema_version": SCHEMA_VERSION,
         "pgml_version": _pgml_version,
@@ -313,11 +366,13 @@ def write_dataset(
         "node_ids": node_ids.tolist(),
         "phase_codes": phase_codes.tolist(),
         "config_type": type(cfg).__name__,
-        "config_json": cfg.model_dump_json(),
+        "config_json": config_json,
+        "config_hash": config_hash(config_json),
         "seed": getattr(cfg, "seed", None),
         "perturbations": [p.model_dump() for p in sampled.perturbations],
         "converged": bool(result.converged),
         "failed_scenarios": [int(i) for i in result.failed_states],
+        **generation_provenance(),
         **sample_meta,
     }
     if result.failed_states:
@@ -416,4 +471,10 @@ def read_dataset(path) -> LoadedDataset:
     )
 
 
-__all__ = ["LoadedDataset", "write_dataset", "read_dataset"]
+__all__ = [
+    "LoadedDataset",
+    "write_dataset",
+    "read_dataset",
+    "config_hash",
+    "generation_provenance",
+]

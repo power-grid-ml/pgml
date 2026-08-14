@@ -26,6 +26,7 @@ from .composition import (
     sample_device_composition,
 )
 from .config import (
+    DEVICE_LIBRARY_VERSION,
     CartesianAxis,
     CartesianConfig,
     ClassCount,
@@ -49,20 +50,34 @@ from .config import (
     Selector,
     SpectrumSweepConfig,
     Uniform,
+    composition_silent_orders,
     default_compositions,
     default_device_classes,
 )
-from .en50160 import en50160_limit, en50160_limits
+from .en50160 import en50160_limit, en50160_limits, en50160_provenance
 from .harmonics import sample_coherent_spectra, spectrum_sweep
 from .profiles import apply_load_profiles, load_profile_factors
 from .iec61000_3_2 import (
     iec61000_3_2_device_caps,
     iec61000_3_2_fraction,
     iec61000_3_2_limits,
+    iec61000_3_2_provenance,
     resolve_emission_class,
 )
 from .node_injection import run_node_injection_sweep
-from .persistence import LoadedDataset, read_dataset, write_dataset
+from .persistence import (
+    LoadedDataset,
+    config_hash,
+    generation_provenance,
+    read_dataset,
+    write_dataset,
+)
+from .presets import (
+    HIGH_ACTIVITY_START_TIME,
+    SE_PRESET_VERSION,
+    se_coherent_scenario_config,
+    se_random_scenario_config,
+)
 from .perturbation import perturbation_sweep
 from .run import ScenarioResult, run_scenarios
 from .sampler import SampledScenarios, cartesian_sample, sample
@@ -130,8 +145,14 @@ __all__ = [
     "ConsumerComposition",
     "CompositionConfig",
     "CompositionDraw",
+    "DEVICE_LIBRARY_VERSION",
+    "composition_silent_orders",
     "default_device_classes",
     "default_compositions",
+    "SE_PRESET_VERSION",
+    "HIGH_ACTIVITY_START_TIME",
+    "se_random_scenario_config",
+    "se_coherent_scenario_config",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -148,12 +169,16 @@ __all__ = [
     "run_node_injection_sweep",
     "en50160_limits",
     "en50160_limit",
+    "en50160_provenance",
     "iec61000_3_2_limits",
     "iec61000_3_2_fraction",
     "iec61000_3_2_device_caps",
+    "iec61000_3_2_provenance",
     "resolve_emission_class",
     "write_dataset",
     "read_dataset",
+    "config_hash",
+    "generation_provenance",
     "LoadedDataset",
     "ScenarioResult",
     "run_scenarios",

@@ -164,6 +164,65 @@ def test_schema_version_and_provenance(grid3, tmp_path):
     read_dataset(tmp_path)
 
 
+def test_generation_provenance_round_trips(grid3, tmp_path):
+    """What produced the data: the config fingerprint, the code, the standards tables."""
+    import json
+
+    from pgml.scenarios import DEVICE_LIBRARY_VERSION, config_hash
+
+    cfg = _cfg(n=2)
+    write_dataset(run_scenarios(grid3, cfg), tmp_path)
+    meta = json.loads((tmp_path / "meta.json").read_text())
+    assert meta["config_hash"] == config_hash(cfg)
+    assert meta["device_library_version"] == DEVICE_LIBRARY_VERSION
+    assert meta["provenance"]["pgml_version"] and meta["provenance"]["git_sha"]
+    for table in ("en50160", "iec61000_3_2"):
+        assert meta["standards"][table]["sha256"]
+        assert meta["standards"][table]["override"] is False
+    # the same stamps survive the read (they live in the sidecar the loader passes through)
+    assert read_dataset(tmp_path).meta["config_hash"] == meta["config_hash"]
+
+
+def test_config_hash_separates_every_knob(grid3):
+    """A fingerprint that ignored the seed or the size would license a stale reuse."""
+    from pgml.scenarios import config_hash
+
+    base = config_hash(_cfg(n=8, seed=1))
+    assert base == config_hash(_cfg(n=8, seed=1))
+    assert base != config_hash(_cfg(n=8, seed=2))
+    assert base != config_hash(_cfg(n=9, seed=1))
+    # a serialized config hashes the same as the model it came from
+    assert base == config_hash(_cfg(n=8, seed=1).model_dump_json())
+
+
+def test_a_dataset_without_provenance_still_reads(grid3, tmp_path):
+    """An older dataset simply lacks the keys; nothing in the read path requires them."""
+    import json
+
+    write_dataset(run_scenarios(grid3, _cfg(n=2)), tmp_path)
+    meta_path = tmp_path / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    for key in ("config_hash", "provenance", "device_library_version", "standards"):
+        del meta[key]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    loaded = read_dataset(tmp_path)
+    assert loaded.meta.get("config_hash") is None
+    assert loaded.v.shape[0] == 2
+
+
+def test_standards_provenance_marks_an_environment_override(tmp_path, monkeypatch):
+    """A PGML_* override silently replaces the emission reference — it must be recorded."""
+    from pgml.scenarios import en50160_provenance
+
+    packaged = en50160_provenance()
+    table = tmp_path / "en50160.yaml"
+    table.write_text("max_harmonic_values: {1: 1.0, 3: 0.05}\n", encoding="utf-8")
+    monkeypatch.setenv("PGML_EN50160", str(table))
+    overridden = en50160_provenance()
+    assert overridden["override"] is True and overridden["source"] == str(table)
+    assert overridden["sha256"] != packaged["sha256"]
+
+
 def test_complex_sample_column_raises(tmp_path):
     """A complex sample column is rejected explicitly: a silent float64 cast
     would drop the imaginary part, and the shared-sample JSON path cannot
