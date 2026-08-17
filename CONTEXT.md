@@ -42,11 +42,13 @@ import.
 | **pghub** | dataset hub — real grid datasets → `pgml.Grid`, structural metrics, embeddings | active | `src/pghub/CONTEXT.md`, `src/pghub/STATUS.md` |
 | **pgd** | dashboard — FastAPI backend + web SPA over simulation, state estimation, and live measurements (DuckDB/parquet aggregation, one-line diagram, grid editing) | active | `src/pgd/CONTEXT.md`, `src/pgd/STATUS.md` |
 
-**Deployment.** The training clusters provide conda only (no pixi) and a recent CUDA
-toolkit; torch comes from conda and the packages pip-install on top (`run/cluster/environment.yml`).
-Quick iteration on a local dev GPU; large-batch runs on the cluster. SLURM jobs + the local
-orchestrator live in `run/cluster/` (see `run/cluster/README.md`); fetched results land in the
-untracked `data/pgl/`.
+**Deployment.** Heavy runs go to a SLURM server — the institute clusters (conda only, no
+pixi; torch from conda matched to the cluster CUDA, the packages pip-installed on top) or the
+single-GPU institute workstation (the repository's own pixi environment). Each server is a
+**target** file (`run/cluster/targets/<name>.sh`: project root, environment kind, sbatch
+options, resource ceilings); the SLURM jobs + the local orchestrator live in `run/cluster/`
+(`run/cluster/README.md`); fetched results land in the untracked `data/pgl/`. Quick
+iteration on a local dev GPU.
 
 ## Why all-PyTorch
 
