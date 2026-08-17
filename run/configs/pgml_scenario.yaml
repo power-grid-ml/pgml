@@ -1,0 +1,47 @@
+# pgml ScenarioConfig — a reproducible batch of operating points for data generation.
+# One config + its 'seed' reproduces the dataset exactly. Validate/round-trip with:
+#   pixi run -e cpu python -c "import yaml; from pgml.scenarios.config import ScenarioConfig; ScenarioConfig.model_validate(yaml.safe_load(open('run/configs/pgml_scenario.yaml')))"
+# Print the JSON Schema:   python -m pgml.scenarios.config --json-schema
+# Regenerate this template: python -m pgml.scenarios.config --example
+n_samples: 256
+seed: 0
+method: sobol
+parameters:
+- name: load_pq
+  selector:
+    component: load
+    ids: null
+    consumer_type: null
+  distribution:
+    kind: uniform
+    low: 0.5
+    high: 1.5
+  field: pq
+  mode: scale
+  per: each
+  correlation: null
+  symmetry: balanced
+  imbalance: 0.0
+  orders: null
+  harmonic_reference: null
+- name: harmonic_injection
+  selector:
+    component: load
+    ids: null
+    consumer_type: null
+  distribution:
+    kind: uniform
+    low: 0.0
+    high: 1.0
+  field: h_mag
+  mode: absolute
+  per: each
+  correlation: null
+  symmetry: balanced
+  imbalance: 0.0
+  orders:
+  - 3
+  - 5
+  - 7
+  harmonic_reference: en50160
+factors: []

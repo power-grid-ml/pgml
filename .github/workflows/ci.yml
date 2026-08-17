@@ -1,0 +1,66 @@
+name: CI
+
+# Enforce the project gates on every push and PR: lint/format, the full test suite
+# (CPU — including the differentiability gradcheck gate and the OpenDSS/pandapower
+# oracle comparisons), and a strict docs build that mirrors Read-the-Docs.
+#
+# The GPU device/dtype parity gate (`tests/gpu`) is NOT run here: GitHub-hosted runners
+# have no CUDA, and pixi's default `gpu` environment requires it. Each job below installs
+# only the CPU / docs environment explicitly. Run the GPU gate on a CUDA machine with
+# `pixi run pytest -q tests/gpu` (or wire a self-hosted CUDA runner).
+#
+# pixi is pinned so the toolchain does not silently float to the latest release: pixi
+# >= 0.71 rejects CUDA-less runners during `pixi list` for any environment under the
+# `cuda` system-requirement (the `gpu` feature), which would fail the cpu/docs jobs even
+# though those environments install fine. Bump deliberately alongside a local check.
+
+# Every branch is built on push, not only main/dev-*: a feature branch that is never opened
+# as a PR (the paper-crunch branches are worked on directly) otherwise runs no gate at all.
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & format (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: v0.66.0
+          environments: cpu
+          cache: true
+      # `run` is linted too: the drivers and study scripts under it are production logic
+      # (thousands of lines that the tests import via sys.path), not scratch files.
+      - run: pixi run -e cpu ruff check src tests run
+      - run: pixi run -e cpu ruff format --check src tests run
+
+  test:
+    name: Tests (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: v0.66.0
+          environments: cpu
+          cache: true
+      - run: pixi run -e cpu pytest -q
+
+  docs:
+    name: Docs (strict Sphinx build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: v0.66.0
+          environments: docs
+          cache: true
+      - run: pixi run -e docs docs-strict

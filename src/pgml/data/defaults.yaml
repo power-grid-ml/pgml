@@ -1,0 +1,220 @@
+# pgml — modeling defaults (single source of truth for default VALUES & MODEL choices)
+#
+# Why this file exists
+# --------------------
+# Every modeling decision should be a DELIBERATE, documented choice — not a hidden
+# implicit default buried in code (the opacity that makes OpenDSS discrepancies hard to
+# explain). All default constants and default model selections live here, each with a
+# short precise description and units.
+#
+# Resolution precedence (highest first) — see `pgml.defaults.resolve`:
+#   1. explicit  — a value the user set on the component / grid (ALWAYS wins).
+#   2. defaults  — the value in this file.
+#   3. converter — inferred from a source library during conversion (e.g. an OpenDSS
+#                  `LineGeometry`); the last-resort fallback when 1 and 2 do not apply.
+#
+# Schema of every leaf:  { value: <default>, units: <str>, description: <str> }.
+# Ordered by component; extend with new components / parameters as the library grows.
+
+# How a simulation distributes appliance power across phases. pgml is ALWAYS phase-
+# domain, so this is operating-point RESOLUTION, not a change to the network solve.
+calculation:
+  symmetry:
+    value: auto
+    units: "enum{auto, symmetric, asymmetric}"
+    description: >
+      Whether a calculation is SYMMETRIC (each appliance's total P/Q split equally over
+      its connected phases — balanced) or ASYMMETRIC (per-phase values honored, falling
+      back to an equal split where a given appliance has none). `auto` (default) selects
+      asymmetric iff ANY appliance or operating point carries per-phase data
+      (*_per_phase_* or a per-phase operating point), else symmetric — so an asymmetric
+      load distribution in the simulation config promotes the whole calculation to
+      asymmetric even on a symmetrically-defined grid. Mirrors power-grid-model's
+      symmetric=True/False (a symmetric calc averages an asymmetric load). See
+      docs/pgml/modeling/asymmetric.md §1.
+
+# Default terminal connection for appliances that do not set `connection` explicitly.
+appliance:
+  load:
+    default_connection:
+      value: wye
+      units: "enum{wye, wye_grounded, delta}"
+      description: >
+        Connection for a MULTI-phase Load/Generator with no explicit `connection`. `wye`
+        = each phase to neutral/ground; `delta` = phase-to-phase (line-to-line). LV
+        distribution is predominantly wye; matches the OpenDSS `conn=wye` default. For
+        wye, the return path is the node's Phase.N row if present, else ground. See
+        docs/pgml/modeling/asymmetric.md §2, §4.
+    single_phase_connection:
+      value: wye
+      units: "enum{wye, wye_grounded}"
+      description: >
+        Connection for a 1-phase Load/Generator with no explicit `connection`. `wye` =
+        line-to-neutral (the European LV residential convention; the node's L-N voltage
+        is the base). A line-to-line single-phase load is modeled as a 2-phase delta load
+        instead. See docs/pgml/modeling/asymmetric.md §3.
+
+line:
+
+  # Which frequency-dependent line model is applied to an R/X line that has NO explicit
+  # `conductor_geometry` and NO explicit `harmonic_line_model` tag. Applied deliberately
+  # via `pgml.geometry.apply_default_harmonic_model(grid)` (never silently at solve time).
+  harmonic_model:
+    three_phase:
+      value: sequence_aware
+      units: "enum{sequence_aware, positive_sequence, naive, none}"
+      description: >
+        Default model for a 3-phase R/X line. `sequence_aware` decomposes Z_abc into
+        Z1 (earth-free, X∝h + skin) and Z0 (carries the Carson earth-return resistance),
+        then recombines — the model a 4-wire UNBALANCED LV harmonic study needs. Earth
+        return is excited only by zero-sequence / residual current, so it correctly
+        vanishes for balanced operation. `positive_sequence` = Z1 only (no Z0 damping);
+        `naive` = R const, X∝h; `none` = leave the line untouched.
+    single_phase:
+      value: positive_sequence
+      units: "enum{sequence_aware, positive_sequence, naive, none}"
+      description: >
+        Default model for a 1- or 2-phase R/X line: skin-corrected R, X∝h, no earth
+        floor. A genuine single-wire-earth-return (SWER) line should instead carry an
+        explicit `conductor_geometry` so the full Carson earth return applies.
+    skin_effect:
+      value: true
+      units: "bool"
+      description: >
+        Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and
+        sequence-aware models. false → R constant (the naive X∝h, R-const model).
+
+  # Assumed zero-sequence/positive-sequence ratios used ONLY when expanding a
+  # positive-sequence (r1/x1/c1) line into a 3-phase phase-domain matrix for an
+  # asymmetric calculation, and the source grid carries no explicit zero-sequence
+  # data (typical for balanced pandapower / power-grid-model datasets). The phase
+  # matrix follows the symmetric-component identity: Z_self=(Z0+2*Z1)/3,
+  # Z_mutual=(Z0-Z1)/3 (and likewise for the shunt C). An explicit per-line value or
+  # native zero-sequence data always wins over these defaults.
+  zero_sequence:
+    r0_over_r1:
+      value: 4.0
+      units: "ratio"
+      description: >
+        Assumed series RESISTANCE ratio R0/R1 for sequence->phase line expansion when no
+        explicit R0 is available. ~4 is a common overhead-line rule of thumb (the earth
+        return dominates the zero-sequence resistance).
+    x0_over_x1:
+      value: 3.0
+      units: "ratio"
+      description: >
+        Assumed series REACTANCE ratio X0/X1 for sequence->phase line expansion when no
+        explicit X0 is available (~3 typical for overhead lines).
+    c0_over_c1:
+      value: 0.5
+      units: "ratio"
+      description: >
+        Assumed shunt CAPACITANCE ratio C0/C1 for sequence->phase line expansion when no
+        explicit C0 is available (~0.5 typical: less zero-sequence than positive-sequence
+        capacitance).
+
+  # Carson/Deri earth-return path (zero-sequence and geometry lines).
+  earth_return:
+    resistivity_ohm_m:
+      value: 100.0
+      units: "ohm*m"
+      description: >
+        Soil resistivity ρ for the Carson/Deri earth-return path (Z0 and geometry lines).
+        100 Ω·m is the OpenDSS / IEEE standard default (average soil).
+    resistance_coeff_ohm_per_m_per_hz:
+      value: 9.869604401089357e-07   # = math.pi**2 * 1e-7 = omega*mu0/8 per Hz
+      units: "ohm/(m*Hz)"
+      description: >
+        Carson earth-return resistance per unit length per Hz: Re(f) = coeff·f. The
+        physical Carson value is π²·1e-7 Ω/m/Hz (= ω·μ0/8 divided by f). Geometry-
+        independent; the dominant frequency-dependent DAMPING of zero-sequence harmonics.
+        Mirrors OpenDSS's user-settable per-LineCode Rg.
+
+  # R/X → conductor-geometry synthesis (when a feeder ships only R/X, no coordinates).
+  conductor:
+    gmr_over_radius:
+      value: 0.7788                  # = e^{-1/4}, solid round conductor
+      units: "ratio"
+      description: >
+        Geometric-mean-radius / physical-radius for a solid round conductor (e^{-1/4}).
+        Used to pick a PHYSICAL GMR when synthesizing a two-conductor go/return
+        equivalent from positive-sequence R1/X1 (so the GMR never exceeds the radius).
+    radius_m:
+      value: 0.0102
+      units: "m"
+      description: >
+        Default conductor outer radius (~ACSR) for R/X→geometry synthesis when no
+        conductor data is supplied. Affects only the (tiny) synthesized capacitance.
+    phase_spacing_m:
+      value: 1.0
+      units: "m"
+      description: >
+        Initial phase-conductor spacing for the equilateral 3-phase R/X→geometry
+        synthesis (the Newton fit then adjusts the spacing + GMR to reproduce X1 and
+        X0). ~1 m is a typical LV/MV phase separation; the value only seeds the solve
+        and trades off against the fitted GMR, so the reproduced Z1/X0 are independent
+        of it (within the physical range).
+    height_overhead_m:
+      value: 10.0
+      units: "m"
+      description: Default conductor height above ground for an overhead ('ol') line.
+    height_cable_m:
+      value: 1.0
+      units: "m"
+      description: >
+        Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.
+
+# Two-winding transformer vector group + grounding.
+transformer:
+  # Vector group assumed when a Transformer carries no explicit from_/to_connection
+  # (e.g. a positive-sequence dataset with no winding metadata). The phase-domain stamp
+  # builds the winding-incidence primitive Y = N^T Y_winding N from these connections;
+  # the delta winding blocks the zero sequence (traps triplen/residual harmonics) and
+  # supplies the nominal sqrt(3) ratio + clock phase shift. An explicit per-transformer
+  # connection always wins over these defaults (precedence: explicit > config).
+  vector_group:
+    from:
+      value: delta
+      units: "enum{wye, wye_grounded, delta}"
+      description: >
+        HV-side winding connection assumed when none is given. `delta` (the D of Dyn) is
+        the standard distribution-transformer HV winding: it blocks zero-sequence /
+        triplen harmonics from propagating to the MV network.
+    to:
+      value: wye_grounded
+      units: "enum{wye, wye_grounded, delta}"
+      description: >
+        LV-side winding connection assumed when none is given. `wye_grounded` (the yn of
+        Dyn) is the standard LV winding: the solidly grounded neutral provides the
+        zero-sequence return path on the LV side.
+    clock:
+      value: 11
+      units: "integer 0..11 (IEC clock; HV->LV shift = -30*clock degrees)"
+      description: >
+        IEC clock number assumed when no explicit tap.shift_deg is given. `11` (Dyn11,
+        LV leads HV by 30 deg) is the IEC / European distribution-transformer default.
+        For a transformer with explicit connections the clock is read from tap.shift_deg
+        (rounded to the nearest 30 deg) instead.
+
+# Upstream-grid (slack Source) modeling.
+source:
+  # Finite series (short-circuit) impedance for a Source whose converter gave a
+  # near-ideal value (e.g. the stock pandapower CIGRE LV ext-grid -> R~1e-6 Ohm, which
+  # short-circuits the bus at harmonics). Builders like cigre_lv_full_grid apply this so
+  # harmonics are not fully absorbed at the source. Specified at the SOURCE node's rated
+  # voltage; the transformer ratio^2 divides it down on the LV side, so cross-feeder LV
+  # coupling stays modest unless this is made (unrealistically) large. Increase to
+  # exaggerate cross-feeder spread; user/grid value always wins.
+  series_impedance_ohm:
+    value: 5.0
+    units: "ohm"
+    description: >
+      |Z| of the upstream-grid Thevenin/Norton series impedance at the source's rated
+      voltage, used when the converted source is near-ideal. Larger = weaker grid = more
+      harmonic voltage at the source bus and more cross-feeder coupling.
+  rx_ratio:
+    value: 10.0
+    units: "ratio"
+    description: >
+      X/R ratio of the source series impedance (R = |Z|/sqrt(1+rx^2), X = rx*R). ~10 is
+      typical for a stiff MV grid.
