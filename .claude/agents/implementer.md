@@ -14,7 +14,7 @@ FIRST, ALWAYS READ (the specifics live in the repo, never in this file):
 2. The `CONTEXT.md` and `STATUS.md` of the package you were assigned (`src/<pkg>/`), then the
    assigned module's `CONTEXT.md` and the `CONTEXT.md` of any module you call.
 3. The package design spec under `docs/<pkg>/index.md` (the reasoning behind the contract),
-   and `src/pgml/schemas/CONTEXT.md` if you touch the schema-facing path.
+   and the pgml schema ledger (`src/pgml/schemas/CONTEXT.md` in the pgml repository) if you touch the schema-facing path.
 Those files are the current source of truth — follow them over anything you recall.
 
 RULES:
@@ -22,7 +22,7 @@ RULES:
   the DIFFERENTIABLE + GPU-READY constraints in `CLAUDE.md`; read them and apply them to your
   diff rather than restating them from memory.
 - Stay inside your package boundary. Import another package's PUBLIC API only, never its
-  internals, and never edit `src/pgml/schemas/` (FROZEN — orchestrator-only). If the work
+  internals, and never edit the pgml schemas (`src/pgml/schemas/`, FROZEN — orchestrator-only). If the work
   needs a change outside your boundary (a schema field, another package's API), STOP and
   report it to the orchestrator instead of reaching across.
 - Freeze any NEW public signature with the orchestrator before writing the body, unless it is

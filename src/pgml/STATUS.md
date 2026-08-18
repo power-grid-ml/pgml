@@ -176,10 +176,14 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
   no-mutation-after-solve rule is currently a docstring contract only. Reuse the network
   fingerprint (the `PowerFlowSystem` guard mechanism) to detect post-solve grid mutation
   on lazy access and raise. WHERE: `src/pgml/simulation.py`.
-- **Native OpenDSS end-to-end benchmark test**: `tests/reference/
-  test_native_harmonics_opendss.py` imports an untracked `paper/scripts` harness, so it
-  always skips. Make it self-contained (vendor the harness or rebuild it on the scenario
-  oracle), and split timing fairly (engine startup vs solve). WHERE: `tests/reference/`.
+- **Native OpenDSS end-to-end parity gate**: the parity test against OpenDSS's NATIVE
+  harmonics mode on IEEE-33 (Carson geometry lines) and the 3-phase CIGRE LV (native Dyn
+  transformers) lives with the paper's benchmark harness (the `pgml-paper` repository),
+  because `pgml.evaluation.oracles.opendss_scenario_oracle` still refuses
+  conductor-geometry lines. Teach the scenario oracle geometry lines (export the
+  `LineGeometry` as an OpenDSS `LineGeometry`/`WireData` pair) and rebuild that gate on
+  it here, self-contained. WHERE: `src/pgml/evaluation/oracles/opendss_scenario_oracle.py`,
+  `tests/reference/`.
 - **Legacy live oracle injection model**: `evaluation/oracles/opendss_oracle.py` stamps
   device harmonic injections on all host-node rows from phase-to-ground voltages and
   nameplate P/Q (documented in its docstring) — not connection-aware, unlike the solver
