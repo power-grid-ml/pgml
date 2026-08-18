@@ -7,7 +7,7 @@ Runnable, documented studies, organised per package:
 | **`pgml`** | [`pgml/`](pgml/) — see [`pgml/README.md`](pgml/README.md) | the differentiable harmonic power-flow core (scenario studies, OpenDSS/pandapower validation, benchmarks) |
 | **`pgl`** | [`pgl/`](pgl/) — see [`pgl/README.md`](pgl/README.md) | harmonic state estimation (dataset generation, the training workflow, the estimator comparison) |
 | **`pgd`** | [`pgd/`](pgd/) — see [`pgd/README.md`](pgd/README.md) | the dashboard service tier (populating the grid library from foreign formats) |
-| **`pgg`** | [`pgg/`](pgg/) — see [`pgg/README.md`](pgg/README.md), plus [`pgg_generation_study.py`](pgg_generation_study.py) | quality-diversity generation of LV grids (evaluation benchmarks, the end-to-end illumination study) |
+| **`pgg`** | [`pgg/`](pgg/) — see [`pgg/README.md`](pgg/README.md) | quality-diversity generation of LV grids (evaluation benchmarks, the end-to-end illumination study) |
 
 Run any example from the repository root with `pixi`:
 
