@@ -14,8 +14,8 @@ codebase from leaving these descriptions stale.
 | `ml-library-architect` | Design / architecture review (structure, schemas, API surface, portability) | the repo it is pointed at |
 | `implementer` | Build a module/feature in the package the orchestrator names | that package's `CONTEXT.md`/`STATUS.md`, `docs/<pkg>/`, `CLAUDE.md` |
 | `code-reviewer` | Read-only pre-integration review of a finished change | `CLAUDE.md` + the module `CONTEXT.md` (the standard is learned, not hard-coded) |
-| `test-runner` | Run + judge the suite and the project's correctness gates | `tests/CONTEXT.md`, `CLAUDE.md` |
-| `reference-integrator` | Converter + oracle test for ONE external tool (OpenDSS / pandapower / power-grid-model / …) | that tool's brief under `docs/pgml/modeling/references/<tool>/` |
+| `test-runner` | Run + judge the suite and the project's correctness gates | `CLAUDE.md`, the repo's `tests/CONTEXT.md` where present |
+| `reference-integrator` | Converter + oracle test for ONE external tool (OpenDSS / pandapower / power-grid-model / …) | that tool's brief under `docs/pgml/modeling/references/<tool>/` (pgml repository) |
 | `rtd-docs-builder` | Author + validate the Sphinx/RTD docs | `docs/`, the changed public surface |
 
 ## Conventions for editing or adding an agent
