@@ -87,13 +87,13 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   CARVE-OUT: `ComplexTap.shift_deg` is a plain `float` (a discrete vector-group
   clock selector realised by the constant winding incidence — never a gradient
   leaf; the continuous differentiable tap is `ratio_magnitude`).
-- Asymmetry (rev: Increment 0): `Load.connection`/`Generator.connection` are now
+- Asymmetry: `Load.connection`/`Generator.connection` are now
   `Optional[WindingConnection]` defaulting to `None` (= resolve from config
   `appliance.load.{single_phase_,}default_connection`); DELTA needs >=2 phases, zigzag
   rejected on appliances. Whether a run honors per-phase vs splits totals equally is the
   config `calculation.symmetry` decision (`auto`/`symmetric`/`asymmetric`), resolved by
   `pgml.assembly._symmetry`. Cross-tool basis: `docs/pgml/modeling/asymmetric.md`.
-- Per-phase harmonics (rev: Increment 2): `Load`/`Generator` gain
+- Per-phase harmonics: `Load`/`Generator` gain
   `spectrum_per_phase: Optional[dict[Phase, Spectrum]]` (asymmetric distortion), mutually
   exclusive with the all-phases `spectrum`; keys must be a subset of `phases`. Consumed
   by `solve_harmonic_flow` (connection-aware harmonic injection). The runtime

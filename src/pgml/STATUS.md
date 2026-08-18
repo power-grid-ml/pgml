@@ -82,9 +82,9 @@ decisions. One entry per capability:
 ## How to run
 
 - **Use it**: `import pgml; pgml.simulate(grid, pgml.SimulationConfig(...))` — see
-  `docs/getting-started/quickstart.md` and `docs/pgml/public-api.md`.
+  `docs/pgml/public-api.md` (and the suite's getting-started guide on the published site).
 - **Tests**: `pixi run -e cpu pytest -q` (diff gate `tests/differentiability`, GPU gate
-  `tests/gpu`). **Lint**: `pixi run -e cpu ruff check src tests`. **Docs**: see `CLAUDE.md`.
+  `tests/gpu`). **Lint**: `pixi run -e cpu ruff check src tests run`. **Docs**: see `CLAUDE.md`.
 - **Examples**: `run/examples/pgml/` (each self-documenting — see `run/examples/README.md`).
 
 ## Open work — where to start
@@ -146,8 +146,9 @@ The sampling layer and the dense scale wins are done (see Status +
 
 ### B. Harmonic state estimation — the `pgl` package
 
-The ML layer is its own package consuming pgml's public API only. Design + status:
-`docs/pgl/index.md`, `src/pgl/CONTEXT.md`, `src/pgl/STATUS.md`.
+The ML layer is its own package (`pgl`, distribution `power-grid-learn`, its own
+repository) consuming pgml's public API only. Design + status live there: `docs/pgl/index.md`,
+`src/pgl/CONTEXT.md`, `src/pgl/STATUS.md` of the pgl repository.
 
 ### C. Frequency-dependent device models (harmonic load shunt + transformer curves)
 
@@ -170,8 +171,8 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
   activity near zero for the whole dataset. Draw a per-scenario start offset (seeded,
   recorded in the samples sidecar) so the scenarios spread over the day; the per-step
   `time_unix_s` becomes `[B, T]` and the `pgl` time features must consume the per-sample
-  axis. WHERE: `src/pgml/scenarios/composition.py`, `harmonics.py` (sidecar),
-  `src/pgl/time_features.py`.
+  axis. WHERE: `src/pgml/scenarios/composition.py`, `harmonics.py` (sidecar), and
+  `pgl.time_features` in the pgl repository.
 - **SolvedState mutation guard**: lazy accessors recompute from the referenced grid; the
   no-mutation-after-solve rule is currently a docstring contract only. Reuse the network
   fingerprint (the `PowerFlowSystem` guard mechanism) to detect post-solve grid mutation

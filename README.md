@@ -1,19 +1,26 @@
-# pgml
+# pgml — power-grid-ml
 
-**Differentiable, GPU-ready, vectorized harmonic power-flow + ML for power grids.**
+**Differentiable, GPU-ready, vectorized harmonic power flow for power grids.**
 
-`pgml` is a single PyTorch library that (1) generates/loads power grids, (2) simulates
-**harmonic power quality in steady state** (harmonic power flow at integer harmonic
-orders, typically 1–50), and (3) supports **machine learning on the simulated data**
-(graph-based state estimation). The defining requirement is **end-to-end differentiability**:
+`pgml` is a PyTorch library that (1) loads or builds power grids, (2) simulates **harmonic
+power quality in steady state** (harmonic power flow at integer harmonic orders, typically
+1–50), and (3) exposes every result as a differentiable tensor, so the same code is a
+forward simulator, a differentiable physics engine for machine learning, and an inverse /
+parameter-recovery tool. The defining requirement is **end-to-end differentiability**:
 gradients flow from grid parameters — down to line geometry — through Y-bus assembly and
-the complex solve to the outputs, so the same code is a forward simulator, a
-differentiable physics engine for ML, and an inverse / parameter-recovery tool.
+the complex solve to the outputs.
 
 Harmonic power flow decouples per harmonic into a *linear* complex solve
 `Y(h)·V(h) = I(h)`, whose adjoint is cheap — so end-to-end gradients flow without
 differentiating Newton iterations. PyTorch provides complex tensors, batched solves, GPU,
 and native PyTorch-Geometric integration for the ML layer.
+
+`pgml` is the **base package of the power-grid-ml suite**; the learning framework
+(`pgl` / `power-grid-learn`), the grid generator (`pgg` / `power-grid-gen`), the dataset hub
+(`pghub` / `power-grid-hub`) and the dashboard (`pgd` / `power-grid-dash`) live in sibling
+repositories under the same organization and build on this package's public API. The
+combined documentation is published from the org `docs` repository; the `suite` repository
+aggregates everything for development.
 
 ## Highlights
 
@@ -37,19 +44,31 @@ and native PyTorch-Geometric integration for the ML layer.
 
 ## Installation
 
-Development uses [pixi](https://pixi.sh) (conda-based, pinned environments):
+```bash
+pip install power-grid-ml                 # core differentiable engine (import name: pgml)
+pip install "power-grid-ml[convert,viz]"  # + reference-library converters and plotting
+pip install "power-grid-ml[all]"          # everything except the docs/dev tooling
+```
+
+| Extra | Adds | For |
+|-------|------|-----|
+| `convert` | pandapower, power-grid-model | converting reference grids into a `Grid` |
+| `scenarios` | polars, pyarrow | batched scenario sampling + parquet datasets |
+| `viz` | matplotlib, plotly, networkx | the `pgml.evaluation` comparison plots |
+| `opendss` | opendssdirect | the OpenDSS harmonic path / oracle |
+| `oracles` | pandapower, power-grid-model, opendss | the reference oracles used in validation |
+| `docs` / `dev` | sphinx stack / pytest, ruff | building the docs, running the tests |
+
+The distribution is named `power-grid-ml` because `pgml` is taken on PyPI by an unrelated
+project; the import name stays `pgml`. Python 3.13.
+
+Development uses [pixi](https://pixi.sh) (conda-based, pinned environments; `PYTHONPATH=src`
+is set on activation, so nothing needs installing):
 
 ```bash
 pixi run -e cpu pytest -q          # run the test suite (CPU)
 pixi run -e cpu python run/examples/pgml/evaluate_ieee33.py
-```
-
-The package is also standard PEP 621 (`pyproject.toml`). Core install plus optional
-extras (`convert`, `scenarios`, `ml`, `viz`, `opendss`, `docs`, `dev`, `all`):
-
-```bash
-pip install .                      # core differentiable engine
-pip install ".[convert,viz]"       # + reference-library converters and plotting
+pixi run -e docs docs-strict       # the strict Sphinx build (mirrors CI)
 ```
 
 ## Quickstart
@@ -108,20 +127,26 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 - **`convert/`** — pandapower / power-grid-model / OpenDSS → `Grid`.
 - **`scenarios/`** — reproducible config-driven batched sampling.
 - **`evaluation/`** — comparison plots and reference oracles.
-- **`config/`** — documented modeling defaults (single source of truth; `defaults.yaml`).
+- **`data/` + `defaults.py`** — documented modeling defaults and standards tables (single
+  source of truth; `defaults.yaml`, shipped in the wheel).
 
-Each subpackage has a `CONTEXT.md` interface ledger. The suite map is the root `CONTEXT.md`;
-per-package status and open work live in each package's `STATUS.md`.
+Each subpackage has a `CONTEXT.md` interface ledger; the package map is the root
+`CONTEXT.md`; status and open work live in `src/pgml/STATUS.md`.
 
 ## Documentation
 
 The full, human-facing documentation — concepts, modeling decisions, examples, and the API
-reference — is published with Sphinx / Read-the-Docs. Start at `docs/index.md`, or build it
-locally:
+reference — is published with Sphinx / Read-the-Docs as part of the suite site
+(<https://power-grid-ml.readthedocs.io>). This repository holds the pgml pages under
+`docs/pgml/` (start at `docs/pgml/index.md`); build them locally with
 
 ```bash
 pixi run -e docs docs            # build HTML into docs/_build/html
 ```
+
+Contributor orientation: `CONTEXT.md` (the package map), `src/pgml/STATUS.md` (status +
+open work), each subpackage's `CONTEXT.md` (interface ledger), `tests/CONTEXT.md` (the
+gates). If you use pgml in research, please cite it (`CITATION.cff`).
 
 ## License
 

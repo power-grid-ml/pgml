@@ -2,7 +2,8 @@ name: CI
 
 # Enforce the project gates on every push and PR: lint/format, the full test suite
 # (CPU — including the differentiability gradcheck gate and the OpenDSS/pandapower
-# oracle comparisons), and a strict docs build that mirrors Read-the-Docs.
+# oracle comparisons), a strict docs build of this package's pages, and a packaging
+# check (wheel + sdist build, clean install, import).
 #
 # The GPU device/dtype parity gate (`tests/gpu`) is NOT run here: GitHub-hosted runners
 # have no CUDA, and pixi's default `gpu` environment requires it. Each job below installs
@@ -14,8 +15,8 @@ name: CI
 # `cuda` system-requirement (the `gpu` feature), which would fail the cpu/docs jobs even
 # though those environments install fine. Bump deliberately alongside a local check.
 
-# Every branch is built on push, not only main/dev-*: a feature branch that is never opened
-# as a PR (the paper-crunch branches are worked on directly) otherwise runs no gate at all.
+# Every branch is built on push, not only main: a feature branch that is never opened as a
+# PR otherwise runs no gate at all.
 on:
   push:
   pull_request:
@@ -36,8 +37,8 @@ jobs:
           pixi-version: v0.66.0
           environments: cpu
           cache: true
-      # `run` is linted too: the drivers and study scripts under it are production logic
-      # (thousands of lines that the tests import via sys.path), not scratch files.
+      # `run` is linted too: the example studies under it are production logic that the
+      # tests import, not scratch files.
       - run: pixi run -e cpu ruff check src tests run
       - run: pixi run -e cpu ruff format --check src tests run
 
@@ -64,3 +65,25 @@ jobs:
           environments: docs
           cache: true
       - run: pixi run -e docs docs-strict
+
+  package:
+    name: Package (build + clean install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+      # A CPU torch keeps the clean-install check light; the wheel itself only requires
+      # `torch` and lets the installer pick the build.
+      - run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu torch
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/python -c "import pgml; print('pgml', pgml.__version__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

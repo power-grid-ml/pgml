@@ -276,7 +276,10 @@ def test_mv_oberrhein_ynd5_delta_referral_and_taps():
     measured in isolation -- see module docstring's third tolerance family).
     """
     net = pn.mv_oberrhein()
-    _assert_matches_pandapower(net, atol_vm=1.2e-3, atol_va=2e-2)
+    # 20 kV rows: an absolute 1e-10 V update sits at the float64 rounding floor of the
+    # solve (~5e-15 relative), where the fixed point stalls depending on the BLAS/LAPACK
+    # build; 1e-9 V is still ~5e-14 relative and far inside the asserted tolerances.
+    _assert_matches_pandapower(net, atol_vm=1.2e-3, atol_va=2e-2, tol=1e-9)
 
 
 def test_mv_oberrhein_delta_lv_referral_factor_applied_in_both_phase_modes():

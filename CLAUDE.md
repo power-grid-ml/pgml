@@ -1,13 +1,16 @@
-# power-grid-ml (pgml) — project memory
+# pgml (power-grid-ml) — project memory
 
-Differentiable, GPU-ready, vectorized harmonic power-flow + ML for power grids.
-Three goals: (1) grid generation, (2) harmonic power-quality simulation, (3) ML on the
-simulated data. The harmonic system `Y(h)·V(h)=I(h)` is the core; load flow is one
-differentiable output.
+Differentiable, GPU-ready, vectorized harmonic power flow for power grids — the **base
+package** of the power-grid-ml suite. The harmonic system `Y(h)·V(h)=I(h)` is the core; load
+flow is one differentiable output. The sibling packages (`pgl` learning, `pgg` generation,
+`pghub` dataset hub, `pgd` dashboard) live in their own repositories under the same GitHub
+organization and depend on this one; `pgml` imports none of them.
 
-**Architecture, package map, and conventions: `CONTEXT.md` (read it first).**
-**Orientation + open work: each package's `STATUS.md` (`src/pgml/STATUS.md`, `src/pgl/STATUS.md`, `src/pgg/STATUS.md`).**
-**Published human docs: `docs/` (Sphinx / Read-the-Docs).**
+**Architecture, package map, and conventions: `CONTEXT.md` (read it first), then
+`src/pgml/CONTEXT.md` (subpackage ledgers).**
+**Orientation + open work: `src/pgml/STATUS.md`.**
+**Published human docs: `docs/pgml/` (Sphinx; the suite site is assembled by the org `docs`
+repository).**
 
 ## TWO HARD CONSTRAINTS (non-negotiable, every line of core code)
 1. DIFFERENTIABLE: gradients must flow grid parameters → Y-bus → solve → outputs. No
@@ -21,42 +24,53 @@ differentiable output.
 A change that breaks gradcheck (float64) or the GPU device/dtype test is not done.
 
 ## Code style (production-bound; research-stage, heading to production)
-- NO conversational / process references in code, comments, docstrings, CONTEXT files, or
-  docs — e.g. "Increment 1", "M1", "the fix above", "as requested", PR/chat phrasing. These
-  do not translate to the published documentation. Describe the BEHAVIOUR and the WHY, not
-  the development history. Roadmap / open-work notes belong in the package `STATUS.md` files
-  (and git history).
+- NO conversational / process references in code, comments, docstrings, CONTEXT files,
+  docs, or commit messages — e.g. "Increment 1", "M1", "the fix above", "as requested",
+  PR/chat phrasing. These do not translate to the published documentation. Describe the
+  BEHAVIOUR and the WHY, not the development history. Roadmap / open-work notes belong in
+  `src/pgml/STATUS.md` (and git history). Commit messages stand alone.
 - Write code as if it ships: clear names, self-explanatory comments, no dead scaffolding. It
   is fine to leave a capability incomplete in research stage, but what exists reads as
   production code.
 
 ## Frozen-contract rule
-`src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Subagents IMPORT
-and conform to it, never modify it. The orchestrator MAY modify a schema, but only after
-asking the user first. (Docstring-only schema edits to keep the docs build RST-clean are
+`src/pgml/schemas/` (grid/result/scenario) is the single source of truth — for this package
+AND for every dependent repository (they pin a `power-grid-ml` version range and read
+`SCHEMA_VERSION` from persisted datasets). Subagents IMPORT and conform to it, never modify
+it. The orchestrator MAY modify a schema, but only after asking the user first, and bumps
+`SCHEMA_VERSION`. (Docstring-only schema edits to keep the docs build RST-clean are
 preferred over working around the schemas in `docs/conf.py`.)
 
 ## Commands
-- Install / run code: `pixi run -e cpu python ...` / `pixi add <pkg>` (use `pixi`, not bare pip).
-- Tests: `pixi run -e cpu pytest -q`. Differentiability gate: `pytest -q tests/differentiability`.
-  GPU gate: `pytest -q tests/gpu`.
-- Lint/format: `ruff check src tests && ruff format src tests`.
-- Docs (HTML): `pixi run --environment docs docs` (clean rebuild: `docs-clean`).
-  Strict / CI-mirror: `pixi run --environment docs sphinx-build -b html -W --keep-going docs docs/_build/html`.
+- Install / run code: `pixi run -e cpu python ...` / `pixi add <pkg>` (use `pixi`, not bare
+  pip). `PYTHONPATH=src` is set by the pixi activation, so run from the repository root.
+- Tests: `pixi run -e cpu pytest -q` (`-m "not slow"` for the quick loop). Differentiability
+  gate: `pytest -q tests/differentiability`. GPU gate: `pytest -q tests/gpu` (CUDA host).
+- Lint/format: `ruff check src tests run && ruff format src tests run`.
+- Docs (HTML): `pixi run -e docs docs` (clean rebuild: `docs-clean`). Strict / CI-mirror:
+  `pixi run -e docs docs-strict`.
 
-## Documentation (Read-the-Docs / Sphinx)
-Sphinx lives in `docs/` (autodoc + autosummary + napoleon + MyST, furo theme); RTD config
-`.readthedocs.yaml`; pip deps `docs/requirements.txt`; local build env is the pixi `docs`
-feature. The published docs are **human-first** and organised per package — `docs/pgml/`
-(with the modeling decisions under `docs/pgml/modeling/`, ex-`references/`), `docs/pgl/`,
-`docs/pgg/`; figures in `docs/_static/figures/`. The API reference is generated from each
-subpackage's `__init__.py` `__all__`, so **docstrings ARE the docs**. `pandapower` is mocked at autodoc time (heavyweight, not needed for autodoc);
-`pydantic`/`torch` are real. Keep schema docstrings RST-safe IN SOURCE (no build-time
-rewriting); `docs/conf.py` keeps only a Python-domain dedup hook for the re-exported schema
-types. A docs build with import errors or broken autosummary is NOT done — keep new
-docstrings valid reStructuredText (wrap inline math/identifiers containing `*` or trailing
-`_` in double backticks; `::` before indented blocks; blank line before bullet lists; no
-explicit forward-ref quotes in annotations under `from __future__ import annotations`).
+## Documentation (Sphinx)
+This repository documents ITS package under `docs/pgml/` (concepts, `modeling/` decisions
+with the reference-library briefs, `api/` autodoc, `examples`); `docs/index.md` is only the
+standalone landing toctree. The org-level `docs` repository assembles every package's
+`docs/<pkg>/` tree plus the suite landing page and `getting-started/` into the single
+published Read-the-Docs site; the strict build here is the per-repo gate. The API reference
+is generated from each subpackage's `__init__.py` `__all__`, so **docstrings ARE the docs**.
+`pandapower` is mocked at autodoc time; `pydantic`/`torch` are real. Keep schema docstrings
+RST-safe IN SOURCE; `docs/conf.py` keeps only the Python-domain dedup hook and the
+suite-wide `{doc}` reference resolver. A docs build with import errors or broken
+autosummary is NOT done — keep new docstrings valid reStructuredText (wrap inline
+math/identifiers containing `*` or trailing `_` in double backticks; `::` before indented
+blocks; blank line before bullet lists; no explicit forward-ref quotes in annotations under
+`from __future__ import annotations`). Figures are committed SVGs in `docs/_static/figures/`.
+
+## Publishing
+Distribution `power-grid-ml` on PyPI, import name `pgml` (unchanged). Version lives in
+`src/pgml/__init__.py` (`pixi.toml`/`CITATION.cff` mirror it); dependents pin
+`power-grid-ml>=X.Y,<X.Y+1`. Release order across the suite: pgml → pghub → pgg / pgl →
+pgd → the `power-grid-suite` meta-package; the `docs` repository then bumps its submodule
+to the release tag.
 
 ## Delegation policy
 - Delegate heavy, isolatable work to subagents (`.claude/agents/`); keep the orchestrator
@@ -64,7 +78,7 @@ explicit forward-ref quotes in annotations under `from __future__ import annotat
   numerically coupled core (assembly+solver) — that is one focused agent.
 - After a subagent ships a module, record its PUBLIC SIGNATURES in that module's `CONTEXT.md`
   — that file is how the next agent learns the interface.
-- **rtd-docs-builder** (`.claude/agents/`): owns the Sphinx/RTD pipeline + the authored docs
+- **rtd-docs-builder** (`.claude/agents/`): owns the Sphinx pipeline + the authored docs
   under `docs/`. Run it at the END of any API-changing refactor (public signatures, `__all__`
   exports, or module docstrings change, or a module is added/removed): it re-authors the
   affected pages and validates with a clean local build mirroring CI. The docs build is a

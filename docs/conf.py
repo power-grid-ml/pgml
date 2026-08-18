@@ -1,14 +1,41 @@
-"""Sphinx configuration for power-grid-ml (pgml) documentation."""
+"""Sphinx configuration for the power-grid-ml suite documentation.
+
+The suite publishes ONE documentation site, assembled from the ``docs/<pkg>/`` tree of
+every package repository (pgml, pgl, pgg, pghub, pgd). This configuration serves both
+build modes with the same settings:
+
+- a **package repository** builds only its own ``docs/<pkg>/`` tree (the CI gate; the
+  landing ``docs/index.md`` is that package's toctree), and
+- the org-level ``docs`` repository builds the assembled site (every ``docs/<pkg>/`` tree
+  next to the suite landing page and ``getting-started/``).
+
+``PACKAGES`` lists which package trees the current source tree contains; cross-package
+``{doc}`` references to a package that is NOT built here resolve to the published site.
+"""
 
 from __future__ import annotations
 
+import posixpath
 import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Path setup — src-layout; add `src` so `import pgml` works without install.
+# Which packages this build documents (edit per repository)
 # ---------------------------------------------------------------------------
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+#: This repository documents its own package only.
+PACKAGES = ('pgml',)
+
+#: All packages of the suite, in dependency order; the published site carries them all.
+SUITE_PACKAGES = ("pgml", "pgl", "pgg", "pghub", "pgd")
+SUITE_DOCS_URL = "https://power-grid-ml.readthedocs.io/en/latest/"
+
+# ---------------------------------------------------------------------------
+# Path setup — src-layout; add `src` so `import <pkg>` works without install (a package
+# repository). In the assembled build the packages are installed (editable) instead.
+# ---------------------------------------------------------------------------
+_SRC = Path(__file__).parent.parent / "src"
+if _SRC.is_dir():
+    sys.path.insert(0, str(_SRC))
 
 
 # ---------------------------------------------------------------------------
@@ -29,78 +56,81 @@ def _patch_module(pkg_path: str, names: list) -> None:
             obj.__module__ = pkg_path
 
 
-_patch_module("pgml.assembly", ["NodePhaseIndex", "YBus"])
-_patch_module("pgml.solver", ["PowerFlowResult", "HarmonicFlowResult"])
-_patch_module("pgml.scenarios", ["SampledScenarios", "ScenarioResult"])
-_patch_module(
-    "pgml.geometry",
-    [
-        "series_impedance",
-        "internal_impedance",
-        "potential_coefficients",
-        "kron_reduce",
-        "line_constants",
-        "i0_over_i1",
-        "positive_sequence_z",
-        "skin_resistance_multiplier",
-        "fit_equivalent_rdc",
-        "two_conductor_geometry",
-        "two_conductor_loop_z",
-        "phase_to_sequence",
-        "sequence_impedances",
-        "carson_earth_resistance",
-        "zero_sequence_harmonic_z",
-        "sequence_to_phase_z",
-        "sequence_aware_phase_z",
-        "synthesize_line_geometry",
-        "synthesize_grid_geometry",
-        "positive_sequence_resistance_model",
-        "apply_positive_sequence_harmonic_model",
-        "apply_sequence_aware_harmonic_model",
-        "apply_default_harmonic_model",
-    ],
-)
-# pgd (the dashboard/service layer) has the same aggregator-package shape: pgd.core and
-# pgd.storage each re-export classes defined in several private submodules
-# (core/{gridstore,jobs,errors}.py; storage/{duck,interface}.py) via __all__, and the
-# rest of pgd's own docstrings cross-reference them under the aggregator's short name
-# (e.g. ``pgd.core.GridStore``, ``pgd.storage.DuckDBStore``) — patch so autodoc registers
-# them there instead of under the private submodule path.
-_patch_module(
-    "pgd.core",
-    [
-        "GridStore",
-        "GridRecord",
-        "GridRevision",
-        "BranchLimit",
-        "GridNotFoundError",
-        "GridEditError",
-        "GridEditValidationError",
-        "EstimationUnavailable",
-        "JobManager",
-        "JobRecord",
-        "JobCancelled",
-    ],
-)
-_patch_module(
-    "pgd.storage",
-    [
-        "DuckDBStore",
-        "TimeseriesStore",
-        "DatasetInfo",
-        "SeriesSpec",
-        "DiagramSpec",
-    ],
-)
+_REEXPORTS = {
+    "pgml": {
+        "pgml.assembly": ["NodePhaseIndex", "YBus"],
+        "pgml.solver": ["PowerFlowResult", "HarmonicFlowResult"],
+        "pgml.scenarios": ["SampledScenarios", "ScenarioResult"],
+        "pgml.geometry": [
+            "series_impedance",
+            "internal_impedance",
+            "potential_coefficients",
+            "kron_reduce",
+            "line_constants",
+            "i0_over_i1",
+            "positive_sequence_z",
+            "skin_resistance_multiplier",
+            "fit_equivalent_rdc",
+            "two_conductor_geometry",
+            "two_conductor_loop_z",
+            "phase_to_sequence",
+            "sequence_impedances",
+            "carson_earth_resistance",
+            "zero_sequence_harmonic_z",
+            "sequence_to_phase_z",
+            "sequence_aware_phase_z",
+            "synthesize_line_geometry",
+            "synthesize_grid_geometry",
+            "positive_sequence_resistance_model",
+            "apply_positive_sequence_harmonic_model",
+            "apply_sequence_aware_harmonic_model",
+            "apply_default_harmonic_model",
+        ],
+    },
+    # pgd (the dashboard/service layer) has the same aggregator-package shape: pgd.core and
+    # pgd.storage each re-export classes defined in several private submodules
+    # (core/{gridstore,jobs,errors}.py; storage/{duck,interface}.py) via __all__, and the
+    # rest of pgd's own docstrings cross-reference them under the aggregator's short name
+    # (e.g. ``pgd.core.GridStore``, ``pgd.storage.DuckDBStore``) — patch so autodoc registers
+    # them there instead of under the private submodule path.
+    "pgd": {
+        "pgd.core": [
+            "GridStore",
+            "GridRecord",
+            "GridRevision",
+            "BranchLimit",
+            "GridNotFoundError",
+            "GridEditError",
+            "GridEditValidationError",
+            "EstimationUnavailable",
+            "JobManager",
+            "JobRecord",
+            "JobCancelled",
+        ],
+        "pgd.storage": [
+            "DuckDBStore",
+            "TimeseriesStore",
+            "DatasetInfo",
+            "SeriesSpec",
+            "DiagramSpec",
+        ],
+    },
+}
+for _pkg in PACKAGES:
+    for _module, _names in _REEXPORTS.get(_pkg, {}).items():
+        _patch_module(_module, _names)
 
 # ---------------------------------------------------------------------------
 # Project information
 # ---------------------------------------------------------------------------
-project = "power-grid-ml"
-author = "pgml contributors"
-copyright = "2024-2026, pgml contributors"
-release = "0.1.0"
-version = "0.1"
+project = "pgml"
+author = "power-grid-ml contributors"
+copyright = "2024-2026, power-grid-ml contributors"
+# Version from the package (the source tree, no install step).
+import pgml as _pkg
+
+release = _pkg.__version__
+version = ".".join(release.split(".")[:2])
 
 # ---------------------------------------------------------------------------
 # General configuration
@@ -174,7 +204,7 @@ intersphinx_mapping = {
 # HTML output — furo theme
 # ---------------------------------------------------------------------------
 html_theme = "furo"
-html_title = f"power-grid-ml {release}"
+html_title = f"{project} {release}"
 html_static_path = ["_static"]
 
 html_theme_options = {
@@ -188,7 +218,8 @@ html_theme_options = {
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
 
-# nitpicky off — avoids noise from cross-refs into mocked/optional deps
+# nitpicky off — avoids noise from cross-refs into mocked/optional deps and into suite
+# packages that are documented in another repository's build.
 nitpicky = False
 
 # Suppress specific recurring warning categories.
@@ -196,9 +227,6 @@ nitpicky = False
 # - ref.python (duplicate cross-refs): pgml.schemas re-exports grid_schema symbols,
 #   so both pgml.schemas.Phase and pgml.schemas.grid_schema.Phase exist; this is
 #   intentional for user convenience.
-# - docutils.nodes.system_message from frozen schema source (grid_schema, result_schema):
-#   RST-interpreted `|from_|`/`|to_|` references are editorial in comments; they cannot
-#   be edited (frozen contract files).
 suppress_warnings = [
     "toc.not_included",
     "ref.python",
@@ -248,6 +276,37 @@ def _patch_py_domain_silent_overwrite(app) -> None:  # noqa: ANN001
     PythonDomain.note_object = _note_object_silent
 
 
+# ---------------------------------------------------------------------------
+# Cross-package ``{doc}`` references.
+#
+# A package's pages may point at another package's pages (a pgl page at
+# ``/pgml/api/provenance``, a pghub page at ``../pgg/workflow``). In the assembled
+# site every target exists; in a per-repository build the target package is not
+# part of the source tree, so the reference would be "unknown document" — a
+# warning that fails the strict build. Resolve such references to the published
+# site instead of dropping them, keeping the strict gate meaningful for genuinely
+# broken intra-package links.
+# ---------------------------------------------------------------------------
+def _resolve_suite_doc_refs(app, env, node, contnode):  # noqa: ANN001
+    """Turn an unresolved ``{doc}`` ref into another suite package into a site link."""
+    if node.get("refdomain") != "std" or node.get("reftype") != "doc":
+        return None
+    target = node.get("reftarget", "")
+    if target.startswith("/"):
+        docname = target.lstrip("/")
+    else:
+        docname = posixpath.normpath(posixpath.join(posixpath.dirname(node.get("refdoc", "")), target))
+    head = docname.split("/", 1)[0]
+    if head not in SUITE_PACKAGES or head in PACKAGES:
+        return None
+    from docutils import nodes
+
+    ref = nodes.reference("", "", internal=False, refuri=f"{SUITE_DOCS_URL}{docname}.html")
+    ref.append(contnode)
+    return ref
+
+
 def setup(app) -> None:  # noqa: ANN001
     """Sphinx setup hook — apply runtime patches."""
     app.connect("builder-inited", _patch_py_domain_silent_overwrite)
+    app.connect("missing-reference", _resolve_suite_doc_refs)

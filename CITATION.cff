@@ -1,0 +1,47 @@
+# Citation metadata for the pgml library (Citation File Format 1.2.0).
+# GitHub renders this as a "Cite this repository" button; cffconvert can emit
+# BibTeX/APA from it. Fields marked TODO are finalised at release time.
+cff-version: 1.2.0
+message: >-
+  If you use pgml in your research, please cite both the software (below) and
+  the accompanying paper (preferred-citation).
+type: software
+title: "pgml: differentiable, GPU-ready harmonic power flow for power grids"
+abstract: >-
+  pgml assembles the complex nodal admittance Y(h) and solves the harmonic
+  system Y(h)V(h)=I(h) inside a single PyTorch automatic-differentiation
+  graph, so gradients flow from physical grid parameters (line geometry,
+  transformer taps, inverter control laws) through the admittance assembly
+  and the complex solve to voltages, currents, and distortion indices. The
+  same code runs on CPU and GPU and batches over thousands of scenarios.
+authors:
+  - family-names: "de Koster"
+    given-names: "Markus"
+    affiliation: "Cologne Institute for Renewable Energy (CIRE), TH Köln"
+    # TODO: orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"
+  # TODO: add co-authors
+version: 0.2.0
+date-released: "2026-08-18"   # TODO: set to the actual release date
+license: MPL-2.0
+repository-code: "https://github.com/power-grid-ml/pgml"
+keywords:
+  - harmonic power flow
+  - automatic differentiation
+  - differentiable simulation
+  - power quality
+  - distribution networks
+  - GPU computing
+  - machine learning
+  - PyTorch
+preferred-citation:
+  type: article
+  title: >-
+    pgml: A Differentiable, GPU-Ready Harmonic Power-Flow Engine for Machine
+    Learning on Power Grids
+  authors:
+    - family-names: "de Koster"
+      given-names: "Markus"
+    # TODO: add co-authors
+  year: 2026
+  # TODO once posted: doi / arXiv identifier of the paper
+  notes: "Preprint in preparation."
