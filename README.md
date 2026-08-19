@@ -19,7 +19,7 @@ and native PyTorch-Geometric integration for the ML layer.
 (`pgl` / `power-grid-learn`), the grid generator (`pgg` / `power-grid-gen`), the dataset hub
 (`pghub` / `power-grid-hub`) and the dashboard (`pgd` / `power-grid-dash`) live in sibling
 repositories under the same organization and build on this package's public API. The
-combined documentation is published from the org `docs` repository; the `suite` repository
+combined documentation is published from the org `docs` repository; the `power-grid-suite` repository
 aggregates everything for development.
 
 ## Highlights
@@ -43,6 +43,12 @@ aggregates everything for development.
   batched solves, for ML training-data generation.
 
 ## Installation
+
+> **Not on PyPI yet** (publication follows the engine paper). Until then install from git
+> in dependency order — `pip install "<distribution> @ git+ssh://git@github.com/power-grid-ml/<repo>.git"`,
+> the engine `power-grid-ml` first — or work from the
+> [power-grid-suite](https://github.com/power-grid-ml/power-grid-suite#installing--what-works-right-now)
+> checkout; the lines below are the released form.
 
 ```bash
 pip install power-grid-ml                 # core differentiable engine (import name: pgml)

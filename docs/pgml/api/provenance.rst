@@ -34,7 +34,7 @@ sibling written under different code now carries this stamp:
 - ``pgl.train.SEModule.on_save_checkpoint`` — stamps every Lightning checkpoint's
   ``pgml_provenance`` key, so a checkpoint records which code trained it independently of its
   ``pgl_config`` (see :doc:`/pgl/api/train`).
-- The suite's cluster submission pipeline (``run/cluster/submit.sh`` in the ``suite`` repository)
+- The suite's cluster submission pipeline (``run/cluster/submit.sh`` in the ``power-grid-suite`` repository)
   appends a record — commit, dirty
   flag, hosts, command line — to a run directory's own ``code_provenance.json`` at submit time.
 

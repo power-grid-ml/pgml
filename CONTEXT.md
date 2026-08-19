@@ -36,7 +36,7 @@ them beyond this table. Every dependent pins a `power-grid-ml` version range and
 | **pgg** | `power-grid-gen` | QD synthesis of LV grids (CVT-MAP-Elites + differentiable repair) | `pgg` |
 | **pghub** | `power-grid-hub` | real grid datasets → `pgml.Grid`, structural metrics, embeddings | `pghub` |
 | **pgd** | `power-grid-dash` | FastAPI backend + web SPA over simulation, estimation, live measurements | `pgd` |
-| — | `power-grid-suite` | developer aggregation (submodules, one pixi env, cluster jobs) + meta-package | `suite` |
+| — | `power-grid-suite` | developer aggregation (submodules, one pixi env, cluster jobs) + meta-package | `power-grid-suite` |
 | — | — | the published documentation site, assembled from every package's `docs/<pkg>/` | `docs` |
 
 ## Why all-PyTorch
