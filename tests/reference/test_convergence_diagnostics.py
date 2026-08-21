@@ -54,6 +54,29 @@ class TestConvergenceDiagnostics:
         assert d.criticality is None  # "auto" + converged -> skipped
         assert d.as_dict()["likely_cause"] == "converged"  # dict round-trip
 
+    def test_criticality_survives_a_failing_decomposition(self, monkeypatch) -> None:
+        """A decomposition that does not converge is REPORTED, never raised.
+
+        The criticality analysis runs on the hard cases by construction — a diverged or
+        barely-converged state, where LAPACK's driver can fail depending on the host's
+        BLAS threading. The diagnostic then has to explain what it could not compute
+        instead of taking the solve down with it.
+        """
+        import pgml.solver.power_flow as pf
+
+        def _boom(*_args, **_kwargs):
+            raise torch.linalg.LinAlgError(
+                "linalg.svd: The algorithm failed to converge"
+            )
+
+        monkeypatch.setattr(pf.torch.linalg, "svd", _boom)
+        r = solve_power_flow(
+            _chain(2000.0, 500.0), slack="ideal", dtype=CDT, criticality="always"
+        )
+        assert r.converged  # the solve itself is untouched
+        assert "skipped" in r.diagnostics.criticality
+        assert "did not converge" in r.diagnostics.criticality["skipped"]
+
     def test_criticality_always_is_a_collapse_margin(self) -> None:
         light = solve_power_flow(
             _chain(2000.0, 500.0), slack="ideal", dtype=CDT, criticality="always"

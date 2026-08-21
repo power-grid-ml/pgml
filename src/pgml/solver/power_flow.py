@@ -2664,15 +2664,33 @@ def _jacobian_criticality(
         return state_residual(xb, y_b.real, y_b.imag, is_b.real, is_b.imag)
 
     j = torch.autograd.functional.jacobian(f, x, vectorize=True)  # [2N, 2N]
-    with torch.no_grad():
-        svals = torch.linalg.svdvals(j)
-        sigma_min, sigma_max = float(svals.min()), float(svals.max())
-        cond = sigma_max / max(sigma_min, 1e-300)
-        _, _, vh = torch.linalg.svd(j)
-        mode = vh[-1]  # right singular vector of the smallest singular value
-        part = torch.sqrt(mode[:n] ** 2 + mode[n:] ** 2)  # [N] per-node participation
-        part = part / part.max().clamp_min(1e-30)
-        vals, idxs = torch.topk(part, min(_DIAG_TOP_K, n))
+    # The decomposition is run on the Jacobian of a state that is, by construction, the
+    # hard case — a non-converged or barely-converged solve, where J is ill-conditioned or
+    # carries repeated singular values. That is exactly where LAPACK's divide-and-conquer
+    # driver can fail to converge, and whether it does depends on the BLAS threading of the
+    # host. A DIAGNOSTIC must never take down the run it is explaining: report what could
+    # not be computed instead.
+    try:
+        with torch.no_grad():
+            svals = torch.linalg.svdvals(j)
+            sigma_min, sigma_max = float(svals.min()), float(svals.max())
+            cond = sigma_max / max(sigma_min, 1e-300)
+            _, _, vh = torch.linalg.svd(j)
+            mode = vh[-1]  # right singular vector of the smallest singular value
+            part = torch.sqrt(
+                mode[:n] ** 2 + mode[n:] ** 2
+            )  # [N] per-node participation
+            part = part / part.max().clamp_min(1e-30)
+            vals, idxs = torch.topk(part, min(_DIAG_TOP_K, n))
+    except torch.linalg.LinAlgError as exc:
+        return {
+            "skipped": (
+                "the singular-value decomposition of the Jacobian did not converge "
+                f"({exc.__class__.__name__}); the state is too ill-conditioned for this "
+                "diagnostic. The convergence verdict and the residual figures above are "
+                "unaffected."
+            )
+        }
     node_ids, phase_codes = index.node_ids.tolist(), index.phase_codes.tolist()
     critical = [
         {
