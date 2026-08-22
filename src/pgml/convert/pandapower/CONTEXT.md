@@ -5,7 +5,7 @@ Converts a pandapower network (`pandapowerNet`) to our schema `Grid`.
 ## Public API
 
 ```python
-from pgml.convert.pandapower import to_grid, PhaseMode
+from pgml.convert.pandapower import to_grid, GenMode, PhaseMode
 
 import pandapower as pp
 import pandapower.networks as pn
@@ -14,11 +14,18 @@ pp.runpp(net)
 
 grid, id_map = to_grid(net)                                    # SINGLE_PHASE_EQUIV (default)
 grid_3ph, id_map_3ph = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
+
+# net.gen (PV buses) — opt-in Volt-VAr approximation, see the section below
+grid_pv, id_map_pv = to_grid(pn.case118(), gen_mode=GenMode.VOLT_VAR_APPROX)
 ```
 
 ### Signature
 ```
-to_grid(net: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV) -> tuple[Grid, dict[str, Any]]
+to_grid(net: Any, *,
+        phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
+        gen_mode: GenMode = GenMode.DROP,
+        gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,  # 500.0
+        ) -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function; `net` must already carry basic DataFrames (`bus`, `line`, `load`,
@@ -35,6 +42,7 @@ explicit per-km parameters are present.
     "load":             {pp_load_idx: Load.id, ...},
     "asymmetric_load":  {pp_asym_idx: Load.id, ...},        # THREE_PHASE only
     "sgen":             {pp_sgen_idx: Generator.id, ...},
+    "gen":              {pp_gen_idx: Generator.id, ...},  # EMPTY unless gen_mode=VOLT_VAR_APPROX
     "ext_grid":         {pp_eg_idx: Source.id, ...},
     "slack_v_complex":  complex,  # FIRST ext_grid's phasor (V, L-L); ideal-slack convenience
 }
@@ -219,20 +227,167 @@ pre-ZIP-aware output. `net.asymmetric_load` has no ZIP percentage columns at all
 `test_mixed_zip_load_coefficients_mapped_correctly`, and
 `test_zero_zip_percentages_stay_byte_identical`.
 
+### `gen` (PV buses) — the OPT-IN Volt-VAr approximation (`gen_mode`)
+
+`net.gen` is pandapower's PV bus: fixed `p_mw`, regulated voltage MAGNITUDE
+`vm_pu`, reactive power free between `min_q_mvar` and `max_q_mvar`. pgml has no
+PV-bus appliance — a true PV bus needs a mixed residual row pair
+(`[P-balance; |V|² − V_set²]`) in `solver.power_flow` plus a schema field to carry
+the setpoint. `gen_mode` therefore selects between two behaviours:
+
+| `gen_mode` | behaviour |
+|---|---|
+| `GenMode.DROP` (**default**) | `net.gen` is not read; `warn_dropped_elements` reports it. The converted `Grid` is byte-identical to the pre-`gen_mode` output, and to converting the same net with the `gen` table emptied. |
+| `GenMode.VOLT_VAR_APPROX` | Each in-service row becomes a `Generator` whose `VoltVarControl` is a steep `Q(|V|)` droop centred on `vm_pu` and saturating at the row's reactive limits. |
+
+**The mapping** (`_gen_volt_var_control`), per in-service row not caught by the
+slack rule below:
+
+| pandapower field | Our schema field | Notes |
+|---|---|---|
+| `p_mw`, `scaling` | `Generator.p_nom_w` | `p_mw·1e6·scaling` — the same generation-positive, `scaling`-aware convention as `sgen` (pandapower's own `build_gen` scales `gen.p_mw` too) |
+| `vm_pu` | droop centre | the x-axis is `|V_terminal| / V0` with `V0` the node's L-N (or L-L for a delta element) nominal, which equals pandapower's `vm_pu` in BOTH phase modes |
+| `min_q_mvar` / `max_q_mvar` | curve saturation levels | read RAW (NOT multiplied by `scaling` — pandapower's `add_q_constraints` does not scale them) |
+| — | `VoltVarControl.s_rated_va` | `hypot(P, max(|q_min|,|q_max|))` per element, so the capability circle's reactive headroom `sqrt(S²−P²)` equals the widest limit exactly: the circle never binds before the curve, and the curve applies the ASYMMETRIC `[q_min, q_max]` saturation |
+| — | `Generator.q_nom_var` | `0.0` for a controlled row (a controlled appliance's reactive nameplate is never read by the nonlinear solve) |
+
+The curve is the two endpoints of the clamped droop line —
+`Q(|V|) = clamp(−slope·q_base·(v_pu − vm_pu), q_min, q_max)` — stored as
+`x_values = (vm_pu − y_max/slope, vm_pu − y_min/slope)`,
+`y_values = (y_max, y_min)` with `y = Q/q_base`, `interpolation="linear"`,
+`extrapolation="constant"` (the constant extrapolation IS the clamp).
+`smoothing=0` (the exact hard clamp — a Q limit is a hard limit).
+Per-phase: the control is evaluated per ELEMENT against that element's share of
+the active power, so the limits and the rating divide by the phase count
+(1 under `SINGLE_PHASE_EQUIV`, 3 under `THREE_PHASE`).
+
+**`gen_volt_var_slope_pu`** (default `DEFAULT_GEN_VOLT_VAR_SLOPE_PU = 500.0`) is
+the droop STEEPNESS in units of the reactive base per per-unit terminal voltage:
+the droop sweeps one full `q_base` over `1/slope` pu of voltage. The regulated bus
+settles off its setpoint by `Q_actual / (slope·q_base)` pu, so the |V| error falls
+as `1/slope` — measured, see "Accuracy" below.
+
+**Fallbacks for a missing reactive limit** (`_gen_reactive_bounds` /
+`_gen_reactive_envelope`). pandapower leaves `min_q_mvar`/`max_q_mvar` NaN on a
+generator created without limits and its own `runpp` then treats the machine as
+effectively unbounded (`q_lim_default = 1e9` MVAr; the DEFAULT `enforce_q_lims=False`
+ignores the limits entirely). An unbounded range is unusable here — the droop needs
+a FINITE reactive base to size the circle and scale the slope — so a missing bound
+falls back to ± a machine-sized envelope, in order:
+1. `sqrt(sn_mva² − p²)` when `sn_mva` is set (the rating itself if `|P| ≥ sn`);
+2. `|p_mw|` when there is no rating (a machine able to run to a 0.707 power factor);
+3. `_GEN_ENVELOPE_FLOOR_VAR = 1.0 var` when the row carries no size information at
+   all (no limits, no rating, no active power) — such a row regulates nothing.
+Every conversion that used a fallback logs one aggregated WARNING with the count.
+`min_q_mvar == max_q_mvar` is NOT a PV bus (no reactive freedom): the row converts
+as a PLAIN PQ `Generator` with `q_nom_var` = that value and NO control.
+`min_q_mvar > max_q_mvar` raises `ConversionError`.
+
+**SLACK-BUS RULE.** A row on a bus that already carries an in-service `ext_grid`,
+or a row flagged `slack=True`, is SKIPPED and logged at WARNING (its `p_mw` really
+is dropped). The ideal slack fixes that bus's voltage phasor outright, so a droop
+there would regulate against an infinitely stiff reference; pandapower's own solve
+treats a generator at the reference bus the same way, absorbing its `p_mw` into the
+slack dispatch rather than injecting it.
+
+**What the approximation does and does NOT give.**
+- It holds `|V|` APPROXIMATELY, never exactly. Steeper trades conditioning for
+  fidelity, in direct proportion, and the trade has a hard ceiling (below).
+- Reactive limits are enforced by the curve saturation (backed by the capability
+  circle), so a limit-hitting generator behaves like pandapower's discrete PV→PQ
+  switch only APPROXIMATELY — the switch happens along the last droop segment
+  rather than as a discrete bus-type change.
+- Active power is a fixed injection (pandapower's own model). No distributed
+  slack, no active-power limit enforcement.
+- **Conditioning / solution branch is the real limit.** Outside the `1/slope`-wide
+  band the droop's `dQ/dV` is exactly zero, so a Newton iterate that starts far from
+  the setpoint sees NO voltage-control feedback. On a heavily loaded transmission
+  benchmark the linear const-Z warm start is far enough out that the solve either
+  fails or converges onto the COLLAPSED low-voltage branch (every generator pinned
+  at its maximum Q and the network still at ~0.6 pu — a genuine second solution of
+  the approximated system, which a true PV row `|V| − V_set = 0` would exclude by
+  construction). Non-convergence, or an implausibly low converged profile, is the
+  signal to REDUCE `gen_volt_var_slope_pu`. Use `method="newton"`; the
+  current-injection fixed point does not contract on a stiff droop.
+  A controlled row's `q_nom_var` is 0.0 — the nonlinear solve never reads it, but
+  the LINEAR const-Z assembler that builds Newton's warm start DOES, so a nonzero
+  value is a free knob on the STARTING POINT. It was measured and REJECTED: seeding
+  the midpoint of each row's reactive range rescues `case39` (4.9e-1 -> 1.7e-3 pu at
+  slope 200) but breaks `case118` (slope 5 stops converging; slope 20 converges to a
+  profile 8.1e-1 pu off at its worst bus). It MOVES the basin, it does not ENLARGE
+  it, so it is not baked in — the only dependable fix is the residual row.
+
+**Accuracy** (max / median per-bus |V| deviation in pu against a live
+`pp.runpp(net, enforce_q_lims=True)` — the apples-to-apples oracle, since the
+converter enforces the reactive limits while pandapower's DEFAULT
+`enforce_q_lims=False` does not; shunt-carrying nets have `net.shunt` disabled in
+BOTH tools so the comparison isolates the `gen` mapping from the unconverted
+`shunt` table; `method="newton"`, `SINGLE_PHASE_EQUIV`, complex128):
+
+| slope | case9 | case14 | case57 | case118 |
+|---|---|---|---|---|
+| 5 | 6.6e-3 / 9.6e-4 | 9.4e-2 / 7.6e-2 | 4.3e-2 / 3.3e-2 | 4.4e-2 / 2.1e-2 |
+| 50 | 8.2e-4 / 2.1e-4 | 1.7e-2 / 1.5e-2 | 6.8e-3 / 4.7e-3 | (no convergence) |
+| 500 | 8.4e-5 / 2.3e-5 | 1.8e-3 / 1.5e-3 | 7.6e-4 / 5.8e-4 | (no convergence) |
+| 2000 | (no convergence) | 4.6e-4 / 3.9e-4 | 2.3e-4 / 1.6e-4 | (no convergence) |
+
+The `1/slope` law holds wherever the solve lands on the correct branch; the
+convergence failures are basin-of-attraction flukes, not a monotone ceiling
+(case9 fails at 200 and 2000 but succeeds at 500). `case_ieee30` is an instructive
+edge: above slope ~20 EVERY generator is pinned at a reactive limit, the problem
+degenerates to the same pure-PQ system pandapower's `enforce_q_lims` solves, and
+the agreement is exact (1.4e-10 pu) and slope-independent.
+
+Two calibrating measurements:
+- **The unconverted `shunt` table is NOT what dominates `case118`.** Re-running the
+  same comparison with its 14 shunts LEFT IN pandapower (so the converter's gap is
+  live) moves the numbers only from 8.1e-2 to 8.9e-2 pu (slope 2) and 4.4e-2 to
+  5.1e-2 pu (slope 5). The residual is the PV-bus approximation, not the shunts.
+- **The network conversion itself is exact.** Freeze every generator at
+  pandapower's OWN converged `(P, Q)` as an `sgen` row and drop the `gen` table:
+  the converted grid then reproduces `runpp` to 2.1e-13 pu on `case39` and 9.8e-11
+  pu on `case9`. Lines, transformers, taps and the slack are not the error source.
+- **`case39` is the cautionary case.** At every slope from 5 upward it CONVERGES —
+  onto the collapsed branch, 4.9e-1 pu away, with all nine generators pinned at
+  their maximum reactive limit. A converged-but-wrong answer, not a loud failure.
+  Sanity-check the converged voltage profile against the source network's
+  `res_bus` whenever this mode is used on a transmission grid.
+
+**Verdict.** Good enough for small and moderately loaded networks (a sub-1e-3 pu
+operating point at slope 500 on case9/case14/case57), and useful as a
+differentiable stand-in for voltage-regulating DER. NOT good enough to import
+transmission benchmarks with: on `case118` the branch problem caps the usable
+steepness at ~5 (a 2-5 % voltage error), and on `case39` there is no usable
+steepness at all — every setting converges silently onto the collapsed branch.
+Importing transmission cases faithfully needs the real fix — a PV residual row pair
+in `solver.power_flow` plus the schema field to carry `V_set` (see
+`docs/pgml/modeling/der-pv-storage.md` §4.5) — and `shunt` conversion.
+
+Tests: `tests/convert/test_pandapower_gen_volt_var.py` (mapping, fallbacks, slack
+rule, droop physics) and `tests/reference/test_pandapower_gen_volt_var.py` (live
+`runpp` oracle + the steepness sweep).
+
 ## Coverage gaps / known scope boundaries
 
-- `gen` (PV / voltage-controlled buses) and `shunt` are NOT converted
-  (`warn_dropped_elements`). `case118` (a 345/161/138 kV transmission benchmark)
-  relies on 53 `gen` + 14 `shunt` for voltage support; a full nonlinear
-  constant-power comparison is therefore NOT a valid oracle for that grid even
-  after freezing pandapower's own converged `res_gen`/`res_shunt` P/Q as fixed
-  `sgen`/`load` (the nonlinear solver converges, but to a badly wrong, inflated
-  operating point at nearly every bus — a known "wrong solution branch"
-  phenomenon from removing voltage-control feedback on a stressed network, not a
-  transformer bug). `case118`'s transformer/tap conversion is instead validated
-  via a LINEAR, exact Y-bus-stamp comparison against pandapower's own internal
-  `Ybus` — see `tests/reference/test_pandapower_grid_matrix.py::
-  TestCase118TransformerOnly`.
+- `gen` (PV / voltage-controlled buses) is converted ONLY under the opt-in
+  `gen_mode=GenMode.VOLT_VAR_APPROX` (see the section above); the DEFAULT drops it
+  (`warn_dropped_elements`). `shunt` is never converted. `case118` (a
+  345/161/138 kV transmission benchmark) relies on 53 `gen` + 14 `shunt` for
+  voltage support; a full nonlinear constant-power comparison is therefore NOT a
+  valid oracle for that grid even after freezing pandapower's own converged
+  `res_gen`/`res_shunt` P/Q as fixed `sgen`/`load` (the nonlinear solver converges,
+  but to a badly wrong, inflated operating point at nearly every bus — a known
+  "wrong solution branch" phenomenon from removing voltage-control feedback on a
+  stressed network, not a transformer bug). The Volt-VAr approximation restores
+  the feedback but only up to a droop steepness of ~5 on that grid (a few percent
+  of voltage error) before the same branch problem returns. `case118`'s
+  transformer/tap conversion is instead validated via a LINEAR, exact Y-bus-stamp
+  comparison against pandapower's own internal `Ybus` — see
+  `tests/reference/test_pandapower_grid_matrix.py::TestCase118TransformerOnly`.
+  (A network whose generators are frozen at pandapower's OWN converged `(P, Q)` as
+  `sgen` rows reproduces pandapower to 2e-13 pu on `case9` and `case39` — the
+  network conversion itself, lines/transformers/taps included, is exact; the whole
+  residual on those grids is the PV-bus model.)
 - Bus-LINE/bus-transformer (`et='l'`/`'t'`) switches (used by `mv_oberrhein` and
   `create_cigre_network_mv` to operate a meshed ring radially) ARE converted, but
   only via the accepted out-of-service approximation described in "Bus-line /
@@ -266,6 +421,14 @@ pre-ZIP-aware output. `net.asymmetric_load` has no ZIP percentage columns at all
   trafo, `parallel=2`/`parallel=3`), a hand-built mixed-ZIP-load net, plus a
   best-effort `runpp_3ph` asymmetric comparison (Dyn passes; Yzn is skipped with
   a documented definitional-gap reason).
+- `tests/convert/test_pandapower_gen_volt_var.py` — unit tests for the `net.gen`
+  Volt-VAr approximation: the default drop (and its byte-identity with a net whose
+  `gen` table is empty), the curve/rating mapping, the `scaling` convention, every
+  reactive-limit fallback, the slack-bus rule, and the droop physics (setpoint held,
+  error ∝ 1/slope, reactive saturation).
+- `tests/reference/test_pandapower_gen_volt_var.py` — the live `runpp` oracle for
+  that mode: `case9` at the default steepness, the 1/slope law on `case57`, and
+  (marked `slow`) `case118`, where the default conversion does not even converge.
 - `tests/reference/test_cigre_lv_full_transformer.py`,
   `test_cigre_lv_pandapower.py`, `test_ieee33_pandapower.py`,
   `test_ieee33_power_flow_pandapower.py`, `tests/convert/test_phase_mode.py` — the

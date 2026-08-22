@@ -172,6 +172,55 @@ Usage::
     net = pn.case33bw()
     grid, id_map = to_grid(net)
 
+Element coverage
+~~~~~~~~~~~~~~~~
+
+``bus``, ``line``, ``trafo`` (two-winding, vector-group and tap-changer aware),
+bus-bus ``switch``, ``load`` (including the four-column ZIP percentages),
+``asymmetric_load`` and ``sgen`` convert. ``gen`` converts only in the opt-in mode
+below. Every remaining non-empty table — ``shunt``, ``trafo3w``, ``impedance``,
+``ward`` / ``xward``, ``dcline``, ``storage``, ``motor``, ``asymmetric_sgen`` —
+raises a WARNING naming the kind and count; nothing is dropped silently.
+
+.. _convert-pandapower-gen-mode:
+
+Voltage-controlled generators — ``gen_mode``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``net.gen`` is pandapower's **PV bus**: fixed active power, regulated voltage
+magnitude ``vm_pu``, reactive power free between ``min_q_mvar`` and
+``max_q_mvar``. pgml's appliance model has no PV bus — that needs a mixed residual
+row pair ``[P-balance; |V|² − V_set²]`` in the power-flow solver plus a schema
+field for the setpoint (see :doc:`/pgml/modeling/der-pv-storage` §4.5). The
+``gen_mode`` keyword therefore selects:
+
+``GenMode.DROP``
+    The default. ``net.gen`` is not read and is reported as a dropped element. A
+    transmission benchmark whose generators live in ``net.gen`` (MATPOWER
+    ``case118``, ``case39``, …) then converts to loads plus a slack, and its
+    operating point is **not** the source network's.
+
+``GenMode.VOLT_VAR_APPROX``
+    Each in-service row becomes a
+    :class:`~pgml.schemas.grid_schema.Generator` whose
+    :class:`~pgml.schemas.grid_schema.VoltVarControl` is a steep ``Q(|V|)`` droop
+    centred on ``vm_pu`` and saturating at the row's reactive limits, with the
+    active power mapped exactly as ``sgen`` is (generation-positive, ``scaling``
+    applied). This **approximates** a PV bus: the bus settles off its setpoint by
+    ``Q / (slope · Q_base)`` per unit, so the deviation falls as
+    ``1 / gen_volt_var_slope_pu`` (default 500). A row on the ``ext_grid`` bus, or
+    one flagged ``slack``, is skipped and logged — the ideal slack already fixes
+    that bus's voltage. A row whose reactive limits coincide has no reactive
+    freedom and converts as a plain PQ generator instead.
+
+    Solve the result with ``solve_power_flow(..., method="newton")``: the
+    current-injection fixed point does not contract on a stiff droop. The binding
+    limitation is conditioning, not steady-state accuracy — outside the
+    ``1/slope``-wide band the droop's ``dQ/d|V|`` is zero, so on a heavily loaded
+    transmission network the solve can settle on the collapsed low-voltage branch.
+    Reduce the steepness when that happens. Measured accuracy and the honest
+    verdict: ``src/pgml/convert/pandapower/CONTEXT.md``.
+
 .. automodule:: pgml.convert.pandapower
    :members:
    :show-inheritance:

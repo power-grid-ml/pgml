@@ -69,7 +69,9 @@ engine; **no harmonics**, **no autograd**.
 - **`gen` (voltage-controlled generator)** — a **PV bus**: fixed P, regulated `vm_pu`, free
   Q. `enforce_q_lims=True` adds the standard **PV→PQ switching loop**: a generator whose Q
   exceeds `min/max_q_mvar` is clamped, its bus converted to PQ, and the system re-solved.
-  `ext_grid` is the slack (REF) bus. [pp-gen-doc][pp-qlims]
+  `ext_grid` is the slack (REF) bus. [pp-gen-doc][pp-qlims] pgml's pandapower converter
+  DROPS this table by default and can, on request, approximate it with a steep Volt-VAr
+  droop — see §4.5.
 - **`asymmetric_sgen`** — per-phase P/Q; summed to a balanced injection in `runpp`, handled
   per phase in `runpp_3ph`. [pp-asym]
 - **`storage`** — a **constant-PQ element at each snapshot**, in *load* convention
@@ -176,7 +178,7 @@ with no SoC. [pgm-components]
 | Capability | pandapower | OpenDSS | power-grid-model | pgml (today) |
 |---|---|---|---|---|
 | PV/DER element | `sgen` (PQ) | `PVSystem` | `sym_gen` (PQ) | `Generator` (PQ) |
-| PV (voltage-regulating) bus | `gen` | `Generator model=3` | — | — (slack only) |
+| PV (voltage-regulating) bus | `gen` | `Generator model=3` | — | — (slack only; a `net.gen` import is approximated by a Volt-VAr droop, §4.5) |
 | Reactive-power limit | `enforce_q_lims` (PV→PQ) | `min/maxkvar` | — | — |
 | Constant power factor | via control | `pf` | — | — |
 | Volt-VAr `Q(V)` | `CharacteristicControl` | `InvControl VOLTVAR` / `ExpControl` | — | — |
@@ -357,15 +359,43 @@ SoC and dispatch live in the time-series layer.**
   resolved per scenario; differentiable w.r.t. irradiance if a sensitivity is wanted, else a
   plain data input.
 
-### 4.5 Optional: a true PV (voltage-regulating) bus
+### 4.5 The PV (voltage-regulating) bus: an approximation today, the real fix later
 
-If voltage-regulating DER/machines are needed (OpenDSS `model=3`, pandapower `gen`), add a
-`|V|`-regulation mode: replace that terminal's power-balance row in the real residual with
-`|V_term| − V_set = 0` and let Q be the free variable, with a smooth Q-saturation for the
-`min/max_q` limit (the smooth analogue of pandapower's PV→PQ switching). This stays inside
-the same `[2N,2N]` IFT residual/Jacobian, so it remains differentiable and batched. Lower
-priority than §4.2 for distribution-feeder DER, which are overwhelmingly PQ/inverter-curve
-controlled.
+If voltage-regulating DER/machines are needed (OpenDSS `model=3`, pandapower `gen`), the
+real fix is a `|V|`-regulation mode: replace that terminal's power-balance row in the real
+residual with `|V_term| − V_set = 0` and let Q be the free variable, with a smooth
+Q-saturation for the `min/max_q` limit (the smooth analogue of pandapower's PV→PQ
+switching). This stays inside the same `[2N,2N]` IFT residual/Jacobian, so it remains
+differentiable and batched, but it needs both a solver change and a schema field to carry
+`V_set`. Lower priority than §4.2 for distribution-feeder DER, which are overwhelmingly
+PQ/inverter-curve controlled.
+
+**What exists today: a droop approximation, opt-in, in the pandapower converter.** A
+Volt-VAr characteristic centred on the generator's `vm_pu` and saturating at its reactive
+limits reproduces PV-bus behaviour in the limit of an infinite slope — the bus is held
+where the droop's reactive output balances the network, i.e. off the setpoint by
+`Q / (slope · Q_base)` per unit, and the reactive limit is enforced by the capability
+bound instead of by a discrete bus-type switch.
+`pgml.convert.pandapower.to_grid(net, gen_mode=GenMode.VOLT_VAR_APPROX)` builds exactly
+that (`gen_volt_var_slope_pu` is the steepness; default 500, i.e. one full reactive base
+per 0.002 pu of voltage). Because the law is an ordinary inverter control it enters
+`I_device(V)` and is differentiated by the same IFT backward — no new machinery.
+
+The approximation's limit is **conditioning, not steady-state fidelity**. Outside the
+`1/slope`-wide band `dQ/d|V|` is exactly zero, so an iterate that starts far from the
+setpoint sees no voltage-control feedback: on heavily loaded transmission benchmarks
+(`case39`, `case118`) the const-Z warm start is far enough out that Newton lands on the
+collapsed low-voltage branch — a genuine second solution of the *approximated* system that
+the exact `|V| − V_set = 0` row would exclude by construction. Measured against a live
+`pp.runpp(..., enforce_q_lims=True)`, the per-bus |V| deviation falls as `1/slope`
+(`case57`: 4.3e-2 pu at slope 5 → 2.3e-4 pu at slope 2000), but the usable steepness caps
+at ~5 on `case118`, and on `case39` every steepness converges *silently* onto the collapsed
+branch (0.49 pu off, all nine machines pinned at their reactive limit). The approximation
+is therefore good for small and moderately loaded networks and for differentiable
+sensitivity studies, and NOT a faithful way to import transmission benchmarks — those need
+the residual-row fix above (and `shunt` conversion). Always sanity-check the converged
+voltage profile against the source network's `res_bus`. Full record:
+`src/pgml/convert/pandapower/CONTEXT.md`.
 
 ### 4.6 Harmonics coupling (already most of the way there)
 
@@ -398,8 +428,9 @@ spectrum tracks the control state with no extra work — and it stays differenti
    change, fully differentiable. *(shipped)*
 2. `Storage` appliance as a signed PQ injection (snapshot only) + SoC/dispatch resolver in
    `scenarios` (§4.4). *(shipped)*
-3. Optional PV-bus regulation mode (§4.5) and harmonic Norton-shunt completion (§4.6) as
-   demand arises. *(open)*
+3. PV-bus regulation mode (§4.5) and harmonic Norton-shunt completion (§4.6) as demand
+   arises. *(open — a Volt-VAr droop approximation of pandapower's `gen` ships in the
+   converter meanwhile)*
 
 Each step is gated by the differentiability + GPU tests and a reference comparison before it
 is considered done.

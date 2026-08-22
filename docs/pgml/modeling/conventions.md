@@ -226,9 +226,10 @@ All four agree (consumer reference for loads, generator reference for generators
 converters pass P/Q through unchanged. ZIP behaviour: pgm `LoadGenType`
 (`const_power/const_impedance/const_current`) maps to pgml's `LoadModel`; pandapower
 `const_z_p_percent`/`const_i_p_percent` (+ the `_q_` twins) map to pgml
-`ZipCoefficients`. (Converter coverage: pgm
-`sym_gen` converts (`Generator`, generation-positive); pandapower `sgen`/`gen` and pgm
-`asym_gen` are **not yet** converted.)
+`ZipCoefficients`. (Converter coverage: pandapower `sgen` and pgm `sym_gen` convert to a
+`Generator`, generation-positive; pandapower `gen` — a PV bus — converts only under the
+opt-in `gen_mode=GenMode.VOLT_VAR_APPROX` (see the converter bullet in §9); pgm `asym_gen`
+is **not yet** converted.)
 
 ---
 
@@ -385,9 +386,14 @@ under-converts. The core model supports each; only the converter intake is missi
   energized via an internal auxiliary bus, so this drops that terminal's shunt too);
   `load` maps the four-column `const_z_p_percent`/`const_i_p_percent`/
   `const_z_q_percent`/`const_i_q_percent` onto `ZipCoefficients` (all-zero, the
-  pandapower default, stays byte-identical). NOT read/converted: `gen` (PV/voltage-controlled
-  buses), `shunt`, `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`,
-  `motor`, `asymmetric_sgen`; an ideal phase-shifter tap
+  pandapower default, stays byte-identical); `gen` (a PV bus: fixed P, regulated `vm_pu`,
+  free Q within `min/max_q_mvar`) is DROPPED by default and converted only under the
+  explicit `gen_mode=GenMode.VOLT_VAR_APPROX`, which APPROXIMATES the PV bus with a steep
+  Volt-VAr droop centred on `vm_pu` and saturating at the reactive limits — it holds |V|
+  near, not at, the setpoint, and a row on the `ext_grid` bus (or flagged `slack`) is
+  skipped (see `src/pgml/convert/pandapower/CONTEXT.md` and
+  the [DER decision record](der-pv-storage.md) §4.5). NOT read/converted: `shunt`, `trafo3w`, `impedance`,
+  `ward`/`xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`; an ideal phase-shifter tap
   (`tap_step_degree`/`tap_phase_shifter`) is not modelled and raises; source
   zero-sequence (`r0x0_max`/`x0x_max`) not read.
 
