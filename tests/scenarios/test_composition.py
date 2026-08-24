@@ -678,3 +678,43 @@ def test_member_emission_capped_at_iec_fraction():
     )
     assert float(roster.mag_rated[hot, 0]) == pytest.approx(cap, rel=1e-9)
     assert float(roster.mag_rated[mild, 0]) == pytest.approx(0.01, rel=1e-9)
+
+
+def test_emission_floor_is_inert_at_zero_and_matches_the_measured_ratio_law():
+    """The affine emission law reduces exactly, and inflates the ratio as measured.
+
+    Measured devices emit a load-INDEPENDENT part, so ``I_h(lam) = A_h + B_h * lam`` and
+    the ratio to the fundamental grows as the device unloads. The correction must leave
+    the rated operating point untouched at any floor, and must vanish bit-for-bit when the
+    floor is zero so a configuration that does not ask for it is unaffected.
+    """
+    import torch
+
+    from pgml.scenarios.composition import _emission_affine
+
+    lam = torch.tensor([0.02, 0.1, 0.25, 0.5, 0.75, 1.0], dtype=torch.float64)
+    zero = torch.zeros_like(lam)
+
+    # A zero floor is exactly the proportional law, not merely close to it.
+    assert torch.all(_emission_affine(lam, zero, zero) == 1.0 + 0.0j)
+
+    # The rated point is unchanged for any floor and any angle.
+    one = torch.ones(1, dtype=torch.float64)
+    for f in (0.0, 0.43, 0.61, 0.73):
+        for d in (0.0, 120.0):
+            rated = _emission_affine(one, one * f, one * d)
+            assert torch.allclose(rated, torch.ones_like(rated))
+
+    # Magnitude follows floor/lam + (1 - floor) — the measured ratio inflation.
+    f = 0.61
+    got = _emission_affine(lam, torch.full_like(lam, f), zero).abs()
+    assert torch.allclose(got, f / lam + (1.0 - f))
+
+    # The angle only moves when the two parts are not co-phased.
+    assert torch.allclose(
+        _emission_affine(lam, torch.full_like(lam, f), zero).angle(), zero
+    )
+    rotated = _emission_affine(
+        lam, torch.full_like(lam, f), torch.full_like(lam, 120.0)
+    )
+    assert rotated.angle().abs().max() > math.radians(10.0)

@@ -655,6 +655,24 @@ class DeviceClassSpec(_Base):
     gamma: tuple[float, float] = (0.0, 0.0)
     #: Range for the per-order phase load-dependence slope ``s_h`` [deg per unit load].
     phase_slope_deg: tuple[float, float] = (0.0, 0.0)
+    #: Range for the per-order LOAD-INDEPENDENT share of the rated harmonic phasor.
+    #:
+    #: Measured devices do not emit a harmonic current proportional to their fundamental.
+    #: A part of the emission is present whenever the device is on and does not scale with
+    #: loading, so the emission is affine, ``I_h(lam) = A_h + B_h * lam``, and the RATIO to
+    #: the fundamental therefore grows as the device unloads. ``emission_floor`` is
+    #: ``|A_h|`` as a share of ``|A_h| + |B_h|``: ``0.0`` (default) restores the purely
+    #: proportional law ``I_h ~ lam`` exactly, ``0.61`` reproduces the ratio inflation
+    #: measured across certified inverters (``ratio(lam) = ratio_rated * (0.39 + 0.61/lam)``).
+    #: The rated (``lam = 1``) emission is unchanged at any value, so this re-shapes the
+    #: load dependence without moving the emission envelope.
+    emission_floor: tuple[float, float] = (0.0, 0.0)
+    #: Range for ``arg(A_h) - arg(B_h)`` [deg], the angle between the load-independent and
+    #: the load-proportional part. Non-zero makes the emission ANGLE move with loading —
+    #: measured devices rotate their harmonic phase as they unload, which decides whether
+    #: two devices at different operating points add or cancel. Ignored when
+    #: ``emission_floor`` is zero.
+    emission_floor_phase_deg: tuple[float, float] = (0.0, 0.0)
 
     #: Diurnal availability shape.
     activity_preset: ActivityPreset = "flat"
@@ -750,7 +768,7 @@ class ConsumerComposition(_Base):
 #: whenever a range changes the drawn population, and recorded in the metadata of every
 #: dataset generated from it — two datasets written from identical configs and seeds can
 #: otherwise differ numerically with nothing to show why.
-DEVICE_LIBRARY_VERSION = "2"
+DEVICE_LIBRARY_VERSION = "3"
 
 
 def default_device_classes() -> list[DeviceClassSpec]:
@@ -758,8 +776,8 @@ def default_device_classes() -> list[DeviceClassSpec]:
 
     Seven plausible LV device characters: a harmonic-free linear base load, an
     SMPS-electronics class (3rd/5th-dominated), an EV charger and a PV inverter (both
-    with the measured falling-THD-fraction-with-load behaviour, ``gamma < 0``; PV
-    injecting), a multi-state inverter drive (white goods: a near-linear heating state vs
+    with the measured falling-THD-fraction-with-load behaviour through
+    ``emission_floor``; PV injecting), a multi-state inverter drive (white goods: a near-linear heating state vs
     a harmonic-rich inverter state), a kW-scale inverter heat pump, and a thermostatic
     resistive heater. Magnitudes are loosely IEC 61000-3-2-shaped plausibility, NOT
     appliance models.
@@ -775,6 +793,17 @@ def default_device_classes() -> list[DeviceClassSpec]:
     continue with the declining envelope of the certification-workbook populations, and
     the emission phase saturates at the full circle from h13, where measured populations
     show no preferred angle.
+
+    The five nonlinear classes carry the load dependence through ``emission_floor``
+    (0.43-0.73, the measured load-independent share of the rated emission) rather than
+    through a ``gamma`` exponent. Certification sweeps and lab racks show an emission
+    FLOOR — the absolute harmonic current grows only 1.2-1.9x while the fundamental grows
+    10x — which makes the ratio to the fundamental inflate 6-10x between rated and 10 %
+    loading and puts a cancellation null inside the operating range. A power law cannot
+    reproduce that: its elasticity ``d ln|I_h| / d ln lam`` is the constant ``1 + gamma``,
+    where the measured elasticity is 0.04-0.08 at 10 % loading and 0.54-0.82 at rated.
+    The mean loadings reach further down than the emission-envelope draw alone would
+    need, because the whole effect lives below ``lam ~ 0.3``.
     """
     return [
         DeviceClassSpec(
@@ -815,12 +844,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-0.2, 0.1),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-20.0, 20.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="household",
             on_off_dwell=(0.5, 0.8),
             loading_min=0.1,
-            loading_mean=(0.3, 0.9),
+            loading_mean=(0.15, 0.9),
         ),
         DeviceClassSpec(
             name="ev_charger",
@@ -853,12 +884,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
             # session tracks the drawn power, so the emission carries fundamental
             # information. A steeply negative exponent makes the harmonic current almost
             # loading-independent and the spectrum uninformative about P.
-            gamma=(-0.8, -0.2),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-15.0, 15.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="ev",
             on_off_dwell=(0.6, 0.82),
             loading_min=0.2,
-            loading_mean=(0.7, 1.0),
+            loading_mean=(0.25, 1.0),
         ),
         DeviceClassSpec(
             name="pv_inverter",
@@ -886,12 +919,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-1.3, -0.6),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-25.0, 25.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="pv",
             discrete_activity=False,
             loading_min=0.05,
-            loading_mean=(0.5, 1.0),
+            loading_mean=(0.2, 1.0),
         ),
         DeviceClassSpec(
             name="inverter_drive",
@@ -920,12 +955,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-0.4, 0.2),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-30.0, 30.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="household",
             on_off_dwell=(0.6, 0.85),
             loading_min=0.15,
-            loading_mean=(0.4, 1.0),
+            loading_mean=(0.2, 1.0),
             states=[
                 DeviceState(
                     name="heating", power_fraction=0.95, spectrum_scale=0.2, weight=0.5
@@ -966,12 +1003,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-0.5, 0.0),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-20.0, 20.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="flat",
             on_off_dwell=(0.9, 0.98),
-            loading_min=0.3,
-            loading_mean=(0.5, 0.95),
+            loading_min=0.15,
+            loading_mean=(0.2, 0.95),
             loading_jitter=0.08,
         ),
         DeviceClassSpec(

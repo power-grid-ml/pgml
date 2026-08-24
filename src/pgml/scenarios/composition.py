@@ -102,6 +102,34 @@ def _phase_law(ang0: Tensor, slope: Tensor, lam: Tensor) -> Tensor:
     return ang0 + slope * (lam - 1.0)
 
 
+def _emission_affine(lam: Tensor, floor: Tensor, delta_deg: Tensor) -> Tensor:
+    """The affine emission law ``I_h(lam) = A_h + B_h * lam``, as a complex correction.
+
+    Returned is ``z(lam) / (lam * z(1))`` with ``z(lam) = floor * exp(j * delta) +
+    (1 - floor) * lam``, so multiplying the purely proportional member phasor by it gives
+    the affine one while leaving the RATED (``lam = 1``) emission untouched. ``floor`` is
+    ``|A_h|`` as a share of ``|A_h| + |B_h|`` and ``delta_deg`` is ``arg(A_h) - arg(B_h)``.
+
+    At ``floor = 0`` this is exactly ``1 + 0j`` — ``lam / lam`` is 1.0 in IEEE arithmetic
+    for any finite non-zero ``lam`` — so the proportional law is recovered bit-for-bit.
+    """
+    a = floor * torch.exp(1j * torch.deg2rad(delta_deg))
+    z = a + (1.0 - floor) * lam
+    z_rated = a + (1.0 - floor)
+    return z / (lam.clamp(min=1e-9) * z_rated)
+
+
+def _urange_opt(gen: torch.Generator, rng: tuple, shape=()) -> Tensor:
+    """``_urange``, but a zero-width range at zero draws nothing and consumes no RNG.
+
+    Keeps the random stream — and therefore every existing dataset — identical unless the
+    optional parameter this draws is actually configured.
+    """
+    if float(rng[0]) == 0.0 and float(rng[1]) == 0.0:
+        return torch.zeros(shape, dtype=_F64)
+    return _urange(gen, rng, shape)
+
+
 def _aggregate_injection(
     c_agg: Tensor, f_agg: Tensor, max_injection_pu: float
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -238,6 +266,8 @@ class _Roster:
     ang0: Tensor  # [M, n_ord]
     gamma: Tensor  # [M, n_ord]
     slope: Tensor  # [M, n_ord]
+    emission_floor: Tensor  # [M, n_ord]
+    emission_floor_phase: Tensor  # [M, n_ord] deg
     lam_min: Tensor  # [M]
     loading_jitter: Tensor  # [M]
     loading_rho: Tensor  # [M]
@@ -332,6 +362,7 @@ def _build_roster(
     load_idx, class_idx = [], []
     p_rated, sign, tan_phi = [], [], []
     mag_rated, ang0, gamma, slope = [], [], [], []
+    e_floor, e_floor_phase = [], []
     lam_min, ljit, lrho, stick = [], [], [], []
     discrete, use_cloud, preset = [], [], []
     state_pfrac, state_sscale, state_wpad, n_states, sdwell = [], [], [], [], []
@@ -363,6 +394,8 @@ def _build_roster(
                 a0 = al + (ah - al) * torch.rand((n_ord,), generator=gen, dtype=_F64)
                 gam = _urange(gen, cls.gamma, (n_ord,))
                 slp = _urange(gen, cls.phase_slope_deg, (n_ord,))
+                efl = _urange_opt(gen, cls.emission_floor, (n_ord,))
+                efp = _urange_opt(gen, cls.emission_floor_phase_deg, (n_ord,))
                 lam_mean = _urange(gen, cls.loading_mean)
                 st = _urange(gen, cls.on_off_dwell)
                 sd = _urange(gen, cls.state_dwell)
@@ -377,6 +410,8 @@ def _build_roster(
                 ang0.append(a0)
                 gamma.append(gam)
                 slope.append(slp)
+                e_floor.append(efl)
+                e_floor_phase.append(efp)
                 lam_min.append(cls.loading_min)
                 ljit.append(cls.loading_jitter)
                 lrho.append(cls.loading_rho)
@@ -456,6 +491,8 @@ def _build_roster(
             ang0=torch.zeros((0, n_ord), dtype=_F64),
             gamma=torch.zeros((0, n_ord), dtype=_F64),
             slope=torch.zeros((0, n_ord), dtype=_F64),
+            emission_floor=torch.zeros((0, n_ord), dtype=_F64),
+            emission_floor_phase=torch.zeros((0, n_ord), dtype=_F64),
             lam_min=empty,
             loading_jitter=empty,
             loading_rho=empty,
@@ -492,6 +529,8 @@ def _build_roster(
         ang0=torch.stack(ang0),
         gamma=torch.stack(gamma),
         slope=torch.stack(slope),
+        emission_floor=torch.stack(e_floor),
+        emission_floor_phase=torch.stack(e_floor_phase),
         lam_min=torch.tensor(lam_min, dtype=_F64),
         loading_jitter=torch.tensor(ljit, dtype=_F64),
         loading_rho=torch.tensor(lrho, dtype=_F64),
@@ -664,8 +703,17 @@ def sample_device_composition(
         r.ang0.reshape(1, m, n_ord, 1), r.slope.reshape(1, m, n_ord, 1), lam_o
     )  # [B, M, n_ord, T] deg
     scale_d = active_mag.unsqueeze(2)  # [B, M, 1, T]
+    affine = _emission_affine(
+        lam_o,
+        r.emission_floor.reshape(1, m, n_ord, 1),
+        r.emission_floor_phase.reshape(1, m, n_ord, 1),
+    )  # [B, M, n_ord, T] complex, exactly 1 when the floor is zero
     c_member = (
-        sign.unsqueeze(2) * mag_h * scale_d * torch.exp(1j * torch.deg2rad(ang_h))
+        sign.unsqueeze(2)
+        * mag_h
+        * scale_d
+        * torch.exp(1j * torch.deg2rad(ang_h))
+        * affine
     )  # [B, M, n_ord, T] complex
     f_member = torch.complex(p_member, torch.zeros_like(p_member))  # [B, M, T]
 
