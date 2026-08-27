@@ -58,6 +58,26 @@ def _slice_inj_range(injection: dict, start: int, end: int) -> dict:
     }
 
 
+def _slice_sources(sources, start: int, end: int) -> list:
+    """The batched ``node_sources`` over ``[start:end]`` of the SCENARIO axis.
+
+    ``source_power_va`` is a batch-independent constant, so only the spectrum is sliced
+    and the network stamp each source contributes is identical across chunks.
+    """
+    from dataclasses import replace
+
+    return [
+        replace(
+            src,
+            spectrum={
+                order: tuple(_slice_range(c, start, end) for c in pair)
+                for order, pair in src.spectrum.items()
+            },
+        )
+        for src in sources
+    ]
+
+
 @dataclass(frozen=True)
 class ScenarioResult:
     """Batched results for a scenario config.
@@ -201,7 +221,7 @@ def run_scenarios(
         else None
     )
 
-    def _solve(op, inj):
+    def _solve(op, inj, sources=()):
         """Solve one (sub)batch -> (v, index, converged, failed_states, frequencies)."""
         if calculation == "power_flow":
             r = solve_power_flow(
@@ -221,6 +241,7 @@ def run_scenarios(
                 slack=slack,
                 operating_point=op,
                 harmonic_injection=inj,
+                node_sources=list(sources) or None,
                 symmetry=symmetry,
                 dtype=dtype,
                 device=device,
@@ -232,10 +253,11 @@ def run_scenarios(
 
     op_full = sampled.operating_point
     inj_full = sampled.harmonic_injection or None
+    src_full = getattr(sampled, "node_sources", []) or []
     b = int(sampled.n_samples)
 
     if chunk_size is None or chunk_size >= b or b <= 1:
-        v, index, converged, failed, freqs = _solve(op_full, inj_full)
+        v, index, converged, failed, freqs = _solve(op_full, inj_full, src_full)
         if output_device is not None:
             v = v.to(output_device)
         return ScenarioResult(
@@ -265,7 +287,8 @@ def run_scenarios(
         end = min(start + chunk_size, b)
         op_c = _slice_op_range(op_full, start, end)
         inj_c = _slice_inj_range(inj_full, start, end) if inj_full else None
-        v_c, index, conv_c, failed_c, freqs = _solve(op_c, inj_c)
+        src_c = _slice_sources(src_full, start, end) if src_full else []
+        v_c, index, conv_c, failed_c, freqs = _solve(op_c, inj_c, src_c)
         if v_c.ndim == batched_ndim - 1:
             v_c = v_c.unsqueeze(0)
         # move each chunk OFF the solve device as it is produced (when requested) so the

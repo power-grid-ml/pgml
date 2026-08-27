@@ -34,6 +34,7 @@ from .composition import (
     sample_device_composition,
 )
 from .config import (
+    BackgroundHarmonicConfig,
     CoherentSpectrumConfig,
     ScenarioConfig,
     Selector,
@@ -335,13 +336,76 @@ def sample_coherent_spectra(
                 config.start_time, config.step_size_s, t
             )[0]
 
+    node_sources = (
+        build_background_sources(
+            grid,
+            config.background,
+            (b, t) if t > 1 else (b,),
+            torch.Generator().manual_seed(config.seed + 8117),
+        )
+        if config.background is not None
+        else []
+    )
     return SampledScenarios(
         operating_point=operating_point,
         samples=samples,
         n_samples=b,
         config=config,
         harmonic_injection=harmonic_injection,
+        node_sources=node_sources,
     )
+
+
+def build_background_sources(
+    grid: Grid,
+    config: BackgroundHarmonicConfig,
+    shape: tuple,
+    gen: torch.Generator,
+) -> list:
+    """Realize the upstream background as one batched ``NodeHarmonicSource``.
+
+    ``shape`` is the batch shape the spectrum tensors take — ``(B,)`` for snapshots,
+    ``(B, T)`` for sequences, where the AR(1) drift runs along the LAST axis. One drift
+    series is shared by every order and every device on the feeder, which is the point:
+    what the background contributes is common, not private to a device.
+
+    Returns an empty list when no order is configured, so a caller can pass the result
+    through unconditionally.
+    """
+    from pgml.solver import NodeHarmonicSource
+
+    if not config.magnitude_pu:
+        return []
+    node_id = config.node_id
+    if node_id is None:
+        sources = [a for a in grid.appliances if type(a).__name__ == "Source"]
+        if not sources:
+            raise InputError(
+                "BackgroundHarmonicConfig.node_id is None and the grid has no Source to "
+                "resolve it from; set node_id explicitly."
+            )
+        node_id = int(sources[0].node)
+
+    if config.drift_std > 0.0 or config.drift_phase_deg > 0.0:
+        drift = _ar1(shape, config.drift_rho, gen)
+    else:
+        drift = torch.zeros(shape, dtype=_F64)
+    spectrum = {}
+    for order, mag in sorted(config.magnitude_pu.items()):
+        ang0 = float(config.phase_deg.get(order, 0.0))
+        spectrum[int(order)] = (
+            float(mag) * torch.exp(config.drift_std * drift),
+            ang0 + config.drift_phase_deg * drift,
+        )
+    return [
+        NodeHarmonicSource(
+            node_id=int(node_id),
+            phases=None,
+            spectrum=spectrum,
+            source_power_va=float(config.source_power_va),
+            kind="voltage",
+        )
+    ]
 
 
 def spectrum_sweep(

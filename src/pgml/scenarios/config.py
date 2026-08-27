@@ -1123,6 +1123,60 @@ def composition_silent_orders(
     return [o for o in sorted({int(o) for o in orders}) if o > 1 and o not in emitting]
 
 
+class BackgroundHarmonicConfig(_Base):
+    """A slowly-varying UPSTREAM harmonic background, injected at the grid's source.
+
+    Every device behind a common supply sees the same background distortion, so the part
+    of a measured harmonic that its own fundamental does not explain is largely SHARED
+    across the devices rather than private to each. Bench measurements of six inverter
+    racks driven together show 54-93 % of that unexplained emission to be common to all of
+    them within an acquisition, which a per-device emission model cannot produce: the
+    common part comes from the network upstream, not from the devices.
+
+    Realised as the Thevenin source of ``docs/pgml/modeling/error-injection.md`` at
+    ``node_id`` (default: the grid's ``Source`` node), present in EVERY scenario rather
+    than swept one node at a time as :func:`~pgml.scenarios.run_node_injection_sweep`
+    does. ``source_power_va`` is constant across the batch, so ``Y(h)`` is unchanged
+    scenario-to-scenario and only the Norton current varies — the batched solve is
+    preserved.
+
+    The level drifts along the STEP axis as an AR(1) shared by every order, because an
+    upstream background moves on the timescale of the supplying network's own load rather
+    than with anything local. Note the drift is a per-step process: a recipe whose steps
+    are far apart relative to the drift's correlation time samples it as white noise.
+
+    ``magnitude_pu`` empty (the default) disables the background entirely, and a run
+    configured without it is byte-identical to one from before this field existed.
+    """
+
+    #: Per-order background VOLTAGE distortion at the source, per unit of the fundamental:
+    #: ``{order: magnitude_pu}``. Empty (default) = no background.
+    magnitude_pu: dict[int, float] = Field(default_factory=dict)
+    #: Per-order background phase [deg]; orders absent here default to 0.
+    phase_deg: dict[int, float] = Field(default_factory=dict)
+    #: Node to inject at. ``None`` (default) resolves the grid's ``Source`` node.
+    node_id: Optional[int] = None
+    #: Source strength ``S_sc`` [VA] — larger is stiffer, so more of the background
+    #: appears at the node. Constant across the batch to keep ``Y(h)`` batched.
+    source_power_va: float = Field(default=20e6, gt=0.0)
+    #: Log-magnitude std of the shared slow drift (``0.0`` = a fixed background level).
+    drift_std: float = Field(default=0.0, ge=0.0)
+    #: Angle std [deg] of the same drift.
+    drift_phase_deg: float = Field(default=0.0, ge=0.0)
+    #: AR(1) stickiness of the drift along the step axis.
+    drift_rho: float = Field(default=0.99, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _check(self) -> "BackgroundHarmonicConfig":
+        bad = [o for o in self.magnitude_pu if o < 2]
+        if bad:
+            raise ValueError(
+                f"BackgroundHarmonicConfig magnitude_pu orders must be >= 2, got {bad}: "
+                "the fundamental is set by the source's own voltage, not the background."
+            )
+        return self
+
+
 class CompositionConfig(_Base):
     """Statistical device-class composition of aggregated loads.
 
@@ -1293,6 +1347,8 @@ class CoherentSpectrumConfig(_Base):
     # Statistical device-class composition of aggregated loads (supersedes the
     # fingerprint + fundamental for the loads it covers). Requires ``start_time``.
     composition: Optional[CompositionConfig] = None
+    #: Upstream harmonic background at the source, shared by every device on the feeder.
+    background: Optional[BackgroundHarmonicConfig] = None
     # Absolute anchor for the profile's daily / weekly / seasonal phases (ISO 8601).
     # A naive (timezone-less) timestamp is interpreted as UTC.
     start_time: Optional[str] = None

@@ -718,3 +718,56 @@ def test_emission_floor_is_inert_at_zero_and_matches_the_measured_ratio_law():
         lam, torch.full_like(lam, f), torch.full_like(lam, 120.0)
     )
     assert rotated.angle().abs().max() > math.radians(10.0)
+
+
+def test_upstream_background_reaches_every_node_and_is_inert_when_unset():
+    """The background is shared by the whole feeder, and absent unless configured.
+
+    A device-side emission model can only produce a residual that is private to each
+    device; what the bench measures is largely COMMON across devices behind one supply.
+    The background source is what supplies that, so it has to (a) change the harmonic
+    state at nodes far from where any device injects, (b) move them TOGETHER, and (c) do
+    nothing at all when no order is configured.
+    """
+    import torch
+
+    from pgml.scenarios import BackgroundHarmonicConfig
+
+    grid = _two_load_grid()
+    cfg = _ccfg(n_steps=6, n_scenarios=5, seed=2)
+    orders = [1, *cfg.orders]
+
+    plain = run_scenarios(grid, cfg, dtype=CDT)
+    empty = _ccfg(n_steps=6, n_scenarios=5, seed=2).model_copy(
+        update={"background": BackgroundHarmonicConfig()}
+    )
+    assert torch.equal(run_scenarios(grid, empty, dtype=CDT).v, plain.v), (
+        "an unconfigured background must leave the solve untouched"
+    )
+
+    order = int(cfg.orders[0])
+    with_bg = _ccfg(n_steps=6, n_scenarios=5, seed=2).model_copy(
+        update={
+            "background": BackgroundHarmonicConfig(
+                magnitude_pu={order: 0.03}, drift_std=0.4, drift_rho=0.9
+            )
+        }
+    )
+    got = run_scenarios(grid, with_bg, dtype=CDT)
+    assert not torch.equal(got.v, plain.v), (
+        "a configured background must reach the solve"
+    )
+
+    # the fundamental is preserved exactly: the source only acts at h > 1
+    h1 = orders.index(1)
+    assert torch.allclose(got.v[..., h1, :], plain.v[..., h1, :], atol=1e-9)
+
+    # the background moves the nodes TOGETHER — that shared motion is its whole purpose
+    hi = orders.index(order)
+    delta = (got.v[..., hi, :] - plain.v[..., hi, :]).reshape(-1, got.v.shape[-1])
+    assert delta.abs().min() > 0, "every node should see the upstream background"
+    a = delta[:, 0].abs()
+    corr = torch.corrcoef(torch.stack([a, delta[:, -1].abs()]).to(torch.float64))[0, 1]
+    assert corr > 0.9, (
+        f"node responses should share the upstream state, got r={corr:.3f}"
+    )
