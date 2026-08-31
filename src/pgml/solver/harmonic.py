@@ -239,6 +239,234 @@ def solve_anchored(
     return v_full.reshape(-1) if unbatched else v_full
 
 
+class AnchoredSystem:
+    r"""Factor-once state of the measurement-anchored solve of ONE shared operator.
+
+    Precomputes, per network operator, exactly what :func:`solve_anchored` rebuilds on
+    every call — the free-block inverse map ``Z = Y_ff^{-1}``, the slack coupling
+    ``Y_fs`` and, when a branch operator is given, its image ``O = op_free · Z`` — so a
+    training loop that solves the SAME network thousands of times pays the ``O(F^3)``
+    factorization once. :meth:`solve` then answers each batch through the push-through
+    identity on the ANCHORED rows only: with ``B = \sqrt{W}\,A\,Z`` (``[R, F]``, ``R`` =
+    anchored rows + anchored channels of the batch) the correction system
+    ``(I + B^H B)\,r = -B^H d`` is solved as ``r = -B^H (I_R + B B^H)^{-1} d`` — a
+    Cholesky of the ``[R, R]`` capacitance matrix instead of the dense ``[F, F]`` build
+    ``G = I + Z^H W Z`` plus its factorization. With ``R \ll F`` (few sensors on a large
+    feeder) the per-call cost drops from ``O(F^3)`` to ``O(R^2 F + R^3)``; the result is
+    ALGEBRAICALLY identical to :func:`solve_anchored` on the same inputs (it optimizes
+    the same identity-floored objective; rounding differs at machine precision). The
+    capacitance matrix is Hermitian PD with eigenvalues ``\ge 1``, so the small Cholesky
+    inherits the stability of the identity floor.
+
+    The cached tensors are CONSTANTS: construction refuses an operator on the autograd
+    tape (use :func:`solve_anchored` when gradients w.r.t. ``Y`` or ``op`` are needed —
+    e.g. a learned-parameter calibration). Gradients still flow through :meth:`solve`
+    w.r.t. the right-hand side, the anchor targets, the anchor weights and ``v_fixed``.
+
+    Parameters
+    ----------
+    y_bus:
+        Complex ``[N, N]`` shared network operator (one system; loop externally over
+        harmonic orders / topologies), NOT requiring grad.
+    op:
+        Optional complex ``[K, N]`` grid-constant linear operator (e.g. the branch-current
+        map), NOT requiring grad. Required to anchor ``op·V`` in :meth:`solve`.
+    fixed_rows, v_fixed contract, anchor semantics and shapes: :func:`solve_anchored`.
+    """
+
+    def __init__(
+        self,
+        y_bus: Tensor,
+        *,
+        op: Optional[Tensor] = None,
+        fixed_rows: Optional[Tensor] = None,
+    ) -> None:
+        if y_bus.ndim != 2:
+            raise InputError(
+                "AnchoredSystem takes a single shared operator y_bus [N, N]; loop "
+                "externally over any harmonic/topology axis."
+            )
+        if y_bus.requires_grad or (op is not None and op.requires_grad):
+            raise InputError(
+                "AnchoredSystem caches Y (and op) as constants; for gradients w.r.t. "
+                "the operator use solve_anchored, which keeps it on the tape."
+            )
+        dev, n = y_bus.device, y_bus.shape[-1]
+        self.n = n
+        self.dtype = y_bus.dtype
+        self.device = dev
+        if fixed_rows is not None:
+            fixed_rows = fixed_rows.to(device=dev, dtype=torch.int64)
+            keep = torch.ones(n, dtype=torch.bool, device=dev).index_fill(
+                0, fixed_rows, False
+            )
+            free = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+        else:
+            free = torch.arange(n, device=dev)
+        self.fixed_rows = fixed_rows
+        self.free_rows = free
+        f = int(free.numel())
+        y_ff = _index_2d(y_bus, free, free)
+        self.z = torch.linalg.solve(
+            y_ff, torch.eye(f, dtype=y_bus.dtype, device=dev)
+        )  # [F, F]
+        self.y_fs = (
+            _index_2d(y_bus, free, fixed_rows) if fixed_rows is not None else None
+        )
+        self.oz = op.index_select(-1, free) @ self.z if op is not None else None
+        self.op_fx = (
+            op.index_select(-1, fixed_rows)
+            if op is not None and fixed_rows is not None
+            else None
+        )
+
+    def nbytes(self) -> int:
+        """Bytes held by the cached operator tensors (the cache-budget accounting unit)."""
+        total = self.z.numel() * self.z.element_size()
+        for t in (self.y_fs, self.oz, self.op_fx):
+            if t is not None:
+                total += t.numel() * t.element_size()
+        return total
+
+    def to(self, device) -> "AnchoredSystem":
+        """Move the cached tensors; returns self."""
+        device = torch.device(device)
+        self.device = device
+        self.free_rows = self.free_rows.to(device)
+        self.z = self.z.to(device)
+        if self.fixed_rows is not None:
+            self.fixed_rows = self.fixed_rows.to(device)
+        if self.y_fs is not None:
+            self.y_fs = self.y_fs.to(device)
+        if self.oz is not None:
+            self.oz = self.oz.to(device)
+        if self.op_fx is not None:
+            self.op_fx = self.op_fx.to(device)
+        return self
+
+    @staticmethod
+    def _anchor_block(mat: Tensor, weight: Tensor, resid: Tensor):
+        """The weighted anchor rows of one term: ``(sqrt(w)·mat[sel], sqrt(w)·resid[sel])``.
+
+        ``mat`` ``[K, F]`` are the term's candidate rows (``Z`` for node anchors, ``O·Z``
+        for channel anchors), ``weight`` ``[*b, K]`` its nonnegative per-sample weights and
+        ``resid`` ``[*b, K]`` the anchored residual at every candidate. Each sample keeps
+        only its positively-weighted rows; samples with fewer than the batch maximum are
+        padded with zero-weight rows, which contribute zero equations exactly. The weight
+        pattern is index data (not a gradient path), so the selection is off the tape;
+        returns ``None`` when no sample anchors any row.
+        """
+        present = weight > 0
+        r = int(present.sum(dim=-1).max())
+        if r == 0:
+            return None
+        order = torch.argsort(
+            present.to(torch.int8), dim=-1, descending=True, stable=True
+        )[..., :r]  # [*b, R]
+        sw = weight.gather(-1, order).clamp_min(0.0).sqrt().to(mat.dtype)
+        rows = mat.index_select(0, order.reshape(-1)).reshape(
+            *order.shape, mat.shape[-1]
+        )  # [*b, R, F]
+        return sw.unsqueeze(-1) * rows, sw * resid.gather(-1, order)
+
+    def solve(
+        self,
+        i_inj: Tensor,
+        *,
+        row_weight: Optional[Tensor] = None,
+        row_target: Optional[Tensor] = None,
+        op_weight: Optional[Tensor] = None,
+        op_target: Optional[Tensor] = None,
+        v_fixed: Optional[Tensor] = None,
+    ) -> Tensor:
+        """The anchored solve against the cached factorization; contract of :func:`solve_anchored`.
+
+        ``op_weight``/``op_target`` anchor the constructor's ``op`` (which must have been
+        given); ``v_fixed`` is required exactly when the system was built with
+        ``fixed_rows``. Without anchors this is the plain factored solve ``V = Z·rhs``.
+        """
+        dtype, dev = self.dtype, self.device
+        rdt = self.z.real.dtype if self.z.is_complex() else self.z.dtype
+        unbatched = i_inj.ndim == 1
+        i = (i_inj.reshape(1, -1) if unbatched else i_inj).to(dtype)  # [*b, N]
+        if unbatched:
+            # the anchor tensors share the missing batch axis of a 1-D right-hand side
+            if row_weight is not None and row_weight.ndim == 1:
+                row_weight = row_weight.unsqueeze(0)
+            if row_target is not None and row_target.ndim == 1:
+                row_target = row_target.unsqueeze(0)
+            if op_weight is not None and op_weight.ndim == 1:
+                op_weight = op_weight.unsqueeze(0)
+            if op_target is not None and op_target.ndim == 1:
+                op_target = op_target.unsqueeze(0)
+        free = self.free_rows
+        f = int(free.numel())
+
+        i_free = i.index_select(-1, free)
+        if self.fixed_rows is not None:
+            if v_fixed is None:
+                raise InputError(
+                    "this AnchoredSystem holds fixed rows; its solve requires v_fixed."
+                )
+            vf = v_fixed.to(dtype=dtype, device=dev)
+            vf = vf.broadcast_to(*i_free.shape[:-1], self.fixed_rows.numel())
+            rhs = i_free - torch.matmul(self.y_fs, vf.unsqueeze(-1)).squeeze(-1)
+        else:
+            rhs = i_free
+        v0 = torch.matmul(self.z, rhs.unsqueeze(-1)).squeeze(-1)  # [*b, F]
+
+        blocks = []
+        if row_weight is not None:
+            wr = row_weight.index_select(-1, free).to(rdt)
+            tgt = (
+                row_target.index_select(-1, free).to(dtype)
+                if row_target is not None
+                else torch.zeros((), dtype=dtype, device=dev)
+            )
+            block = self._anchor_block(self.z, wr, v0 - tgt)
+            if block is not None:
+                blocks.append(block)
+        if op_weight is not None:
+            if self.oz is None:
+                raise InputError(
+                    "op_weight given but this AnchoredSystem was built without op."
+                )
+            wo = op_weight.to(rdt)
+            op_v0 = torch.matmul(self.oz, rhs.unsqueeze(-1)).squeeze(-1)  # [*b, K]
+            ot = (
+                op_target.to(dtype)
+                if op_target is not None
+                else torch.zeros((), dtype=dtype, device=dev)
+            )
+            if self.op_fx is not None:
+                ot = ot - torch.matmul(self.op_fx, vf.unsqueeze(-1)).squeeze(-1)
+            block = self._anchor_block(self.oz, wo, op_v0 - ot)
+            if block is not None:
+                blocks.append(block)
+
+        if blocks:
+            b_mat = torch.cat([b for b, _ in blocks], dim=-2)  # [*b, R, F]
+            d = torch.cat([d for _, d in blocks], dim=-1)  # [*b, R]
+            r_rows = b_mat.shape[-2]
+            cap = torch.eye(r_rows, dtype=dtype, device=dev) + torch.matmul(
+                b_mat, b_mat.conj().mT
+            )
+            s = torch.cholesky_solve(d.unsqueeze(-1), torch.linalg.cholesky(cap))
+            r = -torch.matmul(b_mat.conj().mT, s).squeeze(-1)  # [*b, F]
+            v_free = v0 + torch.matmul(self.z, r.unsqueeze(-1)).squeeze(-1)
+        else:
+            v_free = v0
+
+        lead = v_free.shape[:-1]
+        v_full = torch.zeros(*lead, self.n, dtype=dtype, device=dev)
+        v_full = v_full.scatter(-1, free.expand(*lead, f), v_free)
+        if self.fixed_rows is not None:
+            v_full = v_full.scatter(
+                -1, self.fixed_rows.expand(*lead, self.fixed_rows.numel()), vf
+            )
+        return v_full.reshape(-1) if unbatched else v_full
+
+
 def _solve_norton(y: Tensor, i: Tensor) -> Tensor:
     """Dense solve ``v = Y^-1 I`` broadcasting over leading dims and H.
 

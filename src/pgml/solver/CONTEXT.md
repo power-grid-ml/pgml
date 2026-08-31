@@ -36,6 +36,21 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   - Gradients flow w.r.t. `y_bus`, `i_inj`, the targets and `op`. Consumers: the pgl
     injection-decode anchoring (`pgl.physics.NetworkSolver`); reusable for a classical WLS
     state-estimation solve.
+- `AnchoredSystem(y_bus, *, op=None, fixed_rows=None)` — FACTOR-ONCE state of the anchored
+  solve of ONE shared operator: precomputes what `solve_anchored` rebuilds per call (the
+  free-block inverse image `Z = Y_ff⁻¹`, the slack coupling, `op_free·Z`).
+  `.solve(i_inj, *, row_weight=None, row_target=None, op_weight=None, op_target=None,
+  v_fixed=None) -> v` answers each batch through the push-through identity on the ANCHORED
+  rows: with `B = √W·A·Z` `[R,F]` the correction is `r = −Bᴴ(I_R + BBᴴ)⁻¹d` — a Cholesky of
+  the `[R,R]` capacitance instead of the dense `[F,F]` build + factorization, `O(R²F+R³)`
+  per call for `R` anchored channels. Algebraically identical to `solve_anchored` on the
+  same inputs (same identity-floored objective; rounding differs at machine precision);
+  per-sample heterogeneous anchor patterns are padded with zero-weight rows (exact).
+  Construction REFUSES an operator on the autograd tape (the cached images are constants —
+  use `solve_anchored` for a learned `Y`); gradients flow through `.solve` w.r.t. the RHS,
+  the targets, the weights and `v_fixed`. `.nbytes()` (cache accounting) / `.to(device)`.
+  Consumer: the pgl operator cache (`pgl.physics.NetworkSolver.enable_operator_cache`) for
+  training runs that solve the same network tens of thousands of times.
 
 ## Slack / reference handling (both modes, both differentiable)
 1. **Norton (default, `fixed_rows=None`)**: sources are already stamped as a shunt
