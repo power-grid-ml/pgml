@@ -714,16 +714,19 @@ def _apply_y(y_eff, v: Tensor) -> Tensor:
 def _y_eff_and_islack(
     grid, f0, index, dtype, device, slack, param_overrides, branch_states=None
 ):
-    """Effective admittance ``Y_eff`` ``[1,N,N]`` and slack current ``[1,N]`` or ``[N]``.
+    """Effective admittance ``Y_eff`` ``[N,N]`` / ``[*batch,N,N]`` and slack current ``[N]``.
 
     ``slack="norton"``: ``Y_eff = Y_net + Y_srcNorton``, ``I_slack`` = source
     Norton current. ``slack="ideal"``: ``Y_eff = Y_net``, ``I_slack`` = 0 (slack
     rows pinned by the Schur solve in :func:`solve_harmonic`).
 
-    Batched ``branch_states`` promote ``Y_eff`` to per-scenario matrices; the
-    singleton frequency axis is folded away then (``[*batch, N, N]``) so every
-    leading dim is a scenario dim — the shape the fixed point, Newton, and the
-    IFT backward treat uniformly.
+    The assembly's singleton frequency axis is folded away HERE — it is only known
+    to be the frequency axis at this producer — so every leading dim downstream is
+    a SCENARIO dim: the fixed point, Newton, and the IFT backward never have to
+    guess whether a size-1 dim is the frequency axis or a genuine batch dim of one
+    (an operating point batched ``[B, 1]`` carries exactly such a dim, and a
+    value-based squeeze would silently mix its scenarios). Batched
+    ``branch_states`` promote ``Y_eff`` to per-scenario matrices ``[*batch, N, N]``.
     """
     yb = assemble_network_ybus(
         grid,
@@ -734,6 +737,7 @@ def _y_eff_and_islack(
         branch_states=branch_states,
     )
     y = yb.Y  # [1, N, N] or [*batch, 1, N, N] (batched branch states)
+    has_freq_axis = y.ndim == 3  # ndim > 3: batched states, frequency axis folded next
     if y.ndim > 3:
         y = y.squeeze(-3)  # [*batch, N, N]
     if slack == "norton":
@@ -748,9 +752,11 @@ def _y_eff_and_islack(
             dtype=dtype,
             device=device,
             param_overrides=param_overrides,
-        )  # [1, N]
+        ).squeeze(-2)  # [*b, 1, N] -> [*b, N] (the single-frequency axis, positionally)
     else:
         i_slack = torch.zeros(y.shape[-1], dtype=y.dtype, device=y.device)
+    if has_freq_axis:
+        y = y.squeeze(-3)  # [*b, 1, N, N] -> [*b, N, N]: the single-frequency axis
     return y, i_slack
 
 
@@ -1688,6 +1694,8 @@ def _current_injection_forward(
             y_eff0, i_slack0 = system.y_eff, system.i_slack
         else:
             y_eff0, i_slack0 = build_system()
+        # Every leading dim of y_eff0 / i_slack0 is a SCENARIO dim (the frequency
+        # axis is folded away in _y_eff_and_islack), so this broadcast is pure batch.
         lead = torch.broadcast_shapes(i_slack0.shape[:-1], y_eff0.shape[:-2])
         # Phase-aware balanced warm start: the source reference magnitude rotated by
         # the standard positive-sequence angle of each row's phase (a=0, b=-120,
@@ -1773,10 +1781,10 @@ def _current_injection_forward(
         for _ in range(max_iter):
             i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
             rhs = i_slack0 - i_dev
+            # The factorization carries no frequency axis, so the solution keeps
+            # exactly the right-hand side's batch shape — a trailing singleton batch
+            # dim (an operating point batched [B, 1]) passes through untouched.
             v_new = _factored_solve(fac, rhs, v_fixed)
-            # solve_factored carries Y's leading H=1; drop the singleton axis.
-            if v_new.ndim >= 2 and v_new.shape[-2] == 1 and v_new.shape[-1] == n:
-                v_new = v_new.squeeze(-2)
             # Per-element update + dtype-aware threshold max(tol, floor*||V||). For
             # float64 floor=0 so this is exactly ||ΔV|| < tol (unchanged); for float32
             # the floor caps tol at the achievable relative precision.
@@ -1846,11 +1854,16 @@ def _linear_const_z_init(
     finally:
         pgml_log.setLevel(prev)
     if yb.Y.ndim > 3:
-        y_lin = yb.Y.squeeze(-3)  # [*batch, N, N] (batched branch states)
-    elif yb.Y.ndim == 3:
-        y_lin = yb.Y  # [1, N, N]
+        # Batch dims (a batched operating point folded into the const-Z shunts,
+        # and/or batched branch states) precede the assembly's singleton frequency
+        # axis: fold the frequency axis, KEEP every batch dim — a trailing batch
+        # dim of one (an operating point batched [B, 1]) is a scenario dim, not a
+        # frequency axis, and must survive into the seed's shape.
+        y_lin = yb.Y.squeeze(-3)  # [*batch, N, N]
+        drop_freq_axis = False
     else:
-        y_lin = yb.Y.unsqueeze(0)
+        y_lin = yb.Y if yb.Y.ndim == 3 else yb.Y.unsqueeze(0)  # [1, N, N]
+        drop_freq_axis = True
     if slack == "norton":
         i_init = build_injections(
             grid,
@@ -1859,13 +1872,13 @@ def _linear_const_z_init(
             dtype=dtype,
             device=device,
             param_overrides=param_overrides,
-        )  # [1, N] source Norton current
+        ).squeeze(-2)  # [*b, N] source Norton current (single-frequency axis folded)
     else:
         i_init = torch.zeros(y_lin.shape[-1], dtype=y_lin.dtype, device=device)  # [N]
     with torch.no_grad():
         v0 = solve_harmonic(y_lin, i_init, fixed_rows=fixed_rows, v_fixed=v_fixed)
-    if v0.ndim >= 2 and v0.shape[-2] == 1:
-        v0 = v0.squeeze(-2)  # drop the singleton H axis -> [*b, N]
+    if drop_freq_axis:
+        v0 = v0.squeeze(-2)  # [1, N] -> [N]: the frequency axis, known positionally
     return v0
 
 
@@ -2807,9 +2820,8 @@ def loadability_limit(
     try:
         with torch.no_grad():
             y0, islack0 = build_system()
+            # y0 carries no frequency axis, so the const-Z start keeps islack0's shape.
             v_good = solve_harmonic(y0, islack0, fixed_rows=fixed_rows, v_fixed=v_fixed)
-            if v_good.ndim >= 2 and v_good.shape[-2] == 1:
-                v_good = v_good.squeeze(-2)
         lam_good, trace, total_iters = 0.0, [0.0], 0
         nose_found = False
         lam = lambda_step

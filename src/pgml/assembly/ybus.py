@@ -2010,6 +2010,12 @@ def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
     ``v`` is complex ``[*batch, H, N]`` (or ``[*batch, N]`` / ``[N]``; a missing H
     axis is broadcast). Returns ``[*batch, H, N]`` exactly like
     :func:`device_current_injections`.
+
+    With ``H == 1`` an explicit H axis is recognized only on a bare ``[1, N]``
+    input; any deeper ``v`` is read as ``[*batch, N]``. A size-one dim at ``-2``
+    is otherwise indistinguishable from a trailing scenario dim of one — an
+    operating point batched ``[B, 1]`` produces exactly that, and reading its
+    batch dim as H would mix the scenarios into each other.
     """
     h, n, cdt, device = plan.h, plan.n, plan.cdt, plan.device
     rdt = v.real.dtype if v.is_complex() else v.dtype
@@ -2021,7 +2027,7 @@ def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
         )
     if v.ndim == 1:
         v = v.reshape(1, n)  # [1, N]; treated as [H=1, N] -> broadcast over H below
-    has_h = v.ndim >= 2 and v.shape[-2] == h
+    has_h = v.ndim >= 2 and v.shape[-2] == h and (h > 1 or v.ndim == 2)
     if not has_h:
         v = v.unsqueeze(-2)  # [..., 1, N]
     batch_lead = v.shape[:-2]
