@@ -89,8 +89,9 @@ class SampledScenarios:
     node_sources:
         Realized :class:`~pgml.solver.NodeHarmonicSource` entries — pass to
         ``solve_harmonic_flow(node_sources=...)``. Holds the upstream background of
-        :class:`~pgml.scenarios.BackgroundHarmonicConfig` when one is configured, with
-        ``[B]`` / ``[B, T]`` magnitude and phase tensors; empty otherwise.
+        :class:`~pgml.scenarios.BackgroundHarmonicConfig` when one is configured (one
+        entry per source node, sharing ``[B, T]`` magnitude and phase tensors that
+        align with the injection tensors' batch shape); empty otherwise.
     perturbations:
         Ground-truth :class:`~pgml.schemas.scenario_schema.ParameterPerturbation` rows
         for a :func:`~pgml.scenarios.perturbation.perturbation_sweep` (which scenario

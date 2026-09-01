@@ -340,7 +340,7 @@ def sample_coherent_spectra(
         build_background_sources(
             grid,
             config.background,
-            (b, t) if t > 1 else (b,),
+            (b, t),
             torch.Generator().manual_seed(config.seed + 8117),
         )
         if config.background is not None
@@ -362,29 +362,39 @@ def build_background_sources(
     shape: tuple,
     gen: torch.Generator,
 ) -> list:
-    """Realize the upstream background as one batched ``NodeHarmonicSource``.
+    """Realize the upstream background as batched ``NodeHarmonicSource`` entries.
 
-    ``shape`` is the batch shape the spectrum tensors take — ``(B,)`` for snapshots,
-    ``(B, T)`` for sequences, where the AR(1) drift runs along the LAST axis. One drift
-    series is shared by every order and every device on the feeder, which is the point:
-    what the background contributes is common, not private to a device.
+    ``shape`` is the batch shape the spectrum tensors take — ``(B, T)``, matching the
+    per-device injection tensors (``T = 1`` for snapshot recipes). The AR(1) drift runs
+    along the STEP axis; a snapshot batch has no step to walk, so its scenarios sample
+    the drift's stationary distribution independently — scenarios are far apart relative
+    to any correlation time, never neighbours on one drift path. One drift series is
+    shared by every order and every device on the feeder, which is the point: what the
+    background contributes is common, not private to a device.
+
+    The background is ONE upstream network state seen through every point of common
+    coupling, so each in-service ``Source`` node receives a ``NodeHarmonicSource``
+    carrying the SAME realized spectrum (an explicit ``config.node_id`` narrows the
+    injection to that single node instead).
 
     Returns an empty list when no order is configured, so a caller can pass the result
     through unconditionally.
     """
     from pgml.solver import NodeHarmonicSource
+    from pgml.topology import slack_node_ids
 
     if not config.magnitude_pu:
         return []
-    node_id = config.node_id
-    if node_id is None:
-        sources = [a for a in grid.appliances if type(a).__name__ == "Source"]
-        if not sources:
+    if config.node_id is not None:
+        node_ids = [int(config.node_id)]
+    else:
+        try:
+            node_ids = slack_node_ids(grid)
+        except ValueError:
             raise InputError(
-                "BackgroundHarmonicConfig.node_id is None and the grid has no Source to "
-                "resolve it from; set node_id explicitly."
-            )
-        node_id = int(sources[0].node)
+                "BackgroundHarmonicConfig.node_id is None and the grid has no "
+                "in-service Source to resolve it from; set node_id explicitly."
+            ) from None
 
     if config.drift_std > 0.0 or config.drift_phase_deg > 0.0:
         drift = _ar1(shape, config.drift_rho, gen)
@@ -405,6 +415,7 @@ def build_background_sources(
             source_power_va=float(config.source_power_va),
             kind="voltage",
         )
+        for node_id in node_ids
     ]
 
 

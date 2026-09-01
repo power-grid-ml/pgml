@@ -1124,7 +1124,7 @@ def composition_silent_orders(
 
 
 class BackgroundHarmonicConfig(_Base):
-    """A slowly-varying UPSTREAM harmonic background, injected at the grid's source.
+    """A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.
 
     Every device behind a common supply sees the same background distortion, so the part
     of a measured harmonic that its own fundamental does not explain is largely SHARED
@@ -1133,17 +1133,21 @@ class BackgroundHarmonicConfig(_Base):
     them within an acquisition, which a per-device emission model cannot produce: the
     common part comes from the network upstream, not from the devices.
 
-    Realised as the Thevenin source of ``docs/pgml/modeling/error-injection.md`` at
-    ``node_id`` (default: the grid's ``Source`` node), present in EVERY scenario rather
-    than swept one node at a time as :func:`~pgml.scenarios.run_node_injection_sweep`
-    does. ``source_power_va`` is constant across the batch, so ``Y(h)`` is unchanged
-    scenario-to-scenario and only the Norton current varies — the batched solve is
-    preserved.
+    Realised as the Thevenin source of ``docs/pgml/modeling/error-injection.md``,
+    present in EVERY scenario rather than swept one node at a time as
+    :func:`~pgml.scenarios.run_node_injection_sweep` does. It is ONE upstream network
+    state seen through every point of common coupling: by default each in-service
+    ``Source`` node receives an injection carrying the same realized spectrum (an
+    explicit ``node_id`` narrows it to that single node). ``source_power_va`` is
+    constant across the batch, so ``Y(h)`` is unchanged scenario-to-scenario and only
+    the Norton current varies — the batched solve is preserved.
 
     The level drifts along the STEP axis as an AR(1) shared by every order, because an
     upstream background moves on the timescale of the supplying network's own load rather
     than with anything local. Note the drift is a per-step process: a recipe whose steps
-    are far apart relative to the drift's correlation time samples it as white noise.
+    are far apart relative to the drift's correlation time samples it as white noise —
+    and a snapshot recipe (``n_steps == 1``) has no step axis at all, so its scenarios
+    draw the level independently from the drift's stationary distribution.
 
     ``magnitude_pu`` empty (the default) disables the background entirely, and a run
     configured without it is byte-identical to one from before this field existed.
@@ -1154,10 +1158,12 @@ class BackgroundHarmonicConfig(_Base):
     magnitude_pu: dict[int, float] = Field(default_factory=dict)
     #: Per-order background phase [deg]; orders absent here default to 0.
     phase_deg: dict[int, float] = Field(default_factory=dict)
-    #: Node to inject at. ``None`` (default) resolves the grid's ``Source`` node.
+    #: Node to inject at. ``None`` (default) injects at EVERY in-service ``Source``
+    #: node — one shared upstream state at each external-grid coupling point; an
+    #: explicit id narrows the injection to that single node.
     node_id: Optional[int] = None
-    #: Source strength ``S_sc`` [VA] — larger is stiffer, so more of the background
-    #: appears at the node. Constant across the batch to keep ``Y(h)`` batched.
+    #: Source strength ``S_sc`` [VA] per injection — larger is stiffer, so more of the
+    #: background appears at the node. Constant across the batch to keep ``Y(h)`` batched.
     source_power_va: float = Field(default=20e6, gt=0.0)
     #: Log-magnitude std of the shared slow drift (``0.0`` = a fixed background level).
     drift_std: float = Field(default=0.0, ge=0.0)
