@@ -34,6 +34,7 @@ from .composition import (
     sample_device_composition,
 )
 from .config import (
+    BackgroundHarmonicConfig,
     CoherentSpectrumConfig,
     ScenarioConfig,
     Selector,
@@ -335,13 +336,87 @@ def sample_coherent_spectra(
                 config.start_time, config.step_size_s, t
             )[0]
 
+    node_sources = (
+        build_background_sources(
+            grid,
+            config.background,
+            (b, t),
+            torch.Generator().manual_seed(config.seed + 8117),
+        )
+        if config.background is not None
+        else []
+    )
     return SampledScenarios(
         operating_point=operating_point,
         samples=samples,
         n_samples=b,
         config=config,
         harmonic_injection=harmonic_injection,
+        node_sources=node_sources,
     )
+
+
+def build_background_sources(
+    grid: Grid,
+    config: BackgroundHarmonicConfig,
+    shape: tuple,
+    gen: torch.Generator,
+) -> list:
+    """Realize the upstream background as batched ``NodeHarmonicSource`` entries.
+
+    ``shape`` is the batch shape the spectrum tensors take — ``(B, T)``, matching the
+    per-device injection tensors (``T = 1`` for snapshot recipes). The AR(1) drift runs
+    along the STEP axis; a snapshot batch has no step to walk, so its scenarios sample
+    the drift's stationary distribution independently — scenarios are far apart relative
+    to any correlation time, never neighbours on one drift path. One drift series is
+    shared by every order and every device on the feeder, which is the point: what the
+    background contributes is common, not private to a device.
+
+    The background is ONE upstream network state seen through every point of common
+    coupling, so each in-service ``Source`` node receives a ``NodeHarmonicSource``
+    carrying the SAME realized spectrum (an explicit ``config.node_id`` narrows the
+    injection to that single node instead).
+
+    Returns an empty list when no order is configured, so a caller can pass the result
+    through unconditionally.
+    """
+    from pgml.solver import NodeHarmonicSource
+    from pgml.topology import slack_node_ids
+
+    if not config.magnitude_pu:
+        return []
+    if config.node_id is not None:
+        node_ids = [int(config.node_id)]
+    else:
+        try:
+            node_ids = slack_node_ids(grid)
+        except ValueError:
+            raise InputError(
+                "BackgroundHarmonicConfig.node_id is None and the grid has no "
+                "in-service Source to resolve it from; set node_id explicitly."
+            ) from None
+
+    if config.drift_std > 0.0 or config.drift_phase_deg > 0.0:
+        drift = _ar1(shape, config.drift_rho, gen)
+    else:
+        drift = torch.zeros(shape, dtype=_F64)
+    spectrum = {}
+    for order, mag in sorted(config.magnitude_pu.items()):
+        ang0 = float(config.phase_deg.get(order, 0.0))
+        spectrum[int(order)] = (
+            float(mag) * torch.exp(config.drift_std * drift),
+            ang0 + config.drift_phase_deg * drift,
+        )
+    return [
+        NodeHarmonicSource(
+            node_id=int(node_id),
+            phases=None,
+            spectrum=spectrum,
+            source_power_va=float(config.source_power_va),
+            kind="voltage",
+        )
+        for node_id in node_ids
+    ]
 
 
 def spectrum_sweep(

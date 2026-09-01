@@ -86,6 +86,12 @@ class SampledScenarios:
         Batch size ``B``.
     config:
         The originating config (provenance / reproducibility).
+    node_sources:
+        Realized :class:`~pgml.solver.NodeHarmonicSource` entries — pass to
+        ``solve_harmonic_flow(node_sources=...)``. Holds the upstream background of
+        :class:`~pgml.scenarios.BackgroundHarmonicConfig` when one is configured (one
+        entry per source node, sharing ``[B, T]`` magnitude and phase tensors that
+        align with the injection tensors' batch shape); empty otherwise.
     perturbations:
         Ground-truth :class:`~pgml.schemas.scenario_schema.ParameterPerturbation` rows
         for a :func:`~pgml.scenarios.perturbation.perturbation_sweep` (which scenario
@@ -100,6 +106,7 @@ class SampledScenarios:
         "SpectrumSweepConfig | NodeInjectionSweepConfig"
     )
     harmonic_injection: dict = field(default_factory=dict)
+    node_sources: list = field(default_factory=list)
     perturbations: list = field(default_factory=list)
 
 

@@ -678,3 +678,188 @@ def test_member_emission_capped_at_iec_fraction():
     )
     assert float(roster.mag_rated[hot, 0]) == pytest.approx(cap, rel=1e-9)
     assert float(roster.mag_rated[mild, 0]) == pytest.approx(0.01, rel=1e-9)
+
+
+def test_emission_floor_is_inert_at_zero_and_matches_the_measured_ratio_law():
+    """The affine emission law reduces exactly, and inflates the ratio as measured.
+
+    Measured devices emit a load-INDEPENDENT part, so ``I_h(lam) = A_h + B_h * lam`` and
+    the ratio to the fundamental grows as the device unloads. The correction must leave
+    the rated operating point untouched at any floor, and must vanish bit-for-bit when the
+    floor is zero so a configuration that does not ask for it is unaffected.
+    """
+    import torch
+
+    from pgml.scenarios.composition import _emission_affine
+
+    lam = torch.tensor([0.02, 0.1, 0.25, 0.5, 0.75, 1.0], dtype=torch.float64)
+    zero = torch.zeros_like(lam)
+
+    # A zero floor is exactly the proportional law, not merely close to it.
+    assert torch.all(_emission_affine(lam, zero, zero) == 1.0 + 0.0j)
+
+    # The rated point is unchanged for any floor and any angle.
+    one = torch.ones(1, dtype=torch.float64)
+    for f in (0.0, 0.43, 0.61, 0.73):
+        for d in (0.0, 120.0):
+            rated = _emission_affine(one, one * f, one * d)
+            assert torch.allclose(rated, torch.ones_like(rated))
+
+    # Magnitude follows floor/lam + (1 - floor) — the measured ratio inflation.
+    f = 0.61
+    got = _emission_affine(lam, torch.full_like(lam, f), zero).abs()
+    assert torch.allclose(got, f / lam + (1.0 - f))
+
+    # The angle only moves when the two parts are not co-phased.
+    assert torch.allclose(
+        _emission_affine(lam, torch.full_like(lam, f), zero).angle(), zero
+    )
+    rotated = _emission_affine(
+        lam, torch.full_like(lam, f), torch.full_like(lam, 120.0)
+    )
+    assert rotated.angle().abs().max() > math.radians(10.0)
+
+
+def test_upstream_background_reaches_every_node_and_is_inert_when_unset():
+    """The background is shared by the whole feeder, and absent unless configured.
+
+    A device-side emission model can only produce a residual that is private to each
+    device; what the bench measures is largely COMMON across devices behind one supply.
+    The background source is what supplies that, so it has to (a) change the harmonic
+    state at nodes far from where any device injects, (b) move them TOGETHER, and (c) do
+    nothing at all when no order is configured.
+    """
+    import torch
+
+    from pgml.scenarios import BackgroundHarmonicConfig
+
+    grid = _two_load_grid()
+    cfg = _ccfg(n_steps=6, n_scenarios=5, seed=2)
+    orders = [1, *cfg.orders]
+
+    plain = run_scenarios(grid, cfg, dtype=CDT)
+    empty = _ccfg(n_steps=6, n_scenarios=5, seed=2).model_copy(
+        update={"background": BackgroundHarmonicConfig()}
+    )
+    assert torch.equal(run_scenarios(grid, empty, dtype=CDT).v, plain.v), (
+        "an unconfigured background must leave the solve untouched"
+    )
+
+    order = int(cfg.orders[0])
+    with_bg = _ccfg(n_steps=6, n_scenarios=5, seed=2).model_copy(
+        update={
+            "background": BackgroundHarmonicConfig(
+                magnitude_pu={order: 0.03}, drift_std=0.4, drift_rho=0.9
+            )
+        }
+    )
+    got = run_scenarios(grid, with_bg, dtype=CDT)
+    assert not torch.equal(got.v, plain.v), (
+        "a configured background must reach the solve"
+    )
+
+    # the fundamental is preserved exactly: the source only acts at h > 1
+    h1 = orders.index(1)
+    assert torch.allclose(got.v[..., h1, :], plain.v[..., h1, :], atol=1e-9)
+
+    # the background moves the nodes TOGETHER — that shared motion is its whole purpose
+    hi = orders.index(order)
+    delta = (got.v[..., hi, :] - plain.v[..., hi, :]).reshape(-1, got.v.shape[-1])
+    assert delta.abs().min() > 0, "every node should see the upstream background"
+    a = delta[:, 0].abs()
+    corr = torch.corrcoef(torch.stack([a, delta[:, -1].abs()]).to(torch.float64))[0, 1]
+    assert corr > 0.9, (
+        f"node responses should share the upstream state, got r={corr:.3f}"
+    )
+
+
+def test_background_snapshot_scenarios_are_independent_and_solver_shaped():
+    """A snapshot batch draws the background iid and keeps the ``[B, 1]`` step axis.
+
+    The drift is a per-STEP process: a sequence walks it along the step axis, while a
+    snapshot recipe has no step axis to walk, so its scenarios must be independent
+    draws from the drift's stationary distribution — a level that is sticky across the
+    scenario INDEX would correlate samples that are supposed to be i.i.d. The realized
+    tensors carry the same ``[B, T]`` batch shape as the injection tensors, so the
+    solve broadcasts per scenario instead of mixing the batch with itself.
+    """
+    from pgml.scenarios import BackgroundHarmonicConfig
+    from pgml.scenarios.harmonics import build_background_sources
+
+    grid = _two_load_grid()
+    cfg = BackgroundHarmonicConfig(
+        magnitude_pu={5: 0.03}, drift_std=0.5, drift_rho=0.99
+    )
+
+    def _lag1(x):
+        return float(torch.corrcoef(torch.stack([x[:-1], x[1:]]))[0, 1])
+
+    snap = build_background_sources(
+        grid, cfg, (4096, 1), torch.Generator().manual_seed(3)
+    )
+    level = snap[0].spectrum[5][0].squeeze(-1).log()
+    assert abs(_lag1(level)) < 0.1, "snapshot levels must be iid across scenarios"
+
+    seq = build_background_sources(
+        grid, cfg, (2, 4096), torch.Generator().manual_seed(3)
+    )
+    assert _lag1(seq[0].spectrum[5][0][0].log()) > 0.9, (
+        "a sequence walks the AR(1) along its step axis"
+    )
+
+    # End-to-end: the snapshot solve keeps the injections' [B, 1] batch — the
+    # background must never broadcast a fresh axis against it.
+    base = _ccfg(n_steps=1, n_scenarios=5, seed=2, composition=None)
+    plain = run_scenarios(grid, base, dtype=CDT)
+    with_bg = _ccfg(n_steps=1, n_scenarios=5, seed=2, composition=None).model_copy(
+        update={
+            "background": BackgroundHarmonicConfig(
+                magnitude_pu={5: 0.03}, drift_std=0.4, drift_rho=0.9
+            )
+        }
+    )
+    got = run_scenarios(grid, with_bg, dtype=CDT)
+    assert got.v.shape == plain.v.shape == (5, 1, 3, 3)
+    orders = [1, *base.orders]
+    h1, hi = orders.index(1), orders.index(5)
+    assert torch.allclose(got.v[..., h1, :], plain.v[..., h1, :], atol=1e-9)
+    assert not torch.equal(got.v[..., hi, :], plain.v[..., hi, :]), (
+        "the background must reach the snapshot solve"
+    )
+
+
+def test_background_is_injected_once_per_source_node():
+    """Each in-service ``Source`` node carries one injection of the SAME upstream state.
+
+    A multi-feed grid sees one upstream network through several points of common
+    coupling: every source node gets one ``NodeHarmonicSource`` with the same realized
+    spectrum — the background exists once at the boundary, not once per device and not
+    only at the first source — while an explicit ``node_id`` narrows the injection to
+    that single node.
+    """
+    from pgml.scenarios import BackgroundHarmonicConfig
+    from pgml.scenarios.harmonics import build_background_sources
+
+    base = _two_load_grid()
+    second = base.appliances[0].model_copy(update={"id": 2, "node": 3})
+    grid = Grid(
+        base_frequency_hz=50.0,
+        nodes=list(base.nodes),
+        branches=list(base.branches),
+        appliances=[*base.appliances, second],
+    )
+
+    cfg = BackgroundHarmonicConfig(magnitude_pu={5: 0.03}, drift_std=0.4)
+    got = build_background_sources(grid, cfg, (8, 1), torch.Generator().manual_seed(1))
+    assert [s.node_id for s in got] == [1, 3]
+    assert all(s.kind == "voltage" for s in got)
+    # one upstream state: the SAME realized spectrum tensor at every coupling point
+    assert got[0].spectrum[5][0] is got[1].spectrum[5][0]
+
+    only = build_background_sources(
+        grid,
+        BackgroundHarmonicConfig(magnitude_pu={5: 0.03}, node_id=3),
+        (8, 1),
+        torch.Generator().manual_seed(1),
+    )
+    assert [s.node_id for s in only] == [3]

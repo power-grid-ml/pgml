@@ -655,6 +655,24 @@ class DeviceClassSpec(_Base):
     gamma: tuple[float, float] = (0.0, 0.0)
     #: Range for the per-order phase load-dependence slope ``s_h`` [deg per unit load].
     phase_slope_deg: tuple[float, float] = (0.0, 0.0)
+    #: Range for the per-order LOAD-INDEPENDENT share of the rated harmonic phasor.
+    #:
+    #: Measured devices do not emit a harmonic current proportional to their fundamental.
+    #: A part of the emission is present whenever the device is on and does not scale with
+    #: loading, so the emission is affine, ``I_h(lam) = A_h + B_h * lam``, and the RATIO to
+    #: the fundamental therefore grows as the device unloads. ``emission_floor`` is
+    #: ``|A_h|`` as a share of ``|A_h| + |B_h|``: ``0.0`` (default) restores the purely
+    #: proportional law ``I_h ~ lam`` exactly, ``0.61`` reproduces the ratio inflation
+    #: measured across certified inverters (``ratio(lam) = ratio_rated * (0.39 + 0.61/lam)``).
+    #: The rated (``lam = 1``) emission is unchanged at any value, so this re-shapes the
+    #: load dependence without moving the emission envelope.
+    emission_floor: tuple[float, float] = (0.0, 0.0)
+    #: Range for ``arg(A_h) - arg(B_h)`` [deg], the angle between the load-independent and
+    #: the load-proportional part. Non-zero makes the emission ANGLE move with loading —
+    #: measured devices rotate their harmonic phase as they unload, which decides whether
+    #: two devices at different operating points add or cancel. Ignored when
+    #: ``emission_floor`` is zero.
+    emission_floor_phase_deg: tuple[float, float] = (0.0, 0.0)
 
     #: Diurnal availability shape.
     activity_preset: ActivityPreset = "flat"
@@ -750,7 +768,7 @@ class ConsumerComposition(_Base):
 #: whenever a range changes the drawn population, and recorded in the metadata of every
 #: dataset generated from it — two datasets written from identical configs and seeds can
 #: otherwise differ numerically with nothing to show why.
-DEVICE_LIBRARY_VERSION = "2"
+DEVICE_LIBRARY_VERSION = "3"
 
 
 def default_device_classes() -> list[DeviceClassSpec]:
@@ -758,8 +776,8 @@ def default_device_classes() -> list[DeviceClassSpec]:
 
     Seven plausible LV device characters: a harmonic-free linear base load, an
     SMPS-electronics class (3rd/5th-dominated), an EV charger and a PV inverter (both
-    with the measured falling-THD-fraction-with-load behaviour, ``gamma < 0``; PV
-    injecting), a multi-state inverter drive (white goods: a near-linear heating state vs
+    with the measured falling-THD-fraction-with-load behaviour through
+    ``emission_floor``; PV injecting), a multi-state inverter drive (white goods: a near-linear heating state vs
     a harmonic-rich inverter state), a kW-scale inverter heat pump, and a thermostatic
     resistive heater. Magnitudes are loosely IEC 61000-3-2-shaped plausibility, NOT
     appliance models.
@@ -775,6 +793,17 @@ def default_device_classes() -> list[DeviceClassSpec]:
     continue with the declining envelope of the certification-workbook populations, and
     the emission phase saturates at the full circle from h13, where measured populations
     show no preferred angle.
+
+    The five nonlinear classes carry the load dependence through ``emission_floor``
+    (0.43-0.73, the measured load-independent share of the rated emission) rather than
+    through a ``gamma`` exponent. Certification sweeps and lab racks show an emission
+    FLOOR — the absolute harmonic current grows only 1.2-1.9x while the fundamental grows
+    10x — which makes the ratio to the fundamental inflate 6-10x between rated and 10 %
+    loading and puts a cancellation null inside the operating range. A power law cannot
+    reproduce that: its elasticity ``d ln|I_h| / d ln lam`` is the constant ``1 + gamma``,
+    where the measured elasticity is 0.04-0.08 at 10 % loading and 0.54-0.82 at rated.
+    The mean loadings reach further down than the emission-envelope draw alone would
+    need, because the whole effect lives below ``lam ~ 0.3``.
     """
     return [
         DeviceClassSpec(
@@ -815,12 +844,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-0.2, 0.1),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-20.0, 20.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="household",
             on_off_dwell=(0.5, 0.8),
             loading_min=0.1,
-            loading_mean=(0.3, 0.9),
+            loading_mean=(0.15, 0.9),
         ),
         DeviceClassSpec(
             name="ev_charger",
@@ -853,12 +884,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
             # session tracks the drawn power, so the emission carries fundamental
             # information. A steeply negative exponent makes the harmonic current almost
             # loading-independent and the spectrum uninformative about P.
-            gamma=(-0.8, -0.2),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-15.0, 15.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="ev",
             on_off_dwell=(0.6, 0.82),
             loading_min=0.2,
-            loading_mean=(0.7, 1.0),
+            loading_mean=(0.25, 1.0),
         ),
         DeviceClassSpec(
             name="pv_inverter",
@@ -886,12 +919,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-1.3, -0.6),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-25.0, 25.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="pv",
             discrete_activity=False,
             loading_min=0.05,
-            loading_mean=(0.5, 1.0),
+            loading_mean=(0.2, 1.0),
         ),
         DeviceClassSpec(
             name="inverter_drive",
@@ -920,12 +955,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-0.4, 0.2),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-30.0, 30.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="household",
             on_off_dwell=(0.6, 0.85),
             loading_min=0.15,
-            loading_mean=(0.4, 1.0),
+            loading_mean=(0.2, 1.0),
             states=[
                 DeviceState(
                     name="heating", power_fraction=0.95, spectrum_scale=0.2, weight=0.5
@@ -966,12 +1003,14 @@ def default_device_classes() -> list[DeviceClassSpec]:
                 17: (-180.0, 180.0),
                 19: (-180.0, 180.0),
             },
-            gamma=(-0.5, 0.0),
+            gamma=(0.0, 0.0),
             phase_slope_deg=(-20.0, 20.0),
+            emission_floor=(0.43, 0.73),
+            emission_floor_phase_deg=(100.0, 150.0),
             activity_preset="flat",
             on_off_dwell=(0.9, 0.98),
-            loading_min=0.3,
-            loading_mean=(0.5, 0.95),
+            loading_min=0.15,
+            loading_mean=(0.2, 0.95),
             loading_jitter=0.08,
         ),
         DeviceClassSpec(
@@ -1082,6 +1121,66 @@ def composition_silent_orders(
         if float(high) > 0.0
     }
     return [o for o in sorted({int(o) for o in orders}) if o > 1 and o not in emitting]
+
+
+class BackgroundHarmonicConfig(_Base):
+    """A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.
+
+    Every device behind a common supply sees the same background distortion, so the part
+    of a measured harmonic that its own fundamental does not explain is largely SHARED
+    across the devices rather than private to each. Bench measurements of six inverter
+    racks driven together show 54-93 % of that unexplained emission to be common to all of
+    them within an acquisition, which a per-device emission model cannot produce: the
+    common part comes from the network upstream, not from the devices.
+
+    Realised as the Thevenin source of ``docs/pgml/modeling/error-injection.md``,
+    present in EVERY scenario rather than swept one node at a time as
+    :func:`~pgml.scenarios.run_node_injection_sweep` does. It is ONE upstream network
+    state seen through every point of common coupling: by default each in-service
+    ``Source`` node receives an injection carrying the same realized spectrum (an
+    explicit ``node_id`` narrows it to that single node). ``source_power_va`` is
+    constant across the batch, so ``Y(h)`` is unchanged scenario-to-scenario and only
+    the Norton current varies — the batched solve is preserved.
+
+    The level drifts along the STEP axis as an AR(1) shared by every order, because an
+    upstream background moves on the timescale of the supplying network's own load rather
+    than with anything local. Note the drift is a per-step process: a recipe whose steps
+    are far apart relative to the drift's correlation time samples it as white noise —
+    and a snapshot recipe (``n_steps == 1``) has no step axis at all, so its scenarios
+    draw the level independently from the drift's stationary distribution.
+
+    ``magnitude_pu`` empty (the default) disables the background entirely, and a run
+    configured without it is byte-identical to one from before this field existed.
+    """
+
+    #: Per-order background VOLTAGE distortion at the source, per unit of the fundamental:
+    #: ``{order: magnitude_pu}``. Empty (default) = no background.
+    magnitude_pu: dict[int, float] = Field(default_factory=dict)
+    #: Per-order background phase [deg]; orders absent here default to 0.
+    phase_deg: dict[int, float] = Field(default_factory=dict)
+    #: Node to inject at. ``None`` (default) injects at EVERY in-service ``Source``
+    #: node — one shared upstream state at each external-grid coupling point; an
+    #: explicit id narrows the injection to that single node.
+    node_id: Optional[int] = None
+    #: Source strength ``S_sc`` [VA] per injection — larger is stiffer, so more of the
+    #: background appears at the node. Constant across the batch to keep ``Y(h)`` batched.
+    source_power_va: float = Field(default=20e6, gt=0.0)
+    #: Log-magnitude std of the shared slow drift (``0.0`` = a fixed background level).
+    drift_std: float = Field(default=0.0, ge=0.0)
+    #: Angle std [deg] of the same drift.
+    drift_phase_deg: float = Field(default=0.0, ge=0.0)
+    #: AR(1) stickiness of the drift along the step axis.
+    drift_rho: float = Field(default=0.99, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _check(self) -> "BackgroundHarmonicConfig":
+        bad = [o for o in self.magnitude_pu if o < 2]
+        if bad:
+            raise ValueError(
+                f"BackgroundHarmonicConfig magnitude_pu orders must be >= 2, got {bad}: "
+                "the fundamental is set by the source's own voltage, not the background."
+            )
+        return self
 
 
 class CompositionConfig(_Base):
@@ -1254,6 +1353,8 @@ class CoherentSpectrumConfig(_Base):
     # Statistical device-class composition of aggregated loads (supersedes the
     # fingerprint + fundamental for the loads it covers). Requires ``start_time``.
     composition: Optional[CompositionConfig] = None
+    #: Upstream harmonic background at the source, shared by every device on the feeder.
+    background: Optional[BackgroundHarmonicConfig] = None
     # Absolute anchor for the profile's daily / weekly / seasonal phases (ISO 8601).
     # A naive (timezone-less) timestamp is interpreted as UTC.
     start_time: Optional[str] = None
