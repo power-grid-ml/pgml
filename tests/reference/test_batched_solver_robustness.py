@@ -218,3 +218,104 @@ class TestMixedBatchedDevices:
         # the loads differ per scenario, so the node-3 voltage must differ across the batch
         assert torch.std(r.v[:, -1].abs()).item() > 0.0
         _ = Load  # keep the import meaningful for readers
+
+
+class TestTrailingSingletonBatch:
+    """An operating point batched ``[B, 1]`` keeps its trailing dim as a SCENARIO dim.
+
+    A per-step recipe with one step produces exactly this shape, and the size-one
+    dim sits where the assembly's singleton frequency axis used to sit — a
+    value-based squeeze there mixes the ``B`` scenarios into a ``[B, B]`` broadcast
+    instead of solving them independently. The contract: ``v``'s batch shape equals
+    the operating point's batch shape, for every method and for the harmonic solve.
+    """
+
+    def _refs(self, grid, p, q):
+        """Independent single-scenario solutions ``[B, N]``."""
+        return torch.stack(
+            [
+                solve_power_flow(
+                    grid,
+                    operating_point={30: {"p_w": float(p[i]), "q_var": float(q[i])}},
+                    dtype=CDT,
+                ).v
+                for i in range(len(p))
+            ],
+            0,
+        )
+
+    def test_batch_shape_is_preserved(self) -> None:
+        grid = single_phase_chain()
+        for shape in [(5,), (5, 1), (5, 6), (5, 1, 1), (1,)]:
+            op = {
+                30: {
+                    "p_w": torch.full(shape, 2000.0, dtype=torch.float64),
+                    "q_var": torch.full(shape, 300.0, dtype=torch.float64),
+                }
+            }
+            r = solve_power_flow(grid, operating_point=op, dtype=CDT)
+            assert r.converged
+            assert tuple(r.v.shape) == (*shape, 3), (
+                f"op batch {shape} must survive into v, got {tuple(r.v.shape)}"
+            )
+
+    def test_trailing_singleton_matches_loop_of_singles(self) -> None:
+        grid = single_phase_chain()
+        p = torch.tensor([500.0, 2000.0, 3500.0, 5000.0], dtype=torch.float64)
+        q = torch.tensor([0.0, 150.0, 300.0, 450.0], dtype=torch.float64)
+        ref = self._refs(grid, p, q)
+        for method in ("current_injection", "newton"):
+            r = solve_power_flow(
+                grid,
+                operating_point={
+                    30: {"p_w": p.reshape(4, 1), "q_var": q.reshape(4, 1)}
+                },
+                method=method,
+                dtype=CDT,
+            )
+            assert r.converged
+            assert tuple(r.v.shape) == (4, 1, 3)
+            err = torch.max(torch.abs(r.v.squeeze(1) - ref)).item()
+            assert err < 1e-7, f"{method}: [B, 1] deviates from singles by {err:.3e}"
+
+    def test_harmonic_solve_carries_the_step_axis(self) -> None:
+        from pgml.solver import solve_harmonic_flow
+
+        grid = single_phase_chain()
+        p = torch.tensor([500.0, 2000.0, 3500.0], dtype=torch.float64)
+        q = 0.2 * p
+        inj = {30: {3: (0.04, 10.0), 5: (0.02, -30.0)}}
+        flat = solve_harmonic_flow(
+            grid,
+            [1, 3, 5],
+            operating_point={30: {"p_w": p, "q_var": q}},
+            harmonic_injection=inj,
+            dtype=CDT,
+        ).v  # [B, H, N]
+        stepped = solve_harmonic_flow(
+            grid,
+            [1, 3, 5],
+            operating_point={30: {"p_w": p.reshape(3, 1), "q_var": q.reshape(3, 1)}},
+            harmonic_injection=inj,
+            dtype=CDT,
+        ).v  # [B, 1, H, N]
+        assert tuple(stepped.shape) == (3, 1, 3, 3)
+        assert torch.equal(stepped.squeeze(1), flat)
+
+    def test_gradients_flow_through_the_singleton_batch(self) -> None:
+        """The IFT backward returns a gradient of the operating point's own shape."""
+        grid = single_phase_chain()
+        p = torch.tensor(
+            [[1500.0], [3000.0], [4500.0]], dtype=torch.float64, requires_grad=True
+        )
+        r = solve_power_flow(
+            grid,
+            operating_point={30: {"p_w": p, "q_var": torch.zeros_like(p.detach())}},
+            dtype=CDT,
+        )
+        assert r.converged
+        r.v.abs().sum().backward()
+        assert p.grad is not None
+        assert tuple(p.grad.shape) == (3, 1)
+        assert bool(torch.isfinite(p.grad).all())
+        assert torch.max(torch.abs(p.grad)).item() > 0.0
