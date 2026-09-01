@@ -5,7 +5,8 @@ function producing a valid `grid_schema.Grid` (and, where relevant, the id map b
 to the source so tests can align components).
 
 Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.md):
-- [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+- [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
+      gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU)
       -> (Grid, id_map)` — this file, below.
 - [x] `convert.pgm.to_grid(input_data, *, base_frequency_hz=50.0,
       load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
@@ -78,7 +79,10 @@ calls `to_grid(net)` with no `phase_mode` and stays green.
 - standard balanced `net.load` / `sym_load`: `connection=None` (resolves to WYE from
   config), no per-phase split (the symmetric/auto calc splits the total equally);
 - static generators: pandapower `sgen` and pgm `sym_gen` -> `Generator`
-  (generation-positive nameplate; id_map buckets `"sgen"` / `"sym_gen"`); every other
+  (generation-positive nameplate; id_map buckets `"sgen"` / `"sym_gen"`); pandapower's
+  voltage-controlled `gen` converts only under the opt-in
+  `gen_mode=GenMode.VOLT_VAR_APPROX` (a `Generator` carrying a `VoltVarControl` droop —
+  see `pandapower/CONTEXT.md`); every other
   non-empty pgm component (`transformer`, `three_winding_transformer`, `shunt`,
   `asym_gen`, `link`, `transformer_tap_regulator`) triggers a `warn_dropped_elements`
   WARNING — nothing is dropped silently;
@@ -111,17 +115,23 @@ grid, id_map = to_grid(net)
 
 ### Signature
 ```
-to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
+to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
+        gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU)
     -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function. Converts a (materialised) pandapower network to a schema `Grid`
 and an `id_map` dictionary.  Handles: `bus`, `line`, `load`, `asymmetric_load`,
 `ext_grid`, `trafo`, bus-bus `switch`, and `sgen` (-> `Generator`,
-generation-positive). Every OTHER non-empty element table (`gen`, `shunt`,
-`trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `storage`, `motor`,
-`asymmetric_sgen`) triggers a WARNING naming the kind and count — nothing is
-dropped silently.
+generation-positive). `gen` (a PV bus) is DROPPED by default and converted only
+under the explicit `gen_mode=GenMode.VOLT_VAR_APPROX`, which APPROXIMATES the PV
+bus with a steep Volt-VAr droop centred on `vm_pu` (steepness
+`gen_volt_var_slope_pu`, default 500) and saturating at `min/max_q_mvar` — it holds
+|V| near, not at, the setpoint; a row on the `ext_grid` bus (or flagged `slack`) is
+skipped. Every OTHER non-empty element table (`shunt`, `trafo3w`, `impedance`,
+`ward`, `xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, and `gen` under
+the default mode) triggers a WARNING naming the kind and count — nothing is dropped
+silently.
 
 ### id_map format
 ```python
@@ -130,6 +140,7 @@ dropped silently.
     "line":     {pp_line_index: Line.id, ...},
     "load":     {pp_load_index: Load.id, ...},
     "sgen":     {pp_sgen_index: Generator.id, ...},
+    "gen":      {pp_gen_index: Generator.id, ...},   # empty unless gen_mode=VOLT_VAR_APPROX
     "ext_grid": {pp_extgrid_index: Source.id, ...},
     "slack_v_complex": complex,   # phasor V (line-to-line, V) for ideal-slack solve
 }

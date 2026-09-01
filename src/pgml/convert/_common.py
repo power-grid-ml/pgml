@@ -405,6 +405,7 @@ def build_generator(
     connection: Optional[WindingConnection] = None,
     native_phases: Optional[tuple[Phase, ...]] = None,
     consumer_type: Optional[str] = None,
+    control: Optional[Any] = None,
 ) -> Generator:
     """Build a :class:`~pgml.schemas.grid_schema.Generator` (PQ injection).
 
@@ -412,6 +413,12 @@ def build_generator(
     ``p_total_w > 0`` injects into the grid (the assembly applies the −1 sign for
     the :class:`Generator` component). Used for source-library static generators
     (pandapower ``sgen``, power-grid-model ``sym_gen``).
+
+    ``control`` optionally attaches an
+    :data:`~pgml.schemas.grid_schema.InverterControl` block (constant power factor,
+    ``cosphi(P)``, Volt-VAr, Volt-Watt), making the injection voltage-dependent. A
+    controlled generator's reactive nameplate is never read — the control law
+    supplies Q — so pass ``q_total_var=0.0`` with one.
     """
     kwargs: dict[str, Any] = {
         "id": id,
@@ -422,6 +429,8 @@ def build_generator(
     }
     if consumer_type is not None:
         kwargs["consumer_type"] = consumer_type
+    if control is not None:
+        kwargs["control"] = control
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         kwargs["phases"] = _PHASE_A
         return Generator(**kwargs)

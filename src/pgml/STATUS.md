@@ -256,6 +256,21 @@ results are never read as more physical than they are. Details live in `docs/pgm
   (item C). Resonance magnitudes are conservative (undamped) at load-heavy buses.
 - **Sources.** Zero-sequence source impedance = positive-sequence value (no converter
   reads `r0x0_max`/`z01_ratio`) — `docs/pgml/modeling/conventions.md` §6.
+- **PV (voltage-regulating) buses.** There is no PV-bus appliance: a bus whose voltage
+  MAGNITUDE is regulated with reactive power free (pandapower `net.gen`, OpenDSS
+  `Generator model=3`) needs a mixed residual row pair `[P-balance; |V|² − V_set²]` in
+  `solver/power_flow.py` plus a schema field to carry `V_set`. The pandapower converter can
+  APPROXIMATE one on request (`gen_mode=GenMode.VOLT_VAR_APPROX`) with a steep Volt-VAr
+  droop centred on `vm_pu`: the per-bus deviation from a live `runpp` falls as `1/slope`
+  (case57: 4.3e-2 pu at slope 5 → 2.3e-4 pu at slope 2000), but outside the `1/slope`-wide
+  band the droop's `dQ/d|V|` is exactly zero, so on a heavily loaded transmission grid the
+  solve lands on the collapsed low-voltage branch: `case118` caps out around slope 5 (a few
+  percent of voltage error) and `case39` converges SILENTLY onto that branch at every
+  steepness (4.9e-1 pu off, all nine generators pinned at their reactive limit). Importing
+  transmission benchmarks faithfully needs the residual-row fix (and `net.shunt`
+  conversion, still missing).
+  `docs/pgml/modeling/der-pv-storage.md` §4.5,
+  `src/pgml/convert/pandapower/CONTEXT.md`.
 - **ZIP loads sharing a bus with generation (cross-tool).** pandapower reduces a ZIP load's
   coefficients onto the BUS and applies them to that bus's NET injection
   (`_calc_pq_elements_and_add_on_ppc`), so a const-Z load and a generator on one bus cancel
