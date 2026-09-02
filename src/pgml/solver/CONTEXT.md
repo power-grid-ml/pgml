@@ -394,6 +394,8 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   Runs by DEFAULT at every solve entry (`on_disconnected="raise"`); `"zero"`
   solves `pgml.topology.energized_subgrid` and scatters back 0 V on dead rows
   (full row layout kept); `"ignore"` skips. Report: `pgml.topology.connectivity_report`.
+  `pgml.simulate(..., on_disconnected=…)` threads the same choice into BOTH
+  calculations (power flow and harmonic) as a call-level EXECUTION kwarg.
 - `solve_power_flow(..., linear_solver="auto"|"dense"|"sparse"|"block"|"matrix_free")`
   — for `current_injection` this selects the `Y_eff` factorization backend
   (`harmonic.lu_factor_system(backend=...)`): `"auto"` = scipy SuperLU sparse on

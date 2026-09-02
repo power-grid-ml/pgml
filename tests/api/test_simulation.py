@@ -9,11 +9,13 @@ from pydantic import ValidationError
 import pgml
 from pgml.errors import (
     ComputationError,
+    ConnectivityError,
     ConvergenceError,
     InputError,
     ModelingError,
     PgmError,
 )
+from pgml.grids import synthetic_feeder
 from pgml.schemas.grid_schema import Phase
 from pgml.simulation import (
     ResultBundle,
@@ -290,6 +292,78 @@ def test_interharmonic_orders_rejected():
         solve_harmonic_flow(single_phase_chain(), [1, 2.5])
     # integral floats are fine
     assert SimulationConfig(harmonic_orders=[1.0, 3.0]).harmonic_orders == [1.0, 3.0]
+
+
+# --------------------------------------------------------------------------- #
+# de-energized islands: on_disconnected through the facade
+# --------------------------------------------------------------------------- #
+_ISLAND_NODES = (3, 5)  # behind the out-of-service line 10003 (feeder 0: 0-1-3-5)
+_LIVE_NODES = (0, 1, 2, 4, 6)
+
+
+def _islanded_feeder():
+    """A 7-node feeder whose line 1->3 is out of service, islanding nodes 3 and 5."""
+    grid = synthetic_feeder(7, n_feeders=2, u_rated_v=400.0, total_load_w=3.0e4)
+    branches = [
+        b.model_copy(update={"in_service": False}) if b.id == 10003 else b
+        for b in grid.branches
+    ]
+    return grid.model_copy(update={"branches": branches})
+
+
+@pytest.mark.parametrize("calculation", ["power_flow", "harmonic"])
+def test_simulate_raises_on_disconnected_island_by_default(calculation):
+    with pytest.raises(ConnectivityError) as exc:
+        simulate(
+            _islanded_feeder(),
+            SimulationConfig(calculation=calculation, harmonic_orders=[1, 5]),
+        )
+    assert exc.value.unenergized_nodes == _ISLAND_NODES
+
+
+@pytest.mark.parametrize("calculation", ["power_flow", "harmonic"])
+def test_simulate_on_disconnected_zero_reports_dead_rows(calculation):
+    """The island solves as exactly 0 V; the energized feeder keeps a sane solution."""
+    grid = _islanded_feeder()
+    st = simulate(
+        grid,
+        SimulationConfig(calculation=calculation, harmonic_orders=[1, 5]),
+        on_disconnected="zero",
+    )
+    assert st.converged
+    assert st.node_voltages().shape[-1] == 3 * len(grid.nodes)  # full row layout kept
+    for nid in _ISLAND_NODES:
+        for ph in (Phase.A, Phase.B, Phase.C):
+            v = st.voltage(nid, ph)
+            assert torch.equal(v, torch.zeros_like(v))
+    for nid in _LIVE_NODES:
+        v1 = st.voltage(nid, Phase.A)[0].abs()  # fundamental, line-to-neutral
+        assert 0.9 * 400.0 / 3**0.5 < float(v1) < 1.1 * 400.0 / 3**0.5
+    # Branch quantities stay usable: a de-energized branch carries no current.
+    currents = {bc.branch_id: bc for bc in st.branch_currents()}
+    dead = currents[10005]  # line 3->5, inside the island
+    assert torch.equal(dead.i_from, torch.zeros_like(dead.i_from))
+    assert float(currents[10001].i_from.abs().max()) > 0.0
+    assert bool(torch.isfinite(st.node_voltages().abs()).all())
+
+
+def test_simulate_rejects_unknown_on_disconnected():
+    with pytest.raises(InputError, match="on_disconnected"):
+        simulate(
+            single_phase_chain(),
+            SimulationConfig(calculation="power_flow"),
+            on_disconnected="drop",
+        )
+
+
+def test_simulate_serializable_forwards_on_disconnected():
+    bundle = simulate_serializable(
+        _islanded_feeder(),
+        SimulationConfig(calculation="power_flow"),
+        on_disconnected="zero",
+    )
+    dead = [n for n in bundle.nodes if n.node_id in _ISLAND_NODES]
+    assert dead and all(v == 0.0 for n in dead for v in tuple(n.v_re) + tuple(n.v_im))
 
 
 # --------------------------------------------------------------------------- #

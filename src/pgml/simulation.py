@@ -357,6 +357,7 @@ def simulate(
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
     strict: bool = True,
+    on_disconnected: str = "raise",
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
 ) -> SolvedState:
@@ -370,6 +371,27 @@ def simulate(
     only — the state threads it into its lazy branch quantities so voltage and
     currents describe the same overridden network; the harmonic calculation
     rejects it.
+
+    ``on_disconnected`` decides what the pre-solve connectivity check does with
+    (node, phase) rows that have no galvanic path to an in-service source — an open
+    switch, a line taken out of service, or a grid without a source. It applies to
+    BOTH calculations:
+
+    - ``"raise"`` (default) — raise :class:`~pgml.errors.ConnectivityError` naming the
+      de-energized nodes, the separating branches, and the concrete fixes.
+    - ``"zero"`` — solve the energized sub-grid and report exactly 0 V on the
+      de-energized rows at every order (a de-energized conductor carries no voltage).
+      The state keeps the FULL grid's row layout, so
+      :meth:`SolvedState.node_voltages` / :meth:`SolvedState.voltage` /
+      :meth:`SolvedState.branch_currents` / :meth:`SolvedState.branch_flows` stay
+      addressable by the original node ids and report 0 on everything the island
+      contains. This is the mode an operational tool wants when an element is
+      switched out.
+    - ``"ignore"`` — skip the check; a de-energized area then surfaces as a singular
+      factorization or as non-convergence.
+
+    :meth:`SolvedState.thd` is undefined on a de-energized row (its fundamental
+    magnitude is 0); read it at energized nodes.
 
     ``linear_solver`` / ``block_rows`` select the inner factorization backend (see
     :func:`pgml.solver.solve_power_flow`) — execution concerns like device and dtype,
@@ -399,6 +421,7 @@ def simulate(
             symmetry=config.symmetry,
             linear_solver=linear_solver,
             block_rows=block_rows,
+            on_disconnected=on_disconnected,
         )
         v = pf.v.unsqueeze(-2)  # [*batch, 1, N]
         freqs = torch.tensor(
@@ -439,6 +462,7 @@ def simulate(
             dtype=cdt,
             device=dev,
             symmetry=config.symmetry,
+            on_disconnected=on_disconnected,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
         converged, iterations, residual = (
@@ -484,7 +508,7 @@ def simulate_serializable(
 
     Returns the JSON-serializable :class:`ResultBundle` directly — the entry point a
     REST handler or a file-persistence step calls. Keyword arguments are forwarded to
-    :func:`simulate` (e.g. ``device``, ``dtype``).
+    :func:`simulate` (e.g. ``device``, ``dtype``, ``on_disconnected``).
     """
     return simulate(grid, config, **kwargs).to_result_set(
         grid_id=getattr(grid, "id", None)

@@ -40,6 +40,20 @@ grid parameters for a differentiable parameter-recovery loop. It applies to
 the same overrides, so voltages and currents describe one consistent network — and raises
 for `calculation="harmonic"` rather than silently ignoring it.
 
+**`on_disconnected`** is the keyword for grids that are not fully energized — a line taken
+out of service or an open switch leaving nodes without a galvanic path to a source. It
+applies to BOTH calculations:
+
+- `"raise"` (default) — {class}`~pgml.errors.ConnectivityError` naming the de-energized
+  nodes, the separating branches, and the concrete fixes.
+- `"zero"` — solve the energized sub-grid and report exactly 0 V on the de-energized rows at
+  every order, keeping the FULL grid's row layout, so voltages, branch currents and flows
+  stay addressable by the original ids and read 0 inside the island. This is the mode an
+  operational tool (dashboard, switching study) wants. {meth}`~pgml.simulation.SolvedState.thd`
+  is undefined on a de-energized row.
+- `"ignore"` — skip the check; a de-energized area then surfaces as a singular factorization
+  or as non-convergence.
+
 ## Quick examples
 
 ### Harmonic flow (default)
