@@ -170,6 +170,12 @@ class Correlation(_Base):
     rho: float = Field(ge=0.0, le=1.0)
 
 
+#: The harmonic fields of a :class:`ParameterSpec`: the emission draw itself and the
+#: load-dependence parameters applied on top of it.
+EMISSION_LAW_FIELDS: tuple[str, ...] = ("h_floor", "h_floor_phase", "h_slope")
+HARMONIC_FIELDS: tuple[str, ...] = ("h_mag", "h_phase", *EMISSION_LAW_FIELDS)
+
+
 class ParameterSpec(_Base):
     """One varied quantity.
 
@@ -180,7 +186,9 @@ class ParameterSpec(_Base):
       ``u_ref_v``; requires ``selector.component="source"`` and ``mode="scale"``, and
       supports neither per-phase ``symmetry`` nor harmonic options) — or a HARMONIC
       field — ``"h_mag"`` (per-order injection magnitude relative to the fundamental) /
-      ``"h_phase"`` (per-order phase in degrees). Harmonic fields require ``orders`` and
+      ``"h_phase"`` (per-order phase in degrees), or one of the LOAD-DEPENDENCE fields
+      ``"h_floor"`` / ``"h_floor_phase"`` / ``"h_slope"`` that make a device's emission
+      follow its own drawn loading (below). Harmonic fields require ``orders`` and
       feed ``solve_harmonic_flow(harmonic_injection=...)`` instead of an operating point.
       ``u_ref`` writes a per-source ``u_ref_scale`` operating-point entry that the
       ideal-slack solve multiplies onto ``u_ref_v`` (a batched fundamental boundary).
@@ -216,12 +224,42 @@ class ParameterSpec(_Base):
     - ``emission_class``: IEC 61000-3-2 equipment class ``"A"``/``"B"``/``"C"``/``"D"``,
       or ``"auto"`` (default) to resolve it per device from its ``consumer_type`` and
       nominal power. Valid only with ``harmonic_reference="iec61000-3-2"``.
+    - LOAD DEPENDENCE (``mode="absolute"`` only; drawn per device and order like the
+      other harmonic fields, applied on top of the device's ``h_mag`` / ``h_phase`` draw
+      using the loading ``lam`` its OWN operating-point draw realised — the ratio of the
+      drawn active power to the nameplate, ``1`` for a device no power spec varies):
+
+      * ``"h_floor"`` — the load-INDEPENDENT share ``|A_h| / (|A_h| + |B_h|)`` of the
+        affine emission law ``I_h(lam) = A_h + B_h * lam`` (a ``[0, 1]`` distribution;
+        ``0`` = the proportional law, bit-for-bit). The drawn magnitude is read as the
+        RATED ratio and inflated by ``|z(lam)| / lam`` as the device unloads, exactly as
+        :func:`pgml.scenarios.emission.affine_emission_correction` defines it.
+      * ``"h_floor_phase"`` — ``arg(A_h) - arg(B_h)`` in degrees: the angle between the
+        floor and the proportional part, which makes the emission phase ROTATE with
+        loading and produces the measured cancellation null. Inert without a floor.
+      * ``"h_slope"`` — an explicit phase slope ``s_h`` [deg per unit loading]: the drawn
+        phase is shifted by ``s_h * (lam - 1)``, zero at rating.
+
+      The realized post-law magnitude and phase are what ``samples`` records
+      (``"<spec>_mag"`` / ``"<spec>_phase"``), beside the loading the law used
+      (``"<spec>_loading"``). Loadings below
+      :data:`pgml.scenarios.emission.LOADING_FLOOR` evaluate the law at the floor.
     """
 
     name: str
     selector: Selector
     distribution: Distribution
-    field: Literal["p", "q", "pq", "u_ref", "h_mag", "h_phase"] = "pq"
+    field: Literal[
+        "p",
+        "q",
+        "pq",
+        "u_ref",
+        "h_mag",
+        "h_phase",
+        "h_floor",
+        "h_floor_phase",
+        "h_slope",
+    ] = "pq"
     mode: Literal["scale", "absolute"] = "scale"
     per: Literal["each", "shared"] = "each"
     correlation: Optional[Correlation] = None
@@ -233,7 +271,12 @@ class ParameterSpec(_Base):
 
     @property
     def is_harmonic(self) -> bool:
-        return self.field in ("h_mag", "h_phase")
+        return self.field in HARMONIC_FIELDS
+
+    @property
+    def is_emission_law(self) -> bool:
+        """Whether this spec draws a load-dependence parameter rather than an emission."""
+        return self.field in EMISSION_LAW_FIELDS
 
     @property
     def is_source_voltage(self) -> bool:
@@ -283,8 +326,23 @@ class ParameterSpec(_Base):
                     "`correlation` (use the grid `spectrum_per_phase` for per-phase "
                     "distortion)."
                 )
-            if self.field == "h_phase" and self.mode != "absolute":
-                raise ValueError("field='h_phase' requires mode='absolute'.")
+            if self.field != "h_mag" and self.mode != "absolute":
+                raise ValueError(f"field={self.field!r} requires mode='absolute'.")
+            if self.field == "h_floor":
+                bounds = [
+                    b
+                    for b in (
+                        getattr(self.distribution, "low", None),
+                        getattr(self.distribution, "high", None),
+                        getattr(self.distribution, "value", None),
+                    )
+                    if b is not None
+                ]
+                if any(b < 0.0 or b > 1.0 for b in bounds):
+                    raise ValueError(
+                        "field='h_floor' is the load-independent SHARE of the emission "
+                        "and must be drawn from [0, 1]."
+                    )
             if self.harmonic_reference is not None and self.field != "h_mag":
                 raise ValueError("harmonic_reference applies to field='h_mag' only.")
         else:

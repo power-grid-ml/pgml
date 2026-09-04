@@ -17,7 +17,15 @@ decisions. One entry per capability:
   commit/dirty/versions into every persisted artifact (dataset `meta.json`, corpus
   manifest, checkpoints, cluster run dirs); `pgml.scenarios.presets` is the single
   excitation recipe (IEC emission reference, phase diversity, PV h3–h19 spans, device
-  library v2) every SE dataset generator builds from. ⚠️ Datasets/corpora generated
+  library v3, and — preset v3 — the measured LOAD-DEPENDENT emission law: a complex affine
+  `I_h(λ) = A_h + B_h·λ` floor at 43–73 % of the rated phasor, 100–150° to the
+  proportional part, plus a ±25°/unit-loading phase slope, drawn per device and order in
+  the randomized recipe exactly as the composed library draws it —
+  `docs/pgml/modeling/harmonic-emission.md`) every SE dataset generator builds from.
+  ⚠️ A Task-A dataset drawn before preset v3 has NO harmonic-to-fundamental coupling at all
+  (proportional, linear and spline fits all at R² 0.43–0.44 on the bench topology), so an
+  estimator trained on it cannot learn how a harmonic follows the fundamental; regenerate.
+  ⚠️ Datasets/corpora generated
   BEFORE the presets (pre-2026-08-14: EN 50160-as-current-fractions fallback, silent
   h15–h19 band, midnight coherent window) are miscalibrated — regenerate before
   drawing conclusions from models trained on them; the missing `config_hash` /
