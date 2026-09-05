@@ -21,6 +21,7 @@ per-phase overrides that promote the solve to asymmetric automatically.
 from __future__ import annotations
 
 import math
+import zlib
 from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
@@ -241,8 +242,10 @@ def _resolve(grid: Grid, config: ScenarioConfig):
                 f"Parameter {spec.name!r} selector matched no in-service components."
             )
         if spec.is_harmonic:
-            n_eff = len(ids) if spec.per == "each" else 1
-            block = n_eff * len(spec.orders)
+            n_eff = 1 if spec.per == "shared" else len(ids)
+            # a FIXED spec draws once per component from its own seeded stream and takes
+            # no column of the cube, so every other draw stays where it was
+            block = 0 if spec.per == "fixed" else n_eff * len(spec.orders)
             harm_layouts.append(_HarmLayout(spec, ids, dim, block, n_eff))
             dim += block
             continue
@@ -524,6 +527,7 @@ def _harmonic_injections(
     samples: dict,
     operating_point: Optional[dict] = None,
     nominal: Optional[dict] = None,
+    seed: int = 0,
 ) -> dict:
     """Build ``{id: {order: (mag[B], phase[B])}}`` from the harmonic specs.
 
@@ -561,11 +565,25 @@ def _harmonic_injections(
             built[cid] = {o: list(mp) for o, mp in _stored(cid).items()}
         return built[cid]
 
+    b = int(u.shape[0])
     for lay in harm_layouts:
         spec = lay.spec
         n_orders = len(spec.orders)
-        block = u[:, lay.off : lay.off + lay.dim]  # [B, n_eff * n_orders]
-        vals = spec.distribution.icdf(block).reshape(-1, lay.n_eff, n_orders)
+        if spec.per == "fixed":
+            # one draw per (component, order), the same in every scenario: the device's
+            # signature, seeded by the config seed and the spec name (reproducible,
+            # independent of the cube and of every other spec)
+            gen = torch.Generator().manual_seed(
+                (int(seed) * 1_000_003 + zlib.crc32(spec.name.encode())) % (2**63 - 1)
+            )
+            u_fixed = torch.rand(
+                (1, lay.n_eff * n_orders), generator=gen, dtype=u.dtype
+            )
+            vals = spec.distribution.icdf(u_fixed).reshape(1, lay.n_eff, n_orders)
+            vals = vals.expand(b, lay.n_eff, n_orders).clone()
+        else:
+            block = u[:, lay.off : lay.off + lay.dim]  # [B, n_eff * n_orders]
+            vals = spec.distribution.icdf(block).reshape(-1, lay.n_eff, n_orders)
         samples[spec.name] = vals  # [B, n_eff, n_orders]
         # IEC 61000-3-2 caps are PER DEVICE (from nominal P + node voltage); build once
         # per spec. EN 50160 caps are global per-order (looked up inline below).
@@ -577,7 +595,7 @@ def _harmonic_injections(
             else {}
         )
         for j, cid in enumerate(lay.ids):
-            comp = vals[:, j if spec.per == "each" else 0, :]  # [B, n_orders]
+            comp = vals[:, 0 if spec.per == "shared" else j, :]  # [B, n_orders]
             dev, stored = _dev(cid), _stored(cid)
             for o, order in enumerate(spec.orders):
                 v = comp[:, o]  # [B]
@@ -688,7 +706,9 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
                 )
 
     harmonic_injection = (
-        _harmonic_injections(grid, harm_layouts, u, samples, operating_point, nominal)
+        _harmonic_injections(
+            grid, harm_layouts, u, samples, operating_point, nominal, seed=config.seed
+        )
         if harm_layouts
         else {}
     )

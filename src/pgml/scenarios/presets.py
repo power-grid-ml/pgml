@@ -55,7 +55,7 @@ order set flows into the generated spectrum rather than being configured twice.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 from ..errors import InputError
 from .config import (
@@ -181,7 +181,12 @@ def _pv_emission_high(order: int) -> float:
 
 
 def _phase_specs(
-    orders: Sequence[int], spans: dict[int, float], *, name: str, selector: Selector
+    orders: Sequence[int],
+    spans: dict[int, float],
+    *,
+    name: str,
+    selector: Selector,
+    per: str = "each",
 ) -> list[ParameterSpec]:
     """Per-order emission-phase specs; the full-circle orders share ONE spec.
 
@@ -202,7 +207,7 @@ def _phase_specs(
                 distribution=Uniform(low=-span, high=span),
                 field="h_phase",
                 mode="absolute",
-                per="each",
+                per=per,
                 orders=[int(order)],
             )
         )
@@ -215,7 +220,7 @@ def _phase_specs(
                 distribution=Uniform(low=-FULL_CIRCLE_DEG, high=FULL_CIRCLE_DEG),
                 field="h_phase",
                 mode="absolute",
-                per="each",
+                per=per,
                 orders=saturated,
             )
         )
@@ -230,6 +235,7 @@ def _emission_law_specs(
     floor: tuple[float, float],
     floor_phase_deg: tuple[float, float],
     slope_deg: tuple[float, float],
+    per: str = "each",
 ) -> list[ParameterSpec]:
     """The load-dependence specs of one device group, per (device, order).
 
@@ -258,7 +264,7 @@ def _emission_law_specs(
                 else Uniform(low=lo, high=hi),
                 field=field,
                 mode="absolute",
-                per="each",
+                per=per,
                 orders=[int(o) for o in orders],
             )
         )
@@ -362,6 +368,7 @@ def se_random_scenario_config(
     emission_floor: tuple[float, float] = EMISSION_FLOOR,
     emission_floor_phase_deg: tuple[float, float] = EMISSION_FLOOR_PHASE_DEG,
     phase_slope_deg: tuple[float, float] = EMISSION_PHASE_SLOPE_DEG,
+    emission_persistence: Literal["scenario", "device"] = "scenario",
 ) -> ScenarioConfig:
     """The randomized-snapshot recipe (Task A): independent operating points.
 
@@ -397,6 +404,15 @@ def se_random_scenario_config(
         inverters alike (see the module docstring): the affine law's load-independent
         share and its angle, and the explicit phase slope. ``(0, 0)`` for a range emits
         no spec for it; all three at ``(0, 0)`` is the proportional recipe, bit-for-bit.
+    emission_persistence:
+        ``"scenario"`` (default) redraws every device's emission fraction, phase and law
+        parameters in every scenario — a fresh device population per snapshot, so across
+        the dataset the fundamental predicts a harmonic only through the law's mean.
+        ``"device"`` draws them ONCE per device for the whole dataset (``per="fixed"``):
+        each device keeps its signature, so its harmonic is a stable function of its own
+        loading — the relation a learner can exploit, and one tied to this population's
+        signatures (judge such a model on a population drawn with another seed). The
+        operating point stays a fresh draw per scenario either way.
 
     Returns
     -------
@@ -404,6 +420,7 @@ def se_random_scenario_config(
         The sampling template; feed it to :func:`pgml.scenarios.run_scenarios`.
     """
     injected = _injected_orders(orders)
+    per_device = "fixed" if emission_persistence == "device" else "each"
     specs, factors = _fundamental_specs(
         grid,
         load_scale=load_scale,
@@ -423,7 +440,7 @@ def se_random_scenario_config(
                     low=spectrum_fraction[0], high=spectrum_fraction[1]
                 ),
                 field="h_mag",
-                per="each",
+                per=per_device,
                 orders=injected,
                 harmonic_reference="iec61000-3-2",
             )
@@ -434,6 +451,7 @@ def se_random_scenario_config(
                 LOAD_PHASE_SPAN_DEG,
                 name="spectrum_phase",
                 selector=load_selector,
+                per=per_device,
             )
         )
         specs.extend(
@@ -444,6 +462,7 @@ def se_random_scenario_config(
                 floor=emission_floor,
                 floor_phase_deg=emission_floor_phase_deg,
                 slope_deg=phase_slope_deg,
+                per=per_device,
             )
         )
     if injected and _has_pv(grid):
@@ -455,14 +474,18 @@ def se_random_scenario_config(
                 distribution=Uniform(low=0.0, high=_pv_emission_high(order)),
                 field="h_mag",
                 mode="absolute",
-                per="each",
+                per=per_device,
                 orders=[order],
             )
             for order in injected
         )
         specs.extend(
             _phase_specs(
-                injected, PV_PHASE_SPAN_DEG, name="pv_phase", selector=pv_selector
+                injected,
+                PV_PHASE_SPAN_DEG,
+                name="pv_phase",
+                selector=pv_selector,
+                per=per_device,
             )
         )
         specs.extend(
@@ -473,6 +496,7 @@ def se_random_scenario_config(
                 floor=emission_floor,
                 floor_phase_deg=emission_floor_phase_deg,
                 slope_deg=phase_slope_deg,
+                per=per_device,
             )
         )
     return ScenarioConfig(

@@ -88,6 +88,20 @@ loading — for loads and PV inverters alike. Passing `(0, 0)` for a range to
 sampling dimension keeps every other draw bit-identical), so all three at `(0, 0)` is the
 proportional recipe of preset version 2 exactly.
 
+**Persistence.** By default the randomized recipe redraws every device's emission
+fraction, angle and law parameters in each scenario — a fresh device population per
+snapshot. Across such a dataset the fundamental therefore predicts a harmonic only through
+the law's *mean*, and a fitted linear map finds no usable cross-order information (measured:
+the joint-order ridge is 2 % *worse* than a per-order one). `emission_persistence="device"`
+draws them once per device for the whole dataset (`ParameterSpec.per="fixed"`: one draw per
+matched component, held across the batch, from a stream seeded by the config seed and the
+spec's name, consuming no sampling dimension), so each device keeps its signature and its
+harmonic is a stable function of its own loading — the relation a learner can exploit. The
+operating point stays a fresh draw per scenario. The caveat travels with it: the relation
+is tied to *this* population's signatures, so a model trained on such data must be judged
+on a population drawn with another seed, and a class-level signature (one draw per consumer
+class, the composition library's premise) is the form that transfers.
+
 What a dataset records (`samples`, persisted beside the state): the raw draws under each
 spec's name, the REALIZED post-reference, post-law magnitude and phase (`<spec>_mag`,
 `<spec>_phase`) and the loading the law read (`<spec>_loading`), so the magnitude-to-loading

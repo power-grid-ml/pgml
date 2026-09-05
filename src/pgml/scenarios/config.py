@@ -196,7 +196,15 @@ class ParameterSpec(_Base):
       magnitude) or ``"absolute"`` (the sampled value IS the W / var / pu / degrees).
     - ``per``: ``"each"`` (every matched component varies independently — one sampling
       dimension per component) or ``"shared"`` (one sample applied to all matched).
-      Ignored when ``correlation`` is set.
+      Ignored when ``correlation`` is set. Harmonic fields additionally accept
+      ``"fixed"``: one draw per matched component held FIXED across every scenario of
+      the batch — a device's own signature (its emission fraction, angle, floor, slope),
+      drawn once from a stream seeded by the config's ``seed`` and the spec's name, and
+      consuming no sampling dimension (every other draw is unchanged). This is what makes a
+      device's harmonic a stable function of its own loading across the dataset, the
+      relation a learner can exploit; it also ties that relation to THIS population's
+      signatures, so a model trained on it must be judged on a population drawn with
+      another seed.
     - ``correlation``: optional :class:`Correlation` coupling matched components
       through a shared :class:`LatentFactor` (power fields only).
     - ``symmetry`` (per-phase, power fields only): ``"balanced"`` (one value per
@@ -261,7 +269,7 @@ class ParameterSpec(_Base):
         "h_slope",
     ] = "pq"
     mode: Literal["scale", "absolute"] = "scale"
-    per: Literal["each", "shared"] = "each"
+    per: Literal["each", "shared", "fixed"] = "each"
     correlation: Optional[Correlation] = None
     symmetry: Literal["balanced", "independent", "small_imbalance"] = "balanced"
     imbalance: float = Field(default=0.0, ge=0.0)
@@ -313,6 +321,11 @@ class ParameterSpec(_Base):
             raise ValueError("symmetry='small_imbalance' requires imbalance > 0.")
         if self.symmetry != "small_imbalance" and self.imbalance != 0.0:
             raise ValueError("imbalance is only used with symmetry='small_imbalance'.")
+        if self.per == "fixed" and not self.is_harmonic:
+            raise ValueError(
+                "per='fixed' (one draw per component held across the batch) is a harmonic "
+                "option; a power field varies per scenario."
+            )
         if self.is_harmonic:
             if not self.orders:
                 raise ValueError(f"field={self.field!r} requires a non-empty `orders`.")
