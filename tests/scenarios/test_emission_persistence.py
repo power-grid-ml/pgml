@@ -131,3 +131,56 @@ def test_the_preset_knob_reaches_every_emission_spec(pv_grid):
     assert not torch.all(
         s.samples["load_spectrum_loading"] == s.samples["load_spectrum_loading"][:1]
     )
+
+
+def test_a_class_draw_is_the_same_constant_in_every_dataset(grid3):
+    """``per="class"``: one draw for all matched components, held across the batch and
+    identical whatever the seed — a class constant."""
+    a = sample(grid3, _cfg("class", seed=3))
+    b = sample(grid3, _cfg("class", seed=4))
+    hm = a.samples["hm"]
+    assert hm.shape[1] == 1  # one draw for every matched component ...
+    assert torch.all(hm == hm[:1])  # ... held across the scenarios ...
+    mag = a.samples["hm_mag"]
+    assert torch.allclose(
+        mag[:, 0], mag[:, 1]
+    )  # ... realized identically per device ...
+    assert torch.equal(
+        a.samples["hm"], b.samples["hm"]
+    )  # ... and identical across seeds
+    fixed = sample(grid3, _cfg("fixed", seed=3))
+    assert not torch.equal(fixed.samples["hm"], a.samples["hm"])
+
+
+def test_the_class_persistence_makes_the_law_a_class_constant(pv_grid):
+    from pgml.schemas.grid_schema import Load
+
+    cfg = se_random_scenario_config(
+        pv_grid, orders=[1, 3, 5], n_samples=8, seed=0, emission_persistence="class"
+    )
+    laws = [s for s in cfg.parameters if s.is_emission_law]
+    assert laws and all(s.per == "class" for s in laws)
+    classes = {
+        str(getattr(a.consumer_type, "value", a.consumer_type))
+        for a in pv_grid.appliances
+        if isinstance(a, Load) and a.in_service and a.consumer_type is not None
+    }
+    load_specs = [s for s in laws if s.selector.component == "load"]
+    assert {s.selector.consumer_type for s in load_specs} - {None} == classes
+    untyped = [
+        int(a.id)
+        for a in pv_grid.appliances
+        if isinstance(a, Load) and a.in_service and a.consumer_type is None
+    ]
+    if untyped:
+        by_ids = next(s for s in load_specs if s.selector.ids is not None)
+        assert sorted(by_ids.selector.ids) == sorted(untyped)
+    # the emission level stays a per-device, population-specific draw
+    level = next(s for s in cfg.parameters if s.name == "load_spectrum")
+    assert level.per == "fixed"
+    # ... and two seeds share the class law but not the levels
+    a = sample(pv_grid, cfg)
+    b = sample(pv_grid, cfg.model_copy(update={"seed": 1}))
+    law_name = next(s.name for s in laws if s.selector.component == "load")
+    assert torch.equal(a.samples[law_name], b.samples[law_name])
+    assert not torch.equal(a.samples["load_spectrum"], b.samples["load_spectrum"])

@@ -242,10 +242,10 @@ def _resolve(grid: Grid, config: ScenarioConfig):
                 f"Parameter {spec.name!r} selector matched no in-service components."
             )
         if spec.is_harmonic:
-            n_eff = 1 if spec.per == "shared" else len(ids)
-            # a FIXED spec draws once per component from its own seeded stream and takes
-            # no column of the cube, so every other draw stays where it was
-            block = 0 if spec.per == "fixed" else n_eff * len(spec.orders)
+            n_eff = 1 if spec.per in ("shared", "class") else len(ids)
+            # a FIXED / CLASS spec draws once from its own seeded stream and takes no
+            # column of the cube, so every other draw stays where it was
+            block = 0 if spec.per in ("fixed", "class") else n_eff * len(spec.orders)
             harm_layouts.append(_HarmLayout(spec, ids, dim, block, n_eff))
             dim += block
             continue
@@ -569,12 +569,19 @@ def _harmonic_injections(
     for lay in harm_layouts:
         spec = lay.spec
         n_orders = len(spec.orders)
-        if spec.per == "fixed":
-            # one draw per (component, order), the same in every scenario: the device's
-            # signature, seeded by the config seed and the spec name (reproducible,
-            # independent of the cube and of every other spec)
+        if spec.per in ("fixed", "class"):
+            # one draw per (component, order) the same in every scenario: the device's
+            # signature, seeded by the config seed and the spec name (``fixed``), or one
+            # draw for every matched component seeded by the NAME alone (``class``: the
+            # same constant in every dataset ever drawn) — reproducible, independent of
+            # the cube and of every other spec
             gen = torch.Generator().manual_seed(
-                (int(seed) * 1_000_003 + zlib.crc32(spec.name.encode())) % (2**63 - 1)
+                (
+                    zlib.crc32(spec.name.encode())
+                    if spec.per == "class"
+                    else int(seed) * 1_000_003 + zlib.crc32(spec.name.encode())
+                )
+                % (2**63 - 1)
             )
             u_fixed = torch.rand(
                 (1, lay.n_eff * n_orders), generator=gen, dtype=u.dtype
@@ -595,7 +602,9 @@ def _harmonic_injections(
             else {}
         )
         for j, cid in enumerate(lay.ids):
-            comp = vals[:, 0 if spec.per == "shared" else j, :]  # [B, n_orders]
+            comp = vals[
+                :, 0 if spec.per in ("shared", "class") else j, :
+            ]  # [B, n_orders]
             dev, stored = _dev(cid), _stored(cid)
             for o, order in enumerate(spec.orders):
                 v = comp[:, o]  # [B]

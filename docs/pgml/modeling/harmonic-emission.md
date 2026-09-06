@@ -99,8 +99,13 @@ spec's name, consuming no sampling dimension), so each device keeps its signatur
 harmonic is a stable function of its own loading — the relation a learner can exploit. The
 operating point stays a fresh draw per scenario. The caveat travels with it: the relation
 is tied to *this* population's signatures, so a model trained on such data must be judged
-on a population drawn with another seed, and a class-level signature (one draw per consumer
-class, the composition library's premise) is the form that transfers.
+on a population drawn with another seed. `emission_persistence="class"` is the form that
+transfers: the law — floor, floor angle, slope — becomes a constant of the device's
+consumer class (`per="class"`: one draw for every device of the class, held across the
+batch and identical in every dataset, seeded by the spec's name alone), while the emission
+fraction and phase stay one draw per device (`per="fixed"`). The *shape* of a device's
+harmonic response is then a class property that transfers across populations and — given
+the class of a node — across grids; its *level* is a device property that does not.
 
 What a dataset records (`samples`, persisted beside the state): the raw draws under each
 spec's name, the REALIZED post-reference, post-law magnitude and phase (`<spec>_mag`,

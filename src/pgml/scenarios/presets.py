@@ -271,6 +271,39 @@ def _emission_law_specs(
     return specs
 
 
+def _law_groups(grid, component: str, name: str, per_device: str, persistence: str):
+    """``(spec name, selector, per)`` of the emission-law specs for one component kind.
+
+    One group for the whole kind unless the persistence is ``"class"``, which emits one
+    group per consumer class present in the grid (``Selector(consumer_type=...)``, the
+    untyped devices by id) with ``per="class"`` — the law is then a constant of the class.
+    """
+    from ..schemas.grid_schema import Generator, Load
+
+    if persistence != "class":
+        return [(name, Selector(component=component), per_device)]
+    cls = {"load": Load, "generator": Generator}[component]
+    by_type: dict = {}
+    untyped: list[int] = []
+    for a in grid.appliances:
+        if not isinstance(a, cls) or not a.in_service:
+            continue
+        ctype = getattr(a, "consumer_type", None)
+        if ctype is None:
+            untyped.append(int(a.id))
+        else:
+            by_type.setdefault(str(getattr(ctype, "value", ctype)), None)
+    groups = [
+        (f"{name}_{ctype}", Selector(component=component, consumer_type=ctype), "class")
+        for ctype in sorted(by_type)
+    ]
+    if untyped:
+        groups.append(
+            (f"{name}_untyped", Selector(component=component, ids=untyped), "class")
+        )
+    return groups
+
+
 def _has_generator(grid) -> bool:
     from ..schemas.grid_schema import Generator
 
@@ -368,7 +401,7 @@ def se_random_scenario_config(
     emission_floor: tuple[float, float] = EMISSION_FLOOR,
     emission_floor_phase_deg: tuple[float, float] = EMISSION_FLOOR_PHASE_DEG,
     phase_slope_deg: tuple[float, float] = EMISSION_PHASE_SLOPE_DEG,
-    emission_persistence: Literal["scenario", "device"] = "scenario",
+    emission_persistence: Literal["scenario", "device", "class"] = "scenario",
 ) -> ScenarioConfig:
     """The randomized-snapshot recipe (Task A): independent operating points.
 
@@ -411,8 +444,14 @@ def se_random_scenario_config(
         ``"device"`` draws them ONCE per device for the whole dataset (``per="fixed"``):
         each device keeps its signature, so its harmonic is a stable function of its own
         loading — the relation a learner can exploit, and one tied to this population's
-        signatures (judge such a model on a population drawn with another seed). The
-        operating point stays a fresh draw per scenario either way.
+        signatures (judge such a model on a population drawn with another seed).
+        ``"class"`` makes the LAW — floor, floor angle, slope — a constant of the device's
+        consumer class (one spec per class present in the grid, ``per="class"``: the same
+        draw in every dataset, whatever the seed), while the emission fraction and phase
+        stay one draw per device (``per="fixed"``, population-specific): the SHAPE of a
+        device's harmonic response is then a class property that transfers across
+        populations, its LEVEL a device property that does not. The operating point stays
+        a fresh draw per scenario in every mode.
 
     Returns
     -------
@@ -420,7 +459,7 @@ def se_random_scenario_config(
         The sampling template; feed it to :func:`pgml.scenarios.run_scenarios`.
     """
     injected = _injected_orders(orders)
-    per_device = "fixed" if emission_persistence == "device" else "each"
+    per_device = "each" if emission_persistence == "scenario" else "fixed"
     specs, factors = _fundamental_specs(
         grid,
         load_scale=load_scale,
@@ -454,17 +493,20 @@ def se_random_scenario_config(
                 per=per_device,
             )
         )
-        specs.extend(
-            _emission_law_specs(
-                injected,
-                name="load_emission",
-                selector=load_selector,
-                floor=emission_floor,
-                floor_phase_deg=emission_floor_phase_deg,
-                slope_deg=phase_slope_deg,
-                per=per_device,
+        for name, selector, per in _law_groups(
+            grid, "load", "load_emission", per_device, emission_persistence
+        ):
+            specs.extend(
+                _emission_law_specs(
+                    injected,
+                    name=name,
+                    selector=selector,
+                    floor=emission_floor,
+                    floor_phase_deg=emission_floor_phase_deg,
+                    slope_deg=phase_slope_deg,
+                    per=per,
+                )
             )
-        )
     if injected and _has_pv(grid):
         pv_selector = Selector(component="generator", consumer_type="pv")
         specs.extend(
@@ -496,7 +538,7 @@ def se_random_scenario_config(
                 floor=emission_floor,
                 floor_phase_deg=emission_floor_phase_deg,
                 slope_deg=phase_slope_deg,
-                per=per_device,
+                per="class" if emission_persistence == "class" else per_device,
             )
         )
     return ScenarioConfig(

@@ -68,6 +68,12 @@ verified `batched == loop-of-individual`).
     the spec name (`zlib.crc32`), consuming NO cube column — every other draw is unchanged.
     `samples[<spec>]` still carries `[B, n_dev, n_ord]` (the draw broadcast). The preset's
     `emission_persistence="device"` sets it on every harmonic spec of loads and PV.
+  - `per="class"` (harmonic fields only): ONE draw for every matched component, held across
+    the batch and IDENTICAL for every seed (seeded by the spec name alone; `samples[<spec>]`
+    is `[B, 1, n_ord]`) — a class constant. The preset's `emission_persistence="class"`
+    emits one law-spec group per consumer class present in the grid
+    (`load_emission_<class>` / `_untyped` by ids, `pv_emission`) with `per="class"`, the
+    fraction/phase specs `per="fixed"`.
 - `pgml.scenarios.emission` — the ONE emission-law definition both recipes apply:
   `affine_emission_correction(lam, floor, delta_deg) -> complex` (`z(lam)/(lam·z(1))`,
   `z = floor·e^{jδ} + (1−floor)·lam`), `phase_slope_shift(slope_deg, lam)`, `LOADING_FLOOR`.
@@ -80,7 +86,7 @@ verified `batched == loop-of-individual`).
   load_scale=(0,1), load_correlation=0.5, imbalance=0.15, spectrum_fraction=(0,2),
   pv_scale=(0,1), pv_correlation=None, slack_voltage_std=0.0333,
   emission_floor=EMISSION_FLOOR=(0.43,0.73), emission_floor_phase_deg=(100,150),
-  phase_slope_deg=(−25,25), emission_persistence="scenario"|"device") -> ScenarioConfig`
+  phase_slope_deg=(−25,25), emission_persistence="scenario"|"device"|"class") -> ScenarioConfig`
   (preset v3: the load-dependent emission
   law drawn per device and order for loads AND PV — `load_emission_{floor,floor_phase,
   slope}` / `pv_emission_*` specs; a `(0,0)` range emits no spec, all three `(0,0)` = the

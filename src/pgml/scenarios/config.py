@@ -204,7 +204,12 @@ class ParameterSpec(_Base):
       device's harmonic a stable function of its own loading across the dataset, the
       relation a learner can exploit; it also ties that relation to THIS population's
       signatures, so a model trained on it must be judged on a population drawn with
-      another seed.
+      another seed. ``"class"``: ONE draw for all matched components, held across the
+      batch AND identical for every seed — seeded by the spec's name alone — a CLASS
+      constant: with a selector that names a consumer class, every device of that class
+      shares one law in every dataset ever drawn, so what a model learns about the class
+      transfers to another population of the same grid and, given the class of a node,
+      to another grid.
     - ``correlation``: optional :class:`Correlation` coupling matched components
       through a shared :class:`LatentFactor` (power fields only).
     - ``symmetry`` (per-phase, power fields only): ``"balanced"`` (one value per
@@ -269,7 +274,7 @@ class ParameterSpec(_Base):
         "h_slope",
     ] = "pq"
     mode: Literal["scale", "absolute"] = "scale"
-    per: Literal["each", "shared", "fixed"] = "each"
+    per: Literal["each", "shared", "fixed", "class"] = "each"
     correlation: Optional[Correlation] = None
     symmetry: Literal["balanced", "independent", "small_imbalance"] = "balanced"
     imbalance: float = Field(default=0.0, ge=0.0)
@@ -321,10 +326,10 @@ class ParameterSpec(_Base):
             raise ValueError("symmetry='small_imbalance' requires imbalance > 0.")
         if self.symmetry != "small_imbalance" and self.imbalance != 0.0:
             raise ValueError("imbalance is only used with symmetry='small_imbalance'.")
-        if self.per == "fixed" and not self.is_harmonic:
+        if self.per in ("fixed", "class") and not self.is_harmonic:
             raise ValueError(
-                "per='fixed' (one draw per component held across the batch) is a harmonic "
-                "option; a power field varies per scenario."
+                f"per={self.per!r} (a draw held across the batch) is a harmonic option; a "
+                "power field varies per scenario."
             )
         if self.is_harmonic:
             if not self.orders:
