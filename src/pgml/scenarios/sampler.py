@@ -727,7 +727,36 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
         n_samples=b,
         config=config,
         harmonic_injection=harmonic_injection,
+        node_sources=_background_sources(grid, config, b),
     )
+
+
+def _background_sources(grid: Grid, config: ScenarioConfig, b: int) -> list:
+    """The upstream background of a snapshot batch as batched ``NodeHarmonicSource``s.
+
+    A snapshot recipe has no step axis, so every scenario draws the background level
+    independently from the drift's stationary distribution (the builder is handed the
+    ``[B, 1]`` shape it expects and the step axis is dropped again so the spectrum tensors
+    line up with the per-device ``[B]`` injections). Empty when no background is configured.
+    """
+    if config.background is None or not config.background.magnitude_pu:
+        return []
+    from dataclasses import replace
+
+    from .harmonics import build_background_sources
+
+    gen = torch.Generator().manual_seed(int(config.seed) + 8117)
+    sources = build_background_sources(grid, config.background, (int(b), 1), gen)
+    return [
+        replace(
+            src,
+            spectrum={
+                order: tuple(c.reshape(int(b)) for c in pair)
+                for order, pair in src.spectrum.items()
+            },
+        )
+        for src in sources
+    ]
 
 
 def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:

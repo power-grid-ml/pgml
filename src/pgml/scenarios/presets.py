@@ -59,6 +59,7 @@ from typing import Literal, Optional, Sequence
 
 from ..errors import InputError
 from .config import (
+    BackgroundHarmonicConfig,
     CoherentSpectrumConfig,
     CompositionConfig,
     Constant,
@@ -402,8 +403,14 @@ def se_random_scenario_config(
     emission_floor_phase_deg: tuple[float, float] = EMISSION_FLOOR_PHASE_DEG,
     phase_slope_deg: tuple[float, float] = EMISSION_PHASE_SLOPE_DEG,
     emission_persistence: Literal["scenario", "device", "class"] = "scenario",
+    background: Optional[BackgroundHarmonicConfig] = None,
 ) -> ScenarioConfig:
     """The randomized-snapshot recipe (Task A): independent operating points.
+
+    ``background`` places the upstream harmonic background of
+    :class:`~pgml.scenarios.BackgroundHarmonicConfig` behind every snapshot — the
+    distortion a feeder inherits from the supplying network, shared by all of its devices.
+    Each snapshot draws its own level (a snapshot has no step axis for the drift to walk).
 
     Parameters
     ----------
@@ -547,6 +554,7 @@ def se_random_scenario_config(
         method=method,
         parameters=specs,
         factors=factors,
+        background=background,
     )
 
 
@@ -576,6 +584,7 @@ def se_coherent_scenario_config(
     pv_scale: tuple[float, float] = (0.0, 1.0),
     pv_correlation: Optional[float] = None,
     slack_voltage_std: float = 0.0333,
+    background: Optional[BackgroundHarmonicConfig] = None,
 ) -> CoherentSpectrumConfig:
     """The coherent-sequence recipe (Task B/C): a device population moving through time.
 
@@ -692,4 +701,5 @@ def se_coherent_scenario_config(
             )
         ),
         start_time=start_time if (composed or profile is not None) else None,
+        background=background,
     )

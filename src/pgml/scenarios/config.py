@@ -389,6 +389,9 @@ class ScenarioConfig(_Base):
     method: Literal["sobol", "lhs", "independent"] = "sobol"
     parameters: list[ParameterSpec]
     factors: list[LatentFactor] = Field(default_factory=list)
+    #: Upstream harmonic background at the source, shared by every device on the feeder
+    #: (see :class:`BackgroundHarmonicConfig`). ``None`` (default) = no background.
+    background: Optional["BackgroundHarmonicConfig"] = None
 
 
 # =============================================================================
@@ -1257,6 +1260,10 @@ class BackgroundHarmonicConfig(_Base):
                 "the fundamental is set by the source's own voltage, not the background."
             )
         return self
+
+
+# ``ScenarioConfig`` names the background by forward reference (it is defined above it).
+ScenarioConfig.model_rebuild()
 
 
 class CompositionConfig(_Base):
