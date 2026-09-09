@@ -50,16 +50,22 @@ def test_random_background_is_batched_per_scenario_and_inert_when_unset(grid3):
 def test_random_background_reaches_the_solve_and_keeps_the_fundamental(grid3):
     cfg = _cfg(grid3, 5, 9)
     orders = [1, 3, 5]
-    plain = run_scenarios(grid3, cfg, calculation="harmonic", harmonic_orders=orders, dtype=CDT)
+    plain = run_scenarios(
+        grid3, cfg, calculation="harmonic", harmonic_orders=orders, dtype=CDT
+    )
     bg = _cfg(
         grid3, 5, 9, BackgroundHarmonicConfig(magnitude_pu={3: 0.03}, drift_std=0.3)
     )
-    got = run_scenarios(grid3, bg, calculation="harmonic", harmonic_orders=orders, dtype=CDT)
+    got = run_scenarios(
+        grid3, bg, calculation="harmonic", harmonic_orders=orders, dtype=CDT
+    )
     assert torch.allclose(got.v[:, 0], plain.v[:, 0], atol=1e-9), (
         "the background acts only at h > 1"
     )
     d3 = (got.v[:, 1] - plain.v[:, 1]).abs()
-    assert d3.min() > 0, "every node sees the upstream background at the configured order"
+    assert d3.min() > 0, (
+        "every node sees the upstream background at the configured order"
+    )
     # An order WITHOUT a configured level still sees the source's stiffness: the Thevenin
     # background is the upstream network, which holds the coupling point near its own
     # (here zero) level at that order rather than leaving it to float.
