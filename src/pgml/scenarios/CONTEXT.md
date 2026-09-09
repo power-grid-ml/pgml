@@ -50,13 +50,47 @@ verified `batched == loop-of-individual`).
     phase (deg, `mode="absolute"`). Per-device injection is seeded from the stored
     `StaticSpectrum` so unspecified orders survive. Harmonic fields reject
     `correlation`/per-phase `symmetry`.
+  - LOAD-DEPENDENT EMISSION fields `field="h_floor"|"h_floor_phase"|"h_slope"` (+ `orders`,
+    `mode="absolute"` only; `h_floor` drawn from `[0, 1]`): drawn per (device, order) like
+    the emission and folded into the device's realized (mag, phase) AFTER every spec has
+    written, against the loading `lam` the device's OWN power draw realised (drawn active
+    power over nameplate; per-phase draws average their phase ratios; `1` when no power
+    spec varies the device; floored at `emission.LOADING_FLOOR` = 0.05). `h_floor` = the
+    affine law's load-independent share `|A_h|/(|A_h|+|B_h|)` — magnitude × `|c(lam)|`,
+    phase + `arg c(lam)` with `c = affine_emission_correction` (rated point unchanged, `0`
+    = proportional bit-for-bit); `h_floor_phase` = `arg A_h − arg B_h` [deg]; `h_slope`
+    adds `s_h·(lam−1)` [deg] (`phase_slope_shift`). `ParameterSpec.is_emission_law`;
+    `EMISSION_LAW_FIELDS` / `HARMONIC_FIELDS` name the field sets. Realized columns:
+    `"<spec>_mag"` / `"<spec>_phase"` are post-law; `"<spec>_loading"` `[B, n_dev]` is the
+    loading the law read. `docs/pgml/modeling/harmonic-emission.md`.
+  - `per="fixed"` (harmonic fields only): ONE draw per matched component held across every
+    scenario of the batch (a device's signature), from a stream seeded by `config.seed` and
+    the spec name (`zlib.crc32`), consuming NO cube column — every other draw is unchanged.
+    `samples[<spec>]` still carries `[B, n_dev, n_ord]` (the draw broadcast). The preset's
+    `emission_persistence="device"` sets it on every harmonic spec of loads and PV.
+  - `per="class"` (harmonic fields only): ONE draw for every matched component, held across
+    the batch and IDENTICAL for every seed (seeded by the spec name alone; `samples[<spec>]`
+    is `[B, 1, n_ord]`) — a class constant. The preset's `emission_persistence="class"`
+    emits one law-spec group per consumer class present in the grid
+    (`load_emission_<class>` / `_untyped` by ids, `pv_emission`) with `per="class"`, the
+    fraction/phase specs `per="fixed"`.
+- `pgml.scenarios.emission` — the ONE emission-law definition both recipes apply:
+  `affine_emission_correction(lam, floor, delta_deg) -> complex` (`z(lam)/(lam·z(1))`,
+  `z = floor·e^{jδ} + (1−floor)·lam`), `phase_slope_shift(slope_deg, lam)`, `LOADING_FLOOR`.
+  The composition path's `_emission_affine` delegates here.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
 - CALIBRATED SE RECIPE (`presets.py`) — the ONE source every state-estimation generator
   builds from (the pgl workflow's three tasks, the multi-grid corpus, `pgml.grids
   .se_benchmark_scenario_config`); a fix here reaches all of them.
   `se_random_scenario_config(grid, *, orders, n_samples, seed, method="sobol",
   load_scale=(0,1), load_correlation=0.5, imbalance=0.15, spectrum_fraction=(0,2),
-  pv_scale=(0,1), pv_correlation=None, slack_voltage_std=0.0333) -> ScenarioConfig` and
+  pv_scale=(0,1), pv_correlation=None, slack_voltage_std=0.0333,
+  emission_floor=EMISSION_FLOOR=(0.43,0.73), emission_floor_phase_deg=(100,150),
+  phase_slope_deg=(−25,25), emission_persistence="scenario"|"device"|"class") -> ScenarioConfig`
+  (preset v3: the load-dependent emission
+  law drawn per device and order for loads AND PV — `load_emission_{floor,floor_phase,
+  slope}` / `pv_emission_*` specs; a `(0,0)` range emits no spec, all three `(0,0)` = the
+  proportional v2 recipe bit-for-bit) and
   `se_coherent_scenario_config(grid, *, orders, n_scenarios, n_steps, seed,
   mode="composed"|"fingerprint", name, step_size_s=900, start_time=HIGH_ACTIVITY_START_TIME,
   n_modes=2, dwell=0.9, mode_bank_seed=None, fingerprint_fraction=(0,1), activity_scale=1.0,

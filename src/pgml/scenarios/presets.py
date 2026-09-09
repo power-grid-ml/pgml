@@ -29,6 +29,17 @@ The recipe, and why each part of it is there:
 - **Emission phase diversity** per (device, order), widening with order (+/-30 deg at
   h3 to the full circle from h13). Without it every device injects at 0 deg, all
   injections add coherently and the harmonic voltage field carries no cancellation.
+- **Load-dependent emission** — the drawn fraction is the RATED ratio, and the device's
+  actual ratio follows the measured complex affine law ``I_h(lam) = A_h + B_h * lam``
+  against the loading its own load draw realised: a load-independent floor of 43-73 %
+  of the rated phasor (``emission_floor``) at 100-150 deg to the proportional part
+  (``emission_floor_phase_deg``), plus an explicit phase slope of +/-25 deg per unit
+  loading (``phase_slope_deg``). Measured devices emit 6-10x their rated ratio at 10 %
+  load, rotate their harmonic angle as they unload and show a cancellation null inside
+  the operating range; a proportional draw has none of it, and a state estimator
+  trained on it can never learn how a harmonic follows the fundamental. The three
+  ranges are the ones the composed device library carries, so Task A and Task B share
+  one law; ``(0, 0)`` for all three reproduces the proportional recipe bit-for-bit.
 - **PV inverter emission** with its own h5-dominant per-order shape (a load's class-D
   spectrum is h3-dominant) — the contrast that separates a generation/consumption pair
   whose fundamentals cancel at a shared bus. Spans are calibrated to the measured
@@ -44,12 +55,14 @@ order set flows into the generated spectrum rather than being configured twice.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 from ..errors import InputError
 from .config import (
+    BackgroundHarmonicConfig,
     CoherentSpectrumConfig,
     CompositionConfig,
+    Constant,
     Correlation,
     LatentFactor,
     LoadProfileConfig,
@@ -63,6 +76,9 @@ from .config import (
 __all__ = [
     "SE_PRESET_VERSION",
     "HIGH_ACTIVITY_START_TIME",
+    "EMISSION_FLOOR",
+    "EMISSION_FLOOR_PHASE_DEG",
+    "EMISSION_PHASE_SLOPE_DEG",
     "LOAD_PHASE_SPAN_DEG",
     "PV_EMISSION_HIGH",
     "PV_PHASE_SPAN_DEG",
@@ -72,7 +88,7 @@ __all__ = [
 
 #: Version of the calibrated recipe below. Bumped whenever a default changes the drawn
 #: population; recorded beside a generated dataset so two datasets can be compared.
-SE_PRESET_VERSION = "2"
+SE_PRESET_VERSION = "3"
 
 #: Absolute anchor of the coherent sequences' diurnal phase: the late-afternoon band in
 #: which households ramp, EVs arrive and PV still produces.
@@ -84,6 +100,18 @@ HIGH_ACTIVITY_START_TIME = "2024-06-21T16:00:00"
 LOAD_PHASE_SPAN_DEG: dict[int, float] = {3: 30.0, 5: 60.0, 7: 90.0, 9: 120.0, 11: 150.0}
 #: Phase half-width of any order not tabulated above (the saturated full circle).
 FULL_CIRCLE_DEG = 180.0
+#: Range of the load-INDEPENDENT share of a device's rated harmonic phasor (the affine
+#: emission law's ``|A_h| / (|A_h| + |B_h|)``), measured across certified inverters and
+#: lab racks: the ratio to the fundamental at 10 % load is 6-10x the rated one. The same
+#: range the composed device library carries, so both recipes draw one law.
+EMISSION_FLOOR: tuple[float, float] = (0.43, 0.73)
+#: Range of the angle between the floor and the load-proportional part [deg]; near
+#: anti-phase, which is what produces the measured cancellation null inside the
+#: operating range and the rotation of the emission angle with loading.
+EMISSION_FLOOR_PHASE_DEG: tuple[float, float] = (100.0, 150.0)
+#: Range of the explicit emission phase slope [deg per unit loading], on top of the
+#: affine law's own rotation (the composed library spans +/-15 to +/-30 by class).
+EMISSION_PHASE_SLOPE_DEG: tuple[float, float] = (-25.0, 25.0)
 
 #: Per-order upper end of a PV inverter's emission, as a fraction of the device's OWN
 #: fundamental current. h5-dominant, unlike the h3-dominant class-D load spectrum. The
@@ -154,7 +182,12 @@ def _pv_emission_high(order: int) -> float:
 
 
 def _phase_specs(
-    orders: Sequence[int], spans: dict[int, float], *, name: str, selector: Selector
+    orders: Sequence[int],
+    spans: dict[int, float],
+    *,
+    name: str,
+    selector: Selector,
+    per: str = "each",
 ) -> list[ParameterSpec]:
     """Per-order emission-phase specs; the full-circle orders share ONE spec.
 
@@ -175,7 +208,7 @@ def _phase_specs(
                 distribution=Uniform(low=-span, high=span),
                 field="h_phase",
                 mode="absolute",
-                per="each",
+                per=per,
                 orders=[int(order)],
             )
         )
@@ -188,11 +221,88 @@ def _phase_specs(
                 distribution=Uniform(low=-FULL_CIRCLE_DEG, high=FULL_CIRCLE_DEG),
                 field="h_phase",
                 mode="absolute",
-                per="each",
+                per=per,
                 orders=saturated,
             )
         )
     return specs
+
+
+def _emission_law_specs(
+    orders: Sequence[int],
+    *,
+    name: str,
+    selector: Selector,
+    floor: tuple[float, float],
+    floor_phase_deg: tuple[float, float],
+    slope_deg: tuple[float, float],
+    per: str = "each",
+) -> list[ParameterSpec]:
+    """The load-dependence specs of one device group, per (device, order).
+
+    One spec per law parameter — ``<name>_floor`` (the affine law's load-independent
+    share), ``<name>_floor_phase`` (its angle) and ``<name>_slope`` (the explicit phase
+    slope) — each drawn per device and order like the emission itself. A range that is
+    ``(0, 0)`` emits NO spec: the law is inert at zero anyway, and not consuming a
+    sampling dimension keeps every other draw of the recipe bit-identical, so the
+    proportional recipe is exactly recoverable.
+    """
+    specs: list[ParameterSpec] = []
+    for suffix, field, rng in (
+        ("floor", "h_floor", floor),
+        ("floor_phase", "h_floor_phase", floor_phase_deg),
+        ("slope", "h_slope", slope_deg),
+    ):
+        lo, hi = float(rng[0]), float(rng[1])
+        if lo == 0.0 and hi == 0.0:
+            continue
+        specs.append(
+            ParameterSpec(
+                name=f"{name}_{suffix}",
+                selector=selector,
+                distribution=Constant(value=lo)
+                if lo == hi
+                else Uniform(low=lo, high=hi),
+                field=field,
+                mode="absolute",
+                per=per,
+                orders=[int(o) for o in orders],
+            )
+        )
+    return specs
+
+
+def _law_groups(grid, component: str, name: str, per_device: str, persistence: str):
+    """``(spec name, selector, per)`` of the emission-law specs for one component kind.
+
+    One group for the whole kind unless the persistence is ``"class"``, which emits one
+    group per consumer class present in the grid (``Selector(consumer_type=...)``, the
+    untyped devices by id) with ``per="class"`` — the law is then a constant of the class.
+    """
+    from ..schemas.grid_schema import Generator, Load
+
+    if persistence != "class":
+        return [(name, Selector(component=component), per_device)]
+    cls = {"load": Load, "generator": Generator}[component]
+    by_type: dict = {}
+    untyped: list[int] = []
+    for a in grid.appliances:
+        if not isinstance(a, cls) or not a.in_service:
+            continue
+        ctype = getattr(a, "consumer_type", None)
+        if ctype is None:
+            untyped.append(int(a.id))
+        else:
+            by_type.setdefault(str(getattr(ctype, "value", ctype)), None)
+    groups = [
+        (f"{name}_{ctype}", Selector(component=component, consumer_type=ctype), "class")
+        for ctype in sorted(by_type)
+    ]
+    if untyped:
+        groups.append(
+            (f"{name}_untyped", Selector(component=component, ids=untyped), "class")
+        )
+    return groups
 
 
 def _has_generator(grid) -> bool:
@@ -289,8 +399,18 @@ def se_random_scenario_config(
     pv_scale: tuple[float, float] = (0.0, 1.0),
     pv_correlation: Optional[float] = None,
     slack_voltage_std: float = 0.0333,
+    emission_floor: tuple[float, float] = EMISSION_FLOOR,
+    emission_floor_phase_deg: tuple[float, float] = EMISSION_FLOOR_PHASE_DEG,
+    phase_slope_deg: tuple[float, float] = EMISSION_PHASE_SLOPE_DEG,
+    emission_persistence: Literal["scenario", "device", "class"] = "scenario",
+    background: Optional[BackgroundHarmonicConfig] = None,
 ) -> ScenarioConfig:
     """The randomized-snapshot recipe (Task A): independent operating points.
+
+    ``background`` places the upstream harmonic background of
+    :class:`~pgml.scenarios.BackgroundHarmonicConfig` behind every snapshot — the
+    distortion a feeder inherits from the supplying network, shared by all of its devices.
+    Each snapshot draws its own level (a snapshot has no step axis for the drift to walk).
 
     Parameters
     ----------
@@ -319,6 +439,26 @@ def se_random_scenario_config(
     slack_voltage_std:
         Standard deviation of the ``Normal(1.0, .)`` slack-reference scale; ``0``
         disables the slack draw.
+    emission_floor, emission_floor_phase_deg, phase_slope_deg:
+        The load-dependent emission law, drawn per device and order for loads and PV
+        inverters alike (see the module docstring): the affine law's load-independent
+        share and its angle, and the explicit phase slope. ``(0, 0)`` for a range emits
+        no spec for it; all three at ``(0, 0)`` is the proportional recipe, bit-for-bit.
+    emission_persistence:
+        ``"scenario"`` (default) redraws every device's emission fraction, phase and law
+        parameters in every scenario — a fresh device population per snapshot, so across
+        the dataset the fundamental predicts a harmonic only through the law's mean.
+        ``"device"`` draws them ONCE per device for the whole dataset (``per="fixed"``):
+        each device keeps its signature, so its harmonic is a stable function of its own
+        loading — the relation a learner can exploit, and one tied to this population's
+        signatures (judge such a model on a population drawn with another seed).
+        ``"class"`` makes the LAW — floor, floor angle, slope — a constant of the device's
+        consumer class (one spec per class present in the grid, ``per="class"``: the same
+        draw in every dataset, whatever the seed), while the emission fraction and phase
+        stay one draw per device (``per="fixed"``, population-specific): the SHAPE of a
+        device's harmonic response is then a class property that transfers across
+        populations, its LEVEL a device property that does not. The operating point stays
+        a fresh draw per scenario in every mode.
 
     Returns
     -------
@@ -326,6 +466,7 @@ def se_random_scenario_config(
         The sampling template; feed it to :func:`pgml.scenarios.run_scenarios`.
     """
     injected = _injected_orders(orders)
+    per_device = "each" if emission_persistence == "scenario" else "fixed"
     specs, factors = _fundamental_specs(
         grid,
         load_scale=load_scale,
@@ -345,7 +486,7 @@ def se_random_scenario_config(
                     low=spectrum_fraction[0], high=spectrum_fraction[1]
                 ),
                 field="h_mag",
-                per="each",
+                per=per_device,
                 orders=injected,
                 harmonic_reference="iec61000-3-2",
             )
@@ -356,8 +497,23 @@ def se_random_scenario_config(
                 LOAD_PHASE_SPAN_DEG,
                 name="spectrum_phase",
                 selector=load_selector,
+                per=per_device,
             )
         )
+        for name, selector, per in _law_groups(
+            grid, "load", "load_emission", per_device, emission_persistence
+        ):
+            specs.extend(
+                _emission_law_specs(
+                    injected,
+                    name=name,
+                    selector=selector,
+                    floor=emission_floor,
+                    floor_phase_deg=emission_floor_phase_deg,
+                    slope_deg=phase_slope_deg,
+                    per=per,
+                )
+            )
     if injected and _has_pv(grid):
         pv_selector = Selector(component="generator", consumer_type="pv")
         specs.extend(
@@ -367,14 +523,29 @@ def se_random_scenario_config(
                 distribution=Uniform(low=0.0, high=_pv_emission_high(order)),
                 field="h_mag",
                 mode="absolute",
-                per="each",
+                per=per_device,
                 orders=[order],
             )
             for order in injected
         )
         specs.extend(
             _phase_specs(
-                injected, PV_PHASE_SPAN_DEG, name="pv_phase", selector=pv_selector
+                injected,
+                PV_PHASE_SPAN_DEG,
+                name="pv_phase",
+                selector=pv_selector,
+                per=per_device,
+            )
+        )
+        specs.extend(
+            _emission_law_specs(
+                injected,
+                name="pv_emission",
+                selector=pv_selector,
+                floor=emission_floor,
+                floor_phase_deg=emission_floor_phase_deg,
+                slope_deg=phase_slope_deg,
+                per="class" if emission_persistence == "class" else per_device,
             )
         )
     return ScenarioConfig(
@@ -383,6 +554,7 @@ def se_random_scenario_config(
         method=method,
         parameters=specs,
         factors=factors,
+        background=background,
     )
 
 
@@ -412,6 +584,7 @@ def se_coherent_scenario_config(
     pv_scale: tuple[float, float] = (0.0, 1.0),
     pv_correlation: Optional[float] = None,
     slack_voltage_std: float = 0.0333,
+    background: Optional[BackgroundHarmonicConfig] = None,
 ) -> CoherentSpectrumConfig:
     """The coherent-sequence recipe (Task B/C): a device population moving through time.
 
@@ -528,4 +701,5 @@ def se_coherent_scenario_config(
             )
         ),
         start_time=start_time if (composed or profile is not None) else None,
+        background=background,
     )

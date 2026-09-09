@@ -59,6 +59,7 @@ from pgml.schemas.grid_schema import Grid, Load
 
 from .iec61000_3_2 import iec61000_3_2_fraction
 
+from .emission import affine_emission_correction
 from .config import (
     CoherentSpectrumConfig,
     CompositionConfig,
@@ -103,20 +104,12 @@ def _phase_law(ang0: Tensor, slope: Tensor, lam: Tensor) -> Tensor:
 
 
 def _emission_affine(lam: Tensor, floor: Tensor, delta_deg: Tensor) -> Tensor:
-    """The affine emission law ``I_h(lam) = A_h + B_h * lam``, as a complex correction.
+    """The affine emission law as a complex correction on the proportional phasor.
 
-    Returned is ``z(lam) / (lam * z(1))`` with ``z(lam) = floor * exp(j * delta) +
-    (1 - floor) * lam``, so multiplying the purely proportional member phasor by it gives
-    the affine one while leaving the RATED (``lam = 1``) emission untouched. ``floor`` is
-    ``|A_h|`` as a share of ``|A_h| + |B_h|`` and ``delta_deg`` is ``arg(A_h) - arg(B_h)``.
-
-    At ``floor = 0`` this is exactly ``1 + 0j`` — ``lam / lam`` is 1.0 in IEEE arithmetic
-    for any finite non-zero ``lam`` — so the proportional law is recovered bit-for-bit.
+    The one definition lives in :func:`pgml.scenarios.emission.affine_emission_correction`
+    (shared with the randomized recipe); kept under this name for the composition path.
     """
-    a = floor * torch.exp(1j * torch.deg2rad(delta_deg))
-    z = a + (1.0 - floor) * lam
-    z_rated = a + (1.0 - floor)
-    return z / (lam.clamp(min=1e-9) * z_rated)
+    return affine_emission_correction(lam, floor, delta_deg)
 
 
 def _urange_opt(gen: torch.Generator, rng: tuple, shape=()) -> Tensor:

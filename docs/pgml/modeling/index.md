@@ -30,6 +30,10 @@ Everything here is about the **simulation and modeling** layer (`pgml`). The lea
   control laws fold into the differentiable solve.
 - **[Per-node harmonic disturbance source](error-injection.md)** — injecting a defined
   harmonic "error" at any node, independent of whether a device sits there.
+- **[Harmonic emission of a device](harmonic-emission.md)** — the measured complex affine
+  law `I_h(λ) = A_h + B_h·λ` (load-independent floor, phase rotation with loading,
+  cancellation null) as the correction both scenario recipes apply to the proportional
+  draw, and the sequence structure of a device's harmonics across its phases.
 
 ## Solver architecture
 
@@ -55,6 +59,7 @@ transformer
 harmonic-line-model
 der-pv-storage
 error-injection
+harmonic-emission
 solver-performance
 references/index
 ```

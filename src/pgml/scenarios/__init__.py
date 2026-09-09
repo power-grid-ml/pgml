@@ -73,7 +73,15 @@ from .persistence import (
     read_dataset,
     write_dataset,
 )
+from .emission import (
+    LOADING_FLOOR,
+    affine_emission_correction,
+    phase_slope_shift,
+)
 from .presets import (
+    EMISSION_FLOOR,
+    EMISSION_FLOOR_PHASE_DEG,
+    EMISSION_PHASE_SLOPE_DEG,
     HIGH_ACTIVITY_START_TIME,
     SE_PRESET_VERSION,
     se_coherent_scenario_config,
@@ -154,6 +162,12 @@ __all__ = [
     "default_compositions",
     "SE_PRESET_VERSION",
     "HIGH_ACTIVITY_START_TIME",
+    "EMISSION_FLOOR",
+    "EMISSION_FLOOR_PHASE_DEG",
+    "EMISSION_PHASE_SLOPE_DEG",
+    "LOADING_FLOOR",
+    "affine_emission_correction",
+    "phase_slope_shift",
     "se_random_scenario_config",
     "se_coherent_scenario_config",
     "Perturbation",

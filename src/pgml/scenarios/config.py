@@ -170,6 +170,12 @@ class Correlation(_Base):
     rho: float = Field(ge=0.0, le=1.0)
 
 
+#: The harmonic fields of a :class:`ParameterSpec`: the emission draw itself and the
+#: load-dependence parameters applied on top of it.
+EMISSION_LAW_FIELDS: tuple[str, ...] = ("h_floor", "h_floor_phase", "h_slope")
+HARMONIC_FIELDS: tuple[str, ...] = ("h_mag", "h_phase", *EMISSION_LAW_FIELDS)
+
+
 class ParameterSpec(_Base):
     """One varied quantity.
 
@@ -180,7 +186,9 @@ class ParameterSpec(_Base):
       ``u_ref_v``; requires ``selector.component="source"`` and ``mode="scale"``, and
       supports neither per-phase ``symmetry`` nor harmonic options) — or a HARMONIC
       field — ``"h_mag"`` (per-order injection magnitude relative to the fundamental) /
-      ``"h_phase"`` (per-order phase in degrees). Harmonic fields require ``orders`` and
+      ``"h_phase"`` (per-order phase in degrees), or one of the LOAD-DEPENDENCE fields
+      ``"h_floor"`` / ``"h_floor_phase"`` / ``"h_slope"`` that make a device's emission
+      follow its own drawn loading (below). Harmonic fields require ``orders`` and
       feed ``solve_harmonic_flow(harmonic_injection=...)`` instead of an operating point.
       ``u_ref`` writes a per-source ``u_ref_scale`` operating-point entry that the
       ideal-slack solve multiplies onto ``u_ref_v`` (a batched fundamental boundary).
@@ -188,7 +196,20 @@ class ParameterSpec(_Base):
       magnitude) or ``"absolute"`` (the sampled value IS the W / var / pu / degrees).
     - ``per``: ``"each"`` (every matched component varies independently — one sampling
       dimension per component) or ``"shared"`` (one sample applied to all matched).
-      Ignored when ``correlation`` is set.
+      Ignored when ``correlation`` is set. Harmonic fields additionally accept
+      ``"fixed"``: one draw per matched component held FIXED across every scenario of
+      the batch — a device's own signature (its emission fraction, angle, floor, slope),
+      drawn once from a stream seeded by the config's ``seed`` and the spec's name, and
+      consuming no sampling dimension (every other draw is unchanged). This is what makes a
+      device's harmonic a stable function of its own loading across the dataset, the
+      relation a learner can exploit; it also ties that relation to THIS population's
+      signatures, so a model trained on it must be judged on a population drawn with
+      another seed. ``"class"``: ONE draw for all matched components, held across the
+      batch AND identical for every seed — seeded by the spec's name alone — a CLASS
+      constant: with a selector that names a consumer class, every device of that class
+      shares one law in every dataset ever drawn, so what a model learns about the class
+      transfers to another population of the same grid and, given the class of a node,
+      to another grid.
     - ``correlation``: optional :class:`Correlation` coupling matched components
       through a shared :class:`LatentFactor` (power fields only).
     - ``symmetry`` (per-phase, power fields only): ``"balanced"`` (one value per
@@ -216,14 +237,44 @@ class ParameterSpec(_Base):
     - ``emission_class``: IEC 61000-3-2 equipment class ``"A"``/``"B"``/``"C"``/``"D"``,
       or ``"auto"`` (default) to resolve it per device from its ``consumer_type`` and
       nominal power. Valid only with ``harmonic_reference="iec61000-3-2"``.
+    - LOAD DEPENDENCE (``mode="absolute"`` only; drawn per device and order like the
+      other harmonic fields, applied on top of the device's ``h_mag`` / ``h_phase`` draw
+      using the loading ``lam`` its OWN operating-point draw realised — the ratio of the
+      drawn active power to the nameplate, ``1`` for a device no power spec varies):
+
+      * ``"h_floor"`` — the load-INDEPENDENT share ``|A_h| / (|A_h| + |B_h|)`` of the
+        affine emission law ``I_h(lam) = A_h + B_h * lam`` (a ``[0, 1]`` distribution;
+        ``0`` = the proportional law, bit-for-bit). The drawn magnitude is read as the
+        RATED ratio and inflated by ``|z(lam)| / lam`` as the device unloads, exactly as
+        :func:`pgml.scenarios.emission.affine_emission_correction` defines it.
+      * ``"h_floor_phase"`` — ``arg(A_h) - arg(B_h)`` in degrees: the angle between the
+        floor and the proportional part, which makes the emission phase ROTATE with
+        loading and produces the measured cancellation null. Inert without a floor.
+      * ``"h_slope"`` — an explicit phase slope ``s_h`` [deg per unit loading]: the drawn
+        phase is shifted by ``s_h * (lam - 1)``, zero at rating.
+
+      The realized post-law magnitude and phase are what ``samples`` records
+      (``"<spec>_mag"`` / ``"<spec>_phase"``), beside the loading the law used
+      (``"<spec>_loading"``). Loadings below
+      :data:`pgml.scenarios.emission.LOADING_FLOOR` evaluate the law at the floor.
     """
 
     name: str
     selector: Selector
     distribution: Distribution
-    field: Literal["p", "q", "pq", "u_ref", "h_mag", "h_phase"] = "pq"
+    field: Literal[
+        "p",
+        "q",
+        "pq",
+        "u_ref",
+        "h_mag",
+        "h_phase",
+        "h_floor",
+        "h_floor_phase",
+        "h_slope",
+    ] = "pq"
     mode: Literal["scale", "absolute"] = "scale"
-    per: Literal["each", "shared"] = "each"
+    per: Literal["each", "shared", "fixed", "class"] = "each"
     correlation: Optional[Correlation] = None
     symmetry: Literal["balanced", "independent", "small_imbalance"] = "balanced"
     imbalance: float = Field(default=0.0, ge=0.0)
@@ -233,7 +284,12 @@ class ParameterSpec(_Base):
 
     @property
     def is_harmonic(self) -> bool:
-        return self.field in ("h_mag", "h_phase")
+        return self.field in HARMONIC_FIELDS
+
+    @property
+    def is_emission_law(self) -> bool:
+        """Whether this spec draws a load-dependence parameter rather than an emission."""
+        return self.field in EMISSION_LAW_FIELDS
 
     @property
     def is_source_voltage(self) -> bool:
@@ -270,6 +326,11 @@ class ParameterSpec(_Base):
             raise ValueError("symmetry='small_imbalance' requires imbalance > 0.")
         if self.symmetry != "small_imbalance" and self.imbalance != 0.0:
             raise ValueError("imbalance is only used with symmetry='small_imbalance'.")
+        if self.per in ("fixed", "class") and not self.is_harmonic:
+            raise ValueError(
+                f"per={self.per!r} (a draw held across the batch) is a harmonic option; a "
+                "power field varies per scenario."
+            )
         if self.is_harmonic:
             if not self.orders:
                 raise ValueError(f"field={self.field!r} requires a non-empty `orders`.")
@@ -283,8 +344,23 @@ class ParameterSpec(_Base):
                     "`correlation` (use the grid `spectrum_per_phase` for per-phase "
                     "distortion)."
                 )
-            if self.field == "h_phase" and self.mode != "absolute":
-                raise ValueError("field='h_phase' requires mode='absolute'.")
+            if self.field != "h_mag" and self.mode != "absolute":
+                raise ValueError(f"field={self.field!r} requires mode='absolute'.")
+            if self.field == "h_floor":
+                bounds = [
+                    b
+                    for b in (
+                        getattr(self.distribution, "low", None),
+                        getattr(self.distribution, "high", None),
+                        getattr(self.distribution, "value", None),
+                    )
+                    if b is not None
+                ]
+                if any(b < 0.0 or b > 1.0 for b in bounds):
+                    raise ValueError(
+                        "field='h_floor' is the load-independent SHARE of the emission "
+                        "and must be drawn from [0, 1]."
+                    )
             if self.harmonic_reference is not None and self.field != "h_mag":
                 raise ValueError("harmonic_reference applies to field='h_mag' only.")
         else:
@@ -313,6 +389,9 @@ class ScenarioConfig(_Base):
     method: Literal["sobol", "lhs", "independent"] = "sobol"
     parameters: list[ParameterSpec]
     factors: list[LatentFactor] = Field(default_factory=list)
+    #: Upstream harmonic background at the source, shared by every device on the feeder
+    #: (see :class:`BackgroundHarmonicConfig`). ``None`` (default) = no background.
+    background: Optional["BackgroundHarmonicConfig"] = None
 
 
 # =============================================================================
@@ -1181,6 +1260,10 @@ class BackgroundHarmonicConfig(_Base):
                 "the fundamental is set by the source's own voltage, not the background."
             )
         return self
+
+
+# ``ScenarioConfig`` names the background by forward reference (it is defined above it).
+ScenarioConfig.model_rebuild()
 
 
 class CompositionConfig(_Base):
