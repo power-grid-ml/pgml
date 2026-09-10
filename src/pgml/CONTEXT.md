@@ -39,8 +39,8 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 
 ## Frozen-contract rule
 
-`schemas/` (grid/result/scenario) is the single source of truth — import and conform; never
-edit it as a subagent (orchestrator-only, ask the user first). `SCHEMA_VERSION` stamps the
+`schemas/` (grid/result/scenario) is the single source of truth — import and conform; a
+schema change needs the maintainer's sign-off first. `SCHEMA_VERSION` stamps the
 contract version into persisted datasets. Full rule: `CLAUDE.md`.
 
 ## Key conventions (do not reinvent)

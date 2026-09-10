@@ -8,17 +8,17 @@ them and two datasets carrying the same preset version were drawn the same way.
 
 The recipe, and why each part of it is there:
 
-- **Load level** ``U(0, 1)`` of nameplate, coupled through a shared ``demand`` latent
+- Load level: ``U(0, 1)`` of nameplate, coupled through a shared ``demand`` latent
   (rank correlation 0.5). Independent per-load draws leave the AGGREGATE of a few
   hundred sites nearly constant (the mean concentrates as ``1/sqrt(N)``), so the feeder
   never reaches a system-wide peak or valley; the zero end covers the light-load corner
   a real LV feeder spends much of its time in.
-- **Per-phase unbalance** as a small perturbation of fractional standard deviation 0.15
+- Per-phase unbalance: a small perturbation of fractional standard deviation 0.15
   around the balanced base (``symmetry="small_imbalance"``), which composes with the
   correlation — fully independent phases have no component-level base to correlate.
-- **Slack voltage** ``Normal(1.0, 0.0333)`` on the source reference, so the estimator is
+- Slack voltage: ``Normal(1.0, 0.0333)`` on the source reference, so the estimator is
   not fitted to one boundary condition; +/-10 % is reached only at three sigma.
-- **Harmonic emission** as a fraction of the per-device IEC 61000-3-2 CURRENT-emission
+- Harmonic emission: a fraction of the per-device IEC 61000-3-2 CURRENT-emission
   limit — the appliance emission standard, which is the physically correct reference for
   a device current fingerprint. The DIN EN 50160 supply-VOLTAGE compatibility levels are
   never used as current fractions here: read as per-device emission they are roughly an
@@ -26,10 +26,10 @@ The recipe, and why each part of it is there:
   near-clean loads (otherwise emission is fully entangled with the operating point and an
   estimator shortcuts every harmonic from the load level), the upper end keeps the
   measured max-THD envelope (median ~3.2 %, p99 ~5.8 % on CIGRE LV).
-- **Emission phase diversity** per (device, order), widening with order (+/-30 deg at
+- Emission phase diversity: per (device, order), widening with order (+/-30 deg at
   h3 to the full circle from h13). Without it every device injects at 0 deg, all
   injections add coherently and the harmonic voltage field carries no cancellation.
-- **Load-dependent emission** — the drawn fraction is the RATED ratio, and the device's
+- Load-dependent emission: the drawn fraction is the RATED ratio, and the device's
   actual ratio follows the measured complex affine law ``I_h(lam) = A_h + B_h * lam``
   against the loading its own load draw realised: a load-independent floor of 43-73 %
   of the rated phasor (``emission_floor``) at 100-150 deg to the proportional part
@@ -38,13 +38,14 @@ The recipe, and why each part of it is there:
   load, rotate their harmonic angle as they unload and show a cancellation null inside
   the operating range; a proportional draw has none of it, and a state estimator
   trained on it can never learn how a harmonic follows the fundamental. The three
-  ranges are the ones the composed device library carries, so Task A and Task B share
-  one law; ``(0, 0)`` for all three reproduces the proportional recipe bit-for-bit.
-- **PV inverter emission** with its own h5-dominant per-order shape (a load's class-D
+  ranges are the ones the composed device library carries, so the randomized and
+  coherent recipes below share one law; ``(0, 0)`` for all three reproduces the
+  proportional recipe bit-for-bit.
+- PV inverter emission: its own h5-dominant per-order shape (a load's class-D
   spectrum is h3-dominant) — the contrast that separates a generation/consumption pair
   whose fundamentals cancel at a shared bus. Spans are calibrated to the measured
   populations (certification workbooks plus lab racks, including the measured h17 bump).
-- **Coherent sequences** anchored at 16:00 local summer time, the high-activity band
+- Coherent sequences: anchored at 16:00 local summer time, the high-activity band
   (PV still producing, households ramping, EV arrivals). The time axis is one shared
   window for all scenarios, so a midnight anchor leaves most device rosters dark.
 
@@ -405,7 +406,7 @@ def se_random_scenario_config(
     emission_persistence: Literal["scenario", "device", "class"] = "scenario",
     background: Optional[BackgroundHarmonicConfig] = None,
 ) -> ScenarioConfig:
-    """The randomized-snapshot recipe (Task A): independent operating points.
+    """The randomized-snapshot recipe: independent operating points, redrawn per scenario.
 
     ``background`` places the upstream harmonic background of
     :class:`~pgml.scenarios.BackgroundHarmonicConfig` behind every snapshot — the
@@ -586,7 +587,7 @@ def se_coherent_scenario_config(
     slack_voltage_std: float = 0.0333,
     background: Optional[BackgroundHarmonicConfig] = None,
 ) -> CoherentSpectrumConfig:
-    """The coherent-sequence recipe (Task B/C): a device population moving through time.
+    """The coherent-sequence recipe: a device population moving through time.
 
     Two temporal structures, selected by ``mode``:
 

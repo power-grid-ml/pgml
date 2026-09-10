@@ -138,8 +138,9 @@ Generator, Storage — exports as a native `Load`, negated for the generation-ty
 "Coverage note" below)/`Capacitor`/`Reactor` — then translates a `SampledScenarios` batch
 into per-scenario `Edit` commands + native DSS `Spectrum` objects and solves `Solve` (snap)
 + `Solve mode=harmonics` per order. The scenario oracle for numeric cross-validation AND an
-independent `pgl` test-set generator (see `docs/pgml/modeling/references/opendss/harmonics.md`
-for the harmonic injection convention this reproduces bit-for-bit).
+independent test-set generator for downstream state-estimation work (see
+`docs/pgml/modeling/references/opendss/harmonics.md` for the harmonic injection convention
+this reproduces bit-for-bit).
 - `ExportedCircuit(grid, mode, busname, node_order, rowmap, index, loads, generators,
   sources, spectra)` — a live-circuit handle; `spectra` starts empty, populated by
   `run_opendss_scenarios` once it knows the requested orders.
@@ -182,8 +183,8 @@ for the harmonic injection convention this reproduces bit-for-bit).
   layout="wide", dtype=complex128) -> Path` — `run_opendss_scenarios` +
   `pgml.scenarios.write_dataset`, then stamps `meta.json` with `engine="opendss"`,
   `oracle_mode`, `opendssdirect_version`, `opendss_engine_version` (`Basic.Version()`'s
-  full string). Byte-identical layout otherwise — `read_dataset`/every `pgl` data source
-  consume it unchanged.
+  full string). Byte-identical layout otherwise — `read_dataset` and every downstream data
+  loader consume it unchanged.
 - `compare_to_pgml(grid, sampled, *, harmonic_orders, mode="matched"|"default",
   out_dir=None, slack="norton", symmetry=None, dtype=complex128) -> dict` — runs BOTH
   engines on the IDENTICAL `sampled` and reports, per order over the whole batch: abs

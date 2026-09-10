@@ -245,8 +245,8 @@ def solve_harmonic_flow(
         exactly). Each is a Thevenin voltage source (stamps a resistive shunt ``Y_s``
         on the node-phase diagonal + a Norton current ``I_N``) or a Norton current
         source (``I_N`` only), per ``docs/pgml/modeling/error-injection.md``. Multiple
-        simultaneous sources are allowed. When ``None`` (default), behavior is
-        byte-identical to today. ``source_power_va`` and the spectrum may carry
+        simultaneous sources are allowed. ``None`` (default) injects no node
+        harmonic sources. ``source_power_va`` and the spectrum may carry
         leading SCENARIO batch dims (differentiable; a batched voltage source's
         ``Y_s`` makes ``Y(h)`` ``[*batch, H, N, N]``).
     include_load_shunt:

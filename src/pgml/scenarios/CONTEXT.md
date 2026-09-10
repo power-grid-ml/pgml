@@ -6,7 +6,7 @@ reproduces the dataset (reproducibility is paramount). Reuses the already-batche
 solver (`solve_power_flow` / `solve_harmonic_flow` broadcast a leading scenario dim;
 verified `batched == loop-of-individual`).
 
-## Public API (IMPLEMENTED — increment 1)
+## Public API (IMPLEMENTED)
 `from pgml.scenarios import ...`
 - Distributions (closed-form `icdf(u)` for QMC; `u in [0,1]`): `Uniform(low,high)`,
   `Normal(loc,scale)`, `LogNormal(loc,scale)`, `LogUniform(low,high)`, `Constant(value)`.
@@ -80,8 +80,8 @@ verified `batched == loop-of-individual`).
   The composition path's `_emission_affine` delegates here.
 - `LatentFactor(name)` — shared driver (one QMC dim). `Correlation(factor, rho∈[0,1])`.
 - CALIBRATED SE RECIPE (`presets.py`) — the ONE source every state-estimation generator
-  builds from (the pgl workflow's three tasks, the multi-grid corpus, `pgml.grids
-  .se_benchmark_scenario_config`); a fix here reaches all of them.
+  builds from (every downstream state-estimation dataset, the multi-grid corpus,
+  `pgml.grids.se_benchmark_scenario_config`); a fix here reaches all of them.
   `se_random_scenario_config(grid, *, orders, n_samples, seed, method="sobol",
   load_scale=(0,1), load_correlation=0.5, imbalance=0.15, spectrum_fraction=(0,2),
   pv_scale=(0,1), pv_correlation=None, slack_voltage_std=0.0333,
@@ -140,7 +140,8 @@ verified `batched == loop-of-individual`).
     owns harmonics). The `[B]` operating point + the raw `[B,...]` draws land in
     `operating_point` / `samples`. The op cube is seeded from a stream DISTINCT from the
     fingerprint RNG, so the realized `harmonic_injection` is byte-identical with/without
-    `parameters` (reproducible reconstruction via `pgl.data.physics._reconstruct_sampled`);
+    `parameters` (reproducible reconstruction by a downstream consumer without needing
+    `parameters` itself);
     empty `parameters` (default) = the original fingerprint-only behavior (P/Q nominal,
     source at `u_ref_v`).
   - `profile=LoadProfileConfig(...)` + `start_time` (ISO 8601, REQUIRED with `profile`) make
@@ -244,8 +245,8 @@ verified `batched == loop-of-individual`).
   magnitude is `draw x reference`, and the reference is per device). `<name>_mode_base_mag`
   is the fingerprint's mode bank, NOT a realized injection. Purely additive parquet sample
   columns: `SCHEMA_VERSION` is unaffected (it versions the `pgml.schemas` contract) and a
-  dataset written before them reads back unchanged. Consumer: `pgl.data.validate`
-  (`i_h_emission_pct`, preferred over reconstructing `I(h)=Y(h)·V(h)`).
+  dataset written before them reads back unchanged. A downstream validation consumer
+  prefers the stored `i_h_emission_pct` column over reconstructing `I(h)=Y(h)·V(h)`.
 - CARTESIAN sweep (pgm-style, deterministic): `CartesianAxis(name, selector, values=[...],
   field, mode)`, `CartesianConfig(axes=[...])` -> `cartesian_sample(grid, config) ->
   SampledScenarios` (B = prod(len(axis.values)); each axis level applied to all matched
@@ -337,7 +338,7 @@ verified `batched == loop-of-individual`).
 - `mode="scale"` multiplies the component's nominal `p_nom_w`/`q_nom_var`; `"absolute"`
   sets W/var directly. Unset of P or Q -> solver keeps the nominal for that one.
 
-## Deferred (next increments — see memory `batching-scenarios-design`)
+## Deferred
 - Network-parameter perturbation sweep (line/transformer impedance errors, for parameter
   recovery) — extends `perturbation_sweep` with a branch-aware selector + matrix ground truth.
 - Network-parameter & TOPOLOGY (switch-state) batching; MULTI-GRID batching.
@@ -349,5 +350,5 @@ verified `batched == loop-of-individual`).
   still short/medium-term only (Markov mode dwell + AR(1) jitter over `T`) — a discrete
   device on/off schedule / occupancy process that also switches the FINGERPRINT mode on the
   same diurnal clock (an EV charger's harmonic signature appearing only while it charges)
-  would tie the harmonic attribution to the profile. Couples to the pgl temporal model's
-  context length.
+  would tie the harmonic attribution to the profile. This bears on the context length a
+  downstream temporal model needs to cover.

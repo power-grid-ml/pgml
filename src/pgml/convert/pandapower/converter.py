@@ -50,8 +50,8 @@ electrically identical systems in parallel) divides the series impedance and
 multiplies the shunt admittance (line C/G, transformer magnetizing conductance/
 susceptance) and the rated power (``s_rated_va``), mirroring
 ``pandapower.build_branch``'s own convention exactly (``_parallel_count``).
-``parallel==1`` (pandapower's own default) reproduces the pre-``parallel``-aware
-output byte-for-byte. ``trafo3w`` is not converted at all (see below), so its own
+``parallel==1`` (pandapower's own default) leaves the series impedance and shunt
+admittance unchanged. ``trafo3w`` is not converted at all (see below), so its own
 ``parallel`` column is moot.
 
 Bus-line / bus-transformer switches (``et='l'``/``'t'``)
@@ -71,8 +71,8 @@ Voltage-dependent (ZIP) loads
 ``const_i_q_percent`` columns map onto ``ZipCoefficients`` (``_zip_coefficients``),
 honoured by pandapower's own ``runpp`` whenever ``voltage_depend_loads=True`` (the
 default). All four at zero (pandapower's own default) converts with NO
-``zip_coefficients``/``load_model`` set, so a plain constant-power load stays
-byte-identical to the pre-ZIP-aware output.
+``zip_coefficients``/``load_model`` set, leaving a plain constant-power load's
+conversion unaffected.
 
 Voltage-controlled generators (``net.gen``)
 -------------------------------------------
@@ -164,8 +164,8 @@ class GenMode(str, Enum):
     (``[P-balance; |V|**2 - V_set**2]``) in the power-flow solver and an appliance
     to carry the setpoint.
 
-    ``DROP`` (the default) keeps the historical behaviour: the table is not read
-    and :func:`~pgml.convert._common.warn_dropped_elements` reports it, so a
+    ``DROP`` (the default): the table is not read and
+    :func:`~pgml.convert._common.warn_dropped_elements` reports it, so a
     transmission benchmark converts to loads plus a slack and its converted
     operating point is NOT the source network's.
 
@@ -698,8 +698,7 @@ def to_grid(
         transformer.
     gen_mode:
         :class:`GenMode`. ``DROP`` (default) leaves ``net.gen`` unread and reports
-        it as a dropped element -- the historical behaviour, and byte-identical to
-        it. ``VOLT_VAR_APPROX`` converts each in-service row to a
+        it as a dropped element. ``VOLT_VAR_APPROX`` converts each in-service row to a
         :class:`~pgml.schemas.grid_schema.Generator` whose Volt-VAr control
         approximates the PV bus (see :class:`GenMode` and
         ``_gen_volt_var_control``).
@@ -1102,8 +1101,8 @@ def to_grid(
     # `ZipCoefficients`, honoured by pandapower's own `runpp` whenever
     # `voltage_depend_loads=True` (the default). A load with all four percentages
     # at zero (pandapower's own default -- a pure constant-power load) converts
-    # with NO `zip_coefficients`/`load_model` set, so it stays byte-identical to
-    # the pre-existing output.
+    # with NO `zip_coefficients`/`load_model` set, leaving a plain constant-power
+    # load's conversion unaffected.
     for pp_idx, row in net.load.iterrows():
         if not bool(row.get("in_service", True)):
             continue

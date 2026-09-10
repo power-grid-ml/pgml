@@ -1,4 +1,4 @@
-# Interface ledger: assembly (Y-bus)  (FROZEN rev 1 — orchestrator-pinned)
+# Interface ledger: assembly (Y-bus)  (FROZEN rev 1)
 
 Builds the complex nodal admittance tensor and current-injection vector from a
 (materialised) Grid, per phase, per frequency, batched, differentiable,
@@ -28,7 +28,8 @@ materialisation concern, defined later in the result/ML adapter, NOT here.)
   (`index.py`): per-row line-to-neutral base voltage aligned to `node_phase_index` (the
   per-unit reference; `u_rated/sqrt(3)` for >=3-phase nodes, else `u_rated`, via the
   connection-aware `_params.phase_voltage_magnitude` convention). A fixed reference constant
-  for per-unit reporting/normalization (NOT on the differentiable path); used by `pgl` metrics.
+  for per-unit reporting/normalization (NOT on the differentiable path); used by downstream
+  ML metrics.
 
 ## Public API (IMPLEMENTED — final signatures)
 Module: `pgml.assembly`
@@ -36,7 +37,7 @@ Module: `pgml.assembly`
 
 - `assemble_ybus(grid, frequencies_hz, *, dtype=torch.complex128, device=None,
      operating_point=None, param_overrides=None, symmetry=None) -> YBus`
-  - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
+  - `symmetry`: `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
     -> config `calculation.symmetry`). Resolved ONCE via `resolve_asymmetric` and
     logged ONCE via `log_modeling_summary`; `False` ignores per-phase data and
     splits each total equally over the phases (power-grid-model rule). Loads/gens are
@@ -48,7 +49,7 @@ Module: `pgml.assembly`
   - Contains every PASSIVE / Norton-shunt contribution: line series+shunt, switch,
     generic branch, shunt reactor, transformer stamp, ShuntAppliance (WYE
     phase-to-ground diagonal, or DELTA cyclic phase-to-phase `M^T diag(G+jB) M` bank),
-    source Thévenin shunt `Y_s`, and the M1 const-Z load/gen shunt admittance.
+    source Thévenin shunt `Y_s`, and the linear const-Z load/gen shunt admittance.
   - Unbatched squeeze to `[N,N]` ONLY when `frequencies_hz` is a bare python scalar
     and H==1; a length-1 list/tensor keeps the `[H,N,N]` (== `[1,N,N]`) shape.
   - `param_overrides` (ADDED, optional — see assumption note): `{(kind, id, field):
@@ -66,8 +67,9 @@ Module: `pgml.assembly`
 - `build_injections(grid, frequencies_hz, index, *, dtype=torch.complex128,
      device=None, operating_point=None, param_overrides=None) -> Tensor` complex `[*batch, H, N]`
   - Source Norton current `i_s = Y_s @ V_th` (V_th = `u_ref∠u_angle`) at the source
-    rows; harmonic current sources from spectra are a later milestone. Pure passive
-    grids -> 0. Same scalar-frequency squeeze (`[N]`) rule as `assemble_ybus`.
+    rows; harmonic current sources from spectra are not yet implemented (return 0
+    contribution). Pure passive grids -> 0. Same scalar-frequency squeeze (`[N]`) rule as
+    `assemble_ybus`.
 - `branch_currents(grid, v, frequencies_hz, index, *, dtype=torch.complex128,
      device=None, param_overrides=None) -> list[BranchCurrent]` — IMPLEMENTED (`ybus.py`).
   Per-branch TERMINAL currents from solved node voltages. For every in-service
@@ -108,7 +110,7 @@ Module: `pgml.assembly`
   sweep). Differentiable w.r.t. the branch parameters; device/dtype follow the arguments.
 - `node_phase_index(grid) -> NodePhaseIndex` (above).
 
-`operating_point` format (M1): `{appliance_id: {"p_w": float, "q_var": float}}` or
+`operating_point` format (linear/const-Z assembly): `{appliance_id: {"p_w": float, "q_var": float}}` or
 per-phase `{"p_per_phase_w": [...], "q_per_phase_var": [...]}`; default = nameplate.
 
 ## Branch-stamp registry (THE extension point for new branch / device models)
@@ -185,22 +187,22 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   int64). Vectorized over branches of the same kind (grouped by phase count) and
   over phases — no python loop over individual branches on the tape.
 
-## Implementation notes / M1 simplifications
+## Implementation notes / linear-assembly simplifications
 - `ShuntReactor` (a `BranchBase`) is stamped as a single-terminal shunt at its
   `from_node`/`from_phases` only.
 - `ResistanceFrequencyModel` skin-effect multiplier: only `constant` is wired
-  (analytic falls back to `base_value`); curve/equation laws are Phase-2.
+  (analytic falls back to `base_value`); curve/equation laws are not yet implemented.
 - Line/transformer `type_ref` must already be MATERIALISED before assembly (the
   resolver is a separate component); assembly reads explicit params only.
 
-## M1 load model (so the linear solve matches a const-Z oracle)
-Loads/generators are converted to a **constant shunt admittance** from an operating
+## Linear (const-Z) load model (so the linear solve matches a const-Z oracle)
+Loads/generators are converted to a constant shunt admittance from an operating
 point: per phase `y = conj(P + jQ) / |U_nom|^2` (load sign +consumes; gen sign
 inverts P,Q). `operating_point` defaults to nameplate `p_nom_w/q_nom_var`. The
-const-power (nonlinear) successive-admittance iteration is a later milestone; note
-it but do not implement in M1.
+const-power (nonlinear) successive-admittance iteration is implemented separately
+(see the nonlinear network/device split below) and does not change this linear path.
 
-## Asymmetry: connection-aware load/gen modeling (Increment 1 — DONE)
+## Asymmetry: connection-aware load/gen modeling (DONE)
 `_symmetry.py` (torch-free, PURE; runs on every assemble/solve + PF residual eval):
 - `resolve_asymmetric(grid, operating_point=None, *, mode=None) -> bool` — resolves the
   config `calculation.symmetry` (`auto`/`symmetric`/`asymmetric`) to True==per-phase;
@@ -262,7 +264,7 @@ WYE-neutral element collide V_a with V_N, both giving 0/0 in the const-P current
   of Y entries w.r.t. line R/L/C and source Z.
 
 # =====================================================================
-# Phase-2: network/device split for NONLINEAR power flow (FROZEN — IMPLEMENTED)
+# Network/device split for NONLINEAR power flow (FROZEN — IMPLEMENTED)
 # =====================================================================
 The const-Z `assemble_ybus` above is the LINEAR-model assembler and STAYS (its
 docstring now labels it "LINEAR (const-Z) = assemble_network_ybus + const-Z device

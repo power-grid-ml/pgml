@@ -175,9 +175,7 @@ comparison, not by inspection). Do NOT reintroduce a `phase_mode` condition on t
 factor — see `tests/reference/test_pandapower_grid_matrix.py`'s
 `test_mv_oberrhein_delta_lv_referral_factor_applied_in_both_phase_modes` and
 `test_mv_oberrhein_ybus_transformer_stamp_matches_pandapower` (the pinned regression
-guards) and `.claude/agent-memory/reference-integrator/pandapower-transformer-
-converter.md` (the full account of how the wrong, phase-mode-conditional version was
-first written and then caught).
+guards against exactly this mistake).
 
 ### Magnetizing branch — a real, expected T-vs-pi residual (not a bug)
 

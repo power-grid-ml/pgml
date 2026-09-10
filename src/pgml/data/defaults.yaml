@@ -189,7 +189,7 @@ transformer:
         zero-sequence return path on the LV side.
     clock:
       value: 11
-      units: "integer 0..11 (IEC clock; HV->LV shift = -30*clock degrees)"
+      units: "integer 0..11 (IEC clock; HV->LV shift = +30*clock degrees, mod 360, positive = LV lags HV)"
       description: >
         IEC clock number assumed when no explicit tap.shift_deg is given. `11` (Dyn11,
         LV leads HV by 30 deg) is the IEC / European distribution-transformer default.
@@ -214,7 +214,11 @@ source:
       harmonic voltage at the source bus and more cross-feeder coupling.
   rx_ratio:
     value: 10.0
-    units: "ratio"
+    units: "ratio X/R (not R/X)"
     description: >
       X/R ratio of the source series impedance (R = |Z|/sqrt(1+rx^2), X = rx*R). ~10 is
-      typical for a stiff MV grid.
+      typical for a stiff MV grid. NOT the same convention as the short-circuit-input
+      converter's `rx_ratio` (`SourceShortCircuitInput.rx_ratio`, consumed by
+      `pgml.convert._common.thevenin_from_sk`): that one is R/X (the reciprocal of this
+      one), matching power-grid-model's own `rx_ratio` field. Converting a value between
+      the two means inverting it, not copying it.

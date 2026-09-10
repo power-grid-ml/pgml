@@ -81,9 +81,9 @@ class IdCounter:
 class PhaseMode(str, Enum):
     """How a converted grid represents phases.
 
-    - :data:`SINGLE_PHASE_EQUIV` — today's positive-sequence single-phase
+    - :data:`SINGLE_PHASE_EQUIV` — the default positive-sequence single-phase
       equivalent: every node/branch is ``phases=(Phase.A,)`` and lines carry 1x1
-      matrices. Reproduces the historical converter output byte-for-byte.
+      matrices.
     - :data:`THREE_PHASE` — genuine abc: nodes/branches become ``(A, B, C)`` (or a
       source-native phase tuple, e.g. OpenDSS including ``Phase.N``); lines carry
       n x n matrices built from sequence data or supplied explicitly.
@@ -209,8 +209,8 @@ def sequence_to_phase_matrices(
 def single_phase_matrix(value: float) -> list[list[float]]:
     """Wrap a scalar into the trivial 1x1 matrix ``[[value]]``.
 
-    Used by the single-phase positive-sequence equivalent line path; preserves the
-    exact ``[[r1]]`` / ``[[l1]]`` / ``[[c1]]`` output of the historical converters.
+    Used by the single-phase positive-sequence equivalent line path, which
+    represents a line by its plain ``[[r1]]`` / ``[[l1]]`` / ``[[c1]]`` entries.
     """
     return [[value]]
 
@@ -253,8 +253,7 @@ def thevenin_from_sk(
         L_s   = X_s / two_pi_f0
 
     Falls back to tiny values when ``sk_va`` is non-positive or unreasonably large
-    (> 1e15 VA) to avoid overflow; near-zero results are floored. (Moved verbatim
-    from the pgm converter so its numerics are unchanged.)
+    (> 1e15 VA) to avoid overflow; near-zero results are floored.
     """
     if sk_va <= 0.0 or sk_va > 1.0e15:
         return _FALLBACK_R, _FALLBACK_L

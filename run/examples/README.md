@@ -11,9 +11,6 @@ Run any example from the repository root with `pixi`:
 pixi run -e cpu python run/examples/pgml/<script>.py [out_dir]   # or -e default on a GPU host
 ```
 
-The examples of the other suite packages live in their own repositories under the same
-layout (`run/examples/<pkg>/`).
-
 ## Output locations
 
 Outputs go to the untracked **`data/`** root — `data/pgml/evaluation_output/<name>/` —

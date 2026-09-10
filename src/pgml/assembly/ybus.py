@@ -268,7 +268,7 @@ def assemble_ybus(
 ) -> YBus:
     """Assemble the LINEAR (const-Z) complex nodal admittance ``Y(f)``.
 
-    This is the **linear-model** assembler: it equals
+    This is the linear-model assembler: it equals
     :func:`assemble_network_ybus` (the passive network) PLUS the const-Z device
     shunts (loads/generators folded as constant impedance at nominal voltage) PLUS
     the source Norton (Thévenin) shunt. The nonlinear (const-P / ZIP) power flow
@@ -378,7 +378,7 @@ def assemble_network_ybus(
 
     Contains ONLY the passive network: lines, transformers, switches, shunt
     reactors, generic branches, and :class:`ShuntAppliance` (a fixed linear
-    shunt). It does **not** stamp loads/generators and does **not** fold the
+    shunt). It does NOT stamp loads/generators and does NOT fold the
     source as a Norton shunt — both are handled on the RHS by the nonlinear
     power-flow path (:func:`device_current_injections` and the slack handling in
     :func:`pgml.solver.solve_power_flow`).
@@ -774,11 +774,12 @@ def _resistance_multiplier(line, f, rdt, device) -> Tensor:
     """Per-frequency resistance multiplier m(f) ``[H]`` from ResistanceFrequencyModel.
 
     Supported multipliers:
-    - ``constant`` -> its scalar value (M1 default).
+    - ``constant`` -> its scalar value (the default; 1.0 means no skin effect).
     - ``analytic`` with ``law == "carson_skin_multiplier"`` -> the differentiable
       positive-sequence skin-effect curve (``pgml.geometry.sequence``), the Bessel
       ``I0/I1`` internal-resistance growth WITHOUT the earth-return floor; ``params``
-      carry ``r1_ohm_per_m`` and ``f0_hz`` (see ``synthesize_positive_sequence_*``).
+      carry ``r1_ohm_per_m`` and ``f0_hz`` (see
+      :func:`pgml.geometry.synthesis.positive_sequence_resistance_model`).
       Other analytic laws fall back to ``base_value``.
     - ``curve`` -> linear interpolation of the sampled multiplier (constant
       extrapolation outside the sampled band).
@@ -1642,10 +1643,11 @@ def build_injections(
 ) -> Tensor:
     """Norton current-source vector ``I(f)`` aligned to ``index``.
 
-    M1 content: the source Norton current ``i_s = Y_s @ V_th`` stamped at the
-    source rows, where ``V_th`` is the per-phase Thevenin phasor
-    ``u_ref * exp(j*u_angle)`` and ``Y_s = Z_s(f)^-1``. Harmonic current sources
-    from load/generator spectra are a later milestone (return 0 contribution).
+    Stamps only the source Norton current ``i_s = Y_s @ V_th`` at the source rows,
+    where ``V_th`` is the per-phase Thevenin phasor ``u_ref * exp(j*u_angle)`` and
+    ``Y_s = Z_s(f)^-1``. Harmonic current injections from load/generator spectra
+    are computed separately by :mod:`pgml.solver.harmonic_flow`, not here — a grid
+    with no in-service source contributes 0.
 
     Returns
     -------

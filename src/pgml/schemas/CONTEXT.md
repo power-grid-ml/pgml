@@ -1,4 +1,4 @@
-# Interface ledger: schemas (FROZEN — orchestrator-only)
+# Interface ledger: schemas (FROZEN)
 
 These three files are the single source of truth. Import them; never edit them.
 
@@ -51,8 +51,8 @@ Both defaults are backward-compatible; assembly enforces the semantics.)
     `Grid.attach_measurement_devices(devices)` — atomic: a rejected attach restores the
     previous list (a plain field assignment would keep the bad value on a model-validator
     failure). Slack designation stays Source-based: `pgml.topology.slack_node_ids` (all
-    in-service Sources; `slack_node_id` = first). Consumers: `pgl.data.MeasurementModel
-    .from_grid` (sensor set + slack coverage), future devicecom acquisition.
+    in-service Sources; `slack_node_id` = first). Metadata for a downstream state-estimation
+    sensor model (sensor set + slack coverage) and a future measurement-acquisition service.
 - `result_schema.py` — output: ResultSet, SolverDiagnostics, NodeResult (v_re/v_im),
   BranchResult (i_from_*, i_to_*), InjectionResult (`injection_kind` covers
   load/generator/storage/source/shunt); optional per-phase P/Q/S;

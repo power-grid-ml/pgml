@@ -22,9 +22,10 @@ decisions. One entry per capability:
   proportional part, plus a ±25°/unit-loading phase slope, drawn per device and order in
   the randomized recipe exactly as the composed library draws it —
   `docs/pgml/modeling/harmonic-emission.md`) every SE dataset generator builds from.
-  ⚠️ A Task-A dataset drawn before preset v3 has NO harmonic-to-fundamental coupling at all
-  (proportional, linear and spline fits all at R² 0.43–0.44 on the bench topology), so an
-  estimator trained on it cannot learn how a harmonic follows the fundamental; regenerate.
+  ⚠️ A dataset drawn with `se_random_scenario_config`/`se_coherent_scenario_config` before
+  preset v3 has NO harmonic-to-fundamental coupling at all (proportional, linear and spline
+  fits all at R² 0.43–0.44 on the bench topology), so an estimator trained on it cannot
+  learn how a harmonic follows the fundamental; regenerate.
   ⚠️ Datasets/corpora generated
   BEFORE the presets (pre-2026-08-14: EN 50160-as-current-fractions fallback, silent
   h15–h19 band, midnight coherent window) are miscalibrated — regenerate before
@@ -83,9 +84,9 @@ decisions. One entry per capability:
   magnetizing-branch placement difference, `docs/pgml/modeling/transformer.md`).
 - **Measurement instrumentation** — `MeasurementDevice` on the `Grid` (schema rev 0.0.3):
   node-anchored meters + CT channels, accuracy class, averaging intervals; inert metadata
-  consumed by pgl and the acquisition service.
+  for downstream state-estimation and acquisition tooling to consume.
 - **Infra** — PEP 621 packaging, `py.typed`, GitHub Actions (ruff + tests + strict docs),
-  root `conftest` + markers (`gpu`/`opendss`/`slow`).
+  pytest markers (`gpu`/`opendss`/`slow`, registered in `pyproject.toml`).
 
 ## How to run
 
@@ -98,7 +99,7 @@ decisions. One entry per capability:
 ## Open work — where to start
 
 WHAT / WHY / WHERE / HOW. "⚠️ decision" = confirm the approach with the maintainer before a
-large rework (schema changes are orchestrator-only — ask first).
+large rework (a schema change needs the maintainer's sign-off first).
 
 ### A. Batching / scale → production GPU training-data generation  ⚠️ decision — main gap
 
@@ -152,11 +153,10 @@ The sampling layer and the dense scale wins are done (see Status +
 
 **Where.** `src/pgml/solver/`, `src/pgml/scenarios/`, `tests/gpu/`.
 
-### B. Harmonic state estimation — the `pgl` package
+### B. Harmonic state estimation
 
-The ML layer is its own package (`pgl`, distribution `power-grid-learn`, its own
-repository) consuming pgml's public API only. Design + status live there: `docs/pgl/index.md`,
-`src/pgl/CONTEXT.md`, `src/pgl/STATUS.md` of the pgl repository.
+Out of scope for this repository. Harmonic state-estimation models and training consume
+pgml's public API from a downstream package.
 
 ### C. Frequency-dependent device models (harmonic load shunt + transformer curves)
 
@@ -178,9 +178,8 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
   coverage is whatever the anchor hour provides — a midnight anchor leaves office/PV
   activity near zero for the whole dataset. Draw a per-scenario start offset (seeded,
   recorded in the samples sidecar) so the scenarios spread over the day; the per-step
-  `time_unix_s` becomes `[B, T]` and the `pgl` time features must consume the per-sample
-  axis. WHERE: `src/pgml/scenarios/composition.py`, `harmonics.py` (sidecar), and
-  `pgl.time_features` in the pgl repository.
+  `time_unix_s` becomes `[B, T]` and any downstream time-feature consumer must switch to
+  the per-sample axis. WHERE: `src/pgml/scenarios/composition.py`, `harmonics.py` (sidecar).
 - **SolvedState mutation guard**: lazy accessors recompute from the referenced grid; the
   no-mutation-after-solve rule is currently a docstring contract only. Reuse the network
   fingerprint (the `PowerFlowSystem` guard mechanism) to detect post-solve grid mutation
@@ -330,7 +329,7 @@ results are never read as more physical than they are. Details live in `docs/pgm
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 
-- `schemas/` is FROZEN (orchestrator-only); everything imports and conforms to it. Each
+- `schemas/` is FROZEN (a change needs the maintainer's sign-off); everything imports and conforms to it. Each
   subpackage's `CONTEXT.md` is its interface ledger — read before editing, update after a
   public-signature change.
 - The two hard constraints: **differentiable** + **GPU-ready** (float64 `gradcheck` and the

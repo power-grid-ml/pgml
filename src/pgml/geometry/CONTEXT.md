@@ -1,6 +1,6 @@
 # Interface ledger: geometry (Carson/Deri line constants — differentiable)
 
-Conductor geometry -> per-frequency line impedance/admittance, the Phase-2
+Conductor geometry -> per-frequency line impedance/admittance, the
 "geometry -> impedance" path. Closes the harmonic line-impedance gap (OpenDSS applies
 an earth-return + skin correction at every harmonic; naive `X∝h` is wrong). Model =
 OpenDSS **DERI**, verified **bit-exact** vs OpenDSS (`docs/pgml/modeling/references/opendss/carson.md`).

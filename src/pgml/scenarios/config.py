@@ -1228,8 +1228,8 @@ class BackgroundHarmonicConfig(_Base):
     and a snapshot recipe (``n_steps == 1``) has no step axis at all, so its scenarios
     draw the level independently from the drift's stationary distribution.
 
-    ``magnitude_pu`` empty (the default) disables the background entirely, and a run
-    configured without it is byte-identical to one from before this field existed.
+    ``magnitude_pu`` empty (the default) disables the background entirely, leaving the
+    rest of the run unaffected.
     """
 
     #: Per-order background VOLTAGE distortion at the source, per unit of the fundamental:

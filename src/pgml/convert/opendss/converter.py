@@ -47,18 +47,16 @@ The converter therefore always applies ``u_rated_v = kVBase * sqrt(3) * 1000``.
 For the canonical IEEE 33-bus (single-phase positive-sequence circuit built with
 ``phases=1`` and ``basekv=12.66 kV``): OpenDSS stores ``kVBase = 12.66/sqrt(3) =
 7.31 kV``.  Applying ``* sqrt(3) * 1000`` recovers ``12660 V``, matching the
-pandapower reference.  The old converter stored ``kVBase * 1000 = 7309 V``
-(L-N), which was a factor-of-sqrt(3) error in the const-Z shunt for load-flow
-studies.  The Y-bus oracle test (passive network, no loads) was unaffected; the
-load-flow path (``solve_power_flow``) is corrected by this fix.
+pandapower reference; using ``kVBase`` directly (7309 V, L-N) would introduce a
+factor-of-sqrt(3) error into the const-Z load shunt for load-flow studies, though
+the passive Y-bus oracle test (no loads) is insensitive to it.
 
 ``phase_mode`` controls the node/branch representation:
 
 - ``SINGLE_PHASE_EQUIV`` (default): every node/branch is ``phases=(Phase.A,)``;
-  lines carry 1x1 matrices (the ``[0][0]`` element of the DSS matrix).  This is
-  byte-identical to the historical converter output (except for the ``u_rated_v``
-  fix above, which does not change the IEEE 33-bus numbers because that circuit uses
-  single-phase elements with kVBase == kV_LL).
+  lines carry 1x1 matrices (the ``[0][0]`` element of the DSS matrix). For the
+  IEEE 33-bus circuit (single-phase elements with ``kVBase == kV_LL``) this
+  matches the pandapower reference exactly.
 - ``THREE_PHASE``: nodes carry their real DSS phases (incl. ``Phase.N`` when the
   bus has a neutral conductor); lines carry the full n×n matrices from
   ``Lines.RMatrix()/XMatrix()/CMatrix()``; sources become balanced 3-phase
@@ -224,8 +222,9 @@ def to_grid(
       count -- nothing is dropped silently (see :func:`warn_dropped_elements`).
       Two-winding ``Transformer`` elements convert to
       :class:`~pgml.schemas.grid_schema.Transformer` (winding 1 = HV/from,
-      winding 2 = LV/to; solidly grounded wye or delta windings only; see
-      the module CONTEXT.md for the full field mapping and scope).
+      winding 2 = LV/to; solidly grounded wye or delta windings only).
+      Three-winding transformers and zigzag windings raise
+      :class:`~pgml.errors.ConversionError`.
     - ``First()``/``Next()`` class iterators already skip DISABLED elements
       (verified empirically against opendssdirect 0.9.4); every element loop
       below therefore only ever sees in-service elements without an explicit
@@ -375,9 +374,9 @@ def to_grid(
 
         if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
             # Positive-sequence equivalent. A genuinely 1-phase DSS line (the
-            # IEEE 33-bus oracle) keeps the exact [0][0] entry (byte-identical
-            # to the historical converter); a coupled multi-phase line is
-            # reduced to its POSITIVE-SEQUENCE impedance Z1 = Z_self - Z_mutual
+            # IEEE 33-bus oracle) keeps the exact [0][0] entry; a coupled
+            # multi-phase line is reduced to its POSITIVE-SEQUENCE impedance
+            # Z1 = Z_self - Z_mutual
             # (mean diagonal minus mean off-diagonal, applied independently to
             # R and L) rather than the self impedance alone -- using the self
             # entry ignores the mutual coupling entirely and overstates the
@@ -1433,11 +1432,10 @@ def _positive_sequence_scalar(mat_per_m_flat: list[float], n: int) -> float:
     """Reduce a flat n x n per-length matrix to its positive-sequence scalar.
 
     For a genuinely single-conductor line (``n == 1``) this is exactly the
-    ``[0][0]`` entry (byte-identical to the historical converter). For a
-    coupled multi-phase line, the positive-sequence quantity is
-    ``Z1 = Z_self - Z_mutual`` (mean diagonal minus mean off-diagonal) --
-    using the self entry alone (the historical bug) ignores the mutual
-    coupling and overstates the positive-sequence impedance. The identical
+    ``[0][0]`` entry. For a coupled multi-phase line, the positive-sequence
+    quantity is ``Z1 = Z_self - Z_mutual`` (mean diagonal minus mean
+    off-diagonal) -- using the self entry alone ignores the mutual coupling
+    and overstates the positive-sequence impedance. The identical
     reduction applied to the Maxwell C matrix gives ``C1 = C_self - C_mutual``;
     C's off-diagonal entries are NEGATIVE (mutual coupling reduces net
     charge), so subtracting them INCREASES C1 above C_self, which is the
@@ -1534,11 +1532,11 @@ def _resolve_wye_return_path(
 
     - an explicit ``Phase.N`` tie (``.4``) -> ``'neutral'`` (require the neutral);
     - solidly grounded (no explicit tie) on a node that ALSO carries ``Phase.N``
-      -> ``'ground'`` (the return stays at true ground despite the shared neutral —
-      previously an inexpressible, warned mismatch);
+      -> ``'ground'`` (the return stays at true ground even though the node also
+      carries a shared neutral);
     - otherwise (a 3-wire node, or a non-neutral explicit conductor) -> ``'auto'``,
-      which reduces to ground when the node has no ``Phase.N`` and matches pgml's
-      historical node-level routing when it does.
+      which resolves to ground when the node has no ``Phase.N`` and to the
+      neutral when it does.
     """
     if explicit_return == Phase.N:
         return "neutral"
@@ -1678,9 +1676,9 @@ def _resolve_load_model(
       but these codes couple them in ways outside that model) -- falls back
       to ``CONST_POWER`` with a warning naming the model.
 
-    Returns ``(None, None)`` for model 1 (the schema default already IS
-    ``CONST_POWER``, keeping the historical byte-identical output when no
-    caller ever needed to distinguish "unset" from "explicitly const-power").
+    Returns ``(None, None)`` for model 1, since the schema default is already
+    ``CONST_POWER`` and there is no need to distinguish an unset ``load_model``
+    from one explicitly set to constant power.
     """
     model_code = int(dss.Loads.Model())
     if model_code == 1:

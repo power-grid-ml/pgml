@@ -1,4 +1,4 @@
-# Interface ledger: solver  (FROZEN rev 1 — orchestrator-pinned)
+# Interface ledger: solver  (FROZEN rev 1)
 
 Complex linear solve of the per-frequency nodal system `Y(f) V(f) = I(f)`, batched,
 differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
@@ -30,12 +30,12 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
     `G = I + Σ w·(A Y⁻¹)^H(A Y⁻¹)` — Hermitian PD, eigenvalues ≥ 1, Cholesky-factored per
     right-hand side. The identity floor keeps the factorization stable and the physics block
     avoids normal-equations κ(Y)²; κ(G) itself still grows with `w·σmax(Y⁻¹)²`, so scale
-    anchor weights relative to `Y` (a typical singular value — the pgl consumer's auto-scale).
-    Anchor weights are cast to the real dtype paired with `y_bus` (complex64/128 both
-    supported). Returns `[*batch, N]`.
-  - Gradients flow w.r.t. `y_bus`, `i_inj`, the targets and `op`. Consumers: the pgl
-    injection-decode anchoring (`pgl.physics.NetworkSolver`); reusable for a classical WLS
-    state-estimation solve.
+    anchor weights relative to `Y` (a typical singular value — the convention a downstream
+    consumer's auto-scale follows). Anchor weights are cast to the real dtype paired with
+    `y_bus` (complex64/128 both supported). Returns `[*batch, N]`.
+  - Gradients flow w.r.t. `y_bus`, `i_inj`, the targets and `op`. Built for injection-decode
+    anchoring in a downstream state-estimation solver; reusable for a classical WLS
+    state-estimation solve too.
 - `AnchoredSystem(y_bus, *, op=None, fixed_rows=None)` — FACTOR-ONCE state of the anchored
   solve of ONE shared operator: precomputes what `solve_anchored` rebuilds per call (the
   free-block inverse image `Z = Y_ff⁻¹`, the slack coupling, `op_free·Z`).
@@ -49,8 +49,8 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   Construction REFUSES an operator on the autograd tape (the cached images are constants —
   use `solve_anchored` for a learned `Y`); gradients flow through `.solve` w.r.t. the RHS,
   the targets, the weights and `v_fixed`. `.nbytes()` (cache accounting) / `.to(device)`.
-  Consumer: the pgl operator cache (`pgl.physics.NetworkSolver.enable_operator_cache`) for
-  training runs that solve the same network tens of thousands of times.
+  Built for a downstream operator cache used by training runs that solve the same network
+  tens of thousands of times.
 
 ## Slack / reference handling (both modes, both differentiable)
 1. **Norton (default, `fixed_rows=None`)**: sources are already stamped as a shunt
@@ -81,7 +81,7 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   solve) gradcheck is `tests/differentiability/test_gradcheck.py`.
 
 # =====================================================================
-# Phase-2: NONLINEAR fundamental power flow (FROZEN — to implement)
+# NONLINEAR fundamental power flow (FROZEN — IMPLEMENTED)
 # =====================================================================
 `solve_harmonic` stays as the LINEAR per-frequency solve (used by the const-Z path
 and, later, by each harmonic). Add the nonlinear fundamental solver:
@@ -90,7 +90,7 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
      tol=1e-8, max_iter=100, dtype=torch.complex128, device=None,
      operating_point=None, param_overrides=None, symmetry=None,
      criticality="auto") -> PowerFlowResult`
-  - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
+  - `symmetry`: `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
     -> config `calculation.symmetry`). Resolved ONCE here (`resolve_asymmetric`),
     logged ONCE (`log_modeling_summary`), and threaded as the resolved string into
     every `device_current_injections` call of the iteration (which resolves silently,
@@ -187,7 +187,7 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
 - gradcheck (float64) of `v` w.r.t. line R/L and a load's P/Q through the IFT path.
 
 # =====================================================================
-# Phase-3: HARMONIC power flow (IMPLEMENTED — harmonic_flow.py)
+# HARMONIC power flow (IMPLEMENTED — harmonic_flow.py)
 # =====================================================================
 Reuses `assemble_network_ybus` (builds Y at any `h·f0`) + `solve_harmonic` (batched
 per-frequency linear solve). The OpenDSS conventions are pinned in
@@ -203,11 +203,11 @@ verified empirically). New orchestration:
     point). A controlled Generator/Storage's harmonic injection scales from its
     CONTROL-RESOLVED fundamental current (consistent with the control-aware fundamental
     solve), not the nominal — see `assembly/_control.py` + `docs/pgml/modeling/der-pv-storage.md`.
-  - `symmetry` (Increment 1): `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
+  - `symmetry`: `None`/`"auto"`/`"symmetric"`/`"asymmetric"`. Resolved
     ONCE here; threaded into the fundamental `solve_power_flow` (which emits the single
     modeling-summary log) and into the harmonic-injection power resolution
     (`resolve_operating_power(..., asymmetric=...)`).
-  - Increment 2 (CONNECTION-AWARE / PER-PHASE HARMONIC INJECTION): the inc-1
+  - CONNECTION-AWARE / PER-PHASE HARMONIC INJECTION: the earlier node-level
     DELTA / 4-wire NotImplementedError guard is LIFTED. `_harmonic_injections` now
     mirrors `device_current_injections`: each injecting Load/Generator has a terminal
     incidence `M [n_elem, n_used]` (`pgml.assembly._incidence`; WYE-ground `M=I`,
@@ -216,8 +216,8 @@ verified empirically). New orchestration:
     voltage: WYE phase row, WYE-N `V_phase - V_N`, DELTA L-L), and per element/order
     `|I_h^e|=(mag_h^e/mag_1^e)|I1_elem|`, `arg=ang_h^e + h*(arg(I1_elem)-ang_1^e)`.
     The NODAL injection is `-(M^T @ i_h_elem)` scattered into `used_rows` (out-of-place
-    complex `index_add`). WYE-to-ground reduces EXACTLY to the pre-inc-2 per-phase form
-    (bit-exact: `tests/reference/test_harmonic_flow.py` + `test_carson_harmonics_feeders.py`).
+    complex `index_add`). WYE-to-ground reduces EXACTLY to the earlier node-level per-phase
+    form (bit-exact: `tests/reference/test_harmonic_flow.py` + `test_carson_harmonics_feeders.py`).
     Spectrum coefficients are PER ELEMENT, from three sources (override > schema):
     device `spectrum` (StaticSpectrum, same on all elements), `spectrum_per_phase`
     (element k <- `phases[k]`; a phase/element with no entry injects 0; for DELTA-3 the
@@ -247,8 +247,8 @@ verified empirically). New orchestration:
     source Norton stamp for `Y`; `_harmonic_injections` + `node_sources` for `I`), so
     `solve_harmonic(Y, I)` reproduces the harmonic slices. The harmonic network is
     LINEAR, hence `r(V) = einsum('...hij,...hj->...hi', Y, V) − I` is the
-    physics-consistency residual (`≈ 0` at the true `V`); the downstream consistency
-    package (pgl) forms it without re-deriving the assembly. `solve_harmonic_flow`
+    physics-consistency residual (`≈ 0` at the true `V`); a downstream consumer can form it
+    without re-deriving the assembly. `solve_harmonic_flow`
     CALLS this (single source of the harmonic assembly — no duplication).
   - `harmonic_orders`: orders `h > 1` only (order 1 is the nonlinear fundamental —
     passing 1 raises `InputError`). `v1`: converged fundamental node voltage
@@ -366,10 +366,10 @@ scalar + batched-S_sc-promoted Y).
 fundamental==PF, OpenDSS ballpark (fundamental exact, harmonics within 4% — Carson
 gap), shapes/orders. `tests/differentiability/test_harmonic_flow_gradcheck.py`:
 gradcheck of `V(h)` w.r.t. line R/L, load P/Q, and injection magnitude (incl.
-batched). The live-OpenDSS per-order comparison (with Carson + load shunt) is for
-the reference-integrator agent (OpenDSS) when those models land.
+batched). The live-OpenDSS per-order comparison (with Carson + load shunt) is future work,
+once the frequency-dependent load shunt model lands.
 
-Increment 2 (per-phase / connection-aware): `tests/asymmetric/test_harmonic_per_phase.py`
+Per-phase / connection-aware harmonic injection: `tests/asymmetric/test_harmonic_per_phase.py`
 (WYE `spectrum_per_phase` A-only, DELTA L-L terminal voltage + `M^T` scatter vs numpy
 oracle, DELTA `spectrum_per_phase` branch-k<-phases[k] mapping + missing-branch-injects-0
 vs numpy oracle, WYE-N Kirchhoff return into the N row, device-spectrum WYE-ground

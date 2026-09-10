@@ -1,10 +1,10 @@
 """Reference grid builders: benchmark networks and synthetic feeders as pgml Grids.
 
 Most functions convert a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
-pandapower into a pgml :class:`~pgml.schemas.grid_schema.Grid`.  These are the
-suite's canonical INPUT grids — training-data generation, examples, and the oracle
-comparison tests all build on them — so they live in the core package rather than
-the evaluation oracles.  :func:`synthetic_feeder` additionally builds a
+pandapower into a pgml :class:`~pgml.schemas.grid_schema.Grid`.  These are canonical
+input grids: training-data generation, examples, and the oracle comparison tests all
+build on them, so they live in the core package rather than the evaluation oracles.
+:func:`synthetic_feeder` additionally builds a
 parameterizable radial MV feeder of ANY size directly on the schema (no external
 dependency) — the scaling knob for solver benchmarks and topology studies.
 

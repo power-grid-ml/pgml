@@ -1,6 +1,6 @@
 """Differentiable Carson/Deri line constants — conductor geometry -> Z(f), Yc(f).
 
-Implements the OpenDSS **DERI** earth model (verified bit-exact vs OpenDSS — see
+Implements the OpenDSS DERI earth model (verified bit-exact vs OpenDSS — see
 ``docs/pgml/modeling/references/opendss/carson.md``): series impedance with a complex-penetration-depth
 earth return, GMR geometric reactance, and a skin-effect internal resistance (Bessel
 ``I0/I1`` of a complex argument, via a continued fraction); plus Maxwell potential

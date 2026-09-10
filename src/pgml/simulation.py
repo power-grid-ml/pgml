@@ -1,7 +1,7 @@
 """High-level simulation entry point — the blessed external API.
 
-``simulate(grid, config)`` is the front door for external consumers (dashboards, the
-future REST API, analysis scripts). It dispatches to the differentiable solvers and
+``simulate(grid, config)`` is the front door for external consumers (dashboards, a
+REST API, analysis scripts). It dispatches to the differentiable solvers and
 returns a :class:`SolvedState` — a complete, lazily-derived snapshot of the solved grid
 from which any quantity can be extracted:
 

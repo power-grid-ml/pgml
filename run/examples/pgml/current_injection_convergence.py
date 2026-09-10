@@ -15,7 +15,7 @@ convergence region is SMALLER than the feasible region. This is the well-known w
 Gauss / current-injection iterations versus Newton, and is exactly why the convergence
 diagnostics report "did not settle" and point to the Newton solver
 (``solve_power_flow(method="newton")``) and the ``loadability_limit`` continuation —
-see ``ConvergenceDiagnostics`` and ``run/examples/loadability_continuation.py``.
+see ``ConvergenceDiagnostics`` and ``run/examples/pgml/loadability_continuation.py``.
 
 The grid is a textbook 2-bus radial — a stiff source ``E`` behind a series line ``R+jX``
 feeding a const-P load — for which the P-V nose is known in CLOSED FORM, so the solver's

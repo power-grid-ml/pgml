@@ -6,12 +6,12 @@ Public API
 
 Two slack / reference modes, both differentiable:
 
-1. **Norton (default, ``fixed_rows=None``)**: sources are already stamped as a
+1. Norton (default, ``fixed_rows=None``): sources are already stamped as a
    shunt ``Y_s`` plus a Norton current ``I_s`` by ``assembly/``, so ``Y`` is
    non-singular and ``v = torch.linalg.solve(Y, I)``. The slack voltage equals
    ``u_ref`` only up to the drop across ``Z_s`` (matches OpenDSS Vsource).
 
-2. **Ideal slack (``fixed_rows`` + ``v_fixed``)**: hold
+2. Ideal slack (``fixed_rows`` + ``v_fixed``): hold
    ``v[..., fixed_rows] = v_fixed`` exactly via a partitioned (Schur) solve
    ``v_free = Y_ff^-1 (I_free - Y_fs v_fixed)`` and reassemble the full ``v`` with
    gather/scatter (no in-place on tracked tensors). Matches pandapower / pgm.
@@ -123,9 +123,9 @@ def solve_anchored(
     that factorization stable, and the physics block never passes through normal equations
     (no ``\kappa(Y)^2`` squaring there) — but ``\kappa(G)`` itself grows with
     ``w \cdot \sigma_{\max}(Y^{-1})^2``, so callers should scale anchor weights relative to
-    ``Y`` (e.g. by a typical singular value, as the pgl consumer does). Anchor weights are
-    cast to the real dtype paired with ``y_bus``'s complex dtype (complex64 and complex128
-    both supported).
+    ``Y`` (e.g. by a typical singular value, as a downstream state-estimation consumer
+    does). Anchor weights are cast to the real dtype paired with ``y_bus``'s complex
+    dtype (complex64 and complex128 both supported).
 
     Parameters
     ----------

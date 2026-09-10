@@ -1,8 +1,8 @@
 # pgml navigation index (read this first)
 
-Differentiable, GPU-ready, vectorized **harmonic power flow for power grids** — the base
-package of the power-grid-ml suite. This is the top-level map for contributors and agents:
-what the package does, where the contracts live, and which file to open next.
+Differentiable, GPU-ready, vectorized **harmonic power flow for power grids**. This is the
+top-level map for contributors: what the package does, where the contracts live, and which
+file to open next.
 
 **Read order.** This file → `src/pgml/CONTEXT.md` (the subpackage map + interface ledgers)
 → the subpackage `CONTEXT.md` you are touching → the code. How to *work* here (the hard
@@ -22,22 +22,14 @@ decisions, API reference): `docs/pgml/` (Sphinx; standalone landing `docs/index.
 
 A change that breaks float64 `gradcheck` or the GPU device/dtype test is not done.
 
-## The suite (one repository per package, one-way dependencies)
+## Where pgml sits
 
-`pgml` is the **base** package; the others are one-way dependents that import only `pgml`'s
-public API and never its internals. `pgml` imports none of them and knows nothing about
-them beyond this table. Every dependent pins a `power-grid-ml` version range and reads
-`SCHEMA_VERSION` from persisted datasets — the schemas are the cross-package data contract.
-
-| package | distribution | role | repository |
-|---|---|---|---|
-| **pgml** | `power-grid-ml` | differentiable, GPU-ready harmonic power flow (the gradient engine) | this one |
-| **pgl** | `power-grid-learn` | harmonic state-estimation models + training | `pgl` |
-| **pgg** | `power-grid-gen` | QD synthesis of LV grids (CVT-MAP-Elites + differentiable repair) | `pgg` |
-| **pghub** | `power-grid-hub` | real grid datasets → `pgml.Grid`, structural metrics, embeddings | `pghub` |
-| **pgd** | `power-grid-dash` | FastAPI backend + web SPA over simulation, estimation, live measurements | `pgd` |
-| — | `power-grid-suite` | developer aggregation (submodules, one pixi env, cluster jobs) + meta-package | `power-grid-suite` |
-| — | — | the published documentation site, assembled from every package's `docs/<pkg>/` | `docs` |
+pgml is designed as the base layer of a larger power-grid ecosystem: this repository owns
+the physics engine and the data contracts (the `Grid` / result / scenario schemas).
+Downstream tools — state estimation, grid synthesis, dataset and dashboard applications —
+build on pgml's public API only, pin a `power-grid-ml` version range, and read
+`SCHEMA_VERSION` from persisted datasets; pgml imports none of them and knows nothing about
+their internals beyond that contract.
 
 ## Why all-PyTorch
 
@@ -87,18 +79,17 @@ Don't conflate "config". There are three kinds:
 2. **Run-config schemas** — serializable pydantic contracts; one config + `seed` reproduces a
    run: `pgml.scenarios.config` (data generation). Inspect with
    `python -m pgml.scenarios.config --json-schema|--example`; templates in `run/configs/`.
-   (Dependents follow the same convention: `pgl.config` for training, `pgg.config` for
-   generation.)
+   (A downstream package that adds its own run-config schema follows the same convention.)
 3. **Run-config instances + outputs** — the user's own YAML + datasets/checkpoints/tracking.
    Never tracked here; live under the **experiments root** (`PGML_EXPERIMENTS`, default
-   `./data`; `pgml.experiments_root()`), organised per package (`data/pgml/`, `data/pgl/`, …).
+   `./data`; `pgml.experiments_root()`), organised per package (`data/pgml/` for this one).
 
 ## Frozen-contract rule
 
-`src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Import it; do NOT
-edit it as a subagent (orchestrator-only, and only after asking the user). Everything else
-— here and in every dependent repository — conforms to it. The full behavioral rule is in
-`CLAUDE.md`.
+`src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Import it; a
+schema change needs the maintainer's sign-off (a breaking change to a published data
+contract). Everything else — here and in every downstream consumer — conforms to it. The
+full behavioral rule is in `CLAUDE.md`.
 
 ## Key conventions (defined in the schemas; do not reinvent)
 
@@ -127,8 +118,8 @@ edit it as a subagent (orchestrator-only, and only after asking the user). Every
    parquet. **Done** — including cross-grid batching (`pgml.multigrid.merge_grids`
    disjoint-union solves) and switch-state batching (`branch_states`); the production
    GPU data-generation scale decision remains open (`src/pgml/STATUS.md` §A).
-5. Harmonic state estimation + the inverse (parameter recovery) path — the `pgl`
-   repository builds on this package. **In development there.**
+5. Harmonic state estimation and the inverse (parameter recovery) path build on this
+   package's public API. **Out of scope for this repository.**
 
 ## Commands
 

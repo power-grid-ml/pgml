@@ -19,8 +19,7 @@ Phase mode
 ----------
 ``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) mirrors pgm's symmetric (sym)
 calculation: one positive-sequence equivalent per node, ``phases=(Phase.A,)``,
-``u_rated_v = node.u_rated`` (line-to-line, V), 1x1 line matrices. Reproduces the
-historical output exactly.
+``u_rated_v = node.u_rated`` (line-to-line, V), 1x1 line matrices.
 
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches
 become ``(A, B, C)``; lines are expanded from sequence quantities via the

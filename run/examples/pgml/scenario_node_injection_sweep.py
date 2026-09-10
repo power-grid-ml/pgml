@@ -4,7 +4,7 @@ WHAT THIS DEMONSTRATES
 ----------------------
 "Inject a harmonic ERROR at one node at a time, and measure how it spreads through the
 whole grid." The error is a per-node **Thévenin voltage source** carrying a voltage
-spectrum (read from ``run/examples/spectra/VoltageSag40ms.csv``), of a user-set strength
+spectrum (read from ``run/examples/pgml/spectra/VoltageSag40ms.csv``), of a user-set strength
 ``SOURCE_POWER_VA`` (short-circuit power), applied only at harmonics so the fundamental
 power flow is untouched — the model documented in ``docs/pgml/modeling/error-injection.md``.
 (Set ``KIND="current"`` for a Norton current source instead.)

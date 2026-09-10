@@ -3,7 +3,8 @@
 Files here are PACKAGE DATA: physical/standards tables and documented modeling defaults
 that ship inside the wheel and are read via `importlib.resources` (never a filesystem
 walk-up, never a required env var). They are not user run configuration — the
-serializable run schemas are `pgml.scenarios.config` / `pgl.config` / `pgg.config`.
+serializable run schema is `pgml.scenarios.config`; a downstream package that adds its own
+run config follows the same convention.
 
 ## Files
 - `defaults.yaml` — modeling default VALUES and default MODEL choices, ordered by

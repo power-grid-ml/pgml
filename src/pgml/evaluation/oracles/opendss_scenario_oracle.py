@@ -21,7 +21,7 @@ Two purposes
    :class:`~pgml.scenarios.SampledScenarios` with both engines and reports the per-order
    voltage error (absolute + relative to the per-order RMS voltage), the pgml-vs-OpenDSS
    ground-truth agreement check.
-2. **Independent test set for pgl**: :func:`write_opendss_dataset` persists an OpenDSS-
+2. **Independent evaluation set**: :func:`write_opendss_dataset` persists an OpenDSS-
    solved dataset in the exact same on-disk layout pgml's own generator writes, provenance-
    stamped (``engine="opendss"``), so a trained state estimator can be evaluated on data it
    never saw pgml solve.
@@ -1406,8 +1406,8 @@ def write_opendss_dataset(
     ``meta.json`` gains: ``engine="opendss"``, ``oracle_mode`` (``"matched"``/``"default"``),
     ``opendssdirect_version``, ``opendss_engine_version`` (``Basic.Version()``'s full string —
     the DSS C-API library + underlying OpenDSS SVN revision). The dataset is otherwise
-    byte-for-byte the same layout :func:`pgml.scenarios.read_dataset` and every ``pgl`` data
-    source already consume, so it plugs into training/evaluation unchanged.
+    byte-for-byte the same layout :func:`pgml.scenarios.read_dataset` and every downstream
+    data consumer already expects, so it plugs into training/evaluation unchanged.
     """
     from pgml.scenarios import write_dataset
 

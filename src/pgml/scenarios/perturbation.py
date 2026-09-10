@@ -1,9 +1,9 @@
 """Per-target structured perturbation sweep (inject one error per node).
 
-Use case 1 from the batching roadmap: "inject a specific error ONCE at each node and
-measure how it spreads." This is an ENUMERATION over which target is perturbed — a
-batch of ``B = #targets`` scenarios where scenario ``j`` perturbs exactly target ``j``
-(all other targets nominal) — not a cartesian product of levels.
+Injects a specific error ONCE at each node and measures how it spreads. This is an
+ENUMERATION over which target is perturbed — a batch of ``B = #targets`` scenarios
+where scenario ``j`` perturbs exactly target ``j`` (all other targets nominal) — not a
+cartesian product of levels.
 
 ``perturbation_sweep(grid, selector, perturbation)`` builds the diagonal batch as a
 :class:`~pgml.scenarios.sampler.SampledScenarios` (an ``operating_point`` override per
@@ -15,7 +15,7 @@ Scope: this perturbs an operating-point quantity (P / Q injection) at a load/gen
 Perturbing a network PARAMETER (line/transformer impedance) — the inverse-problem use
 case — needs a branch-aware selector and matrix-valued ground truth (the schema's
 scalar ``nominal_value``/``perturbed_value`` do not fit a per-phase matrix), so it is
-deferred to the parameter-recovery phase.
+not implemented here.
 """
 
 from __future__ import annotations

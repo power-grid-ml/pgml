@@ -174,7 +174,7 @@ IEEE 33-bus Baran & Wu (`pandapower.networks.case33bw()`), 60 Hz, 33 buses,
 32 in-service lines + 5 tie-lines (out of service), 32 loads, 1 slack.
 Oracle test: `tests/reference/test_ieee33_pandapower.py`.
 
-## IEEE 33-bus oracle status (Phase-1 load-flow gate)
+## IEEE 33-bus oracle status (load-flow regression gate)
 All three reference oracles pass on the single-phase positive-sequence IEEE33:
 - pandapower (results): node V within <1e-4 pu. `test_ieee33_pandapower.py`.
 - OpenDSS (Y matrix, absolute siemens): off-diagonal ~2e-15 S, diagonal ~1e-10 S
