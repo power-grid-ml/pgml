@@ -1,7 +1,7 @@
 """The upstream harmonic background on the RANDOM (snapshot) recipe.
 
 The coherent recipe carries ``BackgroundHarmonicConfig`` already; the snapshot recipe has
-to realise the same source so a Task-A dataset can be generated with the upstream
+to realise the same source so a state-estimation dataset can be generated with the upstream
 distortion a real feeder sits behind. Every scenario draws its own level (no step axis to
 walk), the spectrum tensors line up with the per-device ``[B]`` injections, and an
 unconfigured background leaves the batch byte-identical.

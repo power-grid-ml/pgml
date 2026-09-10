@@ -6,7 +6,8 @@ Test strategy
    the pandapower oracle (``case33bw()`` from pandapower) so all tools describe
    an IDENTICAL network in SI units.
 2. Set ALL ``sym_load`` to ``LoadGenType.const_impedance`` so that pgm solves the
-   SAME constant-impedance linear system as our M1 assembly (no Newton iteration).
+   SAME constant-impedance linear system as our linear (const-Z) assembly (no Newton
+   iteration).
 3. Run ``PowerGridModel.calculate_power_flow(symmetric=True)`` for the reference
    node voltages.
 4. Convert the same ``input_data`` to our Grid via ``pgml.convert.pgm.to_grid``.
@@ -18,11 +19,11 @@ Load model and slack setup
 --------------------------
 pgm ``sym_load.type = LoadGenType.const_impedance``:
     At constant-impedance mode pgm linearises the load as
-    ``Y_load = conj(S_rated) / u_rated_ll^2`` — identical to our M1 const-Z
+    ``Y_load = conj(S_rated) / u_rated_ll^2`` — identical to our linear const-Z
     formula ``y = conj(P + jQ) / u_rated_v^2``.  Both sides solve the same
     linear system, so results should agree to numerical precision.
 
-Our schema stores the M1 load shunt per the assembly CONTEXT.md:
+Our schema stores the linear (const-Z) load shunt per the assembly CONTEXT.md:
     ``y = conj(P + jQ) / |U_nom|^2``
 where ``|U_nom|`` is ``u_rated_v`` (line-to-line) for a 1-phase node.  This is
 exactly pgm's constant-impedance admittance at the rated (nominal) voltage.
@@ -67,11 +68,24 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import pandapower.networks as pn
-import power_grid_model as pgm
 import pytest
 import torch
-from power_grid_model import LoadGenType, PowerGridModel
+
+# ---------------------------------------------------------------------------
+# Optional power-grid-model + pandapower guard (matches existing reference test
+# conventions; this oracle needs both)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower.networks as pn
+    import power_grid_model as pgm
+    from power_grid_model import LoadGenType, PowerGridModel
+
+    _PGM_AVAILABLE = True
+except ImportError:
+    _PGM_AVAILABLE = False
+
+if not _PGM_AVAILABLE:
+    pytest.skip("power_grid_model or pandapower not installed", allow_module_level=True)
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index
 from pgml.convert.pgm import to_grid

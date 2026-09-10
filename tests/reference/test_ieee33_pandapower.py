@@ -51,14 +51,26 @@ from __future__ import annotations
 
 import math
 
-import pandapower as pp
-import pandapower.networks as pn
 import pytest
 import torch
 
-from pgml.assembly import assemble_ybus, build_injections, node_phase_index
-from pgml.convert.pandapower import to_grid
-from pgml.solver import solve_harmonic
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+    import pandapower.networks as pn
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.assembly import assemble_ybus, build_injections, node_phase_index  # noqa: E402
+from pgml.convert.pandapower import to_grid  # noqa: E402
+from pgml.solver import solve_harmonic  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

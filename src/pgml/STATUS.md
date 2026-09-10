@@ -251,6 +251,17 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
 Each entry states what the simulator deliberately (or currently) does NOT capture, so
 results are never read as more physical than they are. Details live in `docs/pgml/modeling/`.
 
+- **A converted grid uses the naive harmonic line model unless applied explicitly.** The
+  configured default (`defaults.yaml` `line.harmonic_model.three_phase: sequence_aware`)
+  is BY DESIGN applied only by calling
+  `pgml.geometry.synthesis.apply_default_harmonic_model(grid)` (the yaml comment says so);
+  no solve entry point (`simulate`, `solve_harmonic_flow`, `assemble_ybus`) calls it
+  automatically. An R/X line with no tag and no `conductor_geometry` therefore assembles
+  with the naive R-constant/X∝h model at every harmonic order unless the applier was
+  called, which is easy to miss reading only the config value. Call
+  `apply_default_harmonic_model(grid)` (or `apply_positive_sequence_harmonic_model` /
+  `apply_sequence_aware_harmonic_model`) on a converted grid before a harmonic solve if
+  the corrected model is intended — see `docs/pgml/modeling/harmonic-line-model.md`.
 - **Transformer, frequency dependence.** Leakage X ∝ h with CONSTANT winding resistance
   (curve fields unconsumed — item C). No saturation/inrush (steady-state tool). The
   magnetizing branch sits at the EXTERNAL HV terminal vs OpenDSS's internal "T" — ~1e-3 pu
@@ -325,7 +336,10 @@ results are never read as more physical than they are. Details live in `docs/pgm
   pandapower `gen` (PV bus), `shunt`, `trafo3w`, `impedance`, `ward`/`xward`, `dcline`,
   `storage`, `motor`, `asymmetric_sgen`; pgm `three_winding_transformer`, `shunt`,
   `asym_gen`, `link`, `transformer_tap_regulator`; OpenDSS items under D above.
-  pandapower ideal phase-shifter taps raise.
+  pandapower ideal phase-shifter taps raise. Neither the pandapower nor the pgm converter
+  ever emits `Phase.N` (pandapower's `THREE_PHASE` mode is fixed `(A, B, C)`; pgm has no
+  neutral phase at all) — a 4-wire grid with an explicit neutral conductor comes only from
+  the OpenDSS converter's `THREE_PHASE` mode or a hand-built `Grid`.
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 

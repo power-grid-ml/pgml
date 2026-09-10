@@ -28,17 +28,30 @@ import json
 import pytest
 import torch
 
-import opendssdirect as dss  # noqa: E402
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss  # noqa: E402
 
-from pgml.errors import ConversionError
-from pgml.evaluation.oracles.opendss_scenario_oracle import (
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = pytest.mark.opendss
+
+from pgml.errors import ConversionError  # noqa: E402
+from pgml.evaluation.oracles.opendss_scenario_oracle import (  # noqa: E402
     compare_to_pgml,
     export_grid_to_opendss,
     run_opendss_scenarios,
     write_opendss_dataset,
 )
-from pgml.grids import synthetic_feeder
-from pgml.scenarios import (
+from pgml.grids import synthetic_feeder  # noqa: E402
+from pgml.scenarios import (  # noqa: E402
     CoherentSpectrumConfig,
     ParameterSpec,
     ScenarioConfig,
@@ -48,7 +61,7 @@ from pgml.scenarios import (
     sample,
     sample_coherent_spectra,
 )
-from pgml.schemas.grid_schema import (
+from pgml.schemas.grid_schema import (  # noqa: E402
     ComplexTap,
     Generator,
     Grid,
@@ -64,8 +77,6 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
     ZipCoefficients,
 )
-
-pytestmark = pytest.mark.opendss
 
 _ORDERS = [1, 3, 5]
 

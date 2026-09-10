@@ -16,13 +16,25 @@ Covers:
 
 from __future__ import annotations
 
-import pandapower as pp
 import pytest
 
-from pgml.convert._common import PhaseMode
-from pgml.convert.pandapower import to_grid as pp_to_grid
-from pgml.convert.pgm import to_grid as pgm_to_grid
-from pgml.schemas.grid_schema import (
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.convert._common import PhaseMode  # noqa: E402
+from pgml.convert.pandapower import to_grid as pp_to_grid  # noqa: E402
+from pgml.convert.pgm import to_grid as pgm_to_grid  # noqa: E402
+from pgml.schemas.grid_schema import (  # noqa: E402
     HarmonicComponent,
     Line,
     Load,
@@ -32,7 +44,7 @@ from pgml.schemas.grid_schema import (
     StaticSpectrum,
     WindingConnection,
 )
-from pgml.solver import solve_harmonic_flow, solve_power_flow
+from pgml.solver import solve_harmonic_flow, solve_power_flow  # noqa: E402
 
 ABC = (Phase.A, Phase.B, Phase.C)
 
@@ -315,7 +327,8 @@ def test_pp_three_phase_load_spectrum_per_phase_harmonic_flow():
 # pgm input_data builder
 # ----------------------------------------------------------------------- #
 def _pgm_input(with_asym: bool = False):
-    from power_grid_model import LoadGenType, initialize_array
+    pgm = pytest.importorskip("power_grid_model", exc_type=ImportError)
+    LoadGenType, initialize_array = pgm.LoadGenType, pgm.initialize_array
 
     node = initialize_array("input", "node", 2)
     node["id"] = [1, 2]

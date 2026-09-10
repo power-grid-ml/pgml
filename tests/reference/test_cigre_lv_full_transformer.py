@@ -73,15 +73,27 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import pandapower as pp
-import pandapower.networks as pn
 import pytest
 import torch
 
-from pgml.assembly import assemble_network_ybus
-from pgml.convert.pandapower import PhaseMode, to_grid
-from pgml.schemas.grid_schema import Phase, Transformer
-from pgml.solver import solve_power_flow
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+    import pandapower.networks as pn
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.assembly import assemble_network_ybus  # noqa: E402
+from pgml.convert.pandapower import PhaseMode, to_grid  # noqa: E402
+from pgml.schemas.grid_schema import Phase, Transformer  # noqa: E402
+from pgml.solver import solve_power_flow  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

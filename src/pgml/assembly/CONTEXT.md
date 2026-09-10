@@ -170,10 +170,12 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   is the OFF-NOMINAL tap only (`tap.shift_deg = clock·30`). Magnetizing
   `y_m = G_m + j·(−1/(2π f L_m))` is added to the HV terminal diagonal directly.
   - `from_connection`/`to_connection` resolve via `resolve_vector_group` (explicit, else
-    config `transformer.vector_group.*`, default Dyn11). Supported clocks: Dyn → 1/11,
-    wye-wye/delta-delta → 0/6 (others raise NotImplementedError); clock 6 (a 180° group,
+    config `transformer.vector_group.*`, default Dyn11). Every winding pairing
+    (wye/delta/zigzag, any combination) is supported at every clock of the pairing's
+    parity (odd for Dy/Yd/Yz/Zy, even for Yy/Dd/Dz/Zd) EXCEPT zigzag-zigzag, which raises
+    `NotImplementedError` (no such standard unit); clock 6 (a 180° group,
     Yy6/Dd6) is a reversed LV winding polarity, realised as `−N_lv` (flips the coupling
-    blocks' sign, self blocks unchanged); zigzag and non-solid
+    blocks' sign, self blocks unchanged); non-solid
     `*_grounding` not modelled yet. `P==1` (single-phase / positive-sequence equivalent)
     folds the group into a complex scalar tap `t = (u_from/u_to)·tap_mag·e^{jθ}` and uses
     the textbook off-nominal-tap pi — reducing EXACTLY to the 3-phase positive sequence.

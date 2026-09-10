@@ -32,6 +32,7 @@ bit-for-bit identical to pgml.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from pgml.assembly import node_phase_index
@@ -203,6 +204,7 @@ class TestNodeSourceNumpyOracle:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.opendss
 class TestNodeSourceOpenDSSGeometryOracle:
     """Live OpenDSS oracle (Carson geometry) vs pgml — near machine precision.
 
@@ -214,6 +216,7 @@ class TestNodeSourceOpenDSSGeometryOracle:
     """
 
     def _solve(self, ns: NodeHarmonicSource):
+        pytest.importorskip("opendssdirect", exc_type=ImportError)
         grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
         synthesize_grid_geometry(grid)
         hres = solve_harmonic_flow(
@@ -289,6 +292,7 @@ class TestNodeSourceOpenDSSGeometryOracle:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.opendss
 class TestNodeSourceOpenDSSThreePhaseOracle:
     """Live OpenDSS oracle (sequence-aware, 3-phase) vs pgml.
 
@@ -310,6 +314,7 @@ class TestNodeSourceOpenDSSThreePhaseOracle:
     """
 
     def _solve(self, ns: NodeHarmonicSource):
+        pytest.importorskip("opendssdirect", exc_type=ImportError)
         grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.THREE_PHASE)
         apply_default_harmonic_model(grid)
         hres = solve_harmonic_flow(

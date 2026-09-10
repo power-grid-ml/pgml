@@ -14,6 +14,7 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pytest
 import torch
 
 from pgml.geometry.carson import kron_reduce, series_impedance
@@ -147,7 +148,7 @@ _DSS_ORDERS = [1, 5, 7, 11, 13]
 
 def _dss_series_z(line_cmd: str, nph: int, orders):
     """Series Z(h) [len(orders), nph, nph] (Ω/km) of an OpenDSS R/X line at harmonics."""
-    import opendssdirect as dss
+    dss = pytest.importorskip("opendssdirect", exc_type=ImportError)
 
     dss.Text.Command("Clear")
     dss.Text.Command(
@@ -171,6 +172,7 @@ def _dss_series_z(line_cmd: str, nph: int, orders):
     return np.array(out)
 
 
+@pytest.mark.opendss
 def test_opendss_native_3phase_rx_positive_sequence_is_naive():
     """Native OpenDSS 3-phase R/X line: Z1(h)=R1+jX1·(f/f0) (earth only in Z0).
 
@@ -349,6 +351,7 @@ def test_sequence_aware_assembly_recovers_damped_zero_sequence():
     assert (z0_13.real / z1_13.real) > 2.0 * (z0_1.real / z1_1.real)
 
 
+@pytest.mark.opendss
 def test_opendss_native_1phase_rx_carries_earth_floor():
     """Native OpenDSS 1-phase R/X line: the earth term enters the single self-Z (floor).
 

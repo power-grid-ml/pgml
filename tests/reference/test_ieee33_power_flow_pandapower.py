@@ -34,13 +34,26 @@ from __future__ import annotations
 
 import math
 
-import pandapower as pp
-import pandapower.networks as pn
+import pytest
 import torch
 
-from pgml.convert.pandapower import to_grid
-from pgml.schemas.grid_schema import Phase
-from pgml.solver import solve_power_flow
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+    import pandapower.networks as pn
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.convert.pandapower import to_grid  # noqa: E402
+from pgml.schemas.grid_schema import Phase  # noqa: E402
+from pgml.solver import solve_power_flow  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -40,11 +40,13 @@ def _pgml_harmonic_y(grid, index, h):
     return yb[0].numpy()
 
 
+@pytest.mark.opendss
 @pytest.mark.parametrize(
     "builder", [ref.ieee33_geometry_grid, ref.cigre_lv_geometry_grid]
 )
 def test_offdiagonal_Yh_matches_opendss(builder):
     """Line series admittance Y(h) (off-diagonal) is bit-close to OpenDSS at harmonics."""
+    pytest.importorskip("opendssdirect", exc_type=ImportError)
     grid, _ = builder()
     index = node_phase_index(grid)
     dssY = ref.opendss_geometry_systemy(grid, index, [1, 5, 7])
@@ -59,11 +61,13 @@ def test_offdiagonal_Yh_matches_opendss(builder):
         assert err < 1e-9, f"h={h}: off-diagonal Y(h) rel error {err:.2e}"
 
 
+@pytest.mark.opendss
 @pytest.mark.parametrize(
     "builder", [ref.ieee33_geometry_grid, ref.cigre_lv_geometry_grid]
 )
 def test_harmonic_voltages_match_opendss(builder):
     """Harmonic bus voltages agree with OpenDSS's line model (same injection)."""
+    pytest.importorskip("opendssdirect", exc_type=ImportError)
     grid, _ = builder()
     index = node_phase_index(grid)
     res = solve_harmonic_flow(grid, ORDERS, slack="norton", dtype=CDT)

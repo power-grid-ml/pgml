@@ -11,14 +11,26 @@ Two behaviours per converter:
 
 from __future__ import annotations
 
-import pandapower as pp
 import pytest
 import torch
 
-from pgml.convert.pandapower import to_grid as pp_to_grid
-from pgml.convert.pgm import to_grid as pgm_to_grid
-from pgml.schemas.grid_schema import Generator
-from pgml.solver import solve_power_flow
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.convert.pandapower import to_grid as pp_to_grid  # noqa: E402
+from pgml.convert.pgm import to_grid as pgm_to_grid  # noqa: E402
+from pgml.schemas.grid_schema import Generator  # noqa: E402
+from pgml.solver import solve_power_flow  # noqa: E402
 
 CDT = torch.complex128
 
@@ -80,7 +92,8 @@ class TestPandapowerSgen:
 class TestPgmSymGen:
     @staticmethod
     def _input(*, with_gen: bool, with_shunt: bool = False):
-        from power_grid_model import LoadGenType, initialize_array
+        pgm = pytest.importorskip("power_grid_model", exc_type=ImportError)
+        LoadGenType, initialize_array = pgm.LoadGenType, pgm.initialize_array
 
         node = initialize_array("input", "node", 2)
         node["id"] = [1, 2]

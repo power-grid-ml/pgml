@@ -96,10 +96,27 @@ from __future__ import annotations
 import cmath
 import math
 
-import power_grid_model as pgm
 import pytest
 import torch
-from power_grid_model import CalculationMethod, LoadGenType, PowerGridModel, WindingType
+
+# ---------------------------------------------------------------------------
+# Optional power-grid-model guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import power_grid_model as pgm
+    from power_grid_model import (
+        CalculationMethod,
+        LoadGenType,
+        PowerGridModel,
+        WindingType,
+    )
+
+    _PGM_AVAILABLE = True
+except ImportError:
+    _PGM_AVAILABLE = False
+
+if not _PGM_AVAILABLE:
+    pytest.skip("power_grid_model not installed", allow_module_level=True)
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index
 from pgml.convert.pgm import PhaseMode, to_grid

@@ -26,19 +26,31 @@ from __future__ import annotations
 
 import math
 
-import pandapower as pp
 import pytest
 import torch
 
-from pgml.convert.pandapower import (
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.convert.pandapower import (  # noqa: E402
     DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
     GenMode,
     PhaseMode,
     to_grid,
 )
-from pgml.errors import ConversionError
-from pgml.schemas.grid_schema import Generator, Phase, QReference, VoltVarControl
-from pgml.solver import solve_power_flow
+from pgml.errors import ConversionError  # noqa: E402
+from pgml.schemas.grid_schema import Generator, Phase, QReference, VoltVarControl  # noqa: E402
+from pgml.solver import solve_power_flow  # noqa: E402
 
 CDT = torch.complex128
 

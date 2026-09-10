@@ -11,11 +11,25 @@ harmonic line-impedance gap.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
-import opendssdirect as dss
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss
 
-from pgml.geometry.carson import line_constants
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = pytest.mark.opendss
+
+from pgml.geometry.carson import line_constants  # noqa: E402
 
 CDT = torch.float64
 FREQS = [50.0, 150.0, 250.0, 350.0, 550.0, 750.0]

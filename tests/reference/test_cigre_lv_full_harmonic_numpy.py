@@ -13,7 +13,7 @@ source) for both ``SINGLE_PHASE_EQUIV`` and ``THREE_PHASE`` phase modes.
 
 Transformer model
 -----------------
-pgml stamps each transformer as a per-phase off-nominal-tap leakage-pi (M1
+pgml stamps each transformer as a per-phase off-nominal-tap leakage-pi (the linear
 diagonal model) with ``y_se = (R + j·h·2πf₀·L)⁻¹`` (LV-referred, R fixed with
 frequency) and complex tap ``t = n·exp(j·shift_deg)``::
 
@@ -297,7 +297,7 @@ class TestCigreLvHarmonicOracleThreePhase:
 
     Three-phase grids have N=132 rows (44 nodes × 3 phases A/B/C).
     Uses :func:`numpy_harmonic_voltages` which stamps 3×3 diagonal phase
-    matrices (M1 transformer model, R-const/X∝h) for machine-precision parity.
+    matrices (the linear transformer model, R-const/X∝h) for machine-precision parity.
     """
 
     PHASE_MODE = PhaseMode.THREE_PHASE

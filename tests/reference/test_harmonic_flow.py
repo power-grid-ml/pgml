@@ -150,20 +150,22 @@ def test_fundamental_matches_power_flow():
 
 
 def test_opendss_ballpark():
-    """vs OpenDSS oracle (harmonics.md). Fundamental exact; harmonics within ~4%
-    (the residual is OpenDSS Carson earth-return + load-Y, both deferred)."""
+    """Regression guard against OpenDSS values recorded once (harmonics.md), not a live
+    oracle call. Fundamental exact; harmonics within ~4% (the residual is OpenDSS Carson
+    earth-return + load-Y, both deferred). The live OpenDSS harmonic comparison is
+    `test_cigre_lv_live_opendss.py` / `test_carson_harmonics_feeders.py`."""
     grid = _grid()
     orders = [1, 5, 7]
     res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
     ld = res.index.row(2, Phase.A)
-    # OpenDSS AllBusVolts (NeglectLoadY=yes), |V_ld| per order:
-    oracle_mag = {1: 223.24690, 5: 5.51315, 7: 5.30916}
+    # OpenDSS AllBusVolts (NeglectLoadY=yes), |V_ld| per order, recorded once:
+    recorded_mag = {1: 223.24690, 5: 5.51315, 7: 5.30916}
     for k, h in enumerate(orders):
         mag = abs(complex(res.v[k, ld]))
-        rel = abs(mag - oracle_mag[h]) / oracle_mag[h]
+        rel = abs(mag - recorded_mag[h]) / recorded_mag[h]
         tol = 1e-4 if h == 1 else 0.04
         assert rel < tol, (
-            f"order {h}: |V|={mag:.5f} vs OpenDSS {oracle_mag[h]} (rel {rel:.4f})"
+            f"order {h}: |V|={mag:.5f} vs recorded OpenDSS {recorded_mag[h]} (rel {rel:.4f})"
         )
 
 

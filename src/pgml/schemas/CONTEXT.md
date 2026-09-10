@@ -100,4 +100,4 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   `harmonic_injection` override also accepts per-phase magnitudes/phases.
 - NOT yet converted (plain float; convert when their differentiable path lands):
   catalog `LineType`/`TransformerType`, `ZipCoefficients`, `HarmonicShuntModel` +
-  spectra (Phase 3), and the converter input-convention DTOs.
+  spectra, and the converter input-convention DTOs.

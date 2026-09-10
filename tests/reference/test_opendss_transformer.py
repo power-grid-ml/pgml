@@ -53,7 +53,20 @@ import math
 import pytest
 import torch
 
-import opendssdirect as dss  # noqa: E402
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss  # noqa: E402
+
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = pytest.mark.opendss
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index  # noqa: E402
 from pgml.convert.opendss import PhaseMode, to_grid  # noqa: E402
