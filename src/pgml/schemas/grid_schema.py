@@ -1,9 +1,9 @@
-"""Phase-0 canonical data contract for the grid description (rev 3).
+"""Canonical data contract for the grid description.
 
-**SINGLE SOURCE OF TRUTH** for the grid description. Every other subsystem (Y-bus
-assembly, solver, parquet/SQL persistence, JSON export, the PyTorch-Geometric
-adapter) consumes these models and MUST NOT redefine them. Edits are
-orchestrator-only; subagents import, they do not modify.
+The single source of truth for the grid description. Every other subsystem (Y-bus
+assembly, solver, persistence, JSON export, downstream adapters) consumes these
+models and does not redefine them. Changes to these models are versioned through
+``pgml.schemas.SCHEMA_VERSION``.
 
 The data OUTPUT contract (per-harmonic, per-phase voltages/currents/powers and
 derived THD) lives in a separate artifact, :mod:`pgml.schemas.result_schema`, not
@@ -183,7 +183,7 @@ def si_field(
 
 
 class GridModel(BaseModel):
-    """Base: forbid unknown fields so a subagent inventing a field fails loudly."""
+    """Base model: unknown fields are rejected so a misspelled field fails loudly."""
 
     model_config = ConfigDict(
         extra="forbid", validate_assignment=True, arbitrary_types_allowed=True

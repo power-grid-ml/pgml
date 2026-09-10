@@ -1,7 +1,8 @@
 """Public schema API for pgml.
 
-These three modules are the FROZEN data contracts (orchestrator-only). Consumers
-import the canonical types from here, e.g. ``from pgml.schemas import Grid, Node``.
+These three modules are the versioned data contracts of the package (see
+``SCHEMA_VERSION``). Consumers import the canonical types from here, e.g.
+``from pgml.schemas import Grid, Node``, and never redefine them.
 """
 
 from __future__ import annotations
