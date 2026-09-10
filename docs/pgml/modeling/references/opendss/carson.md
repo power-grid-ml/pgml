@@ -1,15 +1,14 @@
-# OpenDSS line impedance at harmonics — verified Carson/Deri model
+# Carson line constants
 
-Empirically extracted from `dss_capi` `LineConstants.pas` and verified **bit-exact**
-against a running OpenDSS (`relZ ~ 1e-13`) for single- and 3-phase+neutral
-(Kron-reduced) geometry lines across 50–750 Hz. This is the model pgml's geometry
-path implements (`pgml.geometry.carson`).
+The Carson/Deri line model OpenDSS uses, extracted from its line-constants source and checked
+bit-exact against a running OpenDSS, relative impedance error around 1e-13, for single-phase
+and three-phase-plus-neutral geometry lines from 50 to 750 Hz. This is the model pgml's
+geometry path implements.
 
-## Why harmonics need this
-OpenDSS recomputes line impedance at every frequency with an earth-return + skin
-model — for BOTH geometry-defined and R/X-defined lines. So the naïve "R const,
-X ∝ h" is wrong at harmonics (measured: a 0.5+j0.5 Ω/km line → 0.557+j2.015 at
-250 Hz, not 0.5+j2.5). Default earth model is **DERI**.
+OpenDSS recomputes line impedance at every frequency with an earth-return and skin-effect
+model, for geometry-defined and R/X-defined lines alike. A plain "R constant, X proportional
+to h" is therefore not what it does. A 0.5 + j0.5 Ω/km line comes back as 0.557 + j2.015 at
+250 Hz rather than 0.5 + j2.5. The default earth model is Deri.
 
 ## Series impedance per unit length (Ω/m), DERI model
 Constants: `mu0 = 12.56637e-7`, `Fw = 2π f`, `Lfactor = j·Fw·mu0/(2π)`.
@@ -30,10 +29,10 @@ Complex penetration: `Fme = sqrt(j·Fw·mu0/ρ)` (ρ = earth resistivity, defaul
 ## Capacitance (Maxwell potential coefficients)
 `P[i,i] = ln(2·y_i / r_i)`, `P[i,j] = ln(Dij'/Dij)` with image distance
 `Dij' = sqrt((x_i−x_j)² + (y_i+y_j)²)`; `C = (2π·e0)·inv(P)` then Kron-reduce P
-before inverting for grounded neutrals. NOTE: OpenDSS uses a slightly different
-effective `capradius`, so our C is physically correct but not bit-exact to OpenDSS;
-the target feeders (IEEE33, CIGRE LV) have c=0 so this does not affect the harmonic
-experiments. Series Z (the harmonic-gap driver) IS bit-exact.
+before inverting for grounded neutrals. OpenDSS uses a slightly different effective capacitance radius, so pgml's
+capacitance is physically correct but not bit-exact against it. The benchmark feeders used
+here carry no line capacitance, so it does not affect their results. The series impedance,
+which is what drives the harmonic behaviour, is bit-exact.
 
 ## Bessel I0/I1 for complex argument (torch port)
 Use the continued fraction `I1/I0 = 1/(2/z + 1/(4/z + 1/(6/z + …)))` (evaluate

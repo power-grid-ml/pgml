@@ -1,13 +1,12 @@
-# Reference brief: pandapower
+# pandapower
 
-Distilled context; consult installed package (`pip install pandapower`). This is
-our PRIMARY load-flow result oracle AND a Y-bus oracle (it exposes the internal
-bus admittance matrix). Not differentiable. Sequence-domain at heart.
+The primary load-flow reference, and an admittance-matrix reference as well, since it exposes
+its internal bus admittance. Sequence domain at heart, and not differentiable.
 
 ## Data model
 - One pandas DataFrame per element type: net.bus, net.line, net.trafo, net.load,
   net.gen/sgen, net.ext_grid, net.shunt. Result tables net.res_*.
-- Engineering units (kV, MW, MVA, ohm/km, nF/km). Convert to our SI on import.
+- Engineering units (kV, MW, MVA, ohm/km, nF/km). The reader converts them to SI.
 - Transformer: positive-seq vk_percent, vkr_percent, pfe_kw, i0_percent; zero-seq
   vk0_percent, vkr0_percent, mag0_percent, mag0_rx, si0_hv_partial; vector_group +
   shift_degree; tap_* ; trafo_model in {"t","pi"} (default "t").
@@ -20,7 +19,7 @@ bus admittance matrix). Not differentiable. Sequence-domain at heart.
   loading_percent, pl_mw, ql_mvar.
 - res_trafo: loading_percent, p_hv_mw/p_lv_mw, etc.
 
-## Ground-truth extraction (for tests)
+## Extracting ground truth
 ```python
 import pandapower as pp
 pp.runpp(net)                                   # AC power flow
@@ -29,6 +28,6 @@ res_line = net.res_line                          # flows + loading
 Ybus = net._ppc["internal"]["Ybus"]              # scipy sparse, PER-UNIT on ppc base
 bus_lookup = net._pd2ppc_lookups["bus"]          # net.bus index -> ppc bus index
 ```
-CAUTION: Ybus is per-unit on the ppc S/V base — convert to SI (or convert ours to
-the same pu base) before comparing to our SI Y. Feasibility helpers:
-`pp.violated_buses(net, min_vm_pu, max_vm_pu)`, `pp.overloaded_lines(net, max_load)`.
+The exported admittance is per unit on pandapower's own power and voltage base. Convert it to
+SI, or convert the pgml matrix to the same base, before comparing. `pp.violated_buses` and
+`pp.overloaded_lines` are useful for checking a converted network stays feasible.
