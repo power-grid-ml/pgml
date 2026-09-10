@@ -105,8 +105,8 @@ timing.
 
 ``accuracy_class`` (e.g. ``"0.2S"`` per IEC 62053, ``"A"`` / ``"S"`` per
 IEC 61000-4-30) is categorical — pgml attaches no numeric interpretation to it; it
-is the intended key for a future measurement-noise model in the ML layer
-(:mod:`pgl`). ``connection`` is free-form JSON describing how to reach the physical
+is the intended key for a measurement-noise model outside the engine.
+``connection`` is free-form JSON describing how to reach the physical
 instrument (e.g. a Modbus TCP host/port); it is interpreted by the external
 acquisition service, never by pgml.
 
@@ -128,9 +128,8 @@ leaving the grid half-updated::
     ])
 
 Slack designation is unrelated to instrumentation and stays ``Source``-based
-(:func:`pgml.topology.slack_node_ids`); ``pgl.data.MeasurementModel.from_grid``
-derives the ML sensor set — and whether the slack is fully metered — from the
-attached devices.
+(:func:`pgml.topology.slack_node_ids`). A consumer derives its sensor set, and whether
+the slack is metered, from the attached devices.
 
 .. automodule:: pgml.schemas
    :members:

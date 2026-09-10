@@ -17,8 +17,8 @@ implementations.
   :class:`~pgml.evaluation.HarmonicProfile`, :class:`~pgml.evaluation.LabeledMatrix`)
   and builder functions that consume solver results, including the shared row-building
   primitive :func:`~pgml.evaluation.harmonic_profile_from_array` (a plain complex
-  ``[H, N]`` array in, a :class:`~pgml.evaluation.HarmonicProfile` out — the solver-result
-  path here and the ML estimator/dataset path in ``pgl.evaluation`` both delegate to it)
+  ``[H, N]`` array in, a :class:`~pgml.evaluation.HarmonicProfile` out, so a solved
+  result and an externally supplied array plot through the same path)
   and :func:`~pgml.evaluation.node_numbering` (the zero-based display numbering used by
   :func:`~pgml.evaluation.plot_grid_graph` and, optionally, by
   :func:`~pgml.evaluation.data.row_labels`).
@@ -226,7 +226,7 @@ model:
     report = compare_to_pgml(grid, sampled, harmonic_orders=[1, 5, 7, 11])
     # report["per_order"][5]  ->  {"rel_mean": ..., "rel_p95": ..., "rel_max": ..., ...}
 
-    # An independent, provenance-stamped test set for pgl.
+    # An independent, provenance-stamped test set.
     write_opendss_dataset(grid, sampled, "data/opendss_testset", harmonic_orders=[1, 5, 7])
     # meta.json gains engine="opendss", oracle_mode, opendssdirect_version, ...
 
@@ -244,7 +244,7 @@ the OpenDSS-solved result through :func:`pgml.scenarios.write_dataset`
 unchanged and stamps ``meta.json`` with ``engine="opendss"`` plus the
 OpenDSS/``opendssdirect`` version, so a dataset generated this way is never
 mistaken for a pgml-generated one and reads back through
-:func:`pgml.scenarios.read_dataset` / any ``pgl`` data source unmodified.
+:func:`pgml.scenarios.read_dataset` unmodified.
 
 The exporter covers every branch and appliance type in the schema (a
 ``Generator``/``Storage`` exports as a negative-kW ``Load`` — a genuine
@@ -266,11 +266,9 @@ coverage and refusal list.
 Oracle subpackage reference
 ------------------------------
 
-:mod:`pgml.evaluation.oracles` is documented separately below (a package-level
-``automodule``, the same pattern used for ``pgl``'s multi-submodule re-exporting
-packages — see e.g. :doc:`/pgl/api/data`): unlike :mod:`pgml.evaluation` itself, it
-requires the ``oracles`` extra (``pandapower``/``opendssdirect``) and is never imported
-by the plotting side.
+:mod:`pgml.evaluation.oracles` is documented separately below, as one package-level
+``automodule``. Unlike :mod:`pgml.evaluation` itself it requires the ``oracles`` extra
+(``pandapower`` and ``opendssdirect``), and the plotting side never imports it.
 
 .. automodule:: pgml.evaluation.oracles
    :members:

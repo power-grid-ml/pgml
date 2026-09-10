@@ -228,7 +228,7 @@ field for the setpoint (see :doc:`/pgml/modeling/der-pv-storage` §4.5). The
 pgml.convert.pgm
 -----------------
 
-Convert a `power-grid-model <https://power-grid-model.readthedocs.io/>`_
+Convert a `power-grid-model <https://power-grid-model.readthedocs.io/en/stable/>`_
 ``input_data`` dict to a :class:`~pgml.schemas.Grid`.
 
 .. automodule:: pgml.convert.pgm
@@ -238,8 +238,8 @@ Convert a `power-grid-model <https://power-grid-model.readthedocs.io/>`_
 pgml.convert.opendss
 ---------------------
 
-Convert an OpenDSS circuit (via `opendssdirect
-<https://opendssdirect.readthedocs.io/>`_) to a :class:`~pgml.schemas.Grid`.
+Convert an OpenDSS circuit (via `OpenDSSDirect.py
+<https://dss-extensions.org/OpenDSSDirect.py/>`_) to a :class:`~pgml.schemas.Grid`.
 
 .. automodule:: pgml.convert.opendss
    :members:
