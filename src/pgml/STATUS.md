@@ -20,8 +20,8 @@ decisions. One entry per capability:
   library v3, and — preset v3 — the measured LOAD-DEPENDENT emission law: a complex affine
   `I_h(λ) = A_h + B_h·λ` floor at 43–73 % of the rated phasor, 100–150° to the
   proportional part, plus a ±25°/unit-loading phase slope, drawn per device and order in
-  the randomized recipe exactly as the composed library draws it —
-  `docs/pgml/modeling/harmonic-emission.md`) every SE dataset generator builds from.
+  the randomized recipe exactly as the composed library draws it)
+  every SE dataset generator builds from.
   ⚠️ A dataset drawn with `se_random_scenario_config`/`se_coherent_scenario_config` before
   preset v3 has NO harmonic-to-fundamental coupling at all (proportional, linear and spline
   fits all at R² 0.43–0.44 on the bench topology), so an estimator trained on it cannot

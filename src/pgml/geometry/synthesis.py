@@ -126,7 +126,7 @@ def synthesize_line_geometry(
                 # the target X1 is below the single-conductor earth-return reactance
                 # floor (typical of cables / low-X positive-sequence lines). The result
                 # still reproduces R1/X1 at f0 and matches OpenDSS on the SAME geometry,
-                # but is not a physical conductor — see geometry/CONTEXT.md.
+                # but is not a physical conductor (the synthesis docstring explains the floor).
                 "synth_unphysical": str(gmr >= radius_m),
             },
         ),
@@ -273,7 +273,7 @@ def synthesize_three_phase_geometry(
                 "synth_r0_ohm_per_m": f"{z0_fit.real:.6g}",
                 # GMR >= radius means the target X1/X0 are below the geometric floor for
                 # this spacing (non-physical conductor; still matches OpenDSS on the SAME
-                # geometry). See geometry/CONTEXT.md.
+                # geometry; the synthesis docstring explains the floor).
                 "synth_unphysical": str(gmr >= radius_m),
             },
         ),
@@ -328,7 +328,7 @@ def synthesize_grid_geometry(grid: Grid, *, f0: Optional[float] = None) -> Grid:
             "below the earth-return / spacing floor, yielding a non-physical GMR "
             "(>= radius). The geometry still reproduces the target Z at f0 and matches "
             "OpenDSS on the same geometry, but is not a physical conductor (typical of "
-            "cables / low-X feeders). See geometry/CONTEXT.md.",
+            "cables / low-X feeders); the line is tagged synth_unphysical.",
             stacklevel=2,
         )
     return grid

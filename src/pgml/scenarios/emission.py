@@ -21,7 +21,7 @@ zero floor reproduces the proportional law bit-for-bit. The composition path
 (:mod:`pgml.scenarios.composition`) and the randomized recipe
 (:mod:`pgml.scenarios.sampler` through the ``h_floor`` / ``h_floor_phase`` / ``h_slope``
 :class:`~pgml.scenarios.ParameterSpec` fields) apply the same functions, so one definition
-serves both. See ``docs/pgml/modeling/harmonic-emission.md``.
+serves both.
 """
 
 from __future__ import annotations

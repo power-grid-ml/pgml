@@ -61,7 +61,7 @@ The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTE
 | How to *work* here (constraints, style, commands, the frozen-schema rule) | `CLAUDE.md` |
 | The package map (subpackages + interface ledgers) | `src/pgml/CONTEXT.md` |
 | Status + open work | `src/pgml/STATUS.md` |
-| Published human docs (concepts, modeling decisions, API reference) | `docs/pgml/` (`docs/pgml/index.md`) |
+| Published human docs (concepts, modeling decisions, API reference) | `docs/` (landing page `docs/index.md`, pages under `docs/pgml/`) |
 | Modeling decisions (conventions, transformer, line model, DER, asymmetric) | `docs/pgml/modeling/` |
 | Cross-tool conventions + reference-library briefs | `docs/pgml/modeling/conventions.md`, `docs/pgml/modeling/references/` |
 | Runnable studies + config templates | `run/examples/pgml/`, `run/configs/` |

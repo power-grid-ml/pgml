@@ -62,7 +62,7 @@ verified `batched == loop-of-individual`).
     adds `s_h·(lam−1)` [deg] (`phase_slope_shift`). `ParameterSpec.is_emission_law`;
     `EMISSION_LAW_FIELDS` / `HARMONIC_FIELDS` name the field sets. Realized columns:
     `"<spec>_mag"` / `"<spec>_phase"` are post-law; `"<spec>_loading"` `[B, n_dev]` is the
-    loading the law read. `docs/pgml/modeling/harmonic-emission.md`.
+    loading the law read.
   - `per="fixed"` (harmonic fields only): ONE draw per matched component held across every
     scenario of the batch (a device's signature), from a stream seeded by `config.seed` and
     the spec name (`zlib.crc32`), consuming NO cube column — every other draw is unchanged.
