@@ -3,29 +3,58 @@
 Conductor geometry -> per-frequency line impedance/admittance, the
 "geometry -> impedance" path. Closes the harmonic line-impedance gap (OpenDSS applies
 an earth-return + skin correction at every harmonic; naive `X∝h` is wrong). Model =
-OpenDSS **DERI**; on the same geometry it agrees with OpenDSS below 1 kHz to **4.8e-8
-relative** on `Z` and **2.1212e-5** on `C`, which is exactly the difference between the SI
-physical constants used here and OpenDSS's truncated `mu0`/`e0`
-(`docs/pgml/modeling/references/opendss/carson.md`). Above 1 kHz OpenDSS changes its
-conductor spacing term (away from the published GMR) and pgml does not.
+OpenDSS **DERI**; on the same geometry it agrees with OpenDSS to **4.6e-8 relative** on
+`Z` and **2.1212e-5** on `C`, which is exactly the difference between the SI physical
+constants used here and OpenDSS's truncated `mu0`/`e0`
+(`docs/pgml/modeling/references/opendss/carson.md`). That holds below 1 kHz with the
+default conductor internal-inductance model and at EVERY frequency with
+`internal_inductance="gmr_power_frequency"` (see `carson.py` below).
 Fully torch / autograd-safe / GPU-ready / batched over lines and H frequencies;
 gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 
 ## carson.py (torch)
-- `series_impedance(x, y, gmr, rdc, rho, freqs) -> Z[*B, H, N, N]` (Ω/m): Deri earth
-  return (complex penetration depth) + GMR geometric reactance + skin-effect internal
-  RESISTANCE (Bessel `I0/I1` via continued fraction `i0_over_i1`); internal reactance
-  dropped in the 40–1000 Hz band (carried by GMR), matching OpenDSS.
+- `series_impedance(x, y, gmr, rdc, rho, freqs, *, radius=None,
+  internal_inductance=INTERNAL_INDUCTANCE, power_frequency_band_hz=POWER_FREQUENCY_BAND_HZ)
+  -> Z[*B, H, N, N]` (Ω/m): Deri earth return (complex penetration depth) + geometric
+  reactance + skin-effect internal impedance (Bessel `I0/I1` via continued fraction
+  `i0_over_i1`). The internal RESISTANCE is always present; `internal_inductance`
+  selects the self-term spacing radius and the internal REACTANCE:
+  - `"gmr"` (default): published GMR at every frequency, internal reactance dropped.
+    The internal inductance stays at its power-frequency value; needs no `radius`.
+  - `"gmr_skin"`: effective radius `radius*(gmr/radius)^g(f)` with `g` from
+    `internal_reactance_ratio`. Continuous in f, exact at power frequency, and identical
+    to `"bessel"` when `GMR = e^(-1/4)*radius`.
+  - `"gmr_power_frequency"`: `"gmr"` inside `power_frequency_band_hz` (default
+    `(40, 1000)` Hz, exclusive) and `"bessel"` outside — OpenDSS's rule
+    (`LineConstants.pas`: `if (f < 1000.0) and (f > 40.0)`). Reproduces OpenDSS at every
+    frequency; `Z(f)` steps at the band edges.
+  - `"bessel"`: physical radius + the full `Im(Zint)` at every frequency, i.e. the
+    first-principles solid round conductor.
+  Every model except `"gmr"` needs `radius`; an unknown name raises `InputError`. The
+  frequency axis is an INPUT, so the band mask carries no gradient and all four models
+  are differentiable and GPU-safe.
 - `internal_impedance(rdc, freqs) -> Zint[*B, H]` (Ω/m): the skin-effect internal
   impedance alone (Bessel `I0/I1`). Shared by `series_impedance` and `sequence.py`.
+  Verified against the analytic solid-round form `(k*rho_c/(2*pi*a))*I0(ka)/I1(ka)`
+  (scipy) to 1e-13 relative.
+- `internal_reactance_ratio(rdc, freqs) -> g[*B, H]`: `Im(Zint)/(f*mu0/4)`, the internal
+  inductance normalised by its uniform-current-density value (`g -> 1` at DC, `g -> 0`
+  under full skin effect). The physical yardstick for how far a power-frequency GMR is
+  off at a given harmonic.
 - `potential_coefficients(x, y, radius) -> P[*B, N, N]` (Maxwell image method);
   `C = 2*pi*e0 * inv(P)`.
 - `kron_reduce(M, n_phase)` eliminates neutral/shield conductors (>= n_phase).
-- `line_constants(x, y, gmr, rdc, radius, rho, freqs, n_phase) -> (Z[*B,H,P,P] Ω/m,
+- `line_constants(x, y, gmr, rdc, radius, rho, freqs, n_phase, *,
+  internal_inductance=..., power_frequency_band_hz=...) -> (Z[*B,H,P,P] Ω/m,
   C[*B,P,P] F/m)` phase-reduced. Conductor arrays are `[*B, N]`, phases first.
   NOTE: capacitance differs from OpenDSS's by 2.1212e-5 relative (the `e0` constant
-  ratio), and OpenDSS's `capradius` option is not read; irrelevant for the c=0 standard
-  feeders. Series Z agrees to 4.8e-8 relative (the `mu0` constant ratio).
+  ratio), always uses the physical radius, and OpenDSS's `capradius` option is not read;
+  irrelevant for the c=0 standard feeders. Series Z agrees to 4.6e-8 relative (the `mu0`
+  constant ratio).
+- Module constants `INTERNAL_INDUCTANCE_MODELS`, `INTERNAL_INDUCTANCE` and
+  `POWER_FREQUENCY_BAND_HZ` mirror `line.geometry.internal_inductance` and
+  `line.geometry.power_frequency_band_hz`. `assembly/ybus.py` reads the former at
+  ASSEMBLY time, so a defaults override applies without reimporting.
 
 ## sequence.py (positive-sequence harmonic model — NO earth floor)
 The corrected R/X-line harmonic model. A balanced positive-sequence
@@ -37,9 +66,11 @@ internal + geometric, earth return lives only in `Z0`. So `X1(h) = X1·h` (geome
 - `skin_resistance_multiplier(r1, f0, freqs) -> m[*B, H]` (`m(f0)=1`): Bessel `I0/I1`
   internal-resistance growth, earth term dropped. `fit_equivalent_rdc(r1, f0, freqs_ref)`.
 - `two_conductor_geometry(r1, x1, f0, *, radius_m, ...) -> dict` + `two_conductor_loop_z(geom,
-  freqs) -> Z[H]`: a PHYSICAL go/return Carson loop (reuses `series_impedance`); earth
-  cancels in the `[1,-1]` loop transform -> physical GMR/spacing for any X1, agrees with
-  `positive_sequence_z` (residual ~earth coupling, ≲2% to h≈25).
+  freqs) -> Z[H]`: a PHYSICAL go/return Carson loop (reuses `series_impedance` with
+  `internal_inductance="gmr"` PINNED, matching `positive_sequence_z`'s strictly
+  frequency-proportional reactance); earth cancels in the `[1,-1]` loop transform ->
+  physical GMR/spacing for any X1, agrees with `positive_sequence_z` (residual ~earth
+  coupling, ≲2% to h≈25).
 - `phase_to_sequence(z_phase[*,3,3]) -> [*,3,3]` (Fortescue `A⁻¹ Z A`);
   `sequence_impedances(z) -> (Z0, Z1, Z2)` diagonal — shows 3-phase geometry keeps earth
   return only in `Z0`.
@@ -142,12 +173,23 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   relZ 4.66e-8 (single conductor) / 4.81e-8 (3ph+neutral Kron) — the SI-vs-truncated
   `mu0` ratio (4.89e-8), i.e. the MODEL matches to floating point; relC 2.1212e-5 = the
   `e0` ratio exactly. Both are pinned as such (a test asserts `C`'s deviation EQUALS the
-  constant ratio). At 1050 Hz relZ steps to 1.2e-2 because OpenDSS changes its conductor
-  spacing term at 1 kHz — a separate test fixes that boundary, and the docstrings scope
-  the agreement to below 1 kHz. Assembly geometry path vs `line_constants`: ~6e-16.
-  Synthesis reproduces R1/X1 at f0 to ~1e-10. gradcheck passes w.r.t. Rdc, GMR, height.
-  Tests: `tests/reference/test_carson_opendss.py`,
-  `tests/differentiability/test_carson_gradcheck.py`.
+  constant ratio). At 1050 Hz the DEFAULT model steps to 1.2e-2 because OpenDSS leaves
+  its GMR band at 1 kHz; `internal_inductance="gmr_power_frequency"` holds 4.6e-8 from
+  20 Hz to 2.5 kHz on both geometries and across both band edges. Assembly geometry path
+  vs `line_constants`: ~6e-16. Synthesis reproduces R1/X1 at f0 to ~1e-10. gradcheck
+  passes w.r.t. Rdc, GMR, radius, height and rho for every internal-inductance model;
+  CPU/CUDA parity for every model. Tests: `tests/reference/test_carson_opendss.py`,
+  `tests/reference/test_carson_internal_inductance.py`,
+  `tests/differentiability/test_carson_gradcheck.py`, `tests/gpu/test_device_parity.py`.
+- Internal-inductance models, measured: on a solid round 150 mm² Al conductor (where the
+  Bessel solution is exact) `gmr_skin` and `bessel` reproduce the first-principles `Z(f)`
+  to 4e-16, while the default `gmr` is 0.24 % (median) off below 1 kHz and 1.0 % above.
+  On the published ACSR of the OpenDSS line-constants example the OpenDSS rule steps
+  0.05 % (336.4 kcmil, GMR/radius = 0.826) to 8.8 % (1/0, GMR/radius = 0.269) at 1 kHz,
+  although only 3 % of that conductor's internal inductance has decayed there — the step
+  is the GMR substitution, not skin effect. NEVER combine a radius-based model with a
+  `synthesize_grid_geometry` geometry: its radius is a placeholder, and the CIGRE LV
+  feeder's `Z` then moves by a factor of 20 above 1 kHz (assembly warns).
 - Positive-sequence model: `Z1` from a genuine 3-phase Carson geometry scales ∝ h to
   ~1e-3 while `Z0` carries the earth floor (`X0(h)/(h·X0(f0))→0.88`, `R0/R1≈5`);
   `positive_sequence_z` X is ∝ h to floating point and agrees with the two-conductor

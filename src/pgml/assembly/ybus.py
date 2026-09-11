@@ -724,7 +724,12 @@ def _geom_conductor_arrays(ln, rdt, device):
 def _geometry_block_groups(
     grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
 ):
-    """Yield ``(group, block, rows, cols)`` for geometry (Carson/Deri) lines."""
+    """Yield ``(group, block, rows, cols)`` for geometry (Carson/Deri) lines.
+
+    The conductor internal-inductance model is read from the modeling defaults
+    (``line.geometry.internal_inductance``) at assembly time, so a project-level
+    defaults override applies without reimporting the package.
+    """
     glines = [
         b
         for b in grid.branches
@@ -760,7 +765,15 @@ def _geometry_block_groups(
         RHO, LEN = torch.stack(rhos), torch.stack(lengths)  # [K]
 
         z, c = line_constants(
-            X, Y, GMR, RDC, RAD, RHO, f, nph
+            X,
+            Y,
+            GMR,
+            RDC,
+            RAD,
+            RHO,
+            f,
+            nph,
+            internal_inductance=_cfg("line.geometry.internal_inductance"),
         )  # Z[K,H,P,P] Ω/m, C[K,P,P] F/m
         z_len = (z * LEN[:, None, None, None]).to(cdt)
         ys_adm = torch.linalg.inv(z_len).transpose(0, 1)  # [H,K,P,P] series admittance

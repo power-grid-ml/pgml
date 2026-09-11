@@ -223,6 +223,42 @@ line:
         `x0_frequency: carson_sublinear` for the physically derived form. Per-line
         override: `Line.earth_return.x0_exponent`.
 
+  # Conductor-geometry (Carson/Deri) path: how the conductor's INTERNAL inductance
+  # enters the self impedance. A published GMR is a POWER-FREQUENCY quantity: it folds
+  # the internal inductance of the conductor (mu0/8pi for a solid round conductor, i.e.
+  # GMR = e^(-1/4)*radius) into one equivalent radius. Skin effect pushes the current to
+  # the surface, so the internal inductance decays with frequency and a fixed GMR
+  # over-states the reactance at harmonic frequencies.
+  geometry:
+    internal_inductance:
+      value: gmr
+      units: "enum{gmr, gmr_skin, gmr_power_frequency, bessel}"
+      description: >
+        Which internal-inductance model the conductor-geometry path uses.
+        `gmr`: the published GMR carries the internal inductance at every frequency and
+        the internal reactance is dropped (frozen at its power-frequency value).
+        `gmr_skin`: the published GMR's internal reactance is scaled by the solid-round
+        Bessel decay Im(Zint(f))/(f*mu0/4), so the power-frequency value is reproduced
+        exactly and the internal inductance decays with skin effect (continuous in f).
+        `gmr_power_frequency`: `gmr` inside `power_frequency_band_hz` and `bessel`
+        outside it, which is OpenDSS's rule (LineConstants/CNLineConstants/
+        TSLineConstants). Reproduces OpenDSS at every frequency; discontinuous at the
+        band edges unless GMR = e^(-1/4)*radius.
+        `bessel`: physical radius for the spacing term plus the full frequency-dependent
+        Bessel internal impedance at every frequency, i.e. the first-principles solid
+        round conductor; it discards the published GMR and so ignores stranding.
+        `gmr`, `gmr_skin` and `bessel` are continuous in frequency; all four agree at
+        power frequency for a solid round conductor. Needs a conductor radius for every
+        option except `gmr`.
+    power_frequency_band_hz:
+      value: [40.0, 1000.0]
+      units: "Hz"
+      description: >
+        Exclusive frequency band (low, high) in which `internal_inductance:
+        gmr_power_frequency` keeps the published GMR. OpenDSS hard-codes
+        `(f < 1000.0) and (f > 40.0)` in LineConstants.pas, so (40, 1000) reproduces it;
+        only change this to study the sensitivity of the threshold.
+
   # R/X → conductor-geometry synthesis (when a feeder ships only R/X, no coordinates).
   conductor:
     gmr_over_radius:

@@ -168,7 +168,9 @@ def two_conductor_loop_z(geom: dict, freqs: Tensor, *, rho=100.0) -> Tensor:
     current the large earth penetration-depth term is common to all four entries and
     CANCELS, so the result is the earth-floor-free positive-sequence impedance. Verifies,
     via the Carson code, that the direct :func:`positive_sequence_z` model is physically
-    grounded.
+    grounded. Uses the published-GMR conductor internal model at every frequency
+    (``internal_inductance="gmr"``), matching :func:`positive_sequence_z`, regardless of
+    the modeling default.
     """
     rdt = _rdtype(freqs)
     dev = freqs.device
@@ -178,7 +180,19 @@ def two_conductor_loop_z(geom: dict, freqs: Tensor, *, rho=100.0) -> Tensor:
     rdc = torch.tensor(
         [geom["rdc_ohm_per_m"], geom["rdc_ohm_per_m"]], dtype=rdt, device=dev
     )
-    z = series_impedance(x, y, gmr, rdc, rho, freqs.to(rdt))  # [H, 2, 2]
+    # The published-GMR internal model, pinned: this loop cross-checks
+    # `positive_sequence_z`, whose reactance scales strictly with frequency, so it must
+    # not follow a global `line.geometry.internal_inductance` override.
+    z = series_impedance(
+        x,
+        y,
+        gmr,
+        rdc,
+        rho,
+        freqs.to(rdt),
+        radius=torch.full_like(gmr, float(geom["radius_m"])),
+        internal_inductance="gmr",
+    )  # [H, 2, 2]
     # Loop transform t = [1, -1]: Z_loop = z00 - z01 - z10 + z11.
     return z[..., 0, 0] - z[..., 0, 1] - z[..., 1, 0] + z[..., 1, 1]
 

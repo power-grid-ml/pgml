@@ -11,6 +11,7 @@ from pgml.assembly import (
     build_injections,
     node_phase_index,
 )
+from pgml.geometry.carson import INTERNAL_INDUCTANCE_MODELS, line_constants
 from pgml.geometry.sequence import positive_sequence_z, sequence_aware_phase_z
 from pgml.geometry.synthesis import (
     apply_positive_sequence_harmonic_model,
@@ -265,6 +266,35 @@ def test_cpu_cuda_carson_geometry_assembly_parity(dtype):
     assert yb_cuda.Y.device.type == "cuda"
     tol = 1e-9 if dtype == torch.complex128 else 1e-3
     torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("model", INTERNAL_INDUCTANCE_MODELS)
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_cpu_cuda_internal_inductance_parity(model, dtype):
+    """Every conductor internal-inductance model is CPU/CUDA identical.
+
+    The frequencies straddle the power-frequency band, so the masked model
+    (``"gmr_power_frequency"``) exercises both of its branches on both devices.
+    """
+    f = torch.tensor([50.0, 250.0, 1250.0, 2500.0], dtype=dtype)
+    args = [
+        torch.tensor([-1.0, 0.0, 1.0], dtype=dtype),
+        torch.tensor([10.0, 10.0, 10.0], dtype=dtype),
+        torch.tensor([0.0078, 0.0078, 0.0078], dtype=dtype),
+        torch.tensor([1e-4, 1e-4, 1e-4], dtype=dtype),
+        torch.tensor([0.0102, 0.0102, 0.0102], dtype=dtype),
+    ]
+    z_cpu, _ = line_constants(*args, 100.0, f, 3, internal_inductance=model)
+    z_cuda, _ = line_constants(
+        *[a.to("cuda") for a in args],
+        100.0,
+        f.to("cuda"),
+        3,
+        internal_inductance=model,
+    )
+    assert z_cuda.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.float64 else 1e-4
+    torch.testing.assert_close(z_cuda.cpu(), z_cpu, rtol=tol, atol=tol)
 
 
 @pytest.mark.parametrize("grid_fn", GRIDS)

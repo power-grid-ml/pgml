@@ -64,9 +64,13 @@ decisions. One entry per capability:
   smoothing), differentiated through the IFT; `Storage` = signed injection, SoC/dispatch
   off-tape in `pgml.dispatch`. Validated vs pandapower and OpenDSS InvControl
   (`docs/pgml/modeling/der-pv-storage.md`).
-- **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C),
-  agreeing with OpenDSS below 1 kHz to 4.8e-8 relative on `Z` (the SI-vs-truncated `mu0`
-  constant) at every order incl. triplen; analytic sequence-based harmonic line models for R/X
+- **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C)
+  with a selectable conductor internal-inductance model
+  (`line.geometry.internal_inductance`: `gmr` (default) / `gmr_skin` /
+  `gmr_power_frequency` / `bessel`). Agreement with OpenDSS is 4.6e-8 relative on `Z` (the
+  SI-vs-truncated `mu0` constant) at every order incl. triplen — below 1 kHz with the
+  default, and at EVERY frequency with `gmr_power_frequency`, which reproduces OpenDSS's
+  own 40 Hz-1 kHz GMR band. Analytic sequence-based harmonic line models for R/X
   feeders, selected by the typed `Line.harmonic_line_model` and applied by the converters
   from the documented defaults (`docs/pgml/modeling/harmonic-line-model.md`).
 - **Scenarios (the batch contract)** — a batch of per-component deltas on one grid:
@@ -274,6 +278,16 @@ R-L split; validate the resonance vs OpenDSS. **Where.** `solver/harmonic_flow.p
   lines are skipped by `synthesize_grid_geometry`; Carson `C` agrees with OpenDSS's to
   2.1212e-5 relative = the `e0` constant ratio (pgml uses the SI value), and OpenDSS's
   `capradius` option is not read (match it if a c≠0 feeder is added).
+- **Internal-inductance model is global, not per line**: `line.geometry.internal_inductance`
+  is a modeling default read at assembly time; a grid that mixes synthesized geometries
+  (placeholder radius) with measured conductor data cannot choose per line. A
+  `LineGeometry.internal_inductance` field would close it; until then assembly WARNS when a
+  radius-based model meets a `synth_unphysical` geometry.
+- **Stranded conductors**: `gmr_skin` and `bessel` take the internal-inductance decay from
+  the equivalent SOLID round conductor. That is exact for a solid conductor and an
+  approximation for ACSR/stranded ones (tubular / multi-layer internal impedance, steel
+  core); measured spread on the published ACSR data in the OpenDSS line-constants example
+  is under 2 % of `X` up to 2.5 kHz.
 - **Continuation/Newton polish**: a true arc-length predictor-corrector (today's
   `loadability_limit` is a step-and-bisect on Newton FEASIBILITY, so its
   `breaking_lambda` is a lower bound on the nose — measured ~4 % below the closed-form
@@ -389,8 +403,8 @@ results are never read as more physical than they are. Details live in `docs/pgm
   inductive branch if a lossy reactor has to be harmonically exact.
 - **Zero-sequence line impedance at harmonics — lumped R/L lines only.** Lines WITH
   `conductor_geometry` compute Z(h) from first principles (agreeing with OpenDSS to
-  4.8e-8 relative at every order below 1 kHz; above 1 kHz OpenDSS changes its conductor
-  spacing term and pgml does not). Lines WITHOUT geometry embed the earth return AT f0; extrapolating Z0 to h·f0
+  4.6e-8 relative at every order below 1 kHz with the default internal-inductance model,
+  and at every order with `line.geometry.internal_inductance: gmr_power_frequency`). Lines WITHOUT geometry embed the earth return AT f0; extrapolating Z0 to h·f0
   is an ASSUMPTION in every tool. pgml's lumped `sequence_aware` model adds the Carson
   earth-return resistance `3·(Re(f) − Re(f0))` to R0 and scales X0 ∝ h; OpenDSS's R/X
   line does the same with its `Rg` and additionally bends X0 sub-linearly with `Xg`. Both
