@@ -56,9 +56,13 @@ appliance:
 
 line:
 
-  # Which frequency-dependent line model is applied to an R/X line that has NO explicit
-  # `conductor_geometry` and NO explicit `harmonic_line_model` tag. Applied deliberately
-  # via `pgml.geometry.apply_default_harmonic_model(grid)` (never silently at solve time).
+  # Which frequency-dependent line model is written to `Line.harmonic_line_model` for
+  # an R/X line that has NO `conductor_geometry` and NO explicit model. Resolved by the
+  # converters (`pgml.convert.*.to_grid`, which log the default they applied) and by
+  # `pgml.geometry.apply_default_harmonic_model(grid)` for hand-built grids. Assembly
+  # itself never resolves a default: a line whose `harmonic_line_model` is still None is
+  # assembled from its stored parameters as given (R const unless the line carries a
+  # `resistance_frequency` law, X∝h).
   harmonic_model:
     three_phase:
       value: sequence_aware
@@ -69,7 +73,7 @@ line:
         then recombines — the model a 4-wire UNBALANCED LV harmonic study needs. Earth
         return is excited only by zero-sequence / residual current, so it correctly
         vanishes for balanced operation. `positive_sequence` = Z1 only (no Z0 damping);
-        `naive` = R const, X∝h; `none` = leave the line untouched.
+        `naive` = R const, X∝h; `none` = leave the line unresolved (no model written).
     single_phase:
       value: positive_sequence
       units: "enum{sequence_aware, positive_sequence, naive, none}"
@@ -83,6 +87,7 @@ line:
       description: >
         Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and
         sequence-aware models. false → R constant (the naive X∝h, R-const model).
+        Per-line override: `Line.harmonic_skin_effect`.
 
   # Assumed zero-sequence/positive-sequence ratios used ONLY when expanding a
   # positive-sequence (r1/x1/c1) line into a 3-phase phase-domain matrix for an
@@ -112,6 +117,19 @@ line:
         Assumed shunt CAPACITANCE ratio C0/C1 for sequence->phase line expansion when no
         explicit C0 is available (~0.5 typical: less zero-sequence than positive-sequence
         capacitance).
+    r0_includes_earth_return:
+      value: false
+      units: "bool"
+      description: >
+        Whether a line's R0 already contains the Carson earth-return resistance at f0.
+        true (real zero-sequence measurements / datasheet values): the harmonic model
+        splits R0 into a conductor part R0 − 3·Re(f0) that carries the skin-effect
+        multiplier and an earth part 3·Re(f) that does not. false (the default, correct
+        for an R0 synthesised from `r0_over_r1`): R0 is treated as conductor resistance
+        and the earth return enters only as the increment 3·(Re(f) − Re(f0)). Both forms
+        reproduce the stored R0 exactly at f0; they differ only in how much of R0 the
+        skin multiplier scales. Per-line override:
+        `Line.earth_return.r0_includes_earth_return`.
 
   # Carson/Deri earth-return path (zero-sequence and geometry lines).
   earth_return:
@@ -128,7 +146,42 @@ line:
         Carson earth-return resistance per unit length per Hz: Re(f) = coeff·f. The
         physical Carson value is π²·1e-7 Ω/m/Hz (= ω·μ0/8 divided by f). Geometry-
         independent; the dominant frequency-dependent DAMPING of zero-sequence harmonics.
-        Mirrors OpenDSS's user-settable per-LineCode Rg.
+        Mirrors OpenDSS's user-settable per-LineCode Rg (whose default 0.01805 is this
+        same physical value at 60 Hz in Ω per 1000 ft, so on a metric line OpenDSS's
+        default is ≈3.28× smaller). Per-line override:
+        `Line.earth_return.resistance_coeff_ohm_per_m_per_hz`; 0 removes the earth path.
+    reactance_coeff_ohm_per_m_per_hz:
+      value: 1.2566370614359173e-06   # = mu0 = 4*pi*1e-7
+      units: "ohm/(m*Hz) per ln-unit"
+      description: >
+        Carson/Deri earth-return reactance per unit length per Hz per ln-unit:
+        Xg(f) = coeff·f·ln(658.5·sqrt(ρ/f)). The physical value is μ0. Only its
+        frequency DERIVATIVE enters the lumped zero-sequence model, where the
+        ρ-dependent log cancels: X0(h) = h·X0(f0) − 1.5·coeff·f0·h·ln(h). Mirrors
+        OpenDSS's per-LineCode Xg (its default 0.155081 is this value at 60 Hz, ρ=100,
+        in Ω per 1000 ft). Used only by `x0_frequency: carson_sublinear`. Per-line
+        override: `Line.earth_return.reactance_coeff_ohm_per_m_per_hz`.
+    x0_frequency:
+      value: linear
+      units: "enum{linear, carson_sublinear}"
+      description: >
+        Frequency law of the zero-sequence REACTANCE in the lumped sequence_aware model.
+        `linear` (default): X0(h) = X0·h — pure geometric scaling; the earth-return
+        reactance sub-linearity is left to the conductor-geometry path, which resolves
+        the real return path (deep earth vs a nearby neutral/sheath).
+        `carson_sublinear`: additionally subtract the Carson/Deri earth-return reactance
+        decay 1.5·coeff·f0·h·ln(h) (geometry- and ρ-independent), which reproduces
+        OpenDSS's Xg frequency correction for an R/X line. Exact at f0 either way.
+        Per-line override: `Line.earth_return.x0_frequency`.
+    x0_exponent:
+      value: 1.0
+      units: "exponent"
+      description: >
+        Exponent p in X0(h) = X0·h^p for the lumped sequence_aware model. 1.0 (default)
+        is the geometric scaling. p < 1 is an EMPIRICAL way to bend the zero-sequence
+        reactance sub-linear (e.g. to match a measured Z0(h)); prefer
+        `x0_frequency: carson_sublinear` for the physically derived form. Per-line
+        override: `Line.earth_return.x0_exponent`.
 
   # R/X → conductor-geometry synthesis (when a feeder ships only R/X, no coordinates).
   conductor:

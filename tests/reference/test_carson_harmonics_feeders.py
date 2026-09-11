@@ -22,6 +22,7 @@ from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly.ybus import _stamp_sources
 from pgml.evaluation import oracles as ref
+from pgml.geometry.synthesis import strip_grid_geometry
 from pgml.schemas.grid_schema import Phase
 from pgml.solver import solve_harmonic_flow
 
@@ -105,9 +106,7 @@ def test_carson_differs_from_naive_on_feeder():
     res_geom = solve_harmonic_flow(grid, [1, 7], slack="norton", dtype=CDT)
 
     # Strip geometry -> falls back to the explicit R/L path (naive X∝h, R const).
-    for b in grid.branches:
-        if hasattr(b, "conductor_geometry"):
-            b.conductor_geometry = None
+    strip_grid_geometry(grid)
     res_naive = solve_harmonic_flow(grid, [1, 7], slack="norton", dtype=CDT)
 
     row = index.row(int(grid.nodes[-1].id), Phase.A)

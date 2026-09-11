@@ -53,6 +53,7 @@ from pgml.geometry.synthesis import (
     apply_default_harmonic_model,
     apply_positive_sequence_harmonic_model,
     apply_sequence_aware_harmonic_model,
+    strip_grid_geometry,
     synthesize_line_geometry,
 )
 from pgml.schemas.grid_schema import (
@@ -186,10 +187,7 @@ def plot_gmr_floor(out: Path) -> None:
 
 # --- (3) feeder harmonic voltages: corrected vs naive vs single-conductor ---
 def _strip_geometry(grid):
-    for b in grid.branches:
-        if isinstance(b, Line):
-            b.conductor_geometry = None
-    return grid
+    return strip_grid_geometry(grid)
 
 
 def _ieee33_models(orders):

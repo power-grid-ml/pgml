@@ -33,8 +33,8 @@ from pgml.assembly.ybus import _stamp_sources
 from pgml.geometry.synthesis import (
     apply_default_harmonic_model,
     apply_positive_sequence_harmonic_model,
+    strip_grid_geometry,
 )
-from pgml.schemas.grid_schema import Line
 from pgml.solver import solve_harmonic_flow
 
 from pgml import evaluation as ev
@@ -61,10 +61,7 @@ def _pgml_harmonic_y_labeled(grid, index, h, label):
 
 
 def _strip_geometry(grid):
-    for b in grid.branches:
-        if isinstance(b, Line):
-            b.conductor_geometry = None
-    return grid
+    return strip_grid_geometry(grid)
 
 
 def run_feeder(name: str, builder, out_dir: Path) -> None:

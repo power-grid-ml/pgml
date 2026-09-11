@@ -8,7 +8,7 @@ admittance matrices.
 Build an OpenDSS circuit from pgml's synthesized conductor data, read ``SystemY(h)``
 at each harmonic, and solve with pgml-consistent injection.  Parity: ~1e-11 V.
 
-**Sequence-aware path** (three-phase grids tagged ``harmonic_line_model=sequence_aware``):
+**Sequence-aware path** (three-phase grids with ``harmonic_line_model='sequence_aware'``):
 Build an OpenDSS circuit with R1/X1/R0/X0 lines (from the 3×3 phase matrices);
 transformer contributions are overwritten with pgml's own formulas.  Parity: ~1e-8 V.
 
@@ -415,6 +415,43 @@ def _get_stub_norton_from_dss() -> complex:
     return complex(yy[0, 0])
 
 
+def _dss_earth_params(
+    line: Line, f0: float, length_m: float
+) -> tuple[float, float, float]:
+    """OpenDSS ``(Rg, Xg, rho)`` reproducing ONE pgml line's earth-return model.
+
+    OpenDSS frequency-corrects a sequence-defined line as ``R += Rg*(h-1)`` and
+    ``X = h*(X - 0.5*KXg*ln(h))`` per matrix entry, with
+    ``KXg = Xg/ln(658.5*sqrt(rho/f0))`` — i.e. exactly pgml's lumped zero-sequence
+    model with ``Rg = resistance_coeff*f0`` and ``KXg = reactance_coeff*f0``. Its own
+    defaults (``Rg=0.01805``, ``Xg=0.155081``) are the physical Carson values at 60 Hz
+    in ohms per 1000 ft and are reinterpreted in the line's ``units``, so they are
+    passed explicitly here.
+
+    The stub writes the TOTAL impedance onto a ``length=1 units=m`` line, so the earth
+    terms are likewise per whole line. ``Xg=0`` is emitted when the pgml line scales
+    ``X0`` linearly (``x0_frequency='linear'``), which is OpenDSS's way of switching the
+    earth-return reactance correction off.
+    """
+    from pgml import defaults as _d
+
+    er = getattr(line, "earth_return", None)
+    rc = getattr(er, "resistance_coeff_ohm_per_m_per_hz", None)
+    if rc is None:
+        rc = _d.get("line.earth_return.resistance_coeff_ohm_per_m_per_hz")
+    kx = getattr(er, "reactance_coeff_ohm_per_m_per_hz", None)
+    if kx is None:
+        kx = _d.get("line.earth_return.reactance_coeff_ohm_per_m_per_hz")
+    law = getattr(er, "x0_frequency", None) or _d.get("line.earth_return.x0_frequency")
+    rho = float(_d.get("line.earth_return.resistivity_ohm_m"))
+    rg = to_float(rc) * f0 * length_m
+    if law == "carson_sublinear":
+        xg = to_float(kx) * f0 * math.log(658.5 * math.sqrt(rho / f0)) * length_m
+    else:
+        xg = 0.0
+    return rg, xg, rho
+
+
 def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
     """Build an OpenDSS stub circuit for the sequence-aware 3-phase path.
 
@@ -449,6 +486,11 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
     p_src = len(src.phases)
 
     dss.Text.Command("Clear")
+    # Every element's BASE frequency comes from DefaultBaseFrequency (60 Hz out of the
+    # box), and OpenDSS scales a sequence-defined line's reactance by f/basefreq. On a
+    # 50 Hz grid an unset base frequency therefore reports 5/6 of the line reactance the
+    # grid actually stores, at every order including the fundamental.
+    dss.Text.Command(f"Set DefaultBaseFrequency={f0:.10g}")
     ph_conn = ".".join(str(k + 1) for k in range(p_src))
     dss.Text.Command(
         f"New Circuit.pgml_live phases={p_src} basekv={kv_slack} "
@@ -531,10 +573,12 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
             x0 = z0.imag
             c1 = np.diag(c_mat).mean()
             c0 = c_mat.sum() / 3.0
+            rg, xg, rho = _dss_earth_params(ln, f0, length)
             dss.Text.Command(
                 f"New Line.l{ln.id} phases=3 bus1={bus1} bus2={bus2} "
                 f"r1={r1:.10g} x1={x1:.10g} c1={c1 * 1e9:.10g} "
                 f"r0={r0:.10g} x0={x0:.10g} c0={c0 * 1e9:.10g} "
+                f"rg={rg:.10g} xg={xg:.10g} rho={rho:.10g} "
                 "length=1 units=m"
             )
         else:
@@ -715,11 +759,11 @@ def _is_geometry_grid(grid: Grid) -> bool:
 
 
 def _is_sequence_aware_grid(grid: Grid) -> bool:
-    """True if any in-service line is tagged ``harmonic_line_model=sequence_aware``."""
+    """True if any in-service line selected ``harmonic_line_model='sequence_aware'``."""
     return any(
         isinstance(b, Line)
         and b.in_service
-        and (b.tags or {}).get("harmonic_line_model") == "sequence_aware"
+        and b.harmonic_line_model == "sequence_aware"
         for b in grid.branches
     )
 
@@ -759,7 +803,7 @@ def opendss_harmonic_voltages(
     (``R const, X∝h, complex tap``).  The resulting Y-bus matches pgml's
     assembled Y at Carson-line precision (~1e-14 relative for lines).
 
-    **Three-phase sequence-aware path** (lines tagged ``harmonic_line_model=sequence_aware``):
+    **Three-phase sequence-aware path** (lines with ``harmonic_line_model='sequence_aware'``):
 
     In this path OpenDSS supplies ONLY the LINE admittance.  A full OpenDSS
     circuit is built whose Lines are defined via ``R1/X1/R0/X0`` derived from the
@@ -793,7 +837,7 @@ def opendss_harmonic_voltages(
     grid:
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.  Must be one of:
         (a) a single-phase grid with ``conductor_geometry`` on all lines, or
-        (b) a three-phase grid with ``harmonic_line_model=sequence_aware`` tags.
+        (b) a three-phase grid with ``harmonic_line_model='sequence_aware'`` lines.
         Grids with neither path raise ``ValueError``.
     harmonic_injection:
         Per-device harmonic-current spec
@@ -869,7 +913,7 @@ def opendss_harmonic_voltages(
         raise ValueError(
             "opendss_harmonic_voltages requires either (a) all lines to carry "
             "conductor_geometry (single-phase Carson path) or (b) lines tagged "
-            "harmonic_line_model=sequence_aware (3-phase sequence-aware path). "
+            "harmonic_line_model='sequence_aware' (3-phase sequence-aware path). "
             "For plain R/X grids without these tags, use numpy_harmonic_voltages."
         )
 
@@ -1186,7 +1230,7 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     ----------
     grid:
         Materialised three-phase :class:`~pgml.schemas.grid_schema.Grid` whose
-        lines carry ``harmonic_line_model=sequence_aware`` tags.
+        lines carry ``harmonic_line_model='sequence_aware'``.
     busname:
         ``{node_id: dss_bus_name}`` mapping built by the caller.
     """
@@ -1408,7 +1452,7 @@ def opendss_dyn_transformer_harmonic_voltages(
     ----------
     grid:
         Materialised three-phase :class:`~pgml.schemas.grid_schema.Grid`.
-        Lines must carry ``harmonic_line_model=sequence_aware`` tags (the same
+        Lines must carry ``harmonic_line_model='sequence_aware'`` (the same
         prerequisite as :func:`opendss_harmonic_voltages`).
     harmonic_injection:
         Per-device harmonic-current spec
@@ -1453,7 +1497,7 @@ def opendss_dyn_transformer_harmonic_voltages(
     if not _is_sequence_aware_grid(grid):
         raise ValueError(
             "opendss_dyn_transformer_harmonic_voltages requires lines tagged "
-            "harmonic_line_model=sequence_aware (three-phase seq-aware path)."
+            "harmonic_line_model='sequence_aware' (three-phase seq-aware path)."
         )
 
     from pgml.assembly import node_phase_index

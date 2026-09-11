@@ -45,8 +45,11 @@ def series_admittance_matrix(
     cdtype: torch.dtype,
     *,
     r_mult: Tensor | None = None,
+    r_unscaled: Tensor | None = None,
 ) -> Tensor:
     """Series admittance ``Ys(f) = (R(f) + jX(f))^-1`` per branch per frequency.
+
+    ``R(f) = r * r_mult(f) + r_unscaled`` and ``X(f) = 2*pi*f*ind``.
 
     Parameters
     ----------
@@ -58,7 +61,11 @@ def series_admittance_matrix(
         Target complex dtype.
     r_mult:
         Optional real tensor broadcastable to ``[H, K, 1, 1]`` (or ``[H,K,P,P]``)
-        skin-effect multiplier applied to ``R``. Defaults to 1.
+        skin-effect multiplier applied to ``r``. Defaults to 1.
+    r_unscaled:
+        Optional real ``[K, P, P]`` resistance ADDED after the multiplier — the part of
+        the resistance matrix the skin effect does not scale (the earth-return mutual
+        terms of a multi-phase line). Defaults to 0.
 
     Returns
     -------
@@ -72,6 +79,8 @@ def series_admittance_matrix(
     r_b = r[None]  # [1,K,P,P]
     if r_mult is not None:
         r_b = r_b * r_mult
+    if r_unscaled is not None:
+        r_b = r_b + r_unscaled[None]
     z = torch.complex(r_b.expand_as(x).to(_rdtype(cdtype)), x.to(_rdtype(cdtype))).to(
         cdtype
     )  # [H,K,P,P]

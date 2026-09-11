@@ -30,6 +30,7 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 
+from pgml.defaults import get as _cfg
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     GenericBranch,
@@ -474,8 +475,8 @@ def _series_terminal_indices(
 
 
 def _is_sequence_aware(line) -> bool:
-    """A line opted into the sequence-aware harmonic model (UNBALANCED studies)."""
-    return (line.tags or {}).get("harmonic_line_model") == "sequence_aware"
+    """A line that selected the sequence-aware harmonic model (UNBALANCED studies)."""
+    return line.harmonic_line_model == "sequence_aware"
 
 
 @_branch_stamp("line")
@@ -506,7 +507,14 @@ def _line_block_groups(
     seq_lines = [b for b in flow_lines if _is_sequence_aware(b)]
     if rx_lines:
         yield from _line_rx_block_groups(
-            rx_lines, f, index, cdt, rdt, device, param_overrides
+            rx_lines,
+            f,
+            index,
+            cdt,
+            rdt,
+            device,
+            param_overrides,
+            f0=float(grid.base_frequency_hz),
         )
     if seq_lines:
         yield from _sequence_aware_block_groups(
@@ -515,6 +523,54 @@ def _line_block_groups(
     yield from _geometry_block_groups(
         grid, f, index, cdt, rdt, device, param_overrides, branch_states
     )
+
+
+def _sequence_aware_options(line) -> tuple:
+    """DISCRETE sequence-aware model options of one line (the batching group key).
+
+    ``(skin, x0_frequency, r0_includes_earth_return)``, each resolved from the line's
+    typed fields and falling back to the modeling defaults (``pgml.defaults``). These
+    select code paths, so they group lines; the numeric coefficients do not (see
+    :func:`_earth_field`).
+    """
+    from pgml.geometry import sequence as _seq
+
+    er = line.earth_return
+    skin = line.harmonic_skin_effect
+    if skin is None:
+        skin = _cfg("line.harmonic_model.skin_effect")
+    x0_frequency = getattr(er, "x0_frequency", None) or _seq.X0_FREQUENCY
+    r0_inc = getattr(er, "r0_includes_earth_return", None)
+    if r0_inc is None:
+        r0_inc = _seq.R0_INCLUDES_EARTH_RETURN
+    return bool(skin), str(x0_frequency), bool(r0_inc)
+
+
+#: Modeling-default keys of the numeric earth-return coefficients, by field name.
+_EARTH_DEFAULT_KEY = {
+    "resistance_coeff_ohm_per_m_per_hz": (
+        "line.earth_return.resistance_coeff_ohm_per_m_per_hz"
+    ),
+    "reactance_coeff_ohm_per_m_per_hz": (
+        "line.earth_return.reactance_coeff_ohm_per_m_per_hz"
+    ),
+    "x0_exponent": "line.earth_return.x0_exponent",
+}
+
+
+def _earth_field(lines, field: str, rdt: torch.dtype, device) -> Tensor:
+    """Stack one numeric earth-return coefficient over a line group -> ``[K]``.
+
+    Each line's :class:`~pgml.schemas.grid_schema.EarthReturnModel` value is used when
+    set (a python float OR a tensor, so gradients flow), else the modeling default.
+    """
+    vals = []
+    for ln in lines:
+        v = getattr(ln.earth_return, field, None) if ln.earth_return else None
+        if v is None:
+            v = _cfg(_EARTH_DEFAULT_KEY[field])
+        vals.append(_geom_scalar(v, rdt, device))
+    return torch.stack(vals, 0)
 
 
 def _sequence_aware_block_groups(
@@ -529,26 +585,24 @@ def _sequence_aware_block_groups(
     model an asymmetric 4-wire study needs. Differentiable in R/L; the shunt ``C`` keeps
     the usual ``B∝h`` split.
     """
-    from pgml.geometry.sequence import CARSON_EARTH_R_PER_HZ, sequence_aware_phase_z
+    from pgml.geometry.sequence import sequence_aware_phase_z
 
     f0 = float(grid.base_frequency_hz)
     two_pi_f0 = 2.0 * math.pi * f0
     two_pi_f = (2.0 * torch.pi) * f  # [H]
 
-    # Group by (skin, earth coeff) so each batched call shares its model options.
+    # Group by the DISCRETE model options (skin flag, reactance law, R0 convention) so
+    # each batched call shares them; the numeric earth coefficients stay per line and
+    # are stacked into tensors, so a tensor coefficient keeps its gradient.
     by_opts: dict[tuple, list] = {}
     for ln in lines:
-        if len(ln.from_phases) != 3:
-            raise ValueError(
-                f"Line {ln.id}: harmonic_line_model=sequence_aware requires a 3-phase "
-                f"line (got {len(ln.from_phases)} phases); it is a Z1/Z0 model."
-            )
-        tags = ln.tags or {}
-        skin = tags.get("seq_skin", "true") == "true"
-        coeff = float(tags.get("seq_earth_coeff", CARSON_EARTH_R_PER_HZ))
-        by_opts.setdefault((skin, coeff), []).append(ln)
+        by_opts.setdefault(_sequence_aware_options(ln), []).append(ln)
 
-    for (skin, coeff), group in by_opts.items():
+    for opts, group in by_opts.items():
+        skin, x0_frequency, r0_includes_earth = opts
+        coeff = _earth_field(group, "resistance_coeff_ohm_per_m_per_hz", rdt, device)
+        coeff_x = _earth_field(group, "reactance_coeff_ohm_per_m_per_hz", rdt, device)
+        x0_exponent = _earth_field(group, "x0_exponent", rdt, device)
         r_list, l_list, c_list, len_list = [], [], [], []
         for ln in group:
             r_list.append(
@@ -592,6 +646,10 @@ def _sequence_aware_block_groups(
             f,
             skin=skin,
             earth_resistance_coeff=coeff,
+            earth_reactance_coeff=coeff_x,
+            x0_frequency=x0_frequency,
+            x0_exponent=x0_exponent,
+            r0_includes_earth_return=r0_includes_earth,
         )  # [K,H,3,3]  Ω/m
 
         z_len = (z_abc * length[:, None, None, None]).to(cdt)  # [K,H,3,3]
@@ -698,22 +756,38 @@ def _geometry_block_groups(
         yield group, block, rows, cols
 
 
-def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
-    by_p: dict[int, list] = {}
+def _line_rx_block_groups(
+    lines, f, index, cdt, rdt, device, param_overrides, *, f0: float
+):
+    """Yield ``(group, block, rows, cols)`` for explicit-R/L/C lines.
+
+    Covers the ``naive`` and ``positive_sequence`` models and lines whose
+    ``harmonic_line_model`` is still unresolved (assembled from their stored
+    parameters). The series resistance at harmonic ``h`` is::
+
+        R(h) = m(h) * (R - R_earth) + R_earth
+
+    where ``R_earth`` holds the off-diagonal (mutual) entries and, on its diagonal, each
+    row's mean mutual. On a multi-phase line the mutual resistance IS the earth-return
+    term (Carson: it is common to the self and mutual entries), so the skin-effect
+    multiplier ``m(h)`` scales the CONDUCTOR part only; a 1-phase line has no mutual and
+    keeps ``R(h) = m(h) * R``. ``m(h)`` is the Bessel skin curve of the line's
+    positive-sequence resistance for ``positive_sequence`` (differentiable in ``R``),
+    ``1`` for ``naive``, and the line's ``resistance_frequency`` law otherwise.
+    """
+    by_opts: dict[tuple, list] = {}
     for ln in lines:
-        by_p.setdefault(len(ln.from_phases), []).append(ln)
-    for p, group in by_p.items():
-        r_list, l_list, g_list, c_list, mult_list = [], [], [], [], []
+        by_opts.setdefault(_rx_options(ln), []).append(ln)
+    for (p, model, skin), group in by_opts.items():
+        r_list, l_list, g_list, c_list, mult_list, r_pm_list = [], [], [], [], [], []
         for ln in group:
             length = ln.length_m
-            r0 = (
-                _override(
-                    param_overrides,
-                    ("line", ln.id, "series_resistance_ohm_per_m"),
-                    _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
-                )
-                * length
+            r_pm = _override(
+                param_overrides,
+                ("line", ln.id, "series_resistance_ohm_per_m"),
+                _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
             )
+            r0 = r_pm * length
             ind = (
                 _override(
                     param_overrides,
@@ -741,19 +815,32 @@ def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
                 )
             else:
                 cond = torch.zeros((p, p), dtype=rdt, device=device)
+            r_pm_list.append(r_pm)
             r_list.append(r0)
             l_list.append(ind)
             g_list.append(cond)
             c_list.append(cap)
-            mult_list.append(_resistance_multiplier(ln, f, rdt, device))  # [H]
+            if model is None:
+                mult_list.append(_resistance_multiplier(ln, f, rdt, device))  # [H]
         r = torch.stack(r_list, 0)  # [K,P,P]
         ind = torch.stack(l_list, 0)
         g = torch.stack(g_list, 0)
         c = torch.stack(c_list, 0)
-        rmult = torch.stack(mult_list, 1)  # [H,K]
-        rmult = rmult[:, :, None, None]  # [H,K,1,1]
+        r_earth = _mutual_resistance(r)  # [K,P,P] (zeros for P == 1)
+        if model is None:
+            rmult = torch.stack(mult_list, 1)[:, :, None, None]  # [H,K,1,1]
+        elif model == "positive_sequence" and skin:
+            from pgml.geometry.sequence import skin_resistance_multiplier
 
-        ys = series_admittance_matrix(r, ind, f, cdt, r_mult=rmult)  # [H,K,P,P]
+            r1 = _positive_sequence_resistance(torch.stack(r_pm_list, 0))  # [K]
+            rmult = skin_resistance_multiplier(r1, f0, f)  # [K,H]
+            rmult = rmult.transpose(0, 1)[:, :, None, None]  # [H,K,1,1]
+        else:  # naive / positive_sequence without skin: R constant
+            rmult = torch.ones((f.shape[0], 1, 1, 1), dtype=rdt, device=device)
+
+        ys = series_admittance_matrix(
+            r - r_earth, ind, f, cdt, r_mult=rmult, r_unscaled=r_earth
+        )  # [H,K,P,P]
         series_block = pi_series_blocks(ys)  # [H,K,2P,2P]
 
         # Shunt admittance split half to each terminal diagonal block.
@@ -768,6 +855,48 @@ def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
+
+
+def _rx_options(line) -> tuple:
+    """``(n_phases, harmonic_line_model, skin)`` batching key of an explicit-R/L/C line."""
+    model = line.harmonic_line_model
+    skin = line.harmonic_skin_effect
+    if model == "positive_sequence" and skin is None:
+        skin = _cfg("line.harmonic_model.skin_effect")
+    return len(line.from_phases), model, bool(skin)
+
+
+def _mutual_resistance(r: Tensor) -> Tensor:
+    """Earth-return part of a resistance matrix ``[K,P,P]``: the mutual entries.
+
+    Off-diagonal entries are kept as they are; each diagonal entry becomes its row's
+    mean mutual (for the circulant matrix of a transposed line that is exactly the
+    mutual resistance ``Rg``). Returns zeros for a single-phase line, which has no
+    mutual and therefore no earth-return component in its stored ``R``.
+    """
+    p = r.shape[-1]
+    if p == 1:
+        return torch.zeros_like(r)
+    eye = torch.eye(p, dtype=r.dtype, device=r.device)
+    off = r * (1.0 - eye)  # [K,P,P]
+    row_mean = off.sum(-1) / (p - 1)  # [K,P]
+    return off + row_mean.unsqueeze(-1) * eye
+
+
+def _positive_sequence_resistance(r: Tensor) -> Tensor:
+    """Positive-sequence resistance ``[K]`` of per-metre resistance matrices ``[K,P,P]``.
+
+    ``mean(diagonal) - mean(off-diagonal)``: the mutual entries are the earth-return
+    term, so the resistance a balanced (positive-sequence) current sees is the
+    difference. Matches :func:`pgml.geometry.synthesis._line_representative_r1`.
+    """
+    p = r.shape[-1]
+    diag = r.diagonal(dim1=-2, dim2=-1)  # [K,P]
+    self_ = diag.mean(-1)  # [K]
+    if p == 1:
+        return self_
+    mutual = (r.sum((-2, -1)) - diag.sum(-1)) / (p * (p - 1))  # [K]
+    return self_ - mutual
 
 
 def _resistance_multiplier(line, f, rdt, device) -> Tensor:

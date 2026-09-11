@@ -150,6 +150,10 @@ def _dss_series_z(line_cmd: str, nph: int, orders):
     import opendssdirect as dss
 
     dss.Text.Command("Clear")
+    # OpenDSS scales a sequence-defined line's X by f/basefreq, where basefreq comes
+    # from this global setting: set it explicitly (the default is 60 Hz, and another
+    # circuit may have changed it).
+    dss.Text.Command(f"Set DefaultBaseFrequency={_DSS_F0}")
     dss.Text.Command(
         f"New Circuit.t basekv=12.47 phases={nph} bus1=s frequency={_DSS_F0} "
         "r1=1e-6 x1=1e-6"
@@ -325,7 +329,7 @@ def test_sequence_aware_assembly_recovers_damped_zero_sequence():
         ],
     )
     apply_sequence_aware_harmonic_model(grid)
-    assert grid.branches[0].tags["harmonic_line_model"] == "sequence_aware"
+    assert grid.branches[0].harmonic_line_model == "sequence_aware"
 
     a = np.exp(2j * np.pi / 3)
     amat = np.array([[1, 1, 1], [1, a * a, a], [1, a, a * a]])

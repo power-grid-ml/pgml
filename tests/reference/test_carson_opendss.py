@@ -23,6 +23,9 @@ FREQS = [50.0, 150.0, 250.0, 350.0, 550.0, 750.0]
 
 def _dss_series_z(cmds, nph, freqs):
     dss.Text.Command("Clear")
+    # Base frequency of every element (and the reference for OpenDSS's own frequency
+    # scaling); set explicitly so the helper does not inherit another circuit's value.
+    dss.Text.Command("Set DefaultBaseFrequency=50")
     dss.Text.Command(
         f"New Circuit.t basekv=12.47 phases={nph} bus1=s frequency=50 r1=1e-6 x1=1e-6"
     )
