@@ -259,18 +259,46 @@ line:
 
 # Branch modeling limits that are not physical parameters of one element.
 branch:
+  zero_impedance:
+    value: fuse
+    units: "enum{fuse, error}"
+    description: >
+      How a solve treats an in-service branch whose series impedance is EXACTLY zero —
+      a closed switch with no impedance data, a bus coupler or jumper modelled as a
+      zero-impedance line, a zero-length line. `fuse` (default) collapses the branch's
+      terminal node-phase rows into ONE row of the solved system (exact bus fusion: the
+      two terminals share a voltage and their current balances are summed), solves the
+      reduced system and reports the result on the original node ids; the current
+      through the fused branch follows from Kirchhoff's law at the fused node. `error`
+      refuses such a branch by name (`pgml.solver.check_branch_impedances`) and points
+      at `near_ideal_series_resistance_ohm` instead. Fusion is exact and better
+      conditioned than any small-impedance stand-in, which buys its finite voltage drop
+      with an admittance of 1/R in that row. A branch under a `branch_states` sweep is
+      never fused (a swept branch is reached by scaling a stamped admittance): a
+      zero-impedance branch listed there raises under either policy.
   near_ideal_series_resistance_ohm:
     value: 1.0e-4
     units: "ohm"
     description: >
-      Series resistance that stands in for an IDEAL (zero-impedance) branch — a bus
-      coupler, a jumper, or a closed switch with no impedance data. The nodal
-      formulation inverts every branch's series impedance to get its primitive
-      admittance, so an exactly zero impedance has no stamp; the solvers refuse it by
-      name (`pgml.solver.check_branch_impedances`) and point at this value. 1e-4 Ohm is
-      small enough to be electrically negligible on a distribution feeder and large
-      enough to keep the admittance matrix conditioned; the pandapower converter
-      substitutes it for a bus-bus switch that carries no `z_ohm`.
+      Series resistance that stands in for an IDEAL (zero-impedance) branch where the
+      branch has to remain STAMPED — under `zero_impedance: error`, or for a switch
+      whose state a `branch_states` sweep toggles. 1e-4 Ohm is small enough to be
+      electrically negligible on a distribution feeder and large enough to keep the
+      admittance matrix conditioned, but it is not exact: it adds a voltage drop and it
+      raises that row's admittance scale, and with it the achievable mismatch floor.
+      Prefer exact impedance data where it exists and fusion where the element really is
+      an ideal conductor.
+  switch_model:
+    value: ideal
+    units: "enum{ideal, near_ideal}"
+    description: >
+      What a CONVERTER writes for a closed switch whose source library gives no
+      impedance (a pandapower bus-bus switch with `z_ohm = 0`, which pandapower itself
+      solves by fusing the two buses). `ideal` (default) writes a `Switch` with
+      R = L = 0, which the solve collapses exactly (see `zero_impedance`) and which
+      therefore reproduces the source tool's own treatment. `near_ideal` writes
+      `near_ideal_series_resistance_ohm` instead, keeping the switch a stamped branch —
+      the choice to make when the switch's state has to be swept by `branch_states`.
 
 # Two-winding transformer vector group + grounding.
 transformer:

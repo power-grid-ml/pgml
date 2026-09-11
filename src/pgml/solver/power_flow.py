@@ -61,6 +61,7 @@ from torch import Tensor
 
 from pgml import defaults
 from pgml.assembly import (
+    FusionMap,
     NodePhaseIndex,
     assemble_network_ybus,
     assemble_ybus,
@@ -69,6 +70,12 @@ from pgml.assembly import (
     device_current_injections,
     injections_from_plan,
     node_phase_index,
+)
+from pgml.assembly._fusion import (
+    describe_unfusable,
+    log_fusion_summary,
+    resolve_fusion,
+    zero_impedance_branches,
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
@@ -411,83 +418,33 @@ def check_connectivity(grid: Grid) -> None:
         )
 
 
-def _zero_series_impedance_branches(grid: Grid) -> list[tuple[int, str, str]]:
-    """Branches whose series impedance is exactly zero: ``(id, component, detail)``.
+def check_branch_impedances(grid: Grid, *, fusion: Optional[FusionMap] = None) -> None:
+    """Raise :class:`~pgml.errors.ModelingError` for a branch with no primitive stamp.
 
-    Such a branch has no primitive admittance — the per-branch impedance matrix is
-    singular, so the stamp cannot be formed. It is a common idiom in published network
-    data (a bus coupler, a jumper, a zero-length line, an ideal closed switch), which is
-    why it is reported by branch id rather than surfacing as a linear-algebra failure
-    deep in the assembly. Values are read under ``no_grad`` (a structural check, never
-    on the autograd tape) and a branch whose impedance comes from its conductor
-    geometry is skipped — the geometry path always yields a finite impedance.
+    The pre-solve modeling gate. A branch whose series impedance is exactly zero (a bus
+    coupler or jumper modelled as a zero-impedance line, a zero-length line, a closed
+    switch with the schema's zero R/L default) has no primitive admittance — the nodal
+    formulation inverts the series impedance — and without this gate it surfaced as a raw
+    linear-algebra failure naming an internal batch index.
+
+    Two of those branches are REPRESENTABLE rather than invalid, and a solve collapses
+    them instead of refusing them (exact bus fusion: see
+    :func:`pgml.assembly.fusion_map`). Pass the ``fusion`` map the solve resolved and
+    they are accepted; what remains is what neither a stamp nor a fused row can express:
+    a zero-impedance transformer (its ratio and vector group relate the terminals by more
+    than equality), a zero-series branch that still carries a shunt admittance, and a
+    branch whose state a ``branch_states`` sweep toggles. The message names every
+    offending branch and the ways out — the documented near-ideal resistance
+    ``branch.near_ideal_series_resistance_ohm``, merging the two nodes, or real impedance
+    data.
     """
-    from pgml.schemas.grid_schema import GenericBranch, Line, Switch, Transformer
-
-    def zero(*vals) -> bool:
-        with torch.no_grad():
-            for v in vals:
-                if v is None:
-                    continue
-                t = torch.as_tensor(v, dtype=torch.float64)
-                if t.numel() and float(t.abs().max()) != 0.0:
-                    return False
-        return True
-
-    out: list[tuple[int, str, str]] = []
-    for b in grid.branches:
-        if not getattr(b, "in_service", True):
-            continue
-        if isinstance(b, Line):
-            if b.conductor_geometry is not None:
-                continue
-            if zero(b.series_resistance_ohm_per_m, b.series_inductance_h_per_m):
-                out.append((int(b.id), "line", "R and L per metre are both zero"))
-            elif zero(b.length_m):
-                out.append((int(b.id), "line", "length_m is zero"))
-        elif isinstance(b, Switch):
-            if b.closed and zero(b.resistance_ohm, b.inductance_h):
-                out.append(
-                    (int(b.id), "switch", "closed with zero resistance and inductance")
-                )
-        elif isinstance(b, GenericBranch):
-            if zero(b.series_resistance_ohm, b.series_inductance_h):
-                out.append(
-                    (int(b.id), "generic_branch", "series R and L are both zero")
-                )
-        elif isinstance(b, Transformer):
-            if zero(b.series_resistance_ohm, b.series_inductance_h):
-                out.append(
-                    (int(b.id), "transformer", "series (leakage) R and L are both zero")
-                )
-    return out
-
-
-def check_branch_impedances(grid: Grid) -> None:
-    """Raise :class:`~pgml.errors.ModelingError` for a branch with zero series impedance.
-
-    The pre-solve modeling gate that keeps a singular primitive stamp from surfacing as
-    a linear-algebra failure naming an internal batch index: a branch with no series
-    impedance (a bus coupler or jumper modelled as a zero-impedance line, a zero-length
-    line, an ideal closed switch) cannot be inverted into a primitive admittance. The
-    error names every offending branch and the two ways out — give it the documented
-    near-ideal resistance (``branch.near_ideal_series_resistance_ohm``), which is what
-    the pandapower converter substitutes for a bus-bus switch, or merge its two nodes.
-    """
-    bad = _zero_series_impedance_branches(grid)
+    bad = zero_impedance_branches(grid)
+    if fusion is not None:
+        fused = set(fusion.fused_branch_ids)
+        bad = [z for z in bad if z.branch_id not in fused]
     if not bad:
         return
-    r_ideal = float(defaults.get("branch.near_ideal_series_resistance_ohm"))
-    shown = "; ".join(f"{kind} {bid} ({why})" for bid, kind, why in bad[:8])
-    more = "" if len(bad) <= 8 else f" (+{len(bad) - 8} more)"
-    raise ModelingError(
-        f"{len(bad)} branch(es) have zero series impedance and therefore no primitive "
-        f"admittance: {shown}{more}. A zero-impedance branch is a bus coupler or "
-        "jumper, which the nodal formulation cannot stamp as a pi-branch. Give it a "
-        f"small finite series resistance (the documented near-ideal value is "
-        f"{r_ideal:g} Ohm, what the pandapower converter substitutes for a bus-bus "
-        "switch), or merge the two nodes it joins into one."
-    )
+    raise ModelingError(describe_unfusable(bad, fused_available=fusion is None))
 
 
 def _same_device(a: torch.device, b: torch.device) -> bool:
@@ -648,6 +605,49 @@ def _apply_scalar_states(grid: Grid, branch_states: dict) -> Grid:
     return grid.model_copy(update={"branches": branches})
 
 
+def _check_fused_row_conflicts(
+    grid: Grid, fusion: FusionMap, full_index: NodePhaseIndex, fixed_rows
+) -> None:
+    """Refuse a fusion that collapses two terminals the solve has to pin separately.
+
+    Fusing is exact for the network, but two kinds of terminal own a row's equation and
+    cannot share it: an ideal-slack Source (pinned) and a voltage-regulating Generator
+    (its reactive balance row is substituted by the setpoint). Two of either on one fused
+    row is a contradictory model — two references, or two setpoints, for one voltage — so
+    it is named here rather than silently resolved by whichever is applied last. Two
+    Sources with the SAME reference are handled (and deduplicated) by
+    :func:`_distinct_slack_rows`; this check covers the regulating generators.
+    """
+    from pgml.schemas.grid_schema import Generator
+
+    rows: list[int] = []
+    labels: dict[int, str] = {}
+    for a in grid.appliances:
+        if not isinstance(a, Generator) or not getattr(a, "in_service", True):
+            continue
+        if getattr(a, "voltage_regulation", None) is None:
+            continue
+        for ph in a.phases:
+            if not full_index.has(int(a.node), ph):
+                continue
+            r = full_index.row(int(a.node), ph)
+            rows.append(r)
+            labels[r] = f"generator {int(a.id)} at node {int(a.node)} phase {ph.value}"
+    if not rows:
+        return
+    clash = fusion.duplicate_rows(
+        torch.as_tensor(rows, dtype=torch.int64, device=fusion.row_to_reduced.device)
+    )
+    if clash:
+        first = clash[0]
+        raise ModelingError(
+            "a zero-impedance branch fuses the terminals of two voltage-regulating "
+            f"generators onto one node-phase row ({labels[first[0]]} and "
+            f"{labels[first[1]]}). One row cannot hold two voltage setpoints: give the "
+            "joining branch its real impedance, or regulate only one of the two units."
+        )
+
+
 def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
     """Scatter a sub-grid solution back to the full grid with 0 V on dropped rows.
 
@@ -760,6 +760,12 @@ class PowerFlowResult:
         generators (PV terminals), else ``None``: the solved reactive injection of
         each regulating generator and which of them ended up pinned at a reactive
         limit.
+    fusion:
+        The :class:`~pgml.assembly.FusionMap` the solve collapsed zero-impedance
+        branches with, else ``None``. ``v`` and ``index`` are always the grid's FULL row
+        layout; the map records which rows were solved as one (every row of a fused
+        group carries the same voltage) and recovers the current through a fused branch
+        (:func:`pgml.assembly.branch_currents`).
     """
 
     v: Tensor
@@ -771,6 +777,7 @@ class PowerFlowResult:
     converged_mask: Optional[Tensor] = None
     failed_states: tuple[int, ...] = ()
     regulation: Optional[VoltageRegulationResult] = None
+    fusion: Optional[FusionMap] = None
 
 
 @dataclass(frozen=True)
@@ -1076,7 +1083,49 @@ def _slack_rows_and_vref(
     # no scale is batched, matching the historical shape).
     vref = list(torch.broadcast_tensors(*vref)) if len(vref) > 1 else vref
     v_fixed = torch.stack(vref, dim=-1)  # [*batch, S]
+    keep = _distinct_slack_rows(fixed_rows, v_fixed)
+    if keep is not None:
+        fixed_rows = fixed_rows.index_select(0, keep)
+        v_fixed = v_fixed.index_select(-1, keep)
     return fixed_rows, v_fixed
+
+
+def _distinct_slack_rows(rows: Tensor, v_fixed: Tensor) -> Optional[Tensor]:
+    """Positions to keep when two source terminals share a row (fused slack buses).
+
+    Fusing two buses that each carry a Source collapses their pinned rows into one. The
+    Schur slack partition needs each fixed row once, so the duplicate is dropped — but
+    only when the two references AGREE: two ideal sources of different voltage joined by
+    an ideal conductor is a contradictory network, not a modelling shorthand, and is
+    refused by name. ``None`` means there is nothing to drop (the usual case).
+    """
+    seen: dict[int, int] = {}
+    keep: list[int] = []
+    for i, r in enumerate(rows.tolist()):
+        first = seen.get(int(r))
+        if first is None:
+            seen[int(r)] = i
+            keep.append(i)
+            continue
+        with torch.no_grad():
+            a = v_fixed[..., first].reshape(-1)
+            b = v_fixed[..., i].reshape(-1)
+            if not bool(torch.allclose(a, b)):
+                raise ModelingError(
+                    "two in-service Source terminals are fused onto one node-phase row "
+                    f"(row {int(r)}) but reference different voltages "
+                    f"({complex(a[0]):.6g} V and {complex(b[0]):.6g} V). An ideal "
+                    "conductor between two ideal sources fixes one voltage, so give the "
+                    "joining branch its real impedance, or make the references equal."
+                )
+    if len(keep) == len(rows):
+        return None
+    _log.info(
+        "solve: %d source terminal(s) share a fused node-phase row with another source "
+        "of the same reference; the slack is pinned once per fused row.",
+        len(rows) - len(keep),
+    )
+    return torch.as_tensor(keep, dtype=torch.int64, device=rows.device)
 
 
 # ---------------------------------------------------------------------------
@@ -1110,7 +1159,15 @@ def _apply_y(y_eff, v: Tensor) -> Tensor:
 
 
 def _y_eff_and_islack(
-    grid, f0, index, dtype, device, slack, param_overrides, branch_states=None
+    grid,
+    f0,
+    index,
+    dtype,
+    device,
+    slack,
+    param_overrides,
+    branch_states=None,
+    fusion=None,
 ):
     """Effective admittance ``Y_eff`` ``[N,N]`` / ``[*batch,N,N]`` and slack current ``[N]``.
 
@@ -1133,8 +1190,9 @@ def _y_eff_and_islack(
         device=device,
         param_overrides=param_overrides,
         branch_states=branch_states,
+        fusion=fusion,
     )
-    y = yb.Y  # [1, N, N] or [*batch, 1, N, N] (batched branch states)
+    y = yb.Y  # [1, M, M] or [*batch, 1, M, M] (batched branch states)
     has_freq_axis = y.ndim == 3  # ndim > 3: batched states, frequency axis folded next
     if y.ndim > 3:
         y = y.squeeze(-3)  # [*batch, N, N]
@@ -1206,6 +1264,7 @@ def _woodbury_pieces(
     factor_backend,
     block_rows,
     precision="full",
+    fusion=None,
 ):
     """Base admittance, slack current and the per-state low-rank update of a sweep.
 
@@ -1219,7 +1278,7 @@ def _woodbury_pieces(
     """
     base_states = _woodbury_base_states(grid, branch_states)
     y_base, i_slack = _y_eff_and_islack(
-        grid, f0, index, dtype, device, slack, param_overrides, base_states
+        grid, f0, index, dtype, device, slack, param_overrides, base_states, fusion
     )
     u, c = branch_state_terms(
         grid,
@@ -1244,6 +1303,22 @@ def _woodbury_pieces(
         i_slack,
         low_rank_update(fac, u, c),
     )
+
+
+def _reduce_block_rows(
+    block_rows: Optional[Sequence[Tensor]], fusion: Optional[FusionMap]
+) -> Optional[Sequence[Tensor]]:
+    """Map a block-diagonal row partition onto the fused row layout.
+
+    ``pgml.multigrid.MergedGrid.block_rows`` partitions the FULL rows; a fused solve
+    factors the reduced system, so each block's rows are mapped through the fusion and
+    duplicates dropped. A fused group never spans two member grids (a zero-impedance
+    branch joins two nodes of ONE grid), so the mapped blocks still partition the reduced
+    rows exactly — which the factorization validates on its own.
+    """
+    if block_rows is None or fusion is None:
+        return block_rows
+    return [fusion.reduce_rows(rows) for rows in block_rows]
 
 
 def _validate_branch_states_method(
@@ -1312,6 +1387,7 @@ class PowerFlowSystem:
     static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
     network_fp: str = ""  # network_fingerprint(grid) at prepare time
     precision: str = "full"  # working precision of the cached factorization
+    fusion: Optional[FusionMap] = None  # the reduced row layout, when one applies
 
 
 def prepare_power_flow(
@@ -1345,7 +1421,11 @@ def prepare_power_flow(
     resolve_precision(precision, _cdtype(dtype))
     _validate_block_solver(linear_solver, block_rows)
     use_woodbury = _validate_branch_states_method(branch_states_method, branch_states)
-    check_branch_impedances(grid)
+    fusion = resolve_fusion(
+        grid, None, param_overrides=param_overrides, branch_states=branch_states
+    )
+    check_branch_impedances(grid, fusion=fusion)
+    log_fusion_summary(fusion)
     if branch_states is not None:
         if _branch_states_batched(branch_states):
             _check_connectivity_with_states(grid, branch_states)
@@ -1356,7 +1436,8 @@ def prepare_power_flow(
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
-    index = node_phase_index(grid)
+    index = fusion.index if fusion is not None else node_phase_index(grid)
+    block_rows = _reduce_block_rows(block_rows, fusion)
     f0 = float(grid.base_frequency_hz)
     leaves = _grid_param_leaves(grid, param_overrides, None, None, branch_states)
     if device is None:
@@ -1385,10 +1466,19 @@ def prepare_power_flow(
                 factor_backend,
                 block_rows,
                 precision,
+                fusion,
             )
         else:
             y_eff, i_slack = _y_eff_and_islack(
-                grid, f0, index, dtype, device, slack, param_overrides, branch_states
+                grid,
+                f0,
+                index,
+                dtype,
+                device,
+                slack,
+                param_overrides,
+                branch_states,
+                fusion,
             )
             fac = lu_factor_system(
                 y_eff,
@@ -1411,6 +1501,7 @@ def prepare_power_flow(
         static_leaves=tuple(leaves),
         network_fp=network_fingerprint(grid),
         precision=precision,
+        fusion=fusion,
     )
 
 
@@ -1700,10 +1791,21 @@ def solve_power_flow(
             "energized sub-grid re-indexes the node-phase rows, so the given row "
             'partition no longer describes the system. Use "raise" or "ignore".'
         )
+    # Exact bus fusion of the zero-impedance branches (ideal closed switches, jumpers):
+    # their terminal rows are collapsed into one row of the solved system and the
+    # solution is prolonged back to the full layout before it is reported. A prepared
+    # system carries the map it was built with.
+    fusion = (
+        system.fusion
+        if system is not None
+        else resolve_fusion(
+            grid, None, param_overrides=param_overrides, branch_states=branch_states
+        )
+    )
     if system is None:
-        # A zero-impedance branch has no primitive stamp at all, so it is refused by
+        # A zero-impedance branch that can be neither stamped nor fused is refused by
         # name whatever the connectivity policy is (a prepared system already ran it).
-        check_branch_impedances(grid)
+        check_branch_impedances(grid, fusion=fusion)
     if system is None and on_disconnected != "ignore":
         if branch_states is not None:
             if _branch_states_batched(branch_states):
@@ -1746,8 +1848,10 @@ def solve_power_flow(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    index = node_phase_index(grid)
+    full_index = node_phase_index(grid)
+    index = fusion.index if fusion is not None else full_index
     n = index.size
+    block_rows = _reduce_block_rows(block_rows, fusion)
     f0 = float(grid.base_frequency_hz)
 
     # Resolve calculation symmetry ONCE (and log once); thread the canonical string
@@ -1757,6 +1861,8 @@ def solve_power_flow(
     # solve_power_flow call). solve_harmonic_flow does NOT log separately — it
     # delegates its modeling summary to this call, so there is no double logging.
     log_modeling_summary(grid, asymmetric=asymmetric)
+    if system is None:
+        log_fusion_summary(fusion)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
     if (
@@ -1793,6 +1899,7 @@ def solve_power_flow(
     # graph is not reused across gradcheck's multiple backward passes.
     if system is not None and (
         system.slack != slack
+        or (system.fusion is None) != (fusion is None)
         or system.index.size != n
         or system.y_eff.dtype != cdt
         or not _same_device(system.y_eff.device, torch.device(device))
@@ -1849,7 +1956,15 @@ def solve_power_flow(
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
         return _y_eff_and_islack(
-            grid, f0, index, dtype, device, slack, param_overrides, branch_states
+            grid,
+            f0,
+            index,
+            dtype,
+            device,
+            slack,
+            param_overrides,
+            branch_states,
+            fusion,
         )
 
     def make_residual_complex(op):
@@ -1911,6 +2026,8 @@ def solve_power_flow(
     # Their residual row pair (active balance + |V|² − V_set²) replaces the terminal's
     # current-balance rows, so the fixed-point iteration — which has no voltage
     # setpoint to iterate on — cannot solve them: route such a grid to Newton.
+    if fusion is not None:
+        _check_fused_row_conflicts(grid, fusion, full_index, fixed_rows)
     pv = collect_pv_terminals(
         grid,
         index,
@@ -1981,6 +2098,7 @@ def solve_power_flow(
                 fixed_rows,
                 v_fixed if vf is None else vf,
                 branch_states,
+                fusion,
             )
 
         if pv_state is None:
@@ -2086,6 +2204,7 @@ def solve_power_flow(
                     factor_backend,
                     block_rows,
                     precision,
+                    fusion,
                 )
             solve_system = PowerFlowSystem(
                 index=index,
@@ -2098,6 +2217,7 @@ def solve_power_flow(
                 factorization=upd,
                 static_leaves=tuple(leaves),
                 precision=precision,
+                fusion=fusion,
             )
         return _current_injection_forward(
             grid,
@@ -2212,6 +2332,11 @@ def solve_power_flow(
         v_out = _IFTPowerFlow.apply(v_star, real_res, n, rdt, cdt, *leaves)
     else:
         v_out = v_star
+    if fusion is not None:
+        # Report on the grid's own rows: every node-phase of a fused group carries the
+        # group's (single) solved voltage. A gather, so the IFT gradient reaches the
+        # reduced state through its scatter-add adjoint.
+        v_out = fusion.prolong(v_out)
 
     # Per-scenario reporting: a batched solve NEVER raises on a failed element — every
     # element's best-effort V is returned, the failures are listed, and an error record
@@ -2255,7 +2380,7 @@ def solve_power_flow(
 
     return PowerFlowResult(
         v=v_out,
-        index=index,
+        index=full_index,
         iterations=iterations,
         residual=residual_norm.reshape(()),
         converged=bool(converged),
@@ -2263,6 +2388,7 @@ def solve_power_flow(
         converged_mask=cmask_out,
         failed_states=failed_states,
         regulation=regulation,
+        fusion=fusion,
     )
 
 
@@ -2517,6 +2643,7 @@ def _linear_const_z_init(
     fixed_rows,
     v_fixed,
     branch_states=None,
+    fusion=None,
 ):
     """OpenDSS-style warm start: the LINEAR const-Z solution (one linear solve).
 
@@ -2541,6 +2668,7 @@ def _linear_const_z_init(
             operating_point=operating_point,
             param_overrides=param_overrides,
             branch_states=branch_states,
+            fusion=fusion,
         )
     finally:
         pgml_log.setLevel(prev)
@@ -3778,10 +3906,13 @@ def loadability_limit(
             "nameplate value (the textbook continuation-power-flow ramp)."
         )
     tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
-    check_branch_impedances(grid)
+    fusion = resolve_fusion(grid, None, param_overrides=param_overrides)
+    check_branch_impedances(grid, fusion=fusion)
     check_connectivity(grid)
+    log_fusion_summary(fusion)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)
-    index = node_phase_index(grid)
+    full_index = node_phase_index(grid)
+    index = fusion.index if fusion is not None else full_index
     n = index.size
     f0 = float(grid.base_frequency_hz)
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
@@ -3804,7 +3935,9 @@ def loadability_limit(
     v_fixed = v_fixed_fn()
 
     def build_system():
-        return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
+        return _y_eff_and_islack(
+            grid, f0, index, dtype, device, slack, param_overrides, None, fusion
+        )
 
     # Detached injection plans serve every λ step (loadability is a detached
     # diagnostic; λ scales the plan's currents in the residual, not the plan).

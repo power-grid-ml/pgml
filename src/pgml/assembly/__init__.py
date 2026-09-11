@@ -13,9 +13,14 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
   param_overrides=None, branch_states=None) -> YBus`` — PASSIVE-network
   ``Y_net`` (no loads, no source Norton); the nonlinear power-flow assembler.
 - ``branch_currents(grid, v, frequencies_hz, index, *, dtype, device,
-  param_overrides=None, branch_states=None) -> list[BranchCurrent]`` — per-branch
-  terminal currents from solved node voltages (``branch_states`` must match
-  the assembly the voltages were solved with).
+  param_overrides=None, branch_states=None, fusion=None, i_inj=None)
+  -> list[BranchCurrent]`` — per-branch terminal currents from solved node voltages
+  (``branch_states`` must match the assembly the voltages were solved with; a FUSED
+  branch's current comes from Kirchhoff's law at the fused node).
+- ``fusion_map(grid, *, param_overrides=None, branch_states=None) -> FusionMap | None``
+  — exact bus fusion of the zero-impedance branches (ideal closed switches, jumpers):
+  their terminal node-phase rows collapse into one row of the solved system, and
+  ``FusionMap.prolong`` maps the reduced solution back to the grid's full row layout.
 - ``branch_stamp_blocks(grid, frequencies_hz, branch_ids, index, *, dtype,
   device, param_overrides=None) -> list[BranchStampBlock]`` — the primitive
   admittance block and global rows of each named branch (the incidence structure
@@ -36,6 +41,12 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
 
 from __future__ import annotations
 
+from ._fusion import (
+    FusionMap,
+    ZeroImpedanceBranch,
+    fusion_map,
+    zero_impedance_branches,
+)
 from .index import NodePhaseIndex, base_voltage_per_row, node_phase_index
 from .ybus import (
     BranchCurrent,
@@ -56,6 +67,8 @@ from .ybus import (
 # package path rather than the private sub-module, avoiding "duplicate object
 # description" warnings when viewcode and autodoc both traverse the codebase.
 NodePhaseIndex.__module__ = __name__
+FusionMap.__module__ = __name__
+ZeroImpedanceBranch.__module__ = __name__
 YBus.__module__ = __name__
 BranchCurrent.__module__ = __name__
 BranchStampBlock.__module__ = __name__
@@ -64,6 +77,10 @@ InjectionPlan.__module__ = __name__
 __all__ = [
     "NodePhaseIndex",
     "node_phase_index",
+    "FusionMap",
+    "ZeroImpedanceBranch",
+    "fusion_map",
+    "zero_impedance_branches",
     "base_voltage_per_row",
     "YBus",
     "BranchCurrent",
