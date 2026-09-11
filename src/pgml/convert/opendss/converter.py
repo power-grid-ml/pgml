@@ -968,14 +968,16 @@ def to_grid(
     # string into `bus1=busname.k` / `bus2=busname.0` because no `bus2=` was
     # given, which `_grounded_shunt_phases` recognises the same way.
     #
-    # CAVEAT (documented, not modeled): the C-based susceptance model
-    # (`B(h)=2*pi*h*f0*C`) is exact ONLY at h=1 (fundamental) -- a genuinely
-    # inductive reactor's true susceptance `-1/(h*2*pi*f0*L)` DECREASES with
-    # frequency, while the fixed-C model INCREASES linearly with h (the wrong
-    # trend). The schema has no inductive shunt-to-ground primitive (its
-    # `ShuntReactor` branch type stores conductance + capacitance only, no
-    # inductance), so this is the best available representation; load-flow
-    # (fundamental-only) studies are exact, harmonic studies are not.
+    # The reactance is carried by `ShuntAppliance.inductance_h` (stamp term
+    # `1/(j*2*pi*h*f0*L)`), so the susceptance magnitude correctly FALLS as `1/h`
+    # instead of rising with `h` as a fixed-capacitance representation would. An
+    # OpenDSS Reactor is a SERIES R+jX branch, and its frequency behaviour is
+    # `1/(R + j*h*X)`; pgml's shunt primitive is the parallel form
+    # `G + 1/(j*2*pi*h*f0*L) + j*2*pi*h*f0*C`, so the two agree exactly when `R = 0`
+    # (the usual case, and OpenDSS's own default) and differ in the LOSS term only when
+    # `R > 0`: the parallel conductance stays flat where the series one decays as
+    # `1/h^2`. That case is converted as the `f0`-equivalent parallel pair with a
+    # warning, because |Y| is then dominated by the conductance at high orders.
     ret = dss.Reactors.First()
     while ret:
         reactor_name = dss.Reactors.Name().lower()
@@ -1031,12 +1033,28 @@ def to_grid(
             continue
 
         z_ohm = complex(r_ohm, x_ohm)
-        if z_ohm == 0.0:
-            g_scalar, c_scalar = 0.0, 0.0
-        else:
-            y_s = 1.0 / z_ohm
+        g_scalar, c_scalar, l_scalar = 0.0, 0.0, None
+        if z_ohm != 0.0:
+            y_s = 1.0 / z_ohm  # = G_eq + j*B_eq at f0
             g_scalar = y_s.real
-            c_scalar = y_s.imag / two_pi_f0
+            if y_s.imag > 0.0:  # net capacitive: B = 2*pi*f0*C
+                c_scalar = y_s.imag / two_pi_f0
+            elif y_s.imag < 0.0:  # net inductive: B = -1/(2*pi*f0*L)
+                l_scalar = -1.0 / (two_pi_f0 * y_s.imag)
+            if r_ohm != 0.0 and x_ohm != 0.0:
+                _logger.warning(
+                    "OpenDSS Reactor '%s' has R=%g and X=%g in SERIES; pgml's shunt "
+                    "primitive is the parallel G/L/C form, so the conversion is the "
+                    "equivalent parallel pair at f0 (exact at the fundamental). Above "
+                    "it the susceptance trend is right but the LOSS term stays flat "
+                    "where a series R+jX branch decays as 1/h^2 -- at X/R=%.3g the "
+                    "admittance magnitude differs noticeably from OpenDSS's by h=13. "
+                    "Use R=0 for an exact harmonic representation.",
+                    reactor_name,
+                    r_ohm,
+                    x_ohm,
+                    abs(x_ohm / r_ohm),
+                )
 
         reactor_id = _id.next()
         id_map["reactor"][reactor_name] = reactor_id
@@ -1049,6 +1067,7 @@ def to_grid(
                 native_phases=tuple(phase_list),
                 conductance_s=g_scalar,
                 capacitance_f=c_scalar,
+                inductance_h=l_scalar,
                 connection=connection,
             )
         )
@@ -1618,6 +1637,7 @@ def _build_shunt_appliance(
     native_phases: tuple[Phase, ...],
     conductance_s: float,
     capacitance_f: float,
+    inductance_h: Optional[float] = None,
     connection: WindingConnection = WindingConnection.WYE,
 ) -> ShuntAppliance:
     """Build a :class:`~pgml.schemas.grid_schema.ShuntAppliance`, mode-resolved.
@@ -1632,6 +1652,10 @@ def _build_shunt_appliance(
     Under ``THREE_PHASE`` the (balanced) per-leg value is repeated across every
     phase the element carries; ``connection`` (WYE default, or DELTA for a
     phase-to-phase bank) sets the topology.
+
+    ``inductance_h`` (an inductive leg, e.g. a Reactor) follows the same per-phase
+    repetition; its positive-sequence delta equivalent DIVIDES by three, because the
+    admittance of an inductance is inverse in ``L``.
     """
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         phases = phases_for(mode)
@@ -1639,6 +1663,8 @@ def _build_shunt_appliance(
             # Positive-sequence equivalent of a balanced delta bank: Y_wye = 3·Y_leg.
             conductance_s = conductance_s * 3.0
             capacitance_f = capacitance_f * 3.0
+            if inductance_h is not None:
+                inductance_h = inductance_h / 3.0
         return ShuntAppliance(
             id=id,
             name=name,
@@ -1646,6 +1672,9 @@ def _build_shunt_appliance(
             phases=phases,
             conductance_s=[conductance_s] * len(phases),
             capacitance_f=[capacitance_f] * len(phases),
+            inductance_h=(
+                None if inductance_h is None else [inductance_h] * len(phases)
+            ),
         )
     phases = phases_for(mode, native=native_phases)
     n = len(phases)
@@ -1656,6 +1685,7 @@ def _build_shunt_appliance(
         phases=phases,
         conductance_s=[conductance_s] * n,
         capacitance_f=[capacitance_f] * n,
+        inductance_h=(None if inductance_h is None else [inductance_h] * n),
         connection=connection,
     )
 

@@ -1098,17 +1098,27 @@ def _shunt_reactor_block_groups(
     ]
     if not reactors:
         return
-    by_p: dict[int, list] = {}
+    # Group by phase count AND by whether the reactor has an inductive path: the
+    # inductive term needs a matrix inverse, so it cannot share a batch with a
+    # purely capacitive/conductive shunt.
+    by_p: dict[tuple, list] = {}
     for sr in reactors:
-        by_p.setdefault(len(sr.from_phases), []).append(sr)
-    for p, group in by_p.items():
+        by_p.setdefault((len(sr.from_phases), sr.inductance_h is not None), []).append(
+            sr
+        )
+    for (_p, inductive), group in by_p.items():
         g_list, c_list = [], []
         for sr in group:
             g_list.append(_real_matrix(sr.conductance_s, rdt, device))
             c_list.append(_real_matrix(sr.capacitance_f, rdt, device))
         g = torch.stack(g_list, 0)
         c = torch.stack(c_list, 0)
-        block = shunt_admittance_matrix(g, c, f, cdt)  # [H,K,P,P]
+        ind = (
+            torch.stack([_real_matrix(sr.inductance_h, rdt, device) for sr in group], 0)
+            if inductive
+            else None
+        )
+        block = shunt_admittance_matrix(g, c, f, cdt, ind=ind)  # [H,K,P,P]
         rows, cols = _shunt_node_indices(group, index, device, terminal="from")
         yield group, block, rows, cols
 
@@ -1116,13 +1126,15 @@ def _shunt_reactor_block_groups(
 def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides):
     """Stamp every in-service :class:`ShuntAppliance` (fixed linear shunt).
 
-    WYE (default): each per-phase ``y = G + jB`` connects its phase to ground (the
-    historical diagonal stamp). DELTA: element ``k`` connects phase ``k`` to phase
-    ``(k+1) % n`` cyclic with ``y_k = G_k + j·2π f C_k``, stamped ``M^T diag(y) M``
-    via the same :func:`cyclic_delta_incidence` convention the DELTA load uses (``+y``
-    on both leg diagonals, ``-y`` off-diagonal). Both are frequency-correct at every
-    harmonic order and differentiable w.r.t. ``G``/``C`` (the incidence ``M`` is a
-    topology constant).
+    Each per-phase element is ``y(h) = G + j·2π h f0 C + 1/(j·2π h f0 L)`` (the
+    inductive term only where ``inductance_h`` is set — an inductive shunt's
+    susceptance magnitude falls as ``1/h`` where a capacitive one rises as ``h``).
+    WYE (default): each element connects its phase to ground (the historical diagonal
+    stamp). DELTA: element ``k`` connects phase ``k`` to phase ``(k+1) % n`` cyclic,
+    stamped ``M^T diag(y) M`` via the same :func:`cyclic_delta_incidence` convention the
+    DELTA load uses (``+y`` on both leg diagonals, ``-y`` off-diagonal). Both are
+    frequency-correct at every harmonic order and differentiable w.r.t. ``G``/``C``/``L``
+    (the incidence ``M`` is a topology constant).
     """
     shunts = [
         a for a in grid.appliances if isinstance(a, ShuntAppliance) and a.in_service
@@ -1131,8 +1143,10 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
         return y
     by_key: dict[tuple, list] = {}
     for sh in shunts:
-        by_key.setdefault((sh.connection, len(sh.phases)), []).append(sh)
-    for (conn, p), group in by_key.items():
+        by_key.setdefault(
+            (sh.connection, len(sh.phases), sh.inductance_h is not None), []
+        ).append(sh)
+    for (conn, p, inductive), group in by_key.items():
         rows, cols = _shunt_node_indices(group, index, device, terminal="node")
         if conn == WindingConnection.DELTA:
             m_c = cyclic_delta_incidence(p, rdt, device).to(cdt)  # [p, p]
@@ -1154,6 +1168,19 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
             b = two_pi_f[:, None, None] * c[None]  # [H, K, p] (B = 2*pi*f*C)
             g_b = g[None].expand_as(b)  # [H, K, p]
             y_elem = torch.complex(g_b.to(rdt), b.to(rdt)).to(cdt)  # [H, K, p]
+            if inductive:
+                ind = torch.stack(
+                    [
+                        torch.as_tensor(sh.inductance_h, dtype=rdt, device=device)
+                        for sh in group
+                    ],
+                    0,
+                )  # [K, p]
+                z_l = torch.complex(
+                    torch.zeros_like(b).to(rdt),
+                    (two_pi_f[:, None, None] * ind[None]).to(rdt),
+                ).to(cdt)  # j*2*pi*f*L  [H, K, p]
+                y_elem = y_elem + 1.0 / z_l
             # Y_block = M^T diag(y_elem) M  -> [H, K, p, p].
             block = torch.einsum("ei,hke,ej->hkij", m_c, y_elem, m_c)
         else:  # WYE (phase-to-ground) — historical diagonal stamp
@@ -1171,7 +1198,20 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
                 )
             g = torch.stack(g_list, 0)
             c = torch.stack(c_list, 0)
-            block = shunt_admittance_matrix(g, c, f, cdt)
+            ind = (
+                torch.stack(
+                    [
+                        torch.diag(
+                            torch.as_tensor(sh.inductance_h, dtype=rdt, device=device)
+                        )
+                        for sh in group
+                    ],
+                    0,
+                )
+                if inductive
+                else None
+            )
+            block = shunt_admittance_matrix(g, c, f, cdt, ind=ind)
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 
