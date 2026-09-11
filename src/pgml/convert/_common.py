@@ -405,6 +405,7 @@ def build_generator(
     native_phases: Optional[tuple[Phase, ...]] = None,
     consumer_type: Optional[str] = None,
     control: Optional[Any] = None,
+    voltage_regulation: Optional[Any] = None,
 ) -> Generator:
     """Build a :class:`~pgml.schemas.grid_schema.Generator` (PQ injection).
 
@@ -418,6 +419,12 @@ def build_generator(
     ``cosphi(P)``, Volt-VAr, Volt-Watt), making the injection voltage-dependent. A
     controlled generator's reactive nameplate is never read — the control law
     supplies Q — so pass ``q_total_var=0.0`` with one.
+
+    ``voltage_regulation`` instead attaches a
+    :class:`~pgml.schemas.grid_schema.VoltageRegulation` block, making the generator a
+    PV terminal (pandapower ``gen``, OpenDSS ``Generator model=3``): the solver holds
+    its terminal voltage at the setpoint and solves its reactive power, so pass
+    ``q_total_var=0.0`` with one. The two blocks are mutually exclusive.
     """
     kwargs: dict[str, Any] = {
         "id": id,
@@ -430,6 +437,8 @@ def build_generator(
         kwargs["consumer_type"] = consumer_type
     if control is not None:
         kwargs["control"] = control
+    if voltage_regulation is not None:
+        kwargs["voltage_regulation"] = voltage_regulation
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         kwargs["phases"] = _PHASE_A
         return Generator(**kwargs)

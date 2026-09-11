@@ -77,16 +77,27 @@ conversion unaffected.
 Voltage-controlled generators (``net.gen``)
 -------------------------------------------
 ``net.gen`` is pandapower's PV bus: fixed active power, regulated voltage
-MAGNITUDE, free reactive power within ``min_q_mvar``/``max_q_mvar``. pgml has no
-PV-bus appliance (a PV bus needs a mixed residual row pair ``[P-balance;
-|V|^2 - V_set^2]``), so the table is DROPPED by default (``GenMode.DROP`` --
-reported by ``warn_dropped_elements``). ``gen_mode=GenMode.VOLT_VAR_APPROX``
-opts in to an APPROXIMATION: each row becomes a :class:`Generator` whose
-Volt-VAr inverter control is a steep ``Q(|V|)`` droop centred on ``vm_pu`` and
-saturating at the row's reactive limits, which holds the bus voltage near the
-setpoint with Q as the free variable. See :class:`GenMode` and
-``_gen_volt_var_control`` for the exact mapping, the fallbacks, and what the
-approximation does and does not give.
+MAGNITUDE ``vm_pu``, free reactive power within ``min_q_mvar``/``max_q_mvar``.
+``gen_mode=GenMode.VOLTAGE_REGULATING`` (the default) converts each in-service row
+to a :class:`Generator` carrying a
+:class:`~pgml.schemas.grid_schema.VoltageRegulation` block -- the exact PV terminal
+the solver implements (its residual row pair is ``[active balance;
+|V|^2 - V_set^2]``, with the reactive power free and bounded by the row's limits;
+see ``docs/pgml/modeling/der-pv-storage.md`` section 4.5). ``GenMode.VOLT_VAR_APPROX``
+keeps the earlier steep-Volt-VAr-droop approximation, and ``GenMode.DROP`` leaves
+the table unread. The chosen mode is logged.
+
+Shunts (``net.shunt``)
+----------------------
+A pandapower shunt is a fixed admittance at its bus: ``G = p_mw * step / vn_kv^2``
+and ``B = -q_mvar * step / vn_kv^2`` (positive ``q_mvar`` CONSUMES reactive power, so
+its susceptance is negative), referred to the SHUNT's own rated voltage exactly as
+``pandapower.build_bus._calc_shunts_and_add_on_ppc`` does. It converts to a WYE
+:class:`~pgml.schemas.grid_schema.ShuntAppliance` with that conductance and the
+capacitance ``C = B / (2*pi*f0)`` -- exact at the fundamental; an INDUCTIVE shunt
+(positive ``q_mvar``) becomes a negative capacitance, whose susceptance magnitude
+then rises with frequency instead of falling, so a harmonic study on a net with
+inductive shunts is not faithful (a WARNING names them).
 
 Only in-service elements are converted.
 """
@@ -119,8 +130,10 @@ from pgml.schemas.grid_schema import (
     Provenance,
     QReference,
     SourceConvention,
+    ShuntAppliance,
     Switch,
     Transformer,
+    VoltageRegulation,
     VoltVarControl,
     WindingConnection,
     ZipCoefficients,
@@ -160,11 +173,21 @@ class GenMode(str, Enum):
 
     ``net.gen`` is a PV bus: fixed active power, regulated voltage MAGNITUDE
     ``vm_pu``, reactive power free between ``min_q_mvar`` and ``max_q_mvar``.
-    pgml's appliance model has no PV bus -- that needs a mixed residual row pair
-    (``[P-balance; |V|**2 - V_set**2]``) in the power-flow solver and an appliance
-    to carry the setpoint.
 
-    ``DROP`` (the default): the table is not read and
+    ``VOLTAGE_REGULATING`` (the default): each row becomes a
+    :class:`~pgml.schemas.grid_schema.Generator` with a
+    :class:`~pgml.schemas.grid_schema.VoltageRegulation` block, i.e. the exact PV
+    terminal. ``vm_pu`` is the setpoint (same per-unit base), ``min_q_mvar`` /
+    ``max_q_mvar`` are the reactive limits in var, and a MISSING limit stays
+    unbounded (matching pandapower, which treats an unset limit as
+    ``q_lim_default``). ``scaling`` multiplies ``p_mw`` only, as in pandapower's own
+    build. The solver holds the voltage exactly and enforces the limits by PV-to-PQ
+    switching (``solve_power_flow(enforce_q_limits=...)``; pandapower's ``runpp``
+    default is ``enforce_q_lims=False``). Several in-service rows on ONE bus merge
+    into a single regulating generator (summed active power and summed limits) --
+    one bus carries one voltage setpoint.
+
+    ``DROP``: the table is not read and
     :func:`~pgml.convert._common.warn_dropped_elements` reports it, so a
     transmission benchmark converts to loads plus a slack and its converted
     operating point is NOT the source network's.
@@ -185,6 +208,7 @@ class GenMode(str, Enum):
     have.
     """
 
+    VOLTAGE_REGULATING = "voltage_regulating"
     DROP = "drop"
     VOLT_VAR_APPROX = "volt_var_approx"
 
@@ -467,6 +491,52 @@ def _gen_reactive_bounds(row: Any, p_w: float) -> tuple[float, float, Optional[s
     return q_min_var, q_max_var, fallback
 
 
+def _gen_raw_reactive_bounds(row: Any) -> tuple[Optional[float], Optional[float]]:
+    """``(q_min_var, q_max_var)`` of a ``net.gen`` row, unbounded side -> ``None``.
+
+    The EXACT PV terminal needs no synthesised reactive envelope: a missing
+    ``min_q_mvar`` / ``max_q_mvar`` means the machine is unconstrained on that side,
+    which is also how pandapower's own solve reads it (an unset limit becomes
+    ``q_lim_default`` = 1e9 MVAr, and the default ``enforce_q_lims=False`` ignores
+    the limits altogether). The limits are NOT multiplied by ``scaling`` --
+    pandapower's ``add_q_constraints`` reads them raw while ``p_mw`` is scaled.
+    """
+    q_min = _opt_float(row, "min_q_mvar")
+    q_max = _opt_float(row, "max_q_mvar")
+    if q_min is not None and q_max is not None and q_max < q_min:
+        raise ConversionError(
+            f"pandapower gen: min_q_mvar={q_min} exceeds max_q_mvar={q_max} -- "
+            "the source row is inconsistent."
+        )
+    return (
+        None if q_min is None else q_min * 1.0e6,
+        None if q_max is None else q_max * 1.0e6,
+    )
+
+
+def _shunt_admittance(
+    row: Any, bus_vn_kv: float, two_pi_f0: float
+) -> tuple[float, float]:
+    """``(conductance_s, capacitance_f)`` per phase of a ``net.shunt`` row.
+
+    ``Y = (p_mw - j*q_mvar) * step * 1e6 / (vn_kv * 1e3)**2`` referred to the SHUNT's
+    own rated voltage (``vn_kv``, defaulting to the bus's), which is exactly
+    pandapower's ``(G, B) = (p, -q) * step * (vn_bus/vn_shunt)**2`` per unit on the
+    bus base. A positive ``q_mvar`` CONSUMES reactive power, hence a negative
+    susceptance, stored as a negative capacitance (``B = 2*pi*f0*C``): exact at the
+    fundamental, wrong in its frequency TREND above it.
+    """
+    vn_kv = _opt_float(row, "vn_kv")
+    if vn_kv is None or vn_kv <= 0.0:
+        vn_kv = bus_vn_kv
+    step = _opt_float(row, "step")
+    step = 1.0 if step is None else step
+    v_sq = (vn_kv * 1.0e3) ** 2
+    g = float(row.get("p_mw", 0.0) or 0.0) * 1.0e6 * step / v_sq
+    b = -float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6 * step / v_sq
+    return g, b / two_pi_f0
+
+
 def _gen_volt_var_control(
     row: Any,
     *,
@@ -668,7 +738,7 @@ def to_grid(
     net: Any,
     *,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
-    gen_mode: GenMode = GenMode.DROP,
+    gen_mode: GenMode = GenMode.VOLTAGE_REGULATING,
     gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
@@ -697,11 +767,14 @@ def to_grid(
         when the dataset carries no native ``r0``/``x0``/``c0``), not the
         transformer.
     gen_mode:
-        :class:`GenMode`. ``DROP`` (default) leaves ``net.gen`` unread and reports
-        it as a dropped element. ``VOLT_VAR_APPROX`` converts each in-service row to a
-        :class:`~pgml.schemas.grid_schema.Generator` whose Volt-VAr control
-        approximates the PV bus (see :class:`GenMode` and
-        ``_gen_volt_var_control``).
+        :class:`GenMode`. ``VOLTAGE_REGULATING`` (default) converts each in-service
+        row to a :class:`~pgml.schemas.grid_schema.Generator` with a
+        :class:`~pgml.schemas.grid_schema.VoltageRegulation` block: the exact PV
+        terminal, whose voltage the solver holds at ``vm_pu`` with the reactive power
+        free inside ``min_q_mvar``/``max_q_mvar``. ``DROP`` leaves ``net.gen`` unread
+        and reports it as a dropped element. ``VOLT_VAR_APPROX`` converts each row to
+        a generator whose steep Volt-VAr control APPROXIMATES the PV bus (see
+        :class:`GenMode` and ``_gen_volt_var_control``).
     gen_volt_var_slope_pu:
         Droop steepness of that approximation, in units of the generator's reactive
         base per per-unit terminal voltage (default
@@ -725,8 +798,9 @@ def to_grid(
         ``"load"`` -> ``{pp_load_idx: Load.id}``,
         ``"asymmetric_load"`` -> ``{pp_asym_idx: Load.id}`` (THREE_PHASE only),
         ``"sgen"`` -> ``{pp_sgen_idx: Generator.id}``,
-        ``"gen"`` -> ``{pp_gen_idx: Generator.id}`` (empty unless ``gen_mode`` is
-        ``VOLT_VAR_APPROX``),
+        ``"gen"`` -> ``{pp_gen_idx: Generator.id}`` (empty under ``GenMode.DROP``;
+        several rows on one bus share the merged generator's id),
+        ``"shunt"`` -> ``{pp_shunt_idx: ShuntAppliance.id}``,
         ``"ext_grid"`` -> ``{pp_eg_idx: Source.id}``,
         ``"slack_v_complex"`` -> complex slack voltage phasor (V, LL) for
         ideal-slack mode.
@@ -750,6 +824,7 @@ def to_grid(
         "asymmetric_load": {},
         "sgen": {},
         "gen": {},
+        "shunt": {},
         "ext_grid": {},
         "slack_v_complex": None,
     }
@@ -1245,7 +1320,117 @@ def to_grid(
     # at WARNING with the row index, because the row's active power really is
     # dropped from the converted grid.
     gen = getattr(net, "gen", None)
-    if gen_mode is GenMode.VOLT_VAR_APPROX and gen is not None and len(gen):
+    if gen_mode is GenMode.VOLTAGE_REGULATING and gen is not None and len(gen):
+        slack_buses = {
+            int(r["bus"])
+            for _, r in net.ext_grid.iterrows()
+            if bool(r.get("in_service", True))
+        }
+        # One bus carries ONE voltage setpoint, so in-service rows are merged per bus
+        # (active powers and reactive limits add; pandapower's own build puts one PV
+        # bus per bus as well). `None` on a limit side stays unbounded.
+        per_bus: dict[int, dict] = {}
+        n_unbounded = 0
+        for pp_idx, row in gen.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            if bus_pp in slack_buses:
+                _logger.warning(
+                    "pandapower gen %s at bus %s is at the ext_grid bus and is NOT "
+                    "converted as a regulating generator: the slack fixes that bus's "
+                    "voltage phasor, so its %.3f MW injection is absorbed into the "
+                    "slack dispatch (pandapower's own solve treats a generator at the "
+                    "reference bus the same way).",
+                    pp_idx,
+                    bus_pp,
+                    float(row["p_mw"]),
+                )
+                continue
+            if bool(row.get("slack", False)):
+                _logger.warning(
+                    "pandapower gen %s at bus %s is flagged slack=True (a distributed "
+                    "slack). It is converted as a voltage-regulating generator with "
+                    "its %.3f MW FIXED: pgml has one reference (the Source), so this "
+                    "row does not share the slack's active-power imbalance.",
+                    pp_idx,
+                    bus_pp,
+                    float(row["p_mw"]),
+                )
+            scaling = _scaling_factor(row)
+            p_w = float(row["p_mw"]) * 1.0e6 * scaling
+            q_min_var, q_max_var = _gen_raw_reactive_bounds(row)
+            n_unbounded += q_min_var is None or q_max_var is None
+            v_set_pu = _opt_float(row, "vm_pu")
+            entry = per_bus.get(bus_pp)
+            if entry is None:
+                per_bus[bus_pp] = {
+                    "rows": [pp_idx],
+                    "p_w": p_w,
+                    "q_min_var": q_min_var,
+                    "q_max_var": q_max_var,
+                    "v_set_pu": 1.0 if v_set_pu is None else v_set_pu,
+                    "name": str(row.get("name", f"gen_{pp_idx}") or f"gen_{pp_idx}"),
+                }
+                continue
+            entry["rows"].append(pp_idx)
+            entry["p_w"] += p_w
+            entry["q_min_var"] = (
+                None
+                if (entry["q_min_var"] is None or q_min_var is None)
+                else entry["q_min_var"] + q_min_var
+            )
+            entry["q_max_var"] = (
+                None
+                if (entry["q_max_var"] is None or q_max_var is None)
+                else entry["q_max_var"] + q_max_var
+            )
+            if v_set_pu is not None and abs(v_set_pu - entry["v_set_pu"]) > 1.0e-9:
+                _logger.warning(
+                    "pandapower gen %s shares bus %s with gen(s) %s at a DIFFERENT "
+                    "vm_pu (%.5f vs %.5f); the merged regulating generator keeps the "
+                    "first setpoint (one bus holds one voltage).",
+                    pp_idx,
+                    bus_pp,
+                    entry["rows"][:-1],
+                    v_set_pu,
+                    entry["v_set_pu"],
+                )
+
+        for bus_pp, entry in per_bus.items():
+            gen_id = _id.next()
+            for pp_idx in entry["rows"]:
+                id_map["gen"][pp_idx] = gen_id
+            appliances.append(
+                build_generator(
+                    id=gen_id,
+                    name=entry["name"],
+                    node=id_map["bus"][bus_pp],
+                    mode=phase_mode,
+                    p_total_w=entry["p_w"],
+                    q_total_var=0.0,
+                    voltage_regulation=VoltageRegulation(
+                        v_set_pu=entry["v_set_pu"],
+                        q_min_var=entry["q_min_var"],
+                        q_max_var=entry["q_max_var"],
+                    ),
+                )
+            )
+        if per_bus:
+            _logger.info(
+                "pandapower -> Grid: %d 'gen' row(s) converted as %d EXACT PV "
+                "terminal(s) (voltage_regulation at the row's vm_pu, reactive power "
+                "free within min_q_mvar/max_q_mvar). %d row(s) carry an unbounded "
+                "reactive side. Reactive limits are enforced by the solver's PV-to-PQ "
+                "switching unless enforce_q_limits=False (pandapower runpp's own "
+                "default is enforce_q_lims=False).",
+                sum(len(e["rows"]) for e in per_bus.values()),
+                len(per_bus),
+                n_unbounded,
+            )
+    elif gen_mode is GenMode.VOLT_VAR_APPROX and gen is not None and len(gen):
         slack_buses = {
             int(r["bus"])
             for _, r in net.ext_grid.iterrows()
@@ -1323,6 +1508,53 @@ def to_grid(
                 n_unsized,
             )
 
+    # ------------------------------------------------------------------ #
+    # 10. Shunts (net.shunt) -> ShuntAppliance (fixed admittance to ground)#
+    # ------------------------------------------------------------------ #
+    shunt = getattr(net, "shunt", None)
+    if shunt is not None and len(shunt):
+        n_inductive = 0
+        for pp_idx, row in shunt.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            bus_vn_kv = float(net.bus.at[bus_pp, "vn_kv"])
+            g_s, c_f = _shunt_admittance(row, bus_vn_kv, two_pi_f0)
+            if g_s == 0.0 and c_f == 0.0:
+                continue
+            n_inductive += c_f < 0.0
+            sh_id = _id.next()
+            id_map["shunt"][pp_idx] = sh_id
+            sh_phases = phases_for(phase_mode)
+            appliances.append(
+                ShuntAppliance(
+                    id=sh_id,
+                    name=str(row.get("name", f"shunt_{pp_idx}") or f"shunt_{pp_idx}"),
+                    node=id_map["bus"][bus_pp],
+                    phases=sh_phases,
+                    conductance_s=[g_s] * len(sh_phases),
+                    capacitance_f=[c_f] * len(sh_phases),
+                    connection=WindingConnection.WYE,
+                )
+            )
+        if id_map["shunt"]:
+            _logger.info(
+                "pandapower -> Grid: %d 'shunt' row(s) converted as fixed WYE shunt "
+                "admittances (G from p_mw, C from -q_mvar / (2*pi*f0), referred to "
+                "each row's vn_kv).",
+                len(id_map["shunt"]),
+            )
+        if n_inductive:
+            _logger.warning(
+                "pandapower -> Grid: %d converted shunt(s) are INDUCTIVE (q_mvar > 0) "
+                "and are stored as a NEGATIVE capacitance: exact at the fundamental, "
+                "but the susceptance magnitude then rises with frequency instead of "
+                "falling as 1/h. Do not read harmonic results at those buses.",
+                n_inductive,
+            )
+
     # Elements the converter does NOT read: fail loud, never silently wrong.
     warn_dropped_elements(
         _logger,
@@ -1331,7 +1563,6 @@ def to_grid(
             kind: len(tbl)
             for kind in (
                 *(("gen",) if gen_mode is GenMode.DROP else ()),
-                "shunt",
                 "trafo3w",
                 "impedance",
                 "ward",
