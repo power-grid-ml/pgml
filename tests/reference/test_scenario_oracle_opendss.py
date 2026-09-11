@@ -12,10 +12,11 @@ exporter's PRIMARY path exercised tightly):
   :func:`pgml.scenarios.read_dataset` with the OpenDSS provenance stamped;
 - ``mode="matched"`` agrees with pgml's own solver to near machine precision (measured
   ~1e-8 to 1e-10 relative — see the docstrings below for the exact figures pinned);
-- ``mode="default"`` merely produces a valid report; NOT pinned tight (documented
-  divergence: OpenDSS's imperial-calibrated earth-return zero-sequence term dominates the
-  TRIPLEN order on this 3-wire, no-explicit-neutral feeder, and its load Norton shunk
-  — absent from pgml's harmonic model entirely — perturbs the non-triplen order);
+- ``mode="default"`` is pinned on the NON-TRIPLEN orders only: OpenDSS's own device model
+  (``NeglectLoadY=No`` with ``%SeriesRL=50``) is pgml's default, so those orders now agree
+  to ~8e-9 relative, while OpenDSS's imperial-calibrated earth-return zero-sequence term
+  still dominates the TRIPLEN order on this 3-wire, no-explicit-neutral feeder (documented
+  divergence, a few hundred percent);
 - the exporter raises a clear :class:`~pgml.errors.ConversionError` for the documented
   refusals (conductor-geometry lines, zigzag transformer windings, an off-diagonal/coupled
   Source Thevenin impedance) rather than silently exporting a wrong circuit.
@@ -362,20 +363,21 @@ def test_matched_mode_coherent_agrees_with_pgml():
 # ---------------------------------------------------------------------------
 @pytest.mark.slow
 def test_default_mode_report_generated_and_diverges_as_documented():
-    """``mode="default"`` is NOT pinned tight -- it characterizes, not validates, drift.
+    """``mode="default"`` leaves OpenDSS's own settings: ONE divergence source is left.
 
-    Two independent divergence sources are expected and are NOT bugs:
-    1. The TRIPLEN order (h=3, zero-sequence-dominated) is driven by OpenDSS's own
-       imperial-unit-calibrated earth-return ``Rg``/``Xg`` line correction (left at its
-       defaults in this mode) on a 3-wire, no-explicit-neutral feeder -- pgml's non-geometry
-       harmonic line models carry no such term at all (``docs/pgml/modeling/conventions.md``
-       §8, "the earth-return calibration gotcha"). Measured on this feeder: tens to a few
-       hundred percent relative error at h=3.
-    2. The non-triplen order (h=5) is driven by OpenDSS's default load Norton shunt
-       (``NeglectLoadY=No``), which pgml's harmonic solver does not implement at all
-       (``include_load_shunt`` is hard-`False`, see ``pgml.solver.harmonic_flow``). Measured
-       on this feeder: ~0.4-0.5% relative error at h=5.
-    The fundamental (h=1) is UNCHANGED vs matched mode -- ``NeglectLoadY``/``Rg``/``Xg`` only
+    The TRIPLEN order (h=3, zero-sequence-dominated) is driven by OpenDSS's own
+    imperial-unit-calibrated earth-return ``Rg``/``Xg`` line correction (left at its
+    defaults in this mode) on a 3-wire, no-explicit-neutral feeder -- pgml's non-geometry
+    harmonic line models carry no such term at all (``docs/pgml/modeling/conventions.md``
+    §8, "the earth-return calibration gotcha"). Measured on this feeder: 2.4 relative
+    (a few hundred percent) at h=3. That is expected and is NOT a bug.
+
+    The NON-TRIPLEN order is now pinned: OpenDSS's default device model
+    (``NeglectLoadY=No``, ``%SeriesRL=50``) is pgml's own default, so h=5 agrees to
+    8.3e-09 relative -- against 5.0e-03 with the pure current-source model, which is what
+    this test used to characterise as the second divergence source.
+
+    The fundamental (h=1) is mode-independent -- ``NeglectLoadY``/``Rg``/``Xg`` only
     affect the ``Solve mode=harmonics`` path, never the nonlinear snapshot solve.
     """
     grid = _grid()
@@ -387,6 +389,11 @@ def test_default_mode_report_generated_and_diverges_as_documented():
         assert stats["ref_rms_v"] > 0.0  # the report is populated, not vacuous
     # the fundamental is mode-independent (NeglectLoadY/Rg/Xg only affect harmonics mode)
     assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
+    # the non-triplen order: same device model on both sides, only Rg/Xg differ and they
+    # barely touch the positive-sequence path.
+    assert report["per_order"][5]["rel_max"] < _MATCHED_REL_TOL
+    # the triplen order: the earth-return term dominates, as documented.
+    assert report["per_order"][3]["rel_max"] > 0.1
 
 
 # ---------------------------------------------------------------------------

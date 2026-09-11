@@ -55,11 +55,12 @@ Two assumption modes (``mode=``)
 - ``"default"``: leaves OpenDSS's own defaults (``NeglectLoadY=No`` with ``%SeriesRL=50`` on
   every Load — pgml reaches the same device model with ``load_shunt="opendss"``, so what
   remains in this mode is the earth-return ``Rg``/``Xg`` and the ``Vminpu``/``Vmaxpu``
-  band). Expect a DOCUMENTED divergence from these sources, not a bug — this mode exists to characterize how far a "just point OpenDSS at the grid and
-  solve" study would drift from pgml's own reduced model, not to be tight (measured: several
-  hundred percent relative on triplen harmonics of a Dyn feeder, driven almost entirely by the
-  earth-return term dominating the zero-sequence path — see ``opendss_scenario_oracle``'s test
-  module docstring for the exact figures).
+  band). Expect a DOCUMENTED divergence from those two sources, not a bug — this mode
+  characterizes how far a "just point OpenDSS at the grid and solve" study drifts from
+  pgml's own modeling choices. Measured on a 3-wire feeder: the NON-TRIPLEN orders agree to
+  8.3e-09 relative (the device model is the same on both sides now), while the earth-return
+  term dominates the zero-sequence path and leaves a few hundred percent on the triplen
+  order — see ``opendss_scenario_oracle``'s test module docstring for the exact figures.
 
 Exporter coverage
 ------------------
