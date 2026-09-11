@@ -30,13 +30,15 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   reactive powers reported in ``PowerFlowResult.regulation``
   (:class:`VoltageRegulationResult`).
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, method,
-  operating_point, harmonic_injection, node_sources=None, include_load_shunt,
+  operating_point, harmonic_injection, node_sources=None, load_shunt=None,
   tol, max_iter, dtype, device, symmetry=None, on_disconnected="raise",
   branch_states=None) -> HarmonicFlowResult``
   Fundamental + per-harmonic flow; ``method`` selects the fundamental-frequency
   solver (``"current_injection"`` or ``"newton"`` for stiff inverter control
   loops). ``symmetry`` is resolved once and threaded into the fundamental solve
-  and all harmonic injection steps. Optional ``node_sources`` (a list of
+  and all harmonic injection steps. ``load_shunt`` selects the harmonic device
+  Norton shunt (``"opendss"`` / ``"motor"`` / ``"none"``; ``None`` = the
+  documented modeling default). Optional ``node_sources`` (a list of
   :class:`NodeHarmonicSource`) injects per-node Thévenin/Norton harmonic
   disturbances at orders ``h > 1`` only. ``on_disconnected``/``branch_states``
   match :func:`solve_power_flow`.

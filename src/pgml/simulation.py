@@ -46,6 +46,7 @@ from .solver import solve_harmonic_flow, solve_power_flow
 
 Calculation = Literal["power_flow", "harmonic"]
 Slack = Literal["ideal", "norton"]
+LoadShunt = Literal["none", "opendss", "motor"]
 Symmetry = Literal["auto", "symmetric", "asymmetric"]
 _DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
 
@@ -78,7 +79,15 @@ class SimulationConfig(BaseModel):
     operating_point: Optional[dict] = Field(
         default=None, description="Per-appliance P/Q override; None = nameplate."
     )
-    include_load_shunt: bool = False
+    load_shunt: Optional[LoadShunt] = Field(
+        default=None,
+        description="Harmonic Norton shunt of every Load/Generator/Storage: 'opendss' "
+        "(the operating-point admittance split into a series and a parallel R-L "
+        "branch, OpenDSS's own default), 'motor' (fixed blocked-rotor series "
+        "reactance), or 'none' (pure current source, OpenDSS NeglectLoadY=Yes). None = "
+        "the documented default appliance.harmonic_shunt.model. A device's own "
+        "harmonic_model overrides the choice per device.",
+    )
     tol: Optional[float] = Field(
         default=None,
         gt=0.0,
@@ -502,7 +511,7 @@ def simulate(
             operating_point=config.operating_point,
             harmonic_injection=harmonic_injection,
             node_sources=node_sources,
-            include_load_shunt=config.include_load_shunt,
+            load_shunt=config.load_shunt,
             tol=config.tol,
             tol_update_pu=config.tol_update_pu,
             s_base_va=config.s_base_va,

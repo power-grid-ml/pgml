@@ -1278,9 +1278,32 @@ class Source(ApplianceBase):
 
 
 class HarmonicShuntModel(GridModel):
-    """Norton-equivalent harmonic representation (OpenDSS): the attached Spectrum is
-    a current source in parallel with a shunt admittance that is a mix of a SERIES
-    R-L and a PARALLEL R-L branch, derived at assembly time from OPERATING-POINT P,Q."""
+    """Per-device OVERRIDE of the harmonic Norton shunt (OpenDSS ``Load.pas``).
+
+    At orders ``h > 1`` a device is a harmonic current source (its ``spectrum``) in
+    PARALLEL with this shunt. Per element (WYE phase / DELTA leg), with
+    ``s = series_rl_fraction``::
+
+        Y_eq     = conj(P + jQ) / V_rated**2         at the fundamental operating point
+        Y_par(h) = (1 - s)*Re(Y_eq) + j*(1 - s)*Im(Y_eq)/h
+        Z_ser    = 1/(s*Y_eq),  Y_ser(h) = 1/(Re(Z_ser) + j*h*Im(Z_ser))
+        Y(h)     = Y_par(h) + Y_ser(h)
+
+    Two conventions decide the value and are easy to get wrong. ``V_rated`` is the
+    element's RATED voltage (line-to-neutral for WYE, line-to-line for DELTA), never
+    the solved one. ``P, Q`` are the power the device actually draws at the converged
+    FUNDAMENTAL solution (the ZIP-scaled or control-resolved operating point, equal to
+    the nameplate for the constant-power default), so the shunt and the injected
+    current describe one consistent operating point. The split is exact at ``h = 1``
+    (``Y_par(1) + Y_ser(1) = Y_eq`` for any ``s``); it only sets how the shunt rolls
+    off with frequency.
+
+    Setting this block overrides the documented modeling default
+    ``appliance.harmonic_shunt.*`` for this device alone: ``neglect_shunt=True`` makes
+    it a pure current source, a ``motor_x_harm_pu`` selects the blocked-rotor series
+    branch below. A run solved with ``load_shunt="none"`` carries no shunt at all,
+    whatever the devices say (OpenDSS ``Set NeglectLoadY=Yes``).
+    """
 
     series_rl_fraction: float = si_field(
         "Fraction modelled as the SERIES R-L branch vs PARALLEL R-L (OpenDSS %SeriesRL/100). "
@@ -1292,18 +1315,34 @@ class HarmonicShuntModel(GridModel):
         le=1.0,
     )
     neglect_shunt: bool = Field(
-        default=False, description="True = pure current source, no shunt."
+        default=False,
+        description="True = this device is a pure current source (no shunt at any "
+        "order), whatever the run-level model says.",
     )
     motor_x_harm_pu: Optional[float] = si_field(
-        "Motor blocked-rotor / sub-transient reactance for the series branch. None = derive "
-        "from P,Q. Typical ~0.20.",
+        "Blocked-rotor (subtransient) reactance of the SERIES branch: "
+        "X = V_rated**2/(S*s)*x_pu, replacing the P,Q-derived Z_ser. Set = the motor "
+        "model; None = the derived split. Typical ~0.20.",
         short="pu",
         long="per unit of rated kVA",
         default=None,
     )
     motor_xr_harm: float = Field(
-        default=6.0, description="X/R ratio of motor_x_harm_pu at f0."
+        default=6.0,
+        gt=0.0,
+        description="X/R ratio of motor_x_harm_pu at f0 (OpenDSS XRharm).",
     )
+
+    @model_validator(mode="after")
+    def _check(self) -> "HarmonicShuntModel":
+        if self.neglect_shunt and self.motor_x_harm_pu is not None:
+            raise ValueError(
+                "neglect_shunt=True (no shunt) contradicts motor_x_harm_pu (a motor "
+                "series branch); set one or the other."
+            )
+        if self.motor_x_harm_pu is not None and self.motor_x_harm_pu <= 0.0:
+            raise ValueError("motor_x_harm_pu must be > 0 (it is a reactance).")
+        return self
 
 
 class ZipCoefficients(GridModel):
@@ -1734,7 +1773,12 @@ class Load(InjectionAppliance):
         "Phase to its Spectrum (keys subset of phases; missing phase = no harmonics). "
         "Mutually exclusive with spectrum. DELTA key = the delta branch at that phase.",
     )
-    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+    harmonic_model: Optional[HarmonicShuntModel] = Field(
+        default=None,
+        description="Per-device OVERRIDE of the harmonic Norton shunt. None "
+        "(default) = the documented modeling default appliance.harmonic_shunt.*, "
+        "as selected for the run by solve_harmonic_flow(load_shunt=...).",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "Load":
@@ -1819,7 +1863,12 @@ class Generator(InjectionAppliance):
         description="Asymmetric per-phase harmonic current sources (keys subset of "
         "phases; missing phase = no harmonics). Mutually exclusive with spectrum.",
     )
-    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+    harmonic_model: Optional[HarmonicShuntModel] = Field(
+        default=None,
+        description="Per-device OVERRIDE of the harmonic Norton shunt. None "
+        "(default) = the documented modeling default appliance.harmonic_shunt.*, "
+        "as selected for the run by solve_harmonic_flow(load_shunt=...).",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "Generator":
@@ -1961,7 +2010,12 @@ class Storage(InjectionAppliance):
         description="Asymmetric per-phase harmonic current sources. Mutually "
         "exclusive with spectrum.",
     )
-    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+    harmonic_model: Optional[HarmonicShuntModel] = Field(
+        default=None,
+        description="Per-device OVERRIDE of the harmonic Norton shunt. None "
+        "(default) = the documented modeling default appliance.harmonic_shunt.*, "
+        "as selected for the run by solve_harmonic_flow(load_shunt=...).",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "Storage":
