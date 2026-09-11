@@ -1533,6 +1533,59 @@ def solve_power_flow(
             )
 
     # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
+    def _newton_warm_starts(op, pv_state, vf=None):
+        """Newton warm starts to try, in order.
+
+        Without voltage-regulating terminals there is exactly one (the const-Z
+        solution, built lazily) — the historical path. With them, the balanced
+        nominal start that sits ON the setpoints is added, and the order is decided
+        by the const-Z seed itself: a COLLAPSED const-Z profile (a node below half
+        its nominal) is a poor Newton start on a regulated grid, so the nominal start
+        goes first and the const-Z seed stays as the fallback.
+        """
+
+        def const_z():
+            return _linear_const_z_init(
+                grid,
+                f0,
+                index,
+                dtype,
+                device,
+                slack,
+                op,
+                param_overrides,
+                fixed_rows,
+                v_fixed if vf is None else vf,
+                branch_states,
+            )
+
+        if pv_state is None:
+            return [const_z]
+
+        def nominal():
+            return _pv_nominal_init(
+                grid,
+                index,
+                pv_state,
+                rdt,
+                cdt,
+                device,
+                fixed_rows,
+                v_fixed if vf is None else vf,
+            )
+
+        seed = const_z()
+        if _seed_is_collapsed(grid, index, seed, rdt, device):
+            _log.info(
+                "solve_power_flow: the const-impedance warm start collapses below "
+                "%.2f pu somewhere; starting Newton from the balanced nominal profile "
+                "at the voltage setpoints instead (the const-Z seed stays as a "
+                "fallback).",
+                _SEED_COLLAPSE_PU,
+            )
+            return [nominal, lambda: seed]
+        return [lambda: seed, nominal]
+
     def run_forward(op, rr, frc, pv_state):
         """One forward solve at a fixed operating point and PV active set."""
         if method == "newton":
@@ -1553,18 +1606,14 @@ def solve_power_flow(
                 # vectorized current-injection method.
                 return _newton_forward_sequential(
                     grid,
-                    f0,
                     index,
-                    dtype,
                     device,
                     slack,
                     op,
-                    param_overrides,
                     fixed_rows,
-                    v_fixed,
-                    v_fixed_fn,
                     build_system,
                     make_fast_residual_complex,
+                    _newton_warm_starts,
                     bsize,
                     pv_state,
                     n,
@@ -1573,24 +1622,18 @@ def solve_power_flow(
                     tol,
                     max_iter,
                     newton_solver,
-                    branch_states,
                 )
             else:
-                v_init = _linear_const_z_init(
-                    grid,
-                    f0,
-                    index,
-                    dtype,
+                return _newton_from_starts(
+                    rr,
+                    _newton_warm_starts(op, pv_state),
+                    n,
+                    rdt,
+                    cdt,
                     device,
-                    slack,
-                    op,
-                    param_overrides,
-                    fixed_rows,
-                    v_fixed,
-                    branch_states,
-                )
-                return _newton_forward(
-                    rr, v_init, n, rdt, cdt, device, tol, max_iter, newton_solver
+                    tol,
+                    max_iter,
+                    newton_solver,
                 )
         else:
             solve_system = system
@@ -2007,6 +2050,92 @@ def _linear_const_z_init(
     return v0
 
 
+def _pv_nominal_init(
+    grid, index, pv: PVTerminals, rdt, cdt, device, fixed_rows, v_fixed
+) -> Tensor:
+    """Balanced nominal warm start with every regulated row AT its setpoint.
+
+    Each row starts at its own node's line-to-neutral nominal magnitude (so a grid
+    spanning several voltage levels starts at ~1 pu everywhere, unlike a start built
+    from the source's magnitude), with the standard positive-sequence phase rotation,
+    neutral rows at 0 V, ideal-slack rows at their reference magnitude, and every
+    voltage-regulating row at ``v_set``. This is the classical flat start of a
+    transmission solve; it is the SECOND Newton start tried for a grid with PV
+    terminals, because the const-Z seed (:func:`_linear_const_z_init`) wins on
+    load-dominated networks while this one wins where the const-Z fold depresses the
+    profile far from the regulated operating point. Detached — a warm start never
+    enters the gradient.
+    """
+    with torch.no_grad():
+        phase_codes = index.phase_codes.to(device)
+        ang = torch.tensor(
+            [0.0, -2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0, 0.0],
+            dtype=rdt,
+            device=device,
+        )[phase_codes]
+        n = index.size
+        mag = _node_voltage_bases(grid, index, rdt, device) * (
+            1.0 - (phase_codes == 3).to(rdt)
+        )  # [N]
+        rows, vset = pv.setpoint_volts()  # [R], [*b, R]
+        pieces = [(rows, vset.to(rdt))]
+        if fixed_rows is not None and v_fixed is not None:
+            pieces.append((fixed_rows, v_fixed.abs().to(rdt)))
+        lead = torch.broadcast_shapes(*[tuple(t.shape[:-1]) for _r, t in pieces])
+        mag = mag.broadcast_to(*lead, n).clone()
+        for r, val in pieces:
+            mag = mag.scatter(
+                -1,
+                r.expand(*lead, r.shape[-1]),
+                val.broadcast_to(*lead, r.shape[-1]),
+            )
+        return torch.polar(mag, ang).to(cdt)
+
+
+#: A const-Z warm start below this fraction of a node's nominal magnitude is a
+#: COLLAPSED seed (the const-impedance fold of a load that is large against its local
+#: impedance), far outside any steady-state operating point and a poor Newton start.
+_SEED_COLLAPSE_PU = 0.5
+
+
+def _seed_is_collapsed(grid, index, v_seed: Tensor, rdt, device) -> bool:
+    """True if a warm start leaves any live row below :data:`_SEED_COLLAPSE_PU`."""
+    with torch.no_grad():
+        bases = _node_voltage_bases(grid, index, rdt, device).clamp_min(1e-12)
+        pu = v_seed.reshape(-1, index.size).abs() / bases[None, :]
+        live = (index.phase_codes.to(device) != 3)[None, :]
+        return bool((pu[live] < _SEED_COLLAPSE_PU).any())
+
+
+def _newton_from_starts(
+    real_res, v_inits, n, rdt, cdt, device, tol, max_iter, linear_solver
+):
+    """Newton from each warm start in turn until one converges; best result wins.
+
+    A single start is the historical path (identical result, one call). With more
+    than one, a start that fails to converge is followed by the next one and the
+    restart is logged; if none converges the attempt with the smallest final update
+    norm is returned, so the diagnostics describe the best iterate reached.
+    """
+    best = None
+    for attempt, make_init in enumerate(v_inits):
+        out = _newton_forward(
+            real_res, make_init(), n, rdt, cdt, device, tol, max_iter, linear_solver
+        )
+        if out[3]:
+            if attempt:
+                _log.info(
+                    "solve_power_flow: Newton converged on warm start %d of %d "
+                    "(earlier start(s) did not converge).",
+                    attempt + 1,
+                    len(v_inits),
+                )
+            return out
+        if best is None or float(out[2]) < float(best[2]):
+            best = out
+    return best
+
+
 _NEWTON_MAX_BACKTRACK = 20  # line-search step halvings before accepting the Newton step
 _GMRES_RESTART = 100  # Krylov subspace dimension before a restart
 _GMRES_MAX_RESTARTS = 20  # restart cycles before giving up the inner solve
@@ -2170,18 +2299,14 @@ def _newton_forward(
 
 def _newton_forward_sequential(
     grid,
-    f0,
     index,
-    dtype,
     device,
     slack,
     operating_point,
-    param_overrides,
     fixed_rows,
-    v_fixed,
-    v_fixed_fn,
     build_system,
     make_fast_residual_complex,
+    warm_starts,
     bsize,
     pv,
     n,
@@ -2190,11 +2315,10 @@ def _newton_forward_sequential(
     tol,
     max_iter,
     linear_solver,
-    branch_states=None,
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
-    Newton's const-Z warm start and per-element Jacobian are single-grid (the residual
+    Newton's warm starts and per-element Jacobian are single-grid (the residual
     closes over the operating point), so a batched operating point is handled by slicing
     it per scenario, running the proven single-grid forward, and stacking the detached
     ``V*`` ``[B, N]``. The IFT backward (full op, batch-aligned, block-diagonal) attaches
@@ -2221,30 +2345,20 @@ def _newton_forward_sequential(
                 return None
             return _slack_rows_and_vref(grid, index, rdt, cdt, device, op)[1]
 
+        pv_i = None if pv is None else pv.slice(i)
         rr_i = _make_real_residual(
-            build_system,
-            rc_i,
-            fixed_rows,
-            _vfixed_i,
+            build_system, rc_i, fixed_rows, _vfixed_i, n, cdt, pv=pv_i
+        )
+        v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_from_starts(
+            rr_i,
+            warm_starts(op_i, pv_i, _vfixed_i()),
             n,
+            rdt,
             cdt,
-            pv=None if pv is None else pv.slice(i),
-        )
-        v_init_i = _linear_const_z_init(
-            grid,
-            f0,
-            index,
-            dtype,
             device,
-            slack,
-            op_i,
-            param_overrides,
-            fixed_rows,
-            _vfixed_i(),
-            branch_states,
-        )
-        v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_forward(
-            rr_i, v_init_i, n, rdt, cdt, device, tol, max_iter, linear_solver
+            tol,
+            max_iter,
+            linear_solver,
         )
         v_list.append(v_i)  # [N]
         conv_list.append(bool(cv_i))

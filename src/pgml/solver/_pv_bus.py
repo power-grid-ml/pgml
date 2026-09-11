@@ -206,6 +206,31 @@ class PVTerminals:
             groups.append(replace(g, state=new_state))
         return replace(self, groups=tuple(groups)), changed
 
+    def setpoint_volts(self) -> tuple[Tensor, Tensor]:
+        """``(rows [R] int64, v_set [*batch, R])`` in VOLTS over every regulated row.
+
+        A balanced warm start places each regulated phase row at the setpoint
+        magnitude (for positive-sequence regulation the balanced phase magnitude IS
+        ``|V1|``), which puts the Newton seed on the regulation constraint.
+        """
+        rows = []
+        volts = []
+        for g in self.groups:
+            k, p = g.rows.shape
+            rows.append(g.flat_rows)
+            vset = g.v_set_pu * g.v0.to(
+                dtype=g.v_set_pu.dtype, device=g.v_set_pu.device
+            )
+            volts.append(
+                vset.unsqueeze(-1)
+                .expand(*vset.shape, p)
+                .reshape(*vset.shape[:-1], k * p)
+            )
+        if len(volts) > 1:
+            lead = torch.broadcast_shapes(*[t.shape[:-1] for t in volts])
+            volts = [t.broadcast_to(*lead, t.shape[-1]) for t in volts]
+        return torch.cat(rows), torch.cat(volts, dim=-1)
+
     # -- batch plumbing -------------------------------------------------------
     def slice(self, i: int) -> "PVTerminals":
         """The single-scenario terminals at batch index ``i`` (grad-preserving)."""
