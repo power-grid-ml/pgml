@@ -1178,12 +1178,11 @@ def _apply_pq(
     negates a Generator/Storage's generation-positive P/Q into DSS's consumption-positive
     ``Load`` convention -- see ``_ApplianceExport``'s docstring).
 
-    ``t`` selects the STEP for a node-coherent batch. An operating-point entry is
-    ``[B]`` (drawn once per scenario, constant across steps -- the plain/no-profile
-    case) or ``[B, T]`` (a :class:`~pgml.scenarios.LoadProfileConfig`-lifted, per-step
-    fundamental); :func:`_scalar_at` slices either shape correctly from the SAME ``t``
-    argument (a ``[B]`` entry ignores ``t``, so the constant-across-steps case is
-    unaffected).
+    ``t`` selects the STEP of a batch that declares one. An operating-point entry is
+    ``[B]`` (drawn once per scenario, constant across steps -- the snapshot case) or
+    ``[B, T]`` (a per-step fundamental); :func:`_scalar_at` slices either shape correctly
+    from the SAME ``t`` argument (a ``[B]`` entry ignores ``t``, so the
+    constant-across-steps case is unaffected).
     """
     n = len(exp.phases)
     sign = exp.sign
@@ -1241,9 +1240,9 @@ def _apply_operating_point(
     """Edit every targeted element to scenario ``b`` (+ step ``t``)'s operating point.
 
     Called once per STEP (not once per scenario) so a ``[B, T]`` per-step operating
-    point (:class:`~pgml.scenarios.LoadProfileConfig`) is applied correctly; a plain
-    ``[B]`` entry is unaffected (``_scalar_at`` ignores ``t`` for a 1-D tensor), so this
-    is a strict superset of the old once-per-scenario behaviour, not a change to it.
+    point is applied correctly; a plain ``[B]`` entry is unaffected (``_scalar_at``
+    ignores ``t`` for a 1-D tensor), so this is a strict superset of the
+    once-per-scenario behaviour, not a change to it.
     """
     for aid, entry in sampled.operating_point.items():
         if aid in circuit.sources:
@@ -1336,8 +1335,9 @@ def run_opendss_scenarios(
     grid:
         The grid ``sampled`` was drawn against.
     sampled:
-        A realized batch from :func:`pgml.scenarios.sample` /
-        :func:`pgml.scenarios.sample_coherent_spectra` (accepted as-is; never re-sampled).
+        A realized batch from :func:`pgml.scenarios.sample`,
+        :func:`pgml.scenarios.batch_from_values` or any other scenario spec (accepted
+        as-is; never re-sampled).
     harmonic_orders:
         Orders to solve; order 1 is always included even if omitted.
     mode:

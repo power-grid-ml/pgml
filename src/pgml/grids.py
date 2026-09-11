@@ -162,12 +162,12 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
-#: Harmonic orders :func:`se_benchmark_scenario_config` injects by default (the odd
-#: orders up to 13, including the triplen 3/9); pass ``orders`` for a wider range.
+#: The load order set of these benchmark grids: the odd orders up to 13, including the
+#: triplen 3/9. A named set for a batch that injects into loads.
 LOAD_HARMONIC_ORDERS = [3, 5, 7, 9, 11, 13]
 #: The non-triplen orders 5/7/11/13 — a typical inverter switching signature. Kept as a
-#: named order set for spectrum sweeps; the benchmark recipe injects the same orders into
-#: loads and inverters and distinguishes them by their per-order MAGNITUDES instead.
+#: named order set for spectrum sweeps; a batch that excites loads and inverters at the
+#: same orders distinguishes them by their per-order MAGNITUDES instead.
 PV_HARMONIC_ORDERS = [5, 7, 11, 13]
 
 

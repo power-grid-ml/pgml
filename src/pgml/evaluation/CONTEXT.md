@@ -169,10 +169,10 @@ this reproduces bit-for-bit).
   less than nameplate). `mode="default"` leaves OpenDSS's own defaults for all of these.
 - `run_opendss_scenarios(grid, sampled, *, harmonic_orders, mode="matched"|"default",
   dtype=complex128) -> pgml.scenarios.ScenarioResult` — exports once, attaches one native
-  `Spectrum` per device carrying a harmonic injection, then per scenario × per STEP (node-
-  coherent batch, detected via `sampled.samples["time_s"]`; `Vsource`/load `Edit`s happen
-  once per step too, so a `LoadProfileConfig`-lifted PER-STEP `[B, T]` operating point is
-  sliced by step, not just by scenario) edits the operating point (`kW`/`kvar`, per-phase
+  `Spectrum` per device carrying a harmonic injection, then per scenario × per STEP (the
+  step count read from `sampled.n_steps`; `Vsource`/load `Edit`s happen once per step too,
+  so a PER-STEP `[B, T]` operating point is sliced by step, not just by scenario) edits
+  the operating point (`kW`/`kvar`, per-phase
   where the appliance was split, `Vsource.pu` for a source `u_ref_scale`) and each device's
   `Spectrum` `%mag`(`=magnitude_pu*100`)/`angle`(`=phase_deg`, direct — the order-1 entry is
   the same self-relative reference pgml's own `arg(I_h)=ang_h+h*(arg(I1)-ang_1)` formula
