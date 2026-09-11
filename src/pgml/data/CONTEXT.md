@@ -54,10 +54,26 @@ requires an env var to be set.
   a stored `R0` already contains the earth-return resistance at f0 (which decides how
   much of `R0` the skin multiplier scales).
 - `source.{series_impedance_ohm, xr_ratio}` — default slack series impedance synthesis.
+- `source.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of a
+  3-phase `Source` Thevenin when the dataset carries no native zero-sequence data (both
+  1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). Read by
+  `pgml.convert._common.source_zero_sequence_ratios`; a fallback logs a WARNING.
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
   `docs/pgml/modeling/transformer.md`.
+- `transformer.harmonic_resistance.law` — `element` (default, follow each
+  `Transformer.harmonic_xr_constant`) / `constant` / `xr_constant`: how the winding
+  RESISTANCE behaves with frequency (X always scales with the order). Resolved by
+  `pgml.assembly._transformer.harmonic_resistance_law`; an unknown value raises.
+- `transformer.magnetizing_placement` — `from_terminal` (default) / `to_terminal` /
+  `split`: which terminal the magnetizing shunt is stamped on (OpenDSS uses its last
+  winding's terminal, power-grid-model splits it half/half). Resolved by
+  `pgml.assembly._transformer.magnetizing_placement`; an unknown value raises.
+- `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of
+  the leakage impedance when a Transformer carries no explicit `zero_sequence` override
+  (both 1.0 = Z0 = Z1). Read by `pgml.assembly._transformer.zero_sequence_leakage`; the
+  zero-sequence PATH always comes from the winding connections.
 
 ## Resolution precedence (highest first; `resolve(key, explicit, converted)`)
 1. **explicit** — a value the user set on the component / grid (ALWAYS wins).

@@ -13,6 +13,19 @@ override, default "auto" = the historical node-level rule; `ShuntAppliance.conne
 WYE (default, phase-to-ground) or DELTA (cyclic phase-to-phase bank), zigzag rejected.
 Both defaults are backward-compatible; assembly enforces the semantics.)
 
+Pending contract changes awaiting the next `SCHEMA_VERSION` bump: `Source.spectrum` is
+REMOVED (upstream/background distortion is an operating-point quantity carried by
+`pgml.solver.NodeHarmonicSource` / `pgml.scenarios`' `BackgroundHarmonicConfig`, never by
+the grid description). A persisted `Source` that still carries the key loads unchanged: a
+before-validator drops it, with a WARNING when the value is non-null (a null carries no
+information and is dropped silently). Any OTHER unknown field still raises. The same
+before-validator runs on keyword construction, so downstream code that still writes
+`Source(..., spectrum=None)` keeps working (verified against `pghub`'s ding0 loader); it
+should drop the argument anyway, and a non-null value there now warns.
+`TransformerZeroSeq`'s documented reference side is corrected from "HV" to "the to-side
+(LV) winding coil" — the side the positive-sequence leakage fields use and the side
+assembly consumes (a docstring/unit-metadata change; no field, name or value changes).
+
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),
   FrequencyParam, Spectrum, TypeLibrary, plus input-convention DTOs and converters'

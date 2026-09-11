@@ -33,7 +33,8 @@ Per-side building blocks (``P == 3``):
   ``P`` is idempotent, so ``Pᵀ(y·I)P = y·P``, the textbook ``Y_II`` self block; an
   ungrounded-wye neutral floats and blocks the zero sequence with no separate
   Kron reduction.
-- ``zigzag`` / ``zigzag_grounded`` (interconnected star): each phase leg is two
+- ``zigzag`` / ``zigzag_grounded`` (interconnected star) — EXPERIMENTAL, see the
+  note below: each phase leg is two
   half-coils in series opposition on ADJACENT core limbs, so the winding couples
   to the limb fluxes through the normalised circulant ``Z = (I − C)/√3`` (or its
   transpose), where ``C`` is the cyclic phase permutation. Because the limb flux
@@ -51,10 +52,22 @@ Per-side building blocks (``P == 3``):
     blocks lose their zero sequence).
   * a grounded zigzag's own self block stays ``y·I`` — the winding presents a
     LOW-impedance zero-sequence path to ground on its own side (the classic
-    grounding-transformer property). The path's value equals the positive-
-    sequence leakage here; the true zero-sequence leakage of a zigzag (set by
-    the half-coil geometry) is typically smaller and would need an explicit
-    zero-sequence override, which is not consumed yet.
+    grounding-transformer property). Its VALUE comes from the zero-sequence
+    leakage: set ``Transformer.zero_sequence`` (or the
+    ``transformer.zero_sequence.*`` default ratios) and the per-phase leakage
+    becomes the symmetric-component matrix, so the zigzag's true Z0 — typically
+    well below Z1, set by the half-coil geometry — is carried on that path.
+
+Zigzag status (EXPERIMENTAL). The limb-domain incidence above reproduces the
+three properties a zigzag winding must have (±30° clock contribution, no
+zero-sequence TRANSFER, a low-impedance zero-sequence path to ground on its own
+side) and agrees with power-grid-model on a live unbalanced solve once the
+zero-sequence leakage VALUE is carried
+(``tests/reference/test_pgm_transformer.py``), but neither OpenDSS nor pandapower
+can express the same unit as a single two-winding element, so the formulation has
+one independent reference only. Constructing a zigzag transformer logs a WARNING
+once per process. Treat a zigzag result as experimental: check it against a
+purpose-built model before relying on it.
 
 Clock realisation. The IEC clock number ``c`` (LV lags HV by ``c·30°``) is
 realised entirely by constant topology: each delta / zigzag winding contributes
@@ -89,9 +102,20 @@ The ``√3`` then cancels against ``M`` so the assembled positive-sequence block
 identical to ``y/n_LL²`` (HV self) and ``y/n_LL`` (coupling) — the historical
 off-nominal-tap pi — while the zero sequence is now modelled correctly.
 
-The magnetizing (core-loss) shunt ``y_m`` is added to the HV terminal phase
-diagonal directly (referred to the HV line voltage), outside the leakage
-incidence transform.
+The magnetizing (core-loss) shunt ``y_m`` is attached to a terminal phase diagonal
+directly (referred to the HV line voltage), outside the leakage incidence
+transform. WHICH terminal is the documented modeling choice
+``transformer.magnetizing_placement`` (:func:`magnetizing_placement`): the
+``from_terminal`` default, ``to_terminal`` (OpenDSS attaches the whole branch to
+its last winding's terminal) or ``split`` (power-grid-model puts half on each).
+The three differ in whether the magnetizing current sees a winding's leakage
+drop, so they are different topologies, not different referrals.
+
+The leakage itself may be SEQUENCE-AWARE: when the zero-sequence leakage differs
+from the positive-sequence one, ``Y_winding``'s per-phase identity ``I_P`` is
+replaced by the symmetric-component matrix built from (Z1, Z0)
+(:func:`sequence_leakage_matrices`), so the zero-sequence PATH stays topological
+while its VALUE is the transformer's own Z0.
 
 All matrices ``N`` are real, constant topology (no autograd through ``N``);
 ``Y_winding`` carries the differentiable ``y`` and ``τ`` so gradients flow to the
@@ -99,14 +123,35 @@ series R / L and the tap. Vectorised over the K transformers of a group (shared
 incidence) and over the H frequencies — no Python loop over individual units on
 the tape.
 
-References: Chen/Dillon generalized transformer model (Arrillaga & Watson,
-*Computer Modelling of Electrical Power Systems*; Bazrafshan & Gatsis,
-arXiv:1705.06782), extended with the zigzag limb-domain incidence.
+References.
+
+- Winding-incidence (generalized) two-winding model ``Y = Nᵀ Y_winding N``:
+  Chen & Dillon's generalized transformer model as presented in Arrillaga &
+  Watson, *Computer Modelling of Electrical Power Systems* (2nd ed., ch. 2-3),
+  and Bazrafshan & Gatsis, "Comprehensive Modeling of Three-Phase Distribution
+  Systems via the Bus Admittance Matrix" (arXiv:1705.06782), whose per-connection
+  incidence blocks this module follows.
+- Delta incidence ``M`` and the ±30° / ``√3`` consequences: Kersting,
+  *Distribution System Modeling and Analysis* (ch. 8, the ``[D]`` matrix).
+- Clock realisation by positive-sequence eigenvalue matching
+  (:func:`_incidence_pair`): every candidate block is a product of ``I``, ``C``,
+  ``M``, ``Z`` and the wye projection, i.e. an element of the circulant algebra,
+  so ``V⁺`` is an exact eigenvector and the realised HV->LV rotation is
+  ``arg(conj(λ⁺(N_from))·λ⁺(N_to))`` — the selection is a closed-form identity,
+  not a search heuristic (the circulant-eigenvalue property is standard, e.g.
+  Davis, *Circulant Matrices*). The resulting convention (positive clock = LV
+  lags HV) is pinned against a live OpenDSS export and against pandapower's own
+  internal ``Ybus`` (``tests/reference/test_opendss_transformer.py``,
+  ``tests/reference/test_pandapower_grid_matrix.py``,
+  ``tests/reference/test_transformer_clock_matrix.py``).
+- Zigzag limb-domain incidence: the extension documented under "Zigzag status"
+  above; cross-checked against power-grid-model's own zigzag model.
 """
 
 from __future__ import annotations
 
 import cmath
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional
@@ -117,6 +162,8 @@ from torch import Tensor
 from pgml import defaults
 from pgml.errors import ModelingError
 from pgml.schemas.grid_schema import WindingConnection
+
+_logger = logging.getLogger("pgml")
 
 # The delta circulant difference matrix (Kersting's [D]); element k spans phase k
 # and phase (k+1) % 3. Its transpose selects the opposite clock parity. Rows and
@@ -132,6 +179,28 @@ _V_POS = (1.0 + 0.0j, cmath.exp(-2j * math.pi / 3), cmath.exp(2j * math.pi / 3))
 
 _SHIFTING_KINDS = ("delta", "zigzag", "zigzag_grounded")
 _ZIGZAG_KINDS = ("zigzag", "zigzag_grounded")
+
+#: Guard so the experimental-zigzag notice is logged once per process, not per solve
+#: (assembly runs per scenario and per harmonic order).
+_ZIGZAG_NOTICE_LOGGED = False
+
+
+def _warn_zigzag_experimental(vg: "VectorGroup") -> None:
+    """Log the experimental-zigzag notice once per process."""
+    global _ZIGZAG_NOTICE_LOGGED
+    if _ZIGZAG_NOTICE_LOGGED:
+        return
+    _ZIGZAG_NOTICE_LOGGED = True
+    _logger.warning(
+        "transformer winding pairing %s / %s uses the EXPERIMENTAL zigzag model: the "
+        "limb-domain incidence reproduces the clock shift, the blocked zero-sequence "
+        "transfer and the winding's own zero-sequence path to ground, and agrees with "
+        "power-grid-model on an unbalanced solve, but no second reference tool can "
+        "express the same unit as one two-winding element. Check a zigzag result "
+        "against a purpose-built model before relying on it.",
+        vg.from_side.kind,
+        vg.to_side.kind,
+    )
 
 
 @dataclass(frozen=True)
@@ -269,6 +338,8 @@ def resolve_vector_group(t, n_phases: Optional[int] = None) -> VectorGroup:
         raise ModelingError(
             f"transformer {t.id}: zigzag-zigzag winding pairing is not modelled."
         )
+    if vg.from_side.is_zigzag or vg.to_side.is_zigzag:
+        _warn_zigzag_experimental(vg)
     if vg.parity_odd != (clock % 2 == 1):
         pairing = f"{vg.from_side.kind} / {vg.to_side.kind}"
         allowed = (
@@ -283,9 +354,165 @@ def resolve_vector_group(t, n_phases: Optional[int] = None) -> VectorGroup:
     return vg
 
 
-def group_key(vg: VectorGroup, p: int) -> tuple:
-    """Hashable key grouping transformers that share one incidence ``N``."""
-    return (vg.from_side.kind, vg.to_side.kind, vg.clock, p)
+def group_key(vg: VectorGroup, p: int, sequence_aware: bool = False) -> tuple:
+    """Hashable key grouping transformers that share one incidence ``N``.
+
+    ``sequence_aware`` separates units whose leakage is a per-phase MATRIX (Z0 != Z1)
+    from those carrying a scalar leakage, because the two build differently shaped
+    winding primitives and cannot be stacked together.
+    """
+    return (vg.from_side.kind, vg.to_side.kind, vg.clock, p, bool(sequence_aware))
+
+
+#: Allowed `transformer.harmonic_resistance.law` values (see `data/defaults.yaml`).
+HARMONIC_RESISTANCE_LAWS = ("element", "constant", "xr_constant")
+
+
+def harmonic_resistance_law() -> str:
+    """Return the configured transformer winding-resistance frequency law (validated).
+
+    ``element`` (the default) defers to each transformer's own
+    ``harmonic_xr_constant``; ``constant`` and ``xr_constant`` force one law on every
+    transformer. An unrecognised value raises rather than silently falling back.
+    """
+    value = str(defaults.get("transformer.harmonic_resistance.law"))
+    if value not in HARMONIC_RESISTANCE_LAWS:
+        raise ModelingError(
+            f"transformer.harmonic_resistance.law {value!r} is not a modelled law "
+            f"(expected one of {HARMONIC_RESISTANCE_LAWS})."
+        )
+    return value
+
+
+def resistance_scales_with_order(t, law: str) -> bool:
+    """True when a transformer's winding resistance scales with the harmonic order.
+
+    ``law`` comes from :func:`harmonic_resistance_law`; under ``element`` the decision is
+    the transformer's own ``harmonic_xr_constant`` flag (OpenDSS's ``XRConst``).
+    """
+    if law == "element":
+        return bool(getattr(t, "harmonic_xr_constant", False))
+    return law == "xr_constant"
+
+
+#: Allowed `transformer.magnetizing_placement` values (see `data/defaults.yaml`).
+MAGNETIZING_PLACEMENTS = ("from_terminal", "to_terminal", "split")
+
+
+def magnetizing_placement() -> str:
+    """Return the configured magnetizing-shunt placement (validated).
+
+    One of :data:`MAGNETIZING_PLACEMENTS`: ``from_terminal`` (default — the HV/from
+    phase diagonal), ``to_terminal`` (the LV/to diagonal, referred through the squared
+    rated-voltage ratio; OpenDSS's own placement) or ``split`` (half on each terminal;
+    power-grid-model's placement). An unrecognised value raises rather than silently
+    falling back.
+    """
+    value = str(defaults.get("transformer.magnetizing_placement"))
+    if value not in MAGNETIZING_PLACEMENTS:
+        raise ModelingError(
+            f"transformer.magnetizing_placement {value!r} is not a modelled placement "
+            f"(expected one of {MAGNETIZING_PLACEMENTS})."
+        )
+    return value
+
+
+def magnetizing_blocks(
+    y_m: Tensor, ratio_line: Tensor, p: int, placement: str
+) -> Tensor:
+    """Magnetizing shunt as a ``[H, K, 2P, 2P]`` block for the requested placement.
+
+    ``y_m`` ``[H, K]`` is the shunt admittance as stored (referred to the FROM/HV side);
+    ``ratio_line`` ``[K]`` the rated LINE-voltage ratio ``u_from/u_to`` used to refer it
+    to the TO side (``y_m · ratio_line²``). The returned block is zero outside the
+    terminal diagonal(s) the placement selects.
+    """
+    cdt = y_m.dtype
+    eye = torch.eye(p, dtype=cdt, device=y_m.device)
+    n2 = (ratio_line.to(cdt) ** 2)[None, :]  # [1,K]
+    if placement == "from_terminal":
+        from_share, to_share = y_m, torch.zeros_like(y_m)
+    elif placement == "to_terminal":
+        from_share, to_share = torch.zeros_like(y_m), y_m * n2
+    else:  # "split"
+        from_share, to_share = 0.5 * y_m, 0.5 * y_m * n2
+    zeros = torch.zeros_like(from_share)[..., None, None] * eye
+    top = torch.cat([from_share[..., None, None] * eye, zeros], dim=-1)
+    bot = torch.cat([zeros, to_share[..., None, None] * eye], dim=-1)
+    return torch.cat([top, bot], dim=-2)
+
+
+def zero_sequence_leakage_ratios() -> tuple[float, float]:
+    """Return ``(r0_over_r1, x0_over_x1)`` of the leakage from ``pgml.defaults``.
+
+    The documented fallback (``transformer.zero_sequence.*``, both 1.0 = Z0 = Z1) used
+    when a :class:`~pgml.schemas.grid_schema.Transformer` carries no explicit
+    ``zero_sequence`` override.
+    """
+    return (
+        float(defaults.get("transformer.zero_sequence.r0_over_r1")),
+        float(defaults.get("transformer.zero_sequence.x0_over_x1")),
+    )
+
+
+def is_sequence_aware(t, p: int) -> bool:
+    """True when a transformer's leakage must be stamped as a per-phase MATRIX.
+
+    Only a 3-phase unit has a zero sequence, and only a unit whose zero-sequence
+    leakage differs from its positive-sequence leakage needs the matrix form: with
+    ``Z0 == Z1`` the symmetric-component split has a zero mutual term and the scalar
+    stamp is the same primitive (the matrix form reproduces it to 3e-16 relative on a
+    YNyn unit, the floating-point cost of the (Z0 + 2*Z1)/3 round-trip).
+    """
+    if p != 3:
+        return False
+    if getattr(t, "zero_sequence", None) is not None:
+        return True
+    return zero_sequence_leakage_ratios() != (1.0, 1.0)
+
+
+def zero_sequence_leakage(t, r1: Tensor, l1: Tensor, two_pi_f0: float) -> tuple:
+    """Return the zero-sequence leakage ``(R0, L0)`` of a transformer.
+
+    ``Transformer.zero_sequence`` (``TransformerZeroSeq``: ``r0_ohm`` and ``x0_ohm``,
+    the reactance at ``f0``) wins; otherwise the positive-sequence pair is scaled by
+    the documented ``transformer.zero_sequence.*`` ratios. The reference side is the
+    one the positive-sequence fields use (the TO-side / LV winding coil), so the two
+    enter the winding primitive on the same basis.
+
+    Differentiable: ``r1``/``l1`` are tensors and the returned pair is formed from them
+    (ratio path) or from the schema values (override path), never through a python
+    float on the tape.
+    """
+    zs = getattr(t, "zero_sequence", None)
+    if zs is not None:
+        r0 = torch.as_tensor(zs.r0_ohm, dtype=r1.dtype, device=r1.device)
+        x0 = torch.as_tensor(zs.x0_ohm, dtype=l1.dtype, device=l1.device)
+        return r0, x0 / two_pi_f0
+    r_ratio, x_ratio = zero_sequence_leakage_ratios()
+    return r1 * r_ratio, l1 * x_ratio
+
+
+def sequence_leakage_matrices(
+    r1: Tensor, l1: Tensor, r0: Tensor, l0: Tensor, p: int
+) -> tuple[Tensor, Tensor]:
+    """Per-phase leakage ``(R, L)`` matrices ``[P, P]`` from the sequence pair.
+
+    Applies the symmetric-component identity used everywhere else in pgml::
+
+        Q_self   = (Q0 + 2*Q1) / 3
+        Q_mutual = (Q0 -   Q1) / 3
+
+    to the leakage resistance and inductance, giving a symmetric circulant matrix whose
+    positive- (and negative-) sequence eigenvalue is the positive-sequence value and
+    whose zero-sequence eigenvalue is the zero-sequence value. Device and dtype follow
+    ``r1``; differentiable in all four inputs.
+    """
+    eye = torch.eye(p, dtype=r1.dtype, device=r1.device)
+    off = torch.ones((p, p), dtype=r1.dtype, device=r1.device) - eye
+    r_self, r_mut = (r0 + 2.0 * r1) / 3.0, (r0 - r1) / 3.0
+    l_self, l_mut = (l0 + 2.0 * l1) / 3.0, (l0 - l1) / 3.0
+    return r_self * eye + r_mut * off, l_self * eye + l_mut * off
 
 
 # ---------------------------------------------------------------------------
@@ -454,19 +681,38 @@ def nominal_turns_ratio(vg: VectorGroup, u_from: Tensor, u_to: Tensor) -> Tensor
 def winding_leakage_block(y_se: Tensor, tau: Tensor, n_block: Tensor) -> Tensor:
     """Leakage nodal block ``Nᵀ·Y_winding·N`` ``[H, K, 2P, 2P]`` (complex).
 
-    ``y_se`` ``[H, K]`` is the leakage admittance referred to the TO-side coil;
-    ``tau`` ``[K]`` the coil turns ratio; ``n_block`` ``[2P, 2P]`` the (real,
+    ``y_se`` is the leakage admittance referred to the TO-side coil, either as a
+    per-unit-phase SCALAR ``[H, K]`` (one value on every phase, ``Z0 == Z1``) or as a
+    per-phase MATRIX ``[H, K, P, P]`` (the symmetric-component form built by
+    :func:`sequence_leakage_matrices`, so the zero sequence carries its own value).
+    ``tau`` ``[K]`` is the coil turns ratio; ``n_block`` ``[2P, 2P]`` the (real,
     constant) block incidence.
+
+    Both forms build the same winding primitive, with ``I_P`` replaced by the per-phase
+    admittance matrix::
+
+        Y_winding = [[ Y/tau^2 , -Y/tau ],
+                     [ -Y/tau  ,    Y   ]]
+
+    The incidence transform then distributes it over the bus rows, so a delta or zigzag
+    winding still blocks the zero sequence and a grounded-wye winding still carries it —
+    now with its own value.
     """
     p = n_block.shape[0] // 2
     cdt = y_se.dtype
     tau_c = tau.to(cdt)[None, :]  # [1,K]
-    a = y_se / (tau_c * tau_c)  # [H,K]  HV-HV
-    b = -(y_se / tau_c)  # [H,K]         HV-LV / LV-HV
-    d = y_se  # [H,K]                    LV-LV
-    eye = torch.eye(p, dtype=cdt, device=y_se.device)
-    top = torch.cat([a[..., None, None] * eye, b[..., None, None] * eye], dim=-1)
-    bot = torch.cat([b[..., None, None] * eye, d[..., None, None] * eye], dim=-1)
+    if y_se.dim() == 2:
+        eye = torch.eye(p, dtype=cdt, device=y_se.device)
+        y_mat = y_se[..., None, None] * eye  # [H,K,P,P]
+        tau_b = tau_c[..., None, None]  # [1,K,1,1]
+    else:
+        y_mat = y_se  # [H,K,P,P]
+        tau_b = tau_c[..., None, None]
+    a = y_mat / (tau_b * tau_b)  # HV-HV
+    b = -(y_mat / tau_b)  # HV-LV / LV-HV
+    d = y_mat  # LV-LV
+    top = torch.cat([a, b], dim=-1)
+    bot = torch.cat([b, d], dim=-1)
     y_w = torch.cat([top, bot], dim=-2)  # [H,K,2P,2P]
 
     nt = n_block.t().to(cdt)
@@ -480,6 +726,16 @@ __all__ = [
     "resolve_vector_group",
     "group_key",
     "block_incidence",
+    "harmonic_resistance_law",
+    "HARMONIC_RESISTANCE_LAWS",
+    "is_sequence_aware",
+    "MAGNETIZING_PLACEMENTS",
+    "magnetizing_blocks",
+    "magnetizing_placement",
     "nominal_turns_ratio",
+    "resistance_scales_with_order",
+    "sequence_leakage_matrices",
     "winding_leakage_block",
+    "zero_sequence_leakage",
+    "zero_sequence_leakage_ratios",
 ]

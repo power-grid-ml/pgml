@@ -42,35 +42,28 @@ Test strategy
 
 Two genuine modelling-topology differences (not converter bugs)
 -----------------------------------------------------------------
-**Magnetizing-branch split.** pgm's own ``calc_param_y_sym`` (``branch.hpp``)
+**Magnetizing-branch placement.** pgm's own ``calc_param_y_sym`` (``branch.hpp``)
 splits the (to-side-referred) magnetizing admittance HALF onto its ``Y_tt``
-and HALF (reflected through the tap) onto ``Y_ff``; pgml's frozen
-``assembly._transformer`` stamps the magnetizing shunt as a simple, undivided
-shunt at the FROM/HV terminal only (mirroring the pandapower/OpenDSS
-converters). The converter refers pgm's ``i0``/``p0`` to the HV terminal by the
-square nameplate ratio to match pgml's topology as closely as possible; the
-residual (documented empirically below) is a genuine consequence of the two
-different topologies, not a referral-formula bug -- confirmed by rerunning
-every sym case with ``i0=p0=0``, which recovers machine precision (see
-``TestSymOracle::test_no_magnetizing_branch_is_machine_precision``).
+and HALF (reflected through the tap) onto ``Y_ff``; pgml's SHIPPED DEFAULT
+(``transformer.magnetizing_placement = from_terminal``) stamps it as one
+undivided shunt at the FROM/HV terminal. The converter refers pgm's ``i0``/``p0``
+to the HV terminal by the square nameplate ratio, so the residual below is the
+placement alone: it vanishes either with ``i0=p0=0``
+(``TestSymOracle::test_no_magnetizing_branch_is_machine_precision``) or by
+selecting the matching placement
+(``TestSymOracle::test_split_magnetizing_placement_removes_the_residual``).
 
-**Zigzag zero-sequence VALUE.** power-grid-model hardcodes the zero-sequence
-self-impedance of a grounded zigzag (``zigzag_n``) winding as ``0.1 * Z1``
-(``transformer.hpp``: ``z0_series = (1/y_series)*0.1 + ...``, an empirical
-approximation of the true half-coil zero-sequence leakage). pgml's frozen
-``assembly._transformer`` instead stamps the grounded-zigzag zero-sequence self
-path at the FULL positive-sequence leakage, ``Z0 = Z1`` (see the module
-docstring of ``pgml.assembly._transformer``: "The path's value equals the
-positive-sequence leakage here; the true zero-sequence leakage of a zigzag ...
-is typically smaller"). Both tools agree that a zigzag winding BLOCKS
-zero-sequence TRANSFER (no ambiguity there -- confirmed machine-precision on
-the non-zigzag bus even under imbalance); only the zigzag winding's OWN
-zero-sequence self-admittance value differs, by very close to the expected
-10x (``Y0_pgm ≈ 10*Y0_pgml`` since ``0.1*Z1`` inverts to ``10/Z1``), producing a
-per-phase voltage divergence on the zigzag-side bus under an unbalanced load
-(quantified in ``TestAsymOracle::test_ynzn5_unbalanced_zigzag_zero_sequence_gap``).
-This is a definitional difference between the two tools' zero-sequence models,
-not a bug -- REPORTED, not hidden.
+**Zigzag zero-sequence VALUE (resolved).** power-grid-model hardcodes the
+zero-sequence self-impedance of a grounded zigzag (``zigzag_n``) winding as
+``0.1 * Z1`` (``transformer.hpp``: ``z0_series = (1/y_series)*0.1 + ...``, an
+empirical stand-in for the half-coil zero-sequence leakage of a grounding
+transformer). The converter now carries that factor into
+``Transformer.zero_sequence``, which the stamp consumes as the zero-sequence
+leakage VALUE on the topology-derived path, so the zigzag-side bus agrees with
+power-grid-model under imbalance instead of presenting ``Z0 = Z1`` (measured ratio
+of zero-sequence voltages 1.0 to 1.3e-11, against 10 before). Both tools always
+agreed that a zigzag winding BLOCKS zero-sequence TRANSFER; only the winding's own
+zero-sequence self-admittance differed.
 
 Tolerance targets
 ------------------
@@ -84,11 +77,10 @@ Tolerance targets
   ~2e-11 pu / 3e-9 deg.
 - Asym, unbalanced load, Dyn5 / YNyn0 (no zigzag): atol = 1e-6 pu / 1e-4 deg.
   Achieved ~3e-11 pu / 4e-9 deg.
-- Asym, unbalanced load, YNzn5 (grounded zigzag), zigzag-side bus ONLY: a
-  documented, bounded divergence (atol = 2e-2 pu / 2 deg) from the Z0 topology
-  difference above; achieved ~6.8e-3 pu / 0.45 deg for a ~25 %-unbalanced
-  load. The non-zigzag (source) bus stays at atol = 1e-6 pu / 1e-4 deg (no
-  zero-sequence transfer in either model).
+- Asym, unbalanced load, YNzn5 (grounded zigzag): atol = 1e-6 pu / 1e-4 deg on BOTH
+  buses now that the converter carries power-grid-model's ``0.1*Z1`` zigzag
+  zero-sequence value (previously a documented ~6.8e-3 pu gap on the zigzag-side
+  bus for a ~25 %-unbalanced load).
 """
 
 from __future__ import annotations
@@ -399,6 +391,44 @@ class TestSymOracle:
         assert vm_err < self.ATOL_VM_PU_NO_MAGNETIZING
         assert va_err < self.ATOL_VA_DEG_NO_MAGNETIZING
 
+    def test_split_magnetizing_placement_removes_the_residual(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """``transformer.magnetizing_placement="split"`` IS power-grid-model's topology.
+
+        Switching the documented placement from the shipped ``from_terminal`` to
+        ``split`` (half the shunt on each terminal, each referred to its own side) drops
+        the magnetizing residual below from ~1.5e-4 pu to the magnetizing-free tolerance
+        (1e-8 pu), which identifies the residual as the placement and nothing else.
+        """
+        import yaml
+
+        from pgml import defaults
+
+        input_data = _sym_input(
+            winding_from=WindingType.wye_n,
+            winding_to=WindingType.wye_n,
+            clock=0,
+            i0=0.005,
+            p0=1_000.0,
+        )
+        vm_from, va_from = _run_sym_case(input_data)
+        assert vm_from > 1.0e-5, "the from_terminal residual must be present"
+
+        data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+        data["transformer"]["magnetizing_placement"]["value"] = "split"
+        path = tmp_path / "split.yaml"
+        path.write_text(yaml.safe_dump(data))
+        monkeypatch.setenv("PGML_DEFAULTS", str(path))
+        try:
+            defaults.reload(str(path))
+            vm_split, va_split = _run_sym_case(input_data)
+        finally:
+            monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+            defaults.reload()
+        assert vm_split < self.ATOL_VM_PU_NO_MAGNETIZING
+        assert va_split < self.ATOL_VA_DEG_NO_MAGNETIZING
+
     def test_off_nominal_tap_from_side(self) -> None:
         input_data = _sym_input(
             winding_from=WindingType.wye_n,
@@ -564,39 +594,24 @@ class TestAsymOracle:
         assert max(e[0] for e in errors.values()) < self.ATOL_VM_PU
         assert max(e[1] for e in errors.values()) < self.ATOL_VA_DEG
 
-    def test_ynzn5_unbalanced_zigzag_zero_sequence_gap(self) -> None:
-        """Grounded zigzag: pgm Z0=0.1*Z1, pgml Z0=Z1 -- a documented, bounded gap.
+    def test_ynzn5_unbalanced_zigzag_zero_sequence(self) -> None:
+        """Grounded zigzag under imbalance: tight on BOTH buses.
 
-        No zero sequence crosses the zigzag winding in EITHER model (the
-        non-zigzag/source bus stays tight), but the zigzag-side bus's own
-        zero-sequence self-admittance differs by the ~10x factor pgm hardcodes
-        for a grounded zigzag (``transformer.hpp``: ``z0_series = Z1*0.1``).
+        No zero sequence crosses the zigzag winding in either model, and the zigzag
+        winding's own zero-sequence self-impedance now carries power-grid-model's
+        hardcoded ``0.1*Z1`` (``transformer.hpp``: ``z0_series = (1/y_series)*0.1``),
+        converted into ``Transformer.zero_sequence`` and consumed by the stamp — so the
+        zigzag-side bus is no longer a documented 10x gap.
         """
         input_data = _asym_input(
             winding_from=WindingType.wye_n, winding_to=WindingType.zigzag_n, clock=5
         )
         errors = _run_asym_case(input_data)
+        assert max(e[0] for e in errors.values()) < self.ATOL_VM_PU
+        assert max(e[1] for e in errors.values()) < self.ATOL_VA_DEG
 
-        source_errors = [
-            e for (node_id, _p), e in errors.items() if node_id == _NODE_HV
-        ]
-        assert max(e[0] for e in source_errors) < self.ATOL_VM_PU
-        assert max(e[1] for e in source_errors) < self.ATOL_VA_DEG
-
-        zigzag_errors = [
-            e for (node_id, _p), e in errors.items() if node_id == _NODE_LV
-        ]
-        max_vm_err = max(e[0] for e in zigzag_errors)
-        max_va_err = max(e[1] for e in zigzag_errors)
-        # The gap must actually be PRESENT (regression guard against a change
-        # that accidentally makes this tight, masking the definitional gap).
-        assert max_vm_err > 1.0e-4
-        # ... but bounded to a documented envelope (regression guard the other way).
-        assert max_vm_err < 2.0e-2
-        assert max_va_err < 2.0
-
-    def test_ynzn5_zero_sequence_ratio_near_ten(self) -> None:
-        """Quantifies the Z0 gap directly: |V0_pgml|/|V0_pgm| ~= 10 on the zigzag bus."""
+    def test_ynzn5_zero_sequence_matches_power_grid_model(self) -> None:
+        """Quantifies the zigzag Z0 directly: |V0_pgml|/|V0_pgm| == 1 on the zigzag bus."""
         input_data = _asym_input(
             winding_from=WindingType.wye_n, winding_to=WindingType.zigzag_n, clock=5
         )
@@ -638,7 +653,7 @@ class TestAsymOracle:
         )
 
         ratio = abs(v0_pgml) / abs(v0_pgm)
-        assert ratio == pytest.approx(10.0, rel=0.30)
+        assert ratio == pytest.approx(1.0, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

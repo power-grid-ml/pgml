@@ -20,6 +20,8 @@ only contains the source-specific field reading. It provides:
   values and log the one line naming what was applied.
 - :class:`ZeroSequenceDefaults` — tally of the lines whose zero-sequence data was
   invented from the configured ratios, warned once per converted grid.
+- :func:`source_zero_sequence_ratios` — the defaults-driven R0/R1, X0/X1 of a
+  source Thevenin, used when the dataset carries no zero-sequence source data.
 - Emit helpers — :func:`build_node`, :func:`build_load`, :func:`build_source`,
   :func:`build_line_from_sequence`, :func:`build_line_from_matrices` — the single
   place the :class:`PhaseMode` decision and the per-phase mapping live, so all three
@@ -32,6 +34,12 @@ When a positive-sequence (``r1``/``x1``/``c1``) line is expanded to a genuine
 carries no native zero-sequence data, the zero-sequence quantities default to
 ``r1 * (R0/R1)`` etc. using the ratios in ``pgml.defaults`` (``line.zero_sequence.*``).
 An explicit per-line ``r0``/``x0``/``c0`` always wins over these defaults.
+
+The same rule applies to a 3-phase :class:`~pgml.schemas.grid_schema.Source`: its
+Thevenin matrix is built from ``(R1, X1)`` and ``(R0, X0)`` through
+``Z_self = (Z0 + 2*Z1)/3``, ``Z_mutual = (Z0 - Z1)/3``, with
+``source.zero_sequence.{r0_over_r1, x0_over_x1}`` as the documented fallback and a
+WARNING naming the source whenever that fallback is used.
 """
 
 from __future__ import annotations
@@ -58,6 +66,8 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
     ZipCoefficients,
 )
+
+_logger = logging.getLogger(__name__)
 
 # Default abc phase tuple for an expanded three-phase node / branch.
 _ABC: tuple[Phase, ...] = (Phase.A, Phase.B, Phase.C)
@@ -233,6 +243,20 @@ def resolve_converted_line_models(
             requested,
             applied,
         )
+
+
+def source_zero_sequence_ratios() -> tuple[float, float]:
+    """Return ``(r0_over_r1, x0_over_x1)`` of a source Thevenin from ``pgml.defaults``.
+
+    The assumed zero/positive-sequence ratios used to synthesize a source's
+    zero-sequence impedance when it is expanded to a genuine 3-phase Thevenin and
+    the dataset carries no native zero-sequence data
+    (``source.zero_sequence.*``). Native data always wins.
+    """
+    return (
+        float(defaults.get("source.zero_sequence.r0_over_r1")),
+        float(defaults.get("source.zero_sequence.x0_over_x1")),
+    )
 
 
 def _circulant_3x3(self_val: float, mutual_val: float) -> list[list[float]]:
@@ -570,14 +594,30 @@ def build_source(
     l_h: float,
     name: Optional[str] = None,
     native_phases: Optional[tuple[Phase, ...]] = None,
+    r0_ohm: Optional[float] = None,
+    x0_ohm: Optional[float] = None,
+    two_pi_f0: Optional[float] = None,
+    element: Optional[str] = None,
 ) -> Source:
     """Build a :class:`~pgml.schemas.grid_schema.Source` (balanced Thevenin).
 
     Under :data:`PhaseMode.SINGLE_PHASE_EQUIV` the source is 1-phase
-    (``phases=(A,)``, scalar ``u_ref``/angle, 1x1 R/L). Under
-    :data:`PhaseMode.THREE_PHASE` it becomes a BALANCED 3-phase Thevenin: equal
-    magnitudes, angles ``u_angle_deg`` and ``-120`` / ``+120`` offsets, and a
-    diagonal per-phase R/L (positive-sequence value on every phase).
+    (``phases=(A,)``, scalar ``u_ref``/angle, 1x1 R/L) — a positive-sequence
+    equivalent has no zero sequence, so ``r0_ohm``/``x0_ohm`` are ignored there.
+    Under :data:`PhaseMode.THREE_PHASE` it becomes a BALANCED 3-phase Thevenin:
+    equal magnitudes, angles ``u_angle_deg`` and ``-120`` / ``+120`` offsets, and a
+    SEQUENCE-AWARE per-phase R/L matrix built from the positive- and
+    zero-sequence impedances through the symmetric-component identity
+    (:func:`sequence_to_phase_matrices`)::
+
+        Z_self   = (Z0 + 2*Z1) / 3
+        Z_mutual = (Z0 -   Z1) / 3
+
+    so the off-diagonal terms carry the difference between Z0 and Z1. With
+    ``Z0 == Z1`` the mutual term vanishes and the matrix is the plain diagonal
+    ``Z1`` stamp. The identity is applied to the A/B/C rows only; any further
+    conductor (an explicit ``Phase.N`` on a 4-wire source terminal) keeps the
+    positive-sequence value on its diagonal and no mutual coupling.
 
     Parameters
     ----------
@@ -589,10 +629,21 @@ def build_source(
         :data:`PhaseMode.SINGLE_PHASE_EQUIV` it is used directly (positive-sequence
         equivalent).
     r_ohm, l_h:
-        Per-phase Thevenin resistance [Ohm] and inductance [H] (placed on the
-        diagonal under three-phase).
+        Positive-sequence Thevenin resistance [Ohm] and inductance [H].
     native_phases:
         Source-native phase tuple under :data:`PhaseMode.THREE_PHASE`.
+    r0_ohm, x0_ohm:
+        Native zero-sequence resistance [Ohm] and reactance at ``f0`` [Ohm]. When
+        either is ``None`` it is synthesized from the positive-sequence value and
+        the documented ratio in :func:`source_zero_sequence_ratios`, and a WARNING
+        naming ``element`` (or the source id) and the ratio is logged — but only
+        under :data:`PhaseMode.THREE_PHASE`, where the zero sequence exists.
+    two_pi_f0:
+        ``2*pi*f0``, required to convert ``x0_ohm`` into the stored inductance
+        (``L0 = X0 / (2*pi*f0)``). Required whenever the zero-sequence path is
+        built (i.e. under :data:`PhaseMode.THREE_PHASE` with >= 3 phases).
+    element:
+        Source-library element name used in the fallback WARNING.
     """
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         return Source(
@@ -615,8 +666,16 @@ def build_source(
     # load model and the per-unit reporting use (see ``phase_voltage_magnitude``).
     u_ln = u_ref_v / math.sqrt(3.0) if n >= 3 else u_ref_v
     angles = tuple(u_angle_deg - 120.0 * i for i in range(n))
-    r_mat = [[r_ohm if i == j else 0.0 for j in range(n)] for i in range(n)]
-    l_mat = [[l_h if i == j else 0.0 for j in range(n)] for i in range(n)]
+    r_mat, l_mat = _source_impedance_matrices(
+        n=n,
+        phases=phases,
+        r_ohm=r_ohm,
+        l_h=l_h,
+        r0_ohm=r0_ohm,
+        x0_ohm=x0_ohm,
+        two_pi_f0=two_pi_f0,
+        element=element if element is not None else f"source {id}",
+    )
     return Source(
         id=id,
         name=name,
@@ -627,6 +686,78 @@ def build_source(
         resistance_ohm=r_mat,
         inductance_h=l_mat,
     )
+
+
+def _source_impedance_matrices(
+    *,
+    n: int,
+    phases: tuple[Phase, ...],
+    r_ohm: float,
+    l_h: float,
+    r0_ohm: Optional[float],
+    x0_ohm: Optional[float],
+    two_pi_f0: Optional[float],
+    element: str,
+) -> tuple[list[list[float]], list[list[float]]]:
+    """Per-phase (R, L) matrices of a 3-phase source Thevenin, zero-sequence aware.
+
+    Returns the plain diagonal positive-sequence stamp when fewer than three A/B/C
+    conductors are present (no zero sequence is defined for a 1- or 2-conductor
+    terminal); otherwise the symmetric-component self/mutual split over the A/B/C
+    rows, leaving any additional conductor (``Phase.N``) diagonal.
+    """
+    abc_idx = [k for k, ph in enumerate(phases) if ph in _ABC]
+    r_mat = [[r_ohm if i == j else 0.0 for j in range(n)] for i in range(n)]
+    l_mat = [[l_h if i == j else 0.0 for j in range(n)] for i in range(n)]
+    if len(abc_idx) != 3:
+        if r0_ohm is not None or x0_ohm is not None:
+            _logger.warning(
+                "%s: zero-sequence Thevenin data (R0/X0) is ignored — the source "
+                "terminal carries %d of the A/B/C conductors, and the symmetric-"
+                "component self/mutual split needs all three.",
+                element,
+                len(abc_idx),
+            )
+        return r_mat, l_mat
+
+    if two_pi_f0 is None or two_pi_f0 <= 0.0:
+        raise ValueError(
+            f"{element}: two_pi_f0 must be positive to build the zero-sequence "
+            "Thevenin matrix of a 3-phase source."
+        )
+    x_ohm = l_h * two_pi_f0
+    if r0_ohm is None or x0_ohm is None:
+        rr0, xr0 = source_zero_sequence_ratios()
+        r0_ohm = r_ohm * rr0 if r0_ohm is None else r0_ohm
+        x0_ohm = x_ohm * xr0 if x0_ohm is None else x0_ohm
+        _logger.warning(
+            "%s: no zero-sequence Thevenin data; assuming R0/R1 = %g and X0/X1 = %g "
+            "(pgml defaults `source.zero_sequence.*`). The zero-sequence source "
+            "impedance shapes triplen/residual voltage wherever zero-sequence "
+            "current reaches the source.",
+            element,
+            rr0,
+            xr0,
+        )
+
+    # Floor the zero-sequence pair exactly like the positive-sequence Thevenin
+    # (:func:`thevenin_from_z`): an all-zero Z0 would make the per-phase matrix
+    # singular in the zero sequence, and its inverse (the Norton stamp) undefined.
+    r0_ohm = max(r0_ohm, _FALLBACK_R)
+    x0_ohm = max(x0_ohm, two_pi_f0 * _FALLBACK_L)
+    if r0_ohm == r_ohm and x0_ohm == x_ohm:
+        # Z0 == Z1: the mutual term is exactly zero and the self term is exactly
+        # Z1, so keep the plain diagonal stamp unchanged (no round-trip through
+        # (Z0 + 2*Z1)/3, which would move the diagonal by one unit in the last place).
+        return r_mat, l_mat
+
+    r_self, r_mut = (r0_ohm + 2.0 * r_ohm) / 3.0, (r0_ohm - r_ohm) / 3.0
+    x_self, x_mut = (x0_ohm + 2.0 * x_ohm) / 3.0, (x0_ohm - x_ohm) / 3.0
+    for i in abc_idx:
+        for j in abc_idx:
+            r_mat[i][j] = r_self if i == j else r_mut
+            l_mat[i][j] = (x_self if i == j else x_mut) / two_pi_f0
+    return r_mat, l_mat
 
 
 def build_line_from_matrices(

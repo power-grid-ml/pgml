@@ -123,6 +123,7 @@ from pgml.schemas.grid_schema import (
     SourceConvention,
     Switch,
     Transformer,
+    TransformerZeroSeq,
     VoltVarControl,
     WindingConnection,
     ZipCoefficients,
@@ -593,6 +594,169 @@ def _opt_float(row: Any, column: str) -> Optional[float]:
     return None if math.isnan(f) else f
 
 
+def _ext_grid_zero_sequence(
+    row: Any, u_rated_v: float, pp_idx: Any
+) -> tuple[Optional[float], Optional[float]]:
+    """Zero-sequence ext_grid Thevenin ``(R0 [Ohm], X0 [Ohm] at f0)``, or ``(None, None)``.
+
+    pandapower's own unbalanced power flow (``runpp_3ph``) models the external grid
+    as an IDEAL positive-sequence slack plus a zero-sequence SHUNT at the slack bus
+    (``pandapower.pd2ppc_zero._add_ext_grid_sc_impedance_zero``)::
+
+        X1 = (U_LL^2 / S_sc) / sqrt(1 + rx_max^2)      (per-phase, c = 1 here)
+        X0 = x0x_max * X1
+        R0 = r0x0_max * X0
+
+    pgml keeps the POSITIVE-sequence Thevenin near-ideal for a pandapower ext_grid
+    (the same ideal slack pandapower's own power flow uses, balanced and
+    unbalanced) and carries the zero-sequence value as an absolute impedance, so
+    the converted source reproduces pandapower's zero-sequence boundary while the
+    positive sequence stays pinned at ``vm_pu``. pandapower multiplies its own
+    value by the IEC short-circuit voltage factor ``c = 1.1`` even in power-flow
+    mode; pgml stores the physical impedance (``c = 1``), so pandapower's internal
+    zero-sequence shunt is exactly 1.1x pgml's.
+
+    Returns ``(None, None)`` when the ext_grid carries no usable short-circuit data
+    (``s_sc_max_mva``/``rx_max``/``x0x_max`` missing or NaN — pandapower's own
+    defaults), which leaves the documented ``source.zero_sequence.*`` ratio
+    fallback (and its WARNING) in charge.
+    """
+    s_sc_mva = _opt_float(row, "s_sc_max_mva")
+    rx_max = _opt_float(row, "rx_max")
+    x0x_max = _opt_float(row, "x0x_max")
+    r0x0_max = _opt_float(row, "r0x0_max")
+    if s_sc_mva is None or rx_max is None or s_sc_mva <= 0.0:
+        if x0x_max is not None or r0x0_max is not None:
+            _logger.warning(
+                "pandapower ext_grid %s carries zero-sequence ratios "
+                "(x0x_max=%s, r0x0_max=%s) but no positive-sequence short-circuit "
+                "data (s_sc_max_mva / rx_max), so the absolute zero-sequence "
+                "source impedance cannot be derived; falling back to the "
+                "`source.zero_sequence.*` ratios on the near-ideal Thevenin.",
+                pp_idx,
+                x0x_max,
+                r0x0_max,
+            )
+        return None, None
+    if x0x_max is None and r0x0_max is None:
+        return None, None
+
+    z1 = (u_rated_v**2) / (s_sc_mva * 1.0e6)
+    x1 = z1 / math.sqrt(1.0 + rx_max**2)
+    x0 = (x0x_max if x0x_max is not None else 1.0) * x1
+    r0 = (r0x0_max if r0x0_max is not None else rx_max) * x0
+    return r0, x0
+
+
+#: Winding connections that give the zero sequence a path into the transformer
+#: (a solidly grounded star point on either side).
+_ZERO_SEQ_GROUNDED = (
+    WindingConnection.WYE_GROUNDED,
+    WindingConnection.ZIGZAG_GROUNDED,
+)
+
+
+def _transformer_zero_sequence(
+    row: Any,
+    *,
+    z_base_lv: float,
+    vkr_pct: float,
+    coil_factor: float,
+    parallel: float,
+    from_connection: WindingConnection,
+    to_connection: WindingConnection,
+    pp_idx: Any,
+    defaulted: list,
+) -> Optional[TransformerZeroSeq]:
+    """Zero-sequence leakage override from ``vk0_percent``/``vkr0_percent``.
+
+    pandapower stores the zero-sequence short-circuit voltage as a PER-UNIT value on
+    the transformer's own rating, so the ohmic value follows the same formula the
+    positive sequence uses (``Z0 = vk0% * Z_base_LV``, then the TO-side coil factor and
+    the ``parallel`` divide). Per-unit values are base-invariant, so it does not matter
+    that pandapower refers its own zero-sequence branch to the HV base for the ``YNd`` /
+    ``YNy`` groups.
+
+    pandapower's convention (``pd2ppc_zero._add_trafo_sc_impedance_zero``) treats a zero
+    or absent ``vk0_percent`` as "use the positive-sequence value", which is exactly
+    pgml's ``transformer.zero_sequence.*`` default, so such a row returns ``None``.
+
+    What pandapower models and pgml does not, each logged as a WARNING when set to a
+    value that would change the zero sequence:
+
+    - ``mag0_percent``/``mag0_rx`` — a finite zero-sequence MAGNETIZING impedance
+      (``Z_m0 = mag0_percent/100 * Z0``), the three-limb-core path through tank and air.
+      pgml's magnetizing branch is sequence-independent and sits on the HV terminal.
+    - ``si0_hv_partial`` — the HV/LV split of the zero-sequence leakage inside a T
+      model. pgml carries ONE series leakage per winding pair.
+    - ``xn_ohm``/``rn_ohm`` — a neutral earthing impedance (``3*Z_N`` in series with the
+      zero sequence). pgml stamps windings solidly grounded and rejects a finite
+      ``GroundingImpedance``.
+
+    A grounded pairing with no usable ``vk0_percent`` appends its index to ``defaulted``
+    instead of logging; :func:`_warn_defaulted_zero_sequence` reports the whole set once.
+    """
+    vk0 = _opt_float(row, "vk0_percent")
+    vkr0 = _opt_float(row, "vkr0_percent")
+    grounded = (
+        from_connection in _ZERO_SEQ_GROUNDED or to_connection in _ZERO_SEQ_GROUNDED
+    )
+
+    if grounded:
+        for column, what in (
+            ("mag0_percent", "a finite zero-sequence magnetizing impedance"),
+            ("si0_hv_partial", "an HV/LV split of the zero-sequence leakage"),
+            ("xn_ohm", "a neutral earthing reactance"),
+            ("rn_ohm", "a neutral earthing resistance"),
+        ):
+            value = _opt_float(row, column)
+            if value is not None and value != 0.0:
+                _logger.warning(
+                    "pandapower trafo %s sets %s=%g (%s), which pgml does not model: "
+                    "its zero sequence carries the leakage value only, on the "
+                    "topology-derived path, with a sequence-independent magnetizing "
+                    "branch at the HV terminal.",
+                    pp_idx,
+                    column,
+                    value,
+                    what,
+                )
+
+    if vk0 is None or vk0 <= 0.0:
+        if grounded:
+            # Collected and reported ONCE per conversion (see `warn_defaulted_zero_
+            # sequence`): a network of identical Dyn units would otherwise log the same
+            # sentence for every transformer.
+            defaulted.append(pp_idx)
+        return None
+
+    z0_ll = vk0 / 100.0 * z_base_lv
+    r0_ll = (vkr0 if vkr0 is not None else vkr_pct) / 100.0 * z_base_lv
+    x0_ll = math.sqrt(max(z0_ll**2 - r0_ll**2, 0.0))
+    return TransformerZeroSeq(
+        r0_ohm=coil_factor * r0_ll / parallel,
+        x0_ohm=coil_factor * x0_ll / parallel,
+    )
+
+
+def _warn_defaulted_zero_sequence(defaulted: list) -> None:
+    """Report the transformers whose zero-sequence leakage fell back to the defaults.
+
+    One WARNING per conversion, carrying the count and the pandapower indices, so a feeder
+    with many identical Dyn units does not repeat the same sentence per transformer.
+    """
+    if not defaulted:
+        return
+    _logger.warning(
+        "%d pandapower trafo(s) %s have a grounded-wye/zigzag winding (a zero-sequence "
+        "path) but no vk0_percent; their zero-sequence leakage assumes the documented "
+        "`transformer.zero_sequence.*` ratios (Z0 = Z1 by default). A three-limb core "
+        "YNyn unit typically has X0/X1 of 0.3-1.0.",
+        len(defaulted),
+        ", ".join(str(i) for i in defaulted),
+    )
+
+
 def _tap_ratio_magnitude(row: Any) -> float:
     """Off-nominal tap ratio from pandapower's ``tap_*`` columns (1.0 = no tap).
 
@@ -786,7 +950,7 @@ def to_grid(
     # with it).
     open_line_switches, open_trafo_switches = _open_switch_targets(net)
 
-    zero_sequence = ZeroSequenceDefaults()
+    zero_seq_lines = ZeroSequenceDefaults()
     branches: list = []
     for pp_idx, row in net.line.iterrows():
         if not bool(row.get("in_service", True)):
@@ -833,7 +997,7 @@ def to_grid(
         if c0 is not None:
             c0 *= parallel
         if phase_mode is PhaseMode.THREE_PHASE:
-            zero_sequence.note(r0=r0, x0=x0, c0=c0)
+            zero_seq_lines.note(r0=r0, x0=x0, c0=c0)
 
         branches.append(
             build_line_from_sequence(
@@ -919,6 +1083,7 @@ def to_grid(
     # precision with the factor applied, and are wrong by 3x without it --    #
     # see `tests/reference/test_pandapower_grid_matrix.py`.                   #
     # ------------------------------------------------------------------ #
+    zero_seq_defaulted: list = []
     if hasattr(net, "trafo") and len(net.trafo):
         for pp_idx, row in net.trafo.iterrows():
             if not bool(row.get("in_service", True)):
@@ -996,6 +1161,18 @@ def to_grid(
 
             tap_ratio = _tap_ratio_magnitude(row)
 
+            trafo_zero_seq = _transformer_zero_sequence(
+                row,
+                z_base_lv=z_base_lv,
+                vkr_pct=vkr_pct,
+                coil_factor=coil_factor,
+                parallel=parallel,
+                from_connection=from_connection,
+                to_connection=to_connection,
+                pp_idx=pp_idx,
+                defaulted=zero_seq_defaulted,
+            )
+
             tx_phases = phases_for(phase_mode)
             branches.append(
                 Transformer(
@@ -1014,12 +1191,15 @@ def to_grid(
                     series_inductance_h=l_sc,
                     magnetizing_conductance_s=g_m,
                     magnetizing_inductance_h=l_m,
+                    zero_sequence=trafo_zero_seq,
                     # Nominal ratio comes from u_rated + connections; `tap` is the
                     # off-nominal tap-changer ratio plus the vector-group clock angle.
                     tap=ComplexTap(ratio_magnitude=tap_ratio, shift_deg=shift_deg),
                     provenance=_PROVENANCE,
                 )
             )
+
+    _warn_defaulted_zero_sequence(zero_seq_defaulted)
 
     # ------------------------------------------------------------------ #
     # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).      #
@@ -1086,6 +1266,8 @@ def to_grid(
                 math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg))
             )
 
+        r0_ohm, x0_ohm = _ext_grid_zero_sequence(row, u_rated_v, pp_idx)
+
         appliances.append(
             build_source(
                 id=src_id,
@@ -1096,6 +1278,10 @@ def to_grid(
                 u_angle_deg=va_deg,
                 r_ohm=_TINY_R,
                 l_h=_TINY_L,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"pandapower ext_grid {pp_idx}",
             )
         )
 
@@ -1366,7 +1552,7 @@ def to_grid(
             description=description,
         ),
     )
-    zero_sequence.warn(_logger, tool="pandapower")
+    zero_seq_lines.warn(_logger, tool="pandapower")
     resolve_converted_line_models(
         grid, _logger, tool="pandapower", requested=harmonic_line_model
     )

@@ -164,12 +164,13 @@ pgml's public API from a downstream package.
 
 **What.** `solve_harmonic_flow` uses the pure current-source injection model
 (`include_load_shunt=False`, ≡ OpenDSS `NeglectLoadY=yes`); `include_load_shunt=True`
-raises (the OpenDSS shunt split is unpinned). Transformers scale leakage reactance ∝ h
-with constant R (no frequency-correction curve). The schema `HarmonicShuntModel` exists;
-the transformer carries an (unconsumed) `resistance_frequency` + `harmonic_xr_constant`.
+raises (the OpenDSS shunt split is unpinned). The schema `HarmonicShuntModel` exists and
+is unconsumed. The transformer side of this item is CLOSED: `resistance_frequency` and
+`harmonic_xr_constant` are consumed by the stamp (`R(f) = R · m(f) · (f/f0 if
+harmonic_xr_constant else 1)`, validated against OpenDSS's `XRConst`); what remains is
+that no eddy-current/stray-loss curve is SHIPPED, so the default is still R-constant.
 **How.** Implement the load Norton shunt from operating-point P,Q + the series/parallel
-R-L split; wire the transformer curve fields into its stamp; validate the resonance vs
-OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask first),
+R-L split; validate the resonance vs OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask first),
 `docs/pgml/modeling/references/opendss/harmonics.md`, `tests/reference`.
 
 ### D. Smaller follow-ups (no decision needed)
@@ -254,29 +255,57 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
 Each entry states what the simulator deliberately (or currently) does NOT capture, so
 results are never read as more physical than they are. Details live in `docs/pgml/modeling/`.
 
-- **A converted grid uses the naive harmonic line model unless applied explicitly.** The
-  configured default (`defaults.yaml` `line.harmonic_model.three_phase: sequence_aware`)
-  is BY DESIGN applied only by calling
-  `pgml.geometry.synthesis.apply_default_harmonic_model(grid)` (the yaml comment says so);
-  no solve entry point (`simulate`, `solve_harmonic_flow`, `assemble_ybus`) calls it
-  automatically. An R/X line with no tag and no `conductor_geometry` therefore assembles
-  with the naive R-constant/X∝h model at every harmonic order unless the applier was
-  called, which is easy to miss reading only the config value. Call
-  `apply_default_harmonic_model(grid)` (or `apply_positive_sequence_harmonic_model` /
-  `apply_sequence_aware_harmonic_model`) on a converted grid before a harmonic solve if
-  the corrected model is intended — see `docs/pgml/modeling/harmonic-line-model.md`.
-- **Transformer, frequency dependence.** Leakage X ∝ h with CONSTANT winding resistance
-  (curve fields unconsumed — item C). No saturation/inrush (steady-state tool). The
-  magnetizing branch sits at the EXTERNAL HV terminal vs OpenDSS's internal "T" — ~1e-3 pu
-  on a live comparison (`docs/pgml/modeling/transformer.md`).
+- **Transformer, frequency dependence.** `R(f) = R · m(f) · (f/f0 if
+  harmonic_xr_constant else 1)`: the default is OpenDSS's `XRConst=No` (X ∝ h at constant
+  R, so X/R grows with the order), and `harmonic_xr_constant=True` holds X/R constant
+  (validated against OpenDSS's own `Yprim` at h = 1, 5, 13 to 1.25e-6 S, the residual
+  being OpenDSS's anti-float shunt). `resistance_frequency` accepts a constant, the
+  Carson skin law or a sampled curve, the same multiplier the line path uses. No
+  eddy-current/stray-loss curve is shipped as a default, and no saturation/inrush
+  (steady-state tool).
+- **Transformer, magnetizing placement.** A documented modeling choice,
+  `transformer.magnetizing_placement`: `from_terminal` (shipped default — the HV/from
+  phase diagonal, so core loss is independent of loading), `to_terminal` (OpenDSS's own
+  placement: it attaches the whole branch to its LAST winding's terminal, verified on a
+  live `Yprim` difference) or `split` (power-grid-model's: half on each terminal). Measured
+  against a live OpenDSS solve on a 500 kVA 20/0.4 kV unit (Dyn and YNyn, 0-500 kW load):
+  `to_terminal` agrees to 3e-10…2e-9 pu, while the `from_terminal` default deviates by
+  9.2e-5 pu at i0 = 0.1 %, 2.2e-4 pu at 0.5 % and 8.2e-4 pu at 2 %, and `split` by half of
+  that. `split` reproduces power-grid-model to machine precision
+  (`tests/reference/test_opendss_magnetizing_placement.py`,
+  `tests/reference/test_pgm_transformer.py`). No zero-sequence-specific magnetizing branch
+  exists for any placement.
 - **Transformer, construction.** All winding pairings except zigzag-zigzag, at every clock
-  of the pairing's parity; non-solid neutral grounding raises (fail loud); zigzag Z0 uses
-  the positive-sequence leakage VALUE (`docs/pgml/modeling/transformer.md`).
+  of the pairing's parity; non-solid neutral grounding raises (fail loud). The ZIGZAG
+  limb-domain incidence is EXPERIMENTAL: it reproduces the clock shift, the blocked
+  zero-sequence transfer and the winding's own zero-sequence path, and agrees with
+  power-grid-model on an unbalanced solve once the zero-sequence VALUE is carried, but no
+  second reference tool can express the same unit as one two-winding element. Constructing
+  one logs a WARNING once per process. The
+  zero-sequence leakage VALUE is `Transformer.zero_sequence` when set (read from
+  pandapower's `vk0_percent`/`vkr0_percent`), else the documented
+  `transformer.zero_sequence.*` ratios (1.0 = Z0 = Z1, which is what OpenDSS and
+  power-grid-model imply since neither has a zero-sequence leakage input). What is NOT
+  modelled: a zero-sequence MAGNETIZING branch (pandapower `mag0_percent`/`mag0_rx`,
+  power-grid-model `i0_zero_sequence`/`p0_zero_sequence` — the three-limb-core path
+  through tank and air), the HV/LV split of the zero-sequence leakage inside a T
+  (pandapower `si0_hv_partial`), and a neutral earthing impedance (`3*Z_N`; pandapower
+  `xn_ohm`/`rn_ohm`, OpenDSS `Rneut`/`Xneut`). Each is named in a converter WARNING (or
+  refused) rather than silently dropped.
 - **Load harmonic behaviour.** Pure current-source injection (≡ `NeglectLoadY=yes`); the
   frequency-dependent load Norton shunt (damping near resonances) raises when requested
   (item C). Resonance magnitudes are conservative (undamped) at load-heavy buses.
-- **Sources.** Zero-sequence source impedance = positive-sequence value (no converter
-  reads `r0x0_max`/`z01_ratio`) — `docs/pgml/modeling/conventions.md` §6.
+- **Sources.** The per-phase Thevenin is sequence-aware: converters read the native
+  zero-sequence data (OpenDSS `Vsource.R0`/`X0`, power-grid-model `source.z01_ratio`,
+  pandapower `ext_grid.x0x_max`/`r0x0_max` with `s_sc_max_mva`/`rx_max`) into the
+  symmetric-component self/mutual split; without it the documented
+  `source.zero_sequence.*` ratios apply (1.0 = Z0 = Z1) and a WARNING names the element.
+  NEGATIVE sequence is always `Z2 = Z1` (a passive upstream network); a rotating-machine
+  source with `Z2 != Z1` would need the third circulant entry. pandapower's own
+  `runpp_3ph` instead pins the positive sequence and puts the short-circuit impedance in
+  the negative-sequence network, and scales its zero-sequence shunt by the IEC factor
+  `c = 1.1` — both differences are quantified in
+  `tests/reference/test_pandapower_source_zero_sequence.py`.
 - **PV (voltage-regulating) buses.** There is no PV-bus appliance: a bus whose voltage
   MAGNITUDE is regulated with reactive power free (pandapower `net.gen`, OpenDSS
   `Generator model=3`) needs a mixed residual row pair `[P-balance; |V|² − V_set²]` in

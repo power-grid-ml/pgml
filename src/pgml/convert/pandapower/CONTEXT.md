@@ -393,13 +393,42 @@ rule, droop physics) and `tests/reference/test_pandapower_gen_volt_var.py` (live
   admittance is dropped along with the element, unlike pandapower's own
   auxiliary-bus model. Not a silent gap (`_open_switch_targets` is unconditional,
   applied to every network), but not full fidelity either.
+- trafo ZERO-SEQUENCE leakage IS read: `vk0_percent`/`vkr0_percent` become
+  `Transformer.zero_sequence` (per-unit values are base-invariant, so the same
+  `Z = vk0% · Z_base_LV` formula the positive sequence uses applies, including the
+  TO-side delta coil factor and the `parallel` divide). A zero or absent `vk0_percent` is
+  pandapower's own "use the positive-sequence value", which is pgml's
+  `transformer.zero_sequence.*` default; the grounded-wye/zigzag units that fall back are
+  reported in ONE WARNING per conversion carrying the count and their indices
+  (`_warn_defaulted_zero_sequence`). NOT modelled, each named in a WARNING when set: `mag0_percent`/`mag0_rx`
+  (a finite zero-sequence MAGNETIZING impedance — the three-limb-core path through tank
+  and air), `si0_hv_partial` (the HV/LV split of the zero-sequence leakage inside a T) and
+  `xn_ohm`/`rn_ohm` (a neutral earthing impedance, `3·Z_N` in series).
 - `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
   `asymmetric_sgen`: not converted (`warn_dropped_elements`).
-- ext_grid zero/negative-sequence source impedance (`r0x0_max`/`x0x_max`) is not
-  read; the `Source`'s zero-sequence impedance equals its positive-sequence value.
-  Irrelevant to `slack="ideal"` solves (the slack fixes the exact 3-phase phasor
-  set regardless of any Thevenin impedance) but relevant if a `norton`-mode slack
-  or a short-circuit study is ever added.
+- ext_grid NEGATIVE-sequence source impedance is not represented separately: the
+  converted `Source` is one physical Thevenin with `Z2 = Z1` (a passive upstream
+  network), whereas pandapower's own `runpp_3ph` pins the positive sequence as an
+  ideal slack and puts its short-circuit impedance in the NEGATIVE-sequence network
+  only. The converter follows pandapower's positive-sequence behaviour (near-ideal
+  `Z1 = 1e-6` Ohm), so the negative-sequence boundary differs by that
+  short-circuit impedance — negligible for a stiff feed, visible on a weak one
+  (measured 5e-6 pu on the 2-bus case of
+  `tests/reference/test_pandapower_source_zero_sequence.py` at `s_sc_max_mva = 1000`).
+- ext_grid ZERO-sequence source impedance IS read: `x0x_max`/`r0x0_max` together
+  with `s_sc_max_mva`/`rx_max` give `X0 = x0x_max * X1`, `R0 = r0x0_max * X0` with
+  `X1 = (U_LL^2/S_sc)/sqrt(1+rx_max^2)`, carried into the `Source`'s per-phase
+  matrix through `Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`
+  (`_ext_grid_zero_sequence`). pandapower multiplies its OWN zero-sequence shunt by
+  the IEC voltage factor `c = 1.1` even in power-flow mode
+  (`pd2ppc_zero._add_ext_grid_sc_impedance_zero`); pgml stores the physical
+  impedance (`c = 1`), so pandapower's internal value is exactly 1.1x pgml's
+  (asserted in the oracle test). Without the short-circuit columns (pandapower's
+  own default: NaN) the documented `source.zero_sequence.*` ratios apply and a
+  WARNING names the ext_grid. Irrelevant to `slack="ideal"` solves (the slack fixes
+  the exact 3-phase phasor set regardless of any Thevenin impedance); it shapes
+  `slack="norton"` solves and every harmonic order, where the source is a Norton
+  shunt.
 - An ideal phase-shifter tap (`tap_step_degree` nonzero, or `tap_phase_shifter`
   True) is not modelled and raises `ConversionError`.
 

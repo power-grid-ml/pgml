@@ -287,11 +287,12 @@ verified empirically). New orchestration:
      `|I_h|=(mag_h/mag_1)|I1|`, `arg(I_h)=ang_h + h·(arg(I1) − ang_1)` from each
      device's `Spectrum` (or the `harmonic_injection` override).
    - `V(h) = solve_harmonic(Y(h), I(h))` in NORTON mode (no ideal slack at
-     harmonics: the source is a Norton shunt held at 0 harmonic voltage. The
-     persisted `Source.spectrum` schema field is not consumed here or anywhere in
-     assembly/solver; an upstream harmonic voltage/current at a node is only
-     injected via the separate, non-persisted `node_sources` argument
-     (`NodeHarmonicSource`), not by setting `Source.spectrum` on the grid).
+     harmonics: the source contributes ONLY its Norton shunt `Y_s(h)`, i.e. its own
+     harmonic EMF is zero). Upstream / background distortion is an OPERATING-POINT
+     quantity, not grid data: supply it per solve as a `NodeHarmonicSource` at the
+     source's node (`kind="voltage"` = a Thevenin EMF behind that same shunt), which
+     `pgml.scenarios`' `BackgroundHarmonicConfig` realizes reproducibly
+     (`build_background_sources`). A `Source` has no `spectrum` field.
 3. Stack order 1 (from PF) + harmonics into `v [*batch, H, N]`.
 
 ### `harmonic_injection` override (scenario-ready, tensor-friendly, per-element)

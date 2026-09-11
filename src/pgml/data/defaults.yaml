@@ -249,8 +249,114 @@ transformer:
         For a transformer with explicit connections the clock is read from tap.shift_deg
         (rounded to the nearest 30 deg) instead.
 
+  # How the WINDING RESISTANCE of a transformer behaves with frequency. The leakage
+  # reactance always scales with the order (X(h) = 2*pi*h*f0*L); this selects what R does.
+  # OpenDSS calls the choice `XRConst` per transformer; pandapower and power-grid-model
+  # have no frequency-dependent winding resistance at all (their R is always constant).
+  # `element` (the default) follows each Transformer's OWN `harmonic_xr_constant` field
+  # (which the OpenDSS converter fills from `XRConst`), so the per-element value wins as
+  # everywhere else; the two other values force one law on every transformer, for a study
+  # that wants the bound either way.
+  harmonic_resistance:
+    law:
+      value: element
+      units: "enum{element, constant, xr_constant}"
+      description: >
+        `element` = per-transformer `harmonic_xr_constant` (False = R constant, True = R
+        scales with the order so X/R stays constant); `constant` = force R constant on
+        every transformer (OpenDSS's `XRConst=No`, the conservative default of every
+        reference tool: transformer damping at high orders is then UNDERSTATED because no
+        eddy-current/stray-loss rise is modelled); `xr_constant` = force R proportional to
+        the order on every transformer (OpenDSS's `XRConst=Yes`). A
+        `Transformer.resistance_frequency` multiplier curve (skin effect / a measured
+        frequency correction) multiplies on top of whichever law applies.
+
+  # WHERE the magnetizing (core) shunt y_m = G_m + jB_m is attached. The schema stores it
+  # referred to the HV/from side; the three reference engines attach it in three different
+  # places, which is a genuinely different topology (not a referral difference): the
+  # magnetizing current either does or does not see the leakage drop of a winding.
+  #   - OpenDSS attaches the whole branch to the LAST winding's terminal (winding 2, i.e.
+  #     the to/LV side for a standard import), on that winding's base. Verified on a live
+  #     `Yprim`: the magnetizing contribution appears ONLY in the winding-2 diagonal.
+  #   - power-grid-model splits it half onto its `Y_tt` (to side) and half (through the
+  #     tap) onto `Y_ff` (from side).
+  #   - pandapower keeps it on the LV base inside its pi shunt.
+  # `from_terminal` (the default) is the conservative choice for a study driven from the HV
+  # side: core loss is then independent of loading. Pick `to_terminal` to reproduce an
+  # OpenDSS circuit exactly, or `split` to reproduce power-grid-model.
+  magnetizing_placement:
+    value: from_terminal
+    units: "enum{from_terminal, to_terminal, split}"
+    description: >
+      Terminal the magnetizing shunt is stamped on: `from_terminal` = the HV/from phase
+      diagonal (default), `to_terminal` = the LV/to diagonal with the branch referred
+      through the squared rated-voltage ratio (OpenDSS's own placement), `split` = half on
+      each terminal, each referred to its own side (power-grid-model's placement). The
+      VALUE is always `magnetizing_conductance_s`/`magnetizing_inductance_h` as stored,
+      i.e. referred to the from side. Typical residual between the choices: ~2e-4 pu of the
+      transformer admittance at a realistic 0.5 % magnetizing current.
+
+  # Zero-sequence leakage VALUE of a two-winding transformer whose `zero_sequence`
+  # override is not set. The zero-sequence PATH always comes from the winding
+  # connections + clock (a delta or zigzag winding blocks it); these ratios set only the
+  # VALUE carried on that path, through the same symmetric-component identity the line
+  # and source paths use: Z_self=(Z0+2*Z1)/3, Z_mutual=(Z0-Z1)/3 on the winding leakage
+  # admittance. An explicit `Transformer.zero_sequence` always wins. Converting a source
+  # that DOES supply zero-sequence data (pandapower `vk0_percent`/`vkr0_percent`) reads
+  # it instead; a grounded-wye pairing that falls back to these ratios logs a WARNING.
+  zero_sequence:
+    r0_over_r1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed R0/R1 of the leakage impedance when a transformer carries no explicit
+        `zero_sequence` override. 1.0 (Z0 = Z1) is what OpenDSS's and power-grid-model's
+        two-winding transformer models imply -- neither has a zero-sequence leakage
+        input, so their zero sequence sees the positive-sequence winding impedance
+        through the winding topology.
+    x0_over_x1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed X0/X1 of the leakage impedance when a transformer carries no explicit
+        `zero_sequence` override (1.0 = Z0 = Z1). A THREE-LIMB core YNyn unit has
+        X0/X1 ~ 0.3-1.0 (the zero-sequence flux closes through tank and air, not the
+        core); a five-limb or shell-type unit is close to 1.0. A zigzag grounding
+        transformer has X0/X1 well below 1 by design.
+
 # Upstream-grid (slack Source) modeling.
 source:
+  # Assumed zero-sequence/positive-sequence ratios of the Source's Thevenin impedance,
+  # used ONLY when a source is expanded to a genuine 3-phase (abc) Thevenin and the
+  # dataset carries no native zero-sequence data (pandapower `ext_grid.x0x_max` /
+  # `r0x0_max`, power-grid-model `source.z01_ratio`, OpenDSS `Vsource.R0`/`X0`). The
+  # per-phase matrix follows the same symmetric-component identity the line path uses:
+  # Z_self=(Z0+2*Z1)/3, Z_mutual=(Z0-Z1)/3. Native data always wins; falling back to
+  # these ratios logs a WARNING naming the source. The zero-sequence source impedance
+  # only matters where zero-sequence current can actually reach the source (a 4-wire
+  # feeder fed directly by the source, or a grounded-wye HV winding between them); a
+  # delta HV winding blocks it.
+  zero_sequence:
+    r0_over_r1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed R0/R1 of the source Thevenin when the dataset has no zero-sequence data.
+        1.0 (Z0 = Z1) is the value power-grid-model (`z01_ratio`) and pandapower
+        (`x0x_max`) themselves default to, i.e. the assumption of a solidly grounded
+        upstream network. A network whose zero-sequence path runs through an additional
+        transformer or an impedance-earthed neutral has R0/R1 > 1 -- set the native field
+        (or raise this ratio) for a study where triplen/residual current reaches the
+        source.
+    x0_over_x1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed X0/X1 of the source Thevenin when the dataset has no zero-sequence data
+        (1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). X0/X1
+        of a real feeding network ranges from ~1 (solidly grounded, close ground source)
+        to >10 (remote or impedance-earthed ground source).
+
   # Finite series (short-circuit) impedance for a Source whose converter gave a
   # near-ideal value (e.g. the stock pandapower CIGRE LV ext-grid -> R~1e-6 Ohm, which
   # short-circuits the bus at harmonics). Builders like cigre_lv_full_grid apply this so

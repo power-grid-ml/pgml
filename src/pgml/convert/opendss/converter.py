@@ -522,6 +522,23 @@ def to_grid(
             wdg_pct_r.append(float(dss.Transformers.R()))
             wdg_tap.append(float(dss.Transformers.Tap()))
             wdg_is_delta.append(bool(dss.Transformers.IsDelta()))
+            # A per-winding neutral earthing impedance puts 3*Z_N in series with the
+            # zero sequence. pgml stamps windings SOLIDLY grounded (its assembly
+            # rejects a finite GroundingImpedance), so converting this silently would
+            # understate the zero-sequence impedance of exactly the path the winding
+            # topology opens. DSS defaults are `Rneut = -1` ("not set") and
+            # `Xneut = 0`; an explicit `Rneut = 0` is solid grounding and converts.
+            r_neut = float(dss.Transformers.Rneut())
+            x_neut = float(dss.Transformers.Xneut())
+            if r_neut > 0.0 or x_neut != 0.0:
+                raise ConversionError(
+                    f"OpenDSS transformer '{trafo_name}' winding {w} has a neutral "
+                    f"earthing impedance (Rneut={r_neut:g} Ohm, Xneut={x_neut:g} "
+                    "Ohm); pgml stamps transformer windings solidly grounded, so "
+                    "this would silently drop 3*Z_N from the zero-sequence path. "
+                    "Remove Rneut/Xneut (or set Rneut=0 Xneut=0 for a solidly "
+                    "grounded neutral)."
+                )
         xhl_pct = float(dss.Transformers.Xhl())
 
         dss.Text.Command(f"? Transformer.{trafo_name}.%noloadloss")
@@ -559,19 +576,22 @@ def to_grid(
         x_lv_ohm = x_ll_ohm * _lv_coil_factor
         l_lv_h = x_lv_ohm / two_pi_f0
 
-        # Magnetizing shunt referred to the HV terminal (same derivation the
-        # pandapower converter uses for pfe_kw/i0_percent -> G_m/B_m).
+        # Magnetizing shunt, referred to the HV/from terminal (the schema's
+        # convention). OpenDSS's two percentages are the REAL and IMAGINARY parts of
+        # the core admittance separately, each in percent of the winding's base
+        # admittance: `%noloadloss` -> G, `%imag` -> B. They are NOT a loss plus a
+        # TOTAL no-load current (pandapower's `pfe_kw` + `i0_percent` convention,
+        # where B = sqrt(I0^2 - G^2)), so no Pythagorean subtraction applies here.
+        # Verified on a live `Yprim` difference (magnetizing on minus off): the
+        # contribution is exactly `(%noloadloss + j*(-%imag))/100 * S/u^2` at the
+        # LAST winding's terminal, for `%imag` above AND below `%noloadloss`.
         pfe_w = noloadloss_pct / 100.0 * s_rated_va
         g_m = pfe_w / (u_rated_from_v**2) if pfe_w > 0.0 else 0.0
         l_m: Optional[float] = None
         if imag_pct > 0.0:
-            i0_amp = imag_pct / 100.0 * s_rated_va / u_rated_from_v
-            s_nl = u_rated_from_v * i0_amp
-            q_nl_sq = s_nl**2 - pfe_w**2
-            if q_nl_sq > 0.0:
-                b_m = math.sqrt(q_nl_sq) / (u_rated_from_v**2)
-                if b_m > 0.0:
-                    l_m = 1.0 / (two_pi_f0 * b_m)
+            b_m = imag_pct / 100.0 * s_rated_va / (u_rated_from_v**2)
+            if b_m > 0.0:
+                l_m = 1.0 / (two_pi_f0 * b_m)
 
         from_bus_name, from_phase_list, from_grounded, from_rotation = (
             _parse_transformer_winding_bus(bus_names_raw[0], n_phases)
@@ -710,14 +730,21 @@ def to_grid(
             ret = dss.Vsources.Next()
             continue
 
-        # Read R1/X1 via text command (Vsources API doesn't expose them directly)
-        dss.Text.Command(f"? Vsource.{vsrc_name}.r1")
-        r1_str = dss.Text.Result().strip()
-        dss.Text.Command(f"? Vsource.{vsrc_name}.x1")
-        x1_str = dss.Text.Result().strip()
+        # Read R1/X1/R0/X0 via text command (the Vsources API doesn't expose them
+        # directly). A DSS Vsource always carries all four: they are derived from
+        # `MVAsc3`/`MVAsc1`/`X1R1`/`X0R0` (or set explicitly, or via `Z1`/`Z0`/
+        # `puZ1`/`puZ0`), and the element's own Yprim is built from the
+        # symmetric-component identity Zs=(Z0+2*Z1)/3, Zm=(Z0-Z1)/3 -- exactly the
+        # identity `build_source` applies, so the per-phase matrix transfers 1:1.
+        def _vsource_ohm(prop: str) -> float:
+            dss.Text.Command(f"? Vsource.{vsrc_name}.{prop}")
+            raw = dss.Text.Result().strip()
+            return float(raw) if raw else 0.0
 
-        r1_ohm = float(r1_str) if r1_str else 0.0
-        x1_ohm = float(x1_str) if x1_str else 0.0
+        r1_ohm = _vsource_ohm("r1")
+        x1_ohm = _vsource_ohm("x1")
+        r0_ohm = _vsource_ohm("r0")
+        x0_ohm = _vsource_ohm("x0")
         r_s, l_s = thevenin_from_z(r1_ohm, x1_ohm, two_pi_f0)
 
         # A non-negligible Thevenin impedance is silently UNUSED under the
@@ -773,6 +800,10 @@ def to_grid(
                 r_ohm=r_s,
                 l_h=l_s,
                 native_phases=native_src_phases,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"OpenDSS Vsource '{vsrc_name}'",
             )
         )
 

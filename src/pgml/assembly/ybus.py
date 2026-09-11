@@ -58,9 +58,16 @@ from ._incidence import (
 from ._transformer import (
     block_incidence,
     group_key as _xfmr_group_key,
+    harmonic_resistance_law,
+    is_sequence_aware as _xfmr_is_sequence_aware,
+    magnetizing_blocks,
+    magnetizing_placement,
+    resistance_scales_with_order,
     nominal_turns_ratio,
     resolve_vector_group,
+    sequence_leakage_matrices,
     winding_leakage_block,
+    zero_sequence_leakage,
 )
 from ._params import (
     const_z_shunt_admittance,
@@ -1378,13 +1385,40 @@ def _transformer_block_groups(
     so ``tap.ratio_magnitude`` is the OFF-NOMINAL tap only. See
     :mod:`pgml.assembly._transformer` for the full derivation.
 
-    - Leakage admittance ``y_se = (R + jX(f))^-1`` (scalar per phase, X(f)=2πfL),
-      referred to the TO-side (LV) coil, carried through the incidence transform.
-    - Magnetizing shunt ``y_m = G_m + jB_m`` added to the HV terminal phase
-      diagonal directly (referred to the HV line voltage).
+    - Leakage admittance ``y_se = (R + jX(f))^-1`` (X(f)=2πfL), referred to the
+      TO-side (LV) coil, carried through the incidence transform. A 3-phase unit whose
+      ZERO-sequence leakage differs from its positive-sequence one (an explicit
+      ``Transformer.zero_sequence``, or a non-unit ``transformer.zero_sequence.*``
+      default) carries a per-phase leakage MATRIX instead of a scalar: the
+      symmetric-component split ``Z_self=(Z0+2·Z1)/3``, ``Z_mutual=(Z0−Z1)/3``
+      (:func:`pgml.assembly._transformer.sequence_leakage_matrices`). The zero-sequence
+      PATH still comes from the winding topology — a delta or zigzag winding blocks it
+      whatever the value is — so a YNyn three-limb core and a grounding zigzag now carry
+      their true Z0, while ``Z0 == Z1`` keeps the scalar stamp (with the matrix form
+      reproducing it to 3e-16 relative, measured on a YNyn unit).
+    - Winding-resistance frequency law: ``R(f) = R · m(f) · (f/f0 if
+      harmonic_xr_constant else 1)``. ``m(f)`` is the shared
+      :class:`~pgml.schemas.grid_schema.ResistanceFrequencyModel` multiplier (constant,
+      the Carson skin law, or a sampled curve — the same helper the line path uses);
+      ``harmonic_xr_constant`` is OpenDSS's ``XRConst``, which holds X/R constant with
+      frequency by scaling R with the order. Which transformers follow it is the
+      documented ``transformer.harmonic_resistance.law`` choice (``element`` = the
+      per-transformer flag, the default; ``constant`` / ``xr_constant`` force one law).
+      Both default to no change (``m = 1``, ``XRConst = No``), i.e. X ∝ h at fixed R.
+    - Magnetizing shunt ``y_m = G_m + jB_m`` added to a TERMINAL phase diagonal
+      directly (outside the incidence transform), referred to the HV line voltage as
+      stored. The terminal is the documented modeling choice
+      ``transformer.magnetizing_placement``: ``from_terminal`` (default, the HV
+      diagonal), ``to_terminal`` (the LV diagonal through the squared rated-voltage
+      ratio — OpenDSS's own placement) or ``split`` (half on each —
+      power-grid-model's). The three are different topologies: they differ in whether
+      the magnetizing current sees a winding's leakage drop.
 
-    Differentiable w.r.t. series R, L and the off-nominal tap magnitude; the
-    discrete vector-group connections / clock select the constant incidence ``N``.
+    Differentiable w.r.t. series R, L, the zero-sequence R0/L0 and the off-nominal tap
+    magnitude; the discrete vector-group connections / clock select the constant
+    incidence ``N``. ``param_overrides`` keys: ``("transformer", id,
+    "series_resistance_ohm" | "series_inductance_h" | "tap_magnitude" |
+    "zero_sequence_resistance_ohm" | "zero_sequence_inductance_h")``.
 
     Shared primitive builder for the Y-bus stamp (which scatters each block) and
     :func:`branch_currents` (which multiplies it with the terminal voltage). The
@@ -1402,16 +1436,21 @@ def _transformer_block_groups(
     by_key: dict[tuple, list] = {}
     vgs: dict[int, object] = {}
     for t in xfmrs:
-        vg = resolve_vector_group(t, n_phases=len(t.from_phases))
+        p_t = len(t.from_phases)
+        vg = resolve_vector_group(t, n_phases=p_t)
         vgs[id(t)] = vg
-        by_key.setdefault(_xfmr_group_key(vg, len(t.from_phases)), []).append(t)
+        key = _xfmr_group_key(vg, p_t, _xfmr_is_sequence_aware(t, p_t))
+        by_key.setdefault(key, []).append(t)
 
     two_pi_f = (2.0 * torch.pi) * f  # [H]
-    for (_fk, _tk, _clock, p), group in by_key.items():
+    two_pi_f0 = 2.0 * torch.pi * float(grid.base_frequency_hz)
+    placement = magnetizing_placement()
+    resistance_law = harmonic_resistance_law()
+    for (_fk, _tk, _clock, p, sequence_aware), group in by_key.items():
         vg0 = vgs[id(group[0])]
-        eye_p = torch.eye(p, dtype=cdt, device=device)
 
-        yse_list, ratio_list, ym_list = [], [], []
+        yse_list, ratio_list, ym_list, nline_list = [], [], [], []
+        zr_list, zl_list, rmult_list = [], [], []  # sequence-aware matrix path
         for t in group:
             vg = vgs[id(t)]
             r = _override(
@@ -1424,9 +1463,37 @@ def _transformer_block_groups(
                 ("transformer", t.id, "series_inductance_h"),
                 torch.as_tensor(t.series_inductance_h, dtype=rdt, device=device),
             )
-            x = two_pi_f * ell  # [H]
-            z = torch.complex(r.to(rdt).expand_as(x), x.to(rdt)).to(cdt)  # [H]
-            yse_list.append(1.0 / z)  # [H]
+            # Winding-resistance frequency law (the same `ResistanceFrequencyModel`
+            # multiplier the line path uses) times the OpenDSS `XRConst` law: with
+            # `harmonic_xr_constant` the resistance scales with the order so X/R stays
+            # constant, instead of X growing with h at fixed R.
+            rmult = _resistance_multiplier(t, f, rdt, device)  # [H]
+            if resistance_scales_with_order(t, resistance_law):
+                rmult = rmult * (f / float(grid.base_frequency_hz))
+            if sequence_aware:
+                # Zero-sequence leakage VALUE on the topology-derived zero-sequence
+                # PATH: the per-phase leakage becomes the symmetric-component matrix,
+                # carried through the same winding-incidence transform.
+                r0_default, l0_default = zero_sequence_leakage(t, r, ell, two_pi_f0)
+                r0 = _override(
+                    param_overrides,
+                    ("transformer", t.id, "zero_sequence_resistance_ohm"),
+                    r0_default,
+                )
+                l0 = _override(
+                    param_overrides,
+                    ("transformer", t.id, "zero_sequence_inductance_h"),
+                    l0_default,
+                )
+                r_mat, l_mat = sequence_leakage_matrices(r, ell, r0, l0, p)
+                zr_list.append(r_mat)
+                zl_list.append(l_mat)
+                rmult_list.append(rmult)
+            else:
+                x = two_pi_f * ell  # [H]
+                r_f = (r * rmult).to(rdt)  # [H]
+                z = torch.complex(r_f.expand_as(x), x.to(rdt)).to(cdt)  # [H]
+                yse_list.append(1.0 / z)  # [H]
 
             tap_mag = _override(
                 param_overrides,
@@ -1435,6 +1502,9 @@ def _transformer_block_groups(
             )
             u_from = torch.as_tensor(t.u_rated_from_v, dtype=rdt, device=device)
             u_to = torch.as_tensor(t.u_rated_to_v, dtype=rdt, device=device)
+            # Rated LINE-voltage ratio: refers the magnetizing shunt (stored on the
+            # from/HV side) to the to/LV terminal for the to_terminal / split placements.
+            nline_list.append(u_from / u_to)
             if p == 1:
                 # Single-phase / positive-sequence equivalent: the vector group is
                 # folded into a complex line-to-line ratio (magnitude n_LL, exact
@@ -1461,7 +1531,17 @@ def _transformer_block_groups(
             bm = -1.0 / (two_pi_f * lm_t)  # [H]; lm=inf -> 0
             ym_list.append(torch.complex(gm.expand_as(bm), bm).to(cdt))  # [H]
 
-        y_se = torch.stack(yse_list, dim=1)  # [H,K]
+        if sequence_aware:
+            # [H,K,P,P] = ((R(f) + j*2*pi*f*L)^-1) per phase pair (matrix inverse).
+            y_se = series_admittance_matrix(
+                torch.stack(zr_list, 0),
+                torch.stack(zl_list, 0),
+                f,
+                cdt,
+                r_mult=torch.stack(rmult_list, 1)[:, :, None, None],  # [H,K,1,1]
+            )
+        else:
+            y_se = torch.stack(yse_list, dim=1)  # [H,K]
         ratio = torch.stack(ratio_list, dim=0)  # [K]
         if p == 1:
             # The schema stores the leakage referred to the TO-side COIL; the
@@ -1475,11 +1555,11 @@ def _transformer_block_groups(
             n_block = block_incidence(vg0, p, rdt, device)  # [2P,2P]
             block = winding_leakage_block(y_se, ratio, n_block)  # [H,K,2P,2P]
 
-        # Magnetizing shunt on the HV terminal diagonal (outside the incidence).
+        # Magnetizing shunt on a terminal diagonal (outside the incidence transform);
+        # `transformer.magnetizing_placement` picks the terminal (see `_transformer`).
         ym = torch.stack(ym_list, dim=1)  # [H,K]
-        ym_hv = ym[:, :, None, None] * eye_p  # [H,K,P,P]
-        ym_full = torch.nn.functional.pad(ym_hv, (0, p, 0, p))  # [H,K,2P,2P]
-        block = block + ym_full
+        n_line = torch.stack(nline_list, dim=0)  # [K]
+        block = block + magnetizing_blocks(ym, n_line, p, placement)
 
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
