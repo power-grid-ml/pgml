@@ -2254,6 +2254,7 @@ def solve_power_flow(
         device,
         criticality,
         pv,
+        cdt,
     )
 
     if leaves:
@@ -3598,6 +3599,7 @@ def _build_diagnostics(
     device,
     criticality: str = "auto",
     pv: Optional[PVTerminals] = None,
+    cdt: torch.dtype = torch.complex128,
 ) -> "ConvergenceDiagnostics":
     """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence).
 
@@ -3704,18 +3706,11 @@ def _build_diagnostics(
         out_of_band_nodes=out_of_band,
     )
     do_crit = criticality == "always" or (criticality == "auto" and not converged)
-    if do_crit and finite and b == 1:
+    if do_crit and finite:
+        # On a batch this analyses the HARDEST scenario (named in the result) from that
+        # scenario's own system, injection powers and setpoints.
         diag.criticality = _jacobian_criticality(
-            real_res, v_star, n, rdt, device, index, fc_abs, diverged
-        )
-    elif do_crit and b > 1:
-        # The IFT-Jacobian criticality is a single-grid loadability diagnostic; on a
-        # scenario BATCH the operating point reduces the residual per element, so it is
-        # skipped (run a single grid, or use ``loadability_limit``, for the analysis).
-        _log.info(
-            "criticality analysis skipped for a batched solve (b=%d); it is a "
-            "single-grid diagnostic. Re-run one scenario for the Jacobian/SVD.",
-            b,
+            real_res, v_star, n, rdt, device, index, fc_abs, diverged, cdt
         )
     diag.likely_cause = _likely_cause(diag, n_viol, diverged, max_vpu, rel_update)
     return diag
@@ -3789,16 +3784,35 @@ def _likely_cause(
 
 
 def _jacobian_criticality(
-    real_res, v_star, n, rdt, device, index, fc_abs, diverged: bool = False
+    real_res,
+    v_star,
+    n,
+    rdt,
+    device,
+    index,
+    fc_abs,
+    diverged: bool = False,
+    cdt: torch.dtype = torch.complex128,
 ) -> dict:
     """IFT real Jacobian ``J = dR/dx`` at ``V*`` -> proximity to voltage collapse.
 
-    Builds the same ``[2N, 2N]`` real residual Jacobian the IFT backward uses (for the
-    worst batch element), takes its singular values, and reads the critical-bus
-    participation from the right singular vector of the SMALLEST singular value (the
-    collapse mode). A near-singular ``J`` means a genuine loadability limit and names
-    the weakest bus; a well-conditioned ``J`` means the fixed-point map merely failed
-    to contract though a solution likely exists.
+    Builds the same ``[2N, 2N]`` real residual Jacobian the IFT backward uses, takes its
+    singular values, and reads the critical-bus participation from the right singular
+    vector of the SMALLEST singular value (the collapse mode). A near-singular ``J``
+    means a genuine loadability limit and names the weakest bus; a well-conditioned
+    ``J`` means the fixed-point map merely failed to contract though a solution likely
+    exists.
+
+    On a scenario BATCH the analysis describes the hardest scenario — the one with the
+    largest nodal mismatch — and names it in the result (``"batch"``). Its residual is
+    built from that scenario's own admittance, slack current, injection powers and
+    voltage-regulation setpoints (the injection plan and the regulating terminals are
+    index-selected, which is what makes a batched solve analysable at all instead of
+    reporting the batch-wide residual of a single-grid Jacobian).
+
+    The Jacobian build goes through the same budgeted path as the gradient
+    (:func:`_batched_state_jacobian`), so a large state does not make the DIAGNOSTIC the
+    most memory-hungry part of a failed solve.
 
     The verdict is rigorous AT (or near) a solution. When ``diverged`` the iterate is
     unphysical, so ``J`` there is only a local linearization — the result is annotated
@@ -3825,15 +3839,51 @@ def _jacobian_criticality(
     y_b = y_eff[b_star] if y_eff.shape[0] > b_star else y_eff[0]
     is_b = i_slack[b_star] if i_slack.shape[0] > b_star else i_slack[0]
 
-    def f(xb: Tensor) -> Tensor:
-        return state_residual(xb, y_b.real, y_b.imag, is_b.real, is_b.imag)
+    # The worst scenario's own injection powers and regulation setpoints: without this
+    # restriction the residual closure keeps the WHOLE batch's powers and returns
+    # [B, 2N] for a single-grid state, which is not a single-grid Jacobian.
+    rows = torch.tensor([b_star], dtype=torch.int64, device=device)
+    plan = getattr(getattr(real_res, "state_rc", None), "plan", None)
+    rc_one = None
+    if plan is not None and b > 1:
+        flat_plan = flatten_plan_batch(plan, lead) if len(lead) > 1 else plan
+        rc_one = _plan_residual(select_plan_batch(flat_plan, rows, batch_size=b))
+    pv_one = getattr(real_res, "pv", None)
+    if pv_one is not None and b > 1:
+        pv_one = (pv_one.flatten_batch(lead) if len(lead) > 1 else pv_one).select(rows)
 
-    j = torch.autograd.functional.jacobian(f, x, vectorize=True)  # [2N, 2N]
+    def f(xb: Tensor) -> Tensor:
+        return state_residual(
+            xb,
+            y_b.real,
+            y_b.imag,
+            is_b.real,
+            is_b.imag,
+            rc=rc_one,
+            pv_state=pv_one,
+        )
+
+    x_one = x.reshape(1, twon)
+    with torch.no_grad():
+        r_probe = f(x_one)
+    if tuple(r_probe.shape) != (1, twon):
+        # The residual still carries a batch the restriction above could not remove, so
+        # its Jacobian would not be this scenario's. Report that instead of analysing
+        # the wrong matrix (a diagnostic never raises and never guesses).
+        return {
+            "skipped": (
+                f"the residual of the worst scenario came out with shape "
+                f"{tuple(r_probe.shape)} instead of (1, {twon}); the criticality "
+                "analysis is a SINGLE-grid diagnostic. Re-run one scenario for the "
+                "Jacobian/SVD."
+            )
+        }
+    j = _batched_state_jacobian(f, x_one, cdt=cdt)  # [1, 2N, 2N]
     if j.numel() != twon * twon:
-        # A residual closure built over a scenario batch returns [B, 2N], so its
-        # Jacobian carries that leading axis. A size-one batch is still ONE grid, so
-        # fold the singleton away and analyse it; anything else is not a single-grid
-        # state and the diagnostic reports that instead of raising.
+        # A residual closure that still carries a batch returns [K, 2N], so its Jacobian
+        # keeps that leading axis. A size-one batch is one grid, so the singleton is
+        # folded away and analysed; anything else is not a single-grid state and the
+        # diagnostic reports that instead of raising.
         return {
             "skipped": (
                 f"the residual Jacobian came out with shape {tuple(j.shape)} instead of "
