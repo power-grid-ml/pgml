@@ -57,7 +57,9 @@ class SimulationConfig(BaseModel):
     :func:`simulate` call, not here. ``harmonic_orders`` is used only when
     ``calculation == "harmonic"``. The convergence tolerances are PER UNIT, so one
     config means the same thing on any voltage level; ``None`` resolves the documented
-    defaults in ``pgml/data/defaults.yaml``.
+    defaults in ``pgml/data/defaults.yaml``. ``enforce_q_limits`` is a MODELING choice
+    (what a regulating generator is allowed to do), so it belongs in the config even
+    though it reaches the solver as a keyword.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -98,6 +100,13 @@ class SimulationConfig(BaseModel):
         gt=0.0,
         description="Apparent-power base of the per-unit power mismatch. None = the "
         "documented default solver.convergence.s_base_va (1e6 VA).",
+    )
+    enforce_q_limits: Optional[bool] = Field(
+        default=None,
+        description="Whether a voltage-regulating generator's reactive limits bound "
+        "its output (PV-to-PQ switching at the fundamental). None = the documented "
+        "default appliance.generator.enforce_q_limits. False reproduces pandapower "
+        "runpp's own default. Inert on a grid with no regulating generator.",
     )
     max_iter: int = Field(default=100, gt=0)
 
@@ -455,6 +464,7 @@ def simulate(
             tol=config.tol,
             tol_update_pu=config.tol_update_pu,
             s_base_va=config.s_base_va,
+            enforce_q_limits=config.enforce_q_limits,
             max_iter=config.max_iter,
             dtype=cdt,
             precision=precision,
@@ -496,6 +506,7 @@ def simulate(
             tol=config.tol,
             tol_update_pu=config.tol_update_pu,
             s_base_va=config.s_base_va,
+            enforce_q_limits=config.enforce_q_limits,
             max_iter=config.max_iter,
             dtype=cdt,
             precision=precision,

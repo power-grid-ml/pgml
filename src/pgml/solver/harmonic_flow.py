@@ -218,6 +218,7 @@ def solve_harmonic_flow(
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
+    enforce_q_limits: Optional[bool] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -227,8 +228,13 @@ def solve_harmonic_flow(
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.
     harmonic_orders:
         Iterable of integer orders to solve (e.g. ``[1, 5, 7]``; 1 = fundamental).
-    slack, method, operating_point, tol, tol_update_pu, s_base_va, max_iter, dtype, device:
-        Passed to the fundamental :func:`solve_power_flow`. Use ``method="newton"``
+    slack, method, operating_point, tol, tol_update_pu, s_base_va, max_iter, dtype,
+    device, enforce_q_limits:
+        Passed to the fundamental :func:`solve_power_flow`. ``enforce_q_limits``
+        bounds a voltage-regulating generator's reactive power at the fundamental
+        (``None`` -> the documented default); regulation is a fundamental-frequency
+        concept, so it has no effect on the harmonic orders, where such a machine is
+        the same Norton current source as any other generator. Use ``method="newton"``
         for a stiff inverter control loop (Volt-VAr / Volt-Watt), where the
         current-injection fixed point can oscillate. The convergence tolerances are
         PER UNIT (power mismatch / voltage update) and apply to the nonlinear
@@ -386,6 +392,7 @@ def solve_harmonic_flow(
         on_disconnected=("ignore" if branch_states is None else on_disconnected),
         branch_states=branch_states,
         param_overrides=param_overrides,
+        enforce_q_limits=enforce_q_limits,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:

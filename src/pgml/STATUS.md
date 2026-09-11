@@ -388,11 +388,12 @@ results are never read as more physical than they are. Details live in `docs/pgm
 - **Line geometry (Carson/Deri).** No conductor temperature dependence, no sub-conductor
   bundling; transposition per the documented Deri assumptions.
 - **Shunt reactor with a SERIES resistance.** The shunt primitive is the parallel form
-  `G + 1/(j·2πh f0 L) + j·2πh f0 C`. An OpenDSS `Reactor` with `R = 0` (its default) maps
-  exactly at every order; one with a series `R > 0` is converted as the equivalent
-  parallel pair at f0 (exact there, and the converter warns), so its LOSS term stays flat
-  where the series branch decays as `1/h²`. Add a series resistance to the inductive
-  branch if a lossy reactor has to be harmonically exact.
+  `G + 1/(j·2πh f0 L) + j·2πh f0 C`. An OpenDSS `Reactor` with `R = 0` (its default) and a
+  pandapower inductive `net.shunt` map exactly at every order (both carry an
+  `inductance_h`, so `|B(h)| = B/h`); an OpenDSS reactor with a series `R > 0` is converted
+  as the equivalent parallel pair at f0 (exact there, and the converter warns), so its LOSS
+  term stays flat where the series branch decays as `1/h²`. Add a series resistance to the
+  inductive branch if a lossy reactor has to be harmonically exact.
 - **Zero-sequence line impedance at harmonics — lumped R/L lines only.** Lines WITH
   `conductor_geometry` compute Z(h) from first principles (agreeing with OpenDSS to
   4.8e-8 relative at every order below 1 kHz; above 1 kHz OpenDSS changes its conductor

@@ -295,10 +295,13 @@ verified empirically). New orchestration:
      include_load_shunt=False, tol=None, tol_update_pu=None, s_base_va=None,
      max_iter=100, dtype=torch.complex128, precision="full",
      device=None, symmetry=None, on_disconnected="raise", branch_states=None,
-     param_overrides=None) -> HarmonicFlowResult`
+     param_overrides=None, enforce_q_limits=None) -> HarmonicFlowResult`
   - `tol` / `tol_update_pu` / `s_base_va` are the PER-UNIT convergence settings of the
     nonlinear fundamental (see `solve_power_flow`); the harmonic orders are direct linear
     solves with no iteration and therefore no convergence criterion of their own.
+  - `enforce_q_limits` likewise reaches the fundamental only: regulation is a
+    fundamental-frequency concept, so at h>1 a regulating generator is the same Norton
+    current source as any other.
   - `precision` applies to the fundamental AND to every per-order solve (where
     `"mixed"` is the classic iterative refinement of `lu_factor_system`).
   - `param_overrides` is the SAME parameter-substitution hook `solve_power_flow` and the

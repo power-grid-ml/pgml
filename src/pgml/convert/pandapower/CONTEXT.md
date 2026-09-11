@@ -449,17 +449,18 @@ fallbacks and steepness sweep).
 | pandapower field | Our schema field | Notes |
 |---|---|---|
 | `p_mw`, `step`, `vn_kv` | `ShuntAppliance.conductance_s` | `G = p_mw·1e6·step / (vn_kv·1e3)²`, referred to the SHUNT's own rated voltage (`vn_kv`, defaulting to the bus's) — algebraically identical to pandapower's `(G, B) = (p, −q)·step·(vn_bus/vn_shunt)²` per unit on the bus base (`build_bus._calc_shunts_and_add_on_ppc`) |
-| `q_mvar`, `step`, `vn_kv` | `ShuntAppliance.capacitance_f` | `C = −q_mvar·1e6·step / (vn_kv·1e3)² / (2πf0)`. A positive `q_mvar` CONSUMES reactive power, so its susceptance is negative |
+| `q_mvar < 0`, `step`, `vn_kv` | `ShuntAppliance.capacitance_f` | a CAPACITIVE bank: `C = −q_mvar·1e6·step / (vn_kv·1e3)² / (2πf0)`, `inductance_h = None` |
+| `q_mvar > 0`, `step`, `vn_kv` | `ShuntAppliance.inductance_h` | a REACTOR: `L = (vn_kv·1e3)² / (2πf0·q_mvar·1e6·step)`, `capacitance_f = 0` |
 | `in_service` | — | an out-of-service row is skipped |
 
 Under `THREE_PHASE` the per-phase value is the same number repeated over A/B/C (a
-balanced bank's per-phase admittance equals its positive-sequence value). An
-INDUCTIVE shunt (`q_mvar > 0`) is stored as a NEGATIVE capacitance: exact at the
-fundamental, but the susceptance magnitude then rises with frequency where a real
-reactor's falls as `1/h`, so a WARNING names how many rows are affected and harmonic
-results at those buses are not faithful. (The same caveat as the OpenDSS `Reactor`
-conversion; if the `ShuntReactor` schema gains an inductance, this mapping should
-move to it.)
+balanced bank's per-phase admittance equals its positive-sequence value). The reactive
+part becomes the reactive ELEMENT it is, so its susceptance carries the right frequency
+trend: `|B(h)| = h·B` for a capacitor bank, `B/h` for a reactor. Both forms reproduce the
+fundamental admittance exactly, so no load-flow result depends on the choice (verified on
+the MATPOWER benchmarks, whose shunts include 6 inductive rows in `case118` and several in
+`case300`); only the harmonic orders differ, and a negative capacitance would get them
+wrong by `h²`. The conversion log names how many converted rows are inductive.
 
 Tests: `tests/convert/test_pandapower_pv_bus_shunt.py`.
 

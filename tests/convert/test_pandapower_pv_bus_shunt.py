@@ -31,6 +31,7 @@ import pandapower as pp
 import pytest
 import torch
 
+from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.convert.pandapower import GenMode, PhaseMode, to_grid
 from pgml.schemas.grid_schema import (
     Generator,
@@ -205,11 +206,35 @@ class TestShuntMapping:
         )
         assert sh[0].connection is WindingConnection.WYE
 
-    def test_inductive_shunt_is_a_negative_capacitance_and_warns(self, caplog):
-        with caplog.at_level("WARNING", logger="pgml"):
-            grid, _ = to_grid(_net(shunts=[dict(q_mvar=1.0, p_mw=0.0)]))
-        assert _shunts(grid)[0].capacitance_f[0] < 0.0
-        assert any("INDUCTIVE" in r.message for r in caplog.records)
+    def test_inductive_shunt_carries_an_inductance(self):
+        """``q_mvar > 0`` consumes reactive power: a reactor, stored as an inductance.
+
+        ``L = U**2 / (2*pi*f0*q)``, which reproduces the fundamental susceptance
+        ``B = -q/U**2`` exactly while falling as ``1/h`` above it, where a negative
+        capacitance would rise as ``h``.
+        """
+        grid, _ = to_grid(_net(shunts=[dict(q_mvar=1.0, p_mw=0.0)]))
+        sh = _shunts(grid)[0]
+        v_sq = 20_000.0**2
+        b_f0 = 1.0e6 / v_sq  # |B| at f0 [S]
+        assert sh.capacitance_f == pytest.approx((0.0,))
+        assert sh.inductance_h == pytest.approx((1.0 / (2.0 * math.pi * _F0 * b_f0),))
+
+    def test_inductive_shunt_susceptance_falls_with_the_order(self):
+        """The stamped susceptance is exact at f0 and falls as ``1/h`` above it."""
+        grid, id_map = to_grid(_net(shunts=[dict(q_mvar=1.0, p_mw=0.0)]))
+        plain, _ = to_grid(_net())
+        index = node_phase_index(grid)
+        row = index.row(id_map["bus"][1], Phase.A)
+        orders = [1.0, 5.0, 13.0]
+        freqs = torch.tensor([_F0 * h for h in orders], dtype=torch.float64)
+        y_with = assemble_network_ybus(grid, freqs, dtype=CDT).Y
+        y_without = assemble_network_ybus(plain, freqs, dtype=CDT).Y
+        b_f0 = -1.0e6 / 20_000.0**2  # susceptance the shunt must add at f0 [S]
+        for k, h in enumerate(orders):
+            added = complex(y_with[k, row, row] - y_without[k, row, row])
+            assert added.real == pytest.approx(0.0, abs=1e-15)
+            assert added.imag == pytest.approx(b_f0 / h, rel=1e-12)
 
     def test_step_multiplies_the_admittance(self):
         grid, _ = to_grid(_net(shunts=[dict(q_mvar=-1.0, p_mw=0.0, step=3)]))

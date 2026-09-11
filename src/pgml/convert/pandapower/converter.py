@@ -93,11 +93,12 @@ A pandapower shunt is a fixed admittance at its bus: ``G = p_mw * step / vn_kv^2
 and ``B = -q_mvar * step / vn_kv^2`` (positive ``q_mvar`` CONSUMES reactive power, so
 its susceptance is negative), referred to the SHUNT's own rated voltage exactly as
 ``pandapower.build_bus._calc_shunts_and_add_on_ppc`` does. It converts to a WYE
-:class:`~pgml.schemas.grid_schema.ShuntAppliance` with that conductance and the
-capacitance ``C = B / (2*pi*f0)`` -- exact at the fundamental; an INDUCTIVE shunt
-(positive ``q_mvar``) becomes a negative capacitance, whose susceptance magnitude
-then rises with frequency instead of falling, so a harmonic study on a net with
-inductive shunts is not faithful (a WARNING names them).
+:class:`~pgml.schemas.grid_schema.ShuntAppliance` carrying that conductance plus the
+reactive element it physically is: a CAPACITIVE row (``q_mvar < 0``) stores
+``C = B / (2*pi*f0)`` and an INDUCTIVE one (``q_mvar > 0``, a reactor) stores
+``L = 1 / (2*pi*f0*|B|)``. Both reproduce the fundamental admittance exactly, so a
+load-flow result is identical either way, and the inductive row's susceptance
+magnitude then falls as ``1/h`` above the fundamental instead of rising as ``h``.
 
 Only in-service elements are converted.
 """
@@ -519,15 +520,25 @@ def _gen_raw_reactive_bounds(row: Any) -> tuple[Optional[float], Optional[float]
 
 def _shunt_admittance(
     row: Any, bus_vn_kv: float, two_pi_f0: float
-) -> tuple[float, float]:
-    """``(conductance_s, capacitance_f)`` per phase of a ``net.shunt`` row.
+) -> tuple[float, float, Optional[float]]:
+    """``(conductance_s, capacitance_f, inductance_h)`` per phase of a ``net.shunt`` row.
 
     ``Y = (p_mw - j*q_mvar) * step * 1e6 / (vn_kv * 1e3)**2`` referred to the SHUNT's
     own rated voltage (``vn_kv``, defaulting to the bus's), which is exactly
     pandapower's ``(G, B) = (p, -q) * step * (vn_bus/vn_shunt)**2`` per unit on the
-    bus base. A positive ``q_mvar`` CONSUMES reactive power, hence a negative
-    susceptance, stored as a negative capacitance (``B = 2*pi*f0*C``): exact at the
-    fundamental, wrong in its frequency TREND above it.
+    bus base.
+
+    The REACTIVE part becomes the reactive element it physically is, so that its
+    susceptance carries the right frequency trend above the fundamental:
+
+    - a capacitive row (``q_mvar < 0``, ``B > 0``) stores ``C = B / (2*pi*f0)`` and
+      ``inductance_h = None`` — ``|B(h)| = h*B``;
+    - an inductive row (``q_mvar > 0``, ``B < 0``, a reactor) stores
+      ``L = 1 / (2*pi*f0*|B|)`` and ``capacitance_f = 0`` — ``|B(h)| = B/h``.
+
+    Both reproduce the fundamental admittance exactly, so a load-flow result is
+    unchanged either way; only the harmonic orders differ. ``q_mvar == 0`` stores a
+    pure conductance.
     """
     vn_kv = _opt_float(row, "vn_kv")
     if vn_kv is None or vn_kv <= 0.0:
@@ -537,7 +548,9 @@ def _shunt_admittance(
     v_sq = (vn_kv * 1.0e3) ** 2
     g = float(row.get("p_mw", 0.0) or 0.0) * 1.0e6 * step / v_sq
     b = -float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6 * step / v_sq
-    return g, b / two_pi_f0
+    if b < 0.0:
+        return g, 0.0, 1.0 / (two_pi_f0 * -b)
+    return g, b / two_pi_f0, None
 
 
 def _gen_volt_var_control(
@@ -1761,10 +1774,10 @@ def to_grid(
             if bus_pp not in id_map["bus"]:
                 continue
             bus_vn_kv = float(net.bus.at[bus_pp, "vn_kv"])
-            g_s, c_f = _shunt_admittance(row, bus_vn_kv, two_pi_f0)
-            if g_s == 0.0 and c_f == 0.0:
+            g_s, c_f, l_h = _shunt_admittance(row, bus_vn_kv, two_pi_f0)
+            if g_s == 0.0 and c_f == 0.0 and l_h is None:
                 continue
-            n_inductive += c_f < 0.0
+            n_inductive += l_h is not None
             sh_id = _id.next()
             id_map["shunt"][pp_idx] = sh_id
             sh_phases = phases_for(phase_mode)
@@ -1776,22 +1789,18 @@ def to_grid(
                     phases=sh_phases,
                     conductance_s=[g_s] * len(sh_phases),
                     capacitance_f=[c_f] * len(sh_phases),
+                    inductance_h=None if l_h is None else [l_h] * len(sh_phases),
                     connection=WindingConnection.WYE,
                 )
             )
         if id_map["shunt"]:
             _logger.info(
                 "pandapower -> Grid: %d 'shunt' row(s) converted as fixed WYE shunt "
-                "admittances (G from p_mw, C from -q_mvar / (2*pi*f0), referred to "
-                "each row's vn_kv).",
+                "admittances (G from p_mw; a capacitive row carries "
+                "C = -q_mvar / (2*pi*f0 * U^2) and an inductive one "
+                "L = U^2 / (2*pi*f0 * q_mvar), both referred to each row's vn_kv); "
+                "%d of them are inductive.",
                 len(id_map["shunt"]),
-            )
-        if n_inductive:
-            _logger.warning(
-                "pandapower -> Grid: %d converted shunt(s) are INDUCTIVE (q_mvar > 0) "
-                "and are stored as a NEGATIVE capacitance: exact at the fundamental, "
-                "but the susceptance magnitude then rises with frequency instead of "
-                "falling as 1/h. Do not read harmonic results at those buses.",
                 n_inductive,
             )
 
