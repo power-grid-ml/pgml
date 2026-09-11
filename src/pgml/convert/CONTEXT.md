@@ -73,7 +73,7 @@ identity the line path uses (`Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`), applie
 A/B/C rows only (an explicit `Phase.N` conductor stays diagonal). Callers pass native
 `r0_ohm`/`x0_ohm` plus `two_pi_f0`; with either missing, the documented
 `source.zero_sequence.{r0_over_r1, x0_over_x1}` ratios apply and a WARNING names the
-element. `Z0 == Z1` returns the plain diagonal matrix bit-for-bit, so a dataset without
+element. `Z0 == Z1` returns the plain diagonal matrix unchanged, so a dataset without
 zero-sequence data converts exactly as before. Under `SINGLE_PHASE_EQUIV` the zero sequence
 does not exist and `r0_ohm`/`x0_ohm` are ignored. Native reads: OpenDSS `Vsource.R0/X0`
 (absolute Ohm; a DSS Vsource always carries them, derived from `MVAsc1`/`X0R0`),

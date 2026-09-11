@@ -182,7 +182,9 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
     orientation / cyclic permutation `C^m` / polarity combination that realises a
     requested clock is selected by matching the candidate's positive-sequence rotation
     against `clock·30°` (`_incidence_pair`); clock 6 is the reversed LV polarity
-    `−N_lv`. A zigzag winding IS modelled (the limb-difference incidence above); a finite
+    `−N_lv`. A zigzag winding IS modelled (the limb-difference incidence above) but is
+    EXPERIMENTAL — only power-grid-model can express the same unit, so constructing one
+    logs a WARNING once per process; a finite
     `from_grounding`/`to_grounding` (non-solid neutral) raises rather than being silently
     ignored. `P==1` (single-phase / positive-sequence equivalent) folds the group into a
     complex scalar tap `t = (u_from/u_to)·tap_mag·e^{jθ}` on the textbook
@@ -195,13 +197,16 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
     `Z_self=(Z0+2·Z1)/3`, `Z_mutual=(Z0−Z1)/3` (`sequence_leakage_matrices`), inverted as
     a matrix inside `winding_leakage_block`. The zero-sequence PATH stays pure topology,
     so a YNyn three-limb core and a grounded zigzag carry their true Z0 while a delta
-    still blocks it. `Z0 == Z1` keeps the scalar stamp bit-for-bit; the group key
+    still blocks it. `Z0 == Z1` keeps the scalar stamp (the matrix form reproduces it to
+    3e-16 relative, measured on a YNyn unit); the group key
     (`group_key(vg, p, sequence_aware)`) separates the two forms.
-  - WINDING-RESISTANCE FREQUENCY LAW: `R(f) = R · m(f) · (f/f0 if harmonic_xr_constant
-    else 1)`, with `m(f)` the shared `ResistanceFrequencyModel` multiplier
-    (`_resistance_multiplier`, the same helper the line path uses) and
-    `harmonic_xr_constant` = OpenDSS's `XRConst` (R ∝ h, holding X/R constant with
-    frequency). Both default to no change (X ∝ h at fixed R).
+  - WINDING-RESISTANCE FREQUENCY LAW: `R(f) = R · m(f) · (f/f0 if the unit scales R with
+    the order else 1)`, with `m(f)` the shared `ResistanceFrequencyModel` multiplier
+    (`_resistance_multiplier`, the same helper the line path uses). WHICH units scale R is
+    `transformer.harmonic_resistance.law` (`harmonic_resistance_law` /
+    `resistance_scales_with_order`): `element` (default) = each transformer's own
+    `harmonic_xr_constant` (OpenDSS's `XRConst`), `constant` / `xr_constant` force one law
+    on every unit. Defaults to no change (X ∝ h at fixed R).
   - Differentiable w.r.t. R, L, the zero-sequence R0/L0 and the off-nominal tap
     magnitude; the discrete vector group / clock selects the constant `N`.
     `param_overrides` keys: `series_resistance_ohm`/`series_inductance_h`/`tap_magnitude`

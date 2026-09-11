@@ -26,6 +26,7 @@ import pytest
 import torch
 
 from pgml.assembly import assemble_network_ybus
+from pgml.errors import ModelingError
 from pgml.schemas.grid_schema import (
     ComplexTap,
     Grid,
@@ -482,6 +483,60 @@ class TestWindingResistanceFrequencyLaw:
         z13 = _leakage_impedance(grid, 13.0)
         assert z13.real == pytest.approx(3.0 * 13.0 * z1.real, rel=1e-10)
 
+    def test_configured_law_overrides_the_per_element_flag(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """`transformer.harmonic_resistance.law` forces one law on every transformer."""
+        import yaml
+
+        from pgml import defaults
+
+        def _with_law(value: str) -> None:
+            data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+            data["transformer"]["harmonic_resistance"]["law"]["value"] = value
+            path = tmp_path / f"law_{value}.yaml"
+            path.write_text(yaml.safe_dump(data))
+            monkeypatch.setenv("PGML_DEFAULTS", str(path))
+            defaults.reload(str(path))
+
+        grid_plain = self._ynyn()  # harmonic_xr_constant = False
+        grid_flag = self._ynyn(harmonic_xr_constant=True)
+        try:
+            _with_law("xr_constant")
+            z1, z13 = (
+                _leakage_impedance(grid_plain, 1.0),
+                _leakage_impedance(grid_plain, 13.0),
+            )
+            assert z13.real == pytest.approx(13.0 * z1.real, rel=1e-10)
+            _with_law("constant")
+            z1, z13 = (
+                _leakage_impedance(grid_flag, 1.0),
+                _leakage_impedance(grid_flag, 13.0),
+            )
+            assert z13.real == pytest.approx(z1.real, rel=1e-10)
+        finally:
+            monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+            defaults.reload()
+
+    def test_unknown_law_raises(self, tmp_path, monkeypatch) -> None:
+        import yaml
+
+        from pgml import defaults
+        from pgml.assembly._transformer import harmonic_resistance_law
+
+        data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+        data["transformer"]["harmonic_resistance"]["law"]["value"] = "eddy_current"
+        path = tmp_path / "bad_law.yaml"
+        path.write_text(yaml.safe_dump(data))
+        monkeypatch.setenv("PGML_DEFAULTS", str(path))
+        try:
+            defaults.reload(str(path))
+            with pytest.raises(ModelingError, match="harmonic_resistance.law"):
+                harmonic_resistance_law()
+        finally:
+            monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+            defaults.reload()
+
     def test_law_applies_to_the_sequence_aware_path_too(self) -> None:
         """A unit with Z0 != Z1 scales BOTH sequence resistances with the law."""
         grid = self._ynyn(
@@ -497,3 +552,37 @@ class TestWindingResistanceFrequencyLaw:
         for s in range(3):
             assert z_seq_13[s].real == pytest.approx(13.0 * z_seq_1[s].real, rel=1e-10)
             assert z_seq_13[s].imag == pytest.approx(13.0 * z_seq_1[s].imag, rel=1e-10)
+
+
+class TestZigzagExperimentalNotice:
+    """A zigzag pairing announces its experimental status, once per process."""
+
+    def test_zigzag_logs_the_notice_once(self, caplog) -> None:
+        import pgml.assembly._transformer as xfmr_mod
+
+        monkeyed = xfmr_mod._ZIGZAG_NOTICE_LOGGED
+        xfmr_mod._ZIGZAG_NOTICE_LOGGED = False
+        try:
+            grid = _grid(
+                WindingConnection.WYE, WindingConnection.ZIGZAG_GROUNDED, 150.0
+            )
+            with caplog.at_level("WARNING"):
+                assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+                assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+            notices = [r for r in caplog.records if "EXPERIMENTAL zigzag" in r.message]
+            assert len(notices) == 1
+        finally:
+            xfmr_mod._ZIGZAG_NOTICE_LOGGED = monkeyed
+
+    def test_non_zigzag_pairing_is_silent(self, caplog) -> None:
+        import pgml.assembly._transformer as xfmr_mod
+
+        monkeyed = xfmr_mod._ZIGZAG_NOTICE_LOGGED
+        xfmr_mod._ZIGZAG_NOTICE_LOGGED = False
+        try:
+            grid = _grid(WindingConnection.DELTA, WindingConnection.WYE_GROUNDED, 30.0)
+            with caplog.at_level("WARNING"):
+                assemble_network_ybus(grid, [F0], dtype=torch.complex128)
+            assert not [r for r in caplog.records if "EXPERIMENTAL zigzag" in r.message]
+        finally:
+            xfmr_mod._ZIGZAG_NOTICE_LOGGED = monkeyed

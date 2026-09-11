@@ -60,9 +60,10 @@ empirical stand-in for the half-coil zero-sequence leakage of a grounding
 transformer). The converter now carries that factor into
 ``Transformer.zero_sequence``, which the stamp consumes as the zero-sequence
 leakage VALUE on the topology-derived path, so the zigzag-side bus agrees with
-power-grid-model under imbalance instead of presenting ``Z0 = Z1``. Both tools
-always agreed that a zigzag winding BLOCKS zero-sequence TRANSFER; only the
-winding's own zero-sequence self-admittance differed.
+power-grid-model under imbalance instead of presenting ``Z0 = Z1`` (measured ratio
+of zero-sequence voltages 1.0 to 1.3e-11, against 10 before). Both tools always
+agreed that a zigzag winding BLOCKS zero-sequence TRANSFER; only the winding's own
+zero-sequence self-admittance differed.
 
 Tolerance targets
 ------------------
@@ -379,9 +380,9 @@ class TestSymOracle:
         """``transformer.magnetizing_placement="split"`` IS power-grid-model's topology.
 
         Switching the documented placement from the shipped ``from_terminal`` to
-        ``split`` (half the shunt on each terminal, each referred to its own side) turns
-        the magnetizing residual below into machine precision, which identifies the
-        residual as the placement and nothing else.
+        ``split`` (half the shunt on each terminal, each referred to its own side) drops
+        the magnetizing residual below from ~1.5e-4 pu to the magnetizing-free tolerance
+        (1e-8 pu), which identifies the residual as the placement and nothing else.
         """
         import yaml
 

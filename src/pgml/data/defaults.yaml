@@ -196,6 +196,28 @@ transformer:
         For a transformer with explicit connections the clock is read from tap.shift_deg
         (rounded to the nearest 30 deg) instead.
 
+  # How the WINDING RESISTANCE of a transformer behaves with frequency. The leakage
+  # reactance always scales with the order (X(h) = 2*pi*h*f0*L); this selects what R does.
+  # OpenDSS calls the choice `XRConst` per transformer; pandapower and power-grid-model
+  # have no frequency-dependent winding resistance at all (their R is always constant).
+  # `element` (the default) follows each Transformer's OWN `harmonic_xr_constant` field
+  # (which the OpenDSS converter fills from `XRConst`), so the per-element value wins as
+  # everywhere else; the two other values force one law on every transformer, for a study
+  # that wants the bound either way.
+  harmonic_resistance:
+    law:
+      value: element
+      units: "enum{element, constant, xr_constant}"
+      description: >
+        `element` = per-transformer `harmonic_xr_constant` (False = R constant, True = R
+        scales with the order so X/R stays constant); `constant` = force R constant on
+        every transformer (OpenDSS's `XRConst=No`, the conservative default of every
+        reference tool: transformer damping at high orders is then UNDERSTATED because no
+        eddy-current/stray-loss rise is modelled); `xr_constant` = force R proportional to
+        the order on every transformer (OpenDSS's `XRConst=Yes`). A
+        `Transformer.resistance_frequency` multiplier curve (skin effect / a measured
+        frequency correction) multiplies on top of whichever law applies.
+
   # WHERE the magnetizing (core) shunt y_m = G_m + jB_m is attached. The schema stores it
   # referred to the HV/from side; the three reference engines attach it in three different
   # places, which is a genuinely different topology (not a referral difference): the

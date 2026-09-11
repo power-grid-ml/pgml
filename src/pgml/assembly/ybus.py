@@ -57,9 +57,11 @@ from ._incidence import (
 from ._transformer import (
     block_incidence,
     group_key as _xfmr_group_key,
+    harmonic_resistance_law,
     is_sequence_aware as _xfmr_is_sequence_aware,
     magnetizing_blocks,
     magnetizing_placement,
+    resistance_scales_with_order,
     nominal_turns_ratio,
     resolve_vector_group,
     sequence_leakage_matrices,
@@ -1177,14 +1179,17 @@ def _transformer_block_groups(
       (:func:`pgml.assembly._transformer.sequence_leakage_matrices`). The zero-sequence
       PATH still comes from the winding topology — a delta or zigzag winding blocks it
       whatever the value is — so a YNyn three-limb core and a grounding zigzag now carry
-      their true Z0, and ``Z0 == Z1`` keeps the scalar stamp bit-for-bit.
+      their true Z0, while ``Z0 == Z1`` keeps the scalar stamp (with the matrix form
+      reproducing it to 3e-16 relative, measured on a YNyn unit).
     - Winding-resistance frequency law: ``R(f) = R · m(f) · (f/f0 if
       harmonic_xr_constant else 1)``. ``m(f)`` is the shared
       :class:`~pgml.schemas.grid_schema.ResistanceFrequencyModel` multiplier (constant,
       the Carson skin law, or a sampled curve — the same helper the line path uses);
       ``harmonic_xr_constant`` is OpenDSS's ``XRConst``, which holds X/R constant with
-      frequency by scaling R with the order. Both default to no change (``m = 1``,
-      ``XRConst = No``), i.e. X ∝ h at fixed R.
+      frequency by scaling R with the order. Which transformers follow it is the
+      documented ``transformer.harmonic_resistance.law`` choice (``element`` = the
+      per-transformer flag, the default; ``constant`` / ``xr_constant`` force one law).
+      Both default to no change (``m = 1``, ``XRConst = No``), i.e. X ∝ h at fixed R.
     - Magnetizing shunt ``y_m = G_m + jB_m`` added to a TERMINAL phase diagonal
       directly (outside the incidence transform), referred to the HV line voltage as
       stored. The terminal is the documented modeling choice
@@ -1225,6 +1230,7 @@ def _transformer_block_groups(
     two_pi_f = (2.0 * torch.pi) * f  # [H]
     two_pi_f0 = 2.0 * torch.pi * float(grid.base_frequency_hz)
     placement = magnetizing_placement()
+    resistance_law = harmonic_resistance_law()
     for (_fk, _tk, _clock, p, sequence_aware), group in by_key.items():
         vg0 = vgs[id(group[0])]
 
@@ -1247,7 +1253,7 @@ def _transformer_block_groups(
             # `harmonic_xr_constant` the resistance scales with the order so X/R stays
             # constant, instead of X growing with h at fixed R.
             rmult = _resistance_multiplier(t, f, rdt, device)  # [H]
-            if t.harmonic_xr_constant:
+            if resistance_scales_with_order(t, resistance_law):
                 rmult = rmult * (f / float(grid.base_frequency_hz))
             if sequence_aware:
                 # Zero-sequence leakage VALUE on the topology-derived zero-sequence

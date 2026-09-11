@@ -648,8 +648,8 @@ def _source_impedance_matrices(
     x0_ohm = max(x0_ohm, two_pi_f0 * _FALLBACK_L)
     if r0_ohm == r_ohm and x0_ohm == x_ohm:
         # Z0 == Z1: the mutual term is exactly zero and the self term is exactly
-        # Z1, so keep the plain diagonal stamp bit-for-bit (no round-trip through
-        # (Z0 + 2*Z1)/3).
+        # Z1, so keep the plain diagonal stamp unchanged (no round-trip through
+        # (Z0 + 2*Z1)/3, which would move the diagonal by one unit in the last place).
         return r_mat, l_mat
 
     r_self, r_mut = (r0_ohm + 2.0 * r_ohm) / 3.0, (r0_ohm - r_ohm) / 3.0

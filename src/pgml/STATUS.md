@@ -273,7 +273,12 @@ results are never read as more physical than they are. Details live in `docs/pgm
   `tests/reference/test_pgm_transformer.py`). No zero-sequence-specific magnetizing branch
   exists for any placement.
 - **Transformer, construction.** All winding pairings except zigzag-zigzag, at every clock
-  of the pairing's parity; non-solid neutral grounding raises (fail loud). The
+  of the pairing's parity; non-solid neutral grounding raises (fail loud). The ZIGZAG
+  limb-domain incidence is EXPERIMENTAL: it reproduces the clock shift, the blocked
+  zero-sequence transfer and the winding's own zero-sequence path, and agrees with
+  power-grid-model on an unbalanced solve once the zero-sequence VALUE is carried, but no
+  second reference tool can express the same unit as one two-winding element. Constructing
+  one logs a WARNING once per process. The
   zero-sequence leakage VALUE is `Transformer.zero_sequence` when set (read from
   pandapower's `vk0_percent`/`vkr0_percent`), else the documented
   `transformer.zero_sequence.*` ratios (1.0 = Z0 = Z1, which is what OpenDSS and

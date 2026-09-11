@@ -320,7 +320,7 @@ def test_build_source_three_phase_balanced_angles():
     assert s.u_ref_v == pytest.approx((u_ln, u_ln, u_ln))
     assert s.u_angle_deg == (0.0, -120.0, -240.0)
     # The default source zero-sequence ratios are 1.0 (Z0 = Z1), so the mutual term
-    # vanishes and the Thevenin stays the plain diagonal stamp, bit-for-bit.
+    # vanishes and the Thevenin stays the plain diagonal stamp, unrounded.
     assert s.resistance_ohm == [[0.01, 0, 0], [0, 0.01, 0], [0, 0, 0.01]]
     assert s.inductance_h == [[1e-5, 0, 0], [0, 1e-5, 0], [0, 0, 1e-5]]
 

@@ -33,7 +33,8 @@ Per-side building blocks (``P == 3``):
   ``P`` is idempotent, so ``Pᵀ(y·I)P = y·P``, the textbook ``Y_II`` self block; an
   ungrounded-wye neutral floats and blocks the zero sequence with no separate
   Kron reduction.
-- ``zigzag`` / ``zigzag_grounded`` (interconnected star): each phase leg is two
+- ``zigzag`` / ``zigzag_grounded`` (interconnected star) — EXPERIMENTAL, see the
+  note below: each phase leg is two
   half-coils in series opposition on ADJACENT core limbs, so the winding couples
   to the limb fluxes through the normalised circulant ``Z = (I − C)/√3`` (or its
   transpose), where ``C`` is the cyclic phase permutation. Because the limb flux
@@ -56,6 +57,17 @@ Per-side building blocks (``P == 3``):
     ``transformer.zero_sequence.*`` default ratios) and the per-phase leakage
     becomes the symmetric-component matrix, so the zigzag's true Z0 — typically
     well below Z1, set by the half-coil geometry — is carried on that path.
+
+Zigzag status (EXPERIMENTAL). The limb-domain incidence above reproduces the
+three properties a zigzag winding must have (±30° clock contribution, no
+zero-sequence TRANSFER, a low-impedance zero-sequence path to ground on its own
+side) and agrees with power-grid-model on a live unbalanced solve once the
+zero-sequence leakage VALUE is carried
+(``tests/reference/test_pgm_transformer.py``), but neither OpenDSS nor pandapower
+can express the same unit as a single two-winding element, so the formulation has
+one independent reference only. Constructing a zigzag transformer logs a WARNING
+once per process. Treat a zigzag result as experimental: check it against a
+purpose-built model before relying on it.
 
 Clock realisation. The IEC clock number ``c`` (LV lags HV by ``c·30°``) is
 realised entirely by constant topology: each delta / zigzag winding contributes
@@ -111,14 +123,35 @@ series R / L and the tap. Vectorised over the K transformers of a group (shared
 incidence) and over the H frequencies — no Python loop over individual units on
 the tape.
 
-References: Chen/Dillon generalized transformer model (Arrillaga & Watson,
-*Computer Modelling of Electrical Power Systems*; Bazrafshan & Gatsis,
-arXiv:1705.06782), extended with the zigzag limb-domain incidence.
+References.
+
+- Winding-incidence (generalized) two-winding model ``Y = Nᵀ Y_winding N``:
+  Chen & Dillon's generalized transformer model as presented in Arrillaga &
+  Watson, *Computer Modelling of Electrical Power Systems* (2nd ed., ch. 2-3),
+  and Bazrafshan & Gatsis, "Comprehensive Modeling of Three-Phase Distribution
+  Systems via the Bus Admittance Matrix" (arXiv:1705.06782), whose per-connection
+  incidence blocks this module follows.
+- Delta incidence ``M`` and the ±30° / ``√3`` consequences: Kersting,
+  *Distribution System Modeling and Analysis* (ch. 8, the ``[D]`` matrix).
+- Clock realisation by positive-sequence eigenvalue matching
+  (:func:`_incidence_pair`): every candidate block is a product of ``I``, ``C``,
+  ``M``, ``Z`` and the wye projection, i.e. an element of the circulant algebra,
+  so ``V⁺`` is an exact eigenvector and the realised HV->LV rotation is
+  ``arg(conj(λ⁺(N_from))·λ⁺(N_to))`` — the selection is a closed-form identity,
+  not a search heuristic (the circulant-eigenvalue property is standard, e.g.
+  Davis, *Circulant Matrices*). The resulting convention (positive clock = LV
+  lags HV) is pinned against a live OpenDSS export and against pandapower's own
+  internal ``Ybus`` (``tests/reference/test_opendss_transformer.py``,
+  ``tests/reference/test_pandapower_grid_matrix.py``,
+  ``tests/reference/test_transformer_clock_matrix.py``).
+- Zigzag limb-domain incidence: the extension documented under "Zigzag status"
+  above; cross-checked against power-grid-model's own zigzag model.
 """
 
 from __future__ import annotations
 
 import cmath
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional
@@ -129,6 +162,8 @@ from torch import Tensor
 from pgml import defaults
 from pgml.errors import ModelingError
 from pgml.schemas.grid_schema import WindingConnection
+
+_logger = logging.getLogger("pgml")
 
 # The delta circulant difference matrix (Kersting's [D]); element k spans phase k
 # and phase (k+1) % 3. Its transpose selects the opposite clock parity. Rows and
@@ -144,6 +179,28 @@ _V_POS = (1.0 + 0.0j, cmath.exp(-2j * math.pi / 3), cmath.exp(2j * math.pi / 3))
 
 _SHIFTING_KINDS = ("delta", "zigzag", "zigzag_grounded")
 _ZIGZAG_KINDS = ("zigzag", "zigzag_grounded")
+
+#: Guard so the experimental-zigzag notice is logged once per process, not per solve
+#: (assembly runs per scenario and per harmonic order).
+_ZIGZAG_NOTICE_LOGGED = False
+
+
+def _warn_zigzag_experimental(vg: "VectorGroup") -> None:
+    """Log the experimental-zigzag notice once per process."""
+    global _ZIGZAG_NOTICE_LOGGED
+    if _ZIGZAG_NOTICE_LOGGED:
+        return
+    _ZIGZAG_NOTICE_LOGGED = True
+    _logger.warning(
+        "transformer winding pairing %s / %s uses the EXPERIMENTAL zigzag model: the "
+        "limb-domain incidence reproduces the clock shift, the blocked zero-sequence "
+        "transfer and the winding's own zero-sequence path to ground, and agrees with "
+        "power-grid-model on an unbalanced solve, but no second reference tool can "
+        "express the same unit as one two-winding element. Check a zigzag result "
+        "against a purpose-built model before relying on it.",
+        vg.from_side.kind,
+        vg.to_side.kind,
+    )
 
 
 @dataclass(frozen=True)
@@ -281,6 +338,8 @@ def resolve_vector_group(t, n_phases: Optional[int] = None) -> VectorGroup:
         raise ModelingError(
             f"transformer {t.id}: zigzag-zigzag winding pairing is not modelled."
         )
+    if vg.from_side.is_zigzag or vg.to_side.is_zigzag:
+        _warn_zigzag_experimental(vg)
     if vg.parity_odd != (clock % 2 == 1):
         pairing = f"{vg.from_side.kind} / {vg.to_side.kind}"
         allowed = (
@@ -303,6 +362,37 @@ def group_key(vg: VectorGroup, p: int, sequence_aware: bool = False) -> tuple:
     winding primitives and cannot be stacked together.
     """
     return (vg.from_side.kind, vg.to_side.kind, vg.clock, p, bool(sequence_aware))
+
+
+#: Allowed `transformer.harmonic_resistance.law` values (see `data/defaults.yaml`).
+HARMONIC_RESISTANCE_LAWS = ("element", "constant", "xr_constant")
+
+
+def harmonic_resistance_law() -> str:
+    """Return the configured transformer winding-resistance frequency law (validated).
+
+    ``element`` (the default) defers to each transformer's own
+    ``harmonic_xr_constant``; ``constant`` and ``xr_constant`` force one law on every
+    transformer. An unrecognised value raises rather than silently falling back.
+    """
+    value = str(defaults.get("transformer.harmonic_resistance.law"))
+    if value not in HARMONIC_RESISTANCE_LAWS:
+        raise ModelingError(
+            f"transformer.harmonic_resistance.law {value!r} is not a modelled law "
+            f"(expected one of {HARMONIC_RESISTANCE_LAWS})."
+        )
+    return value
+
+
+def resistance_scales_with_order(t, law: str) -> bool:
+    """True when a transformer's winding resistance scales with the harmonic order.
+
+    ``law`` comes from :func:`harmonic_resistance_law`; under ``element`` the decision is
+    the transformer's own ``harmonic_xr_constant`` flag (OpenDSS's ``XRConst``).
+    """
+    if law == "element":
+        return bool(getattr(t, "harmonic_xr_constant", False))
+    return law == "xr_constant"
 
 
 #: Allowed `transformer.magnetizing_placement` values (see `data/defaults.yaml`).
@@ -371,7 +461,8 @@ def is_sequence_aware(t, p: int) -> bool:
     Only a 3-phase unit has a zero sequence, and only a unit whose zero-sequence
     leakage differs from its positive-sequence leakage needs the matrix form: with
     ``Z0 == Z1`` the symmetric-component split has a zero mutual term and the scalar
-    stamp is the identical (and bit-exact) primitive.
+    stamp is the same primitive (the matrix form reproduces it to 3e-16 relative on a
+    YNyn unit, the floating-point cost of the (Z0 + 2*Z1)/3 round-trip).
     """
     if p != 3:
         return False
@@ -635,11 +726,14 @@ __all__ = [
     "resolve_vector_group",
     "group_key",
     "block_incidence",
+    "harmonic_resistance_law",
+    "HARMONIC_RESISTANCE_LAWS",
     "is_sequence_aware",
     "MAGNETIZING_PLACEMENTS",
     "magnetizing_blocks",
     "magnetizing_placement",
     "nominal_turns_ratio",
+    "resistance_scales_with_order",
     "sequence_leakage_matrices",
     "winding_leakage_block",
     "zero_sequence_leakage",
