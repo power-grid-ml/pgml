@@ -13,24 +13,12 @@ decisions. One entry per capability:
 - **Public API** — `pgml.simulate(grid, config) -> SolvedState` (eager voltages + lazy
   branch currents/flows/spectra/THD), `simulate_serializable`, `SimulationConfig`, the
   `pgml.errors` hierarchy (`docs/pgml/public-api.md`).
-- **Provenance + calibrated SE recipes** — `pgml.provenance.code_provenance()` stamps
-  commit/dirty/versions into every persisted artifact (dataset `meta.json`, corpus
-  manifest, checkpoints, cluster run dirs); `pgml.scenarios.presets` is the single
-  excitation recipe (IEC emission reference, phase diversity, PV h3–h19 spans, device
-  library v3, and — preset v3 — the measured LOAD-DEPENDENT emission law: a complex affine
-  `I_h(λ) = A_h + B_h·λ` floor at 43–73 % of the rated phasor, 100–150° to the
-  proportional part, plus a ±25°/unit-loading phase slope, drawn per device and order in
-  the randomized recipe exactly as the composed library draws it)
-  every SE dataset generator builds from.
-  ⚠️ A dataset drawn with `se_random_scenario_config`/`se_coherent_scenario_config` before
-  preset v3 has NO harmonic-to-fundamental coupling at all (proportional, linear and spline
-  fits all at R² 0.43–0.44 on the bench topology), so an estimator trained on it cannot
-  learn how a harmonic follows the fundamental; regenerate.
-  ⚠️ Datasets/corpora generated
-  BEFORE the presets (pre-2026-08-14: EN 50160-as-current-fractions fallback, silent
-  h15–h19 band, midnight coherent window) are miscalibrated — regenerate before
-  drawing conclusions from models trained on them; the missing `config_hash` /
-  `device_library_version` keys in their `meta.json` identify them.
+- **Provenance** — `pgml.provenance.code_provenance()` stamps commit/dirty/versions into
+  every persisted artifact (dataset `meta.json`, checkpoints, cluster run dirs), and
+  `generation_provenance()` adds the ACTIVE EN 50160 / IEC 61000-3-2 tables with their
+  content hashes (a `PGML_*` override replaces them silently). A generator with its own
+  versioned inputs — a calibrated recipe, a device library — records them through
+  `write_dataset(provenance=...)`, since those change the data without changing the config.
 - **Load flow** — linear (const-Z) + nonlinear (const-P / full ZIP); current-injection
   fixed point AND Newton (matrix-free option); IFT gradients; `ConvergenceDiagnostics` +
   `loadability_limit` continuation (with a `capped` flag when no nose is found). Batched-
@@ -43,63 +31,25 @@ decisions. One entry per capability:
 - **DER inverter control + storage** — `InverterControl` on `Generator`/`Storage`
   (constant PF, cosphi(P), Volt-VAr, Volt-Watt, combined; capability circle, C¹
   smoothing), differentiated through the IFT; `Storage` = signed injection, SoC/dispatch
-  off-tape in `scenarios.storage`. Validated vs pandapower and OpenDSS InvControl
+  off-tape in `pgml.dispatch`. Validated vs pandapower and OpenDSS InvControl
   (`docs/pgml/modeling/der-pv-storage.md`).
 - **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C),
   bit-exact vs OpenDSS incl. triplen; analytic sequence-based harmonic line models for R/X
   feeders (`docs/pgml/modeling/harmonic-line-model.md`).
-- **Scenarios** — reproducible QMC/cartesian sampling, correlated/per-phase draws,
-  IEC 61000-3-2 device current-emission spectra (default; EN 50160 stays a voltage-shaped
-  option), perturbation/injection sweeps, parquet persistence with `converged` +
-  `failed_scenarios` in the sidecar meta. Node-coherent sequences: optional multi-scale
-  load profiles (per-step `[B,T]` operating points, absolute time axis) and the
-  statistical device-class COMPOSITION (per-step device activity drives power AND spectrum
-  jointly, per-class attribution labels). `batched == loop`, differentiable through the
-  batch.
-- **Scale / solver architecture** — factor-once-solve-many, the `InjectionPlan` fast path,
-  prepared systems (`prepare_power_flow`), scenario chunk tiling, the CPU sparse (SuperLU)
-  backend with backend-aware convergence floors, switch-state batching (`branch_states`
-  admittance scaling, differentiable) with the optional Woodbury LOW-RANK update-solve
-  (`branch_states_method="woodbury"` — one base factorization for the whole sweep,
-  `pgml.solver.lowrank`), multi-grid disjoint-union batching
-  (`pgml.multigrid.merge_grids`) plus its BLOCK-DIAGONAL factorization backend
-  (`linear_solver="block"` + `MergedGrid.block_rows()` — factors each member's diagonal
-  block, equal sizes stacked into one batched LU, so an ensemble costs `O(Σ n³)` instead
-  of the union's `O((Σ N)³)`; the CUDA path, where dense is otherwise the only union
-  option), and pre-solve connectivity checks
-  (`ConnectivityError` / `on_disconnected="zero"`). Design + measurements:
-  `docs/pgml/modeling/solver-performance.md`; benchmarks:
-  `run/examples/pgml/benchmark_speed.py`, `run/examples/pgml/benchmark_sparse.py`,
-  `run/examples/pgml/benchmark_woodbury.py`.
-- **Convert** — pandapower / OpenDSS / power-grid-model → `Grid`, with per-terminal phase
-  permutations, n_phases-aware neutrals, positive-sequence reduction (Z1 = Zself−Zmutual),
-  pandapower `parallel` + line/trafo switches, ZIP load models, OpenDSS
-  Capacitor/Reactor/Generator/PVSystem/Storage, and a dropped-element warning naming any
-  unconverted kind. Coverage table: "Known modeling gaps" below.
-- **Evaluation** — comparison plots + reference oracles (optional `oracles` extra),
-  including the INDEPENDENT OpenDSS scenario oracle (`opendss_scenario_oracle`): full DSS
-  export, snapshot + coherent dataset generation in `write_dataset` format with
-  `meta["engine"]="opendss"`, matched + default assumption modes. Matched-mode parity is
-  ~1e-8 pu on the feeder cases (~1e-6 on CIGRE LV 3-phase; the residual is the documented
-  magnetizing-branch placement difference, `docs/pgml/modeling/transformer.md`).
-- **Measurement instrumentation** — `MeasurementDevice` on the `Grid` (schema rev 0.0.3):
-  node-anchored meters + CT channels, accuracy class, averaging intervals; inert metadata
-  for downstream state-estimation and acquisition tooling to consume.
-- **Infra** — PEP 621 packaging, `py.typed`, GitHub Actions (ruff + tests + strict docs),
-  pytest markers (`gpu`/`opendss`/`slow`, registered in `pyproject.toml`).
-
-## How to run
-
-- **Use it**: `import pgml; pgml.simulate(grid, pgml.SimulationConfig(...))` — see
-  `docs/pgml/public-api.md` (and the suite's getting-started guide on the published site).
-- **Tests**: `pixi run -e cpu pytest -q` (diff gate `tests/differentiability`, GPU gate
-  `tests/gpu`). **Lint**: `pixi run -e cpu ruff check src tests run`. **Docs**: see `CLAUDE.md`.
-- **Examples**: `run/examples/pgml/` (each self-documenting — see `run/examples/README.md`).
-
-## Open work — where to start
-
-WHAT / WHY / WHERE / HOW. "⚠️ decision" = confirm the approach with the maintainer before a
-large rework (a schema change needs the maintainer's sign-off first).
+- **Scenarios (the batch contract)** — a batch of per-component deltas on one grid:
+  reproducible QMC/cartesian sampling with correlated and per-phase draws, IEC 61000-3-2
+  device current-emission references (default; EN 50160 stays a voltage-shaped option), the
+  affine load-dependent emission law, the excitation sweeps (perturbation, spectrum,
+  per-node source) and the upstream `BackgroundHarmonicConfig`. `batch_from_values` builds a
+  batch from tensors a caller already has, and `run_scenarios` accepts any `ScenarioSpec`
+  (an object with `sample(grid)`), so a downstream generator plugs its own recipe in without
+  this package knowing it. A batch declares its own step count `n_steps` and its
+  batch-shared records, so the persistence layer no longer guesses either. Parquet
+  persistence records the time axis, the config owner and the caller's own provenance
+  stamps. `batched == loop`, differentiable through the batch.
+  The state-estimation RECIPES (the device-class library, the statistical composition, the
+  load profiles, the node-coherent fingerprint sampler, the two calibrated presets) are not
+  part of this package: they are calibrated modeling choices of a study and live with it.
 
 ### A. Batching / scale → production GPU training-data generation  ⚠️ decision — main gap
 
@@ -172,14 +122,12 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
 
 ### D. Smaller follow-ups (no decision needed)
 
-- **Per-scenario staggered composition starts**: the composed coherent generator evaluates
-  ONE absolute time window for every scenario (`composition.sample_device_composition`
-  builds a single `[T]` hour/day axis from `config.start_time`), so a dataset's diurnal
-  coverage is whatever the anchor hour provides — a midnight anchor leaves office/PV
-  activity near zero for the whole dataset. Draw a per-scenario start offset (seeded,
-  recorded in the samples sidecar) so the scenarios spread over the day; the per-step
-  `time_unix_s` becomes `[B, T]` and any downstream time-feature consumer must switch to
-  the per-sample axis. WHERE: `src/pgml/scenarios/composition.py`, `harmonics.py` (sidecar).
+- **Per-scenario time anchors in the batch contract**: a sequence batch records ONE `[T]`
+  `time_unix_s` vector for the whole batch, so a generator that wanted to stagger its
+  scenarios over the day has nowhere to put a per-scenario anchor. Allowing a `[B, T]`
+  `time_unix_s` is a contract change here (the shared-record split, the sidecar's
+  `t0_unix_s`, and every downstream time-feature consumer). WHERE:
+  `src/pgml/scenarios/sampler.py` (the record contract), `persistence.py` (the sidecar).
 - **SolvedState mutation guard**: lazy accessors recompute from the referenced grid; the
   no-mutation-after-solve rule is currently a docstring contract only. Reuse the network
   fingerprint (the `PowerFlowSystem` guard mechanism) to detect post-solve grid mutation
@@ -209,13 +157,9 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
 - **DER (optional extensions)**: a true voltage-regulating PV bus (replace a terminal's
   power-balance row with `|V| − V_set`, free Q, smooth Q-limit —
   `docs/pgml/modeling/der-pv-storage.md` §4.5).
-- **Storage dispatch (optional extensions)**: higher-level dispatch policies and a
-  scenarios `Selector(component="storage")` to sample storage setpoints across a batch.
-- **Composition (statistical device classes)**: per-phase member placement (members
-  currently land on the load's total, split by the symmetry rule), a richer per-class
-  reactive/power-factor shape, and coupling the fingerprint MODE to the same activity
-  clock (an EV's harmonic mode appearing only while charging). WHERE:
-  `src/pgml/scenarios/composition.py`.
+- **Storage dispatch (optional extensions)**: higher-level dispatch policies in
+  `pgml.dispatch`, and a scenarios `Selector(component="storage")` to sample storage
+  setpoints across a batch.
 - **Harmonic flow**: batch-dim mismatch guard (operating_point vs harmonic_injection);
   vectorize the device×order python loop in `harmonic_flow._harmonic_injections`.
 - **Criticality on a batch**: the IFT-Jacobian criticality SVD is skipped for `b>1`
