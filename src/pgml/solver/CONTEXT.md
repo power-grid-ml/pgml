@@ -351,9 +351,20 @@ verified empirically). New orchestration:
     rank lifted to the injection's so it stacks against the `[B, T, N]` harmonic slices. A
     no-op for the snapshot (`[B]`/`[B]`) and nominal (empty-op) cases — byte-identical.
 
+- `harmonic_injections(grid, v1, harmonic_orders, *, operating_point=None,
+     harmonic_injection=None, node_sources=None, symmetry=None, dtype=torch.complex128,
+     device=None, param_overrides=None, index=None) -> Tensor` complex `[*batch, Hh, N]`
+  — the RHS half of `assemble_harmonic_system` without assembling `Y(h)`: every injecting
+  device's connection-aware harmonic current from its converged fundamental terminal
+  current and its spectrum, plus the Norton current of every CURRENT-kind
+  `NodeHarmonicSource` (a VOLTAGE-kind one is refused — it adds a shunt admittance as
+  well, so it belongs to the system assembly). `index` defaults to the grid's full layout
+  (the layout `v1` is in); pass a reduced one to get the injection summed onto fused rows.
+  The nodal-injection input a fused branch's current recovery needs
+  (`pgml.assembly.branch_currents(..., i_inj=…)`).
 - `assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point=None,
      harmonic_injection=None, node_sources=None, symmetry=None,
-     dtype=torch.complex128, device=None) -> (Y, I, index)`
+     dtype=torch.complex128, device=None, fusion=None) -> (Y, I, index)`
   - Exposes the per-harmonic LINEAR system `Y(h) V(h) = I(h)` for orders `h > 1` —
     EXACTLY the `(yh, ih)` `solve_harmonic_flow` builds (`assemble_network_ybus` +
     source Norton stamp for `Y`; `_harmonic_injections` + `node_sources` for `I`), so
@@ -670,21 +681,47 @@ precision="full", refine_steps=None) -> FactoredSystem`
   slower at 3600 rows), so `mixed` is not a win there — it is a dense/CUDA lever.
 
 # =====================================================================
-# PRE-SOLVE MODELING GATE
+# ZERO-IMPEDANCE BRANCHES: EXACT BUS FUSION + THE PRE-SOLVE GATE
 # =====================================================================
-`check_branch_impedances(grid) -> None` — raises `pgml.errors.ModelingError` naming every
-branch whose SERIES IMPEDANCE IS EXACTLY ZERO (a bus coupler or jumper modelled as a
-zero-impedance line, a zero-length line, a closed switch with the schema's zero R/L
-default, a zero-impedance generic branch or transformer). Such a branch has no primitive
-admittance — the nodal formulation inverts the series impedance — and without the gate it
-surfaced as a raw `torch._C._LinAlgError` naming an internal batch index. The message
-names the branch ids and the two ways out: the documented near-ideal series resistance
-`branch.near_ideal_series_resistance_ohm` (1e-4 Ohm, what the pandapower converter
-substitutes for a bus-bus switch), or merging the two nodes. Every solve entry point runs
-it (`solve_power_flow`, `prepare_power_flow`, `solve_harmonic_flow`,
-`loadability_limit`); a prepared system carries the result. Values are read under
-`no_grad` (structural, never on the tape) and a `conductor_geometry` line is skipped (the
-geometry path always yields a finite impedance).
+A branch whose series impedance is EXACTLY zero (a closed switch with the schema's zero
+R/L default, a bus coupler or jumper modelled as a zero-impedance line, a zero-length
+line, a zero-impedance generic branch) has no primitive admittance — the nodal formulation
+inverts the series impedance. It IS representable: it is an ideal conductor, and every
+solve entry point now collapses its terminal node-phase rows into ONE row of the solved
+system (`pgml.assembly.fusion_map`, `assembly/CONTEXT.md` rev 3) instead of refusing it.
+
+- The map is resolved ONCE per solve from the documented policy `branch.zero_impedance`
+  (`fuse` default / `error`) and threaded into the assembly, the slack rows, the injection
+  plan, the warm start, the Woodbury base, the per-order harmonic systems and the
+  diagnostics. The row layout of the SOLVE is the reduced one; the row layout of the
+  RESULT is the grid's own — `PowerFlowResult.v` / `HarmonicFlowResult.v` are prolonged
+  back (a gather, so the IFT gradient reaches the reduced state through its scatter-add
+  adjoint) and `.index` is the full `NodePhaseIndex` as before. Both results carry the
+  map in a new `fusion` field (`None` when nothing fused); `PowerFlowSystem` caches it and
+  a consuming solve must match it.
+- `layout_fingerprint` / persisted tensors are UNAFFECTED: fusion never changes the full
+  row layout a result or a dataset is written in.
+- Two terminals the solve has to pin separately may not share a fused row: two in-service
+  Sources are deduplicated when their references AGREE (logged) and refused when they do
+  not, and two voltage-REGULATING generators on one fused row are refused by name.
+- A fused group's per-row diagnostics (`worst_nodes`, `out_of_band_nodes`) report ONE row
+  per group, under the group's representative node id — the group is one electrical node.
+- `block_rows` (a merged ensemble's partition) is mapped through the fusion, which keeps
+  it a partition: a fused group never spans two member grids.
+
+`check_branch_impedances(grid, *, fusion=None, param_overrides=None) -> None` — the
+pre-solve gate, which answers the STRUCTURAL question "is every in-service branch
+stampable?" when called with no map (unchanged behaviour, and the message now names exact
+bus fusion as a third way out next to the documented near-ideal series resistance
+`branch.near_ideal_series_resistance_ohm` and merging the two nodes). Every solve entry
+point passes the map it resolved, so what remains is what neither a stamp nor a fused row
+can express: a zero-impedance TRANSFORMER (its ratio and vector group relate the terminals
+by more than equality), a zero-series branch that still carries a shunt admittance
+(fusing would drop that shunt), and a zero-impedance branch listed in `branch_states` (a
+swept branch is reached by scaling a stamped admittance; the two mechanisms are mutually
+exclusive by construction). `param_overrides` makes the check read the EFFECTIVE impedance
+the stamps will use. Values are read under `no_grad` (structural, never on the tape) and a
+`conductor_geometry` line is skipped (the geometry path always yields a finite impedance).
 
 # =====================================================================
 # IFT backward cost (open work, design note)

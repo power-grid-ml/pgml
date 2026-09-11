@@ -23,7 +23,7 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | **Modeling defaults** (documented values + model choices; explicit > defaults > converter) — internal, not user run-config | `defaults.py` (loader) + shipped `data/` | `data/CONTEXT.md` |
 | **Run-config schemas** (serializable; one config + seed reproduces a run) — user-facing | `scenarios/config.py` (data gen) | `scenarios/CONTEXT.md` |
 | **Experiments root** (where run outputs + config instances live; `PGML_EXPERIMENTS`, default `./data`) | `paths.py` | `data/README.md` |
-| **Y-bus assembly** (per-phase/per-harmonic/batched stamps; network + device injections; node-phase index; branch currents; vector-group transformer; control laws) | `assembly/` | `assembly/CONTEXT.md` |
+| **Y-bus assembly** (per-phase/per-harmonic/batched stamps; network + device injections; node-phase index; branch currents; vector-group transformer; control laws; exact bus fusion of zero-impedance branches) | `assembly/` | `assembly/CONTEXT.md` |
 | **Solve** (complex batched linear; nonlinear const-P/ZIP via IFT; Newton; harmonic flow; diagnostics + loadability) | `solver/` | `solver/CONTEXT.md` |
 | **Geometry → impedance** (differentiable Carson/Deri + skin; R/X → geometry synthesis; sequence-aware harmonic line models) | `geometry/` | `geometry/CONTEXT.md` |
 | **Converters** from pandapower / power-grid-model / OpenDSS → our `Grid` | `convert/` | `convert/CONTEXT.md` |

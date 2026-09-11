@@ -416,3 +416,74 @@ load P/Q passes; full suite green.
   on the tape stays differentiable. `v` with `H == 1`: only a bare `[1, N]` is
   read as carrying the H axis; any deeper `v` is `[*batch, N]`, so a trailing
   scenario dim of one (a `[B, 1]` operating point) is never mistaken for H.
+
+# =====================================================================
+# rev 3 additions (exact bus fusion of zero-impedance branches)
+# =====================================================================
+A branch whose series impedance is EXACTLY zero — a closed `Switch` with the schema's
+zero R/L default, a bus coupler or jumper modelled as a zero-impedance `Line`, a
+zero-length line, a zero-impedance `GenericBranch` — has no primitive admittance (the
+nodal formulation inverts the series impedance). It is nevertheless an ordinary network
+element: an ideal conductor, which constrains its two terminal voltages to be equal. That
+constraint is expressed EXACTLY by collapsing the branch's terminal node-phase rows into
+ONE row of the solved system (`V = P v`, `(Pᵀ Y P) v = Pᵀ I`), never by a small-impedance
+stand-in and never by editing the grid.
+
+- `fusion_map(grid, *, param_overrides=None, branch_states=None) -> FusionMap | None`
+  (`_fusion.py`) — union-find over the fused terminals PER PHASE (position k of
+  `from_phases` is shorted to position k of `to_phases`, so a phase-rotating jumper is
+  handled), then one reduced row per connected group. `None` when nothing fuses, which is
+  the signal to every caller to keep the unreduced path. Reads the EFFECTIVE impedance: a
+  `param_overrides` entry wins, so a substituted finite leaf keeps the branch stamped and
+  a substituted zero fuses an ordinary branch.
+- `FusionMap` (frozen dataclass): `size` (M), `index` (the REDUCED `NodePhaseIndex`, whose
+  `(node, phase) -> row` map is MANY-TO-ONE), `full_index` (the grid's own N-row layout),
+  `row_to_reduced [N]`, `representative [M]`, `fused_branch_ids`, `groups` (the full rows
+  of each multi-row reduced row), `indeterminate_branch_ids`. Methods:
+  `prolong(v_red) -> v_full` (gather; the adjoint of `restrict`), `restrict(x_full)`
+  (index_add — the right reduction for an extensive quantity: the fused rows' current
+  balances are summed), `sample(x_full)` (gather at the representatives — the right
+  reduction for an intensive one: a voltage, a per-row base), `reduce_rows(rows)` (keeps a
+  row SET a set: the ideal-slack `fixed_rows`, a block-diagonal partition),
+  `duplicate_rows(rows)`, `node_groups()`, `describe()`, `to(device)`.
+  THE KEY PROPERTY: because the reduced index is a many-to-one row map, every existing
+  stamp / injection / incidence path that indexes through an index accumulates `Pᵀ Y P`
+  and `Pᵀ I` DIRECTLY — no reduction matrix and no full-size matrix is ever materialised.
+- `zero_impedance_branches(grid, *, param_overrides=None) -> list[ZeroImpedanceBranch]`
+  — `(branch_id, component, detail, fusable)` per offending in-service branch. NOT
+  fusable: a `Transformer` (its ratio and vector group relate the terminals by more than
+  equality) and a zero-series branch that still carries a shunt admittance (fusing would
+  drop that shunt). Both keep raising through `pgml.solver.check_branch_impedances`.
+- `assemble_ybus` / `assemble_network_ybus` gain `fusion: FusionMap | bool | None = None`
+  — `None` resolves the documented policy `branch.zero_impedance` (`fuse` default,
+  `error` refuses), `False` refuses, a map uses that map (how a solve shares ONE map
+  across the fundamental and every harmonic order). When fusion applies, the returned
+  `YBus.Y` is the reduced `[*batch, H, M, M]`, `YBus.index is fusion.index`, and the new
+  field `YBus.fusion` carries the map. The fused branches are dropped from a shallow grid
+  view before stamping (`_unfused_view`), so no builder sees a singular impedance.
+- `branch_currents(..., fusion=None, i_inj=None)` — a fused branch has no primitive block,
+  so its terminal current comes from Kirchhoff's law at the fused rows instead: the defect
+  `d = i_inj − Y_network_without_fused_branches · V` (assembled once in the FULL layout)
+  is inverted per fused group by the structural maps `pinv(A_known)` of the group's
+  oriented incidence, with the rows of a Source terminal left out (an ideal slack's own
+  current is an output of the solve, not an input). `i_from = -i_to` exactly. `v`/`index`
+  must be the FULL layout (what a result reports). `i_inj` is optional: without it the
+  injection at the fused rows is taken as zero, which is exact for a fused node carrying
+  no appliance and logs a WARNING when one does. A LOOP of ideal conductors (parallel
+  fused branches) leaves a circulating current undetermined by the node voltages — the
+  physics of ideal conductors; those branches are listed in
+  `FusionMap.indeterminate_branch_ids`, the reported split is the minimum-norm one, and a
+  WARNING names them once.
+- `branch_stamp_blocks` REFUSES a zero-impedance branch by name (a low-rank update needs
+  a stamped block), and `NodePhaseIndex` gains `has(node_id, phase) -> bool`.
+- `fusion_map` RAISES (`ModelingError`) when a zero-impedance branch is listed in
+  `branch_states` (the two mechanisms are mutually exclusive: a swept branch is reached by
+  SCALING a stamped admittance, a fused branch has no stamp to scale), when an ideal
+  branch joins two different rated voltages, and for the unfusable kinds above.
+- Differentiable (the reduced assembly, the prolongation gather and the current recovery
+  are linear operations on the tape; a fused branch's own impedance is structurally not a
+  parameter of the solve, so its gradient is a finite ZERO), batched, device/dtype from
+  the inputs. `tests/topology/test_fusion_map.py`,
+  `tests/reference/test_switch_fusion_pandapower.py`,
+  `tests/reference/test_switch_fusion_pgm.py`,
+  `tests/differentiability/test_fusion_gradcheck.py`, `tests/gpu/test_fusion_parity.py`.

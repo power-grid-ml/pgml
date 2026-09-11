@@ -327,7 +327,7 @@ def solve_harmonic_flow(
     fusion = resolve_fusion(
         grid, None, param_overrides=param_overrides, branch_states=branch_states
     )
-    check_branch_impedances(grid, fusion=fusion)
+    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -376,7 +376,7 @@ def solve_harmonic_flow(
                 on_disconnected="ignore",
                 param_overrides=param_overrides,
             )
-            return _expand_zeroed_harmonic_result(grid, sub_res)
+            return _expand_zeroed_harmonic_result(grid, sub_res, fusion)
 
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
@@ -462,13 +462,14 @@ def solve_harmonic_flow(
 
 
 def _expand_zeroed_harmonic_result(
-    grid: Grid, res: HarmonicFlowResult
+    grid: Grid, res: HarmonicFlowResult, fusion=None
 ) -> HarmonicFlowResult:
     """Scatter a sub-grid harmonic solution back to the full grid (0 V dead rows).
 
     The ``on_disconnected="zero"`` reassembly at every order: rows absent from the
     energized sub-grid report 0 V in ``v`` and in the embedded fundamental
     :class:`PowerFlowResult`. Out-of-place ``index_copy`` (gradients preserved).
+    ``fusion`` is the FULL grid's map (see :func:`_expand_zeroed_result`).
     """
     full_index = node_phase_index(grid)
     sub_index = res.index
@@ -487,7 +488,8 @@ def _expand_zeroed_harmonic_result(
         v=v_full,
         frequencies_hz=res.frequencies_hz,
         index=full_index,
-        pf=_expand_zeroed_result(grid, res.pf),
+        pf=_expand_zeroed_result(grid, res.pf, fusion),
+        fusion=fusion,
     )
 
 

@@ -418,7 +418,12 @@ def check_connectivity(grid: Grid) -> None:
         )
 
 
-def check_branch_impedances(grid: Grid, *, fusion: Optional[FusionMap] = None) -> None:
+def check_branch_impedances(
+    grid: Grid,
+    *,
+    fusion: Optional[FusionMap] = None,
+    param_overrides: Optional[dict] = None,
+) -> None:
     """Raise :class:`~pgml.errors.ModelingError` for a branch with no primitive stamp.
 
     The pre-solve modeling gate. A branch whose series impedance is exactly zero (a bus
@@ -437,8 +442,11 @@ def check_branch_impedances(grid: Grid, *, fusion: Optional[FusionMap] = None) -
     offending branch and the ways out — the documented near-ideal resistance
     ``branch.near_ideal_series_resistance_ohm``, merging the two nodes, or real impedance
     data.
+
+    ``param_overrides`` makes the check read the EFFECTIVE impedance the stamps will use,
+    so a branch whose zero impedance is substituted by a finite leaf passes.
     """
-    bad = zero_impedance_branches(grid)
+    bad = zero_impedance_branches(grid, param_overrides=param_overrides)
     if fusion is not None:
         fused = set(fusion.fused_branch_ids)
         bad = [z for z in bad if z.branch_id not in fused]
@@ -648,13 +656,18 @@ def _check_fused_row_conflicts(
         )
 
 
-def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
+def _expand_zeroed_result(
+    grid: Grid, res: PowerFlowResult, fusion: Optional[FusionMap] = None
+) -> PowerFlowResult:
     """Scatter a sub-grid solution back to the full grid with 0 V on dropped rows.
 
     The ``on_disconnected="zero"`` reassembly: ``res`` was solved on
     :func:`pgml.topology.energized_subgrid`; every full-grid row absent from the
     sub-grid is a de-energized conductor and reports 0 V. Out-of-place
-    ``index_copy`` so gradients keep flowing into the solved rows.
+    ``index_copy`` so gradients keep flowing into the solved rows. ``fusion`` is the
+    FULL grid's map, carried through so a fused branch's current stays derivable: a
+    fused group inside the de-energized part has a zero current balance and therefore
+    reports zero current, which is what a de-energized branch carries.
     """
     full_index = node_phase_index(grid)
     sub_index = res.index
@@ -678,6 +691,7 @@ def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
         diagnostics=res.diagnostics,
         converged_mask=res.converged_mask,
         failed_states=res.failed_states,
+        fusion=fusion,
     )
 
 
@@ -1424,7 +1438,7 @@ def prepare_power_flow(
     fusion = resolve_fusion(
         grid, None, param_overrides=param_overrides, branch_states=branch_states
     )
-    check_branch_impedances(grid, fusion=fusion)
+    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
     log_fusion_summary(fusion)
     if branch_states is not None:
         if _branch_states_batched(branch_states):
@@ -1805,7 +1819,7 @@ def solve_power_flow(
     if system is None:
         # A zero-impedance branch that can be neither stamped nor fused is refused by
         # name whatever the connectivity policy is (a prepared system already ran it).
-        check_branch_impedances(grid, fusion=fusion)
+        check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
     if system is None and on_disconnected != "ignore":
         if branch_states is not None:
             if _branch_states_batched(branch_states):
@@ -1843,7 +1857,7 @@ def solve_power_flow(
                     on_disconnected="ignore",
                     enforce_q_limits=enforce_q_limits,
                 )
-                return _expand_zeroed_result(grid, sub_res)
+                return _expand_zeroed_result(grid, sub_res, fusion)
 
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
@@ -3907,7 +3921,7 @@ def loadability_limit(
         )
     tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
     fusion = resolve_fusion(grid, None, param_overrides=param_overrides)
-    check_branch_impedances(grid, fusion=fusion)
+    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
     check_connectivity(grid)
     log_fusion_summary(fusion)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)
