@@ -34,8 +34,10 @@ decisions. One entry per capability:
 - **Load flow** — linear (const-Z) + nonlinear (const-P / full ZIP); current-injection
   fixed point AND Newton (matrix-free option); IFT gradients; `ConvergenceDiagnostics` +
   `loadability_limit` λ-ramp (with a `capped` flag when no limit is found inside the ramp,
-  and a `ramp` choice between the load-only and the joint ramp). Batched-
-  robust: per-scenario `converged_mask`/`failed_states` instead of raising. Validated vs
+  and a `ramp` choice between the load-only ramp — the default, the textbook continuation
+  quantity — and the joint ramp of the whole operating point). Batched-
+  robust: per-scenario `converged_mask`/`failed_states` instead of raising, and the
+  criticality diagnostic analyses the hardest scenario of a batch. Validated vs
   pandapower & OpenDSS on IEEE-33 / CIGRE LV.
 - **Convergence in PER UNIT** — the nonlinear solve converges on the largest nodal
   apparent-power mismatch over a power base (pandapower's and power-grid-model's
@@ -46,6 +48,17 @@ decisions. One entry per capability:
   count, so iteration counts are comparable with the other tools (measured: the same
   deviations against pandapower and OpenDSS at 25–43 % fewer iterations than the former
   absolute volt criterion).
+- **Equilibrated factorizations** — every linear system is factored in its diagonally
+  equilibrated form `D_r A D_c` and the scaling is undone on the solution, so results,
+  units and gradients are unchanged while the factored system is far better conditioned
+  (measured 1-norm estimates: three-phase CIGRE LV's fundamental free block 5.5e4 → 2.1e3,
+  a 2016-row network's 1.4e5 → 1.3e4, IEEE-33 at harmonic order 13 8.0e8 → 1.5e3). Default
+  `solver.equilibration.mode = "symmetric"` (van der Sluis `d_i = |A_ii|^-1/2`, scale
+  factors rounded to powers of two so the scaled matrix is exact in binary floating point);
+  `"row_column"` is the two-sided variant, `equilibrate="off"` factors the matrix as
+  assembled. It buys robustness rather than forward accuracy — on a 2016-row system a plain
+  complex64 solve runs to the iteration cap unscaled and converges in 9 iterations
+  equilibrated.
 - **Mixed precision** — `precision="mixed"` factors at complex64 and keeps complex128
   accuracy: the linear solve by iterative refinement, the nonlinear solve by running its
   fixed point in residual-correction form (measured below 1e-9 pu against a complex128
@@ -158,8 +171,9 @@ The sampling layer and the dense scale wins are done (see Status +
 - **GPU / memory micro-optimisations (benchmark-informed)**: measure `precision="mixed"`
   on CUDA, where the FP64 throughput ratio (1/64 on consumer cards) makes the
   single-precision factorization the dominant lever — the CPU measurement is only the
-  lower bound of the win; retune the IFT backward's
-  JVP-vs-dense threshold (`_IFT_DENSE_JAC_MAX_ELEMS`) on current GPU numbers;
+  lower bound of the win; re-measure the state-Jacobian memory budget
+  (`solver.ift.jacobian_budget_mb`, 1 GiB, calibrated on a 12 GB card) on the device the
+  campaign runs on (`run/examples/pgml/benchmark_ift_backward.py`);
   chunk-to-chunk warm starting for sorted/correlated scenario chunks;
   `torch.cuda.CUDAGraph` / `torch.compile` over the fixed-point iteration (static shapes
   per chunk — likely wins at small N).
@@ -178,13 +192,14 @@ The sampling layer and the dense scale wins are done (see Status +
   with Newton). `linear_solver="block"` already removes the union-sized FACTORIZATION for
   an ensemble; these three are what still bound it.
 - **Matrix-free / factorization-reusing IFT backward.** The backward builds the real
-  `[B, 2N, 2N]` state Jacobian by autograd and solves the adjoint densely, so a gradient
-  costs far more than the forward it differentiates (measured by the application demos:
-  ~8 forward solves at batch 12 on IEEE-33; 200–730 s on a 1176-row grid at batch 16–64
-  on the CPU sparse path against an 85 ms forward). The adjoint system is the TRANSPOSE
-  of the same Jacobian the forward already factors, so the dense build is avoidable: see
-  the design sketch in the solver ledger (`src/pgml/solver/CONTEXT.md`, "IFT backward
-  cost"). This is the largest remaining differentiability cost.
+  `[B, 2N, 2N]` state Jacobian by autograd, which still dominates the cost of a gradient
+  even after the build was budgeted and the adjoint factorization cached (measured CPU,
+  one process per point: IEEE-33 at batch 64, 773 ms against a 15 ms forward; a 1176-row
+  ensemble at batch 1, 658 ms against 136 ms, and 2.26 s at batch 4). The adjoint system is
+  the TRANSPOSE of the same operator the forward already factors, and its device term is
+  block-diagonal per node-phase row, so the autograd build is avoidable altogether: see the
+  design sketch in the solver ledger (`src/pgml/solver/CONTEXT.md`, "IFT backward"). This is
+  the largest remaining differentiability cost.
 - **Beyond direct-factorization scale**: a GPU-resident Krylov path (block-Jacobi /
   additive-Schwarz preconditioning, the shape GPU power-flow solvers built on iterative
   methods take) is the fork for networks too large to factor at all — secondary at LV
@@ -267,8 +282,9 @@ R-L split; validate the resonance vs OpenDSS. **Where.** `solver/harmonic_flow.p
   `src/pgml/scenarios/composition.py`.
 - **Harmonic flow**: batch-dim mismatch guard (operating_point vs harmonic_injection);
   vectorize the device×order python loop in `harmonic_flow._harmonic_injections`.
-- **Criticality on a batch**: the IFT-Jacobian criticality SVD is skipped for `b>1`
-  (logged); a batched variant needs per-scenario operating-point slicing.
+- **Criticality beyond one scenario**: the IFT-Jacobian criticality analysis describes the
+  hardest scenario of a batch (named in the result). A per-scenario SVD for every element of
+  a batch, or a sparse / matrix-free variant for states above `2N = 4000`, is open.
 - **Per-node harmonic-source sweeps** (`run_node_injection_sweep`) loop one solve per
   node; batch the target-row index (`[B, P]` scatter) to lift the loop.
 - **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`) and
@@ -422,12 +438,17 @@ results are never read as more physical than they are. Details live in `docs/pgm
   `emission_class="auto"` maps consumer_type→class, an approximation — no lighting
   consumer_type yet for Class C).
 - **complex64 on ill-conditioned grids.** The engine carries no per-unit normalisation, so
-  an SI-unit system is ill-conditioned: measured 1-norm condition estimates of the factored
-  fundamental system are 2.8e3 (IEEE-33), 1.7e4 (CIGRE LV single-phase-equivalent), 5.5e4
+  an SI-unit system is badly SCALED: the 1-norm condition estimate of the fundamental
+  system AS ASSEMBLED is 2.8e3 (IEEE-33), 1.7e4 (CIGRE LV single-phase-equivalent), 5.5e4
   (three-phase), 6.9e4 (mv_oberrhein) and 4.6e5 (a 3600-row synthetic feeder), and a stiff
-  source or a near-ideal switch pushes it decades higher. A plain complex64 solve therefore
-  keeps only `7 − log10(cond)` digits (measured |ΔV| against complex128: 4e-6 pu on
-  IEEE-33, 2e-3 pu at 3600 rows) and logs a one-time warning naming the estimate. The
+  source or a near-ideal switch pushes it decades higher. The equilibration above removes
+  most of that (and is what the reported estimate now describes), but not all of it: a
+  low-voltage-only harmonic system stays at 1e7 because its conditioning is not a scaling
+  artefact, and equilibration does not make single precision accurate — LU with partial
+  pivoting is backward stable, so the complex64 error barely moves. A plain complex64 solve
+  therefore still keeps only `7 − log10(cond)` digits (measured |ΔV| against complex128:
+  8e-6 pu on IEEE-33, 4e-5 pu at 2016 rows) and logs a one-time warning naming the
+  estimate. The
   recipe: solve at complex128, or at complex128 with `precision="mixed"`
   (single-precision factorization refined against double-precision residuals — measured
   1.5–1.9x faster than complex128 on the DENSE path at 132–3600 rows, and no faster on the
