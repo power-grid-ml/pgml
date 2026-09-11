@@ -49,6 +49,91 @@ from pgml.evaluation.data import HarmonicProfile
 from pgml.evaluation.topology import distance_from_slack
 
 
+# ---------------------------------------------------------------------------
+# ideal (zero-impedance) branches: the oracle's own dense bus fusion
+# ---------------------------------------------------------------------------
+def _is_ideal_branch(b) -> bool:
+    """A closed branch with exactly zero series impedance (an ideal conductor).
+
+    Such a branch has no primitive admittance, so the oracle does not stamp it: its two
+    terminals are the SAME electrical node, which :func:`fusion_prolongation` expresses.
+    """
+    if not getattr(b, "in_service", True):
+        return False
+    if isinstance(b, Switch):
+        if not b.closed:
+            return False
+        return to_float(b.resistance_ohm) == 0.0 and to_float(b.inductance_h) == 0.0
+    if isinstance(b, Line):
+        if b.conductor_geometry is not None:
+            return False
+        if to_float(b.length_m) == 0.0:
+            return True
+        r = b.series_resistance_ohm_per_m
+        ell = b.series_inductance_h_per_m
+        if r is None or ell is None:
+            return False
+        flat_r = [to_float(x) for row in r for x in row]
+        flat_l = [to_float(x) for row in ell for x in row]
+        return not any(flat_r) and not any(flat_l)
+    return False
+
+
+def fusion_prolongation(grid: Grid, index) -> Optional[np.ndarray]:
+    """Dense 0/1 prolongation ``P`` ``[N, M]`` merging the ideal branches' terminal rows.
+
+    The textbook form of exact bus fusion, written out for the oracle: with ``V = P v``
+    the reduced system is ``(P^T Y P) v = P^T I``, which is what
+    :func:`solve_with_fusion` solves. ``None`` when the grid has no ideal branch.
+
+    pgml's solver reaches the same system through a many-to-one row index instead of a
+    matrix (:func:`pgml.assembly.fusion_map`), so this is an independent implementation
+    of the same algebra.
+    """
+    pairs = []
+    for b in grid.branches:
+        if not _is_ideal_branch(b):
+            continue
+        for pf, pt in zip(b.from_phases, b.to_phases):
+            pairs.append(
+                (
+                    index.row(int(b.from_node), pf),
+                    index.row(int(b.to_node), pt),
+                )
+            )
+    if not pairs:
+        return None
+    parent = list(range(index.size))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, c in pairs:
+        ra, rc = find(a), find(c)
+        if ra != rc:
+            parent[rc] = ra
+    col_of: dict[int, int] = {}
+    cols = []
+    for row in range(index.size):
+        root = find(row)
+        if root not in col_of:
+            col_of[root] = len(col_of)
+        cols.append(col_of[root])
+    p_mat = np.zeros((index.size, len(col_of)), dtype=complex)
+    p_mat[np.arange(index.size), cols] = 1.0
+    return p_mat
+
+
+def solve_with_fusion(y: np.ndarray, i: np.ndarray, p_mat) -> np.ndarray:
+    """Solve ``Y V = I``, collapsing the fused rows when ``p_mat`` is given."""
+    if p_mat is None:
+        return np.linalg.solve(y, i)
+    return p_mat @ np.linalg.solve(p_mat.conj().T @ y @ p_mat, p_mat.conj().T @ i)
+
+
 def _resolve_spectrum(app, harmonic_injection):
     if harmonic_injection is not None and app.id in harmonic_injection:
         return dict(harmonic_injection[app.id])
@@ -334,6 +419,8 @@ def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
 
     # Lines: series pi + shunt capacitance
     for b in grid.branches:
+        if _is_ideal_branch(b):
+            continue  # an ideal conductor: no stamp, its rows are fused instead
         if not (isinstance(b, Line) and getattr(b, "in_service", True)):
             continue
         if getattr(b, "conductor_geometry", None) is not None:
@@ -392,6 +479,8 @@ def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
 
     # Switches: series RL only (no shunt)
     for b in grid.branches:
+        if _is_ideal_branch(b):
+            continue  # an ideal conductor: no stamp, its rows are fused instead
         if not (isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed):
             continue
         phases_b = b.from_phases
@@ -536,10 +625,14 @@ def numpy_harmonic_profiles(
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
     n = index.size
+    # An ideal (zero-impedance) branch has no stamp; its terminals are one node.
+    p_fuse = fusion_prolongation(grid, index)
 
     def _build_y(h: int) -> np.ndarray:
         y = np.zeros((n, n), dtype=complex)
         for b in grid.branches:
+            if _is_ideal_branch(b):
+                continue  # an ideal conductor: no stamp, its rows are fused instead
             if not (isinstance(b, Line) and getattr(b, "in_service", True)):
                 continue
             length = to_float(b.length_m)
@@ -610,7 +703,7 @@ def numpy_harmonic_profiles(
                     )
                 )
                 i[row] += -i_drawn  # nodal injection
-            vh = np.linalg.solve(y, i)
+            vh = solve_with_fusion(y, i, p_fuse)
         ds, mags, angs, nids = [], [], [], []
         for node in grid.nodes:
             row = index.row(int(node.id), Phase.A)
@@ -716,6 +809,9 @@ def numpy_harmonic_voltages(
 
     orders_list = [int(h) for h in orders]
     index = node_phase_index(grid)
+    # An ideal (zero-impedance) branch has no stamp; its terminals are one electrical
+    # node, which the dense prolongation expresses (see `fusion_prolongation`).
+    p_fuse = fusion_prolongation(grid, index)
     n = index.size
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
@@ -773,7 +869,7 @@ def numpy_harmonic_voltages(
             i_s = ys_mat @ v_th
             for k in range(p):
                 i1[src_rows_v[k]] += i_s[k]
-        v1_eff = np.linalg.solve(y1, i1)
+        v1_eff = solve_with_fusion(y1, i1, p_fuse)
     else:
         v1_arr = np.asarray(v1).reshape(-1)
         if v1_arr.shape[0] != n:
@@ -865,12 +961,14 @@ def numpy_harmonic_voltages(
         if node_sources:
             _apply_node_sources_numpy(grid, node_sources, v1_eff, index, h, y_h, i_h)
 
-        result_slices.append(np.linalg.solve(y_h, i_h))
+        result_slices.append(solve_with_fusion(y_h, i_h, p_fuse))
 
     return np.stack(result_slices, axis=0)  # [H, N]
 
 
 __all__ = [
+    "fusion_prolongation",
     "numpy_harmonic_profiles",
     "numpy_harmonic_voltages",
+    "solve_with_fusion",
 ]

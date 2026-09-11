@@ -44,8 +44,11 @@ from pgml.evaluation.data import HarmonicProfile, LabeledMatrix, row_labels
 from pgml.evaluation.topology import distance_from_slack
 from pgml.evaluation.oracles.numpy_oracle import (
     _apply_node_sources_numpy,
+    _is_ideal_branch,
     _stamp_transformer_numpy,
+    fusion_prolongation,
     numpy_harmonic_voltages,
+    solve_with_fusion,
 )
 
 
@@ -207,6 +210,9 @@ def opendss_geometry_harmonic_profiles(
     index = hres.index
     f0 = float(grid.base_frequency_hz)
     freqs = hres.frequencies_hz.detach().cpu().numpy()
+    # An ideal (zero-impedance) branch is in neither engine's admittance: its terminals
+    # are one electrical node, which the dense prolongation expresses.
+    p_fuse = fusion_prolongation(grid, index)
     dssY = opendss_geometry_systemy(grid, index, orders, slack_node=slack_node)
     dist = distance_from_slack(grid, slack_node)
     v = hres.v.detach().cpu().numpy()  # [H, N]
@@ -215,7 +221,7 @@ def opendss_geometry_harmonic_profiles(
         k = int(np.argmin(np.abs(freqs - h * f0)))
         vp = v[k]
         i_inj = _pgml_harmonic_y(grid, index, h) @ vp
-        vd = np.linalg.solve(dssY[int(h)], i_inj)
+        vd = solve_with_fusion(dssY[int(h)], i_inj, p_fuse)
         ds, mags, angs, nids = [], [], [], []
         for node in grid.nodes:
             row = index.row(int(node.id), Phase.A)
@@ -606,9 +612,13 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
                 "length=1 units=m"
             )
 
-    # Switches: model as pure-R Lines (x1=0 => no Carson correction, safe to include)
+    # Switches: model as pure-R Lines (x1=0 => no Carson correction, safe to include).
+    # An IDEAL switch has no impedance to write: its two terminals are one electrical
+    # node, which the dense bus fusion of the comparison expresses instead.
     for b in grid.branches:
         if not (isinstance(b, Switch) and b.in_service and b.closed):
+            continue
+        if _is_ideal_branch(b):
             continue
         p = len(b.from_phases)
         ph_suffix = ".".join(str(k + 1) for k in range(p))
@@ -652,6 +662,8 @@ def _stamp_non_line_elements_no_source(
     w0 = 2.0 * math.pi * f0
 
     for b in grid.branches:
+        if _is_ideal_branch(b):
+            continue  # an ideal conductor: no stamp, its rows are fused instead
         if isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed:
             p = len(b.from_phases)
             fr_rows = index.rows(b.from_node)
@@ -1100,6 +1112,9 @@ def opendss_harmonic_voltages(
         return y_out
 
     # --- Per-order solve ---
+    # An ideal (zero-impedance) branch is in neither engine's admittance: its terminals
+    # are one electrical node, which the dense prolongation expresses.
+    p_fuse = fusion_prolongation(grid, index)
     result_slices: list[np.ndarray] = []
     for h in orders_list:
         if h == 1:
@@ -1115,7 +1130,7 @@ def opendss_harmonic_voltages(
         if node_sources:
             _apply_node_sources_numpy(grid, node_sources, v1_eff, index, h, y_h, i_h)
 
-        result_slices.append(np.linalg.solve(y_h, i_h))
+        result_slices.append(solve_with_fusion(y_h, i_h, p_fuse))
 
     return np.stack(result_slices, axis=0)  # [H, N]
 
@@ -1303,9 +1318,12 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
                 "length=1 units=m"
             )
 
-    # Switches: pure-R Lines (no Carson correction at X=0).
+    # Switches: pure-R Lines (no Carson correction at X=0). An IDEAL switch is not a
+    # DSS element: its terminals are one electrical node (see `fusion_prolongation`).
     for b in grid.branches:
         if not (isinstance(b, Switch) and b.in_service and b.closed):
+            continue
+        if _is_ideal_branch(b):
             continue
         p = len(b.from_phases)
         ph_suffix = ".".join(str(k + 1) for k in range(p))
@@ -1654,6 +1672,9 @@ def opendss_dyn_transformer_harmonic_voltages(
         return y_out
 
     # --- Per-order solve ---
+    # An ideal (zero-impedance) branch is in neither engine's admittance: its terminals
+    # are one electrical node, which the dense prolongation expresses.
+    p_fuse = fusion_prolongation(grid, index)
     result_slices: list[np.ndarray] = []
     for h in orders_list:
         if h == 1:
@@ -1661,7 +1682,7 @@ def opendss_dyn_transformer_harmonic_voltages(
             continue
         y_h = _build_harmonic_ybus_with_real_trafo(h)
         i_h = _build_injection(h)
-        result_slices.append(np.linalg.solve(y_h, i_h))
+        result_slices.append(solve_with_fusion(y_h, i_h, p_fuse))
 
     return np.stack(result_slices, axis=0)  # [H, N]
 
