@@ -100,12 +100,14 @@ decisions. One entry per capability:
   `run/examples/pgml/benchmark_woodbury.py`.
 - **Convert** — pandapower / OpenDSS / power-grid-model → `Grid`, with per-terminal phase
   permutations, n_phases-aware neutrals, positive-sequence reduction (Z1 = Zself−Zmutual),
-  pandapower `parallel` + line/trafo switches, ZIP load models, OpenDSS
-  Capacitor/Reactor/Generator/PVSystem/Storage, and a dropped-element warning naming any
+  pandapower `parallel` + line/trafo switches, ZIP load models, pandapower `gen`
+  (voltage-regulating by default) and `shunt` (a capacitor bank or a reactor, by the sign
+  of `q_mvar`), OpenDSS Capacitor/Reactor/Generator/PVSystem/Storage, the resolved
+  harmonic line model on every converted line, and a dropped-element warning naming any
   unconverted kind. Coverage table: "Known modeling gaps" below.
 - **Evaluation** — comparison plots + reference oracles (optional `oracles` extra),
   including the INDEPENDENT OpenDSS scenario oracle (`opendss_scenario_oracle`): full DSS
-  export, snapshot + coherent dataset generation in `write_dataset` format with
+  export, snapshot + sequence dataset generation in `write_dataset` format with
   `meta["engine"]="opendss"`, matched + default assumption modes. Matched-mode parity is
   ~1e-8 pu on the feeder cases (~1e-6 on CIGRE LV 3-phase; the residual is the documented
   magnetizing-branch placement difference, `docs/pgml/modeling/transformer.md`).
