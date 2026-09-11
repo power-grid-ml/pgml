@@ -77,11 +77,17 @@ class TestNewtonPowerFlow:
     def test_matches_current_injection_cigre(self) -> None:
         for mode in (PhaseMode.SINGLE_PHASE_EQUIV, PhaseMode.THREE_PHASE):
             grid, _ = cigre_lv_full_grid(phase_mode=mode)
+            # Agreement is asserted in VOLTS at the 1e-8 level, which is three orders
+            # tighter than the engine's per-unit power-mismatch default allows on a
+            # 20 kV/400 V grid, so both solves are driven by the per-unit VOLTAGE
+            # criterion (1e-13 pu ~ 4e-11 V on the LV rows). The power-mismatch
+            # tolerance stays at its default: on this grid it bottoms out at ~1e-9 pu
+            # (the cancellation scale of Y·V at the stiff 20 kV source).
             ci = solve_power_flow(
                 grid,
                 slack="ideal",
                 method="current_injection",
-                tol=1e-10,
+                tol_update_pu=1e-13,
                 max_iter=200,
                 dtype=CDT,
             )
@@ -89,7 +95,7 @@ class TestNewtonPowerFlow:
                 grid,
                 slack="ideal",
                 method="newton",
-                tol=1e-10,
+                tol_update_pu=1e-13,
                 max_iter=50,
                 dtype=CDT,
             )
@@ -122,7 +128,7 @@ class TestNewtonPowerFlow:
         assert nt.converged
         assert nt.iterations < 20
         # Converged onto the stable (upper) branch with a ~zero power mismatch.
-        assert nt.diagnostics.power_mismatch_max < 1e-5
+        assert nt.diagnostics.mismatch_max_a < 1e-5
         assert 0.5 < _v2_pu(nt) < 0.65  # upper-branch nose voltage (~0.55 pu)
 
     def test_does_not_fabricate_a_solution_past_the_nose(self) -> None:

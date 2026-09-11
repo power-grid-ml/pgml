@@ -46,9 +46,13 @@ class TestConvergenceDiagnostics:
         d = r.diagnostics
         assert isinstance(d, ConvergenceDiagnostics)
         assert d.likely_cause == "converged"
-        assert d.power_mismatch_max < 1e-3  # ~0 nodal current mismatch at the solution
+        assert d.mismatch_max_a < 1e-3  # ~0 nodal current mismatch at the solution
+        # Both criteria are reported in per unit, with the SI values alongside.
+        assert d.mismatch_max_pu < 1e-8  # the primary criterion (per unit of s_base)
+        assert d.mismatch_max_va == pytest.approx(d.mismatch_max_pu * d.s_base_va)
+        assert d.update_max_pu < 1e-8 and d.update_norm_v > 0.0
         assert len(d.residual_history) == r.iterations
-        assert d.residual_history[-1] < 1e-6  # below tol
+        assert d.residual_history[-1] < 1e-6  # the per-unit update, below tol
         assert d.worst_nodes and "node_id" in d.worst_nodes[0]
         assert d.out_of_band_nodes == []  # healthy voltages, in band
         assert d.criticality is None  # "auto" + converged -> skipped

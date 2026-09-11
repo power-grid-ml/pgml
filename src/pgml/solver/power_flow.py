@@ -59,6 +59,7 @@ from typing import Any, Optional, Sequence
 import torch
 from torch import Tensor
 
+from pgml import defaults
 from pgml.assembly import (
     NodePhaseIndex,
     assemble_network_ybus,
@@ -73,10 +74,16 @@ from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly.ybus import _stamp_sources, flatten_plan_batch
 from pgml.errors import ConnectivityError, InputError, ModelingError
-from pgml.schemas.grid_schema import Grid, Source
+from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
-from .harmonic import lu_factor_system, solve_factored, solve_harmonic
+from .harmonic import (
+    estimate_condition,
+    lu_factor_system,
+    resolve_precision,
+    solve_factored,
+    solve_harmonic,
+)
 from .lowrank import (
     LowRankOperator,
     LowRankUpdate,
@@ -89,28 +96,238 @@ _log = logging.getLogger("pgml")
 
 
 def _rel_convergence_floor(rdt: torch.dtype, backend: str = "dense") -> float:
-    """Smallest relative update ``||ΔV|| / ||V||`` the dtype (and backend) can resolve.
+    """Smallest per-unit VOLTAGE UPDATE the working precision and backend can resolve.
 
-    The fixed-point / Newton update stops shrinking once it reaches the rounding
-    noise of the working precision. ``float64`` has ample headroom (eps ~2e-16), so
-    its floor is ``0.0`` and the absolute ``tol`` governs unchanged. ``float32``
-    (eps ~1.2e-7) cannot resolve an update below ~1e-6 of the voltage scale, so a
-    tighter absolute ``tol`` is physically unreachable; the floor caps the
-    achievable tolerance and is reported via a one-time warning.
+    The per-row update ``|ΔV| / V_LN`` stops shrinking once it reaches the rounding noise
+    of the working precision, so a tolerance below that is unreachable: the floor caps
+    the achievable tolerance and is reported by a warning.
 
-    The floor is also a property of the linear-algebra ``backend``: SuperLU's
-    single-precision back-substitution (different pivoting/ordering than the dense
-    torch LU) leaves per-iterate rounding noise measured at ~2e-6 relative, so
-    marginal scenarios oscillate just above the dense-calibrated floor without ever
-    crossing it (measured: batched IEEE-33 at complex64 plateaus flat at 2.0e-6 for
-    ~0.2 % of scenarios, floor-accurate but running to ``max_iter``). The sparse
-    float32 floor is therefore 4e-6 (2x headroom over the measured plateau). The
-    block backend back-substitutes with the same torch LU as the dense one and
-    shares its floor.
+    Calibrated on a 5000-scenario batched IEEE-33 run (CPU) by iterating to the plateau:
+    ``float64`` dense reaches 1.0e-15 per-row relative (the floor is 16 eps ~ 3.6e-15,
+    ~3x headroom and still ~1000x below any useful tolerance); ``float32`` dense was
+    still contracting at 8.8e-7, so the 1e-6 floor stands. SuperLU's single-precision
+    back-substitution (different pivoting / ordering than the dense torch LU) is
+    noisier: the same batch plateaus FLAT at 5.7e-6 per row, which is why the sparse
+    float32 floor is 1.2e-5 (~2x headroom) — without it marginal scenarios oscillate
+    above a dense-calibrated floor and run to ``max_iter`` at floor-accurate voltages.
+    The block backend back-substitutes with the same torch LU as the dense one and
+    shares its floor. A mixed-precision factorization is refined at the working
+    precision, so it resolves the working precision's floor, not the factors'.
     """
     if rdt == torch.float64:
-        return 0.0
+        return 16.0 * float(torch.finfo(torch.float64).eps)
+    return 1.2e-5 if backend == "sparse" else 1.0e-6
+
+
+def _mismatch_floor_rel(rdt: torch.dtype, backend: str = "dense") -> float:
+    """Relative floor of the POWER MISMATCH, as a fraction of a row's ``Y V`` scale.
+
+    The nodal residual is a difference of terms of size ``Σ_j |Y_ij||V_j|``
+    (:func:`_abs_row_scale`), so floating point resolves it only down to this fraction
+    of that scale — a 20 kV node behind a 1e-4 Ohm source impedance keeps terms of
+    ~1e9 A and its mismatch therefore bottoms out near 1e-9 pu at complex128, which no
+    iteration count can improve.
+
+    ``float64`` uses 4 eps (measured: the CIGRE LV benchmark bottoms out at 1.05e-9 pu
+    where this estimate gives 7.1e-9 pu, so the floor stays below the documented default
+    tolerance while covering the observed noise). ``float32`` uses the back-substitution
+    precision of the backend, which dominates the cancellation term there.
+    """
+    if rdt == torch.float64:
+        return 4.0 * float(torch.finfo(torch.float64).eps)
     return 4.0e-6 if backend == "sparse" else 1.0e-6
+
+
+def _resolve_tolerances(
+    tol: Optional[float], tol_update_pu: Optional[float], s_base_va: Optional[float]
+) -> tuple[float, float, float]:
+    """Fill the per-unit convergence settings from the documented defaults.
+
+    ``None`` means "the shipped default" (``solver.convergence.*`` in
+    ``pgml/data/defaults.yaml``), so a caller never has to restate the tolerances and
+    the defaults stay in one documented place.
+    """
+    if tol is None:
+        tol = float(defaults.get("solver.convergence.mismatch_pu"))
+    if tol_update_pu is None:
+        tol_update_pu = float(defaults.get("solver.convergence.update_pu"))
+    if s_base_va is None:
+        s_base_va = float(defaults.get("solver.convergence.s_base_va"))
+    if not (tol > 0.0 and tol_update_pu > 0.0 and s_base_va > 0.0):
+        raise InputError(
+            "tol (per-unit power mismatch), tol_update_pu (per-unit voltage update) "
+            f"and s_base_va must be positive; got {tol!r}, {tol_update_pu!r}, "
+            f"{s_base_va!r}."
+        )
+    return float(tol), float(tol_update_pu), float(s_base_va)
+
+
+def _abs_row_scale(y_eff, v_abs: Tensor) -> Tensor:
+    """``Σ_j |Y_ij| |V_j|`` per row — the cancellation scale of the residual ``Y V``.
+
+    The nodal residual is a difference of terms of this size, so floating point
+    resolves it only down to ``eps`` times this scale: it is what turns the working
+    precision into a per-row floor on the power-mismatch criterion. A switch-state
+    sweep's matrix-free operator (``A + U C Vᴴ``) adds the low-rank term's row sums,
+    bounded factor by factor — a closed near-ideal switch raises the scale of its
+    terminal rows by orders of magnitude, and the floor must follow it.
+    """
+    if isinstance(y_eff, LowRankOperator):
+        base = _apply_y(y_eff.base.abs(), v_abs)  # [*b, N]
+        vt = torch.matmul(y_eff.v.abs().mT, v_abs.unsqueeze(-1))  # [k, 1]
+        cvt = torch.matmul(y_eff.c.abs(), vt)  # [*states, k, 1]
+        return base + torch.matmul(y_eff.u.abs(), cvt).squeeze(-1)
+    return _apply_y(y_eff.abs(), v_abs)
+
+
+#: One-time-per-process guard for the plain-complex64 conditioning warning.
+_COMPLEX64_COND_WARNED = False
+
+
+def _warn_complex64_conditioning(fac, rdt: torch.dtype) -> None:
+    """Warn ONCE when a plain complex64 solve runs on an ill-conditioned system.
+
+    An SI-unit feeder's admittance reaches ``cond(Y) ~ 1e6`` to ``1e9`` (no per-unit
+    normalisation anywhere in the engine), and a single-precision solve loses about
+    ``cond(Y) * 1.2e-7`` of relative accuracy — which can be most of the digits. The
+    estimate costs a few back-substitutions against the factorization the solve already
+    built (:func:`~pgml.solver.harmonic.estimate_condition`) and is taken only while the
+    warning has not been issued yet, so it never repeats inside a scenario sweep. The
+    threshold is the documented ``solver.precision.complex64_cond_warn``.
+    """
+    global _COMPLEX64_COND_WARNED
+    if _COMPLEX64_COND_WARNED or rdt != torch.float32 or fac.precision != "full":
+        return
+    limit = float(defaults.get("solver.precision.complex64_cond_warn"))
+    cond = estimate_condition(fac)
+    if not math.isfinite(cond) or cond <= limit:
+        return
+    _COMPLEX64_COND_WARNED = True
+    _log.warning(
+        "solve_power_flow: complex64 on a system with an estimated condition number of "
+        "%.1e (above the %.0e threshold) keeps only about %.1f significant digits — an "
+        "SI-unit feeder's admittance is ill-conditioned because the engine carries no "
+        "per-unit normalisation. Solve at dtype=torch.complex128, or at "
+        "dtype=torch.complex128 with precision='mixed' (single-precision factorization "
+        "refined against double-precision residuals) for complex128 accuracy at "
+        "single-precision solve cost, and store complex64.",
+        cond,
+        limit,
+        max(0.0, 7.0 - math.log10(max(cond, 1.0))),
+    )
+
+
+class _PuConvergence:
+    """The per-unit convergence test of the nonlinear power flow.
+
+    The engine solves in SI units, so every convergence measure is normalised before
+    it meets a tolerance. Per scenario, with free (non-slack) rows ``f``:
+
+    - PRIMARY, the apparent-power mismatch ``max_f |V_f conj(F_f)| / S_base`` with
+      ``F = Y_eff V + I_device(V) - I_slack``. This is the quantity pandapower
+      (``tolerance_mva`` on a 1 MVA base) and power-grid-model converge on, so an
+      iteration count is comparable across the three tools.
+    - SECONDARY, the voltage update ``max_rows |ΔV| / V_LN(node)``, the per-row form
+      of power-grid-model's voltage criterion.
+
+    Both must hold. Per-row normalisation makes each measure independent of the
+    voltage level and of the number of rows, so a multi-voltage grid, and an ensemble
+    of grids solved as one block-diagonal system, are judged exactly like a single
+    feeder (an absolute norm over the concatenated state is not).
+
+    The mismatch threshold is per row, ``max(tol_mismatch_pu, floor · s_scale_row)``
+    with ``s_scale_row`` the row's cancellation scale (:func:`_abs_row_scale`, built
+    from the rated voltages, so it is a property of the network and not of the
+    iterate) and ``floor`` the working precision's relative resolution
+    (:func:`_rel_convergence_floor`). Without it a tolerance tighter than the
+    cancellation noise of a stiff node — a 20 kV source behind a 1e-4 Ohm impedance
+    reaches ~1e-9 pu at complex128 — would be unreachable and the solve would run to
+    ``max_iter`` at a converged voltage.
+    """
+
+    def __init__(
+        self,
+        *,
+        v_base: Tensor,
+        s_base: float,
+        tol_mismatch_pu: float,
+        tol_update_pu: float,
+        floor_update: float,
+        floor_mismatch: float,
+        fixed_rows: Optional[Tensor],
+        y_eff,
+        n: int,
+        device,
+        rdt: torch.dtype,
+        warn: bool = True,
+    ) -> None:
+        self.v_base = v_base.clamp_min(1e-12)  # [N] line-to-neutral base per row
+        self.s_base = float(s_base)
+        self.tol_mismatch_pu = float(tol_mismatch_pu)
+        self.tol_update_pu = float(tol_update_pu)
+        self.floor_update = float(floor_update)
+        self.floor_mismatch = float(floor_mismatch)
+        free = torch.ones(n, dtype=rdt, device=device)
+        if fixed_rows is not None and fixed_rows.numel() > 0:
+            # Slack rows absorb mismatch by construction; they carry no equation.
+            free = free.index_fill(0, fixed_rows.to(device), 0.0)
+        self.free = free
+        with torch.no_grad():
+            s_scale_pu = (
+                self.v_base * _abs_row_scale(y_eff, self.v_base)
+            ) / self.s_base  # [*b, N]
+            self.thr_mismatch = torch.clamp(
+                self.floor_mismatch * s_scale_pu, min=self.tol_mismatch_pu
+            )
+            self.thr_update = max(self.tol_update_pu, self.floor_update)
+            if warn:
+                self._warn_unreachable()
+
+    def _warn_unreachable(self) -> None:
+        """Report a tolerance the working precision cannot resolve (the floor governs)."""
+        floor_m = float((self.thr_mismatch * self.free).max())
+        if floor_m > self.tol_mismatch_pu:
+            _log.warning(
+                "solve_power_flow: the power-mismatch tolerance %.1e pu is below the "
+                "precision floor of this system (~%.1e pu, set by the cancellation "
+                "scale of Y·V at the working precision); the floor governs "
+                "convergence. Use complex128 (or precision='mixed') for a tighter "
+                "tolerance.",
+                self.tol_mismatch_pu,
+                floor_m,
+            )
+        if self.tol_update_pu < self.floor_update:
+            _log.warning(
+                "solve_power_flow: the voltage-update tolerance %.1e pu is below the "
+                "%.1e relative precision floor of the working dtype / linear-solver "
+                "backend; the floor governs convergence. Use complex128 (or "
+                "precision='mixed') for a tighter tolerance.",
+                self.tol_update_pu,
+                self.floor_update,
+            )
+
+    def mismatch_rows_pu(self, v: Tensor, fc: Tensor) -> Tensor:
+        """Per-row apparent-power mismatch in per unit ``[*b, N]`` (slack rows 0)."""
+        return (v.abs() * fc.abs()) * self.free / self.s_base
+
+    def update_rows_pu(self, dv: Tensor) -> Tensor:
+        """Per-row voltage update in per unit ``[*b, N]``."""
+        return dv.abs() / self.v_base
+
+    def check(
+        self, mism_rows: Tensor, upd_rows: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """``(converged_mask, mismatch_max_pu, update_max_pu)``, all per scenario ``[*b]``.
+
+        Each row meets its OWN mismatch threshold (the per-row precision floor), while
+        the reported maxima are plain maxima — so a floor-limited row can leave
+        ``mismatch_max_pu`` above the requested tolerance on a converged solve, which
+        is the honest reading of what the precision allows.
+        """
+        ok = (mism_rows <= self.thr_mismatch).all(dim=-1) & (
+            upd_rows <= self.thr_update
+        ).all(dim=-1)
+        return ok, mism_rows.amax(dim=-1), upd_rows.amax(dim=-1)
 
 
 def _validate_block_solver(
@@ -383,6 +600,37 @@ def _expand_zeroed_result(grid: Grid, res: PowerFlowResult) -> PowerFlowResult:
     )
 
 
+def _only_appliances(grid: Grid, kind) -> Grid:
+    """A grid copy in which only appliances of ``kind`` (plus Sources) are in service.
+
+    The injection-plan split behind a load-only λ ramp: taking the other injecting
+    devices out of service drops them from :func:`pgml.assembly.build_injection_plan`
+    while every resolution rule (per-phase split, ZIP law, inverter control) applies
+    unchanged to the ones that remain. Sources stay in service — they are the boundary,
+    not an injection.
+    """
+    kept = [
+        a
+        if (isinstance(a, (kind, Source)) or not isinstance(a, InjectionAppliance))
+        else a.model_copy(update={"in_service": False})
+        for a in grid.appliances
+    ]
+    return grid.model_copy(update={"appliances": kept})
+
+
+def _without_appliances(grid: Grid, kind) -> Grid:
+    """A grid copy in which appliances of ``kind`` are taken out of service.
+
+    The complement of :func:`_only_appliances` (the un-ramped half of a load-only λ
+    ramp: generation and storage at their nameplate values).
+    """
+    kept = [
+        a.model_copy(update={"in_service": False}) if isinstance(a, kind) else a
+        for a in grid.appliances
+    ]
+    return grid.model_copy(update={"appliances": kept})
+
+
 def _resolve_failed_states(mask: Optional[Tensor]) -> tuple[Optional[Tensor], tuple]:
     """``(converged_mask, failed_indices)`` for a result; unbatched -> ``(None, ())``."""
     if mask is None or mask.ndim == 0:
@@ -403,12 +651,17 @@ class PowerFlowResult:
     index:
         The compact :class:`NodePhaseIndex` describing ``v``'s row layout.
     iterations:
-        Number of fixed-point iterations performed (python int).
+        Number of fixed-point / Newton iterations performed (python int).
     residual:
-        Real scalar tensor: the final ``||V_{k+1} - V_k||`` (max over batch).
+        Real scalar tensor: the achieved value of the PRIMARY convergence criterion,
+        the largest nodal apparent-power mismatch in per unit of ``s_base_va``
+        (max over batch). A floor-limited row can leave it above the requested ``tol``
+        on a converged solve — see :class:`ConvergenceDiagnostics`, which also reports
+        the per-unit voltage update and both SI counterparts.
     converged:
-        ``True`` if EVERY batch element's residual fell below ``tol`` (or the
-        dtype floor) within ``max_iter``.
+        ``True`` if EVERY batch element met BOTH per-unit criteria (power mismatch and
+        voltage update, each capped by the working precision's floor) within
+        ``max_iter``.
     diagnostics:
         Non-fatal :class:`ConvergenceDiagnostics` (per-node physical mismatch,
         voltage-band offenders, residual history, worst offenders, likely cause, and
@@ -438,18 +691,37 @@ class ConvergenceDiagnostics:
     """Structured power-flow convergence telemetry (autograd-free, computed at ``V*``).
 
     Cheap state diagnostics are always populated; ``criticality`` is filled only when
-    the solve did not converge (it costs a dense Jacobian + SVD). All voltages are
-    per-unit on each node's line-to-neutral base; ``mismatch_a`` is the nodal current
-    mismatch ``|F_c|`` [A] of the power-balance residual at the (free) row.
+    the solve did not converge (it costs a dense Jacobian + SVD).
+
+    Both convergence criteria are reported in PER UNIT — the values the solve is judged
+    on — and in SI units under explicitly named fields:
+
+    - ``mismatch_max_pu`` / ``mismatch_max_va``: the PRIMARY criterion, the largest nodal
+      apparent-power mismatch over the free (non-slack) rows, per unit of ``s_base_va``
+      and in volt-amperes.
+    - ``mismatch_max_a``: the same residual as a CURRENT, ``max |F_c|`` in amperes
+      (``F = Y_eff V + I_device(V) - I_slack``) — what the nodal equations balance.
+    - ``update_max_pu`` / ``update_norm_v``: the SECONDARY criterion, the largest per-row
+      voltage update per unit of the node's line-to-neutral rated voltage, and the
+      two-norm of the same update in volts.
+
+    Voltages (``v_pu``, ``voltage_band_pu``) are per unit on each node's line-to-neutral
+    base.
     """
 
     converged: bool
     iterations: int
-    update_norm: float  # final ||ΔV|| (the fixed-point convergence measure)
-    power_mismatch_max: float  # max |F_c| over free (non-slack) rows [A]
+    mismatch_max_pu: float  # PRIMARY: max |V·conj(F)| / s_base_va over free rows [pu]
+    update_max_pu: float  # SECONDARY: max |ΔV| / V_LN(node) [pu]
+    mismatch_max_va: float  # max |V·conj(F)| over free rows [VA]
+    mismatch_max_a: float  # max |F_c| over free rows [A]
+    update_norm_v: float  # ||ΔV||_2 of the final update [V]
+    s_base_va: float  # power base of the per-unit mismatch [VA]
     voltage_band_pu: tuple[float, float]
-    residual_history: list[float] = field(default_factory=list)  # ||ΔV|| per iteration
-    worst_nodes: list[dict] = field(default_factory=list)  # top-k by current mismatch
+    residual_history: list[float] = field(
+        default_factory=list
+    )  # update_max_pu per iter
+    worst_nodes: list[dict] = field(default_factory=list)  # top-k by power mismatch
     out_of_band_nodes: list[dict] = field(default_factory=list)  # |V| outside the band
     likely_cause: str = ""
     criticality: Optional[dict] = None  # IFT-Jacobian analysis (non-convergence only)
@@ -461,27 +733,37 @@ class ConvergenceDiagnostics:
 
 @dataclass
 class LoadabilityResult:
-    """Continuation (λ-ramp) loadability analysis — where/what limits solvability.
+    """λ-ramp loadability analysis — how far the loading scales, and what limits it.
 
-    Ramps the load by ``λ`` (``λ=1`` = the grid's nameplate load) from a feasible base,
-    Newton-correcting at each step, until the power-flow Jacobian goes singular (the P-V
-    nose). At the nose the singular Jacobian's vectors localize the collapse: the RIGHT
-    singular vector is the voltage-collapse mode (the weakest buses), and the LEFT
-    singular vector gives the margin's sensitivity to each load (which apparent-power
-    injection most reduces the margin).
+    Scales the injections by ``λ`` (``λ=1`` = the grid's nameplate loading) from a
+    feasible base, Newton-corrects at each step, and bisects onto the first ``λ`` the
+    corrector can no longer solve.
 
-    When every ramp step up to ``lambda_max`` converges, no nose exists inside the
-    ramp: ``capped=True`` and ``breaking_lambda`` (= ``lambda_max``) is only a LOWER
-    BOUND on the true loadability — raise ``lambda_max`` to find the nose.
+    ``breaking_lambda`` is therefore the largest ``λ`` at which the Newton corrector
+    still CONVERGES, which is a LOWER BOUND on the true P-V nose: a plain corrector
+    fails slightly before the singularity, and the gap depends on the corrector's
+    tolerance and iteration budget (~4 % on a two-bus feeder whose nose is known in
+    closed form). The Jacobian figures (``min_singular_value``, ``condition_number``,
+    ``critical_nodes``, ``limiting_loads``, ``nose_voltage_min_pu``) describe that last
+    converged point — close to the nose, not the singular point itself. An arc-length
+    predictor-corrector continuation, which can turn the nose, is open work.
+
+    ``ramp`` records WHAT ``λ`` multiplied: ``"all"`` (loads and generators / storage
+    together, the default) or ``"load"`` (loads only, generation at nameplate — the
+    textbook continuation-power-flow ramp).
+
+    When every ramp step up to ``lambda_max`` converges, no limit exists inside the
+    ramp: ``capped=True`` and ``breaking_lambda`` (= ``lambda_max``) only says the
+    loading scales at least that far — raise ``lambda_max`` to find the limit.
     """
 
-    breaking_lambda: float  # λ* at the nose (load multiplier of the nameplate load)
-    feasible: bool  # λ* >= 1 -> the nameplate load is solvable
+    breaking_lambda: float  # largest λ whose Newton corrector converged (lower bound)
+    feasible: bool  # λ* >= 1 -> the nameplate loading solves
     margin: (
         float  # λ* − 1 (headroom above nameplate; negative = infeasible at nameplate)
     )
-    nose_voltage_min_pu: float  # lowest |V|/V_LN at the nose
-    capped: bool = False  # ramp reached lambda_max without a nose; λ* is a LOWER BOUND
+    nose_voltage_min_pu: float  # lowest |V|/V_LN at the last converged λ
+    capped: bool = False  # ramp reached lambda_max without a limit; λ* is a LOWER BOUND
     critical_nodes: list[dict] = field(default_factory=list)  # voltage-collapse mode
     limiting_loads: list[dict] = field(
         default_factory=list
@@ -492,6 +774,7 @@ class LoadabilityResult:
         default_factory=list
     )  # the λ trace (plotting)
     corrector_iterations: int = 0  # total Newton iterations across the ramp
+    ramp: str = "all"  # what λ multiplied: "all" devices or "load" only
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -807,6 +1090,7 @@ def _woodbury_pieces(
     fixed_rows,
     factor_backend,
     block_rows,
+    precision="full",
 ):
     """Base admittance, slack current and the per-state low-rank update of a sweep.
 
@@ -833,7 +1117,12 @@ def _woodbury_pieces(
         base_states=base_states,
     )
     fac = lu_factor_system(
-        y_base, fixed_rows=fixed_rows, backend=factor_backend, block_rows=block_rows
+        y_base,
+        fixed_rows=fixed_rows,
+        backend=factor_backend,
+        block_rows=block_rows,
+        precision=precision,
+        refine_steps=0,  # the nonlinear outer iteration IS the refinement loop
     )
     return (
         LowRankOperator(y_base, u, c, u),
@@ -907,6 +1196,7 @@ class PowerFlowSystem:
     factorization: object  # FactoredSystem of y_eff (or its LowRankUpdate)
     static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
     network_fp: str = ""  # network_fingerprint(grid) at prepare time
+    precision: str = "full"  # working precision of the cached factorization
 
 
 def prepare_power_flow(
@@ -914,6 +1204,7 @@ def prepare_power_flow(
     *,
     slack: str = "ideal",
     dtype: torch.dtype = torch.complex128,
+    precision: str = "full",
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
@@ -930,10 +1221,13 @@ def prepare_power_flow(
     (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver``,
     ``block_rows`` and ``branch_states_method`` as in :func:`solve_power_flow`).
     Pass the result as ``solve_power_flow(..., system=...)`` to skip that work on
-    every subsequent call — with the SAME ``branch_states_method``.
+    every subsequent call — with the SAME ``branch_states_method`` and ``precision``
+    (``precision="mixed"`` caches single-precision factors, so the consuming solve must
+    run its residual-correction iteration).
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    resolve_precision(precision, _cdtype(dtype))
     _validate_block_solver(linear_solver, block_rows)
     use_woodbury = _validate_branch_states_method(branch_states_method, branch_states)
     if branch_states is not None:
@@ -974,6 +1268,7 @@ def prepare_power_flow(
                 fixed_rows,
                 factor_backend,
                 block_rows,
+                precision,
             )
         else:
             y_eff, i_slack = _y_eff_and_islack(
@@ -984,6 +1279,9 @@ def prepare_power_flow(
                 fixed_rows=fixed_rows,
                 backend=factor_backend,
                 block_rows=block_rows,
+                precision=precision,
+                # The nonlinear outer iteration IS the refinement loop.
+                refine_steps=0,
             )
     return PowerFlowSystem(
         index=index,
@@ -996,6 +1294,7 @@ def prepare_power_flow(
         factorization=fac,
         static_leaves=tuple(leaves),
         network_fp=network_fingerprint(grid),
+        precision=precision,
     )
 
 
@@ -1004,9 +1303,12 @@ def solve_power_flow(
     *,
     slack: str = "ideal",
     method: str = "current_injection",
-    tol: float = 1e-8,
+    tol: Optional[float] = None,
+    tol_update_pu: Optional[float] = None,
+    s_base_va: Optional[float] = None,
     max_iter: int = 100,
     dtype: torch.dtype = torch.complex128,
+    precision: str = "full",
     device: Optional[torch.device] = None,
     operating_point: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
@@ -1036,11 +1338,48 @@ def solve_power_flow(
         (OpenDSS-style); quadratic, and converges near the loadability nose where the
         fixed point oscillates. Both share the IFT gradient path.
     tol:
-        Fixed-point convergence tolerance on ``||ΔV||`` (max over batch).
+        PRIMARY convergence tolerance, the largest nodal apparent-power mismatch in PER
+        UNIT: ``max_f |V_f conj(F_f)| / s_base_va`` over the free (non-slack) rows, with
+        ``F = Y_eff V + I_device(V) - I_slack``. ``None`` (default) resolves the
+        documented default ``solver.convergence.mismatch_pu`` (1e-8 pu — pandapower's
+        ``tolerance_mva`` default on a 1 MVA base, and the same order as
+        power-grid-model's ``error_tolerance``), so an iteration count is comparable
+        across the three tools. Per unit, so one value means the same thing on a 400 V
+        node and on a 20 kV node.
+    tol_update_pu:
+        SECONDARY convergence tolerance, the largest per-row voltage update
+        ``max_rows |ΔV| / V_LN(node)`` in per unit; both criteria must hold. ``None``
+        resolves ``solver.convergence.update_pu`` (1e-8 pu). Per-row normalisation makes
+        it independent of the voltage level and of the number of rows, so a multi-voltage
+        grid, and an ensemble of grids solved as one block-diagonal system, are judged
+        exactly like a single feeder.
+    s_base_va:
+        Apparent-power base of the per-unit mismatch; ``None`` resolves
+        ``solver.convergence.s_base_va`` (1e6 VA, pandapower's default ``sn_mva``).
     max_iter:
-        Maximum fixed-point iterations.
+        Maximum fixed-point / Newton iterations.
     dtype:
-        Complex dtype (``complex128`` for gradcheck; ``complex64`` ok).
+        Complex dtype (``complex128`` for gradcheck; ``complex64`` ok — but see
+        ``precision``: an SI-unit feeder's ``Y`` is ill-conditioned, so a plain
+        complex64 solve loses about ``cond(Y)·1.2e-7`` of relative accuracy and a
+        one-time warning names the estimated condition number when it exceeds the
+        documented ``solver.precision.complex64_cond_warn`` threshold).
+    precision:
+        Working precision of the LINEAR ALGEBRA inside the iteration, independent of
+        ``dtype``:
+
+        - ``"full"`` (default) factors and back-substitutes at ``dtype``.
+        - ``"mixed"`` factors a complex64 copy of ``Y_eff`` and keeps the iteration,
+          the residual and the convergence test at complex128 (required): the fixed
+          point runs in its residual-correction form
+          ``V_{k+1} = V_k - A_s^{-1} F(V_k)``, so the single-precision factorization
+          only preconditions the iteration and the converged voltage carries
+          complex128 accuracy. Newton solves its direction in single precision
+          (inexact Newton) with the residual and step at complex128. This is the
+          recommended recipe for throughput on an ill-conditioned SI-unit feeder,
+          above all on a GPU where double precision runs at a fraction of the
+          single-precision rate; the plain complex64 path (``dtype=torch.complex64``,
+          ``precision="full"``) stays available for comparison.
     device:
         Target device; defaults to the device of the first parameter leaf, else CPU.
     operating_point:
@@ -1152,8 +1491,9 @@ def solve_power_flow(
     -------
     PowerFlowResult
         ``v`` complex ``[*batch, N]`` (DIFFERENTIABLE via the IFT), the index, the
-        iteration count, the final update-norm residual, the convergence flag, and a
-        :class:`ConvergenceDiagnostics`.
+        iteration count, the achieved per-unit power mismatch (``residual``), the
+        convergence flag, and a :class:`ConvergenceDiagnostics` reporting both criteria
+        in per unit and in SI units.
     """
     if method not in ("current_injection", "newton"):
         raise ModelingError(
@@ -1161,6 +1501,8 @@ def solve_power_flow(
         )
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
+    resolve_precision(precision, _cdtype(dtype))
     if criticality not in ("auto", "always", "never"):
         raise InputError(
             f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
@@ -1180,6 +1522,14 @@ def solve_power_flow(
     use_woodbury = _validate_branch_states_method(
         branch_states_method, branch_states, method
     )
+    if system is not None and system.precision != precision:
+        raise InputError(
+            f"The provided PowerFlowSystem was prepared with precision="
+            f"{system.precision!r} but the solve requests {precision!r}: the cached "
+            "factorization is single precision only in the mixed mode, and only the "
+            "mixed mode runs the residual-correction iteration that needs it. Prepare "
+            "and solve with the same precision."
+        )
     if system is not None and use_woodbury != isinstance(
         system.factorization, LowRankUpdate
     ):
@@ -1236,8 +1586,11 @@ def solve_power_flow(
                     slack=slack,
                     method=method,
                     tol=tol,
+                    tol_update_pu=tol_update_pu,
+                    s_base_va=s_base_va,
                     max_iter=max_iter,
                     dtype=dtype,
+                    precision=precision,
                     device=device,
                     operating_point=operating_point,
                     param_overrides=param_overrides,
@@ -1424,23 +1777,9 @@ def solve_power_flow(
         state_residual_complex=fast_residual_complex,
     )
 
-    # One-time warning when the absolute `tol` is below what the working precision can
-    # resolve at this voltage scale (complex64); the dtype floor governs convergence.
-    floor = _rel_convergence_floor(rdt)
-    if floor > 0.0:
-        _, _sl_vref = _slack_rows_and_vref(grid, index, rdt, cdt, device)
-        v_ref = float(_sl_vref.detach().abs().max()) if _sl_vref is not None else 1.0
-        if v_ref > 0.0 and tol < floor * v_ref:
-            _log.warning(
-                "solve_power_flow: tol=%.1e is below the %s precision floor (~%.1e V, "
-                "%.0e relative at the ~%.0f V scale); the dtype floor governs "
-                "convergence. Use complex128 for a tighter tolerance.",
-                tol,
-                dtype,
-                floor * v_ref,
-                floor,
-                v_ref,
-            )
+    # Per-row per-unit bases of both convergence criteria (the voltage base is each
+    # node's line-to-neutral rated voltage, as in the flat start and the diagnostics).
+    v_base = _node_voltage_bases(grid, index, rdt, device)
 
     # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
     if method == "newton":
@@ -1464,11 +1803,14 @@ def solve_power_flow(
                 iterations,
                 residual_norm,
                 converged,
-                residual_history,
+                update_history,
                 y_eff0,
                 i_slack0,
                 converged_mask,
                 residual_vec,
+                update_max_pu,
+                update_norm_v,
+                fc_star,
             ) = _newton_forward_sequential(
                 grid,
                 f0,
@@ -1487,10 +1829,14 @@ def solve_power_flow(
                 n,
                 rdt,
                 cdt,
+                v_base,
                 tol,
+                tol_update_pu,
+                s_base_va,
                 max_iter,
                 newton_solver,
                 branch_states,
+                precision,
             )
         else:
             v_init = _linear_const_z_init(
@@ -1511,13 +1857,29 @@ def solve_power_flow(
                 iterations,
                 residual_norm,
                 converged,
-                residual_history,
+                update_history,
                 y_eff0,
                 i_slack0,
                 converged_mask,
                 residual_vec,
+                update_max_pu,
+                update_norm_v,
+                fc_star,
             ) = _newton_forward(
-                real_res, v_init, n, rdt, cdt, device, tol, max_iter, newton_solver
+                real_res,
+                v_init,
+                n,
+                rdt,
+                cdt,
+                device,
+                v_base,
+                tol,
+                tol_update_pu,
+                s_base_va,
+                max_iter,
+                newton_solver,
+                precision,
+                fixed_rows,
             )
     else:
         solve_system = system
@@ -1538,6 +1900,7 @@ def solve_power_flow(
                     fixed_rows,
                     factor_backend,
                     block_rows,
+                    precision,
                 )
             solve_system = PowerFlowSystem(
                 index=index,
@@ -1549,17 +1912,21 @@ def solve_power_flow(
                 v_fixed=v_fixed.detach() if v_fixed is not None else None,
                 factorization=upd,
                 static_leaves=tuple(leaves),
+                precision=precision,
             )
         (
             v_star,
             iterations,
             residual_norm,
             converged,
-            residual_history,
+            update_history,
             y_eff0,
             i_slack0,
             converged_mask,
             residual_vec,
+            update_max_pu,
+            update_norm_v,
+            fc_star,
         ) = _current_injection_forward(
             grid,
             index,
@@ -1571,11 +1938,15 @@ def solve_power_flow(
             rdt,
             cdt,
             device,
+            v_base,
             tol,
+            tol_update_pu,
+            s_base_va,
             max_iter,
             factor_backend,
             solve_system,
             block_rows,
+            precision,
         )
 
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
@@ -1584,15 +1955,17 @@ def solve_power_flow(
         grid,
         index,
         v_star,
-        y_eff0,
-        i_slack0,
-        fast_residual_complex,
+        fc_star,
+        v_base,
+        s_base_va,
         real_res,
         fixed_rows,
-        residual_history,
+        update_history,
         bool(converged),
         iterations,
         float(residual_norm),
+        float(update_max_pu),
+        float(update_norm_v),
         rdt,
         device,
         criticality,
@@ -1614,8 +1987,8 @@ def solve_power_flow(
         cause = diagnostics.likely_cause if diagnostics is not None else ""
         _log.error(
             "solve_power_flow: %d/%d scenarios did not converge in %d iterations "
-            "(worst residual %.3e); returning best-effort voltages. Failed indices: "
-            "[%s%s]%s",
+            "(worst power mismatch %.3e pu); returning best-effort voltages. Failed "
+            "indices: [%s%s]%s",
             len(failed_states),
             total,
             iterations,
@@ -1664,11 +2037,15 @@ def _current_injection_forward(
     rdt,
     cdt,
     device,
-    tol,
+    v_base,
+    tol_mismatch_pu,
+    tol_update_pu,
+    s_base_va,
     max_iter,
     factor_backend="auto",
     system=None,
     block_rows=None,
+    precision="full",
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
@@ -1681,13 +2058,24 @@ def _current_injection_forward(
     runs the SAME iteration: ``y_eff0`` is then the matrix-free per-state operator
     and each back-substitution carries the low-rank correction.
 
-    Returns ``(v_star, iterations, residual_norm, converged, residual_history, y_eff0,
-    i_slack0, converged_mask, residual_vec)``; ``residual_norm`` is the final ``||ΔV||``
-    (max over batch), while ``converged_mask`` / ``residual_vec`` are PER scenario.
-    Convergence is per element on ``||ΔV|| < max(tol, floor·||V||)`` where ``floor`` is
-    the resolvable relative precision of the dtype AND linear-algebra backend
-    (0 for float64; 1e-6 for float32 dense, 4e-6 for float32 sparse SuperLU —
-    see :func:`_rel_convergence_floor`).
+    Convergence is per scenario on the two PER-UNIT criteria of
+    :class:`_PuConvergence` (apparent-power mismatch and voltage update), which is why
+    the iteration also forms the nodal residual ``F(V) = Y_eff V + I_device(V) -
+    I_slack`` — one matrix-vector product per iteration on top of the injection
+    evaluation the fixed point needs anyway.
+
+    ``precision="mixed"`` turns the iteration into its RESIDUAL-CORRECTION form
+    ``V_{k+1} = V_k - A_s^{-1} F(V_k)`` (algebraically the same fixed point) with the
+    single-precision factorization ``A_s`` as the correction operator and ``F`` formed
+    at the working precision. The outer iteration is then itself the refinement loop:
+    an inexact ``A_s^{-1}`` changes only the contraction rate, never the fixed point, so
+    the converged voltage carries complex128 accuracy at the cost of single-precision
+    back-substitutions.
+
+    Returns ``(v_star, iterations, mismatch_max_pu, converged, update_history, y_eff0,
+    i_slack0, converged_mask, mismatch_vec, update_max_pu, update_norm_v, fc)``; the
+    maxima are over the batch, while ``converged_mask`` / ``mismatch_vec`` are PER
+    scenario and ``fc`` is the final nodal residual (reused by the diagnostics).
     """
     with torch.no_grad():
         if system is not None:
@@ -1756,12 +2144,14 @@ def _current_injection_forward(
         v_row = torch.polar(row_mag, row_ang).to(cdt)
         v = v_row.expand(*lead, n).clone()
 
-        residual_norm = torch.zeros((), dtype=rdt, device=device)
-        residual_vec = torch.zeros((), dtype=rdt, device=device)
+        mismatch_vec = torch.zeros((), dtype=rdt, device=device)
+        mismatch_max = torch.zeros((), dtype=rdt, device=device)
+        update_max = torch.zeros((), dtype=rdt, device=device)
+        update_norm_v = torch.zeros((), dtype=rdt, device=device)
         converged_mask = torch.zeros((), dtype=torch.bool, device=device)
         iterations = 0
         converged = False
-        residual_history: list[float] = []
+        update_history: list[float] = []
         # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
         # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
@@ -1773,28 +2163,58 @@ def _current_injection_forward(
                 fixed_rows=fixed_rows,
                 backend=factor_backend,
                 block_rows=block_rows,
+                precision=precision,
+                # The outer iteration below IS the refinement loop, so the inner solve
+                # needs no refinement of its own.
+                refine_steps=0,
             )
         )
-        # The achievable update floor depends on the RESOLVED backend (SuperLU's
+        mixed = precision == "mixed"
+        _warn_complex64_conditioning(fac, rdt)
+        # The achievable floor of both criteria depends on the RESOLVED backend (SuperLU's
         # single-precision back-substitution is noisier than the dense torch LU).
-        floor = _rel_convergence_floor(rdt, fac.backend)
-        for _ in range(max_iter):
-            i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
-            rhs = i_slack0 - i_dev
-            # The factorization carries no frequency axis, so the solution keeps
-            # exactly the right-hand side's batch shape — a trailing singleton batch
-            # dim (an operating point batched [B, 1]) passes through untouched.
-            v_new = _factored_solve(fac, rhs, v_fixed)
-            # Per-element update + dtype-aware threshold max(tol, floor*||V||). For
-            # float64 floor=0 so this is exactly ||ΔV|| < tol (unchanged); for float32
-            # the floor caps tol at the achievable relative precision.
-            delta = torch.linalg.vector_norm(v_new - v, dim=-1)  # [*b]
-            v_scale = torch.linalg.vector_norm(v_new, dim=-1)  # [*b]
-            thresh = torch.clamp(floor * v_scale, min=tol)  # [*b]
-            converged_mask = delta < thresh
-            residual_vec = delta
-            residual_norm = delta.max()
-            residual_history.append(float(residual_norm))
+        # A low-rank (switch-state) update amplifies the base solve's rounding by a
+        # measured factor, so the precision this solve path resolves is that much
+        # coarser — both floors carry it.
+        amp = float(getattr(fac, "amplification", 1.0))
+        ctest = _PuConvergence(
+            v_base=v_base,
+            s_base=s_base_va,
+            tol_mismatch_pu=tol_mismatch_pu,
+            tol_update_pu=tol_update_pu,
+            floor_update=_rel_convergence_floor(rdt, fac.backend) * amp,
+            floor_mismatch=_mismatch_floor_rel(rdt, fac.backend) * amp,
+            fixed_rows=fixed_rows,
+            y_eff=y_eff0,
+            n=n,
+            device=device,
+            rdt=rdt,
+        )
+        i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
+        fc = _apply_y(y_eff0, v) + i_dev - i_slack0 if mixed else None
+        zero_slack = None if v_fixed is None else torch.zeros_like(v_fixed)
+        for k in range(max_iter):
+            if mixed and k > 0:
+                # Residual-correction form: the slack rows of the correction are held
+                # at 0, so the pinned voltages stay exactly the reference.
+                v_new = v - _factored_solve(fac, fc, zero_slack)
+            else:
+                # The factorization carries no frequency axis, so the solution keeps
+                # exactly the right-hand side's batch shape — a trailing singleton batch
+                # dim (an operating point batched [B, 1]) passes through untouched.
+                v_new = _factored_solve(fac, i_slack0 - i_dev, v_fixed)
+            # One injection evaluation per iteration serves both the next right-hand
+            # side and the residual the per-unit criteria are measured on.
+            i_dev = injections_from_plan(plan, v_new).squeeze(-2)  # [*b, N]
+            fc = _apply_y(y_eff0, v_new) + i_dev - i_slack0  # [*b, N]
+            dv = v_new - v
+            mism_rows = ctest.mismatch_rows_pu(v_new, fc)
+            upd_rows = ctest.update_rows_pu(dv)
+            converged_mask, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            mismatch_max = mismatch_vec.max()
+            update_max = update_vec.max()
+            update_norm_v = torch.linalg.vector_norm(dv, dim=-1).max()
+            update_history.append(float(update_max))
             v = v_new
             iterations += 1
             if bool(converged_mask.all()):
@@ -1804,13 +2224,16 @@ def _current_injection_forward(
     return (
         v,
         iterations,
-        residual_norm,
+        mismatch_max,
         converged,
-        residual_history,
+        update_history,
         y_eff0,
         i_slack0,
         converged_mask,
-        residual_vec,
+        mismatch_vec,
+        update_max,
+        update_norm_v,
+        fc,
     )
 
 
@@ -1946,13 +2369,27 @@ def _gmres(
 
 
 def _newton_forward(
-    real_res, v_init, n, rdt, cdt, device, tol, max_iter, linear_solver="dense"
+    real_res,
+    v_init,
+    n,
+    rdt,
+    cdt,
+    device,
+    v_base,
+    tol_mismatch_pu,
+    tol_update_pu,
+    s_base_va,
+    max_iter,
+    linear_solver="dense",
+    precision="full",
+    fixed_rows=None,
 ):
     """Newton on the real residual ``R(x) = 0`` from the warm start ``v_init``.
 
     Each step solves ``J·Δx = −R`` with ``J = dR/dx`` and a backtracking line search on
-    ``‖R‖∞`` for global robustness, converging on ``‖Δx‖ < tol`` (the same measure the
-    fixed point uses). ``linear_solver``:
+    ``‖R‖∞`` for global robustness, converging on the same two PER-UNIT criteria as the
+    fixed point (:class:`_PuConvergence`): the apparent-power mismatch carried by the
+    free rows of ``R`` and the per-row voltage step. ``linear_solver``:
 
     - ``"dense"`` (default): the explicit real ``[2N, 2N]`` Jacobian (autograd) + a direct
       solve. Per-element loop avoids the ``[B, 2N, B, 2N]`` memory of a batched Jacobian.
@@ -1961,12 +2398,17 @@ def _newton_forward(
       ``J·v ≈ (R(x+εv) − R(x))/ε``. ``O(N)`` memory, for large grids where the dense
       Jacobian is prohibitive (accuracy is the ``√eps`` FD floor, ample for a PF solve).
 
-    Returns the same 9-tuple as :func:`_current_injection_forward`.
+    ``precision="mixed"`` solves for the Newton DIRECTION in single precision while the
+    residual, the line search and the step stay at the working precision — an inexact
+    Newton method: a direction with a relative error of ``cond(J)·eps_single`` changes
+    the contraction rate, not the solution the iteration converges to.
+
+    Returns the same 12-tuple as :func:`_current_injection_forward` (its last entry, the
+    nodal residual, is the complex residual rebuilt from the free rows of ``R``).
     """
     state_residual = real_res.state_residual
     build_system = real_res.build_system
     twon = 2 * n
-    floor = _rel_convergence_floor(rdt)
     fd_eps = math.sqrt(torch.finfo(rdt).eps)
     with torch.no_grad():
         y_eff0, i_slack0 = build_system()
@@ -1979,6 +2421,19 @@ def _newton_forward(
         y_flat = y_flat.expand(b, n, n) if y_flat.shape[0] == 1 else y_flat
         is_flat = i_slack0.reshape(-1, n)
         is_flat = is_flat.expand(b, n) if is_flat.shape[0] == 1 else is_flat
+        ctest = _PuConvergence(
+            v_base=v_base,
+            s_base=s_base_va,
+            tol_mismatch_pu=tol_mismatch_pu,
+            tol_update_pu=tol_update_pu,
+            floor_update=_rel_convergence_floor(rdt),
+            floor_mismatch=_mismatch_floor_rel(rdt),
+            fixed_rows=fixed_rows,
+            y_eff=y_eff0,
+            n=n,
+            device=device,
+            rdt=rdt,
+        )
 
         def res_all(xx: Tensor) -> Tensor:
             return state_residual(
@@ -1994,18 +2449,32 @@ def _newton_forward(
                 is_flat[bi].imag,
             )
 
-        residual_history: list[float] = []
+        def pu_measures(xx: Tensor, rr: Tensor, dxx: Tensor):
+            """Per-unit mismatch / update rows of the real state and residual."""
+            v_c = torch.complex(xx[..., :n], xx[..., n:])
+            fc_c = torch.complex(rr[..., :n], rr[..., n:])
+            dv_c = torch.complex(dxx[..., :n], dxx[..., n:])
+            return (
+                ctest.mismatch_rows_pu(v_c, fc_c),
+                ctest.update_rows_pu(dv_c),
+                fc_c,
+            )
+
+        update_history: list[float] = []
         converged = False
         iterations = 0
-        dx_norm = torch.zeros((), dtype=rdt, device=device)
+        mismatch_max = torch.zeros((), dtype=rdt, device=device)
+        update_max = torch.zeros((), dtype=rdt, device=device)
+        update_norm_v = torch.zeros((), dtype=rdt, device=device)
         converged_mask = torch.zeros(b, dtype=torch.bool, device=device)
-        residual_vec = torch.zeros(b, dtype=rdt, device=device)
+        mismatch_vec = torch.zeros(b, dtype=rdt, device=device)
+        r = res_all(x)  # [b, 2N]
+        fc = torch.complex(r[..., :n], r[..., n:])
         for _ in range(max_iter):
-            r = res_all(x)  # [b, 2N]
             if linear_solver == "matrix_free":
                 dx = _newton_dir_matrix_free(res_one, x, r, b, fd_eps)
             else:
-                dx = _newton_dir_dense(res_all, x, r)
+                dx = _newton_dir_dense(res_all, x, r, precision=precision)
             # PER-ELEMENT backtracking on each scenario's residual infinity-norm
             # (global robustness): a hard scenario halves only its own step.
             r0 = r.abs().amax(dim=-1)  # [b]
@@ -2015,31 +2484,38 @@ def _newton_forward(
                 if bool(ok.all()):
                     break
                 step = torch.where(ok.unsqueeze(-1), step, 0.5 * step)
-            x = x + step * dx
-            # Per-element step norm + dtype-aware threshold max(tol, floor*||x||).
-            dxn = (step * dx).norm(dim=-1)  # [b]
-            x_scale = x.norm(dim=-1)  # [b]
-            converged_mask = dxn < torch.clamp(floor * x_scale, min=tol)
-            residual_vec = dxn
-            dx_norm = dxn.max()
-            residual_history.append(float(dx_norm))
+            dx_taken = step * dx
+            x = x + dx_taken
+            # The residual at the NEW state feeds both the per-unit mismatch criterion
+            # and the next step's Jacobian / line search (evaluated once).
+            r = res_all(x)
+            mism_rows, upd_rows, fc = pu_measures(x, r, dx_taken)
+            converged_mask, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            mismatch_max = mismatch_vec.max()
+            update_max = update_vec.max()
+            update_norm_v = dx_taken.norm(dim=-1).max()
+            update_history.append(float(update_max))
             iterations += 1
             if bool(converged_mask.all()):
                 converged = True
                 break
         v_star = torch.complex(x[..., :n], x[..., n:]).reshape(*lead, n)
         cmask = converged_mask.reshape(lead) if lead else converged_mask.reshape(())
-        rvec = residual_vec.reshape(lead) if lead else residual_vec.reshape(())
+        mvec = mismatch_vec.reshape(lead) if lead else mismatch_vec.reshape(())
+        fc = fc.reshape(*lead, n) if lead else fc.reshape(n)
     return (
         v_star,
         iterations,
-        dx_norm,
+        mismatch_max,
         converged,
-        residual_history,
+        update_history,
         y_eff0,
         i_slack0,
         cmask,
-        rvec,
+        mvec,
+        update_max,
+        update_norm_v,
+        fc,
     )
 
 
@@ -2061,10 +2537,14 @@ def _newton_forward_sequential(
     n,
     rdt,
     cdt,
-    tol,
+    v_base,
+    tol_mismatch_pu,
+    tol_update_pu,
+    s_base_va,
     max_iter,
     linear_solver,
     branch_states=None,
+    precision="full",
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
@@ -2075,10 +2555,10 @@ def _newton_forward_sequential(
     batched gradients to the stacked result, so this is forward-only sequencing — the
     differentiability is unchanged. The per-scenario residual comes from
     ``make_fast_residual_complex`` (one detached injection plan per slice — the
-    detached forward needs only ``dR/dx``). Returns the same 9-tuple as
+    detached forward needs only ``dR/dx``). Returns the same 12-tuple as
     :func:`_newton_forward`.
     """
-    v_list, conv_list, res_list = [], [], []
+    v_list, conv_list, mis_list, upd_list, updv_list, fc_list = [], [], [], [], [], []
     iterations = 0
     y_eff0 = i_slack0 = None
     for i in range(bsize):
@@ -2108,30 +2588,61 @@ def _newton_forward_sequential(
             _vfixed_i(),
             branch_states,
         )
-        v_i, it_i, rn_i, cv_i, _, y_eff0, i_slack0, _, _ = _newton_forward(
-            rr_i, v_init_i, n, rdt, cdt, device, tol, max_iter, linear_solver
+        (
+            v_i,
+            it_i,
+            mis_i,
+            cv_i,
+            _,
+            y_eff0,
+            i_slack0,
+            _,
+            _,
+            upd_i,
+            updv_i,
+            fc_i,
+        ) = _newton_forward(
+            rr_i,
+            v_init_i,
+            n,
+            rdt,
+            cdt,
+            device,
+            v_base,
+            tol_mismatch_pu,
+            tol_update_pu,
+            s_base_va,
+            max_iter,
+            linear_solver,
+            precision,
+            fixed_rows,
         )
         v_list.append(v_i)  # [N]
         conv_list.append(bool(cv_i))
-        res_list.append(rn_i.reshape(()))
+        mis_list.append(mis_i.reshape(()))
+        upd_list.append(upd_i.reshape(()))
+        updv_list.append(updv_i.reshape(()))
+        fc_list.append(fc_i.reshape(-1)[:n])
         iterations = max(iterations, it_i)
     v_star = torch.stack(v_list, 0)  # [B, N]
     converged_mask = torch.tensor(conv_list, dtype=torch.bool, device=device)  # [B]
-    residual_vec = torch.stack(res_list, 0)  # [B]
-    residual_norm = residual_vec.max()
+    mismatch_vec = torch.stack(mis_list, 0)  # [B]
     converged = bool(converged_mask.all())
-    # Per-scenario residual histories are not aggregated (their lengths differ); the
-    # cheap state diagnostics + the per-element residual_vec carry the per-batch detail.
+    # Per-scenario update histories are not aggregated (their lengths differ); the cheap
+    # state diagnostics + the per-scenario mismatch carry the per-batch detail.
     return (
         v_star,
         iterations,
-        residual_norm,
+        mismatch_vec.max(),
         converged,
         [],
         y_eff0,
         i_slack0,
         converged_mask,
-        residual_vec,
+        mismatch_vec,
+        torch.stack(upd_list, 0).max(),
+        torch.stack(updv_list, 0).max(),
+        torch.stack(fc_list, 0),
     )
 
 
@@ -2169,9 +2680,18 @@ def _batched_state_jacobian(batched_state_res, x_flat: Tensor) -> Tensor:
     return torch.stack(cols, dim=-1)  # [B, 2N, 2N]
 
 
-def _newton_dir_dense(batched_state_res, x, r) -> Tensor:
-    """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element."""
+def _newton_dir_dense(batched_state_res, x, r, *, precision: str = "full") -> Tensor:
+    """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element.
+
+    ``precision="mixed"`` solves the Jacobian system in single precision (an inexact
+    Newton direction: the residual and the step stay at the working precision, so the
+    iteration converges to the same solution with a slightly degraded rate).
+    """
     j = _batched_state_jacobian(batched_state_res, x)  # [b, 2N, 2N]
+    if precision == "mixed":
+        sdt = torch.float32
+        dx = torch.linalg.solve(j.to(sdt), -r.unsqueeze(-1).to(sdt)).squeeze(-1)
+        return dx.to(r.dtype)
     return torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
 
 
@@ -2460,47 +2980,58 @@ def _build_diagnostics(
     grid,
     index,
     v_star,
-    y_eff0,
-    i_slack0,
-    residual_complex,
+    fc_star,
+    v_base,
+    s_base_va,
     real_res,
     fixed_rows,
     residual_history,
     converged,
     iterations,
-    update_norm,
+    mismatch_max_pu,
+    update_max_pu,
+    update_norm_v,
     rdt,
     device,
     criticality: str = "auto",
 ) -> "ConvergenceDiagnostics":
-    """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence)."""
+    """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence).
+
+    ``fc_star`` is the nodal residual ``F = Y_eff V* + I_device(V*) - I_slack`` the
+    forward already formed for its per-unit convergence test, so the diagnostics add no
+    further solve or assembly; the per-unit criterion VALUES come from the forward and
+    are reported next to their SI counterparts.
+    """
     n = index.size
     vmin, vmax = _DIAG_VBAND_PU
     node_ids = index.node_ids.tolist()
     phase_codes = index.phase_codes.tolist()
     with torch.no_grad():
-        fc = residual_complex(v_star, y_eff0, i_slack0)  # [*B, N] complex (all rows)
         lead = v_star.shape[:-1]
         b = int(torch.tensor(lead).prod().item()) if lead else 1
         vflat = v_star.reshape(b, n)
-        fc_abs = fc.reshape(b, n).abs().clone()
+        fc_abs = fc_star.reshape(b, n).abs().clone()
         if fixed_rows is not None and fixed_rows.numel() > 0:
             fc_abs[:, fixed_rows] = 0.0  # slack rows absorb mismatch by construction
-        bases = _node_voltage_bases(grid, index, rdt, device)
-        vpu = vflat.abs() / bases.clamp_min(1e-12)[None, :]  # [B, N]
-        power_mismatch_max = float(fc_abs.max()) if fc_abs.numel() else 0.0
+        bases = v_base.clamp_min(1e-12)
+        vpu = vflat.abs() / bases[None, :]  # [B, N]
+        mismatch_va = vflat.abs() * fc_abs  # [B, N] apparent-power mismatch
+        mismatch_max_a = float(fc_abs.max()) if fc_abs.numel() else 0.0
+        mismatch_max_va = float(mismatch_va.max()) if mismatch_va.numel() else 0.0
 
         worst_nodes: list[dict] = []
         k = min(_DIAG_TOP_K, b * n)
-        if k > 0 and power_mismatch_max > 0.0:
-            vals, idxs = torch.topk(fc_abs.reshape(-1), k)
+        if k > 0 and mismatch_max_va > 0.0:
+            vals, idxs = torch.topk(mismatch_va.reshape(-1), k)
             for val, fi in zip(vals.tolist(), idxs.tolist()):
                 bi, r = divmod(int(fi), n)
                 worst_nodes.append(
                     {
                         "node_id": int(node_ids[r]),
                         "phase": _phase_name(int(phase_codes[r])),
-                        "mismatch_a": float(val),
+                        "mismatch_pu": float(val) / s_base_va,
+                        "mismatch_va": float(val),
+                        "mismatch_a": float(fc_abs[bi, r]),
                         "v_pu": float(vpu[bi, r]),
                         **({"batch": bi} if b > 1 else {}),
                     }
@@ -2537,18 +3068,19 @@ def _build_diagnostics(
             float((vpu * nonneutral.to(vpu.dtype)).max()) if finite else float("inf")
         )
         diverged = (not finite) or (max_vpu > _DIAG_VBLOWUP)
-        # Relative final update: a large ||ΔV|| vs the voltage scale means the iterate
+        # The per-unit update IS the relative measure: a large one means the iterate
         # never settled (oscillating), so any band violation on it is an artifact.
-        v_scale = float(vflat.abs().max()) if finite else float("inf")
-        rel_update = (
-            update_norm / v_scale if (finite and v_scale > 0.0) else float("inf")
-        )
+        rel_update = update_max_pu if finite else float("inf")
 
     diag = ConvergenceDiagnostics(
         converged=converged,
         iterations=iterations,
-        update_norm=update_norm,
-        power_mismatch_max=power_mismatch_max,
+        mismatch_max_pu=mismatch_max_pu,
+        update_max_pu=update_max_pu,
+        mismatch_max_va=mismatch_max_va,
+        mismatch_max_a=mismatch_max_a,
+        update_norm_v=update_norm_v,
+        s_base_va=s_base_va,
         voltage_band_pu=(vmin, vmax),
         residual_history=residual_history,
         worst_nodes=worst_nodes,
@@ -2604,11 +3136,11 @@ def _likely_cause(
             f"(cond={crit.get('condition_number', float('nan')):.1e}); "
             f"critical node(s): {names}"
         )
-    if rel_update > 0.01:  # iterate never settled (oscillating ||ΔV|| vs voltage scale)
+    if rel_update > 0.01:  # iterate never settled (oscillating update vs rated voltage)
         return (
-            f"fixed-point iteration did not settle (oscillating; final ||ΔV|| = "
-            f"{diag.update_norm:.2e} V, ~{rel_update * 100:.0f}% of the voltage scale) "
-            "— the current-injection map is not contracting here; try Newton or a "
+            f"fixed-point iteration did not settle (oscillating; final per-row update "
+            f"{diag.update_max_pu:.2e} pu, {diag.update_norm_v:.2e} V) — the "
+            "current-injection map is not contracting here; try Newton or a "
             "homotopy continuation from a feasible base"
         )
     if n_viol > 0 and diag.out_of_band_nodes:
@@ -2621,18 +3153,21 @@ def _likely_cause(
     hist = diag.residual_history
     if len(hist) >= 3 and hist[-1] >= hist[-3]:  # not contracting
         return (
-            f"fixed-point iteration not contracting (||ΔV|| plateaued at {hist[-1]:.2e}); "
-            "a solution may exist — try Newton / a better start / more iterations"
+            "fixed-point iteration not contracting (per-row voltage update plateaued at "
+            f"{hist[-1]:.2e} pu); a solution may exist — try Newton / a better start / "
+            "more iterations"
         )
     wn = diag.worst_nodes[0] if diag.worst_nodes else None
     tail = (
-        f"; max mismatch {wn['mismatch_a']:.2e} A at node {wn['node_id']}.{wn['phase']}"
+        f"; max mismatch {wn['mismatch_pu']:.2e} pu ({wn['mismatch_a']:.2e} A) at node "
+        f"{wn['node_id']}.{wn['phase']}"
         if wn
         else ""
     )
     return (
-        f"did not reach tol in {diag.iterations} iterations "
-        f"(||ΔV||={diag.update_norm:.2e}){tail}"
+        f"did not reach tol in {diag.iterations} iterations (power mismatch "
+        f"{diag.mismatch_max_pu:.2e} pu, per-row update {diag.update_max_pu:.2e} pu)"
+        f"{tail}"
     )
 
 
@@ -2758,31 +3293,67 @@ def loadability_limit(
     lambda_max: float = 2.0,
     lambda_step: float = 0.1,
     bisect_tol: float = 1.0e-3,
-    tol: float = 1.0e-8,
+    tol: Optional[float] = None,
+    tol_update_pu: Optional[float] = None,
+    s_base_va: Optional[float] = None,
     max_iter: int = 50,
     top_k: int = 5,
+    ramp: str = "all",
 ) -> LoadabilityResult:
-    """Continuation power flow: find the loadability nose and WHAT/WHERE limits it.
+    """Step-and-bisect continuation: the largest ``λ`` whose power flow still solves.
 
-    Ramps every load/generator by a scalar ``λ`` (the residual is
-    ``R(V,λ) = Y_eff·V + λ·I_device(V) − I_slack``; ``λ=1`` is the nameplate load) from a
-    feasible base (``λ=0``, the trivial no-load solve), Newton-correcting at each step and
-    bisecting onto the breaking ``λ*`` where the corrector fails — the P-V nose. At ``λ*``
-    the power-flow Jacobian is (near) singular; its SVD localizes the collapse:
+    Scales the injections by ``λ`` (the residual is
+    ``R(V,λ) = Y_eff·V + λ·I_device(V) − I_slack``; ``λ=1`` is the nameplate loading),
+    steps ``λ`` up from a feasible base (``λ=0``, the trivial no-load solve),
+    Newton-corrects at each step, and bisects onto the first ``λ`` where the corrector
+    no longer converges.
+
+    What ``breaking_lambda`` is — and is not. This is a step-and-bisect on Newton
+    FEASIBILITY, not an arc-length predictor-corrector continuation in the augmented
+    ``(V, λ)`` space: there is no tangent predictor and no corrector that can turn the
+    nose. A plain Newton corrector stops converging slightly BEFORE the singularity
+    (the Jacobian becomes ill-conditioned first), so ``breaking_lambda`` is the largest
+    ``λ`` at which the corrector still converges and therefore a LOWER BOUND on the true
+    P-V nose, with a gap that depends on ``tol``, ``max_iter`` and ``bisect_tol``
+    (measured at ~4 % on a two-bus feeder whose nose is known in closed form). The
+    Jacobian figures reported at that ``λ`` describe the last converged point, which is
+    near the nose, not the singular point itself.
+
+    ``ramp`` chooses WHAT ``λ`` multiplies:
+
+    - ``"all"`` (default) — every injecting device: loads AND generators / storage scale
+      together (a joint ramp of the whole operating point, the quantity a scenario sweep
+      of a distribution feeder usually wants).
+    - ``"load"`` — loads only, with generation held at its nameplate value: the textbook
+      continuation-power-flow load ramp. On a feeder with substantial generation the two
+      give different limits, because ramping generation with the load offsets the drop
+      the ramp is meant to create.
+
+    At the breaking ``λ`` the SVD of the power-flow Jacobian localizes the approaching
+    collapse:
 
     - ``critical_nodes`` (RIGHT singular vector of the smallest σ): the voltage-collapse
       mode — the buses whose voltage gives way (where it breaks).
-    - ``limiting_loads`` (LEFT singular vector · each load's current): the loads whose
-      apparent power most reduces the margin (which input, at which node, causes the
-      non-convergence). ``responsibility`` is normalized to ``[0, 1]``.
+    - ``limiting_loads`` (LEFT singular vector · each device's current): the injections
+      whose apparent power most reduces the margin (which input, at which node, drives
+      the non-convergence). ``responsibility`` is normalized to ``[0, 1]``.
 
-    ``breaking_lambda < 1`` means the nameplate load itself is infeasible (the fixed point
-    / Newton cannot converge); ``margin = λ* − 1`` is the headroom above nameplate.
+    ``breaking_lambda < 1`` means the nameplate loading itself does not solve;
+    ``margin = λ* − 1`` is the headroom above nameplate. ``tol`` / ``tol_update_pu`` /
+    ``s_base_va`` are the per-unit convergence settings of the Newton corrector (see
+    :func:`solve_power_flow`).
 
     Single grid only (no scenario batch). Detached (a diagnostic, not on the autograd tape).
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    if ramp not in ("all", "load"):
+        raise InputError(
+            f"Unsupported ramp {ramp!r}: 'all' scales every injecting device (loads and "
+            "generators together), 'load' scales loads only and holds generation at its "
+            "nameplate value (the textbook continuation-power-flow ramp)."
+        )
+    tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
     check_connectivity(grid)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)
     index = node_phase_index(grid)
@@ -2793,6 +3364,7 @@ def loadability_limit(
     leaves = _grid_param_leaves(grid, param_overrides, None, operating_point)
     if device is None:
         device = leaves[0].device if leaves else torch.device("cpu")
+    v_base = _node_voltage_bases(grid, index, rdt, device)
 
     def v_fixed_fn():
         if slack != "ideal":
@@ -2809,24 +3381,38 @@ def loadability_limit(
     def build_system():
         return _y_eff_and_islack(grid, f0, index, dtype, device, slack, param_overrides)
 
-    # One detached injection plan serves every λ step (loadability is a detached
+    # Detached injection plans serve every λ step (loadability is a detached
     # diagnostic; λ scales the plan's currents in the residual, not the plan).
-    with torch.no_grad():
-        plan = build_injection_plan(
-            grid,
-            index,
-            [f0],
-            dtype=dtype,
-            device=device,
-            operating_point=operating_point,
-            param_overrides=param_overrides,
-            symmetry=sym_resolved,
-        )
+    # ``ramp="load"`` needs the two device classes separately, so their currents can be
+    # scaled independently; the split is made by taking the other class out of service
+    # in a grid copy, which leaves every other resolution rule (per-phase split, ZIP
+    # law, inverter control) untouched.
+    def plan_for(g):
+        with torch.no_grad():
+            return build_injection_plan(
+                g,
+                index,
+                [f0],
+                dtype=dtype,
+                device=device,
+                operating_point=operating_point,
+                param_overrides=param_overrides,
+                symmetry=sym_resolved,
+            )
+
+    if ramp == "load":
+        plan = plan_for(_only_appliances(grid, Load))
+        plan_fixed = plan_for(_without_appliances(grid, Load))
+    else:
+        plan = plan_for(grid)
+        plan_fixed = None
 
     def make_real_res(lam: float):
         def rc(v: Tensor, y: Tensor, islack: Tensor) -> Tensor:
-            i_dev = injections_from_plan(plan, v).squeeze(-2)
-            return _apply_y(y, v) + lam * i_dev - islack
+            i_dev = lam * injections_from_plan(plan, v).squeeze(-2)
+            if plan_fixed is not None:
+                i_dev = i_dev + injections_from_plan(plan_fixed, v).squeeze(-2)
+            return _apply_y(y, v) + i_dev - islack
 
         return _make_real_residual(build_system, rc, fixed_rows, v_fixed_fn, n, cdt)
 
@@ -2843,10 +3429,24 @@ def loadability_limit(
         lam_good, trace, total_iters = 0.0, [0.0], 0
         nose_found = False
         lam = lambda_step
+        newton_args = (
+            n,
+            rdt,
+            cdt,
+            device,
+            v_base,
+            tol,
+            tol_update_pu,
+            s_base_va,
+            max_iter,
+            "dense",
+            "full",
+            fixed_rows,
+        )
         while lam <= lambda_max + 1e-12:
-            vk, it, _, conv, _, _, _, _, _ = _newton_forward(
-                make_real_res(lam), v_good, n, rdt, cdt, device, tol, max_iter
-            )
+            vk, it, _, conv = _newton_forward(make_real_res(lam), v_good, *newton_args)[
+                :4
+            ]
             total_iters += it
             if conv:
                 lam_good, v_good = lam, vk
@@ -2857,9 +3457,9 @@ def loadability_limit(
             lo, hi = lam_good, lam  # bisect the feasibility boundary
             while hi - lo > bisect_tol:
                 mid = 0.5 * (lo + hi)
-                vm, itm, _, cm, _, _, _, _, _ = _newton_forward(
-                    make_real_res(mid), v_good, n, rdt, cdt, device, tol, max_iter
-                )
+                vm, itm, _, cm = _newton_forward(
+                    make_real_res(mid), v_good, *newton_args
+                )[:4]
                 total_iters += itm
                 if cm:
                     lo, lam_good, v_good = mid, mid, vm
@@ -2897,6 +3497,7 @@ def loadability_limit(
         condition_number=crit["cond"],
         converged_lambdas=trace,
         corrector_iterations=total_iters,
+        ramp=ramp,
     )
 
 
@@ -2916,7 +3517,12 @@ def _nose_criticality(
     dtype,
     top_k,
 ) -> dict:
-    """At the nose: SVD of ``J = dR/dV`` -> collapse mode + margin-limiting loads."""
+    """At the last converged λ: SVD of ``J = dR/dV`` -> collapse mode + limiting loads.
+
+    Evaluated at the largest λ whose corrector converged, which is just short of the
+    true nose, so the singular values describe an ill-conditioned — not a singular —
+    Jacobian.
+    """
     from pgml.schemas.grid_schema import Generator as _Gen, Load as _Load
 
     state_residual = real_res.state_residual
