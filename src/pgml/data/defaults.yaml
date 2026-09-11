@@ -63,10 +63,11 @@ appliance:
   # docs/pgml/modeling/references/opendss/harmonics.md.
   harmonic_shunt:
     model:
-      value: none
+      value: opendss
       units: "enum{none, opendss, motor}"
       description: >
-        Which harmonic shunt every injection appliance carries. `opendss` splits the
+        Which harmonic shunt every injection appliance carries. `opendss` (the default,
+        and OpenDSS's own: `NeglectLoadY=No` with `%SeriesRL=50`) splits the
         operating-point admittance Yeq = conj(S)/V_rated^2 into a PARALLEL R-L
         branch (1-s)Re(Yeq) + j(1-s)Im(Yeq)/h and a SERIES R-L branch
         1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction`,

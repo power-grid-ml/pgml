@@ -76,8 +76,9 @@ SOURCE_POWER_VA = 1e6
 # two Bessel implementations (~2e-8 V on ~240 V here, i.e. ~1e-10 relative) rather than
 # machine precision. Any genuine formula error is orders of magnitude larger.
 ATOL_NUMPY = 1e-6
-ATOL_OPENDSS_GEOM = 1e-7  # geometry-path live OpenDSS (empirically ~1e-11 V;
-#                            reuse existing geometry-path tolerance)
+ATOL_OPENDSS_GEOM = 1e-6  # geometry-path live OpenDSS (empirically ~1.1e-7 V: the
+#                            SI-vs-OpenDSS mu0 difference in the Carson line model,
+#                            carried into every branch by the device shunt)
 ATOL_OPENDSS_SEQ = 5.0  # sequence-aware 3-phase path: ~3.7 V at MV-bus phases B/C.
 # The LV-injection at node 3 (Phase A) excites cross-phase coupling through the
 # sequence-aware 3x3 phase matrix (zero-sequence off-diagonal terms). pgml and the
@@ -121,7 +122,9 @@ class TestNodeSourceNumpyOracle:
 
     def _solve(self, ns: NodeHarmonicSource):
         """Build plain grid, run pgml + numpy oracle, return (v_pgml, v_numpy)."""
-        grid, _ = cigre_lv_full_grid()  # plain R/X grid, no conductor geometry
+        # Naive R/X lines: the line model the numpy oracle implements (pgml's
+        # default skin-effect law is not mirrored there).
+        grid, _ = cigre_lv_full_grid(harmonic_line_model="naive")
         hres = solve_harmonic_flow(
             grid,
             ORDERS,
@@ -179,7 +182,7 @@ class TestNodeSourceNumpyOracle:
 
     def test_output_shape(self) -> None:
         """Oracle returns [H, N] complex array (same shape as pgml)."""
-        grid, _ = cigre_lv_full_grid()
+        grid, _ = cigre_lv_full_grid(harmonic_line_model="naive")
         ns = _make_current_source()
         hres = solve_harmonic_flow(
             grid, ORDERS, slack="norton", node_sources=[ns], dtype=torch.complex128
@@ -194,7 +197,7 @@ class TestNodeSourceNumpyOracle:
 
     def test_no_node_sources_backward_compatible(self) -> None:
         """node_sources=None gives identical result to omitting the argument."""
-        grid, _ = cigre_lv_full_grid()
+        grid, _ = cigre_lv_full_grid(harmonic_line_model="naive")
         hres = solve_harmonic_flow(grid, ORDERS, slack="norton", dtype=torch.complex128)
         v1_np = hres.pf.v.detach().cpu().numpy()
         v_new = numpy_harmonic_voltages(

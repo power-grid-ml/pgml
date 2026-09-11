@@ -13,11 +13,13 @@ import cmath
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from pgml.schemas.grid_schema import (
     Grid,
     HarmonicComponent,
+    HarmonicShuntModel,
     Line,
     Load,
     LoadModel,
@@ -85,12 +87,16 @@ def _grid(spec=SPEC) -> Grid:
     )
 
 
-def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex]:
+def _numpy_harmonic_v_ld(
+    v_ld_fundamental: complex, orders, *, series_rl: float = 0.5
+) -> dict[int, complex]:
     """Independent numpy harmonic solve (simple R-const, X∝h model) at the load bus.
 
     Uses the fundamental load-bus voltage to form ``I1 = conj(S0)/conj(V1)`` then,
-    per harmonic, builds the 2x2 Y (line series + source Norton shunt), injects the
-    nodal harmonic current ``-I_h`` at the load bus, and solves.
+    per harmonic, builds the 2x2 Y (line series + source Norton shunt + the load's own
+    harmonic shunt), injects the nodal harmonic current ``-I_h`` at the load bus, and
+    solves. ``series_rl`` is the shunt's series fraction ``s``; ``None`` leaves the load
+    a pure current source.
     """
     s0 = complex(P_LOAD, Q_LOAD)
     i1 = np.conj(s0) / np.conj(v_ld_fundamental)
@@ -105,7 +111,19 @@ def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex
         z_src = R_SRC + 1j * h * X_SRC
         y_line = 1.0 / z_line
         y_src = 1.0 / z_src
-        Y = np.array([[y_src + y_line, -y_line], [-y_line, y_line]], dtype=complex)
+        y_load = 0.0 + 0.0j
+        if series_rl is not None:
+            # The load's harmonic Norton shunt at its RATED voltage: a parallel R-L
+            # branch plus a series R-L branch, both derived from conj(S0)/V_rated**2.
+            y_eq = np.conj(s0) / 230.0**2
+            s = series_rl
+            y_load = complex((1.0 - s) * y_eq.real, (1.0 - s) * y_eq.imag / h)
+            if s > 0.0:
+                z_ser = 1.0 / (s * y_eq)
+                y_load += 1.0 / complex(z_ser.real, h * z_ser.imag)
+        Y = np.array(
+            [[y_src + y_line, -y_line], [-y_line, y_line + y_load]], dtype=complex
+        )
         mag_h, ang_h = spec.get(h, (0.0, 0.0))
         i_drawn = (
             (mag_h / mag1)
@@ -121,6 +139,7 @@ def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex
 
 
 def test_matches_numpy_oracle():
+    """The shipped default: the load is a current source in parallel with its shunt."""
     grid = _grid()
     orders = [1, 5, 7]
     res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
@@ -136,6 +155,52 @@ def test_matches_numpy_oracle():
             rtol=1e-7,
             atol=1e-9,
             err_msg=f"order {h} mismatch vs numpy oracle",
+        )
+
+
+def test_matches_numpy_oracle_without_the_device_shunt():
+    """``load_shunt="none"``: the pure current-source model, same hand-written oracle."""
+    grid = _grid()
+    orders = [1, 5, 7]
+    res = solve_harmonic_flow(
+        grid, orders, slack="norton", dtype=CDT, load_shunt="none"
+    )
+    ld = res.index.row(2, Phase.A)
+    ref = _numpy_harmonic_v_ld(
+        complex(res.v[orders.index(1), ld]), orders, series_rl=None
+    )
+    for k, h in enumerate(orders):
+        got = complex(res.v[k, ld])
+        np.testing.assert_allclose(
+            [got.real, got.imag],
+            [ref[h].real, ref[h].imag],
+            rtol=1e-7,
+            atol=1e-9,
+            err_msg=f"order {h} mismatch vs numpy oracle (no device shunt)",
+        )
+
+
+@pytest.mark.parametrize("series_rl", [0.0, 1.0])
+def test_matches_numpy_oracle_for_every_split(series_rl):
+    """The two limits of the split, against the same hand-written oracle."""
+    grid = _grid()
+    for a in grid.appliances:
+        if isinstance(a, Load):
+            a.harmonic_model = HarmonicShuntModel(series_rl_fraction=series_rl)
+    orders = [1, 5, 7]
+    res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
+    ld = res.index.row(2, Phase.A)
+    ref = _numpy_harmonic_v_ld(
+        complex(res.v[orders.index(1), ld]), orders, series_rl=series_rl
+    )
+    for k, h in enumerate(orders):
+        got = complex(res.v[k, ld])
+        np.testing.assert_allclose(
+            [got.real, got.imag],
+            [ref[h].real, ref[h].imag],
+            rtol=1e-7,
+            atol=1e-9,
+            err_msg=f"order {h} mismatch vs numpy oracle (s={series_rl})",
         )
 
 

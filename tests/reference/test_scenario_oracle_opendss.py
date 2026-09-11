@@ -513,7 +513,16 @@ def test_const_current_zip_harmonic_matched_tight():
     """ZIP-model loads with harmonic content agree at the tight matched-mode floor:
     the solver anchors each device's spectrum to its MODEL-CONSISTENT fundamental
     current (S_eff at the converged voltage), matching OpenDSS's per-model
-    fundamental current."""
+    fundamental current.
+
+    Solved with ``load_shunt="none"`` on both sides. The harmonic device shunt is the
+    one quantity where a voltage-dependent load model does NOT agree: pgml derives the
+    shunt from the power the device REALLY draws at the converged voltage, OpenDSS from
+    the SPECIFIED kW/kvar whatever the load model
+    (``Load.pas``'s ``Yeq`` comes from ``SetNominalLoad``). The resulting deviation is
+    measured and bounded by
+    ``tests/reference/test_opendss_load_shunt.py::test_zip_load_shunt_divergence_is_bounded``.
+    """
     grid = _devices_grid()
     grid = grid.model_copy(deep=True)
     for i, a in enumerate(grid.appliances):
@@ -559,7 +568,7 @@ def test_const_current_zip_harmonic_matched_tight():
     )
     sampled = sample(grid, cfg)
     report = compare_to_pgml(
-        grid, sampled, harmonic_orders=[1, *orders], mode="matched"
+        grid, sampled, harmonic_orders=[1, *orders], mode="matched", load_shunt="none"
     )
     assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
     for h in orders:

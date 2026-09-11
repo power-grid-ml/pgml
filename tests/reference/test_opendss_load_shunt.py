@@ -51,7 +51,9 @@ from pgml.schemas.grid_schema import (
     HarmonicShuntModel,
     InjectionAppliance,
     Load,
+    LoadModel,
     ShuntAppliance,
+    ZipCoefficients,
 )
 from pgml.solver import solve_harmonic_flow
 
@@ -235,6 +237,19 @@ def _add_capacitor(grid, node_id: int, kvar_total: float) -> None:
     )
 
 
+def _voltage_dependent(grid, load_model, zip_coefficients=None):
+    """Give every Load a voltage-dependent model (const-Z / const-I / ZIP), in place."""
+    for i, a in enumerate(grid.appliances):
+        if isinstance(a, Load):
+            grid.appliances[i] = a.model_copy(
+                update={
+                    "load_model": load_model,
+                    "zip_coefficients": zip_coefficients,
+                }
+            )
+    return grid
+
+
 def _build_grid(name: str, *, bank: bool = False):
     """IEEE-33 with lumped R/X lines, or the three-phase CIGRE LV benchmark."""
     if name == "ieee33_rx":
@@ -367,10 +382,20 @@ def _read_rows(dss, index, rowmap, busname):
     return out
 
 
-def _compare(name: str, variant: str, *, bank: bool = False, geometry: bool = False):
+def _compare(
+    name: str,
+    variant: str,
+    *,
+    bank: bool = False,
+    geometry: bool = False,
+    load_model=None,
+    zip_coefficients=None,
+):
     """Max |Δ|V(h)|| over harmonic orders and energised rows, in pu of nominal."""
     load_shunt, override, props = VARIANTS[variant]
     grid = _build_grid(name, bank=bank)
+    if load_model is not None:
+        _voltage_dependent(grid, load_model, zip_coefficients)
     _set_override(grid, override)
     orders = _orders_for(grid, name)
     res = solve_harmonic_flow(
@@ -459,3 +484,44 @@ def test_the_shunt_damps_the_resonance_peak():
     assert peaks["series_rl_0"] < peaks["series_rl_50"] < peaks["series_rl_100"]
     assert peaks["series_rl_100"] < peaks["none"]
     assert peaks["series_rl_0"] < 0.75 * peaks["none"]
+
+
+@pytest.mark.parametrize(
+    "load_model,zip_coefficients",
+    [
+        (LoadModel.CONST_IMPEDANCE, None),
+        (LoadModel.CONST_CURRENT, None),
+        (
+            LoadModel.ZIP,
+            ZipCoefficients(z_p=0.3, i_p=0.3, p_p=0.4, z_q=0.3, i_q=0.3, p_q=0.4),
+        ),
+    ],
+)
+def test_voltage_dependent_load_shunt_divergence_is_bounded(
+    load_model, zip_coefficients
+):
+    """The ONE disclosed difference: which power the shunt is derived from.
+
+    pgml builds ``Y_eq`` from the power the device REALLY draws at the converged
+    fundamental voltage, so the shunt and the injected current describe one operating
+    point. OpenDSS builds it from the SPECIFIED kW/kvar whatever the load model
+    (``Load.pas``'s ``Yeq`` comes from ``SetNominalLoad``), so the two differ for a
+    voltage-dependent load by the load's own voltage deviation, squared. On this feeder
+    (buses down to 0.94 pu) the difference is 6e-05 to 1e-04 pu of nominal, while the
+    pure current-source model still agrees to 4e-12 pu — which locates the difference
+    in the shunt and nowhere else.
+    """
+    worst_none, *_ = _compare(
+        "ieee33_rx", "none", load_model=load_model, zip_coefficients=zip_coefficients
+    )
+    worst_shunt, *_ = _compare(
+        "ieee33_rx",
+        "series_rl_50",
+        load_model=load_model,
+        zip_coefficients=zip_coefficients,
+    )
+    assert worst_none < 1e-9, f"no-shunt model should still match: {worst_none:.2e}"
+    assert 1e-6 < worst_shunt < 5e-4, (
+        f"shunt-on deviation {worst_shunt:.2e} pu is outside the disclosed band; the "
+        "shunt is derived from the REALISED power, OpenDSS's from the specified one."
+    )

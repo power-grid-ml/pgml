@@ -637,7 +637,27 @@ def assemble_harmonic_system(
         yh, ih = _apply_node_sources(
             node_sources, grid, v1, index, orders, yh, ih, cdt, rdt, device
         )
-    return yh, ih, index
+    return _align_y_batch_rank(yh, v1, harmonic_injection), ih, index
+
+
+def _align_y_batch_rank(
+    yh: Tensor, v1: Tensor, harmonic_injection: Optional[dict]
+) -> Tensor:
+    """Right-pad a BATCHED ``Y(h)``'s scenario dims to the injection's batch rank.
+
+    A scenario-dependent ``Y(h)`` (a device shunt or a voltage node source driven by a
+    per-scenario operating point) carries the FUNDAMENTAL's batch ``[*vbatch, Hh, N,
+    N]``, while a node-coherent harmonic injection carries a deeper ``[B, T]`` batch in
+    ``I(h)``. Inserting the missing singleton step axes just before the order axis lets
+    one matrix per scenario serve every step of that scenario. A no-op for an unbatched
+    ``Y`` (which broadcasts anyway) and for the snapshot / nominal cases.
+    """
+    if yh.ndim <= 3:
+        return yh
+    extra = _injection_batch_rank(harmonic_injection) - (v1.ndim - 1)
+    for _ in range(max(0, extra)):
+        yh = yh.unsqueeze(-4)
+    return yh
 
 
 def assemble_harmonic_ybus(

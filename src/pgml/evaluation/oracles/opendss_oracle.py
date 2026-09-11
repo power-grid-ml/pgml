@@ -44,6 +44,7 @@ from pgml.evaluation.data import HarmonicProfile, LabeledMatrix, row_labels
 from pgml.evaluation.topology import distance_from_slack
 from pgml.evaluation.oracles.numpy_oracle import (
     _apply_node_sources_numpy,
+    _stamp_device_shunts_numpy,
     _stamp_transformer_numpy,
     numpy_harmonic_voltages,
 )
@@ -774,6 +775,7 @@ def opendss_harmonic_voltages(
     v1: Optional[np.ndarray] = None,
     operating_point: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
+    load_shunt: Optional[str] = None,
 ) -> np.ndarray:
     """Live OpenDSS harmonic oracle for full multi-voltage-level grids.
 
@@ -849,6 +851,12 @@ def opendss_harmonic_voltages(
         Optional per-device operating-point override.  Currently used only when
         ``v1 is None`` (passed to the internal linear fundamental solve).
         Accepted for API compatibility with the scenario example scripts.
+    load_shunt:
+        Device harmonic shunt model (``"none"`` / ``"opendss"`` / ``"motor"``; ``None`` =
+        the documented modeling default), as in
+        :func:`pgml.solver.solve_harmonic_flow`. It is stamped with the oracles' OWN
+        formula (:func:`pgml.evaluation.oracles.numpy_oracle._device_shunt_numpy`), so
+        this oracle stays a LINE-model comparison with the device model held equal.
     node_sources:
         Optional sequence of :class:`~pgml.solver.NodeHarmonicSource` — per-node
         harmonic disturbance sources applied ONLY at ``h > 1``.  These are stamped
@@ -891,7 +899,9 @@ def opendss_harmonic_voltages(
         )
 
     from pgml.assembly import node_phase_index
+    from pgml.assembly._load_shunt import resolve_shunt_model_name
 
+    shunt = resolve_shunt_model_name(load_shunt)
     orders_list = [int(h) for h in orders]
     index = node_phase_index(grid)
     n = index.size
@@ -1096,6 +1106,9 @@ def opendss_harmonic_voltages(
         else:
             _stamp_transformers_only(y_out, grid, h, index)
         _stamp_source_nortons(y_out, grid, h, index)
+        # The device harmonic shunt, from the same independent formula the numpy oracle
+        # uses, so the comparison stays a LINE-model comparison.
+        _stamp_device_shunts_numpy(y_out, grid, index, h, shunt, operating_point)
 
         return y_out
 
@@ -1415,6 +1428,7 @@ def opendss_dyn_transformer_harmonic_voltages(
     slack: str = "norton",
     v1: Optional[np.ndarray] = None,
     operating_point: Optional[dict] = None,
+    load_shunt: Optional[str] = None,
 ) -> np.ndarray:
     """Live OpenDSS harmonic oracle using REAL OpenDSS Transformer elements.
 
@@ -1496,7 +1510,9 @@ def opendss_dyn_transformer_harmonic_voltages(
         )
 
     from pgml.assembly import node_phase_index
+    from pgml.assembly._load_shunt import resolve_shunt_model_name
 
+    shunt = resolve_shunt_model_name(load_shunt)
     orders_list = [int(h) for h in orders]
     index = node_phase_index(grid)
     n = index.size
@@ -1650,6 +1666,7 @@ def opendss_dyn_transformer_harmonic_voltages(
                 rj = rowmap_dss_to_pgml[slack_dss_rows[pj]]
                 y_out[ri, rj] -= y_stub_block[pi, pj]
         _stamp_source_nortons(y_out, grid, h, index)
+        _stamp_device_shunts_numpy(y_out, grid, index, h, shunt, operating_point)
 
         return y_out
 
