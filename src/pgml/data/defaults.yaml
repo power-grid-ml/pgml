@@ -54,6 +54,46 @@ appliance:
         is the base). A line-to-line single-phase load is modeled as a 2-phase delta load
         instead. See docs/pgml/modeling/asymmetric.md §3.
 
+  # How a voltage-regulating Generator (a `voltage_regulation` block = a PV terminal)
+  # has its reactive limits enforced by the nonlinear power flow. See
+  # docs/pgml/modeling/der-pv-storage.md §4.5.
+  generator:
+    enforce_q_limits:
+      value: true
+      units: "bool"
+      description: >
+        Whether a regulating generator's `q_min_var`/`q_max_var` bound its reactive
+        output. true (default) enforces them by PV-to-PQ switching: a unit whose
+        required reactive power leaves the band is re-solved as a plain PQ injection
+        pinned at the violated limit, and returns to regulation when the terminal
+        voltage crosses its setpoint from the other side. false solves every
+        regulating generator unbounded, which is pandapower `runpp`'s own default
+        (`enforce_q_lims=False`). Overridable per call:
+        `solve_power_flow(enforce_q_limits=...)`.
+    q_limit_switch_rounds_max:
+      value: 12
+      units: "count"
+      description: >
+        Maximum number of PV-to-PQ switching rounds (each round is one full Newton
+        solve at a fixed active set). The loop normally settles in one to three
+        rounds; hitting the cap logs a WARNING naming the oscillating generators and
+        keeps the last solution.
+    q_limit_hysteresis_pu:
+      value: 1.0e-6
+      units: "pu"
+      description: >
+        Voltage band, in per unit of the terminal's nominal, a pinned generator must
+        cross before it is released back to voltage regulation. Guards the switching
+        loop against cycling on solver noise; far below any physical regulation
+        deadband.
+    q_limit_hysteresis_rel:
+      value: 1.0e-9
+      units: "pu"
+      description: >
+        Reactive band, relative to the widest of the generator's reactive limits, the
+        required reactive power must exceed before the unit is pinned at that limit.
+        Guards against switching on the converged solve's rounding noise.
+
 line:
 
   # Which frequency-dependent line model is applied to an R/X line that has NO explicit

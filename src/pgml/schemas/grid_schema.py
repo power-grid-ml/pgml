@@ -1188,6 +1188,100 @@ InverterControl = Annotated[
 ]
 
 
+class RegulatedQuantity(str, Enum):
+    """Which voltage magnitude a :class:`VoltageRegulation` holds at its setpoint."""
+
+    #: The positive-sequence magnitude ``|V1|`` of the terminal (balanced regulation,
+    #: the standard for a machine or a three-phase inverter). For a single-phase
+    #: terminal this is the phase magnitude itself.
+    POSITIVE_SEQUENCE = "positive_sequence"
+    #: Each connected phase holds its own magnitude at the setpoint (independent
+    #: single-phase regulators sharing one reactive capability).
+    PER_PHASE = "per_phase"
+
+
+class VoltageRegulation(GridModel):
+    """Voltage setpoint of a regulating generator: the PV-terminal model.
+
+    A generator carrying this block is a PV terminal: its ACTIVE power is the
+    nameplate / operating-point value, its terminal voltage MAGNITUDE is held at
+    ``v_set_pu``, and its REACTIVE power is whatever that takes, bounded by
+    ``q_min_var`` / ``q_max_var``. The nonlinear power flow replaces the terminal's
+    reactive power-balance row with ``|V|**2 - V_set**2`` and recovers the reactive
+    injection from the converged solution; see ``docs/pgml/modeling/der-pv-storage.md``
+    section 4.5. It is the model behind pandapower ``net.gen``, power-grid-model's
+    ``source``-like voltage control and OpenDSS ``Generator model=3``.
+
+    ``v_set_pu`` is per unit of the HOST NODE's rated voltage, i.e. the regulated
+    magnitude in volts is ``v_set_pu * phase_voltage_magnitude(node.u_rated_v,
+    len(node.phases))`` (line-to-neutral for a three-phase node, the rated value
+    itself below three phases) — the same per-unit base the Volt-VAr characteristic
+    and the convergence diagnostics use, and numerically equal to pandapower's
+    ``vm_pu``.
+
+    ``q_min_var`` / ``q_max_var`` are TOTAL over the connected phases and follow the
+    generator injection convention (positive = injected into the grid), exactly like
+    ``q_nom_var``. ``None`` means unbounded on that side. Limits are enforced by
+    PV-to-PQ switching in the solver (``solve_power_flow(enforce_q_limits=...)``).
+
+    Mutually exclusive with ``control``: an inverter control law states Q (or a P
+    curtailment) as an explicit function of the terminal voltage, while voltage
+    regulation states the voltage and leaves Q implicit.
+    """
+
+    v_set_pu: PosNum = si_field(
+        "Regulated voltage magnitude, per unit of the host node's rated voltage.",
+        short="pu",
+        long="per unit of the node rated voltage",
+        default=1.0,
+    )
+    q_min_var: Optional[Num] = si_field(
+        "Lower reactive limit (TOTAL, injection-positive). None = unbounded.",
+        short="var",
+        long="var",
+        default=None,
+    )
+    q_max_var: Optional[Num] = si_field(
+        "Upper reactive limit (TOTAL, injection-positive). None = unbounded.",
+        short="var",
+        long="var",
+        default=None,
+    )
+    regulated: RegulatedQuantity = Field(
+        default=RegulatedQuantity.POSITIVE_SEQUENCE,
+        description="Regulated quantity: the positive-sequence magnitude (balanced, "
+        "the standard) or each phase magnitude independently.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> "VoltageRegulation":
+        lo, hi = self.q_min_var, self.q_max_var
+        if lo is None or hi is None:
+            return self
+        if _is_arraylike(lo) or _is_arraylike(hi):
+            return self  # tensor limits: caller owns the ordering
+        if lo > hi:
+            raise ValueError("`q_min_var` must not exceed `q_max_var`.")
+        return self
+
+
+def _check_voltage_regulation(obj) -> None:
+    """Validate an appliance's optional ``voltage_regulation`` block.
+
+    Voltage regulation and an inverter ``control`` law are two ways to state the same
+    reactive degree of freedom, so they are mutually exclusive.
+    """
+    reg = getattr(obj, "voltage_regulation", None)
+    if reg is None:
+        return
+    if getattr(obj, "control", None) is not None:
+        raise ValueError(
+            "Set either `voltage_regulation` (a PV terminal: the voltage magnitude is "
+            "held and Q is free) or `control` (an inverter law that states Q as a "
+            "function of the voltage), not both."
+        )
+
+
 def _check_control(obj) -> None:
     """Validate an appliance's optional inverter ``control`` block.
 
@@ -1409,6 +1503,15 @@ class Generator(InjectionAppliance):
         "injection. Honored by the nonlinear power flow (`solve_power_flow` / "
         "`solve_harmonic_flow`); the linear const-Z assembler uses the base P/Q.",
     )
+    voltage_regulation: Optional[VoltageRegulation] = Field(
+        default=None,
+        description="Optional voltage setpoint making this generator a PV terminal: "
+        "the terminal voltage magnitude is held at `v_set_pu` and the reactive power "
+        "is free within `q_min_var`/`q_max_var`. None = a plain PQ injection. "
+        "Mutually exclusive with `control`. Honored by the nonlinear power flow "
+        "(`solve_power_flow`, which solves a grid with a PV terminal by Newton); the "
+        "linear const-Z assembler uses the base P/Q.",
+    )
     consumer_type: Optional[ConsumerType] = Field(
         default=None,
         description="Closed device taxonomy (ML categorical; does not drive physics). "
@@ -1435,6 +1538,7 @@ class Generator(InjectionAppliance):
         _check_load_connection(self)
         _check_spectrum_per_phase(self)
         _check_control(self)
+        _check_voltage_regulation(self)
         return self
 
 
@@ -2185,6 +2289,8 @@ __all__ = [
     "VoltWattControl",
     "VoltVarVoltWattControl",
     "InverterControl",
+    "RegulatedQuantity",
+    "VoltageRegulation",
     "InjectionAppliance",
     "Load",
     "Generator",

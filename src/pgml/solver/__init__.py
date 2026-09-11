@@ -7,8 +7,8 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 - ``solve_power_flow(grid, *, slack, method, tol, max_iter, dtype, device,
   operating_point, param_overrides, symmetry=None, criticality="auto",
   linear_solver="auto", block_rows=None, on_disconnected="raise",
-  branch_states=None, branch_states_method="assemble", system=None)
-  -> PowerFlowResult``
+  branch_states=None, branch_states_method="assemble", system=None,
+  enforce_q_limits=None) -> PowerFlowResult``
   Nonlinear const-P / ZIP fundamental power flow: current-injection fixed point
   forward, implicit-function-theorem backward (real-coordinate adjoint).
   ``symmetry`` selects per-phase vs balanced load modeling (``None`` -> config).
@@ -23,7 +23,12 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   factorization through a Sherman-Morrison-Woodbury low-rank update
   (:mod:`pgml.solver.lowrank`) instead of assembling every state.
   ``system`` reuses a :class:`PowerFlowSystem` from :func:`prepare_power_flow`
-  across repeated solves of the same grid.
+  across repeated solves of the same grid. A grid with voltage-regulating
+  generators (PV terminals) is solved by Newton with the regulated row pair
+  substituted, its reactive limits enforced by PV-to-PQ switching
+  (``enforce_q_limits``, default from :mod:`pgml.defaults`), and the solved
+  reactive powers reported in ``PowerFlowResult.regulation``
+  (:class:`VoltageRegulationResult`).
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, method,
   operating_point, harmonic_injection, node_sources=None, include_load_shunt,
   tol, max_iter, dtype, device, symmetry=None, on_disconnected="raise",
@@ -80,6 +85,7 @@ from .power_flow import (
     LoadabilityResult,
     PowerFlowResult,
     PowerFlowSystem,
+    VoltageRegulationResult,
     check_connectivity,
     loadability_limit,
     prepare_power_flow,
@@ -91,6 +97,7 @@ PowerFlowResult.__module__ = __name__
 PowerFlowSystem.__module__ = __name__
 ConvergenceDiagnostics.__module__ = __name__
 LoadabilityResult.__module__ = __name__
+VoltageRegulationResult.__module__ = __name__
 HarmonicFlowResult.__module__ = __name__
 NodeHarmonicSource.__module__ = __name__
 
@@ -104,6 +111,7 @@ __all__ = [
     "solve_power_flow",
     "PowerFlowResult",
     "ConvergenceDiagnostics",
+    "VoltageRegulationResult",
     "loadability_limit",
     "LoadabilityResult",
     "solve_harmonic_flow",
