@@ -129,29 +129,38 @@ def test_every_solve_entry_point_fuses_it(entry):
         lambda g: solve_harmonic_flow(g, [1, 5], dtype=CDT),
     ],
 )
-def test_every_solve_entry_point_refuses_it_under_the_error_policy(entry, tmp_path):
+def test_every_solve_entry_point_refuses_it_under_the_error_policy(
+    entry, zero_impedance_error_policy
+):
     """A pgml error, not a raw torch linear-algebra error, from every entry point."""
-    _with_zero_impedance_policy(tmp_path, "error")
-    try:
-        with pytest.raises(PgmlError) as err:
-            entry(_coupler_grid())
-        assert isinstance(err.value, ModelingError)
-        assert "line 10" in str(err.value)
-    finally:
-        defaults.reload()
+    with pytest.raises(PgmlError) as err:
+        entry(_coupler_grid())
+    assert isinstance(err.value, ModelingError)
+    assert "line 10" in str(err.value)
 
 
-def _with_zero_impedance_policy(tmp_path, policy: str) -> None:
-    """Point ``pgml.defaults`` at a copy of the shipped file with one key changed."""
+@pytest.fixture
+def zero_impedance_error_policy(tmp_path, monkeypatch):
+    """Run the test under ``branch.zero_impedance: error`` (the refusal policy).
+
+    Points ``pgml.defaults`` at a copy of the shipped file with that one key changed and
+    restores the packaged defaults afterwards — both the environment pointer and the
+    loader's cache, so the policy cannot leak into another test.
+    """
     import yaml
 
     data = yaml.safe_load(
         (pathlib.Path(defaults.__file__).parent / "data" / "defaults.yaml").read_text()
     )
-    data["branch"]["zero_impedance"]["value"] = policy
+    data["branch"]["zero_impedance"]["value"] = "error"
     path = tmp_path / "defaults.yaml"
     path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
     defaults.reload(str(path))
+    yield
+    monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+    defaults.reload()
+    assert defaults.get("branch.zero_impedance") == "fuse"
 
 
 def test_zero_length_line_is_reported_as_such():
