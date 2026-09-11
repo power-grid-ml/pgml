@@ -47,6 +47,13 @@ assumption produces, so the test fails loudly if the sequence split regresses.
 term to a matrix-specified line by default, which pgml's explicit-matrix line model
 does not carry. Zeroing it makes both engines solve the same line.
 
+``Set NeglectLoadY=yes`` on the circuit and ``load_shunt="none"`` on the pgml solve:
+the device harmonic shunt is a second model under test elsewhere, and OpenDSS derives it
+from each Load's own ``kV`` property while pgml derives it from the host node's rated
+voltage -- on this feeder 231 V against 400/sqrt(3) = 230.94 V, a 0.05 % difference in
+the shunt that would sit two orders of magnitude above the tolerance the zero-sequence
+quantity needs.
+
 ``harmonic_line_model="naive"`` at conversion for the same reason: OpenDSS carries a
 matrix-defined line to a harmonic order with ``R`` constant and ``X`` proportional to
 the order and applies no skin-effect correction, which is exactly pgml's ``naive``
@@ -279,6 +286,7 @@ class TestLiveOpenDSSParity:
             tol=1e-12,
             max_iter=300,
             dtype=torch.complex128,
+            load_shunt="none",
         )
         assert res.converged
         for k, h in enumerate(_ORDERS):
@@ -310,6 +318,7 @@ class TestLiveOpenDSSParity:
             tol=1e-12,
             max_iter=300,
             dtype=torch.complex128,
+            load_shunt="none",
         )
         dev_h3 = _max_abs_deviation(res.v[1], res.index, id_map, v_dss[3])
         scale_h3 = max(abs(v) for d in v_dss[3].values() for v in d.values())

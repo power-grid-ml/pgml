@@ -505,6 +505,114 @@ def _apply_node_sources_numpy(
                 y_h[row, row] += y_s
 
 
+def _operating_power_numpy(appliance, operating_point, n_ph: int):
+    """Per-phase ``(P, Q)`` lists of an appliance: override, per-phase nameplate, split.
+
+    Mirrors :func:`pgml.assembly._params.resolve_operating_power` for the plain-float
+    (oracle) case, so the shunt and the injected current read the same operating point.
+    """
+    p_total = to_float(appliance.p_nom_w)
+    q_total = to_float(appliance.q_nom_var)
+    p_pp = (
+        [to_float(x) for x in appliance.p_nom_per_phase_w]
+        if getattr(appliance, "p_nom_per_phase_w", None) is not None
+        else [p_total / n_ph] * n_ph
+    )
+    q_pp = (
+        [to_float(x) for x in appliance.q_nom_per_phase_var]
+        if getattr(appliance, "q_nom_per_phase_var", None) is not None
+        else [q_total / n_ph] * n_ph
+    )
+    if operating_point and appliance.id in operating_point:
+        op = operating_point[appliance.id]
+        if "p_per_phase_w" in op:
+            p_pp = [to_float(x) for x in op["p_per_phase_w"]]
+        elif "p_w" in op:
+            p_pp = [to_float(op["p_w"]) / n_ph] * n_ph
+        if "q_per_phase_var" in op:
+            q_pp = [to_float(x) for x in op["q_per_phase_var"]]
+        elif "q_var" in op:
+            q_pp = [to_float(op["q_var"]) / n_ph] * n_ph
+    return p_pp, q_pp
+
+
+def _device_shunt_numpy(
+    appliance,
+    load_shunt: str,
+    p_elem: float,
+    q_elem: float,
+    v_rated: float,
+    h: int,
+    *,
+    kva_base: Optional[float] = None,
+) -> complex:
+    """The harmonic device shunt of one element, written out in plain python complex.
+
+    Mirrors OpenDSS ``Load.pas`` ``CalcYPrimMatrix`` from the equations, not from the
+    torch implementation::
+
+        Y_eq     = (P - jQ)/V_rated**2
+        Y_par(h) = (1-s)Re(Y_eq) + j(1-s)Im(Y_eq)/h
+        Z_ser    = 1/(s*Y_eq)  (or X/xr + jX for the motor model), scaled Re + j*h*Im
+
+    ``p_elem``/``q_elem`` carry the device's sign (a generator's are negative).
+    ``kva_base`` is the motor reactance's apparent-power base (defaults to the element's
+    own). Returns ``0`` for the ``none`` model or a device at zero power.
+    """
+    from pgml.assembly._load_shunt import resolve_harmonic_shunt
+
+    spec = resolve_harmonic_shunt(appliance, load_shunt)
+    if spec.kind == "none":
+        return 0.0 + 0.0j
+    y_eq = complex(p_elem, -q_elem) / (v_rated * v_rated)
+    if y_eq == 0.0:
+        return 0.0 + 0.0j
+    s = spec.series_rl_fraction
+    y = complex((1.0 - s) * y_eq.real, (1.0 - s) * y_eq.imag / h)
+    if s > 0.0:
+        if spec.kind == "motor":
+            kva = abs(complex(p_elem, q_elem)) if kva_base is None else kva_base
+            if kva == 0.0:
+                return y
+            x = v_rated * v_rated / (kva * s) * spec.motor_x_harm_pu
+            z_ser = complex(x / spec.motor_xr_harm, x)
+        else:
+            z_ser = 1.0 / (s * y_eq)
+        y += 1.0 / complex(z_ser.real, h * z_ser.imag)
+    return y
+
+
+def _stamp_device_shunts_numpy(
+    y: np.ndarray, grid, index, h: int, load_shunt: str, operating_point=None
+) -> None:
+    """Add every in-service device's harmonic shunt to the diagonal of ``y`` (in place).
+
+    Phase-to-ground (WYE) per device phase, which is the connection these oracles
+    support; the admittance is :func:`_device_shunt_numpy`. ``load_shunt == "none"``
+    does nothing. Shared by the numpy and the live-OpenDSS harmonic oracles so both
+    compare against the SAME device model the engine solves.
+    """
+    if load_shunt == "none":
+        return
+    nodes = {int(nd.id): nd for nd in grid.nodes}
+    for a in grid.appliances:
+        if not (isinstance(a, InjectionAppliance) and getattr(a, "in_service", True)):
+            continue
+        n_ph = len(a.phases)
+        node = nodes[int(a.node)]
+        v0 = (
+            to_float(node.u_rated_v) / math.sqrt(3.0)
+            if len(node.phases) >= 3
+            else to_float(node.u_rated_v)
+        )
+        sign = 1.0 if isinstance(a, Load) else -1.0
+        p_pp, q_pp = _operating_power_numpy(a, operating_point, n_ph)
+        for k_ph, row in enumerate(index.rows(a.node)[:n_ph]):
+            y[row, row] += _device_shunt_numpy(
+                a, load_shunt, sign * p_pp[k_ph], sign * q_pp[k_ph], v0, h
+            )
+
+
 def numpy_harmonic_profiles(
     grid: Grid,
     v1,
@@ -516,15 +624,21 @@ def numpy_harmonic_profiles(
     unit: str = "pu",
     harmonic_injection=None,
     operating_point=None,
+    load_shunt: Optional[str] = None,
 ) -> list[HarmonicProfile]:
     """Independent numpy harmonic solve -> one :class:`HarmonicProfile` per order.
 
     Single-phase only. ``v1`` is the converged fundamental node-voltage vector (numpy
     or tensor, aligned to ``index`` rows) — the SHARED operating point. For each order
-    ``h > 1`` this builds ``Y(h)`` (line series/shunt with R const & X∝h, plus the
-    source Norton shunt), injects each device's harmonic current per the OpenDSS
-    convention, and solves ``Y(h) V(h) = I(h)``. Order 1 returns ``v1``.
+    ``h > 1`` this builds ``Y(h)`` (line series/shunt with R const & X∝h, the source
+    Norton shunt and each device's harmonic shunt), injects each device's harmonic
+    current per the OpenDSS convention, and solves ``Y(h) V(h) = I(h)``. Order 1 returns
+    ``v1``. ``load_shunt`` selects the device shunt model (``None`` = the documented
+    modeling default, as in :func:`pgml.solver.solve_harmonic_flow`).
     """
+    from pgml.assembly._load_shunt import resolve_shunt_model_name
+
+    shunt = resolve_shunt_model_name(load_shunt)
     for node in grid.nodes:
         if len(node.phases) != 1:
             raise ValueError(
@@ -594,6 +708,7 @@ def numpy_harmonic_profiles(
             vh = v1
         else:
             y = _build_y(h)
+            _stamp_device_shunts_numpy(y, grid, index, h, shunt, operating_point)
             i = np.zeros(n, dtype=complex)
             for spec, row, i1 in devs:
                 mag1, ang1 = spec.get(1, (1.0, 0.0))
@@ -644,6 +759,7 @@ def numpy_harmonic_voltages(
     v1: Optional[np.ndarray] = None,
     operating_point: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
+    load_shunt: Optional[str] = None,
 ) -> np.ndarray:
     """Pure-numpy harmonic voltage oracle — exact pgml parity (R const / X∝h).
 
@@ -712,8 +828,10 @@ def numpy_harmonic_voltages(
             f"numpy_harmonic_voltages supports only slack='norton'; got {slack!r}"
         )
     from pgml.assembly import node_phase_index
+    from pgml.assembly._load_shunt import resolve_shunt_model_name
     from pgml.schemas.grid_schema import Generator as PgmlGen, Load as PgmlLoad
 
+    shunt = resolve_shunt_model_name(load_shunt)
     orders_list = [int(h) for h in orders]
     index = node_phase_index(grid)
     n = index.size
@@ -840,6 +958,7 @@ def numpy_harmonic_voltages(
             result_slices.append(v1_eff)
             continue
         y_h = _build_numpy_ybus(grid, h, index)
+        _stamp_device_shunts_numpy(y_h, grid, index, h, shunt, operating_point)
         i_h = np.zeros(n, dtype=complex)
         for spec, src_rows, i1_list in devs:
             mag1, ang1 = spec.get(1, (1.0, 0.0))

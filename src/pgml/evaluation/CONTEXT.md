@@ -97,12 +97,20 @@ Canonical home for all reference-library adapters and grid builders.
 
 ### numpy oracle (`oracles.numpy_oracle`)
 Pure-numpy harmonic oracle, no live OpenDSS required.
-- `numpy_harmonic_profiles(grid, v1, index, orders, ...) -> [HarmonicProfile]` —
-  single-phase, R-const/X∝h, shared fundamental v1.
+- `numpy_harmonic_profiles(grid, v1, index, orders, *, load_shunt=None, ...) ->
+  [HarmonicProfile]` — single-phase, R-const/X∝h, shared fundamental v1.
 - `numpy_harmonic_voltages(grid, harmonic_injection, orders, *, slack="norton",
-  v1=None, operating_point=None, node_sources=None) -> np.ndarray` — full multi-element
-  oracle returning complex `[H, N]`; machine-precision parity (~1e-13 V) vs
-  `solve_harmonic_flow`; supports single-phase and three-phase, plain R/X lines.
+  v1=None, operating_point=None, node_sources=None, load_shunt=None) -> np.ndarray` —
+  full multi-element oracle returning complex `[H, N]`; machine-precision parity
+  (~1e-13 V) vs `solve_harmonic_flow`; supports single-phase and three-phase, plain R/X
+  lines. `load_shunt` (`None` = the documented default) adds each device's harmonic
+  Norton shunt, re-derived from the OpenDSS equations in plain python; it is stamped
+  phase-to-ground, which is the connection these oracles support. NOTE the oracle
+  implements the NAIVE line model (R const, X∝h): with every device shunted, harmonic
+  current flows in every branch, so a grid converted with the documented
+  `sequence_aware`/`positive_sequence` default (skin effect + a `resistance_frequency`
+  law, which the oracle does not mirror) deviates by ~2e-2 V on CIGRE LV — convert with
+  `harmonic_line_model="naive"` for a machine-precision comparison.
 
 ### pandapower oracle (`oracles.pandapower_oracle`)
 - `pandapower_ybus(net, grid, id_map, index, *, label)` -> LabeledMatrix (pu->SI,
@@ -121,11 +129,16 @@ Requires `opendssdirect` (imported lazily inside functions).
 - `opendss_geometry_harmonic_profiles(grid, hres, orders, ...) -> [HarmonicProfile]` —
   OpenDSS line-model profiles for the SAME geometry as pgml.
 - `opendss_harmonic_voltages(grid, harmonic_injection, orders, *, slack="norton",
-  v1=None, operating_point=None, node_sources=None) -> np.ndarray` — LIVE OpenDSS
-  harmonic oracle; returns complex `[H, N]`; supports single-phase geometry path
-  (parity ~1e-11 V) and three-phase sequence-aware path (parity ~1e-8 V).
-- `opendss_dyn_transformer_harmonic_voltages(grid, harmonic_injection, orders, ...) ->
-  np.ndarray` — genuine vector-group validation using real OpenDSS Transformer elements.
+  v1=None, operating_point=None, node_sources=None, load_shunt=None) -> np.ndarray` —
+  LIVE OpenDSS harmonic oracle; returns complex `[H, N]`; supports single-phase geometry
+  path (parity ~1.1e-7 V with the device shunt, ~1e-11 V without) and three-phase
+  sequence-aware path (parity ~1e-8 V without the device shunt; with it the Carson
+  line-model difference reaches ~2e-2 V because every branch then carries harmonic
+  current). `load_shunt` is stamped with the numpy oracle's own formula, so the
+  comparison stays a LINE-model comparison.
+- `opendss_dyn_transformer_harmonic_voltages(grid, harmonic_injection, orders, *,
+  load_shunt=None, ...) -> np.ndarray` — genuine vector-group validation using real
+  OpenDSS Transformer elements.
 
 ### OpenDSS SCENARIO oracle (`oracles.opendss_scenario_oracle`)
 Requires `opendssdirect` (imported lazily). Unlike `oracles.opendss_oracle` above (which
@@ -144,8 +157,8 @@ this reproduces bit-for-bit).
 - `ExportedCircuit(grid, mode, busname, node_order, rowmap, index, loads, generators,
   sources, spectra)` — a live-circuit handle; `spectra` starts empty, populated by
   `run_opendss_scenarios` once it knows the requested orders.
-- `export_grid_to_opendss(grid, *, mode="matched"|"default", circuit_name=...) ->
-  ExportedCircuit` — builds the circuit, solves an initial nominal snapshot (validates +
+- `export_grid_to_opendss(grid, *, mode="matched"|"default", load_shunt=None,
+  circuit_name=...) -> ExportedCircuit` — builds the circuit, solves an initial nominal snapshot (validates +
   captures the stable DSS row order), raises `pgml.errors.ConversionError` for any
   unsupported grid feature (conductor-geometry lines — use `opendss_oracle`'s geometry
   path instead; unresolved `type_ref`; a non-diagonal/unbalanced `Source`; zigzag windings;
@@ -156,8 +169,11 @@ this reproduces bit-for-bit).
   transformer winding count other than 1; an impedance-grounded transformer neutral or an
   explicit `zero_sequence` override — NOT yet consumed by `pgml.assembly`, so faithfully
   exporting them would silently diverge; a per-phase override on a DELTA appliance).
-  `mode="matched"` sets: `NeglectLoadY=Yes` (REQUIRED for physical equivalence — pgml's
-  harmonic solver has no load-shunt model at all, `include_load_shunt` is hard-`False`);
+  `mode="matched"` sets: the harmonic DEVICE model `load_shunt` names (`None` = the
+  documented default) — `%SeriesRL` (plus `puXharm`/`XRharm` for the motor model) on every
+  exported `Load`, or `NeglectLoadY=Yes` for the pure current-source model; REQUIRED for
+  physical equivalence, and a device that switches its own shunt off while the run keeps
+  one is refused (`NeglectLoadY` is global, with no per-`Load` equivalent);
   `Rg=Xg=0` on every LINE-LIKE element including `Switch` (a sequence-form `r1/x1/r0/x0`
   Line under the hood — it picks up OpenDSS's earth-return default exactly like an
   `r1/x1`-defined Line; verified live, a switch-only repro alone desynced a comparison by
@@ -168,11 +184,11 @@ this reproduces bit-for-bit).
   live: a bus at 0.919 pu, an everyday LV drop, made a default-banded load deliver 6.8%
   less than nameplate). `mode="default"` leaves OpenDSS's own defaults for all of these.
 - `run_opendss_scenarios(grid, sampled, *, harmonic_orders, mode="matched"|"default",
-  dtype=complex128) -> pgml.scenarios.ScenarioResult` — exports once, attaches one native
-  `Spectrum` per device carrying a harmonic injection, then per scenario × per STEP (the
-  step count read from `sampled.n_steps`; `Vsource`/load `Edit`s happen once per step too,
-  so a PER-STEP `[B, T]` operating point is sliced by step, not just by scenario) edits
-  the operating point (`kW`/`kvar`, per-phase
+  load_shunt=None, dtype=complex128) -> pgml.scenarios.ScenarioResult` — exports once,
+  attaches one native `Spectrum` per device carrying a harmonic injection, then per
+  scenario × per STEP (the step count read from `sampled.n_steps`; `Vsource`/load `Edit`s
+  happen once per step too, so a PER-STEP `[B, T]` operating point is sliced by step, not
+  just by scenario) edits the operating point (`kW`/`kvar`, per-phase
   where the appliance was split, `Vsource.pu` for a source `u_ref_scale`) and each device's
   `Spectrum` `%mag`(`=magnitude_pu*100`)/`angle`(`=phase_deg`, direct — the order-1 entry is
   the same self-relative reference pgml's own `arg(I_h)=ang_h+h*(arg(I1)-ang_1)` formula
@@ -180,13 +196,13 @@ this reproduces bit-for-bit).
   `[B,H,N]` / `[B,T,H,N]`, aligned to `node_phase_index` rows exactly like `run_scenarios`'s
   own output.
 - `write_opendss_dataset(grid, sampled, path, *, harmonic_orders, mode="matched",
-  layout="wide", dtype=complex128) -> Path` — `run_opendss_scenarios` +
+  load_shunt=None, layout="wide", dtype=complex128) -> Path` — `run_opendss_scenarios` +
   `pgml.scenarios.write_dataset`, then stamps `meta.json` with `engine="opendss"`,
-  `oracle_mode`, `opendssdirect_version`, `opendss_engine_version` (`Basic.Version()`'s
+  `oracle_mode`, `oracle_load_shunt`, `opendssdirect_version`, `opendss_engine_version` (`Basic.Version()`'s
   full string). Byte-identical layout otherwise — `read_dataset` and every downstream data
   loader consume it unchanged.
 - `compare_to_pgml(grid, sampled, *, harmonic_orders, mode="matched"|"default",
-  out_dir=None, slack="norton", symmetry=None, dtype=complex128) -> dict` — runs BOTH
+  load_shunt=None, out_dir=None, slack="norton", symmetry=None, dtype=complex128) -> dict` — runs BOTH
   engines on the IDENTICAL `sampled` and reports, per order over the whole batch: abs
   `|V_opendss-V_pgml|` and that error RELATIVE TO the order's RMS voltage, each
   mean/p95/max, plus `opendss_converged`/`pgml_converged`. `slack` defaults to `"norton"`

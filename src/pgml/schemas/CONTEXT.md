@@ -18,8 +18,8 @@ Revision history (what each bump added, and what it means for data written befor
   phase-to-phase bank; zigzag rejected). Both defaults are backward-compatible; assembly
   enforces the semantics.
 - Rev 0.0.6 — the harmonic line model, the inductive shunt, the source background
-  distortion, the PV terminal, and four unused realized-value models dropped from
-  `scenario_schema`, in detail below.
+  distortion, the PV terminal, the harmonic device shunt, and four unused realized-value
+  models dropped from `scenario_schema`, in detail below.
 
 ## Migrating a 0.0.5 grid JSON to 0.0.6
 
@@ -74,6 +74,21 @@ always meant to be used):
   else 1)`). The OpenDSS converter has always written `harmonic_xr_constant` from
   `XRConst`, so an OpenDSS-imported grid with `XRConst=Yes` changes its harmonic result.
   The shipped defaults (`False` and a constant multiplier) reproduce the old behaviour.
+
+`Load`/`Generator`/`Storage.harmonic_model` becomes
+`Optional[HarmonicShuntModel] = None` and IS consumed: it is now the per-device OVERRIDE
+of the harmonic Norton shunt, whose default lives in `appliance.harmonic_shunt.*` and is
+selected per run by `solve_harmonic_flow(load_shunt=...)`. A persisted grid is read
+unchanged — a stored block (every grid written by pgml carries the former default
+`{series_rl_fraction: 0.5, neglect_shunt: false, motor_x_harm_pu: null,
+motor_xr_harm: 6.0}`) keeps exactly the same meaning, which is also the shipped default,
+so no stored value changes its physics. The RESULT of a harmonic solve DOES change,
+because the field was previously ignored: at orders `h > 1` each device now carries
+`Y_eq = conj(S)/V_rated²` split between a parallel and a series R-L branch
+(`docs/pgml/modeling/references/opendss/harmonics.md`). `load_shunt="none"` reproduces
+the former pure current-source model exactly. `HarmonicShuntModel` additionally rejects
+two ill-posed combinations (`neglect_shunt=True` together with a `motor_x_harm_pu`, and a
+non-positive `motor_x_harm_pu`/`motor_xr_harm`) instead of silently picking a branch.
 
 `TransformerZeroSeq`'s documented reference side is corrected from "HV" to "the to-side
 (LV) winding coil" — the side the positive-sequence leakage fields use and the side
@@ -203,4 +218,7 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   `harmonic_injection` override also accepts per-phase magnitudes/phases.
 - NOT yet converted (plain float; convert when their differentiable path lands):
   catalog `LineType`/`TransformerType`, `ZipCoefficients`, `HarmonicShuntModel` +
-  spectra, and the converter input-convention DTOs.
+  spectra, and the converter input-convention DTOs. The harmonic shunt is still
+  differentiable in the quantities that matter — it is built from the device's P/Q and
+  the fundamental solution — but `series_rl_fraction` / `motor_x_harm_pu` themselves are
+  not gradient leaves.

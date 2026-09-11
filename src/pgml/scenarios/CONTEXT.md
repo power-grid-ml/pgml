@@ -202,7 +202,8 @@ leading scenario dim (verified `batched == loop-of-individual`).
   unless the caller named one. This is the seam a downstream generator plugs into; the
   serializable configs satisfy it themselves.
 - `run_scenarios(grid, spec, *, calculation="power_flow"|"harmonic", harmonic_orders=None,
-  slack="ideal", symmetry=None, dtype, device, chunk_size=None, output_device=None) ->
+  slack="ideal", symmetry=None, load_shunt=None, dtype, device, chunk_size=None,
+  output_device=None) ->
   ScenarioResult(v, index, sampled, frequencies_hz, converged, failed_states)`. `spec` is a
   `ScenarioSpec` or a pre-built `SampledScenarios`.
   - `v` is `[B, N]` (power flow), `[B, H, N]` (harmonic) or `[B, T, H, N]` (a sequence
@@ -226,6 +227,11 @@ leading scenario dim (verified `batched == loop-of-individual`).
     generation; leave `None` for a differentiable GPU pipeline.
   - `symmetry` forwards to the solver (None/"auto" lets per-phase samples promote to
     asymmetric).
+  - `load_shunt` (harmonic only) selects each device's harmonic Norton shunt
+    (`"none"`/`"opendss"`/`"motor"`; `None` = the documented default
+    `appliance.harmonic_shunt.model`). A shunt derived from a PER-SCENARIO operating
+    point makes `Y(h)` scenario-dependent, so every scenario factors its own matrix
+    instead of sharing one factorization per order — `"none"` keeps the shared one.
 - Two specs writing the same `(device, field, order)` — or the same power field of one
   component — raise `InputError` at resolve time: last-writer-wins would desync the
   recorded samples from the realized operating point.
