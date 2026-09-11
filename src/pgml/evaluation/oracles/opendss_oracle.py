@@ -626,10 +626,13 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
         bus1 = f"{busname[b.from_node]}.{ph_suffix}"
         bus2 = f"{busname[b.to_node]}.{ph_suffix}"
         r_sw = to_float(b.resistance_ohm)
+        # rg/xg = 0: a switch is a lumped contact resistance with no earth-return path,
+        # so OpenDSS must not frequency-correct it (its defaults would add ~0.018 Ohm
+        # per order on a `units=m length=1` element).
         dss.Text.Command(
             f"New Line.sw{b.id} phases={p} bus1={bus1} bus2={bus2} "
             f"r1={r_sw:.10g} x1=0.0 c1=0.0 r0={r_sw:.10g} x0=0.0 c0=0.0 "
-            "length=1 units=m"
+            "rg=0 xg=0 length=1 units=m"
         )
 
     # Voltage bases: use only the slack node kV (LV nodes are isolated without transformers)
@@ -1320,10 +1323,13 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
         bus1 = f"{busname[b.from_node]}.{ph_suffix}"
         bus2 = f"{busname[b.to_node]}.{ph_suffix}"
         r_sw = to_float(b.resistance_ohm)
+        # rg/xg = 0: a switch is a lumped contact resistance with no earth-return path,
+        # so OpenDSS must not frequency-correct it (its defaults would add ~0.018 Ohm
+        # per order on a `units=m length=1` element).
         dss.Text.Command(
             f"New Line.sw{b.id} phases={p} bus1={bus1} bus2={bus2} "
             f"r1={r_sw:.10g} x1=0.0 c1=0.0 r0={r_sw:.10g} x0=0.0 c0=0.0 "
-            "length=1 units=m"
+            "rg=0 xg=0 length=1 units=m"
         )
 
     # Transformers: REAL OpenDSS Transformer elements.
