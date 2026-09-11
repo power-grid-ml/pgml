@@ -149,6 +149,53 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     batched op) and the per-scenario `V*` are stacked; the SHARED IFT backward (full op,
     batch-aligned) then attaches batched gradients — so differentiability is unchanged.
     Newton is the hard-grid / near-nose solver; for bulk batches use current-injection.
+  - VOLTAGE-REGULATING TERMINALS (PV buses): a `Generator` carrying a
+    `VoltageRegulation` block (setpoint `v_set_pu` in per unit of the host node's rated
+    voltage, optional `q_min_var`/`q_max_var` totals, `regulated` =
+    positive-sequence | per-phase) has its terminal's REACTIVE power-balance row
+    replaced by `(|V_reg|² − V_set²)/(2·V_set)` and its ACTIVE row by
+    `Re(conj(V)·F_c)/v0` (both scaled so the active row stays in amperes and the
+    setpoint row matches the ideal-slack pin rows). The reactive power is eliminated
+    ANALYTICALLY (it enters only the imaginary part of the power-form row), so the
+    state stays `[Re V; Im V]`, the `[2N,2N]` IFT Jacobian / adjoint is unchanged, and
+    `Q` is recovered at `V*` as `Q_e = Q_pinned − Im(conj(V_r)·F_c,r)` summed over the
+    unit's elements. For a 3-phase positive-sequence unit the other two imaginary rows
+    carry the equal-reactive-split conditions `Im(g_e) − Im(g_0) = 0`, which are
+    reactive-power-free, so the elimination stays exact. Implementation:
+    `solver/_pv_bus.py` (`PVTerminals`, `collect_pv_terminals`).
+    - `enforce_q_limits: Optional[bool] = None` (kwarg; `None` → config
+      `appliance.generator.enforce_q_limits`, default TRUE — pandapower `runpp`'s own
+      default is False): limits are enforced by PV-to-PQ SWITCHING, one complete solve
+      per round at a FIXED active set, with a hysteresis band
+      (`appliance.generator.q_limit_hysteresis_pu` / `_rel`, max rounds
+      `q_limit_switch_rounds_max`). The switching decision is off-tape; the residual at
+      the resolved active set is on-tape, so `dV/dv_set` (regulating) and
+      `dV/dq_limit` (pinned) are exact. A non-converged round stops the loop (a
+      decision read off an unsettled iterate would switch on noise).
+    - METHOD: a grid with a PV terminal is always solved by Newton (the
+      current-injection fixed point has no setpoint to iterate on); `method=
+      "current_injection"` logs a WARNING and switches. Newton gets a SECOND warm
+      start in that case — the balanced nominal profile with every regulated row AT its
+      setpoint (`_pv_nominal_init`) — ordered against the const-Z seed by whether that
+      seed collapses below `_SEED_COLLAPSE_PU = 0.5` of nominal; a start that fails is
+      followed by the other, and the restart is logged (`_newton_from_starts`).
+    - RESULT: `PowerFlowResult.regulation: Optional[VoltageRegulationResult]` —
+      `q_var {gen_id: [*batch] var}` (solved total, autograd-free like the
+      diagnostics), `regulating {gen_id: [*batch] bool}`, `switch_rounds`,
+      `enforce_q_limits`. The convergence diagnostics report the ACTIVE component of
+      the mismatch at a regulating row (its raw current mismatch is the reactive
+      current the machine supplies).
+    - BATCHED: `operating_point[gen_id]["v_set_pu"]` is a per-scenario setpoint (float
+      or `[*batch]` tensor, same per-unit base); limits and the active set batch with
+      it, so different scenarios may pin different units. A `v_set_pu` on an appliance
+      that is not an in-service regulating generator raises; a `q_var` override on one
+      that is warns and is ignored.
+    - REFUSED (ModelingError, at the solve): DELTA connection, a WYE terminal returning
+      through its node's neutral row (use `return_path='ground'`), a positive-sequence
+      setpoint on a 2-phase terminal, and a regulating generator on an in-service
+      Source's node.
+    - HARMONICS: regulation is a fundamental-frequency concept; at orders h>1 the
+      machine stays the Norton current source it is today (see `solve_harmonic_flow`).
   - `loadability_limit(grid, *, slack, lambda_max, lambda_step, ...) -> LoadabilityResult`:
     CONTINUATION power flow. Ramps the load by `λ` (`R(V,λ)=Y_eff·V+λ·I_dev(V)−I_slack`)
     from a feasible base, Newton-correcting + bisecting onto the breaking `λ*` (the P-V

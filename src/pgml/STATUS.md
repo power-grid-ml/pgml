@@ -40,6 +40,21 @@ decisions. One entry per capability:
   OpenDSS-exact spectrum injection, vector-group transformers (Dyn traps triplen),
   connection-aware per-phase injection. Integer orders only — non-integer orders raise
   (see the time-domain note under open work).
+- **Voltage-regulating generators (PV terminals)** — a `Generator` with a
+  `VoltageRegulation` block (setpoint in per unit of the node rating, reactive limits,
+  positive-sequence or per-phase regulated magnitude) has its terminal's REACTIVE
+  power-balance row replaced by `|V|² − V_set²`, with the reactive power eliminated
+  analytically, so the `[2N,2N]` IFT Jacobian/adjoint is unchanged and `dV/dv_set` /
+  `dV/dq_limit` are exact (`solver/_pv_bus.py`). Reactive limits are enforced by
+  PV-to-PQ switching with hysteresis (one complete solve per round at a fixed active
+  set; `enforce_q_limits`, default from `pgml.defaults`). Such a grid is solved by
+  Newton (logged); batched per-scenario setpoints work. Converted from pandapower
+  `net.gen` (the default `GenMode.VOLTAGE_REGULATING`) and OpenDSS
+  `Generator model=3`. Validated against `pp.runpp` on the MATPOWER benchmarks as
+  published — case9/39/57 to 1e-15 pu, case14/30 at pandapower's own 1e-10 mismatch
+  floor, case118/case300 limited only by the transformer magnetizing-branch placement
+  (1e-15 pu once `i0_percent` is zeroed in both tools) — and against OpenDSS
+  `model=3` to 6.6e-10 pu / 4.2e-4 kvar (`docs/pgml/modeling/der-pv-storage.md` §4.5).
 - **DER inverter control + storage** — `InverterControl` on `Generator`/`Storage`
   (constant PF, cosphi(P), Volt-VAr, Volt-Watt, combined; capability circle, C¹
   smoothing), differentiated through the IFT; `Storage` = signed injection, SoC/dispatch
@@ -206,9 +221,15 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
   (only a shape check); pandapower line/trafo switches lack a minimal dedicated
   open-switch parity case (currently exercised only inside the large CIGRE MV /
   mv_oberrhein comparisons). WHERE: `tests/convert/`, `tests/reference/`.
-- **DER (optional extensions)**: a true voltage-regulating PV bus (replace a terminal's
-  power-balance row with `|V| − V_set`, free Q, smooth Q-limit —
-  `docs/pgml/modeling/der-pv-storage.md` §4.5).
+- **DER (optional extensions)**: a REMOTE regulated bus (a machine holding a voltage at
+  another node — pandapower has no column for it, OpenDSS `RegControl` does), a DELTA or
+  neutral-returning regulating terminal (the row pair is formed for a grounded WYE
+  terminal; the neutral case needs the generator's rows folded into the neutral row
+  before the substitution), a scenarios `ParameterSpec(field="v_set")` so a setpoint
+  sweep is writable from a scenario config, and carrying the SOLVED reactive power of a
+  regulating machine into its harmonic injection scaling (today the nameplate value is
+  used). WHERE: `src/pgml/solver/_pv_bus.py`, `src/pgml/scenarios/`,
+  `src/pgml/solver/harmonic_flow.py`.
 - **Storage dispatch (optional extensions)**: higher-level dispatch policies and a
   scenarios `Selector(component="storage")` to sample storage setpoints across a batch.
 - **Composition (statistical device classes)**: per-phase member placement (members
@@ -263,21 +284,19 @@ results are never read as more physical than they are. Details live in `docs/pgm
   (item C). Resonance magnitudes are conservative (undamped) at load-heavy buses.
 - **Sources.** Zero-sequence source impedance = positive-sequence value (no converter
   reads `r0x0_max`/`z01_ratio`) — `docs/pgml/modeling/conventions.md` §6.
-- **PV (voltage-regulating) buses.** There is no PV-bus appliance: a bus whose voltage
-  MAGNITUDE is regulated with reactive power free (pandapower `net.gen`, OpenDSS
-  `Generator model=3`) needs a mixed residual row pair `[P-balance; |V|² − V_set²]` in
-  `solver/power_flow.py` plus a schema field to carry `V_set`. The pandapower converter can
-  APPROXIMATE one on request (`gen_mode=GenMode.VOLT_VAR_APPROX`) with a steep Volt-VAr
-  droop centred on `vm_pu`: the per-bus deviation from a live `runpp` falls as `1/slope`
-  (case57: 4.3e-2 pu at slope 5 → 2.3e-4 pu at slope 2000), but outside the `1/slope`-wide
-  band the droop's `dQ/d|V|` is exactly zero, so on a heavily loaded transmission grid the
-  solve lands on the collapsed low-voltage branch: `case118` caps out around slope 5 (a few
-  percent of voltage error) and `case39` converges SILENTLY onto that branch at every
-  steepness (4.9e-1 pu off, all nine generators pinned at their reactive limit). Importing
-  transmission benchmarks faithfully needs the residual-row fix (and `net.shunt`
-  conversion, still missing).
-  `docs/pgml/modeling/der-pv-storage.md` §4.5,
-  `src/pgml/convert/pandapower/CONTEXT.md`.
+- **PV-terminal scope.** The regulated row pair is formed for a WYE terminal whose
+  return is ground: a DELTA machine (its reactive current is shared between two node
+  rows, so only the circulating total is observable), a WYE machine returning through
+  its node's neutral row (use `return_path='ground'`), a positive-sequence setpoint on
+  a 2-phase terminal, and a regulating generator on a Source's node all raise
+  `ModelingError`. Two regulating machines on ONE node are not separable either (their
+  summed reactive power is observable, the split is not) and raise; the pandapower
+  converter merges such rows instead. Reactive limits bind by SWITCHING,
+  so the solution is exact at the limit but the active set is piecewise constant in the
+  parameters: at a switching boundary the gradient is one-sided. Regulation is a
+  fundamental-frequency concept; at orders h>1 the machine stays a Norton current
+  source, and its harmonic current is scaled from the NAMEPLATE reactive power, not the
+  regulated one (`docs/pgml/modeling/der-pv-storage.md` §4.5).
 - **ZIP loads sharing a bus with generation (cross-tool).** pandapower reduces a ZIP load's
   coefficients onto the BUS and applies them to that bus's NET injection
   (`_calc_pq_elements_and_add_on_ppc`), so a const-Z load and a generator on one bus cancel
@@ -318,14 +337,17 @@ results are never read as more physical than they are. Details live in `docs/pgm
 - **Scenario sampling runs on CPU** (`SobolEngine`), promoted to the solve device after —
   deliberate; the sampled tensors are tiny next to the solve.
 - **Converter coverage.** Converted: pandapower `bus`/`line`/`load`/`asymmetric_load`/
-  `trafo` (vector groups + taps)/bus-bus + line/trafo `switch` (+`parallel`)/`ext_grid`/
-  `sgen`; OpenDSS Lines/2W-Transformers/Vsources/Loads (ZIP models)/Capacitor/Reactor/
-  Generator/PVSystem/Storage; pgm `node`/`line`/`sym_load`/`asym_load`/`source`/
-  `sym_gen`/`transformer`. NOT converted (a WARNING names any non-empty dropped kind):
-  pandapower `gen` (PV bus), `shunt`, `trafo3w`, `impedance`, `ward`/`xward`, `dcline`,
+  `trafo` (vector groups + taps, `tap_changer_type` honoured as pandapower does)/bus-bus
+  + line/trafo `switch` (+`parallel`)/`ext_grid`/`sgen`/`gen` (an exact PV terminal by
+  default)/`shunt`; OpenDSS Lines/2W-Transformers/Vsources/Loads (ZIP models)/Capacitor/
+  Reactor/Generator (incl. `model=3`)/PVSystem/Storage; pgm `node`/`line`/`sym_load`/
+  `asym_load`/`source`/`sym_gen`/`transformer`. NOT converted (a WARNING names any
+  non-empty dropped kind): pandapower `trafo3w`, `impedance`, `ward`/`xward`, `dcline`,
   `storage`, `motor`, `asymmetric_sgen`; pgm `three_winding_transformer`, `shunt`,
   `asym_gen`, `link`, `transformer_tap_regulator`; OpenDSS items under D above.
-  pandapower ideal phase-shifter taps raise.
+  pandapower ideal phase-shifter taps raise, and a tap position whose
+  `tap_changer_type` is unset is dropped with a WARNING (pandapower ignores it too).
+  pgm has no voltage-controlled generator component to map.
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 

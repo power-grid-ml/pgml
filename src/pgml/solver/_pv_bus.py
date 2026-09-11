@@ -323,8 +323,19 @@ def collect_pv_terminals(
         a.node for a in grid.appliances if isinstance(a, Source) and a.in_service
     }
     by_key: dict[tuple, list] = {}
+    seen_nodes: dict[int, int] = {}
     for a in regs:
         _validate_terminal(a, node_map[a.node], slack_nodes)
+        if a.node in seen_nodes:
+            raise ModelingError(
+                f"generator {a.id} and generator {seen_nodes[a.node]} both regulate "
+                f"node {a.node}. One node holds ONE voltage, and two free reactive "
+                "powers on the same rows are not separable (their sum is observable, "
+                "the split is not). Merge them into one generator with the summed "
+                "active power and summed reactive limits, or regulate one and give the "
+                "other a reactive setpoint."
+            )
+        seen_nodes[a.node] = int(a.id)
         by_key.setdefault((len(a.phases), a.voltage_regulation.regulated), []).append(a)
 
     groups: list[PVGroup] = []

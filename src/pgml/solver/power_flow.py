@@ -437,7 +437,7 @@ class PowerFlowResult:
     diagnostics: Optional[ConvergenceDiagnostics] = None
     converged_mask: Optional[Tensor] = None
     failed_states: tuple[int, ...] = ()
-    regulation: Optional["VoltageRegulationResult"] = None
+    regulation: Optional[VoltageRegulationResult] = None
 
 
 @dataclass(frozen=True)

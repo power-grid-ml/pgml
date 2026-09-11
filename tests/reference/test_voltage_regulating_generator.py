@@ -398,6 +398,16 @@ class TestGuards:
         with pytest.raises(ModelingError, match="Source"):
             _solve(grid)
 
+    def test_two_regulating_generators_on_one_node_raise(self):
+        """One node holds one voltage; two free reactive powers on the same rows are
+        not separable (only their sum is observable)."""
+        grid = _grid(regulation=VoltageRegulation(v_set_pu=1.0))
+        second = grid.appliances[2].model_copy(deep=True)
+        second.id = 99
+        grid.appliances = list(grid.appliances) + [second]
+        with pytest.raises(ModelingError, match="both regulate"):
+            _solve(grid)
+
     def test_two_phase_positive_sequence_raises(self):
         phases = (Phase.A, Phase.B)
         grid = _grid(phases=phases, regulation=VoltageRegulation(v_set_pu=1.0))
