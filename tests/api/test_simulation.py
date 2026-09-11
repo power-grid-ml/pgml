@@ -269,15 +269,32 @@ def test_param_overrides_thread_into_branch_currents():
         assert torch.allclose(a.i_to, b.i_to, atol=1e-9)
 
 
-def test_harmonic_simulate_rejects_param_overrides():
-    with pytest.raises(InputError, match="param_overrides"):
-        simulate(
-            single_phase_chain(),
-            SimulationConfig(calculation="harmonic", harmonic_orders=[1, 3]),
-            param_overrides={
-                ("line", 20, "series_resistance_ohm_per_m"): torch.tensor([[1.0e-3]])
-            },
-        )
+def test_harmonic_simulate_applies_param_overrides():
+    """An override reaches EVERY order's admittance, not just the fundamental.
+
+    The harmonic path takes the same ``param_overrides`` hook as the power flow, so a
+    substituted line resistance must give the same result as the value carried on the
+    grid itself — at the fundamental and at every harmonic order.
+    """
+    grid = single_phase_chain()
+    cfg = SimulationConfig(calculation="harmonic", harmonic_orders=[1, 3, 5])
+    st = simulate(
+        grid,
+        cfg,
+        param_overrides={
+            ("line", 20, "series_resistance_ohm_per_m"): torch.tensor(
+                [[2.0e-3]], dtype=torch.float64
+            )
+        },
+    )
+    ref_grid = grid.model_copy(deep=True)
+    line = next(b for b in ref_grid.branches if b.id == 20)
+    line.series_resistance_ohm_per_m = [[2.0e-3]]
+    ref = simulate(ref_grid, cfg)
+    assert torch.allclose(st.v, ref.v, atol=1e-9)
+    # The override really moves the network (otherwise the comparison is vacuous).
+    plain = simulate(grid, cfg)
+    assert not torch.allclose(st.v, plain.v, atol=1e-6)
 
 
 # --------------------------------------------------------------------------- #

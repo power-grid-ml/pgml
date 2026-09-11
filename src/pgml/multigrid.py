@@ -38,11 +38,14 @@ Semantics to be aware of (documented, deliberate):
 - All members must share ``base_frequency_hz`` and be materialised consistently
   (identical ``types`` entries may repeat across members; conflicting definitions
   under one name raise).
-- Convergence is evaluated on the UNION state vector: the fixed point iterates all
-  members together and the absolute ``tol`` applies to the concatenated update
-  norm, so one hard member keeps iterating an already-settled easy member (cheap —
-  the extra iterations are back-substitutions). Per-scenario ``converged_mask``
-  semantics are unchanged.
+- Convergence is evaluated on the UNION state vector, but both criteria are PER ROW
+  and per unit (the largest per-row voltage update over each node's rated voltage,
+  the largest per-row power mismatch over the power base), so the union is judged
+  exactly like a single member: no member's tolerance is diluted or tightened by the
+  row count or the voltage level of the others. The fixed point still iterates all
+  members together, so one hard member keeps iterating an already-settled easy one
+  (cheap — the extra iterations are back-substitutions). Per-scenario
+  ``converged_mask`` semantics are unchanged.
 - The calculation symmetry resolves once for the union: one asymmetric member
   makes the whole batch solve asymmetric (correct for every member, marginally
   more work for the symmetric ones).

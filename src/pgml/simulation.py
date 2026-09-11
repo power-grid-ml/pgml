@@ -53,8 +53,11 @@ _DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
 class SimulationConfig(BaseModel):
     """Serializable definition of WHAT to simulate (the REST-friendly run spec).
 
-    Device / dtype are execution concerns and live on the :func:`simulate` call, not
-    here. ``harmonic_orders`` is used only when ``calculation == "harmonic"``.
+    Device / dtype / working precision are execution concerns and live on the
+    :func:`simulate` call, not here. ``harmonic_orders`` is used only when
+    ``calculation == "harmonic"``. The convergence tolerances are PER UNIT, so one
+    config means the same thing on any voltage level; ``None`` resolves the documented
+    defaults in ``pgml/data/defaults.yaml``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -74,7 +77,28 @@ class SimulationConfig(BaseModel):
         default=None, description="Per-appliance P/Q override; None = nameplate."
     )
     include_load_shunt: bool = False
-    tol: float = Field(default=1e-10, gt=0.0)
+    tol: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="PRIMARY convergence tolerance of the nonlinear fundamental: the "
+        "largest nodal apparent-power mismatch in PER UNIT of s_base_va (what "
+        "pandapower and power-grid-model converge on). None = the documented default "
+        "solver.convergence.mismatch_pu (1e-8 pu).",
+    )
+    tol_update_pu: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="SECONDARY convergence tolerance: the largest per-row voltage "
+        "update in PER UNIT of the node's line-to-neutral rated voltage; both criteria "
+        "must hold. None = the documented default solver.convergence.update_pu "
+        "(1e-8 pu).",
+    )
+    s_base_va: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="Apparent-power base of the per-unit power mismatch. None = the "
+        "documented default solver.convergence.s_base_va (1e6 VA).",
+    )
     max_iter: int = Field(default=100, gt=0)
 
     @model_validator(mode="after")
@@ -166,6 +190,15 @@ class SolvedState:
 
     def thd(self, node_id: int, phase: Phase) -> Tensor:
         """Voltage THD at a ``(node, phase)``: ``sqrt(sum_{h>1}|V_h|^2)/|V_1|``.
+
+        Computed over the REQUESTED orders only — the orders in
+        ``config.harmonic_orders``, which is what ``v`` holds. This is the IEC
+        definition restricted to the solved spectrum, so the value depends on which
+        orders the caller asked for: a solve of ``[1, 5, 7]`` reports the THD of those
+        two harmonics, not of the full spectrum up to order 40 that a standard
+        measurement would cover. Ask for every order that carries energy (the default
+        ``[1, 3, 5, 7, 9, 11, 13]`` covers the dominant ones of a converter spectrum)
+        when the number is to be compared with a measurement or a limit.
 
         Requires the fundamental (order 1) to be among the solved orders.
         """
@@ -353,6 +386,7 @@ def simulate(
     *,
     device: Optional[str | torch.device] = None,
     dtype: str | torch.dtype = "complex128",
+    precision: str = "full",
     param_overrides: Optional[dict] = None,
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
@@ -364,13 +398,19 @@ def simulate(
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
     ``config`` (a :class:`SimulationConfig`, default = harmonic with standard orders)
-    is the serializable definition of WHAT to compute; ``device`` / ``dtype`` are the
-    execution concerns. Gradients flow from ``grid`` parameters through the result's
-    tensor accessors. ``param_overrides`` (per-parameter tensor substitution, see
-    :func:`pgml.assembly.assemble_ybus`) applies to ``calculation="power_flow"``
-    only — the state threads it into its lazy branch quantities so voltage and
-    currents describe the same overridden network; the harmonic calculation
-    rejects it.
+    is the serializable definition of WHAT to compute; ``device`` / ``dtype`` /
+    ``precision`` are the execution concerns. Gradients flow from ``grid`` parameters
+    through the result's tensor accessors. ``param_overrides`` (per-parameter tensor
+    substitution, see :func:`pgml.assembly.assemble_ybus`) applies to BOTH calculations:
+    the state threads it into its lazy branch quantities so voltage and currents
+    describe the same overridden network, and the harmonic calculation applies it to
+    every order's admittance and device power.
+
+    ``precision`` selects the working precision of the linear algebra: ``"full"``
+    (default) factors at ``dtype``, ``"mixed"`` factors at complex64 and refines
+    against complex128 residuals (see :func:`pgml.solver.solve_power_flow`) — the
+    recommended recipe for throughput on an ill-conditioned SI-unit feeder, since a
+    plain complex64 run of such a network keeps only a handful of digits.
 
     ``on_disconnected`` decides what the pre-solve connectivity check does with
     (node, phase) rows that have no galvanic path to an in-service source — an open
@@ -413,8 +453,11 @@ def simulate(
             grid,
             slack=config.slack,
             tol=config.tol,
+            tol_update_pu=config.tol_update_pu,
+            s_base_va=config.s_base_va,
             max_iter=config.max_iter,
             dtype=cdt,
+            precision=precision,
             device=dev,
             operating_point=config.operating_point,
             param_overrides=param_overrides,
@@ -435,13 +478,6 @@ def simulate(
         )
         pf_diag = pf.diagnostics
     else:
-        if param_overrides is not None:
-            raise InputError(
-                "param_overrides is not supported for calculation='harmonic': the "
-                "harmonic solve reads parameters from the grid only. Apply the "
-                "values to the grid (float/tensor duality) or use "
-                "calculation='power_flow'."
-            )
         if linear_solver != "auto" or block_rows is not None:
             raise InputError(
                 "linear_solver / block_rows apply to calculation='power_flow' only: "
@@ -458,11 +494,15 @@ def simulate(
             node_sources=node_sources,
             include_load_shunt=config.include_load_shunt,
             tol=config.tol,
+            tol_update_pu=config.tol_update_pu,
+            s_base_va=config.s_base_va,
             max_iter=config.max_iter,
             dtype=cdt,
+            precision=precision,
             device=dev,
             symmetry=config.symmetry,
             on_disconnected=on_disconnected,
+            param_overrides=param_overrides,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
         converged, iterations, residual = (

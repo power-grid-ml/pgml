@@ -3,10 +3,12 @@
 Public API
 ----------
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, operating_point,
-  harmonic_injection, node_sources, include_load_shunt, tol, max_iter, dtype,
-  device, symmetry) -> HarmonicFlowResult``
+  harmonic_injection, node_sources, include_load_shunt, tol, tol_update_pu,
+  s_base_va, max_iter, dtype, precision, device, symmetry, param_overrides)
+  -> HarmonicFlowResult``
 - ``assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point,
-  harmonic_injection, node_sources, symmetry, dtype, device) -> (Y, I, index)`` —
+  harmonic_injection, node_sources, symmetry, dtype, device, param_overrides)
+  -> (Y, I, index)`` —
   the assembled per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders
   ``h > 1`` (the building block of :func:`solve_harmonic_flow`'s harmonic slices),
   so ``r(V) = Y(h)·V − I(h)`` is the physics-consistency residual.
@@ -62,7 +64,7 @@ from pgml.assembly._incidence import build_incidence, group_appliances, used_row
 from pgml.assembly._params import phase_voltage_magnitude, resolve_operating_power
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
-from pgml.assembly.ybus import _stamp_sources
+from pgml.assembly.ybus import _override, _stamp_sources
 from pgml.errors import InputError, ModelingError
 from pgml.assembly._control import resolve_injection_power
 from pgml.schemas.grid_schema import (
@@ -205,13 +207,17 @@ def solve_harmonic_flow(
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
     include_load_shunt: bool = False,
-    tol: float = 1e-10,
+    tol: Optional[float] = None,
+    tol_update_pu: Optional[float] = None,
+    s_base_va: Optional[float] = None,
     max_iter: int = 100,
     dtype: torch.dtype = torch.complex128,
+    precision: str = "full",
     device: Optional[torch.device] = None,
     symmetry: Optional[str] = None,
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -221,10 +227,26 @@ def solve_harmonic_flow(
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.
     harmonic_orders:
         Iterable of integer orders to solve (e.g. ``[1, 5, 7]``; 1 = fundamental).
-    slack, method, operating_point, tol, max_iter, dtype, device:
+    slack, method, operating_point, tol, tol_update_pu, s_base_va, max_iter, dtype, device:
         Passed to the fundamental :func:`solve_power_flow`. Use ``method="newton"``
         for a stiff inverter control loop (Volt-VAr / Volt-Watt), where the
-        current-injection fixed point can oscillate.
+        current-injection fixed point can oscillate. The convergence tolerances are
+        PER UNIT (power mismatch / voltage update) and apply to the nonlinear
+        fundamental only: every harmonic order is a direct linear solve with no
+        iteration and therefore no convergence criterion of its own.
+    precision:
+        Working precision of the linear algebra, as in :func:`solve_power_flow`:
+        ``"full"`` (default) or ``"mixed"`` (complex64 factorization refined against
+        complex128 residuals). It applies to the fundamental solve AND to every
+        per-order harmonic solve, which is a direct solve and therefore gets the
+        classic iterative refinement of :func:`pgml.solver.lu_factor_system`.
+    param_overrides:
+        Optional differentiability hook ``{(component_kind, element_id, field): tensor}``
+        substituting network (R/L/C/Z) or device (P/Q) parameters, exactly as in
+        :func:`solve_power_flow` and :func:`pgml.assembly.assemble_ybus`. It reaches the
+        fundamental solve, the per-order admittance ``Y(h)``, the source stamp, and the
+        device powers behind each harmonic injection, so a gradient w.r.t. an overridden
+        parameter flows into every order.
     harmonic_injection:
         Optional SCENARIO override of per-device spectra, tensor-friendly so
         scenarios can vary harmonic injections differentiably. Format:
@@ -325,11 +347,15 @@ def solve_harmonic_flow(
                 node_sources=node_sources,
                 include_load_shunt=include_load_shunt,
                 tol=tol,
+                tol_update_pu=tol_update_pu,
+                s_base_va=s_base_va,
                 max_iter=max_iter,
                 dtype=dtype,
+                precision=precision,
                 device=device,
                 symmetry=symmetry,
                 on_disconnected="ignore",
+                param_overrides=param_overrides,
             )
             return _expand_zeroed_harmonic_result(grid, sub_res)
 
@@ -350,12 +376,16 @@ def solve_harmonic_flow(
         method=method,
         operating_point=operating_point,
         tol=tol,
+        tol_update_pu=tol_update_pu,
+        s_base_va=s_base_va,
         max_iter=max_iter,
         dtype=dtype,
+        precision=precision,
         device=device,
         symmetry=sym_resolved,
         on_disconnected=("ignore" if branch_states is None else on_disconnected),
         branch_states=branch_states,
+        param_overrides=param_overrides,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -382,6 +412,7 @@ def solve_harmonic_flow(
             dtype=dtype,
             device=device,
             branch_states=branch_states,
+            param_overrides=param_overrides,
         )
         # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
         # case — the batch varies injections, not the network), factor each order ONCE
@@ -389,9 +420,9 @@ def solve_harmonic_flow(
         # batched voltage node_source promotes Y(h) to [*batch, Hh, N, N]; that path keeps
         # the per-element solve.
         if yh.ndim == 3:
-            vh = solve_factored(lu_factor_system(yh), ih)
+            vh = solve_factored(lu_factor_system(yh, precision=precision), ih)
         else:
-            vh = solve_harmonic(yh, ih)
+            vh = solve_harmonic(yh, ih, precision=precision)
         for k, h in enumerate(harm):
             v_by_order[h] = vh[..., k, :]
 
@@ -446,6 +477,7 @@ def assemble_harmonic_system(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     branch_states: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
 ) -> tuple[Tensor, Tensor, NodePhaseIndex]:
     """Assemble the per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders ``h > 1``.
 
@@ -499,6 +531,12 @@ def assemble_harmonic_system(
         :func:`pgml.assembly.assemble_ybus`) — MUST match the states the
         fundamental ``v1`` was solved with. A batched state promotes ``Y`` to
         ``[*batch, Hh, N, N]``.
+    param_overrides:
+        Optional parameter substitution ``{(component_kind, element_id, field): tensor}``
+        (see :func:`pgml.assembly.assemble_ybus`), reaching ``Y(h)``, the source stamp and
+        the device powers behind the harmonic injection — the same hook
+        :func:`solve_power_flow` takes, so an override used for the fundamental can be
+        reused here unchanged and gradients flow to it at every order.
 
     Returns
     -------
@@ -530,11 +568,18 @@ def assemble_harmonic_system(
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
     yh = assemble_network_ybus(
-        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+        grid,
+        freqs,
+        dtype=dtype,
+        device=device,
+        branch_states=branch_states,
+        param_overrides=param_overrides,
     ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
-    yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
+    yh = _stamp_sources(
+        grid, fvec, yh, index, cdt, rdt, device, param_overrides
+    )  # [Hh, N, N]
     ih = _harmonic_injections(
         grid,
         v1,
@@ -546,6 +591,7 @@ def assemble_harmonic_system(
         rdt,
         device,
         asymmetric,
+        param_overrides,
     )  # [*batch, Hh, N]
     if node_sources:
         yh, ih = _apply_node_sources(
@@ -561,6 +607,7 @@ def assemble_harmonic_ybus(
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     branch_states: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
 ) -> tuple[Tensor, NodePhaseIndex]:
     """The harmonic system MATRIX ``Y(h)`` for orders ``h > 1`` — no injection RHS assembled.
 
@@ -588,6 +635,9 @@ def assemble_harmonic_ybus(
         Optional topology / switch-state mask ``{branch_id: state}`` (see
         :func:`pgml.assembly.assemble_ybus`); a batched state promotes ``Y`` to
         ``[*batch, Hh, N, N]``.
+    param_overrides:
+        Optional parameter substitution (see :func:`pgml.assembly.assemble_ybus`),
+        applied to the network admittance and the source stamp.
 
     Returns
     -------
@@ -612,11 +662,18 @@ def assemble_harmonic_ybus(
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
     yh = assemble_network_ybus(
-        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+        grid,
+        freqs,
+        dtype=dtype,
+        device=device,
+        branch_states=branch_states,
+        param_overrides=param_overrides,
     ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
-    yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
+    yh = _stamp_sources(
+        grid, fvec, yh, index, cdt, rdt, device, param_overrides
+    )  # [Hh, N, N]
     return yh, index
 
 
@@ -801,6 +858,7 @@ def _harmonic_injections(
     rdt,
     device,
     asymmetric=True,
+    param_overrides=None,
 ) -> Tensor:
     """Per-device, connection-aware harmonic nodal current injection ``[*batch, Hh, N]``.
 
@@ -857,6 +915,12 @@ def _harmonic_injections(
                 [_as_rt(x, rdt, device) for x in p_list], dim=-1
             )  # [*b,n_elem]
             q_t = torch.stack([_as_rt(x, rdt, device) for x in q_list], dim=-1)
+            # Same parameter-substitution hook the fundamental solve uses, so a
+            # differentiable P/Q override drives the harmonic injection too (the
+            # override replaces the whole per-element vector, as in the assembly).
+            kind = "load" if isinstance(a, Load) else "generator"
+            p_t = _override(param_overrides, (kind, a.id, "p_nom_per_phase_w"), p_t)
+            q_t = _override(param_overrides, (kind, a.id, "q_nom_per_phase_var"), q_t)
 
             rows = rows_grp[ki]  # [n_used]
             v_used = v1.index_select(-1, rows).to(cdt)  # [*vbatch, n_used]
