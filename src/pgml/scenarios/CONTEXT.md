@@ -259,7 +259,8 @@ verified `batched == loop-of-individual`).
   Scope = P/Q injection errors; network-parameter (line/transformer) perturbation is deferred
   to the inverse/parameter-recovery phase (needs a branch selector + matrix-valued ground truth).
 - `run_scenarios(grid, spec, *, calculation="power_flow"|"harmonic", harmonic_orders=None,
-  slack="ideal", symmetry=None, dtype, device, chunk_size=None, output_device=None) ->
+  slack="ideal", symmetry=None, load_shunt=None, dtype, device, chunk_size=None,
+  output_device=None) ->
   ScenarioResult(v, index, sampled, frequencies_hz, converged, failed_states)`. `converged` is
   True iff EVERY scenario converged; `failed_states` lists the non-converged scenario indices.
   A batch NEVER raises on a failed scenario — its best-effort `v` is returned and the solver
@@ -270,6 +271,11 @@ verified `batched == loop-of-individual`).
   slice is along the SCENARIO axis `B` (each scenario's full `T`-step sequence solves together).
   `chunk_size` bounds the per-solve WORKSPACE, NOT the collected OUTPUT: the full `[B,...]` `v`
   still accumulates on `device`, so on a GPU a large `B` OOMs regardless of `chunk_size`. Set
+  `load_shunt` (harmonic only) selects each device's harmonic Norton shunt
+  (`"none"`/`"opendss"`/`"motor"`; `None` = the documented default
+  `appliance.harmonic_shunt.model`). A shunt derived from a PER-SCENARIO operating point
+  makes `Y(h)` scenario-dependent, so every scenario factors its own matrix instead of
+  sharing one factorization per order — `"none"` keeps the shared one.
   `output_device="cpu"` to move each chunk's result off the GPU as produced (VRAM bounded to
   one chunk; dataset written from host memory) — for non-differentiable data generation; leave
   `None` to keep `v` on the solve device for a differentiable GPU pipeline.

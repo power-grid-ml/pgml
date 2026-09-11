@@ -292,7 +292,7 @@ verified empirically). New orchestration:
 
 - `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", method="current_injection",
      operating_point=None, harmonic_injection=None, node_sources=None,
-     include_load_shunt=False, tol=None, tol_update_pu=None, s_base_va=None,
+     load_shunt=None, tol=None, tol_update_pu=None, s_base_va=None,
      max_iter=100, dtype=torch.complex128, precision="full",
      device=None, symmetry=None, on_disconnected="raise", branch_states=None,
      param_overrides=None, enforce_q_limits=None) -> HarmonicFlowResult`
@@ -352,11 +352,13 @@ verified empirically). New orchestration:
     no-op for the snapshot (`[B]`/`[B]`) and nominal (empty-op) cases — byte-identical.
 
 - `assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point=None,
-     harmonic_injection=None, node_sources=None, symmetry=None,
-     dtype=torch.complex128, device=None) -> (Y, I, index)`
+     harmonic_injection=None, node_sources=None, load_shunt=None, symmetry=None,
+     dtype=torch.complex128, device=None, branch_states=None,
+     param_overrides=None) -> (Y, I, index)`
   - Exposes the per-harmonic LINEAR system `Y(h) V(h) = I(h)` for orders `h > 1` —
     EXACTLY the `(yh, ih)` `solve_harmonic_flow` builds (`assemble_network_ybus` +
-    source Norton stamp for `Y`; `_harmonic_injections` + `node_sources` for `I`), so
+    source Norton stamp + the device harmonic shunt for `Y`; `_harmonic_injections` +
+    `node_sources` for `I`), so
     `solve_harmonic(Y, I)` reproduces the harmonic slices. The harmonic network is
     LINEAR, hence `r(V) = einsum('...hij,...hj->...hi', Y, V) − I` is the
     physics-consistency residual (`≈ 0` at the true `V`); a downstream consumer can form it
@@ -365,11 +367,12 @@ verified empirically). New orchestration:
   - `harmonic_orders`: orders `h > 1` only (order 1 is the nonlinear fundamental —
     passing 1 raises `InputError`). `v1`: converged fundamental node voltage
     `[*batch, N]` complex (typically `solve_power_flow(grid, ...).v`), aligned to
-    `index`. `operating_point` / `harmonic_injection` / `node_sources` / `symmetry`:
-    same meaning/format as `solve_harmonic_flow` (resolve `symmetry` upstream and pass
-    the canonical string to reproduce a `solve_harmonic_flow` run exactly).
-  - Returns `Y` complex `[Hh, N, N]` (or `[*batch, Hh, N, N]` if a BATCHED voltage
-    `node_source` promotes it), `I` complex `[*batch, Hh, N]`, and the
+    `index`. `operating_point` / `harmonic_injection` / `node_sources` / `load_shunt` /
+    `symmetry`: same meaning/format as `solve_harmonic_flow` (resolve `symmetry`
+    upstream and pass the canonical string to reproduce a `solve_harmonic_flow` run
+    exactly).
+  - Returns `Y` complex `[Hh, N, N]` (or `[*batch, Hh, N, N]` if a batched device shunt
+    or a BATCHED voltage `node_source` promotes it), `I` complex `[*batch, Hh, N]`, and the
     `NodePhaseIndex`. `device=None` -> `v1.device`; honours `dtype`/`device`.
   - DIFFERENTIABLE (grad to grid params, `v1`, and the injections; no
     `.item()/.detach()/.numpy()`, no in-place on tracked tensors) + GPU + batched.
@@ -385,9 +388,17 @@ verified empirically). New orchestration:
    converged `pf.v` — needs a PER-DEVICE current (add a helper / option to
    `device_current_injections` to return per-device, not just the nodal sum).
 2. Per harmonic `h>1` (batched over all orders at once):
-   - `Y(h) = assemble_network_ybus(grid, [h·f0]) + source Norton shunt Y_s(h)`
-     (+ load Norton shunt `Y_load(h)` from `HarmonicShuntModel` when
-     `include_load_shunt=True`; `False` = OpenDSS `NeglectLoadY` pure-source model).
+   - `Y(h) = assemble_network_ybus(grid, [h·f0]) + source Norton shunt Y_s(h)
+     + each device's harmonic shunt Y_load(h)` (`load_shunt`, default
+     `appliance.harmonic_shunt.model` = `"opendss"`; `"none"` = the OpenDSS
+     `NeglectLoadY` pure current-source model, `"motor"` = the blocked-rotor series
+     branch). Per element: `Y_eq = conj(S_eff)/V_rated²` at the realised fundamental
+     power, split into `(1−s)Re(Y_eq) + j(1−s)Im(Y_eq)/h` and
+     `1/(Re(Z_s) + j·h·Im(Z_s))` with `Z_s = 1/(s·Y_eq)`, stamped
+     `Mᵗ diag(y_elem) M` through the SAME incidence the injection uses
+     (`pgml.assembly._load_shunt`, `_stamp_harmonic_load_shunt`). A per-device
+     `HarmonicShuntModel` overrides the model; a per-scenario operating point makes
+     `Y(h)` `[*batch, Hh, N, N]`.
    - `I(h)` = sum of per-device harmonic injections using the verified convention
      `|I_h|=(mag_h/mag_1)|I1|`, `arg(I_h)=ang_h + h·(arg(I1) − ang_1)` from each
      device's `Spectrum` (or the `harmonic_injection` override).
@@ -471,19 +482,29 @@ scalar + batched-S_sc-promoted Y).
   `device_current_injections`; reuses `group_appliances`/`build_incidence`/`used_rows`).
 - `harmonic_injection` magnitudes/phases may carry a leading scenario batch dim
   (batched harmonic injection works; full scenario batching is the next phase).
-- DEFERRED: `include_load_shunt=True` (load Norton shunt at harmonics) raises
-  `NotImplementedError` — the OpenDSS shunt split is unpinned. EXACT OpenDSS
-  per-order VOLTAGE parity also needs the Carson earth-return line model (the
-  harmonic line impedance differs ~2.5%/h; see `docs/pgml/modeling/references/opendss/harmonics.md`),
-  which is the POSTPONED geometry path. The INJECTION convention IS OpenDSS-exact.
+- The device harmonic shunt and the harmonic current injection read ONE per-element
+  power (`_effective_element_power`: control-resolved / ZIP-scaled at the converged
+  fundamental terminal voltage), so they cannot describe different operating points.
+  `assemble_harmonic_ybus` has no fundamental solution and therefore evaluates the
+  shunt at the RATED terminal voltage (exact for a constant-power device; a WARNING
+  names a voltage-dependent one), unless `v1` is passed.
+- A scenario-dependent `Y(h)` (device shunt or batched voltage node source) is padded
+  to the harmonic injection's batch rank (`_align_y_batch_rank`), so one matrix per
+  scenario serves every step of a node-coherent sequence.
 
 ### Validation (DONE)
-`tests/reference/test_harmonic_flow.py`: independent numpy oracle (exact, ~1e-9),
-fundamental==PF, OpenDSS ballpark (fundamental exact, harmonics within 4% — Carson
-gap), shapes/orders. `tests/differentiability/test_harmonic_flow_gradcheck.py`:
-gradcheck of `V(h)` w.r.t. line R/L, load P/Q, and injection magnitude (incl.
-batched). The live-OpenDSS per-order comparison (with Carson + load shunt) is future work,
-once the frequency-dependent load shunt model lands.
+`tests/reference/test_harmonic_flow.py`: independent numpy oracle (exact, ~1e-9, with
+and without the device shunt and at both splits), fundamental==PF, OpenDSS ballpark,
+shapes/orders. `tests/differentiability/test_harmonic_flow_gradcheck.py`: gradcheck of
+`V(h)` w.r.t. line R/L, load P/Q, and injection magnitude (incl. batched).
+`tests/reference/test_opendss_load_shunt.py`: the device shunt against a live OpenDSS
+engine — the element admittance equals the DSS `Load`'s own `YPrim` to 4.7e-16 relative
+(1-phase WYE, 3-phase WYE, 3-phase DELTA; `%SeriesRL` 0/50/100 and the motor branch),
+and harmonic bus voltages agree to 1.6e-12 pu of nominal on IEEE-33 (6.8e-12 with a
+370 kvar bank resonating at order 6.9), 1.3e-9 on the Carson-geometry feeder and 4.5e-9
+on the three-phase CIGRE LV benchmark.
+`tests/differentiability/test_harmonic_load_shunt_gradcheck.py` + `tests/gpu/
+test_load_shunt_parity.py`: the shunt's gradient and device/dtype parity.
 
 Per-phase / connection-aware harmonic injection: `tests/asymmetric/test_harmonic_per_phase.py`
 (WYE `spectrum_per_phase` A-only, DELTA L-L terminal voltage + `M^T` scatter vs numpy

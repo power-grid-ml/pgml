@@ -259,6 +259,24 @@ capacitive, `B(f0)/h` where it is inductive (`_const_z_frequency_scaling`, built
 `clamp` so `h = 1` is exact and P/Q stay differentiable). `assemble_network_ybus`
 contains no device fold at all and is the harmonic path.
 
+`_load_shunt.py` — the HARMONIC device shunt (a different model from the const-Z fold
+above, and the one the harmonic solver uses). Internal API:
+`HARMONIC_SHUNT_MODELS = ("none", "opendss", "motor")`,
+`resolve_shunt_model_name(model) -> str` (`None` -> the modeling default
+`appliance.harmonic_shunt.model`; an unknown name raises `InputError`),
+`resolve_harmonic_shunt(appliance, model) -> ResolvedHarmonicShunt` (device override >
+run-level model > defaults file; `"none"` at run level wins over every device, which is
+OpenDSS's global `NeglectLoadY`), and
+`harmonic_shunt_element_admittance(s_elem, v_rated, h, series_rl, *, motor_x_pu,
+motor_xr, motor_s_base, cdtype) -> [*batch, H, K, E]`, the per-element admittance
+`(1−s)Re(Y_eq) + j(1−s)Im(Y_eq)/h + 1/(Re(Z_s) + j·h·Im(Z_s))` with
+`Y_eq = conj(S)/V_rated²` and `Z_s = 1/(s·Y_eq)` (OpenDSS `Load.pas`
+`CalcYPrimMatrix`, verified against a live `YPrim` to 4.7e-16 relative). NOTE the
+parallel branch divides its susceptance by `h` whatever the sign of `Q` (OpenDSS models
+it as R‖L), which is NOT the const-Z fold's sign-dependent law. The nodal stamp lives in
+`pgml.solver.harmonic_flow._stamp_harmonic_load_shunt`, where the fundamental solution
+that sets the operating point is available.
+
 ## Asymmetry: connection-aware load/gen modeling (DONE)
 `_symmetry.py` (torch-free, PURE; runs on every assemble/solve + PF residual eval):
 - `resolve_asymmetric(grid, operating_point=None, *, mode=None) -> bool` — resolves the
@@ -276,8 +294,8 @@ contains no device fold at all and is the harmonic path.
   `apply_default_harmonic_model` when a line's `harmonic_line_model` is still unresolved
   (such a line is assembled from its stored parameters, i.e. the naive model above f0).
 
-`_incidence.py` — the terminal incidence model wired into `_stamp_const_z_loads` +
-`device_current_injections`. A constant real `M [n_elem, n_used]` maps used node-rows
+`_incidence.py` — the terminal incidence model wired into `_stamp_const_z_loads`,
+`device_current_injections` and the harmonic device shunt. A constant real `M [n_elem, n_used]` maps used node-rows
 to element ("terminal") voltages `V_term = M @ V_used`; nodal admittance block =
 `Mᵀ diag(y_elem) M [n_used, n_used]`, nodal current = `Mᵀ i_elem`. Cases (n=len(phases)):
 - WYE, node NO `Phase.N` (to ground): `M = I_n` (== the historical diagonal stamp,
