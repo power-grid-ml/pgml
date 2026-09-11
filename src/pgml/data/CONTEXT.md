@@ -34,16 +34,25 @@ requires an env var to be set.
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
   `docs/pgml/modeling/asymmetric.md`.
 - `line.harmonic_model.{three_phase, single_phase, skin_effect}` — which
-  frequency-dependent line model `apply_default_harmonic_model(grid)` applies to an R/X
-  line (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =
-  `positive_sequence`).
-- `line.earth_return.{resistivity_ohm_m, resistance_coeff_ohm_per_m_per_hz}` — Carson
-  earth path (ρ; the `π²·1e-7` Ω/m/Hz earth-return resistance coefficient).
+  frequency-dependent line model is written to `Line.harmonic_line_model` for an R/X line
+  (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =
+  `positive_sequence`). Resolved by the converters (`to_grid`, which logs it) and by
+  `apply_default_harmonic_model(grid)` for hand-built grids; assembly itself never
+  resolves a default. Per-line override: `Line.harmonic_line_model` /
+  `Line.harmonic_skin_effect`.
+- `line.earth_return.{resistivity_ohm_m, resistance_coeff_ohm_per_m_per_hz,
+  reactance_coeff_ohm_per_m_per_hz, x0_frequency, x0_exponent}` — the lumped Carson earth
+  path of the `sequence_aware` model (ρ; the `π²·1e-7` Ω/m/Hz resistance coefficient; the
+  `μ0` reactance coefficient; whether `X0` scales linearly or with the Carson/Deri
+  sub-linear decay; the `X0` exponent). Per-line override: `Line.earth_return`.
 - `line.conductor.{gmr_over_radius, radius_m, height_overhead_m, height_cable_m,
   phase_spacing_m}` — R/X→geometry synthesis defaults (`gmr_over_radius = e^{-1/4} =
   0.7788`; `phase_spacing_m` seeds the equilateral 3-phase synthesis fit).
-- `line.zero_sequence.{r0_over_r1, x0_over_x1, c0_over_c1}` — zero/positive-sequence
-  ratios used by the converter when only a positive-sequence impedance is given.
+- `line.zero_sequence.{r0_over_r1, x0_over_x1, c0_over_c1, r0_includes_earth_return}` —
+  zero/positive-sequence ratios used by the converter when only a positive-sequence
+  impedance is given (the converter warns once per grid when it used them), plus whether
+  a stored `R0` already contains the earth-return resistance at f0 (which decides how
+  much of `R0` the skin multiplier scales).
 - `source.{series_impedance_ohm, rx_ratio}` — default slack series impedance synthesis.
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by

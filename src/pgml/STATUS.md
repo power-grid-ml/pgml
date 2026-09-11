@@ -47,7 +47,8 @@ decisions. One entry per capability:
   (`docs/pgml/modeling/der-pv-storage.md`).
 - **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C),
   bit-exact vs OpenDSS incl. triplen; analytic sequence-based harmonic line models for R/X
-  feeders (`docs/pgml/modeling/harmonic-line-model.md`).
+  feeders, selected by the typed `Line.harmonic_line_model` and applied by the converters
+  from the documented defaults (`docs/pgml/modeling/harmonic-line-model.md`).
 - **Scenarios** — reproducible QMC/cartesian sampling, correlated/per-phase draws,
   IEC 61000-3-2 device current-emission spectra (default; EN 50160 stays a voltage-shaped
   option), perturbation/injection sweeps, parquet persistence with `converged` +
@@ -297,16 +298,30 @@ results are never read as more physical than they are. Details live in `docs/pgm
   section 4 (bus-bus switches).
 - **Line geometry (Carson/Deri).** No conductor temperature dependence, no sub-conductor
   bundling; transposition per the documented Deri assumptions.
+- **Shunt reactor with a SERIES resistance.** The shunt primitive is the parallel form
+  `G + 1/(j·2πh f0 L) + j·2πh f0 C`. An OpenDSS `Reactor` with `R = 0` (its default) maps
+  exactly at every order; one with a series `R > 0` is converted as the equivalent
+  parallel pair at f0 (exact there, and the converter warns), so its LOSS term stays flat
+  where the series branch decays as `1/h²`. Add a series resistance to the inductive
+  branch if a lossy reactor has to be harmonically exact.
 - **Zero-sequence line impedance at harmonics — lumped R/L lines only.** Lines WITH
   `conductor_geometry` compute Z(h) from first principles (bit-exact vs OpenDSS at every
   order). Lines WITHOUT geometry embed the earth return AT f0; extrapolating Z0 to h·f0
-  is an ASSUMPTION in every tool — pgml scales X∝h/R const (≡ OpenDSS `Rg=Xg=0`), OpenDSS
-  defaults reconstruct Z0(f) via Deri, and the two can differ by up to ~0.3 pu at LV
-  triplen voltages. A modeling-assumption divergence, not a solver error — supply
-  conductor geometry when the zero-sequence earth return matters
-  (`docs/pgml/modeling/harmonic-line-model.md`).
+  is an ASSUMPTION in every tool. pgml's lumped `sequence_aware` model adds the Carson
+  earth-return resistance `3·(Re(f) − Re(f0))` to R0 and scales X0 ∝ h; OpenDSS's R/X
+  line does the same with its `Rg` and additionally bends X0 sub-linearly with `Xg`. Both
+  engines agree to ~1e-10 relative when the earth parameters are MATCHED (see
+  `tests/reference/test_lumped_sequence_opendss.py`), so the remaining divergence is a
+  choice of parameters, not of formula: OpenDSS's DEFAULT `Rg`/`Xg` are the physical
+  Carson values at 60 Hz in Ω per 1000 ft and are reinterpreted in the line's `units`, so
+  on a metric line they are ≈3.28× smaller than pgml's physical default. The sub-linear
+  X0 law is available as `line.earth_return.x0_frequency: carson_sublinear` (off by
+  default: it can drive X0 negative above h ≈ 30 for a cable whose stored X0 is small,
+  exactly as OpenDSS does). Supply conductor geometry when the zero-sequence earth return
+  must be right (`docs/pgml/modeling/harmonic-line-model.md`).
 - **Missing zero-sequence line data** is invented with global overhead-line ratios
-  (R0/R1=4, X0/X1=3, C0/C1=0.5 — `data/defaults.yaml`); weak for cables.
+  (R0/R1=4, X0/X1=3, C0/C1=0.5 — `data/defaults.yaml`); weak for cables. The converters
+  now WARN once per grid when they used them, naming the ratios.
 - **Spectra tables.** EN 50160 = supply-VOLTAGE compatibility levels (orders 26–49 a
   marked manual extension) — correct for source/background distortion, NOT device
   emission. Device current fingerprints default to IEC 61000-3-2 (per class A/B/C/D;

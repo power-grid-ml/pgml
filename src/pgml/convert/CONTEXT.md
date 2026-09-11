@@ -6,13 +6,21 @@ to the source so tests can align components).
 
 Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.md):
 - [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-      gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU)
-      -> (Grid, id_map)` — this file, below.
+      gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
+      harmonic_line_model=None) -> (Grid, id_map)` — this file, below.
 - [x] `convert.pgm.to_grid(input_data, *, base_frequency_hz=50.0,
-      load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
-      -> (Grid, id_map)` — see `pgm/CONTEXT.md`.
-- [x] `convert.opendss.to_grid(dss_handle, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
-      -> (Grid, id_map)` — see `opendss/CONTEXT.md`.
+      load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
+      harmonic_line_model=None) -> (Grid, id_map)` — see `pgm/CONTEXT.md`.
+- [x] `convert.opendss.to_grid(dss_handle, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
+      harmonic_line_model=None) -> (Grid, id_map)` — see `opendss/CONTEXT.md`.
+
+`harmonic_line_model` (all three): the frequency-dependent line model written to every
+converted R/X line — `None` resolves the modeling default
+(`line.harmonic_model.three_phase` / `.single_phase`), `"sequence_aware"` /
+`"positive_sequence"` / `"naive"` force one, `"none"` leaves the lines unresolved (the
+stored parameters as given). The applied model is logged once per grid; an unknown name
+raises. Without this step a converted grid would reach a harmonic solve as the naive
+model, since no source library carries a harmonic line model.
 Conventions: convert engineering units -> SI; record source convention in
 Provenance; map sequence/nameplate inputs via the schema's input-convention DTOs;
 never invent fields (schema has extra="forbid").
@@ -41,6 +49,12 @@ API:
   A balanced sequence input (Z0==Z1) yields a pure diagonal (decoupled) matrix; in
   general a symmetric circulant (off-diagonal == mutual). `r0/x0/c0` default to
   `r1*ratio` etc. from `zero_sequence_ratios()` when `None`.
+- `ZeroSequenceDefaults()` — tally of the lines whose zero-sequence data had to be
+  invented (`note(r0=, x0=, c0=)` per three-phase line, `warn(logger, tool=)` once per
+  grid, naming the ratios and the affected line count).
+- `resolve_converted_line_models(grid, logger, *, tool, requested=None)` — write the
+  harmonic line model onto every converted R/X line and log what was applied (wraps
+  `pgml.geometry.resolve_harmonic_line_models`).
 - `single_phase_matrix(value) -> [[value]]` — the exact 1x1 wrapper used by the
   positive-sequence-equivalent line path (preserves `[[r1]]`/`[[l1]]`/`[[c1]]`).
 - `thevenin_from_z(r_ohm, x_ohm, two_pi_f0) -> (R, L)` and
@@ -116,7 +130,8 @@ grid, id_map = to_grid(net)
 ### Signature
 ```
 to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-        gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU)
+        gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
+        harmonic_line_model=None)
     -> tuple[Grid, dict[str, Any]]
 ```
 

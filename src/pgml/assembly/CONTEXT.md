@@ -155,6 +155,22 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
 - Series branch (Line/Switch/GenericBranch): primitive
   `[[Ys, -Ys], [-Ys, Ys]]` where `Ys = (R(f) + jX(f))^-1` (n×n matrix inverse via
   `torch.linalg.inv`); shunt `Y_sh = G + jB` split half to each terminal diagonal.
+- LINE harmonic models (`_line_block_groups` dispatches on the typed
+  `Line.harmonic_line_model`, grouping lines by model + skin flag + phase count):
+  `conductor_geometry` -> the Carson/Deri `_geometry_block_groups`; `sequence_aware` ->
+  `_sequence_aware_block_groups` (`Z_abc(f0)` -> `Z1`/`Z0`, each frequency-corrected,
+  recombined; the per-line `earth_return` coefficients are stacked into tensors so a
+  tensor coefficient keeps its gradient, while the DISCRETE options — skin flag,
+  `x0_frequency`, `r0_includes_earth_return` — form the batching key); everything else ->
+  `_line_rx_block_groups`, whose resistance is
+  `R(h) = m(h)·(R − R_earth) + R_earth` with `R_earth` the mutual entries (the
+  earth-return path, which the skin multiplier must NOT scale) and `m(h)` either the
+  line's own positive-sequence skin curve (`positive_sequence`), 1 (`naive`) or the
+  `resistance_frequency` law (unresolved model). A line whose model is unresolved is
+  assembled from its stored parameters and reported by `log_line_models`.
+- Single-terminal shunt (ShuntReactor / ShuntAppliance):
+  `Y(h) = G + 1/(j·2πh f0 L) + j·2πh f0 C`; the inductive term only where
+  `inductance_h` is set (grouped separately because it needs a matrix inverse).
 - Source: Thévenin (`u_ref∠u_angle` behind per-phase `R + jX` matrix) -> Norton:
   `Y_s = Z_s(f)^-1` added to the source-node diagonal block; current handled by
   `build_injections`.
@@ -190,8 +206,11 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
 ## Implementation notes / linear-assembly simplifications
 - `ShuntReactor` (a `BranchBase`) is stamped as a single-terminal shunt at its
   `from_node`/`from_phases` only.
-- `ResistanceFrequencyModel` skin-effect multiplier: only `constant` is wired
-  (analytic falls back to `base_value`); curve/equation laws are not yet implemented.
+- `ResistanceFrequencyModel` multiplier laws: `constant`, `curve` (linear interp) and
+  the `carson_skin_multiplier` analytic law are wired; any other analytic law falls back
+  to `base_value` and `equation` is not implemented. A multiplier scales the CONDUCTOR
+  part of a multi-phase resistance matrix only. Setting a law together with a typed
+  `harmonic_line_model` is rejected by the schema (the model derives its own curve).
 - Line/transformer `type_ref` must already be MATERIALISED before assembly (the
   resolver is a separate component); assembly reads explicit params only.
 
@@ -201,6 +220,11 @@ point: per phase `y = conj(P + jQ) / |U_nom|^2` (load sign +consumes; gen sign
 inverts P,Q). `operating_point` defaults to nameplate `p_nom_w/q_nom_var`. The
 const-power (nonlinear) successive-admittance iteration is implemented separately
 (see the nonlinear network/device split below) and does not change this linear path.
+Over FREQUENCY the fold keeps its conductance flat (a resistance) and scales its
+susceptance as the equivalent reactive element — `B(f0)·h` where the device is
+capacitive, `B(f0)/h` where it is inductive (`_const_z_frequency_scaling`, built from
+`clamp` so `h = 1` is exact and P/Q stay differentiable). `assemble_network_ybus`
+contains no device fold at all and is the harmonic path.
 
 ## Asymmetry: connection-aware load/gen modeling (DONE)
 `_symmetry.py` (torch-free, PURE; runs on every assemble/solve + PF residual eval):
@@ -212,8 +236,12 @@ const-power (nonlinear) successive-admittance iteration is implemented separatel
 - `resolve_connection(appliance) -> WindingConnection` — explicit `connection` else the
   config default (single- vs multi-phase). WYE_GROUNDED folds to WYE for a terminal.
 - `log_modeling_summary(grid, *, asymmetric)` — INFO log of the FINAL modeling (neutral
-  modeled iff a node carries `Phase.N`; WYE/DELTA mix; symmetry). Emitted ONCE per
-  user entry point (`assemble_ybus` / `solve_power_flow` / `solve_harmonic_flow`).
+  modeled iff a node carries `Phase.N`; WYE/DELTA mix; symmetry; the line harmonic models
+  in use). Emitted ONCE per user entry point (`assemble_ybus` / `solve_power_flow` /
+  `solve_harmonic_flow`).
+- `log_line_models(grid)` — the line-model part of that summary, plus a WARNING naming
+  `apply_default_harmonic_model` when a line's `harmonic_line_model` is still unresolved
+  (such a line is assembled from its stored parameters, i.e. the naive model above f0).
 
 `_incidence.py` — the terminal incidence model wired into `_stamp_const_z_loads` +
 `device_current_injections`. A constant real `M [n_elem, n_used]` maps used node-rows
