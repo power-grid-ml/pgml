@@ -409,6 +409,85 @@ def check_connectivity(grid: Grid) -> None:
         )
 
 
+def _zero_series_impedance_branches(grid: Grid) -> list[tuple[int, str, str]]:
+    """Branches whose series impedance is exactly zero: ``(id, component, detail)``.
+
+    Such a branch has no primitive admittance — the per-branch impedance matrix is
+    singular, so the stamp cannot be formed. It is a common idiom in published network
+    data (a bus coupler, a jumper, a zero-length line, an ideal closed switch), which is
+    why it is reported by branch id rather than surfacing as a linear-algebra failure
+    deep in the assembly. Values are read under ``no_grad`` (a structural check, never
+    on the autograd tape) and a branch whose impedance comes from its conductor
+    geometry is skipped — the geometry path always yields a finite impedance.
+    """
+    from pgml.schemas.grid_schema import GenericBranch, Line, Switch, Transformer
+
+    def zero(*vals) -> bool:
+        with torch.no_grad():
+            for v in vals:
+                if v is None:
+                    continue
+                t = torch.as_tensor(v, dtype=torch.float64)
+                if t.numel() and float(t.abs().max()) != 0.0:
+                    return False
+        return True
+
+    out: list[tuple[int, str, str]] = []
+    for b in grid.branches:
+        if not getattr(b, "in_service", True):
+            continue
+        if isinstance(b, Line):
+            if b.conductor_geometry is not None:
+                continue
+            if zero(b.series_resistance_ohm_per_m, b.series_inductance_h_per_m):
+                out.append((int(b.id), "line", "R and L per metre are both zero"))
+            elif zero(b.length_m):
+                out.append((int(b.id), "line", "length_m is zero"))
+        elif isinstance(b, Switch):
+            if b.closed and zero(b.resistance_ohm, b.inductance_h):
+                out.append(
+                    (int(b.id), "switch", "closed with zero resistance and inductance")
+                )
+        elif isinstance(b, GenericBranch):
+            if zero(b.series_resistance_ohm, b.series_inductance_h):
+                out.append(
+                    (int(b.id), "generic_branch", "series R and L are both zero")
+                )
+        elif isinstance(b, Transformer):
+            if zero(b.series_resistance_ohm, b.series_inductance_h):
+                out.append(
+                    (int(b.id), "transformer", "series (leakage) R and L are both zero")
+                )
+    return out
+
+
+def check_branch_impedances(grid: Grid) -> None:
+    """Raise :class:`~pgml.errors.ModelingError` for a branch with zero series impedance.
+
+    The pre-solve modeling gate that keeps a singular primitive stamp from surfacing as
+    a linear-algebra failure naming an internal batch index: a branch with no series
+    impedance (a bus coupler or jumper modelled as a zero-impedance line, a zero-length
+    line, an ideal closed switch) cannot be inverted into a primitive admittance. The
+    error names every offending branch and the two ways out — give it the documented
+    near-ideal resistance (``branch.near_ideal_series_resistance_ohm``), which is what
+    the pandapower converter substitutes for a bus-bus switch, or merge its two nodes.
+    """
+    bad = _zero_series_impedance_branches(grid)
+    if not bad:
+        return
+    r_ideal = float(defaults.get("branch.near_ideal_series_resistance_ohm"))
+    shown = "; ".join(f"{kind} {bid} ({why})" for bid, kind, why in bad[:8])
+    more = "" if len(bad) <= 8 else f" (+{len(bad) - 8} more)"
+    raise ModelingError(
+        f"{len(bad)} branch(es) have zero series impedance and therefore no primitive "
+        f"admittance: {shown}{more}. A zero-impedance branch is a bus coupler or "
+        "jumper, which the nodal formulation cannot stamp as a pi-branch. Give it a "
+        f"small finite series resistance (the documented near-ideal value is "
+        f"{r_ideal:g} Ohm, what the pandapower converter substitutes for a bus-bus "
+        "switch), or merge the two nodes it joins into one."
+    )
+
+
 def _same_device(a: torch.device, b: torch.device) -> bool:
     """Device equality with an unindexed spec matching any index of its type.
 
@@ -1230,6 +1309,7 @@ def prepare_power_flow(
     resolve_precision(precision, _cdtype(dtype))
     _validate_block_solver(linear_solver, block_rows)
     use_woodbury = _validate_branch_states_method(branch_states_method, branch_states)
+    check_branch_impedances(grid)
     if branch_states is not None:
         if _branch_states_batched(branch_states):
             _check_connectivity_with_states(grid, branch_states)
@@ -1563,6 +1643,10 @@ def solve_power_flow(
             "energized sub-grid re-indexes the node-phase rows, so the given row "
             'partition no longer describes the system. Use "raise" or "ignore".'
         )
+    if system is None:
+        # A zero-impedance branch has no primitive stamp at all, so it is refused by
+        # name whatever the connectivity policy is (a prepared system already ran it).
+        check_branch_impedances(grid)
     if system is None and on_disconnected != "ignore":
         if branch_states is not None:
             if _branch_states_batched(branch_states):
@@ -3212,6 +3296,19 @@ def _jacobian_criticality(
         return state_residual(xb, y_b.real, y_b.imag, is_b.real, is_b.imag)
 
     j = torch.autograd.functional.jacobian(f, x, vectorize=True)  # [2N, 2N]
+    if j.numel() != twon * twon:
+        # A residual closure built over a scenario batch returns [B, 2N], so its
+        # Jacobian carries that leading axis. A size-one batch is still ONE grid, so
+        # fold the singleton away and analyse it; anything else is not a single-grid
+        # state and the diagnostic reports that instead of raising.
+        return {
+            "skipped": (
+                f"the residual Jacobian came out with shape {tuple(j.shape)} instead of "
+                f"({twon}, {twon}); the criticality analysis is a SINGLE-grid diagnostic. "
+                "Re-run one scenario for the Jacobian/SVD."
+            )
+        }
+    j = j.reshape(twon, twon)
     # The decomposition is run on the Jacobian of a state that is, by construction, the
     # hard case — a non-converged or barely-converged solve, where J is ill-conditioned or
     # carries repeated singular values. That is exactly where LAPACK's divide-and-conquer
@@ -3354,6 +3451,7 @@ def loadability_limit(
             "nameplate value (the textbook continuation-power-flow ramp)."
         )
     tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
+    check_branch_impedances(grid)
     check_connectivity(grid)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)
     index = node_phase_index(grid)
@@ -3610,6 +3708,7 @@ def _nose_criticality(
 
 
 __all__ = [
+    "check_branch_impedances",
     "check_connectivity",
     "prepare_power_flow",
     "PowerFlowSystem",

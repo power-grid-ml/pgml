@@ -39,6 +39,11 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   Raises :class:`~pgml.errors.ConnectivityError` when part of the grid has no
   galvanic path to an in-service source; the pre-solve gate every entry point
   above runs by default.
+- ``check_branch_impedances(grid) -> None``
+  Raises :class:`~pgml.errors.ModelingError` naming any branch with ZERO series
+  impedance (a bus coupler or jumper modelled as a zero-impedance line, a
+  zero-length line, an ideal closed switch): such a branch has no primitive
+  admittance. The second pre-solve gate, run by every entry point above.
 - ``prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
   branch_states, branch_states_method="assemble", linear_solver="auto",
   block_rows=None) -> PowerFlowSystem``
@@ -80,6 +85,7 @@ from .power_flow import (
     LoadabilityResult,
     PowerFlowResult,
     PowerFlowSystem,
+    check_branch_impedances,
     check_connectivity,
     loadability_limit,
     prepare_power_flow,
@@ -95,6 +101,7 @@ HarmonicFlowResult.__module__ = __name__
 NodeHarmonicSource.__module__ = __name__
 
 __all__ = [
+    "check_branch_impedances",
     "check_connectivity",
     "prepare_power_flow",
     "PowerFlowSystem",

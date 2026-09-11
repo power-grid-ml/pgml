@@ -79,6 +79,7 @@ from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 from .power_flow import (
     PowerFlowResult,
     _expand_zeroed_result,
+    check_branch_impedances,
     check_connectivity,
     solve_power_flow,
 )
@@ -285,6 +286,7 @@ def solve_harmonic_flow(
         )
 
     orders = _integer_orders(harmonic_orders)
+    check_branch_impedances(grid)
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "

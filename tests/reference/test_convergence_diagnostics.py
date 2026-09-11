@@ -29,6 +29,11 @@ from tests.fixtures.tiny_grids import single_phase_chain
 CDT = torch.complex128
 
 
+def grid_rows(res) -> int:
+    """Node-phase row count of a solved result (the state's last dimension)."""
+    return res.index.size
+
+
 def _chain(p_w: float, q_var: float):
     """The radial single-phase chain with the node-3 load set to ``(p_w, q_var)``."""
     g = single_phase_chain()
@@ -116,6 +121,34 @@ class TestConvergenceDiagnostics:
         if c is not None:
             assert c["evaluated_at"] in ("diverged_iterate", "final_iterate")
             assert c["near_singular"] is False
+
+    def test_criticality_handles_a_batch_of_one(self) -> None:
+        """A one-element scenario batch is still ONE grid: the analysis runs on it.
+
+        A batched operating point keeps a leading axis on the state (``[1, N]`` instead
+        of ``[N]``) and therefore on the residual and its Jacobian. The analysis folds
+        that singleton away and returns the same numbers as the unbatched solve; a
+        diagnostic must never raise on the run it is explaining.
+        """
+        grid = _chain(2000.0, 500.0)
+        p_batch = torch.tensor([2000.0], dtype=torch.float64)
+        op = {30: {"p_w": p_batch, "q_var": 0.25 * p_batch}}
+        plain = solve_power_flow(grid, slack="ideal", dtype=CDT, criticality="always")
+        batched = solve_power_flow(
+            grid,
+            slack="ideal",
+            dtype=CDT,
+            operating_point=op,
+            criticality="always",
+        )
+        assert tuple(batched.v.shape) == (1, grid_rows(plain))
+        cb, cp = batched.diagnostics.criticality, plain.diagnostics.criticality
+        assert "skipped" not in cb
+        assert cb["min_singular_value"] == pytest.approx(cp["min_singular_value"])
+        assert cb["condition_number"] == pytest.approx(cp["condition_number"])
+        assert [n["node_id"] for n in cb["critical_nodes"]] == [
+            n["node_id"] for n in cp["critical_nodes"]
+        ]
 
     def test_criticality_never_skips_even_on_failure(self) -> None:
         r = solve_power_flow(

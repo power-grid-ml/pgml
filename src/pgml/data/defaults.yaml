@@ -164,6 +164,21 @@ line:
       description: >
         Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.
 
+# Branch modeling limits that are not physical parameters of one element.
+branch:
+  near_ideal_series_resistance_ohm:
+    value: 1.0e-4
+    units: "ohm"
+    description: >
+      Series resistance that stands in for an IDEAL (zero-impedance) branch — a bus
+      coupler, a jumper, or a closed switch with no impedance data. The nodal
+      formulation inverts every branch's series impedance to get its primitive
+      admittance, so an exactly zero impedance has no stamp; the solvers refuse it by
+      name (`pgml.solver.check_branch_impedances`) and point at this value. 1e-4 Ohm is
+      small enough to be electrically negligible on a distribution feeder and large
+      enough to keep the admittance matrix conditioned; the pandapower converter
+      substitutes it for a bus-bus switch that carries no `z_ohm`.
+
 # Two-winding transformer vector group + grounding.
 transformer:
   # Vector group assumed when a Transformer carries no explicit from_/to_connection
