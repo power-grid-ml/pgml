@@ -21,7 +21,8 @@ import torch
 
 from pgml.convert.pandapower import PhaseMode
 from pgml.evaluation.oracles.grids import cigre_lv_full_grid
-from pgml.schemas.grid_schema import Grid, Line, Load, Node, Phase, Source
+from pgml.errors import InputError
+from pgml.schemas.grid_schema import Generator, Grid, Line, Load, Node, Phase, Source
 from pgml.solver.power_flow import loadability_limit, solve_power_flow
 
 CDT = torch.complex128
@@ -63,6 +64,13 @@ def _two_bus(p_w: float) -> Grid:
             Load(id=30, node=2, phases=(Phase.A,), p_nom_w=p_w, q_nom_var=0.0),
         ],
     )
+
+
+def _two_bus_with_generation(p_load_w: float, p_gen_w: float) -> Grid:
+    """:func:`_two_bus` plus a generator at the load bus (for the λ-ramp choice)."""
+    grid = _two_bus(p_load_w)
+    gen = Generator(id=40, node=2, phases=(Phase.A,), p_nom_w=p_gen_w, q_nom_var=0.0)
+    return grid.model_copy(update={"appliances": [*grid.appliances, gen]})
 
 
 def _nose_power() -> float:
@@ -232,6 +240,77 @@ class TestLoadabilityContinuation:
         assert not res.feasible
         assert res.breaking_lambda == pytest.approx(0.833, abs=0.05)
         assert res.margin < 0.0
+
+    def test_the_ramp_option_decides_what_lambda_multiplies(self) -> None:
+        """``ramp="load"`` holds generation at nameplate; ``"all"`` scales it too.
+
+        Both limits are known in closed form on this two-bus feeder. With a load of
+        ``0.8 P*`` and a generator of ``0.3 P*`` at the same bus, the net load reaches the
+        nose ``P*`` at
+
+        - ``λ_load = (P* + P_gen) / P_load = 1.625``  (generation fixed), and
+        - ``λ_all  = P* / (P_load − P_gen)  = 2.0``   (generation scaled with the load),
+
+        so the choice is worth 23 % of the reported margin on a feeder with modest
+        generation — which is why it is named in the result.
+        """
+        nose = _nose_power()
+        p_load, p_gen = 0.8 * nose, 0.3 * nose
+        grid = _two_bus_with_generation(p_load, p_gen)
+        got = {
+            ramp: loadability_limit(
+                grid,
+                slack="ideal",
+                lambda_max=4.0,
+                lambda_step=0.1,
+                dtype=CDT,
+                ramp=ramp,
+            )
+            for ramp in ("all", "load")
+        }
+        assert got["load"].breaking_lambda == pytest.approx(
+            (nose + p_gen) / p_load, abs=0.05
+        )
+        assert got["all"].breaking_lambda == pytest.approx(
+            nose / (p_load - p_gen), abs=0.05
+        )
+        assert got["load"].breaking_lambda < got["all"].breaking_lambda
+        for ramp, res in got.items():
+            assert res.ramp == ramp  # the result records what it measured
+            assert not res.capped and res.feasible
+
+    def test_the_two_ramps_agree_without_generation(self) -> None:
+        """With loads only there is nothing to hold fixed, so both ramps coincide."""
+        grid = _two_bus(0.8 * _nose_power())
+        kw = dict(slack="ideal", lambda_max=3.0, lambda_step=0.1, dtype=CDT)
+        assert loadability_limit(
+            grid, ramp="load", **kw
+        ).breaking_lambda == pytest.approx(
+            loadability_limit(grid, ramp="all", **kw).breaking_lambda
+        )
+
+    def test_unknown_ramp_raises(self) -> None:
+        with pytest.raises(InputError):
+            loadability_limit(_two_bus(1000.0), ramp="generation")
+
+    def test_breaking_lambda_is_a_lower_bound_on_the_nose(self) -> None:
+        """The corrector fails before the singularity, so tightening it moves λ* UP.
+
+        This is the documented bias of a step-and-bisect on Newton feasibility against a
+        true arc-length continuation: the reported limit is the largest λ whose corrector
+        converged, never more than the nose.
+        """
+        grid = _two_bus(0.8 * _nose_power())
+        kw = dict(slack="ideal", lambda_max=3.0, lambda_step=0.1, dtype=CDT)
+        loose = loadability_limit(grid, bisect_tol=1e-1, **kw)
+        tight = loadability_limit(grid, bisect_tol=1e-4, **kw)
+        exact = 1.25  # the closed-form nose of this feeder at this load
+        assert loose.breaking_lambda <= tight.breaking_lambda + 1e-9
+        assert tight.breaking_lambda <= exact + 1e-3
+        assert (
+            abs(tight.breaking_lambda - exact)
+            < abs(loose.breaking_lambda - exact) + 1e-9
+        )
 
     @pytest.mark.slow
     def test_cigre_has_positive_margin_and_localizes(self) -> None:

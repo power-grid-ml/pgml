@@ -180,29 +180,30 @@ def _abs_row_scale(y_eff, v_abs: Tensor) -> Tensor:
     return _apply_y(y_eff.abs(), v_abs)
 
 
-#: One-time-per-process guard for the plain-complex64 conditioning warning.
-_COMPLEX64_COND_WARNED = False
+#: Once-per-process guard for the plain-complex64 conditioning check (the estimate
+#: costs a few back-substitutions, so a scenario sweep must not pay it per solve).
+_COMPLEX64_COND_CHECKED = False
 
 
 def _warn_complex64_conditioning(fac, rdt: torch.dtype) -> None:
     """Warn ONCE when a plain complex64 solve runs on an ill-conditioned system.
 
-    An SI-unit feeder's admittance reaches ``cond(Y) ~ 1e6`` to ``1e9`` (no per-unit
-    normalisation anywhere in the engine), and a single-precision solve loses about
-    ``cond(Y) * 1.2e-7`` of relative accuracy — which can be most of the digits. The
-    estimate costs a few back-substitutions against the factorization the solve already
-    built (:func:`~pgml.solver.harmonic.estimate_condition`) and is taken only while the
-    warning has not been issued yet, so it never repeats inside a scenario sweep. The
+    A single-precision solve loses about ``cond(Y) * 1.2e-7`` of relative accuracy, and
+    an SI-unit power system is ill-conditioned because the engine carries no per-unit
+    normalisation (measured on the factored fundamental system: IEEE-33 ~2.8e3, CIGRE LV
+    ~1.7e4 to 5.5e4, decades higher with a stiff source or a near-ideal switch). The
+    estimate runs against the factorization the solve already built
+    (:func:`~pgml.solver.harmonic.estimate_condition`), ONCE per process, and the
     threshold is the documented ``solver.precision.complex64_cond_warn``.
     """
-    global _COMPLEX64_COND_WARNED
-    if _COMPLEX64_COND_WARNED or rdt != torch.float32 or fac.precision != "full":
+    global _COMPLEX64_COND_CHECKED
+    if _COMPLEX64_COND_CHECKED or rdt != torch.float32 or fac.precision != "full":
         return
+    _COMPLEX64_COND_CHECKED = True
     limit = float(defaults.get("solver.precision.complex64_cond_warn"))
     cond = estimate_condition(fac)
     if not math.isfinite(cond) or cond <= limit:
         return
-    _COMPLEX64_COND_WARNED = True
     _log.warning(
         "solve_power_flow: complex64 on a system with an estimated condition number of "
         "%.1e (above the %.0e threshold) keeps only about %.1f significant digits — an "
@@ -3009,13 +3010,22 @@ class _IFTPowerFlow(torch.autograd.Function):
             # ("backward through the graph a second time") whenever such an intermediate is
             # also used elsewhere on the outer tape. The freshly built residual sub-graph is
             # dropped normally on scope exit; the outer engine owns the shared history.
-            grads = torch.autograd.grad(
-                r_theta,
-                leaves,
-                grad_outputs=grad_out,
-                retain_graph=True,
-                allow_unused=True,
-            )
+            if r_theta.requires_grad:
+                grads = torch.autograd.grad(
+                    r_theta,
+                    leaves,
+                    grad_outputs=grad_out,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+            else:
+                # No collected leaf reaches the fundamental residual, so every
+                # parameter gradient is structurally zero. This happens for a
+                # parameter the fundamental system does not contain — e.g. a source
+                # series impedance under IDEAL slack, which the pinned slack row makes
+                # irrelevant at f0 while the harmonic orders (Norton-stamped) do depend
+                # on it. Asking autograd for a gradient of a constant would raise.
+                grads = (None,) * len(leaves)
 
         grad_leaves = tuple(
             g if g is not None else torch.zeros_like(leaf)

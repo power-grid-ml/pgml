@@ -276,15 +276,20 @@ solver:
         A grid-specific base (e.g. the transformer rating) only rescales the criterion.
   precision:
     complex64_cond_warn:
-      value: 1.0e+4
+      value: 1.0e+3
       units: "condition number of the factored system"
       description: >
-        Estimated condition number above which a plain complex64 solve logs a one-time
-        WARNING. The relative error of a single-precision solve grows like
-        cond * eps_single (eps_single ~ 1.2e-7), so at cond = 1e4 about four digits are
-        already lost. SI-unit feeders reach cond 1e6 to 1e9, hence the recommended recipe:
-        solve at complex128, or at complex128 with precision="mixed" (single-precision
-        factorization refined against double-precision residuals), and store complex64.
+        Estimated 1-norm condition number above which a plain complex64 solve logs a
+        one-time WARNING. The relative error of a single-precision solve grows like
+        cond * eps_single (eps_single ~ 1.2e-7), so at cond = 1e3 about four of the seven
+        single-precision digits are already gone. SI-unit power systems sit above this
+        routinely — measured on the factored fundamental system: IEEE-33 cond ~2.8e3,
+        CIGRE LV ~1.7e4 single-phase-equivalent and ~5.5e4 three-phase, and a stiff
+        source or a near-ideal switch pushes it decades higher — which is the point of
+        the warning. The recommended recipe: solve at complex128, or at complex128 with
+        precision="mixed" (single-precision factorization refined against
+        double-precision residuals), and store complex64. The estimate itself costs a
+        few back-substitutions and is taken ONCE per process.
     refine_steps:
       value: 2
       units: "count"
