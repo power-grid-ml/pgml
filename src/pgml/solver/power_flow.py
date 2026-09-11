@@ -1704,6 +1704,17 @@ def solve_power_flow(
         ) = run_forward(op_eff, real_res, fast_residual_complex, pv)
         if pv is None or not pv.enforce_q_limits:
             break
+        if not converged:
+            # A reactive-limit decision reads the converged reactive power; taken at a
+            # non-converged iterate it would switch on noise (and pay another full
+            # solve per round). Stop with what the solve reached and report it.
+            _log.warning(
+                "solve_power_flow: the solve did not converge, so the reactive-limit "
+                "(PV-to-PQ) switching stopped after %d round(s) with %s.",
+                switch_rounds,
+                pv.describe_state(),
+            )
+            break
         with torch.no_grad():
             fc_star = fast_residual_complex(v_star, y_eff0, i_slack0)
         pv_next, changed = pv.switch(fc_star, v_star)

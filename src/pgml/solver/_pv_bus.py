@@ -591,13 +591,16 @@ def _required_q(g: PVGroup, fc: Tensor, v: Tensor) -> Tensor:
 
 
 def _pinned_q(g: PVGroup) -> Tensor:
-    """Reactive power written into the operating point ``[*batch, K]`` (var)."""
-    zero = torch.zeros_like(g.v_set_pu)
-    return torch.where(
-        (g.state > 0).broadcast_to(g.q_max.shape),
-        g.q_max,
-        torch.where((g.state < 0).broadcast_to(g.q_min.shape), g.q_min, zero),
+    """Reactive power written into the operating point ``[*batch, K]`` (var).
+
+    The active set, the limits and the setpoint may each carry their own batch shape
+    (an unbatched limit against a per-scenario active set, say), so all four are
+    broadcast to their common shape before the selection.
+    """
+    lo, hi, state, zero = torch.broadcast_tensors(
+        g.q_min, g.q_max, g.state, torch.zeros_like(g.v_set_pu)
     )
+    return torch.where(state > 0, hi, torch.where(state < 0, lo, zero))
 
 
 def _switch_group(
