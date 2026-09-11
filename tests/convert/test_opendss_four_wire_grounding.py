@@ -22,9 +22,9 @@ This file pins the three cases that matter on an import:
    without a path to the reference. The const-power solve's effective admittance (the
    passive network plus the source Norton shunt) is then rank-deficient — measured rank 8
    of 12 on the three-bus feeder, against 9 of 12 with the tie — and the solve does not
-   return a usable answer: it reports ``converged=False`` with a diverged residual
-   (4.9e16 on this feeder), or raises out of the factorization when the singular structure
-   produces an exact zero pivot. pgml has no anti-float stabiliser (OpenDSS adds a
+   return a usable answer: it reports ``converged=False`` with a diverged voltage update
+   (measured 4.9e16 V, i.e. 1.2e14 per unit, at a power mismatch of 1.3e-2 pu), or raises
+   out of the factorization when the singular structure produces an exact zero pivot. pgml has no anti-float stabiliser (OpenDSS adds a
    ``ppm_antifloat`` shunt to every transformer winding and then answers with every node
    at nominal voltage), so such a grid must carry an explicit ground tie. A pgml-level
    diagnostic naming the unreferenced rows would be friendlier than either failure mode.
@@ -182,9 +182,12 @@ class TestUngroundedNeutralFailsLoud:
 
         Which of the two happens depends on the singular structure: an exact zero pivot
         raises out of the factorization, while a merely unreferenced block (this feeder)
-        reports ``converged=False`` with a diverged residual. OpenDSS answers the same
-        circuit with every node at nominal voltage, because its anti-float shunt
-        references the floating neutral and the load then carries no current.
+        reports ``converged=False`` with both convergence criteria far above their
+        tolerances. Measured on this feeder: a per-unit power mismatch of 1.3e-2 pu
+        against the 1e-13 pu requested, and a voltage update of 1.2e14 pu (4.9e16 V).
+        OpenDSS answers the same circuit with every node at nominal voltage, because its
+        anti-float shunt references the floating neutral and the load then carries no
+        current.
         """
         _four_wire_feeder(ground_reactor=False)
         grid, _ = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
@@ -195,7 +198,10 @@ class TestUngroundedNeutralFailsLoud:
         except RuntimeError:
             return
         assert not res.converged
-        assert float(res.residual) > 1.0
+        # `residual` is the per-unit power mismatch; 1e-4 pu is nine orders above the
+        # requested tolerance and far outside any converged solve on this feeder.
+        assert float(res.residual) > 1.0e-4
+        assert float(res.diagnostics.update_max_pu) > 1.0
 
 
 def test_phase_voltages_are_unaffected_by_the_neutral_row_count() -> None:

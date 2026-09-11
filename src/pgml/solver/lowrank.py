@@ -41,7 +41,9 @@ already spends 4, and the power flow then stops converging), while the same swee
 based on the network WITHOUT the switch stays at ``~1e-12`` relative. So build the
 base from the LOWEST admittance each branch takes over the sweep wherever the grid
 stays connected — what :func:`pgml.solver.power_flow._woodbury_base_states` does —
-and heed the warning :func:`_warn_if_ill_conditioned` raises otherwise.
+and heed the warning :func:`_amplification` raises otherwise (the nonlinear
+solvers widen their convergence floors by the same factor, so a solve that keeps
+fewer digits is not reported as non-converged).
 
 Public API
 ----------
@@ -215,11 +217,17 @@ class LowRankUpdate:
     u_free: Tensor  # u restricted to the factored rows [m, k]
     v_free: Tensor
     v_slack: Optional[Tensor]  # v on the fixed rows [S, k] (ideal slack only)
+    amplification: float = 1.0  # by how much the update amplifies the base's rounding
 
     @property
     def backend(self) -> str:
         """Factorization backend of the base system (``"dense"``/``"sparse"``/``"block"``)."""
         return self.fac.backend
+
+    @property
+    def precision(self) -> str:
+        """Working precision of the base factorization (``"full"`` / ``"mixed"``)."""
+        return self.fac.precision
 
     @property
     def mode(self) -> str:
@@ -243,12 +251,14 @@ class LowRankUpdate:
         return v0 - torch.matmul(self.w, x).squeeze(-1)
 
 
-def _warn_if_ill_conditioned(k_lu: Tensor, k_piv: Tensor, cz: Tensor) -> None:
-    """Warn once per update when the correction spends too much of the precision.
+def _amplification(k_lu: Tensor, k_piv: Tensor, cz: Tensor) -> float:
+    """How much the correction amplifies the base solution's rounding; warn if extreme.
 
-    Diagnostic only (no autograd, no effect on the result): the ∞-norm of
-    ``(I + CZ)^{-1} CZ``, maximised over the batched updates, is the factor by
-    which the base solution's rounding reaches the corrected result.
+    The ∞-norm of ``(I + CZ)^{-1} CZ``, maximised over the batched updates, is the factor
+    by which the base solution's rounding reaches the corrected result. It is returned so
+    the nonlinear solvers can widen their convergence floors by it — a solve path that
+    keeps fewer digits cannot meet a tolerance tighter than that — and a large factor is
+    warned about. No autograd, no effect on the solved value.
     """
     with torch.no_grad():
         amp = torch.linalg.lu_solve(k_lu, k_piv, cz).abs().sum(-1).max()
@@ -265,6 +275,7 @@ def _warn_if_ill_conditioned(k_lu: Tensor, k_piv: Tensor, cz: Tensor) -> None:
             factor,
             max(0.0, 16.0 - math.log10(factor)),
         )
+    return max(1.0, factor)
 
 
 def low_rank_update(
@@ -328,7 +339,6 @@ def low_rank_update(
     eye = torch.eye(k, dtype=w.dtype, device=w.device)
     cz = torch.matmul(c, z)
     k_lu, k_piv = torch.linalg.lu_factor(eye + cz)
-    _warn_if_ill_conditioned(k_lu, k_piv, cz)
     return LowRankUpdate(
         fac=fac,
         u=u,
@@ -340,6 +350,7 @@ def low_rank_update(
         u_free=u_free,
         v_free=v_free,
         v_slack=v_slack,
+        amplification=_amplification(k_lu, k_piv, cz),
     )
 
 
@@ -443,7 +454,7 @@ def branch_state_terms(
     grid stays connected without them: the update then ADDS admittance, which is
     numerically benign, whereas removing a near-ideal switch multiplies a branch
     voltage drop that floating point resolves poorly (see
-    :func:`_warn_if_ill_conditioned`).
+    :func:`_amplification`).
 
     This builder is the seam a second consumer reuses: any change that scales,
     adds or removes a branch of an already-factored grid — for example solving a

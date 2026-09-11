@@ -1,25 +1,32 @@
-"""Loadability continuation: how much load until collapse, and which bus/load is the limit.
+"""Loadability limit: how much load until collapse, and which bus/load is the limit.
 
 WHAT THIS DEMONSTRATES
 ----------------------
 :func:`pgml.solver.loadability_limit` answers the question a failed power flow raises —
 *"how much more load can this grid take, and which injection at which node makes it
-non-convergent?"* It is a CONTINUATION power flow: it ramps every load by a multiplier
-``λ`` (``λ=1`` = the nameplate load) from a feasible base, Newton-corrects at each step,
-and bisects onto the breaking ``λ*`` — the nose of the P-V curve. At the nose the
-power-flow Jacobian is singular, and its singular vectors localize the collapse:
+non-convergent?"* It scales the injections by a multiplier ``λ`` (``λ=1`` = the nameplate
+loading) from a feasible base, Newton-corrects at each step, and bisects onto the first
+``λ`` the corrector can no longer solve. The reported ``λ*`` is therefore the largest ``λ``
+at which the Newton corrector still converges, a LOWER BOUND on the true nose of the P-V
+curve (a plain corrector fails shortly before the singularity). Close to that point the
+power-flow Jacobian is nearly singular, and its singular vectors localize the approaching
+collapse:
 
 - the RIGHT singular vector is the voltage-collapse mode -> the **critical bus(es)** (where
   the voltage gives way);
 - the LEFT singular vector, projected on each load's current, is the margin sensitivity ->
   the **limiting load(s)** (which apparent-power injection most reduces the margin).
 
+By default ``λ`` scales loads AND generation together (``ramp="all"``); pass
+``ramp="load"`` for the textbook load-only continuation ramp.
+
 On the FULL CIGRE LV benchmark this script:
 
 1. runs :func:`loadability_limit` and prints the margin + critical bus + limiting load;
 2. traces the P-V curve at the critical bus (ramping the load and solving with the Newton
    method, ``solve_power_flow(method="newton")``, which converges near the nose);
-3. plots the voltage profile at the nose with the critical bus(es) highlighted, and a bar
+3. plots the voltage profile at that last converged point with the critical bus(es)
+   highlighted, and a bar
    chart of the loads ranked by how much they limit the margin.
 
 RUN
@@ -86,16 +93,19 @@ def main(out_dir: str = str(_OUT / "loadability")) -> None:
 
     grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
 
-    # 1. The continuation diagnostic: margin + critical bus + limiting load.
+    # 1. The λ-ramp diagnostic: margin + critical bus + limiting load. ``ramp="all"``
+    # (the default) scales loads and generation together; this benchmark has no
+    # generation, so the load-only ramp would give the same limit.
     res = loadability_limit(
-        grid, slack="ideal", lambda_max=8.0, lambda_step=0.5, dtype=CDT
+        grid, slack="ideal", lambda_max=8.0, lambda_step=0.5, dtype=CDT, ramp="all"
     )
     crit = res.critical_nodes[0]
     lim = res.limiting_loads[0]
     print(
-        f"loadability: breaking λ* = {res.breaking_lambda:.2f}  "
+        f"loadability: largest solvable λ* = {res.breaking_lambda:.2f}  "
         f"(feasible={res.feasible}, margin = {res.margin:.2f}× nameplate); "
-        f"nose voltage {res.nose_voltage_min_pu:.3f} pu"
+        f"lowest voltage there {res.nose_voltage_min_pu:.3f} pu; "
+        f"ramp={res.ramp} (λ* is a lower bound on the true nose)"
     )
     print(
         f"  critical bus (voltage-collapse mode): node {crit['node_id']} "
@@ -156,13 +166,13 @@ def _plot_pv(lams, v_crit, v_ref, crit_id, ref_id, res, path: Path) -> None:
         res.breaking_lambda,
         ls="--",
         color="C7",
-        label=f"nose λ* = {res.breaking_lambda:.2f} (margin {res.margin:+.2f})",
+        label=f"λ* = {res.breaking_lambda:.2f} (margin {res.margin:+.2f}, a lower bound)",
     )
     ax.axvline(1.0, ls=":", color="k", lw=1, label="nameplate load (λ=1)")
     ax.set(
         xlabel="load multiplier λ  (×nameplate)",
         ylabel=r"$|V|/V_{LN}$  [pu]",
-        title="P-V nose: voltage vs load, traced by the continuation\n"
+        title="P-V curve: voltage vs load, traced by the λ ramp\n"
         "(the critical bus collapses first; λ* is the loadability limit)",
     )
     ax.legend(fontsize=8)

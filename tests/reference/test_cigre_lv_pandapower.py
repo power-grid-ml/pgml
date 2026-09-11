@@ -106,7 +106,7 @@ class TestCIGRELVVsPandapower:
         result = solve_power_flow(
             grid,
             slack="ideal",
-            tol=1e-10,
+            tol_update_pu=1e-12,
             max_iter=100,
             dtype=torch.complex128,
         )
@@ -142,19 +142,26 @@ class TestCIGRELVVsPandapower:
             )
 
     def test_convergence_metadata(self) -> None:
-        """Solver must converge within 100 iterations."""
+        """Solver must converge within 100 iterations, at the tolerance it reports."""
         net = _build_cigre_net()
         grid, id_map = to_grid(net)
+        tol_pu = 1e-8  # per-unit power mismatch (pandapower's own default)
         result = solve_power_flow(
             grid,
             slack="ideal",
-            tol=1e-10,
+            tol=tol_pu,
             max_iter=100,
             dtype=torch.complex128,
         )
         assert result.converged
         assert result.iterations <= 100
-        assert float(result.residual) < 1e-10
+        # ``residual`` is the achieved PRIMARY criterion: the largest nodal
+        # apparent-power mismatch in per unit of the 1 MVA base.
+        assert float(result.residual) < tol_pu
+        d = result.diagnostics
+        assert d.mismatch_max_pu == pytest.approx(float(result.residual))
+        assert d.mismatch_max_va == pytest.approx(d.mismatch_max_pu * d.s_base_va)
+        assert d.update_max_pu < 1e-8
 
     def test_transformer_count_in_grid(self) -> None:
         """Converter must produce exactly 3 Transformer objects (one per CIGRE trafo)."""

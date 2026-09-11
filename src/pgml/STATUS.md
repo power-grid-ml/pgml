@@ -33,9 +33,25 @@ decisions. One entry per capability:
   `device_library_version` keys in their `meta.json` identify them.
 - **Load flow** — linear (const-Z) + nonlinear (const-P / full ZIP); current-injection
   fixed point AND Newton (matrix-free option); IFT gradients; `ConvergenceDiagnostics` +
-  `loadability_limit` continuation (with a `capped` flag when no nose is found). Batched-
+  `loadability_limit` λ-ramp (with a `capped` flag when no limit is found inside the ramp,
+  and a `ramp` choice between the load-only and the joint ramp). Batched-
   robust: per-scenario `converged_mask`/`failed_states` instead of raising. Validated vs
   pandapower & OpenDSS on IEEE-33 / CIGRE LV.
+- **Convergence in PER UNIT** — the nonlinear solve converges on the largest nodal
+  apparent-power mismatch over a power base (pandapower's and power-grid-model's
+  criterion, default 1e-8 pu) AND the largest per-row voltage update over the node's
+  line-to-neutral rated voltage (default 1e-8 pu), each capped by the precision floor of
+  the dtype / factorization backend / low-rank amplification. Per-row normalisation makes
+  one tolerance mean the same thing on every voltage level and independent of the row
+  count, so iteration counts are comparable with the other tools (measured: the same
+  deviations against pandapower and OpenDSS at 25–43 % fewer iterations than the former
+  absolute volt criterion).
+- **Mixed precision** — `precision="mixed"` factors at complex64 and keeps complex128
+  accuracy: the linear solve by iterative refinement, the nonlinear solve by running its
+  fixed point in residual-correction form (measured below 1e-9 pu against a complex128
+  reference on IEEE-33, CIGRE LV three-phase and a 3600-row feeder, where a plain
+  complex64 run is 4e-6 to 2e-3 pu off). A plain complex64 solve logs a one-time warning
+  with the estimated condition number.
 - **Harmonic flow** — `solve_harmonic_flow`: nonlinear fundamental + linear per-harmonic,
   OpenDSS-exact spectrum injection, vector-group transformers (Dyn traps triplen),
   connection-aware per-phase injection. Integer orders only — non-integer orders raise
@@ -124,9 +140,10 @@ The sampling layer and the dense scale wins are done (see Status +
   factorization plus `[S, k, k]`.
   The BASE omits every switched branch it can (opening one is a stable update, removing
   a near-ideal switch from the base is not — `pgml.solver.lowrank`).
-- **GPU / memory micro-optimisations (benchmark-informed)**: a validated complex64
-  data-generation fast path (generate at complex128, store complex64 — see the
-  conditioning caveat under "Known modeling gaps"); retune the IFT backward's
+- **GPU / memory micro-optimisations (benchmark-informed)**: measure `precision="mixed"`
+  on CUDA, where the FP64 throughput ratio (1/64 on consumer cards) makes the
+  single-precision factorization the dominant lever — the CPU measurement is only the
+  lower bound of the win; retune the IFT backward's
   JVP-vs-dense threshold (`_IFT_DENSE_JAC_MAX_ELEMS`) on current GPU numbers;
   chunk-to-chunk warm starting for sorted/correlated scenario chunks;
   `torch.cuda.CUDAGraph` / `torch.compile` over the fixed-point iteration (static shapes
@@ -145,6 +162,14 @@ The sampling layer and the dense scale wins are done (see Status +
   `Y_fs` coupling gather, and (3) the IFT backward's dense `[2N, 2N]` Jacobian (shared
   with Newton). `linear_solver="block"` already removes the union-sized FACTORIZATION for
   an ensemble; these three are what still bound it.
+- **Matrix-free / factorization-reusing IFT backward.** The backward builds the real
+  `[B, 2N, 2N]` state Jacobian by autograd and solves the adjoint densely, so a gradient
+  costs far more than the forward it differentiates (measured by the application demos:
+  ~8 forward solves at batch 12 on IEEE-33; 200–730 s on a 1176-row grid at batch 16–64
+  on the CPU sparse path against an 85 ms forward). The adjoint system is the TRANSPOSE
+  of the same Jacobian the forward already factors, so the dense build is avoidable: see
+  the design sketch in the solver ledger (`src/pgml/solver/CONTEXT.md`, "IFT backward
+  cost"). This is the largest remaining differentiability cost.
 - **Beyond direct-factorization scale**: a GPU-resident Krylov path (block-Jacobi /
   additive-Schwarz preconditioning, the shape GPU power-flow solvers built on iterative
   methods take) is the fork for networks too large to factor at all — secondary at LV
@@ -235,8 +260,11 @@ R-L split; validate the resonance vs OpenDSS. **Where.** `solver/harmonic_flow.p
   lines are skipped by `synthesize_grid_geometry`; Carson `C` agrees with OpenDSS's to
   2.1212e-5 relative = the `e0` constant ratio (pgml uses the SI value), and OpenDSS's
   `capradius` option is not read (match it if a c≠0 feeder is added).
-- **Continuation/Newton polish**: a true arc-length predictor-corrector; a GMRES
-  preconditioner near the nose; batched continuation. Iwamoto's optimal multiplier
+- **Continuation/Newton polish**: a true arc-length predictor-corrector (today's
+  `loadability_limit` is a step-and-bisect on Newton FEASIBILITY, so its
+  `breaking_lambda` is a lower bound on the nose — measured ~4 % below the closed-form
+  nose of a two-bus feeder); a GMRES preconditioner near the nose; batched continuation.
+  Iwamoto's optimal multiplier
   (Iwamoto & Tamura 1981, IEEE Trans. PAS-100:1736): the complex power-flow residual is
   EXACTLY quadratic in `(V, conj(V))`, so the second-order Taylor term is exact and the
   optimal Newton step length has a closed form from one extra residual evaluation per
@@ -370,9 +398,18 @@ results are never read as more physical than they are. Details live in `docs/pgm
   emission. Device current fingerprints default to IEC 61000-3-2 (per class A/B/C/D;
   `emission_class="auto"` maps consumer_type→class, an approximation — no lighting
   consumer_type yet for Class C).
-- **complex64 on ill-conditioned grids.** Physical feeder Y reaches κ ~1e6–1e9 in SI, so
-  complex64 ASSEMBLY+solve can lose most digits (measured). complex64 is the THROUGHPUT
-  dtype; generate labels at complex128 and store complex64.
+- **complex64 on ill-conditioned grids.** The engine carries no per-unit normalisation, so
+  an SI-unit system is ill-conditioned: measured 1-norm condition estimates of the factored
+  fundamental system are 2.8e3 (IEEE-33), 1.7e4 (CIGRE LV single-phase-equivalent), 5.5e4
+  (three-phase), 6.9e4 (mv_oberrhein) and 4.6e5 (a 3600-row synthetic feeder), and a stiff
+  source or a near-ideal switch pushes it decades higher. A plain complex64 solve therefore
+  keeps only `7 − log10(cond)` digits (measured |ΔV| against complex128: 4e-6 pu on
+  IEEE-33, 2e-3 pu at 3600 rows) and logs a one-time warning naming the estimate. The
+  recipe: solve at complex128, or at complex128 with `precision="mixed"`
+  (single-precision factorization refined against double-precision residuals — measured
+  1.5–1.9x faster than complex128 on the DENSE path at 132–3600 rows, and no faster on the
+  CPU SuperLU sparse path, where single precision does not speed the factorization up),
+  and store complex64.
 - **Scenario sampling runs on CPU** (`SobolEngine`), promoted to the solve device after —
   deliberate; the sampled tensors are tiny next to the solve.
 - **Converter coverage.** Converted: pandapower `bus`/`line`/`load`/`asymmetric_load`/
