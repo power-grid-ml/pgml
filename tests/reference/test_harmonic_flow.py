@@ -188,3 +188,93 @@ def test_harmonic_only_orders_without_fundamental():
     full = solve_harmonic_flow(grid, [1, 5, 7], slack="norton", dtype=CDT)
     torch.testing.assert_close(res.v[0], full.v[1], rtol=1e-7, atol=1e-9)
     torch.testing.assert_close(res.v[1], full.v[2], rtol=1e-7, atol=1e-9)
+
+
+class TestSolverOptions:
+    """The harmonic entry point exposes the solver options, and runs the safety gates.
+
+    A harmonic study's expensive part is the fundamental solve plus one direct solve per
+    order, all of which are factorizations of systems with the same sparsity — so the
+    caller has to be able to pick the backend, the equilibration and the criticality
+    policy for the whole study, and the pre-solve connectivity check must not be
+    silently skipped by any of it.
+    """
+
+    @staticmethod
+    def _orders():
+        return [1, 5, 13]
+
+    def test_every_backend_gives_the_same_voltages(self):
+        grid = _grid()
+        orders = self._orders()
+        ref = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, linear_solver="dense"
+        )
+        got = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, linear_solver="sparse"
+        )
+        torch.testing.assert_close(got.v, ref.v, rtol=1e-10, atol=1e-12)
+
+    def test_backend_reaches_the_per_order_solve(self):
+        """A forced backend is used by the HARMONIC orders, not only the fundamental.
+
+        Without this the option would be inert for the part of the study it is meant to
+        control, which is invisible in the result and shows up only as identical timings.
+        """
+        import pgml.solver.harmonic_flow as hf
+
+        seen = []
+        original = hf.lu_factor_system
+
+        def spy(y, **kw):
+            seen.append(kw.get("backend"))
+            return original(y, **kw)
+
+        hf.lu_factor_system = spy
+        try:
+            solve_harmonic_flow(
+                _grid(),
+                self._orders(),
+                slack="norton",
+                dtype=CDT,
+                linear_solver="sparse",
+            )
+        finally:
+            hf.lu_factor_system = original
+        assert seen and all(b == "sparse" for b in seen)
+
+    def test_equilibration_option_reaches_the_orders(self):
+        grid = _grid()
+        orders = self._orders()
+        ref = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, equilibrate="off"
+        )
+        got = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, equilibrate="symmetric"
+        )
+        torch.testing.assert_close(got.v, ref.v, rtol=1e-10, atol=1e-10)
+
+    def test_criticality_option_is_accepted(self):
+        res = solve_harmonic_flow(
+            _grid(), self._orders(), slack="norton", dtype=CDT, criticality="always"
+        )
+        assert res.pf.diagnostics.criticality is not None
+
+    def test_connectivity_is_checked_by_default(self):
+        """The default run raises on a de-energized row; only "ignore" skips the check."""
+        import pytest
+
+        from pgml.errors import ConnectivityError
+
+        grid = _grid()
+        grid.branches[0].in_service = False  # cuts the load bus off the source
+        with pytest.raises(ConnectivityError):
+            solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
+        with pytest.raises(ConnectivityError):
+            solve_harmonic_flow(
+                grid, [1, 5], slack="norton", dtype=CDT, on_disconnected="raise"
+            )
+        zeroed = solve_harmonic_flow(
+            grid, [1, 5], slack="norton", dtype=CDT, on_disconnected="zero"
+        )
+        assert zeroed.v.shape[-1] == len(grid.nodes)
