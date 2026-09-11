@@ -105,7 +105,8 @@ def build_opendss_geometry_circuit(grid, *, slack_node: Optional[int] = None) ->
     Emits the slack Vsource (Thévenin from the :class:`Source`) and one WireData +
     LineGeometry + Line per geometry line, using the SAME synthesized conductor data
     pgml uses — so OpenDSS's ``SystemY(h)`` equals pgml's harmonic ``Y(h)`` up to the
-    Carson model (which is bit-exact). No loads (harmonic injection is applied
+    Carson model (which agrees to ~5e-8 relative, the SI-vs-truncated ``mu0`` constant).
+    No loads (harmonic injection is applied
     externally). Returns ``{node_id: dss_bus_name}``. DERI earth model (OpenDSS default).
     """
     import opendssdirect as dss

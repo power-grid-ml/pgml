@@ -167,8 +167,8 @@ def two_conductor_loop_z(geom: dict, freqs: Tensor, *, rho=100.0) -> Tensor:
     pair and applies the loop transform ``[1, -1]·Z·[1, -1]^T`` — for the ``+I/-I``
     current the large earth penetration-depth term is common to all four entries and
     CANCELS, so the result is the earth-floor-free positive-sequence impedance. Verifies,
-    via the bit-exact Carson code, that the direct :func:`positive_sequence_z` model is
-    physically grounded.
+    via the Carson code, that the direct :func:`positive_sequence_z` model is physically
+    grounded.
     """
     rdt = _rdtype(freqs)
     dev = freqs.device

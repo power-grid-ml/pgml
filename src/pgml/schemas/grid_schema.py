@@ -722,6 +722,15 @@ class Line(BranchBase):
 
     Electrical matrices may come from ``type_ref`` (``Grid.types.lines``) instead
     of being given explicitly; a resolver materialises them before assembly.
+
+    Every model is a LUMPED pi branch: the series impedance is ``z * length_m``, the
+    shunt admittance ``y * length_m`` split half to each terminal, with no hyperbolic
+    (``sinh``/``tanh``) long-line correction and no distributed-parameter model. This is
+    the standard representation for distribution feeders over the harmonic range (a 1 km
+    LV cable at 2.5 kHz is a small fraction of a wavelength) and it is a frequency-domain
+    steady-state model: standing-wave and travelling-wave phenomena are outside it, and
+    the lumped form loses accuracy for long lines at high order. Split a long line into
+    several shorter ones when that matters.
     """
 
     component: Literal["line"] = "line"

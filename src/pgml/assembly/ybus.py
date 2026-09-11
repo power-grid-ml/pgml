@@ -495,6 +495,12 @@ def _line_block_groups(
 ):
     """Yield ``(group, block, rows, cols)`` for every line group (all three paths).
 
+    Every path produces a LUMPED pi branch — ``Z = z·length``, ``Y = y·length`` with the
+    shunt split half to each terminal, no hyperbolic long-line correction and no
+    distributed-parameter model. Frequency-domain steady state only: no standing or
+    travelling waves. Accurate for distribution feeders over the harmonic range; split a
+    long line into segments when the electrical length stops being small.
+
     Explicit-R/L/C lines go through the matrix path; lines carrying a
     ``conductor_geometry`` go through the Carson/Deri geometry path; lines tagged
     ``harmonic_line_model=sequence_aware`` go through the Z1/Z0 sequence-aware path

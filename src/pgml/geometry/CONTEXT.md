@@ -3,7 +3,11 @@
 Conductor geometry -> per-frequency line impedance/admittance, the
 "geometry -> impedance" path. Closes the harmonic line-impedance gap (OpenDSS applies
 an earth-return + skin correction at every harmonic; naive `X∝h` is wrong). Model =
-OpenDSS **DERI**, verified **bit-exact** vs OpenDSS (`docs/pgml/modeling/references/opendss/carson.md`).
+OpenDSS **DERI**; on the same geometry it agrees with OpenDSS below 1 kHz to **4.8e-8
+relative** on `Z` and **2.1212e-5** on `C`, which is exactly the difference between the SI
+physical constants used here and OpenDSS's truncated `mu0`/`e0`
+(`docs/pgml/modeling/references/opendss/carson.md`). Above 1 kHz OpenDSS changes its
+conductor spacing term (away from the published GMR) and pgml does not.
 Fully torch / autograd-safe / GPU-ready / batched over lines and H frequencies;
 gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 
@@ -19,8 +23,9 @@ gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 - `kron_reduce(M, n_phase)` eliminates neutral/shield conductors (>= n_phase).
 - `line_constants(x, y, gmr, rdc, radius, rho, freqs, n_phase) -> (Z[*B,H,P,P] Ω/m,
   C[*B,P,P] F/m)` phase-reduced. Conductor arrays are `[*B, N]`, phases first.
-  NOTE: capacitance is physically correct but not bit-exact to OpenDSS (different
-  capradius convention); irrelevant for the c=0 standard feeders. Series Z is exact.
+  NOTE: capacitance differs from OpenDSS's by 2.1212e-5 relative (the `e0` constant
+  ratio), and OpenDSS's `capradius` option is not read; irrelevant for the c=0 standard
+  feeders. Series Z agrees to 4.8e-8 relative (the `mu0` constant ratio).
 
 ## sequence.py (positive-sequence harmonic model — NO earth floor)
 The corrected R/X-line harmonic model. A balanced positive-sequence
@@ -133,10 +138,15 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   per line; every field is tensor-capable and part of the differentiable path.
 
 ## Validation
-- `series_impedance`/`line_constants` vs OpenDSS geometry lines: relZ ~1e-13 (single +
-  3ph+neutral Kron) across 50–750 Hz. Assembly geometry path vs `line_constants`:
-  ~6e-16. Synthesis reproduces R1/X1 at f0 to ~1e-10. gradcheck passes w.r.t. Rdc, GMR,
-  height. Tests: `tests/reference/test_carson_opendss.py`,
+- `series_impedance`/`line_constants` vs OpenDSS geometry lines across 50–750 Hz:
+  relZ 4.66e-8 (single conductor) / 4.81e-8 (3ph+neutral Kron) — the SI-vs-truncated
+  `mu0` ratio (4.89e-8), i.e. the MODEL matches to floating point; relC 2.1212e-5 = the
+  `e0` ratio exactly. Both are pinned as such (a test asserts `C`'s deviation EQUALS the
+  constant ratio). At 1050 Hz relZ steps to 1.2e-2 because OpenDSS changes its conductor
+  spacing term at 1 kHz — a separate test fixes that boundary, and the docstrings scope
+  the agreement to below 1 kHz. Assembly geometry path vs `line_constants`: ~6e-16.
+  Synthesis reproduces R1/X1 at f0 to ~1e-10. gradcheck passes w.r.t. Rdc, GMR, height.
+  Tests: `tests/reference/test_carson_opendss.py`,
   `tests/differentiability/test_carson_gradcheck.py`.
 - Positive-sequence model: `Z1` from a genuine 3-phase Carson geometry scales ∝ h to
   ~1e-3 while `Z0` carries the earth floor (`X0(h)/(h·X0(f0))→0.88`, `R0/R1≈5`);

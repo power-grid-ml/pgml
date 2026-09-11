@@ -79,7 +79,7 @@ zero-sequence quantity defaults to `r1*(R0/R1)` etc. from config. An explicit na
 
 `phase_mode=PhaseMode.SINGLE_PHASE_EQUIV` (the DEFAULT) reproduces the historical
 positive-sequence single-phase-equivalent output BYTE-FOR-BYTE (same phases, 1x1
-matrices, ids, id_map) — the bit-exact regression gate; the reference oracle suite
+matrices, ids, id_map) — the byte-identical regression gate; the reference oracle suite
 calls `to_grid(net)` with no `phase_mode` and stays green.
 
 `phase_mode=PhaseMode.THREE_PHASE`:

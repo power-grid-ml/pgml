@@ -46,7 +46,8 @@ decisions. One entry per capability:
   off-tape in `scenarios.storage`. Validated vs pandapower and OpenDSS InvControl
   (`docs/pgml/modeling/der-pv-storage.md`).
 - **Geometry → impedance** — differentiable Carson/Deri (earth return + skin + Maxwell C),
-  bit-exact vs OpenDSS incl. triplen; analytic sequence-based harmonic line models for R/X
+  agreeing with OpenDSS below 1 kHz to 4.8e-8 relative on `Z` (the SI-vs-truncated `mu0`
+  constant) at every order incl. triplen; analytic sequence-based harmonic line models for R/X
   feeders, selected by the typed `Line.harmonic_line_model` and applied by the converters
   from the documented defaults (`docs/pgml/modeling/harmonic-line-model.md`).
 - **Scenarios** — reproducible QMC/cartesian sampling, correlated/per-phase draws,
@@ -230,8 +231,9 @@ OpenDSS. **Where.** `solver/harmonic_flow.py`, `assembly/ybus`, `schemas` (ask f
   zero-sequence reference (line-to-line-correct, absolutely-undetermined voltages as
   load → 0); a reference injection / per-island pin would close it.
 - **Geometry**: low-X R/X lines hit the GMR floor (flagged `synth_unphysical`); 2-phase
-  lines are skipped by `synthesize_grid_geometry`; Carson `C` is correct but not bit-exact
-  to OpenDSS's `capradius` (match it if a c≠0 feeder is added).
+  lines are skipped by `synthesize_grid_geometry`; Carson `C` agrees with OpenDSS's to
+  2.1212e-5 relative = the `e0` constant ratio (pgml uses the SI value), and OpenDSS's
+  `capradius` option is not read (match it if a c≠0 feeder is added).
 - **Continuation/Newton polish**: a true arc-length predictor-corrector; a GMRES
   preconditioner near the nose; batched continuation. Iwamoto's optimal multiplier
   (Iwamoto & Tamura 1981, IEEE Trans. PAS-100:1736): the complex power-flow residual is
@@ -305,8 +307,9 @@ results are never read as more physical than they are. Details live in `docs/pgm
   where the series branch decays as `1/h²`. Add a series resistance to the inductive
   branch if a lossy reactor has to be harmonically exact.
 - **Zero-sequence line impedance at harmonics — lumped R/L lines only.** Lines WITH
-  `conductor_geometry` compute Z(h) from first principles (bit-exact vs OpenDSS at every
-  order). Lines WITHOUT geometry embed the earth return AT f0; extrapolating Z0 to h·f0
+  `conductor_geometry` compute Z(h) from first principles (agreeing with OpenDSS to
+  4.8e-8 relative at every order below 1 kHz; above 1 kHz OpenDSS changes its conductor
+  spacing term and pgml does not). Lines WITHOUT geometry embed the earth return AT f0; extrapolating Z0 to h·f0
   is an ASSUMPTION in every tool. pgml's lumped `sequence_aware` model adds the Carson
   earth-return resistance `3·(Re(f) − Re(f0))` to R0 and scales X0 ∝ h; OpenDSS's R/X
   line does the same with its `Rg` and additionally bends X0 sub-linearly with `Xg`. Both
