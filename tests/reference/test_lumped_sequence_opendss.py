@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 import torch
 
-from pgml.assembly import assemble_network_ybus
+from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.defaults import get as cfg
 from pgml.evaluation.oracles.opendss_oracle import _build_seq_aware_circuit_stub
 from pgml.geometry.synthesis import apply_sequence_aware_harmonic_model
@@ -210,3 +210,66 @@ def test_skin_effect_is_the_only_deviation_from_opendss():
     assert errs[0] < 1e-12  # exact at f0
     assert all(b >= a for a, b in zip(errs, errs[1:]))  # grows with order
     assert 0.01 < errs[-1] < 0.15, errs
+
+
+# ---------------------------------------------------------------------------
+# IEEE-33, the whole feeder
+# ---------------------------------------------------------------------------
+def _ieee33_sequence_grid(law: str, *, skin: bool):
+    """IEEE-33 converted to three-phase R/X lines with the sequence-aware model.
+
+    The feeder ships no conductor geometry, so its three-phase lines are exactly the
+    lumped case this model exists for: ``R0``/``X0`` come from the configured ratios and
+    the earth return is an extrapolation.
+    """
+    import pandapower as pp
+    import pandapower.networks as pn
+
+    from pgml.convert.pandapower import PhaseMode, to_grid
+
+    net = pn.case33bw()
+    pp.runpp(net, numba=False)
+    grid, _ = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
+    from pgml.geometry.synthesis import apply_sequence_aware_harmonic_model
+
+    apply_sequence_aware_harmonic_model(grid, skin=skin)
+    for b in grid.branches:
+        if isinstance(b, Line):
+            b.earth_return = EarthReturnModel(x0_frequency=law)
+    return grid
+
+
+@pytest.mark.parametrize("law", ["linear", "carson_sublinear"])
+def test_ieee33_lines_match_opendss_with_matched_earth_parameters(law):
+    """Every IEEE-33 line's Z_abc(h) matches OpenDSS across the feeder's R/X range."""
+    import opendssdirect as dss
+
+    from pgml.evaluation.oracles.opendss_oracle import dss_systemy
+
+    grid = _ieee33_sequence_grid(law, skin=False)
+    f0 = float(grid.base_frequency_hz)
+    index = node_phase_index(grid)
+    busname = {int(nd.id): f"bus{int(nd.id)}" for nd in grid.nodes}
+    lines = [b for b in grid.branches if isinstance(b, Line)]
+    assert len(lines) > 30
+
+    worst = 0.0
+    for h in (1, 5, 13):
+        _build_seq_aware_circuit_stub(grid, busname)
+        dss.Text.Command("Set voltagebases=[12.66]")
+        dss.Text.Command("Calcvoltagebases")
+        dss.Text.Command("Solve")
+        dss.Text.Command(f"set frequency={h * f0}")
+        dss.Solution.BuildYMatrix(2, 1)
+        y_dss, order = dss_systemy()
+        rows = {e.upper(): i for i, e in enumerate(order)}
+        y_pgml = assemble_network_ybus(grid, [h * f0], dtype=CDT).Y[0].numpy()
+        for ln in lines:
+            fr = [rows[f"{busname[ln.from_node]}.{k + 1}".upper()] for k in range(3)]
+            to = [rows[f"{busname[ln.to_node]}.{k + 1}".upper()] for k in range(3)]
+            z_dss = np.linalg.inv(-y_dss[np.ix_(fr, to)])
+            fr_p = [index.row(ln.from_node, p) for p in ln.from_phases]
+            to_p = [index.row(ln.to_node, p) for p in ln.to_phases]
+            z_pgml = np.linalg.inv(-y_pgml[np.ix_(fr_p, to_p)])
+            worst = max(worst, np.abs(z_pgml - z_dss).max() / np.abs(z_dss).max())
+    assert worst < 1e-7, f"IEEE-33 ({law}): worst Z_abc rel error {worst:.3e}"
