@@ -104,6 +104,7 @@ from typing import Any, Optional
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
+    ZeroSequenceDefaults,
     build_generator,
     build_line_from_sequence,
     build_load,
@@ -111,6 +112,7 @@ from pgml.convert._common import (
     build_source,
     make_metadata,
     phases_for,
+    resolve_converted_line_models,
     thevenin_from_sk,
     warn_dropped_elements,
 )
@@ -157,6 +159,7 @@ def to_grid(
     base_frequency_hz: float = 50.0,
     load_model: LoadModel = LoadModel.CONST_IMPEDANCE,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
+    harmonic_line_model: Optional[str] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a power-grid-model ``input_data`` dict to a schema :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -178,6 +181,13 @@ def to_grid(
         reproduces the positive-sequence single-phase-equivalent output exactly;
         ``THREE_PHASE`` expands to a genuine abc grid (sequence->phase line
         matrices, balanced 3-phase sources, ``asym_load`` per-phase capture).
+    harmonic_line_model:
+        Frequency-dependent line model written to every converted line
+        (``"sequence_aware"``, ``"positive_sequence"``, ``"naive"``, or ``"none"`` to
+        leave the lines unresolved). ``None`` (default) takes the modeling defaults
+        ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
+        logged once. power-grid-model is fundamental-only, so this is a pgml modeling
+        decision, not a property of the source data.
 
     Returns
     -------
@@ -233,6 +243,7 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # 2. Lines                                                             #
     # ------------------------------------------------------------------ #
+    zero_sequence = ZeroSequenceDefaults()
     branches: list = []
     for row in input_data.get("line", []):
         if int(row["from_status"]) == 0 or int(row["to_status"]) == 0:
@@ -258,6 +269,8 @@ def to_grid(
         r0 = _opt_field(row, "r0")
         x0 = _opt_field(row, "x0")
         c0 = _opt_field(row, "c0")
+        if phase_mode is PhaseMode.THREE_PHASE:
+            zero_sequence.note(r0=r0, x0=x0, c0=c0)
 
         line_id = _id.next()
         id_map["line"][pgm_id] = line_id
@@ -609,6 +622,10 @@ def to_grid(
         branches=branches,
         appliances=appliances,
         metadata=make_metadata(name="pgm_import", description=description),
+    )
+    zero_sequence.warn(_logger, tool="power-grid-model")
+    resolve_converted_line_models(
+        grid, _logger, tool="power-grid-model", requested=harmonic_line_model
     )
     return grid, id_map
 

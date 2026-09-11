@@ -1,10 +1,24 @@
 """Differentiable Carson/Deri line constants — conductor geometry -> Z(f), Yc(f).
 
-Implements the OpenDSS DERI earth model (verified bit-exact vs OpenDSS — see
-``docs/pgml/modeling/references/opendss/carson.md``): series impedance with a complex-penetration-depth
-earth return, GMR geometric reactance, and a skin-effect internal resistance (Bessel
-``I0/I1`` of a complex argument, via a continued fraction); plus Maxwell potential
-coefficients for the shunt capacitance. Neutrals/shield wires are Kron-reduced out.
+Implements the OpenDSS DERI earth model (see
+``docs/pgml/modeling/references/opendss/carson.md``): series impedance with a
+complex-penetration-depth earth return, GMR geometric reactance, and a skin-effect
+internal resistance (Bessel ``I0/I1`` of a complex argument, via a continued fraction);
+plus Maxwell potential coefficients for the shunt capacitance. Neutrals/shield wires are
+Kron-reduced out.
+
+Agreement with OpenDSS on the same geometry: ``Z(f)`` to ~5e-8 relative and ``C`` to
+~2.1e-5 relative, both set by the physical constants — this module uses the SI values of
+``mu0`` and ``e0`` while OpenDSS truncates them (see :data:`MU0`, :data:`E0`). The MODEL
+is the same to floating point.
+
+Scope of that agreement: BELOW 1 kHz. OpenDSS's geometry line model switches the
+conductor's geometric mean radius for its physical radius at exactly 1 kHz (its
+`LineGeometry` code selects ``GMR`` only while ``f < 1000 Hz``, on the argument that the
+current has crowded into the conductor surface above that), and pgml always uses the
+published ``GMR``. Above 1 kHz the two therefore differ by the geometric reactance
+``(f*mu0)*ln(radius/GMR)`` per conductor, which is an intentional, documented difference
+and not a defect on either side.
 
 Everything is torch and autograd-safe (complex ``sqrt``/``log``, no ``.item()`` /
 control flow on tensor values), batched over a leading set of lines ``*B`` and over
@@ -24,8 +38,14 @@ import math
 import torch
 from torch import Tensor
 
-MU0 = 12.56637e-7  # H/m (OpenDSS constant)
-E0 = 8.854e-12  # F/m (OpenDSS constant)
+#: Vacuum permeability (SI, H/m). OpenDSS truncates it to ``12.56637e-7``, which is
+#: 4.9e-8 smaller in relative terms; `series_impedance` is linear in ``mu0`` (and
+#: square-root in it through the earth penetration depth and the skin term), so the
+#: constant alone moves ``Z`` by ~5e-8 relative — the floor of the OpenDSS comparison.
+MU0 = 4.0e-7 * math.pi
+#: Vacuum permittivity (SI, F/m). OpenDSS truncates it to ``8.854e-12``, which is
+#: 2.1e-5 smaller in relative terms, and ``C = 2*pi*e0*inv(P)`` is linear in it.
+E0 = 8.8541878128e-12
 _TWO_PI = 2.0 * math.pi
 
 
@@ -97,6 +117,17 @@ def series_impedance(
     x: Tensor, y: Tensor, gmr: Tensor, rdc: Tensor, rho, freqs: Tensor
 ) -> Tensor:
     """Carson/Deri series impedance ``Z[*B, H, N, N]`` in Ω/m (unreduced).
+
+    ``Z_ii = Re(Zint(Rdc, f)) + Lfactor·ln(1/GMR_i) + Ze``,
+    ``Z_ij = Lfactor·ln(1/D_ij) + Ze`` with ``Lfactor = j·2πf·mu0/(2π)`` and the Deri
+    earth term ``Ze = Lfactor·ln(√((y_i+y_j+2/Fme)² + (x_i−x_j)²))``,
+    ``Fme = √(j·2πf·mu0/rho)``.
+
+    The conductor spacing term uses the published ``gmr`` at EVERY frequency. OpenDSS
+    does the same below 1 kHz and changes the term at exactly 1 kHz (toward the physical
+    radius, on the argument that the current has crowded into the conductor surface), so
+    the parity with OpenDSS stated in the module docstring holds BELOW 1 kHz; at 1050 Hz
+    the measured deviation steps to ~1e-2 relative on a typical ACSR geometry.
 
     Parameters
     ----------
@@ -180,7 +211,10 @@ def line_constants(
     """Phase-reduced ``(Z[*B, H, P, P] Ω/m, C[*B, P, P] F/m)`` for line geometry.
 
     Series ``Z`` is Kron-reduced per frequency; capacitance ``C`` reduces the
-    (frequency-independent) potential-coefficient matrix then inverts.
+    (frequency-independent) potential-coefficient matrix then inverts. Agreement with
+    OpenDSS on the same geometry, measured: ``Z`` to 4.8e-8 relative BELOW 1 kHz (the
+    ``mu0`` constant; see :func:`series_impedance` for the 1 kHz scope) and ``C`` to
+    2.1212e-5 relative (the ``e0`` constant).
     """
     z = kron_reduce(series_impedance(x, y, gmr, rdc, rho, freqs), n_phase)  # [*B,H,P,P]
     p_red = kron_reduce(potential_coefficients(x, y, radius), n_phase)  # [*B,P,P]

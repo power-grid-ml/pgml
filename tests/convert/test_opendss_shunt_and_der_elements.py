@@ -221,17 +221,24 @@ class TestReactorWyeShunt:
             dss, phase_mode=PhaseMode.THREE_PHASE
         )
 
-    def test_converts_to_shunt_appliance_with_negative_c(self) -> None:
-        """An inductive reactor's fundamental susceptance is NEGATIVE; the
-        C-based shunt model represents it as a negative capacitance (exact at
-        h=1 only -- see the converter's Reactor section docstring)."""
+    def test_converts_to_an_inductive_shunt_appliance(self) -> None:
+        """An inductive reactor becomes an INDUCTANCE, not a negative capacitance.
+
+        The fundamental susceptance of a reactor is negative; carrying it as
+        ``inductance_h`` makes the stamp ``1/(j*2*pi*h*f0*L)``, whose magnitude falls
+        as ``1/h`` the way the element physically behaves (a fixed capacitance would
+        rise as ``h``). Harmonic parity against OpenDSS:
+        ``tests/reference/test_shunt_reactor_opendss.py``.
+        """
         reac = next(
             a
             for a in self._grid.appliances
             if isinstance(a, ShuntAppliance)
             and a.id == self._id_map["reactor"]["reac1"]
         )
-        assert all(c < 0.0 for c in reac.capacitance_f)
+        assert reac.inductance_h is not None
+        assert all(ell > 0.0 for ell in reac.inductance_h)
+        assert all(c == 0.0 for c in reac.capacitance_f)
 
     def test_admittance_matches_closed_form(self) -> None:
         r_ohm = dss.Reactors.R()
@@ -244,9 +251,10 @@ class TestReactorWyeShunt:
             if isinstance(a, ShuntAppliance)
             and a.id == self._id_map["reactor"]["reac1"]
         )
-        for g, c in zip(reac.conductance_s, reac.capacitance_f):
+        for g, ell in zip(reac.conductance_s, reac.inductance_h):
             assert g == pytest.approx(y.real, rel=1e-9)
-            assert c == pytest.approx(y.imag / two_pi_f0, rel=1e-9)
+            # B(f0) = -1/(2*pi*f0*L) reproduces the reactor's susceptance exactly.
+            assert -1.0 / (two_pi_f0 * ell) == pytest.approx(y.imag, rel=1e-9)
 
 
 class TestGroundingReactorPattern:

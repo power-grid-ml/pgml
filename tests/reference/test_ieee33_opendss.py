@@ -121,6 +121,10 @@ def _build_dss_circuit_passive(net) -> None:
     x1_tiny = 2.0 * math.pi * f0 * 1.0e-12  # Ohm (X = 2*pi*f*L, L=1e-12 H)
 
     dss.Text.Command("Clear")
+    # Every OpenDSS element takes its BASE frequency from this global setting, and the
+    # converter reads it back as the grid's base frequency: set it explicitly so the
+    # circuit does not depend on whatever a previous circuit left behind.
+    dss.Text.Command(f"Set DefaultBaseFrequency={f0:.10g}")
     dss.Text.Command(
         f"New Circuit.ieee33_passive basekv={vn_kv} pu=1.0 phases=1 "
         f"bus1=bus0.1 r1={r1_tiny} x1={x1_tiny} frequency={f0}"
@@ -157,6 +161,10 @@ def _build_dss_circuit_with_loads(net) -> None:
     x1_tiny = 2.0 * math.pi * f0 * 1.0e-12
 
     dss.Text.Command("Clear")
+    # Every OpenDSS element takes its BASE frequency from this global setting, and the
+    # converter reads it back as the grid's base frequency: set it explicitly so the
+    # circuit does not depend on whatever a previous circuit left behind.
+    dss.Text.Command(f"Set DefaultBaseFrequency={f0:.10g}")
     dss.Text.Command(
         f"New Circuit.ieee33_full basekv={vn_kv} pu=1.0 phases=1 "
         f"bus1=bus0.1 r1={r1_tiny} x1={x1_tiny} frequency={f0}"

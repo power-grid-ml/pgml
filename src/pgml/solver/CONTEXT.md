@@ -223,7 +223,8 @@ verified empirically). New orchestration:
     `|I_h^e|=(mag_h^e/mag_1^e)|I1_elem|`, `arg=ang_h^e + h*(arg(I1_elem)-ang_1^e)`.
     The NODAL injection is `-(M^T @ i_h_elem)` scattered into `used_rows` (out-of-place
     complex `index_add`). WYE-to-ground reduces EXACTLY to the earlier node-level per-phase
-    form (bit-exact: `tests/reference/test_harmonic_flow.py` + `test_carson_harmonics_feeders.py`).
+    form (identical values: `tests/reference/test_harmonic_flow.py` +
+    `test_carson_harmonics_feeders.py`).
     Spectrum coefficients are PER ELEMENT, from three sources (override > schema):
     device `spectrum` (StaticSpectrum, same on all elements), `spectrum_per_phase`
     (element k <- `phases[k]`; a phase/element with no entry injects 0; for DELTA-3 the

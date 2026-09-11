@@ -65,7 +65,9 @@ def ieee33_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
-def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
+def cigre_lv_full_grid(
+    *, phase_mode=None, source_impedance_ohm=None, harmonic_line_model=None
+):
     """The FULL CIGRE LV benchmark grid (all 3 feeders + MV source + 3 transformers).
 
     Unlike :func:`cigre_lv_geometry_grid` (one residential feeder with synthesized
@@ -88,6 +90,9 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     source_impedance_ohm:
         Source series-impedance magnitude [Ohm]; ``None`` -> config
         ``source.series_impedance_ohm``. Pass ``0`` to keep the converted (stiff) source.
+    harmonic_line_model:
+        Forwarded to the converter: the harmonic line model every line gets
+        (``None`` -> the modeling default, ``"none"`` -> leave the lines unresolved).
 
     Returns
     -------
@@ -102,7 +107,11 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     from pgml.schemas.grid_schema import Source
 
     mode = phase_mode if phase_mode is not None else PhaseMode.SINGLE_PHASE_EQUIV
-    grid, id_map = to_grid(pn.create_cigre_network_lv(), phase_mode=mode)
+    grid, id_map = to_grid(
+        pn.create_cigre_network_lv(),
+        phase_mode=mode,
+        harmonic_line_model=harmonic_line_model,
+    )
 
     z = (
         _defaults.get("source.series_impedance_ohm")

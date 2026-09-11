@@ -15,6 +15,11 @@ only contains the source-specific field reading. It provides:
   equivalent path (preserves the exact ``[[value]]`` output of the old converters).
 - :func:`thevenin_from_z` / :func:`thevenin_from_sk` — source Thevenin (R, L)
   from an explicit impedance or from short-circuit power + R/X ratio.
+- :func:`resolve_converted_line_models` — turn the configured default harmonic line
+  model into per-line :attr:`~pgml.schemas.grid_schema.Line.harmonic_line_model`
+  values and log the one line naming what was applied.
+- :class:`ZeroSequenceDefaults` — tally of the lines whose zero-sequence data was
+  invented from the configured ratios, warned once per converted grid.
 - Emit helpers — :func:`build_node`, :func:`build_load`, :func:`build_source`,
   :func:`build_line_from_sequence`, :func:`build_line_from_matrices` — the single
   place the :class:`PhaseMode` decision and the per-phase mapping live, so all three
@@ -31,7 +36,9 @@ An explicit per-line ``r0``/``x0``/``c0`` always wins over these defaults.
 
 from __future__ import annotations
 
+import logging
 import math
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
@@ -133,6 +140,99 @@ def zero_sequence_ratios() -> tuple[float, float, float]:
         float(defaults.get("line.zero_sequence.x0_over_x1")),
         float(defaults.get("line.zero_sequence.c0_over_c1")),
     )
+
+
+@dataclass
+class ZeroSequenceDefaults:
+    """Tally of lines whose zero-sequence data was invented from configured ratios.
+
+    A positive-sequence dataset (the common case for pandapower / power-grid-model LV
+    and MV feeders) carries no ``r0``/``x0``/``c0``, so a three-phase expansion has to
+    synthesise them from the ``line.zero_sequence.*`` ratios. Those ratios are overhead
+    line rules of thumb; on a cable-dominated LV feeder ``R0/R1`` is typically much
+    closer to 1-2, and the assumption moves every unbalanced and triplen result. The
+    converter therefore counts the affected lines and warns ONCE per grid, naming the
+    ratios it used.
+    """
+
+    lines: int = 0
+    r0: int = 0
+    x0: int = 0
+    c0: int = 0
+
+    def note(self, *, r0=None, x0=None, c0=None) -> None:
+        """Record one converted line: ``None`` means the value had to be invented."""
+        self.lines += 1
+        self.r0 += r0 is None
+        self.x0 += x0 is None
+        self.c0 += c0 is None
+
+    def warn(self, logger: logging.Logger, *, tool: str) -> None:
+        """Emit the one-per-grid WARNING (no-op when nothing was invented)."""
+        if not (self.r0 or self.x0 or self.c0):
+            return
+        rr0, xr0, cr0 = zero_sequence_ratios()
+        logger.warning(
+            "%s conversion: %d of %d three-phase lines carry no zero-sequence data; "
+            "R0 invented for %d (R0/R1=%g), X0 for %d (X0/X1=%g), C0 for %d "
+            "(C0/C1=%g) from line.zero_sequence.*. These are overhead-line rules of "
+            "thumb: every unbalanced or triplen-harmonic result on this grid rests on "
+            "them (a cable feeder typically has a much lower R0/R1). Supply native "
+            "zero-sequence data, set the ratios in the modeling defaults, or give the "
+            "lines a conductor_geometry.",
+            tool,
+            max(self.r0, self.x0, self.c0),
+            self.lines,
+            self.r0,
+            rr0,
+            self.x0,
+            xr0,
+            self.c0,
+            cr0,
+        )
+
+
+def resolve_converted_line_models(
+    grid,
+    logger: logging.Logger,
+    *,
+    tool: str,
+    requested: Optional[str] = None,
+) -> None:
+    """Give every converted R/X line its harmonic line model, and log what was applied.
+
+    A source library has no concept of a frequency-dependent line model, so the
+    converted grid would otherwise reach a harmonic solve with an unresolved model and
+    be assembled with constant ``R`` and ``X ∝ h`` — the naive model the modeling
+    defaults deliberately do not choose. The default
+    (``line.harmonic_model.three_phase`` = ``sequence_aware``,
+    ``.single_phase`` = ``positive_sequence``) is therefore applied here, at conversion
+    time, where it can be logged; ``requested`` overrides it for every line
+    (``"none"`` leaves the lines unresolved, reproducing the raw stored parameters).
+    Lines that carry a ``conductor_geometry`` keep the full Carson model.
+    """
+    from pgml.geometry.synthesis import resolve_harmonic_line_models
+
+    counts = resolve_harmonic_line_models(grid, model=requested)
+    if not counts:
+        return
+    applied = ", ".join(f"{n} x {name}" for name, n in sorted(counts.items()))
+    if requested is None:
+        logger.info(
+            "%s conversion: harmonic line model applied from the modeling defaults "
+            "(line.harmonic_model.*): %s. Pass harmonic_line_model= to to_grid() to "
+            "choose another model, or give the lines a conductor_geometry for the full "
+            "Carson/Deri model.",
+            tool,
+            applied,
+        )
+    else:
+        logger.info(
+            "%s conversion: harmonic line model %r applied as requested: %s.",
+            tool,
+            requested,
+            applied,
+        )
 
 
 def _circulant_3x3(self_val: float, mutual_val: float) -> list[list[float]]:
@@ -674,6 +774,8 @@ __all__ = [
     "PhaseMode",
     "phases_for",
     "zero_sequence_ratios",
+    "ZeroSequenceDefaults",
+    "resolve_converted_line_models",
     "sequence_to_phase_matrices",
     "single_phase_matrix",
     "thevenin_from_z",

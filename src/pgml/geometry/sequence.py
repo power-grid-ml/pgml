@@ -167,8 +167,8 @@ def two_conductor_loop_z(geom: dict, freqs: Tensor, *, rho=100.0) -> Tensor:
     pair and applies the loop transform ``[1, -1]·Z·[1, -1]^T`` — for the ``+I/-I``
     current the large earth penetration-depth term is common to all four entries and
     CANCELS, so the result is the earth-floor-free positive-sequence impedance. Verifies,
-    via the bit-exact Carson code, that the direct :func:`positive_sequence_z` model is
-    physically grounded.
+    via the Carson code, that the direct :func:`positive_sequence_z` model is physically
+    grounded.
     """
     rdt = _rdtype(freqs)
     dev = freqs.device
@@ -231,10 +231,30 @@ CARSON_EARTH_R_PER_HZ = _cfg(
     "line.earth_return.resistance_coeff_ohm_per_m_per_hz"
 )  # Ohm/m per Hz (= pi^2 * 1e-7)
 
+# Carson/Deri earth-return REACTANCE coefficient: Xg(f) = coeff*f*ln(658.5*sqrt(rho/f)),
+# physically coeff = mu0. Only its frequency derivative enters a lumped zero sequence,
+# where the rho-dependent log cancels (see `zero_sequence_harmonic_z`). OpenDSS exposes
+# the same physics as the per-LineCode Xg.
+CARSON_EARTH_X_PER_HZ = _cfg(
+    "line.earth_return.reactance_coeff_ohm_per_m_per_hz"
+)  # Ohm/m per Hz per ln-unit (= mu0)
+
+#: Default frequency law of the zero-sequence reactance (see `zero_sequence_harmonic_z`).
+X0_FREQUENCY = _cfg("line.earth_return.x0_frequency")
+#: Default exponent p in X0(h) = X0*h**p.
+X0_EXPONENT = _cfg("line.earth_return.x0_exponent")
+#: Default assumption about whether a stored R0 already contains the earth return.
+R0_INCLUDES_EARTH_RETURN = _cfg("line.zero_sequence.r0_includes_earth_return")
+
 
 def carson_earth_resistance(freqs: Tensor, *, coeff: float = CARSON_EARTH_R_PER_HZ):
     """Carson earth-return resistance ``Re(f) = coeff*f`` (Ω/m), one phase (∝ frequency)."""
     return coeff * freqs.to(_rdtype(freqs))
+
+
+def _lead(v, rdt, dev) -> Tensor:
+    """Coerce a model coefficient to a tensor with a trailing axis for ``H`` broadcast."""
+    return _to(v, rdt, dev).unsqueeze(-1)
 
 
 def zero_sequence_harmonic_z(
@@ -244,26 +264,74 @@ def zero_sequence_harmonic_z(
     freqs: Tensor,
     *,
     skin: bool = True,
-    earth_resistance_coeff: float = CARSON_EARTH_R_PER_HZ,
+    earth_resistance_coeff=CARSON_EARTH_R_PER_HZ,
+    earth_reactance_coeff=CARSON_EARTH_X_PER_HZ,
+    x0_frequency: str = X0_FREQUENCY,
+    x0_exponent=X0_EXPONENT,
+    r0_includes_earth_return: bool = R0_INCLUDES_EARTH_RETURN,
 ) -> Tensor:
     """Zero-sequence harmonic impedance ``Z0(h)`` ``[*B, H]`` (Ω/m or Ω).
 
-    The conductor part scales like the positive sequence (``X0 ∝ h``, optional skin on
-    ``R0``); ADDED to it is the Carson earth/ground-loop resistance growth
-    ``3·(Re(f) − Re(f0))`` (``Re`` per :func:`carson_earth_resistance`), the
-    frequency-dependent DAMPING that a balanced positive-sequence current never sees.
-    The growth is ``≥ 0`` and monotone, so ``Z0(h)`` can never become non-physical.
-    Set ``earth_resistance_coeff=0`` to recover a pure conductor (no earth) zero
-    sequence. (The earth-return REACTANCE sub-linearity is geometry / return-path
-    dependent — deep earth vs nearby neutral/sheath — and is left to the full Carson
-    geometry path; here ``X0`` scales ∝ h.) Differentiable in ``R0``/``X0``; batched.
+    ::
+
+        R0(h) = R0_conductor * m_skin(h) + 3 * (Re(f) - Re_offset)
+        X0(h) = X0 * h**x0_exponent  [- 1.5*kx*f0*h*ln(h)   if carson_sublinear]
+
+    with ``Re(f) = earth_resistance_coeff * f`` (Carson's geometry-independent
+    earth-return resistance, ∝ f) and ``kx = earth_reactance_coeff``. Both forms
+    reproduce the stored ``R0``/``X0`` exactly at ``f0``.
+
+    ``r0_includes_earth_return`` selects how much of ``R0`` is conductor resistance:
+    ``True`` (real zero-sequence data) takes ``R0_conductor = R0 - 3*Re(f0)`` with
+    ``Re_offset = 0``, so the skin multiplier scales the conductor part only; ``False``
+    (an ``R0`` synthesised from an ``R0/R1`` ratio, which carries no earth content)
+    takes ``R0_conductor = R0`` with ``Re_offset = Re(f0)``, adding the earth return as
+    a pure increment. ``earth_resistance_coeff=0`` recovers a pure conductor
+    (no-earth) zero sequence.
+
+    The earth-return REACTANCE is sub-linear in frequency (the penetration depth
+    shrinks as ``1/sqrt(f)``). ``x0_frequency='linear'`` leaves that to the full
+    Carson geometry path, which knows the real return path (deep earth vs a nearby
+    neutral/sheath). ``x0_frequency='carson_sublinear'`` applies the lumped
+    Carson/Deri form, in which the soil resistivity cancels:
+    ``X0(h) = h*(X0 - 1.5*kx*f0*ln(h))`` — the same correction OpenDSS applies to an
+    R/X line through its ``Xg``. ``x0_exponent`` is an empirical alternative
+    (``X0 ∝ h**p``).
+
+    Differentiable in ``R0``/``X0`` and in every coefficient (each may be a tensor,
+    batched over the leading line axis); batched over lines and ``H``.
     """
-    z = positive_sequence_z(r0, x0, f0, freqs, skin=skin)  # [*B, H] conductor-like
     rdt = _rdtype(freqs)
+    dev = freqs.device
     f = freqs.to(rdt).reshape(-1)  # [H]
-    f0t = _to(f0, rdt, freqs.device).reshape(())
-    d_re = (3.0 * earth_resistance_coeff) * (f - f0t)  # [H] Ω/m, >= 0
-    return z + d_re.to(z.dtype)
+    f0t = _to(f0, rdt, dev).reshape(())
+    h = f / f0t  # [H]
+    r0t = _to(r0, rdt, dev)  # [*B]
+    x0t = _to(x0, rdt, dev)  # [*B]
+    rc = _lead(earth_resistance_coeff, rdt, dev)  # [*B, 1]
+
+    if r0_includes_earth_return:
+        r_cond = torch.clamp(r0t - 3.0 * rc.squeeze(-1) * f0t, min=0.0)  # [*B]
+        r_earth = (3.0 * rc) * f  # [*B, H]
+    else:
+        r_cond = r0t
+        r_earth = (3.0 * rc) * (f - f0t)  # [*B, H]
+    m = skin_resistance_multiplier(r_cond, f0, f) if skin else torch.ones_like(h)
+    r = r_cond.unsqueeze(-1) * m + r_earth  # [*B, H]
+
+    if isinstance(x0_exponent, float) and x0_exponent == 1.0:
+        x = x0t.unsqueeze(-1) * h  # exact geometric scaling
+    else:
+        x = x0t.unsqueeze(-1) * torch.pow(h, _lead(x0_exponent, rdt, dev))
+    if x0_frequency == "carson_sublinear":
+        kx = _lead(earth_reactance_coeff, rdt, dev)  # [*B, 1]
+        x = x - (1.5 * kx * f0t) * (h * torch.log(h))
+    elif x0_frequency != "linear":
+        raise InputError(
+            f"Unknown zero-sequence reactance law x0_frequency={x0_frequency!r} "
+            "(expected 'linear' or 'carson_sublinear')."
+        )
+    return torch.complex(r, x.expand_as(r)).to(_cdtype(rdt))
 
 
 def sequence_to_phase_z(z1: Tensor, z0: Tensor) -> Tensor:
@@ -291,22 +359,36 @@ def sequence_aware_phase_z(
     freqs: Tensor,
     *,
     skin: bool = True,
-    earth_resistance_coeff: float = CARSON_EARTH_R_PER_HZ,
+    earth_resistance_coeff=CARSON_EARTH_R_PER_HZ,
+    earth_reactance_coeff=CARSON_EARTH_X_PER_HZ,
+    x0_frequency: str = X0_FREQUENCY,
+    x0_exponent=X0_EXPONENT,
+    r0_includes_earth_return: bool = R0_INCLUDES_EARTH_RETURN,
 ) -> Tensor:
     """Full coupled phase impedance ``Z_abc(h)`` ``[*B, H, 3, 3]`` for UNBALANCED studies.
 
     Combines an earth-free positive sequence ``Z1(h)`` (:func:`positive_sequence_z`,
     ``X1 ∝ h`` + skin) with a damped zero sequence ``Z0(h)``
-    (:func:`zero_sequence_harmonic_z`, conductor + Carson earth-return resistance) and
-    recombines them (:func:`sequence_to_phase_z`). An unbalanced / zero-sequence current
-    then sees the earth-return damping in ``Z0``, while a balanced positive-sequence
-    current still sees only the earth-free ``Z1``. This is the model an asymmetric
-    4-wire LV harmonic study needs; differentiable in ``R1/X1/R0/X0``, batched over
-    lines and ``H``.
+    (:func:`zero_sequence_harmonic_z`, conductor + Carson earth return) and recombines
+    them (:func:`sequence_to_phase_z`). An unbalanced / zero-sequence current then sees
+    the earth-return damping in ``Z0``, while a balanced positive-sequence current still
+    sees only the earth-free ``Z1``. This is the model an asymmetric 4-wire LV harmonic
+    study needs; differentiable in ``R1/X1/R0/X0`` and in the earth-return
+    coefficients, batched over lines and ``H``. The zero-sequence keyword arguments are
+    documented on :func:`zero_sequence_harmonic_z`.
     """
     z1 = positive_sequence_z(r1, x1, f0, freqs, skin=skin)
     z0 = zero_sequence_harmonic_z(
-        r0, x0, f0, freqs, skin=skin, earth_resistance_coeff=earth_resistance_coeff
+        r0,
+        x0,
+        f0,
+        freqs,
+        skin=skin,
+        earth_resistance_coeff=earth_resistance_coeff,
+        earth_reactance_coeff=earth_reactance_coeff,
+        x0_frequency=x0_frequency,
+        x0_exponent=x0_exponent,
+        r0_includes_earth_return=r0_includes_earth_return,
     )
     return sequence_to_phase_z(z1, z0)
 
@@ -320,6 +402,8 @@ __all__ = [
     "phase_to_sequence",
     "sequence_impedances",
     "carson_earth_resistance",
+    "CARSON_EARTH_R_PER_HZ",
+    "CARSON_EARTH_X_PER_HZ",
     "zero_sequence_harmonic_z",
     "sequence_to_phase_z",
     "sequence_aware_phase_z",

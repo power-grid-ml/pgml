@@ -276,3 +276,93 @@ def test_cpu_cuda_power_flow_parity(grid_fn, slack):
     )
     assert res_cuda.v.device.type == "cuda"
     torch.testing.assert_close(res_cuda.v.cpu(), res_cpu.v, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("dtype", [torch.complex128, torch.complex64])
+def test_cpu_cuda_inductive_shunt_parity(dtype):
+    """The inductive shunt term ``1/(j*2*pi*f*L)`` is CPU/CUDA identical."""
+    from pgml.schemas.grid_schema import ShuntAppliance, ShuntReactor
+
+    ph = (Phase.A, Phase.B, Phase.C)
+    grid = Grid(
+        base_frequency_hz=50.0,
+        nodes=[Node(id=1, u_rated_v=400.0, phases=ph)],
+        branches=[
+            ShuntReactor(
+                id=5,
+                from_node=1,
+                to_node=1,
+                from_phases=ph,
+                to_phases=ph,
+                conductance_s=[
+                    [1e-4 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                capacitance_f=[
+                    [1e-6 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                inductance_h=[
+                    [0.4 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+            )
+        ],
+        appliances=[
+            Source(
+                id=1,
+                node=1,
+                phases=ph,
+                u_ref_v=(230.0,) * 3,
+                u_angle_deg=(0.0, -120.0, 120.0),
+                resistance_ohm=[
+                    [1.0 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                inductance_h=[
+                    [1e-6 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+            ),
+            ShuntAppliance(
+                id=9,
+                node=1,
+                phases=ph,
+                conductance_s=[0.0] * 3,
+                capacitance_f=[0.0] * 3,
+                inductance_h=[0.25] * 3,
+            ),
+        ],
+    )
+    rdt = torch.float64 if dtype == torch.complex128 else torch.float32
+    f = torch.tensor([50.0, 250.0, 650.0], dtype=rdt)
+    yb_cpu = assemble_network_ybus(grid, f, dtype=dtype, device=torch.device("cpu"))
+    yb_cuda = assemble_network_ybus(grid, f.to("cuda"), dtype=dtype, device="cuda")
+    assert yb_cuda.Y.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.complex128 else 1e-3
+    torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("dtype", [torch.complex128, torch.complex64])
+def test_cpu_cuda_per_line_earth_return_parity(dtype):
+    """A per-line earth-return override (tensor coefficients) is CPU/CUDA identical."""
+    from pgml.schemas.grid_schema import EarthReturnModel
+
+    grid = _sequence_aware_grid()
+    rdt = torch.float64 if dtype == torch.complex128 else torch.float32
+    for b in grid.branches:
+        if isinstance(b, Line):
+            b.earth_return = EarthReturnModel(
+                resistance_coeff_ohm_per_m_per_hz=torch.tensor(9.8696e-7, dtype=rdt),
+                x0_frequency="carson_sublinear",
+            )
+    f = torch.tensor([50.0, 250.0, 650.0], dtype=rdt)
+    yb_cpu = assemble_network_ybus(grid, f, dtype=dtype, device=torch.device("cpu"))
+    grid_cuda = _sequence_aware_grid()
+    for b in grid_cuda.branches:
+        if isinstance(b, Line):
+            b.earth_return = EarthReturnModel(
+                resistance_coeff_ohm_per_m_per_hz=torch.tensor(
+                    9.8696e-7, dtype=rdt, device="cuda"
+                ),
+                x0_frequency="carson_sublinear",
+            )
+    yb_cuda = assemble_network_ybus(grid_cuda, f.to("cuda"), dtype=dtype, device="cuda")
+    assert yb_cuda.Y.device.type == "cuda"
+    tol = 1e-9 if dtype == torch.complex128 else 1e-3
+    torch.testing.assert_close(yb_cuda.Y.cpu(), yb_cpu.Y, rtol=tol, atol=tol)

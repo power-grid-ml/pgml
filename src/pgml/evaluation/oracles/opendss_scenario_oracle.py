@@ -87,7 +87,8 @@ Capacitor/Reactor banks being balanced per leg).
 Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
 - ``Line.conductor_geometry`` — out of scope for this exporter; the EXISTING geometry
   parity oracle (``opendss_oracle.build_opendss_geometry_circuit`` /
-  ``opendss_geometry_systemy``) already gives bit-exact Carson-geometry parity for that case.
+  ``opendss_geometry_systemy``) already gives Carson-geometry parity (4.8e-8 relative) for
+  that case.
 - An unresolved ``type_ref`` on a ``Line``/``Transformer`` — materialise against
   ``Grid.types`` before exporting (this module never reads the catalog).
 - A ``Source`` with off-diagonal (phase-coupled) Thevenin impedance, or non-balanced
@@ -392,7 +393,7 @@ def _export_line(dss, ln: Line, busname: dict, f0: float, mode: str) -> None:
             f"Line {ln.id}: conductor_geometry lines are out of scope for this "
             "full-circuit scenario exporter -- use "
             "pgml.evaluation.oracles.opendss_oracle.build_opendss_geometry_circuit "
-            "/ opendss_geometry_systemy (bit-exact Carson-geometry parity) for a "
+            "/ opendss_geometry_systemy (Carson-geometry parity to ~5e-8 relative) for a "
             "geometry-based grid instead."
         )
     n = len(ln.from_phases)

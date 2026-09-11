@@ -382,7 +382,10 @@ class ResistanceFrequencyModel(GridModel):
     multiplier: FrequencyParam = Field(
         default_factory=lambda: ConstantParam(value=1.0),
         description="Per-unit resistance MULTIPLIER vs frequency, applied to the "
-        "reference-frequency resistance (1.0 = no skin effect).",
+        "reference-frequency resistance (1.0 = no skin effect). On a multi-phase "
+        "line the multiplier scales the CONDUCTOR part of the resistance matrix "
+        "only (diagonal minus the row's mean mutual); the mutual entries are the "
+        "geometry/earth-return path, where skin effect does not apply.",
     )
 
 
@@ -607,6 +610,89 @@ class BranchBase(GridModel):
     tags: dict[str, str] = Field(default_factory=dict)
 
 
+def _has_resistance_law(rfm: Optional["ResistanceFrequencyModel"]) -> bool:
+    """Whether a :class:`ResistanceFrequencyModel` carries a non-trivial law.
+
+    ``None`` or the default ``ConstantParam(value=1.0)`` is "no law"; anything else
+    (a constant other than 1, an analytic law, a sampled curve, an equation) is a
+    user-supplied resistance-vs-frequency multiplier.
+    """
+    if rfm is None:
+        return False
+    mult = rfm.multiplier
+    if isinstance(mult, ConstantParam):
+        return float(mult.value) != 1.0
+    return True
+
+
+class EarthReturnModel(GridModel):
+    """Carson earth-return parameters of the lumped ``sequence_aware`` line model.
+
+    Every field is ``None`` by default and then resolves from the packaged modeling
+    defaults (``pgml.defaults``, ``line.earth_return.*`` / ``line.zero_sequence.*``),
+    so this object is only needed to override the earth path of ONE line. The earth
+    return enters the zero sequence only (it cancels in the positive sequence), and
+    every form below reproduces the stored ``R0``/``X0`` exactly at ``f0``::
+
+        R0(h) = R0_conductor * m_skin(h) + 3 * (Re(h*f0) - Re_offset)
+        X0(h) = X0 * h**x0_exponent  [- 1.5 * kx * f0 * h * ln(h)  if carson_sublinear]
+
+    with ``Re(f) = resistance_coeff_ohm_per_m_per_hz * f`` (Carson's geometry-
+    independent earth-return resistance) and ``kx =
+    reactance_coeff_ohm_per_m_per_hz``. ``r0_includes_earth_return`` selects
+    ``R0_conductor = R0 - 3*Re(f0)``, ``Re_offset = 0`` (the stored ``R0`` is real
+    zero-sequence data that already contains the earth return) or, when false,
+    ``R0_conductor = R0``, ``Re_offset = Re(f0)`` (the stored ``R0`` is a
+    conductor-only value, e.g. one synthesised from an ``R0/R1`` ratio).
+
+    Consumed by the ``sequence_aware`` model only (``pgml.geometry.sequence``);
+    setting it on a line with another ``harmonic_line_model`` is rejected.
+    """
+
+    resistance_coeff_ohm_per_m_per_hz: Optional[Num] = si_field(
+        "Earth-return resistance per unit length per Hz (Carson: ``pi**2 * 1e-7``). "
+        "0 disables the earth-return damping. None = modeling default.",
+        short="Ohm/(m*Hz)",
+        long="ohm per metre per hertz",
+        default=None,
+    )
+    reactance_coeff_ohm_per_m_per_hz: Optional[Num] = si_field(
+        "Earth-return reactance per unit length per Hz per ln-unit (Carson/Deri: "
+        "``mu0``). Used by ``x0_frequency='carson_sublinear'`` only. None = modeling "
+        "default.",
+        short="Ohm/(m*Hz)",
+        long="ohm per metre per hertz",
+        default=None,
+    )
+    x0_frequency: Optional[Literal["linear", "carson_sublinear"]] = Field(
+        default=None,
+        description="Frequency law of the zero-sequence REACTANCE. ``linear``: "
+        "``X0(h) = X0*h`` (geometric scaling; the earth-return reactance "
+        "sub-linearity is left to the conductor-geometry path). "
+        "``carson_sublinear``: additionally subtract the Carson/Deri earth-return "
+        "reactance decay ``1.5*kx*f0*h*ln(h)``, which is geometry- and "
+        "soil-resistivity-independent and reproduces OpenDSS's ``Xg`` frequency "
+        "correction. None = modeling default.",
+    )
+    x0_exponent: Optional[Num] = si_field(
+        "Exponent of the zero-sequence reactance scaling ``X0(h) = X0*h**p``. "
+        "1.0 = geometric. Values below 1 mimic a sub-linear earth-return reactance "
+        "empirically; prefer ``x0_frequency='carson_sublinear'`` for the physical "
+        "form. None = modeling default.",
+        short="1",
+        long="exponent",
+        default=None,
+    )
+    r0_includes_earth_return: Optional[bool] = Field(
+        default=None,
+        description="True when the stored ``R0`` already contains the earth-return "
+        "resistance at ``f0`` (real zero-sequence data): the earth part is then "
+        "excluded from the skin-effect multiplier. False for an ``R0`` synthesised "
+        "from an ``R0/R1`` ratio, which carries no earth content. Either way "
+        "``R0(f0)`` equals the stored ``R0``. None = modeling default.",
+    )
+
+
 class Line(BranchBase):
     """Multi-phase line/cable, canonical SI per-length phase-domain form.
 
@@ -615,8 +701,36 @@ class Line(BranchBase):
         Z_series(h) = (R0 .* r_mult(h) + j*2*pi*h*f0 * L) * length_m
         Y_shunt(h)  = (G + j*2*pi*h*f0 * C) * length_m   (split half to each end)
 
+    That explicit-matrix form is ONE of three line models; ``harmonic_line_model``
+    selects which physics builds ``Z_series(h)``:
+
+    - ``geometry`` — a ``conductor_geometry`` is given and the full differentiable
+      Carson/Deri model (earth return + skin effect, per harmonic) replaces the
+      stored R/L/C entirely (``pgml.geometry.carson``).
+    - ``sequence_aware`` — the stored 3x3 ``Z_abc(f0)`` is split into ``Z1``/``Z0``,
+      each sequence is frequency-corrected separately (``Z1`` earth-free, ``Z0``
+      carrying the Carson earth-return damping of :class:`EarthReturnModel`) and
+      recombined; the model an unbalanced 4-wire harmonic study needs.
+    - ``positive_sequence`` — the formula above with ``r_mult(h)`` the Bessel
+      skin-effect rise of the positive-sequence resistance and no earth return.
+    - ``naive`` — the formula above with ``r_mult(h) = 1`` (``R`` constant,
+      ``X`` proportional to ``h``).
+    - ``None`` — unresolved: assembly uses the stored parameters as they are
+      (equivalent to ``naive`` unless ``resistance_frequency`` carries a law). The
+      converters and ``pgml.geometry.apply_default_harmonic_model`` resolve it from
+      the modeling default ``line.harmonic_model.*``.
+
     Electrical matrices may come from ``type_ref`` (``Grid.types.lines``) instead
     of being given explicitly; a resolver materialises them before assembly.
+
+    Every model is a LUMPED pi branch: the series impedance is ``z * length_m``, the
+    shunt admittance ``y * length_m`` split half to each terminal, with no hyperbolic
+    (``sinh``/``tanh``) long-line correction and no distributed-parameter model. This is
+    the standard representation for distribution feeders over the harmonic range (a 1 km
+    LV cable at 2.5 kHz is a small fraction of a wavelength) and it is a frequency-domain
+    steady-state model: standing-wave and travelling-wave phenomena are outside it, and
+    the lumped form loses accuracy for long lines at high order. Split a long line into
+    several shorter ones when that matters.
     """
 
     component: Literal["line"] = "line"
@@ -661,12 +775,121 @@ class Line(BranchBase):
         description="Carson conductor geometry; when set, Z(h)/Yc(h) are computed via "
         "the Carson/Deri model (earth return + skin effect) instead of explicit R/L/C.",
     )
+    harmonic_line_model: Optional[
+        Literal["geometry", "sequence_aware", "positive_sequence", "naive"]
+    ] = Field(
+        default=None,
+        description="Frequency-dependent line model (see the class docstring). None = "
+        "unresolved: assembly uses the stored parameters, and the converters / "
+        "``pgml.geometry.apply_default_harmonic_model`` resolve it from the modeling "
+        "default ``line.harmonic_model.three_phase`` / ``.single_phase``.",
+    )
+    harmonic_skin_effect: Optional[bool] = Field(
+        default=None,
+        description="Apply the Bessel ``I0/I1`` skin-effect resistance rise in the "
+        "``sequence_aware`` / ``positive_sequence`` models (``m(f0) = 1`` exactly, so "
+        "the fundamental is unchanged). None = modeling default "
+        "``line.harmonic_model.skin_effect``. Rejected with ``naive`` (which is the "
+        "constant-R model) and with ``geometry`` (whose skin effect comes from Rdc).",
+    )
+    earth_return: Optional[EarthReturnModel] = Field(
+        default=None,
+        description="Per-line override of the Carson earth-return path of the "
+        "``sequence_aware`` model. None = the modeling defaults "
+        "(``line.earth_return.*``). Rejected with another ``harmonic_line_model``, "
+        "which does not consume it.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_tag_selectors(cls, data: Any) -> Any:
+        """Migrate the pre-typed ``tags`` harmonic-model selectors to typed fields.
+
+        Grids persisted before the typed fields existed carried the line model in
+        ``tags["harmonic_line_model"]`` plus ``tags["seq_skin"]`` and
+        ``tags["seq_earth_coeff"]``. Those keys are moved onto
+        :attr:`harmonic_line_model`, :attr:`harmonic_skin_effect` and
+        :attr:`earth_return` (warning once per line) and removed from ``tags``, so a
+        persisted grid keeps its physics. An unknown model name now raises instead of
+        silently selecting the naive model.
+        """
+        if not isinstance(data, dict):
+            return data
+        tags = data.get("tags")
+        if not isinstance(tags, dict) or "harmonic_line_model" not in tags:
+            return data
+        import warnings
+
+        tags = dict(tags)
+        model = tags.pop("harmonic_line_model")
+        skin = tags.pop("seq_skin", None)
+        coeff = tags.pop("seq_earth_coeff", None)
+        data = dict(data)
+        data["tags"] = tags
+        if data.get("harmonic_line_model") is None:
+            data["harmonic_line_model"] = model
+        if skin is not None and data.get("harmonic_skin_effect") is None:
+            data["harmonic_skin_effect"] = str(skin).lower() == "true"
+        if coeff is not None and data.get("earth_return") is None:
+            data["earth_return"] = {"resistance_coeff_ohm_per_m_per_hz": float(coeff)}
+        warnings.warn(
+            f"Line {data.get('id')!r}: the harmonic line model was read from the "
+            f"legacy tags['harmonic_line_model']={model!r} and migrated to the typed "
+            "fields harmonic_line_model / harmonic_skin_effect / earth_return. "
+            "Re-persist the grid to drop the legacy tags.",
+            stacklevel=2,
+        )
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "Line":
         n = len(self.from_phases)
         if len(self.to_phases) != n:
             raise ValueError("Line `from_phases`/`to_phases` must have equal length.")
+        model = self.harmonic_line_model
+        if model == "geometry" and self.conductor_geometry is None:
+            raise ValueError(
+                "`harmonic_line_model='geometry'` requires a `conductor_geometry`."
+            )
+        if (
+            model is not None
+            and model != "geometry"
+            and self.conductor_geometry is not None
+        ):
+            raise ValueError(
+                f"`harmonic_line_model={model!r}` contradicts the `conductor_geometry` "
+                "on this line (a geometry line always uses the Carson/Deri model); "
+                "drop one of the two."
+            )
+        if model == "sequence_aware" and n != 3:
+            raise ValueError(
+                "`harmonic_line_model='sequence_aware'` needs a 3-phase line (it is a "
+                f"Z1/Z0 model); this line has {n} phase(s)."
+            )
+        if self.harmonic_skin_effect is not None and model in ("naive", "geometry"):
+            raise ValueError(
+                f"`harmonic_skin_effect` is not consumed by "
+                f"`harmonic_line_model={model!r}` (naive is the constant-R model; a "
+                "geometry line takes its skin effect from the conductor Rdc)."
+            )
+        if self.earth_return is not None and model in (
+            "naive",
+            "positive_sequence",
+            "geometry",
+        ):
+            raise ValueError(
+                f"`earth_return` is not consumed by `harmonic_line_model={model!r}` "
+                "(only the sequence_aware model has a lumped earth-return path; a "
+                "geometry line derives it from the conductor coordinates)."
+            )
+        if model is not None and _has_resistance_law(self.resistance_frequency):
+            raise ValueError(
+                f"`resistance_frequency` carries a frequency law, which "
+                f"`harmonic_line_model={model!r}` does not consume (it derives its own "
+                "resistance vs frequency). Use `resistance_frequency` with "
+                "`harmonic_line_model=None` for a measured multiplier, or "
+                "`harmonic_skin_effect` with the typed model."
+            )
         core = (
             self.series_resistance_ohm_per_m,
             self.series_inductance_h_per_m,
@@ -854,6 +1077,19 @@ class Switch(BranchBase):
 
 
 class ShuntReactor(BranchBase):
+    """Single-terminal shunt branch: a parallel G / L / C admittance to ground.
+
+    Per-phase matrix admittance per harmonic ``h``::
+
+        Y(h) = G + 1/(j*2*pi*h*f0*L) + j*2*pi*h*f0*C
+
+    The inductive term is present only when ``inductance_h`` is given, and it is the
+    only term whose susceptance magnitude FALLS with frequency — an inductive shunt
+    (a reactor, a grounding reactor) must use it, because the same element entered as
+    an equivalent negative capacitance has the wrong sign of frequency slope above
+    the fundamental.
+    """
+
     component: Literal["shunt_reactor"] = "shunt_reactor"
     conductance_s: PerPhaseMatrix = si_field(
         "Shunt conductance matrix G.", short="S", long="siemens"
@@ -861,14 +1097,24 @@ class ShuntReactor(BranchBase):
     capacitance_f: PerPhaseMatrix = si_field(
         "Shunt capacitance matrix C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
     )
+    inductance_h: Optional[PerPhaseMatrix] = si_field(
+        "Shunt inductance matrix L (Y_L(h)=(j*2*pi*h*f0*L)^-1). None = no inductive "
+        "path. Must be invertible (a diagonal matrix of positive inductances for an "
+        "uncoupled reactor bank).",
+        short="H",
+        long="henry",
+        default=None,
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "ShuntReactor":
         # Single-terminal shunt: matrices align to `from_phases` (the stamp reads
         # only the from side; `to_node`/`to_phases` conventionally mirror it).
         n = len(self.from_phases)
-        for f in ("conductance_s", "capacitance_f"):
+        for f in ("conductance_s", "capacitance_f", "inductance_h"):
             m = getattr(self, f)
+            if m is None:
+                continue
             if len(m) != n or any(len(r) != n for r in m):
                 raise ValueError(f"`{f}` must be {n}x{n} to match phase count.")
         return self
@@ -1582,12 +1828,31 @@ class Storage(InjectionAppliance):
 
 
 class ShuntAppliance(ApplianceBase):
+    """Fixed linear shunt (capacitor bank, reactor, filter leg) at one node.
+
+    Per-phase element admittance per harmonic ``h``::
+
+        y(h) = G + 1/(j*2*pi*h*f0*L) + j*2*pi*h*f0*C
+
+    ``inductance_h`` is optional; when absent the element is the historical parallel
+    G/C shunt. A genuinely INDUCTIVE shunt must set it, because an equivalent
+    negative capacitance has the wrong sign of frequency slope above the
+    fundamental (``|B|`` must fall like ``1/h``, not rise like ``h``).
+    """
+
     component: Literal["shunt"] = "shunt"
     conductance_s: Vec = si_field(
         "Per-phase shunt conductance G.", short="S", long="siemens"
     )
     capacitance_f: Vec = si_field(
         "Per-phase shunt capacitance C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
+    )
+    inductance_h: Optional[Vec] = si_field(
+        "Per-phase shunt inductance L (y_L(h)=1/(j*2*pi*h*f0*L)); every entry must be "
+        "> 0. None = no inductive path.",
+        short="H",
+        long="henry",
+        default=None,
     )
     connection: WindingConnection = Field(
         default=WindingConnection.WYE,
@@ -1609,6 +1874,17 @@ class ShuntAppliance(ApplianceBase):
                 "connection=DELTA requires at least 2 phases (a delta branch is a "
                 "phase-to-phase element)."
             )
+        n = len(self.phases)
+        for f in ("conductance_s", "capacitance_f", "inductance_h"):
+            v = getattr(self, f)
+            if v is not None and not _is_arraylike(v) and len(v) != n:
+                raise ValueError(f"`{f}` length must match the {n} connected phases.")
+        if self.inductance_h is not None and not _is_arraylike(self.inductance_h):
+            if any(float(x) <= 0.0 for x in self.inductance_h):
+                raise ValueError(
+                    "`inductance_h` entries must be > 0 (an inductive shunt branch is "
+                    "1/(j*2*pi*h*f0*L); use None for no inductive path)."
+                )
         return self
 
 

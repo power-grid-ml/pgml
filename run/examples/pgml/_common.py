@@ -11,7 +11,7 @@ from typing import Callable
 
 import torch
 
-from pgml.schemas.grid_schema import Line
+from pgml.geometry.synthesis import strip_grid_geometry
 
 
 def _time(fn: Callable[[], object], *, repeat: int, sync: bool = False) -> float:
@@ -30,8 +30,10 @@ def _time(fn: Callable[[], object], *, repeat: int, sync: bool = False) -> float
 
 
 def _strip_geometry(grid):
-    """Clear ``conductor_geometry`` off every Line so the R/X->geometry path is unused."""
-    for b in grid.branches:
-        if isinstance(b, Line):
-            b.conductor_geometry = None
-    return grid
+    """Clear every Line's geometry and harmonic model so the R/X path is used.
+
+    Delegates to :func:`pgml.geometry.strip_grid_geometry`: dropping
+    ``conductor_geometry`` alone would leave a line on the ``geometry`` harmonic model
+    with nothing to evaluate it from.
+    """
+    return strip_grid_geometry(grid)

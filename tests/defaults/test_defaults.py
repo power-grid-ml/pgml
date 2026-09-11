@@ -172,7 +172,11 @@ def test_default_model_three_phase_is_sequence_aware():
 
     grid = _three_phase_grid()
     apply_default_harmonic_model(grid)
-    assert grid.branches[0].tags["harmonic_line_model"] == "sequence_aware"
+    ln = grid.branches[0]
+    assert ln.harmonic_line_model == "sequence_aware"
+    assert ln.harmonic_skin_effect is True  # line.harmonic_model.skin_effect
+    # No per-line earth-return override: the line follows the defaults file.
+    assert ln.earth_return is None
 
 
 def test_default_model_single_phase_is_positive_sequence():
@@ -214,8 +218,8 @@ def test_default_model_single_phase_is_positive_sequence():
     )
     apply_default_harmonic_model(grid)
     ln = grid.branches[0]
-    assert "harmonic_line_model" not in (ln.tags or {})
-    assert ln.resistance_frequency.multiplier.law == "carson_skin_multiplier"
+    assert ln.harmonic_line_model == "positive_sequence"
+    assert ln.harmonic_skin_effect is True
 
 
 def test_default_model_respects_explicit_precedence():
@@ -223,6 +227,6 @@ def test_default_model_respects_explicit_precedence():
     from pgml.geometry import apply_default_harmonic_model
 
     grid = _three_phase_grid()
-    grid.branches[0].tags = {"harmonic_line_model": "positive_sequence"}
+    grid.branches[0].harmonic_line_model = "positive_sequence"
     apply_default_harmonic_model(grid)
-    assert grid.branches[0].tags["harmonic_line_model"] == "positive_sequence"
+    assert grid.branches[0].harmonic_line_model == "positive_sequence"

@@ -3,7 +3,11 @@
 Conductor geometry -> per-frequency line impedance/admittance, the
 "geometry -> impedance" path. Closes the harmonic line-impedance gap (OpenDSS applies
 an earth-return + skin correction at every harmonic; naive `X∝h` is wrong). Model =
-OpenDSS **DERI**, verified **bit-exact** vs OpenDSS (`docs/pgml/modeling/references/opendss/carson.md`).
+OpenDSS **DERI**; on the same geometry it agrees with OpenDSS below 1 kHz to **4.8e-8
+relative** on `Z` and **2.1212e-5** on `C`, which is exactly the difference between the SI
+physical constants used here and OpenDSS's truncated `mu0`/`e0`
+(`docs/pgml/modeling/references/opendss/carson.md`). Above 1 kHz OpenDSS changes its
+conductor spacing term (away from the published GMR) and pgml does not.
 Fully torch / autograd-safe / GPU-ready / batched over lines and H frequencies;
 gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 
@@ -19,8 +23,9 @@ gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 - `kron_reduce(M, n_phase)` eliminates neutral/shield conductors (>= n_phase).
 - `line_constants(x, y, gmr, rdc, radius, rho, freqs, n_phase) -> (Z[*B,H,P,P] Ω/m,
   C[*B,P,P] F/m)` phase-reduced. Conductor arrays are `[*B, N]`, phases first.
-  NOTE: capacitance is physically correct but not bit-exact to OpenDSS (different
-  capradius convention); irrelevant for the c=0 standard feeders. Series Z is exact.
+  NOTE: capacitance differs from OpenDSS's by 2.1212e-5 relative (the `e0` constant
+  ratio), and OpenDSS's `capradius` option is not read; irrelevant for the c=0 standard
+  feeders. Series Z agrees to 4.8e-8 relative (the `mu0` constant ratio).
 
 ## sequence.py (positive-sequence harmonic model — NO earth floor)
 The corrected R/X-line harmonic model. A balanced positive-sequence
@@ -44,15 +49,28 @@ For asymmetric studies the full coupled `Z_abc(h)` is needed: `Z1` earth-free, `
 carrying the earth/neutral return (excited by zero-sequence/residual current).
 - `carson_earth_resistance(freqs, *, coeff=π²·1e-7) -> Re[H]` (Ω/m): Carson earth-return
   resistance `Re(f)=coeff·f`, geometry-independent, ∝ f (the zero-seq damping).
-- `zero_sequence_harmonic_z(r0, x0, f0, freqs, *, skin=True, earth_resistance_coeff=π²·1e-7)
-  -> Z0[*B,H]`: conductor part (`X0∝h`+skin) `+ 3·(Re(f)−Re(f0))`; monotone, never
-  non-physical; `coeff=0` -> pure conductor. (Earth REACTANCE sub-linearity is return-path
-  dependent -> geometry path; `X0∝h` here.)
+- `zero_sequence_harmonic_z(r0, x0, f0, freqs, *, skin=True,
+  earth_resistance_coeff=π²·1e-7, earth_reactance_coeff=μ0, x0_frequency="linear",
+  x0_exponent=1.0, r0_includes_earth_return=False) -> Z0[*B,H]`:
+  `R0(h) = R0_cond·m_skin(h) + 3·(Re(f) − Re_offset)` and
+  `X0(h) = X0·h^p [− 1.5·kx·f0·h·ln h if carson_sublinear]`, exact at f0 for every
+  option. `r0_includes_earth_return` chooses whether the stored `R0` already contains
+  `3·Re(f0)` (real zero-sequence data; then the earth part is excluded from the skin
+  multiplier) or is conductor-only (an `R0/R1`-ratio value; the earth return is added as
+  an increment). `x0_frequency="carson_sublinear"` is the lumped Carson/Deri reactance
+  decay (ρ-independent, reproduces OpenDSS's `Xg` correction); `"linear"` (the default)
+  leaves the sub-linearity to the geometry path. Every coefficient may be a tensor
+  (differentiable, batched over lines). Defaults come from `line.earth_return.*` /
+  `line.zero_sequence.r0_includes_earth_return`; module constants
+  `CARSON_EARTH_R_PER_HZ`, `CARSON_EARTH_X_PER_HZ`, `X0_FREQUENCY`, `X0_EXPONENT`,
+  `R0_INCLUDES_EARTH_RETURN`.
 - `sequence_to_phase_z(z1, z0) -> [*,H,3,3]`: inverse Fortescue, `Zself=(Z0+2Z1)/3`,
   `Zmutual=(Z0−Z1)/3` (balanced/transposed).
-- `sequence_aware_phase_z(r1, x1, r0, x0, f0, freqs, *, skin, earth_resistance_coeff)
-  -> Z_abc[*B,H,3,3]`: positive seq (earth-free) + damped zero seq, recombined.
-  Differentiable in R1/X1/R0/X0; batched.
+- `sequence_aware_phase_z(r1, x1, r0, x0, f0, freqs, *, skin, earth_resistance_coeff,
+  earth_reactance_coeff, x0_frequency, x0_exponent, r0_includes_earth_return)
+  -> Z_abc[*B,H,3,3]`: positive seq (earth-free) + damped zero seq, recombined. The
+  zero-sequence keywords are those of `zero_sequence_harmonic_z`. Differentiable in
+  R1/X1/R0/X0 and in every coefficient; batched.
 
 ## synthesis.py
 - `synthesize_line_geometry(r1, x1, *, f0, phase, line_type, ...) -> LineGeometry` —
@@ -74,32 +92,61 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   CIGRE LV) that ship no geometry; the SAME geometry is fed to pgml and OpenDSS for the
   harmonic comparison (apples-to-apples Carson, incl. the triplen / zero-sequence
   orders). Validation vehicle; non-physical for low-X.
+- `strip_grid_geometry(grid) -> grid` (in place) — the inverse: drops every line's
+  `conductor_geometry` AND its harmonic model, so the lines return to explicit R/L/C with
+  an UNRESOLVED model (ready for `apply_default_harmonic_model`). Use it to compare the
+  lumped models against the geometry model on the same feeder; a bare
+  `line.conductor_geometry = None` now contradicts `harmonic_line_model="geometry"` and
+  is rejected by the schema.
 - `apply_positive_sequence_harmonic_model(grid, *, f0=None, skin=True) -> grid` (in place,
-  RECOMMENDED for R/X feeders): sets each R/X line's `resistance_frequency` to the
-  `carson_skin_multiplier` law; the explicit R/L path then gives `X(h)=X1·h` + skin on R,
-  NO geometry, NO earth floor. `positive_sequence_resistance_model(r1, *, f0)` builds the
-  model object. Assembly `_resistance_multiplier` evaluates the law differentiably (and
-  also supports `curve` multipliers via linear interp).
+  RECOMMENDED for R/X feeders): sets `Line.harmonic_line_model="positive_sequence"` +
+  `harmonic_skin_effect`; assembly then derives the skin multiplier from the line's OWN
+  positive-sequence resistance (mean diagonal minus mean mutual), scales the CONDUCTOR
+  part of the R matrix only (the mutual entries are the earth-return path) and gives
+  `X(h)=X1·h`, NO geometry, NO earth floor. `positive_sequence_resistance_model(r1, *, f0)`
+  still builds a `carson_skin_multiplier` `resistance_frequency` object for a line that
+  carries a user-supplied law instead of a typed model; assembly's
+  `_resistance_multiplier` evaluates that law differentiably (and `curve` multipliers via
+  linear interp).
 - `apply_sequence_aware_harmonic_model(grid, *, skin=True, earth_resistance_coeff=None)
-  -> grid` (in place, for UNBALANCED 4-wire studies): tags each 3-phase R/X line
-  `harmonic_line_model=sequence_aware`; assembly `_stamp_sequence_aware_lines` decomposes
-  `Z_abc(f0)` -> `Z1`/`Z0`, frequency-corrects each (`sequence_aware_phase_z`), and stamps
-  `Z_abc(h)`. Needs a full 3×3 R/L matrix (off-diagonals carry `Z0`). Untagged lines and
-  geometry lines unaffected.
+  -> grid` (in place, for UNBALANCED 4-wire studies): sets
+  `Line.harmonic_line_model="sequence_aware"` on each 3-phase R/X line (+
+  `harmonic_skin_effect`, and `earth_return` when a coefficient is passed); assembly
+  decomposes `Z_abc(f0)` -> `Z1`/`Z0`, frequency-corrects each
+  (`sequence_aware_phase_z`), and stamps `Z_abc(h)`. Needs a full 3×3 R/L matrix
+  (off-diagonals carry `Z0`). Other lines unaffected.
+- `resolve_harmonic_line_models(grid, *, f0=None, model=None, skin=None) -> {model: count}`
+  — resolve every UNRESOLVED R/X line from the modeling defaults (or from `model`), and
+  report what was applied; `apply_default_harmonic_model(grid, *, f0=None, skin=None,
+  model=None) -> grid` is the same thing returning the grid. The converters call the
+  former at conversion time and log the counts, so only hand-built grids need the call.
 
 ## Schema (grid_schema.py)
 - `ConductorPlacement(phase, x_m, y_m, gmr_m, radius_m, r_dc_ohm_per_m, is_neutral)` —
   physical fields tensor-capable (autograd through geometry).
 - `LineGeometry(conductors, earth_resistivity_ohm_m=100, provenance)`.
 - `Line.conductor_geometry: Optional[LineGeometry]` — when set, assembly
-  (`_stamp_geometry_lines` in `assembly/ybus.py`) uses Carson for Z(h)/Yc(h) instead of
+  (`_geometry_block_groups` in `assembly/ybus.py`) uses Carson for Z(h)/Yc(h) instead of
   explicit R/L/C. Lines group by (n_phase, n_cond) and batch through `line_constants`.
+- `Line.harmonic_line_model: Optional[Literal["geometry","sequence_aware",
+  "positive_sequence","naive"]]`, `Line.harmonic_skin_effect: Optional[bool]` and
+  `Line.earth_return: Optional[EarthReturnModel]` — the TYPED model selector (no free-text
+  tags). `None` = unresolved: assembly uses the stored parameters as given, and the
+  converters / `apply_default_harmonic_model` resolve it from `line.harmonic_model.*`.
+  `EarthReturnModel(resistance_coeff_ohm_per_m_per_hz, reactance_coeff_ohm_per_m_per_hz,
+  x0_frequency, x0_exponent, r0_includes_earth_return)` overrides the lumped earth path
+  per line; every field is tensor-capable and part of the differentiable path.
 
 ## Validation
-- `series_impedance`/`line_constants` vs OpenDSS geometry lines: relZ ~1e-13 (single +
-  3ph+neutral Kron) across 50–750 Hz. Assembly geometry path vs `line_constants`:
-  ~6e-16. Synthesis reproduces R1/X1 at f0 to ~1e-10. gradcheck passes w.r.t. Rdc, GMR,
-  height. Tests: `tests/reference/test_carson_opendss.py`,
+- `series_impedance`/`line_constants` vs OpenDSS geometry lines across 50–750 Hz:
+  relZ 4.66e-8 (single conductor) / 4.81e-8 (3ph+neutral Kron) — the SI-vs-truncated
+  `mu0` ratio (4.89e-8), i.e. the MODEL matches to floating point; relC 2.1212e-5 = the
+  `e0` ratio exactly. Both are pinned as such (a test asserts `C`'s deviation EQUALS the
+  constant ratio). At 1050 Hz relZ steps to 1.2e-2 because OpenDSS changes its conductor
+  spacing term at 1 kHz — a separate test fixes that boundary, and the docstrings scope
+  the agreement to below 1 kHz. Assembly geometry path vs `line_constants`: ~6e-16.
+  Synthesis reproduces R1/X1 at f0 to ~1e-10. gradcheck passes w.r.t. Rdc, GMR, height.
+  Tests: `tests/reference/test_carson_opendss.py`,
   `tests/differentiability/test_carson_gradcheck.py`.
 - Positive-sequence model: `Z1` from a genuine 3-phase Carson geometry scales ∝ h to
   ~1e-3 while `Z0` carries the earth floor (`X0(h)/(h·X0(f0))→0.88`, `R0/R1≈5`);
@@ -108,8 +155,15 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   1-phase -> earth floor.
 - Sequence-aware (unbalanced) model: `Z0(h)` gains a frequency-growing earth-return
   resistance the positive sequence lacks; `Z_abc(h)` recombines to exactly `(Z0,Z1,Z1)`;
-  a tagged 3-phase line assembled at harmonics recovers an earth-free `Z1` and a damped
-  `Z0`. gradcheck w.r.t. R1/X1/R0/X0 and through both assembly paths; CPU/CUDA parity.
-  Tests: `tests/reference/test_carson_sequence.py`,
+  a 3-phase line assembled at harmonics recovers an earth-free `Z1` and a damped `Z0`.
+  Against OpenDSS's own R/X-line model with MATCHED earth parameters (`Rg = coeff·f0`,
+  `Xg` from the reactance coefficient, `DefaultBaseFrequency = f0`) and `skin=False`, the
+  lumped `Z_abc(h)` agrees to ~1e-10 relative at h = 1..25 for BOTH `x0_frequency` laws;
+  with `skin=True` (a pgml refinement OpenDSS does not apply to an R/X line) the
+  deviation is the skin rise alone (1.7 % at h=3 to 9.6 % at h=25 on `Z1` for an LV
+  cable). gradcheck w.r.t. R1/X1/R0/X0, the earth coefficients and the X0 exponent, and
+  through both assembly paths; CPU/CUDA parity. Tests:
+  `tests/reference/test_carson_sequence.py`,
+  `tests/reference/test_lumped_sequence_opendss.py`,
   `tests/differentiability/test_sequence_gradcheck.py`, `tests/gpu/test_device_parity.py`.
   Decision record: `docs/pgml/modeling/harmonic-line-model.md`.

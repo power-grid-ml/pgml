@@ -1,7 +1,10 @@
 """pgml.geometry — conductor geometry -> differentiable line constants (Carson/Deri).
 
 - ``carson``: torch Carson/Deri series impedance + skin effect + Maxwell capacitance,
-  bit-exact vs OpenDSS (see ``docs/pgml/modeling/references/opendss/carson.md``), differentiable & batched.
+  differentiable & batched. On the same geometry it agrees with OpenDSS below 1 kHz to
+  4.8e-8 relative on ``Z`` and 2.1e-5 on ``C`` — the difference between the SI physical
+  constants used here and OpenDSS's truncated ones (see
+  ``docs/pgml/modeling/references/opendss/carson.md``).
 - ``synthesis``: build a :class:`~pgml.schemas.grid_schema.LineGeometry` that reproduces
   a line's R/X at fundamental (for R/X-defined feeders that lack conductor geometry),
   with provenance tracking.
@@ -38,6 +41,8 @@ from .synthesis import (
     apply_positive_sequence_harmonic_model,
     apply_sequence_aware_harmonic_model,
     positive_sequence_resistance_model,
+    resolve_harmonic_line_models,
+    strip_grid_geometry,
     synthesize_grid_geometry,
     synthesize_line_geometry,
     synthesize_three_phase_geometry,
@@ -68,8 +73,10 @@ __all__ = [
     "synthesize_line_geometry",
     "synthesize_three_phase_geometry",
     "synthesize_grid_geometry",
+    "strip_grid_geometry",
     "positive_sequence_resistance_model",
     "apply_positive_sequence_harmonic_model",
     "apply_sequence_aware_harmonic_model",
     "apply_default_harmonic_model",
+    "resolve_harmonic_line_models",
 ]

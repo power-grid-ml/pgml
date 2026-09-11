@@ -20,6 +20,27 @@ Both defaults are backward-compatible; assembly enforces the semantics.)
   the schema (real pairs), structured unit metadata via `si_field`. Conductor geometry:
   `ConductorPlacement` (x/y/GMR/radius/Rdc, tensor-capable) + `LineGeometry`; a
   `Line.conductor_geometry` makes assembly use the Carson/Deri path (`pgml.geometry`).
+  - Harmonic line model (typed, replaces the former free-text `Line.tags` selectors):
+    `Line.harmonic_line_model: Optional[Literal["geometry","sequence_aware",
+    "positive_sequence","naive"]]` (None = unresolved; the converters and
+    `pgml.geometry.apply_default_harmonic_model` resolve it from the modeling default
+    `line.harmonic_model.*`, assembly never does), `Line.harmonic_skin_effect:
+    Optional[bool]`, and `Line.earth_return: Optional[EarthReturnModel]`
+    (`resistance_coeff_ohm_per_m_per_hz`, `reactance_coeff_ohm_per_m_per_hz`,
+    `x0_frequency`, `x0_exponent`, `r0_includes_earth_return` — the lumped Carson
+    earth-return path of the `sequence_aware` model, every field tensor-capable and on
+    the differentiable path). The `Line` validator REJECTS contradictory combinations (a
+    lumped model on a geometry line, `sequence_aware` on a non-3-phase line, an
+    `earth_return` / `harmonic_skin_effect` / `resistance_frequency` law the selected
+    model does not consume). A grid persisted with the old
+    `tags["harmonic_line_model"]` / `tags["seq_skin"]` / `tags["seq_earth_coeff"]` is
+    MIGRATED to the typed fields by a `mode="before"` validator with a warning, and an
+    unknown model name now raises instead of silently selecting the naive model.
+  - Inductive shunt: `ShuntReactor.inductance_h: Optional[PerPhaseMatrix]` and
+    `ShuntAppliance.inductance_h: Optional[Vec]` (entries > 0) add the
+    `1/(j·2πh f0 L)` term to the shunt stamp, so an inductive shunt's susceptance
+    magnitude falls as `1/h` instead of rising as `h`. Absent = no inductive path, so
+    persisted grids are unchanged.
   - DER / inverter control + storage (`docs/pgml/modeling/der-pv-storage.md`):
     `Load`/`Generator`/`Storage` share the `InjectionAppliance` base (consumers test
     `isinstance(a, InjectionAppliance)`; sign = +1 Load, −1 Generator/Storage). `Generator`

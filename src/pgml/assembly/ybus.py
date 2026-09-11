@@ -30,6 +30,7 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 
+from pgml.defaults import get as _cfg
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     GenericBranch,
@@ -273,8 +274,18 @@ def assemble_ybus(
     shunts (loads/generators folded as constant impedance at nominal voltage) PLUS
     the source Norton (Thévenin) shunt. The nonlinear (const-P / ZIP) power flow
     instead uses :func:`assemble_network_ybus` + :func:`device_current_injections`
-    (see ``assembly/CONTEXT.md``). The IEEE33 / tiny-grid oracle tests keep using
-    this function as their regression suite, so its behaviour is UNCHANGED.
+    (see ``assembly/CONTEXT.md``).
+
+    The folded device shunt is the OPERATING POINT expressed as an admittance: its
+    conductance ``P/|V0|^2`` is a resistance and stays flat with frequency, while its
+    susceptance ``-Q/|V0|^2`` is the equivalent reactive element and scales like one
+    (``* h`` where the device is capacitive, ``/ h`` where it is inductive) — the
+    parallel R-L / R-C branch of the classical harmonic load model. The fold is exact
+    at ``f0``; it is a MODEL of the device at other frequencies, derived from P and Q
+    and not from a measured harmonic impedance. The harmonic power flow
+    (:func:`pgml.solver.solve_harmonic_flow`) does not fold devices at all: it
+    assembles :func:`assemble_network_ybus` and treats every device as a current
+    source, so use that function for a harmonic network matrix.
 
     Parameters
     ----------
@@ -474,8 +485,8 @@ def _series_terminal_indices(
 
 
 def _is_sequence_aware(line) -> bool:
-    """A line opted into the sequence-aware harmonic model (UNBALANCED studies)."""
-    return (line.tags or {}).get("harmonic_line_model") == "sequence_aware"
+    """A line that selected the sequence-aware harmonic model (UNBALANCED studies)."""
+    return line.harmonic_line_model == "sequence_aware"
 
 
 @_branch_stamp("line")
@@ -483,6 +494,12 @@ def _line_block_groups(
     grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
 ):
     """Yield ``(group, block, rows, cols)`` for every line group (all three paths).
+
+    Every path produces a LUMPED pi branch — ``Z = z·length``, ``Y = y·length`` with the
+    shunt split half to each terminal, no hyperbolic long-line correction and no
+    distributed-parameter model. Frequency-domain steady state only: no standing or
+    travelling waves. Accurate for distribution feeders over the harmonic range; split a
+    long line into segments when the electrical length stops being small.
 
     Explicit-R/L/C lines go through the matrix path; lines carrying a
     ``conductor_geometry`` go through the Carson/Deri geometry path; lines tagged
@@ -506,7 +523,14 @@ def _line_block_groups(
     seq_lines = [b for b in flow_lines if _is_sequence_aware(b)]
     if rx_lines:
         yield from _line_rx_block_groups(
-            rx_lines, f, index, cdt, rdt, device, param_overrides
+            rx_lines,
+            f,
+            index,
+            cdt,
+            rdt,
+            device,
+            param_overrides,
+            f0=float(grid.base_frequency_hz),
         )
     if seq_lines:
         yield from _sequence_aware_block_groups(
@@ -515,6 +539,54 @@ def _line_block_groups(
     yield from _geometry_block_groups(
         grid, f, index, cdt, rdt, device, param_overrides, branch_states
     )
+
+
+def _sequence_aware_options(line) -> tuple:
+    """DISCRETE sequence-aware model options of one line (the batching group key).
+
+    ``(skin, x0_frequency, r0_includes_earth_return)``, each resolved from the line's
+    typed fields and falling back to the modeling defaults (``pgml.defaults``). These
+    select code paths, so they group lines; the numeric coefficients do not (see
+    :func:`_earth_field`).
+    """
+    from pgml.geometry import sequence as _seq
+
+    er = line.earth_return
+    skin = line.harmonic_skin_effect
+    if skin is None:
+        skin = _cfg("line.harmonic_model.skin_effect")
+    x0_frequency = getattr(er, "x0_frequency", None) or _seq.X0_FREQUENCY
+    r0_inc = getattr(er, "r0_includes_earth_return", None)
+    if r0_inc is None:
+        r0_inc = _seq.R0_INCLUDES_EARTH_RETURN
+    return bool(skin), str(x0_frequency), bool(r0_inc)
+
+
+#: Modeling-default keys of the numeric earth-return coefficients, by field name.
+_EARTH_DEFAULT_KEY = {
+    "resistance_coeff_ohm_per_m_per_hz": (
+        "line.earth_return.resistance_coeff_ohm_per_m_per_hz"
+    ),
+    "reactance_coeff_ohm_per_m_per_hz": (
+        "line.earth_return.reactance_coeff_ohm_per_m_per_hz"
+    ),
+    "x0_exponent": "line.earth_return.x0_exponent",
+}
+
+
+def _earth_field(lines, field: str, rdt: torch.dtype, device) -> Tensor:
+    """Stack one numeric earth-return coefficient over a line group -> ``[K]``.
+
+    Each line's :class:`~pgml.schemas.grid_schema.EarthReturnModel` value is used when
+    set (a python float OR a tensor, so gradients flow), else the modeling default.
+    """
+    vals = []
+    for ln in lines:
+        v = getattr(ln.earth_return, field, None) if ln.earth_return else None
+        if v is None:
+            v = _cfg(_EARTH_DEFAULT_KEY[field])
+        vals.append(_geom_scalar(v, rdt, device))
+    return torch.stack(vals, 0)
 
 
 def _sequence_aware_block_groups(
@@ -529,26 +601,24 @@ def _sequence_aware_block_groups(
     model an asymmetric 4-wire study needs. Differentiable in R/L; the shunt ``C`` keeps
     the usual ``B∝h`` split.
     """
-    from pgml.geometry.sequence import CARSON_EARTH_R_PER_HZ, sequence_aware_phase_z
+    from pgml.geometry.sequence import sequence_aware_phase_z
 
     f0 = float(grid.base_frequency_hz)
     two_pi_f0 = 2.0 * math.pi * f0
     two_pi_f = (2.0 * torch.pi) * f  # [H]
 
-    # Group by (skin, earth coeff) so each batched call shares its model options.
+    # Group by the DISCRETE model options (skin flag, reactance law, R0 convention) so
+    # each batched call shares them; the numeric earth coefficients stay per line and
+    # are stacked into tensors, so a tensor coefficient keeps its gradient.
     by_opts: dict[tuple, list] = {}
     for ln in lines:
-        if len(ln.from_phases) != 3:
-            raise ValueError(
-                f"Line {ln.id}: harmonic_line_model=sequence_aware requires a 3-phase "
-                f"line (got {len(ln.from_phases)} phases); it is a Z1/Z0 model."
-            )
-        tags = ln.tags or {}
-        skin = tags.get("seq_skin", "true") == "true"
-        coeff = float(tags.get("seq_earth_coeff", CARSON_EARTH_R_PER_HZ))
-        by_opts.setdefault((skin, coeff), []).append(ln)
+        by_opts.setdefault(_sequence_aware_options(ln), []).append(ln)
 
-    for (skin, coeff), group in by_opts.items():
+    for opts, group in by_opts.items():
+        skin, x0_frequency, r0_includes_earth = opts
+        coeff = _earth_field(group, "resistance_coeff_ohm_per_m_per_hz", rdt, device)
+        coeff_x = _earth_field(group, "reactance_coeff_ohm_per_m_per_hz", rdt, device)
+        x0_exponent = _earth_field(group, "x0_exponent", rdt, device)
         r_list, l_list, c_list, len_list = [], [], [], []
         for ln in group:
             r_list.append(
@@ -592,6 +662,10 @@ def _sequence_aware_block_groups(
             f,
             skin=skin,
             earth_resistance_coeff=coeff,
+            earth_reactance_coeff=coeff_x,
+            x0_frequency=x0_frequency,
+            x0_exponent=x0_exponent,
+            r0_includes_earth_return=r0_includes_earth,
         )  # [K,H,3,3]  Ω/m
 
         z_len = (z_abc * length[:, None, None, None]).to(cdt)  # [K,H,3,3]
@@ -698,22 +772,38 @@ def _geometry_block_groups(
         yield group, block, rows, cols
 
 
-def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
-    by_p: dict[int, list] = {}
+def _line_rx_block_groups(
+    lines, f, index, cdt, rdt, device, param_overrides, *, f0: float
+):
+    """Yield ``(group, block, rows, cols)`` for explicit-R/L/C lines.
+
+    Covers the ``naive`` and ``positive_sequence`` models and lines whose
+    ``harmonic_line_model`` is still unresolved (assembled from their stored
+    parameters). The series resistance at harmonic ``h`` is::
+
+        R(h) = m(h) * (R - R_earth) + R_earth
+
+    where ``R_earth`` holds the off-diagonal (mutual) entries and, on its diagonal, each
+    row's mean mutual. On a multi-phase line the mutual resistance IS the earth-return
+    term (Carson: it is common to the self and mutual entries), so the skin-effect
+    multiplier ``m(h)`` scales the CONDUCTOR part only; a 1-phase line has no mutual and
+    keeps ``R(h) = m(h) * R``. ``m(h)`` is the Bessel skin curve of the line's
+    positive-sequence resistance for ``positive_sequence`` (differentiable in ``R``),
+    ``1`` for ``naive``, and the line's ``resistance_frequency`` law otherwise.
+    """
+    by_opts: dict[tuple, list] = {}
     for ln in lines:
-        by_p.setdefault(len(ln.from_phases), []).append(ln)
-    for p, group in by_p.items():
-        r_list, l_list, g_list, c_list, mult_list = [], [], [], [], []
+        by_opts.setdefault(_rx_options(ln), []).append(ln)
+    for (p, model, skin), group in by_opts.items():
+        r_list, l_list, g_list, c_list, mult_list, r_pm_list = [], [], [], [], [], []
         for ln in group:
             length = ln.length_m
-            r0 = (
-                _override(
-                    param_overrides,
-                    ("line", ln.id, "series_resistance_ohm_per_m"),
-                    _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
-                )
-                * length
+            r_pm = _override(
+                param_overrides,
+                ("line", ln.id, "series_resistance_ohm_per_m"),
+                _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
             )
+            r0 = r_pm * length
             ind = (
                 _override(
                     param_overrides,
@@ -741,19 +831,32 @@ def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
                 )
             else:
                 cond = torch.zeros((p, p), dtype=rdt, device=device)
+            r_pm_list.append(r_pm)
             r_list.append(r0)
             l_list.append(ind)
             g_list.append(cond)
             c_list.append(cap)
-            mult_list.append(_resistance_multiplier(ln, f, rdt, device))  # [H]
+            if model is None:
+                mult_list.append(_resistance_multiplier(ln, f, rdt, device))  # [H]
         r = torch.stack(r_list, 0)  # [K,P,P]
         ind = torch.stack(l_list, 0)
         g = torch.stack(g_list, 0)
         c = torch.stack(c_list, 0)
-        rmult = torch.stack(mult_list, 1)  # [H,K]
-        rmult = rmult[:, :, None, None]  # [H,K,1,1]
+        r_earth = _mutual_resistance(r)  # [K,P,P] (zeros for P == 1)
+        if model is None:
+            rmult = torch.stack(mult_list, 1)[:, :, None, None]  # [H,K,1,1]
+        elif model == "positive_sequence" and skin:
+            from pgml.geometry.sequence import skin_resistance_multiplier
 
-        ys = series_admittance_matrix(r, ind, f, cdt, r_mult=rmult)  # [H,K,P,P]
+            r1 = _positive_sequence_resistance(torch.stack(r_pm_list, 0))  # [K]
+            rmult = skin_resistance_multiplier(r1, f0, f)  # [K,H]
+            rmult = rmult.transpose(0, 1)[:, :, None, None]  # [H,K,1,1]
+        else:  # naive / positive_sequence without skin: R constant
+            rmult = torch.ones((f.shape[0], 1, 1, 1), dtype=rdt, device=device)
+
+        ys = series_admittance_matrix(
+            r - r_earth, ind, f, cdt, r_mult=rmult, r_unscaled=r_earth
+        )  # [H,K,P,P]
         series_block = pi_series_blocks(ys)  # [H,K,2P,2P]
 
         # Shunt admittance split half to each terminal diagonal block.
@@ -768,6 +871,48 @@ def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
+
+
+def _rx_options(line) -> tuple:
+    """``(n_phases, harmonic_line_model, skin)`` batching key of an explicit-R/L/C line."""
+    model = line.harmonic_line_model
+    skin = line.harmonic_skin_effect
+    if model == "positive_sequence" and skin is None:
+        skin = _cfg("line.harmonic_model.skin_effect")
+    return len(line.from_phases), model, bool(skin)
+
+
+def _mutual_resistance(r: Tensor) -> Tensor:
+    """Earth-return part of a resistance matrix ``[K,P,P]``: the mutual entries.
+
+    Off-diagonal entries are kept as they are; each diagonal entry becomes its row's
+    mean mutual (for the circulant matrix of a transposed line that is exactly the
+    mutual resistance ``Rg``). Returns zeros for a single-phase line, which has no
+    mutual and therefore no earth-return component in its stored ``R``.
+    """
+    p = r.shape[-1]
+    if p == 1:
+        return torch.zeros_like(r)
+    eye = torch.eye(p, dtype=r.dtype, device=r.device)
+    off = r * (1.0 - eye)  # [K,P,P]
+    row_mean = off.sum(-1) / (p - 1)  # [K,P]
+    return off + row_mean.unsqueeze(-1) * eye
+
+
+def _positive_sequence_resistance(r: Tensor) -> Tensor:
+    """Positive-sequence resistance ``[K]`` of per-metre resistance matrices ``[K,P,P]``.
+
+    ``mean(diagonal) - mean(off-diagonal)``: the mutual entries are the earth-return
+    term, so the resistance a balanced (positive-sequence) current sees is the
+    difference. Matches :func:`pgml.geometry.synthesis._line_representative_r1`.
+    """
+    p = r.shape[-1]
+    diag = r.diagonal(dim1=-2, dim2=-1)  # [K,P]
+    self_ = diag.mean(-1)  # [K]
+    if p == 1:
+        return self_
+    mutual = (r.sum((-2, -1)) - diag.sum(-1)) / (p * (p - 1))  # [K]
+    return self_ - mutual
 
 
 def _resistance_multiplier(line, f, rdt, device) -> Tensor:
@@ -969,17 +1114,27 @@ def _shunt_reactor_block_groups(
     ]
     if not reactors:
         return
-    by_p: dict[int, list] = {}
+    # Group by phase count AND by whether the reactor has an inductive path: the
+    # inductive term needs a matrix inverse, so it cannot share a batch with a
+    # purely capacitive/conductive shunt.
+    by_p: dict[tuple, list] = {}
     for sr in reactors:
-        by_p.setdefault(len(sr.from_phases), []).append(sr)
-    for p, group in by_p.items():
+        by_p.setdefault((len(sr.from_phases), sr.inductance_h is not None), []).append(
+            sr
+        )
+    for (_p, inductive), group in by_p.items():
         g_list, c_list = [], []
         for sr in group:
             g_list.append(_real_matrix(sr.conductance_s, rdt, device))
             c_list.append(_real_matrix(sr.capacitance_f, rdt, device))
         g = torch.stack(g_list, 0)
         c = torch.stack(c_list, 0)
-        block = shunt_admittance_matrix(g, c, f, cdt)  # [H,K,P,P]
+        ind = (
+            torch.stack([_real_matrix(sr.inductance_h, rdt, device) for sr in group], 0)
+            if inductive
+            else None
+        )
+        block = shunt_admittance_matrix(g, c, f, cdt, ind=ind)  # [H,K,P,P]
         rows, cols = _shunt_node_indices(group, index, device, terminal="from")
         yield group, block, rows, cols
 
@@ -987,13 +1142,15 @@ def _shunt_reactor_block_groups(
 def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides):
     """Stamp every in-service :class:`ShuntAppliance` (fixed linear shunt).
 
-    WYE (default): each per-phase ``y = G + jB`` connects its phase to ground (the
-    historical diagonal stamp). DELTA: element ``k`` connects phase ``k`` to phase
-    ``(k+1) % n`` cyclic with ``y_k = G_k + j·2π f C_k``, stamped ``M^T diag(y) M``
-    via the same :func:`cyclic_delta_incidence` convention the DELTA load uses (``+y``
-    on both leg diagonals, ``-y`` off-diagonal). Both are frequency-correct at every
-    harmonic order and differentiable w.r.t. ``G``/``C`` (the incidence ``M`` is a
-    topology constant).
+    Each per-phase element is ``y(h) = G + j·2π h f0 C + 1/(j·2π h f0 L)`` (the
+    inductive term only where ``inductance_h`` is set — an inductive shunt's
+    susceptance magnitude falls as ``1/h`` where a capacitive one rises as ``h``).
+    WYE (default): each element connects its phase to ground (the historical diagonal
+    stamp). DELTA: element ``k`` connects phase ``k`` to phase ``(k+1) % n`` cyclic,
+    stamped ``M^T diag(y) M`` via the same :func:`cyclic_delta_incidence` convention the
+    DELTA load uses (``+y`` on both leg diagonals, ``-y`` off-diagonal). Both are
+    frequency-correct at every harmonic order and differentiable w.r.t. ``G``/``C``/``L``
+    (the incidence ``M`` is a topology constant).
     """
     shunts = [
         a for a in grid.appliances if isinstance(a, ShuntAppliance) and a.in_service
@@ -1002,8 +1159,10 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
         return y
     by_key: dict[tuple, list] = {}
     for sh in shunts:
-        by_key.setdefault((sh.connection, len(sh.phases)), []).append(sh)
-    for (conn, p), group in by_key.items():
+        by_key.setdefault(
+            (sh.connection, len(sh.phases), sh.inductance_h is not None), []
+        ).append(sh)
+    for (conn, p, inductive), group in by_key.items():
         rows, cols = _shunt_node_indices(group, index, device, terminal="node")
         if conn == WindingConnection.DELTA:
             m_c = cyclic_delta_incidence(p, rdt, device).to(cdt)  # [p, p]
@@ -1025,6 +1184,19 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
             b = two_pi_f[:, None, None] * c[None]  # [H, K, p] (B = 2*pi*f*C)
             g_b = g[None].expand_as(b)  # [H, K, p]
             y_elem = torch.complex(g_b.to(rdt), b.to(rdt)).to(cdt)  # [H, K, p]
+            if inductive:
+                ind = torch.stack(
+                    [
+                        torch.as_tensor(sh.inductance_h, dtype=rdt, device=device)
+                        for sh in group
+                    ],
+                    0,
+                )  # [K, p]
+                z_l = torch.complex(
+                    torch.zeros_like(b).to(rdt),
+                    (two_pi_f[:, None, None] * ind[None]).to(rdt),
+                ).to(cdt)  # j*2*pi*f*L  [H, K, p]
+                y_elem = y_elem + 1.0 / z_l
             # Y_block = M^T diag(y_elem) M  -> [H, K, p, p].
             block = torch.einsum("ei,hke,ej->hkij", m_c, y_elem, m_c)
         else:  # WYE (phase-to-ground) — historical diagonal stamp
@@ -1042,7 +1214,20 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
                 )
             g = torch.stack(g_list, 0)
             c = torch.stack(c_list, 0)
-            block = shunt_admittance_matrix(g, c, f, cdt)
+            ind = (
+                torch.stack(
+                    [
+                        torch.diag(
+                            torch.as_tensor(sh.inductance_h, dtype=rdt, device=device)
+                        )
+                        for sh in group
+                    ],
+                    0,
+                )
+                if inductive
+                else None
+            )
+            block = shunt_admittance_matrix(g, c, f, cdt, ind=ind)
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 
@@ -1091,18 +1276,48 @@ def _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides):
 
 
 # ---- const-Z load / generator ---------------------------------------------
+def _const_z_frequency_scaling(y_elem, f, f0: float, cdt) -> Tensor:
+    """Scale a const-Z element admittance ``[*b, K, P]`` over frequency -> ``[*b, H, K, P]``.
+
+    The conductance stays flat; the susceptance scales as the reactive element it
+    represents at the operating point (``B*h`` where it is capacitive, ``B/h`` where it
+    is inductive). The two branches are selected with ``clamp``, so the result is exact
+    at ``h = 1`` and differentiable in the operating-point power.
+    """
+    rdt = _rdtype(cdt)
+    h = (f / f0).to(rdt).reshape(-1)[:, None, None]  # [H,1,1]
+    g = y_elem.real.unsqueeze(-3)  # [*b,1,K,P]
+    b0 = y_elem.imag.unsqueeze(-3)  # [*b,1,K,P]
+    b = torch.clamp(b0, min=0.0) * h + torch.clamp(b0, max=0.0) / h
+    return torch.complex(g.expand_as(b), b).to(cdt)
+
+
 def _stamp_const_z_loads(
     grid, f, y, index, cdt, rdt, device, operating_point, param_overrides, asymmetric
 ):
     """Fold each Load/Generator as a connection-aware const-Z shunt.
 
-    The internal per-ELEMENT admittance ``y_elem = conj(P_k + jQ_k)/|V0|^2`` is
-    mapped to a nodal block ``M^T diag(y_elem) M`` via the terminal incidence ``M``
-    (``_incidence``): WYE-to-ground reduces to ``M = I`` (the historical diagonal
-    stamp, bit-exact); WYE-with-neutral uses ``[I|-1]`` (the neutral row receives
-    the phase return); DELTA-3 uses the circulant difference. ``asymmetric=False``
-    forces the equal split inside ``resolve_operating_power``. ``V0`` is L-N for WYE
-    and L-L for DELTA (:func:`phase_voltage_magnitude`).
+    The internal per-ELEMENT admittance at the operating point is
+    ``y_elem = conj(P_k + jQ_k)/|V0|^2`` and is mapped to a nodal block
+    ``M^T diag(y_elem) M`` via the terminal incidence ``M`` (``_incidence``):
+    WYE-to-ground reduces to ``M = I`` (the historical diagonal stamp, bit-exact);
+    WYE-with-neutral uses ``[I|-1]`` (the neutral row receives the phase return);
+    DELTA-3 uses the circulant difference. ``asymmetric=False`` forces the equal split
+    inside ``resolve_operating_power``. ``V0`` is L-N for WYE and L-L for DELTA
+    (:func:`phase_voltage_magnitude`).
+
+    Frequency dependence: the CONDUCTANCE ``G = P/|V0|^2`` is frequency-flat (a
+    resistance), while the SUSCEPTANCE ``B = -Q/|V0|^2`` is the equivalent reactive
+    element at the operating point and scales like it::
+
+        B(h) = B(f0) * h    where B(f0) > 0  (capacitive, Q < 0 -> a fixed C)
+        B(h) = B(f0) / h    where B(f0) < 0  (inductive,  Q > 0 -> a fixed L)
+
+    which is the parallel R-L / R-C branch of the classical harmonic load model. The
+    operating point is preserved EXACTLY at ``h = 1`` (both forms reduce to ``B(f0)``),
+    so the fundamental load flow is unchanged; the split by the sign of ``B`` is
+    built from ``clamp`` so it stays differentiable in P and Q. Frequencies must be
+    positive (an inductive shunt diverges at DC).
     """
     loads = [
         a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
@@ -1135,12 +1350,12 @@ def _stamp_const_z_loads(
         y_elem_k = torch.stack(
             [t.broadcast_to(*lead, t.shape[-1]) for t in elem_list], -2
         )
-        # Y_block = M^T diag(y_elem) M  -> [*b, K, n_used, n_used].
-        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_k, m_c)
-        # Insert the frequency axis: [*b, H, K, n_used, n_used].
-        block = block.unsqueeze(-4).expand(
-            *block.shape[:-3], f.shape[0], *block.shape[-3:]
+        # Frequency-dependent element admittance: [*b, H, K, n_elem].
+        y_elem_hk = _const_z_frequency_scaling(
+            y_elem_k, f, float(grid.base_frequency_hz), cdt
         )
+        # Y_block = M^T diag(y_elem) M  -> [*b, H, K, n_used, n_used].
+        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_hk, m_c)
         rows = used_rows(grp, index, device)  # [K, n_used]
         y = scatter_blocks_into(y, block, rows, rows)
     return y
