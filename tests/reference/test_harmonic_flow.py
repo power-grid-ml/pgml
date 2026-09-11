@@ -254,6 +254,30 @@ class TestSolverOptions:
         )
         torch.testing.assert_close(got.v, ref.v, rtol=1e-10, atol=1e-10)
 
+    def test_block_backend_solves_the_ensemble_at_every_order(self):
+        """`block_rows` reaches the per-order solves too (the CUDA ensemble path).
+
+        A disjoint union of two feeders has a block-diagonal admittance at EVERY order, so
+        the member-by-member factorization must answer the same voltages as the dense union
+        at the fundamental and at each harmonic.
+        """
+        from pgml.grids import synthetic_feeder
+        from pgml.multigrid import merge_grids
+
+        merged = merge_grids([synthetic_feeder(6), synthetic_feeder(6)])
+        orders = self._orders()
+        ref = solve_harmonic_flow(merged.grid, orders, dtype=CDT, linear_solver="dense")
+        blk = solve_harmonic_flow(
+            merged.grid,
+            orders,
+            dtype=CDT,
+            linear_solver="block",
+            block_rows=merged.block_rows(),
+        )
+        # Volts on a 20 kV feeder; the dense union and the per-member factorization differ
+        # only in their rounding.
+        assert float((blk.v - ref.v).abs().max()) < 1e-8
+
     def test_criticality_option_is_accepted(self):
         res = solve_harmonic_flow(
             _grid(), self._orders(), slack="norton", dtype=CDT, criticality="always"
