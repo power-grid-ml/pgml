@@ -253,3 +253,23 @@ def test_source_still_rejects_an_unknown_field():
     """The migration is narrow: any OTHER unknown field is still a loud error."""
     with pytest.raises(ValidationError):
         Source.model_validate(_legacy_source_payload(not_a_field=1.0))
+
+
+def test_source_accepts_keyword_construction_with_the_legacy_argument():
+    """The migration also covers `Source(..., spectrum=None)` in code, not just JSON.
+
+    Downstream loaders that still pass the removed argument keep working (the
+    before-validator sees the keyword dict), so the removal needs no lockstep release.
+    """
+    src = Source(
+        component="source",
+        id=9,
+        node=1,
+        phases=("a",),
+        u_ref_v=(400.0,),
+        u_angle_deg=(0.0,),
+        resistance_ohm=[[1.0e-6]],
+        inductance_h=[[1.0e-12]],
+        spectrum=None,
+    )
+    assert "spectrum" not in src.model_dump()
