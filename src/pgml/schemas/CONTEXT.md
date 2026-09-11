@@ -13,6 +13,14 @@ override, default "auto" = the historical node-level rule; `ShuntAppliance.conne
 WYE (default, phase-to-ground) or DELTA (cyclic phase-to-phase bank), zigzag rejected.
 Both defaults are backward-compatible; assembly enforces the semantics.)
 
+Pending contract changes awaiting the next `SCHEMA_VERSION` bump: `Source.spectrum` is
+REMOVED (upstream/background distortion is an operating-point quantity carried by
+`pgml.solver.NodeHarmonicSource` / `pgml.scenarios`' `BackgroundHarmonicConfig`, never by
+the grid description). A persisted `Source` that still carries the key loads unchanged: a
+before-validator drops it, with a WARNING when the value is non-null (a null carries no
+information and is dropped silently). Any OTHER unknown field still raises. Downstream code
+that CONSTRUCTS a `Source` with `spectrum=None` must drop that argument.
+
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),
   FrequencyParam, Spectrum, TypeLibrary, plus input-convention DTOs and converters'
