@@ -28,20 +28,11 @@ kind disambiguates, since these are setpoints, not signed flows.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Optional
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
-from .grid_schema import GridModel, Phase, si_field
-
-
-def _check_phase_lengths(phases: tuple, **named) -> None:
-    n = len(phases)
-    for name, val in named.items():
-        if val is not None and len(val) != n:
-            raise ValueError(
-                f"`{name}` length ({len(val)}) must match phase count ({n})."
-            )
+from .grid_schema import GridModel, si_field
 
 
 # =============================================================================

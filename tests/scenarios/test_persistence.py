@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from pgml.scenarios import (
-    CoherentSpectrumConfig,
     ParameterSpec,
     Perturbation,
     ScenarioConfig,
@@ -65,28 +64,47 @@ def test_layouts_agree(grid3, tmp_path):
 
 
 @pytest.mark.parametrize("layout", ["wide", "long"])
-def test_roundtrip_coherent_preserves_dtypes(grid3, tmp_path, layout):
-    res = run_scenarios(
+def test_roundtrip_sequence_preserves_dtypes(grid3, tmp_path, layout):
+    """A sequence batch round-trips its ``[B, T, H, N]`` voltages and both record kinds."""
+    from pgml.scenarios import batch_from_values
+
+    b, t, ids = 8, 6, [10, 11]
+    mode = torch.randint(0, 2, (b, len(ids), t), dtype=torch.int64)
+    batch = batch_from_values(
         grid3,
-        CoherentSpectrumConfig(
-            selector=Selector(component="load"), orders=[3, 5], n_steps=6, n_scenarios=8
-        ),
+        n_samples=b,
+        n_steps=t,
+        p_w={cid: torch.full((b, t), 1.2e3, dtype=torch.float64) for cid in ids},
+        harmonic_injection={
+            cid: {
+                order: (
+                    torch.full((b, t), 0.04, dtype=torch.float64),
+                    torch.zeros((b, t), dtype=torch.float64),
+                )
+                for order in (3, 5)
+            }
+            for cid in ids
+        },
+        samples={"mode": mode},
+        shared_samples={
+            "time_s": torch.arange(t, dtype=torch.float64) * 900.0,
+            "device_ids": torch.tensor(ids, dtype=torch.long),
+        },
     )
+    res = run_scenarios(grid3, batch, calculation="harmonic", harmonic_orders=[1, 3, 5])
     write_dataset(res, tmp_path, layout=layout)
     L = read_dataset(tmp_path)
-    assert L.v.shape == res.v.shape == (8, 6, 3, 3)
+    assert L.v.shape == res.v.shape == (b, t, 3, 3)
     torch.testing.assert_close(L.v, res.v)
-    # int64 mode path preserved exactly (B-leading multi-dim sample)
-    mode = res.sampled.samples["harmonics_mode"]
-    assert L.samples["harmonics_mode"].dtype == mode.dtype
-    torch.testing.assert_close(L.samples["harmonics_mode"], mode)
-    # shared (non-batched) samples restored from the sidecar
-    torch.testing.assert_close(L.samples["time_s"], res.sampled.all_samples["time_s"])
+    # int64 per-scenario record preserved exactly (B-leading, multi-dimensional)
+    assert L.samples["mode"].dtype == mode.dtype
+    torch.testing.assert_close(L.samples["mode"], mode)
+    # declared batch-shared records restored from the sidecar
+    torch.testing.assert_close(L.samples["time_s"], batch.shared_samples["time_s"])
     torch.testing.assert_close(
-        L.samples["harmonics_device_ids"],
-        res.sampled.all_samples["harmonics_device_ids"],
+        L.samples["device_ids"], batch.shared_samples["device_ids"]
     )
-    assert isinstance(L.config, CoherentSpectrumConfig)
+    assert L.meta["n_steps"] == t
 
 
 def test_roundtrip_perturbation_records(grid3, tmp_path):

@@ -103,24 +103,40 @@ def test_chunked_equals_whole_harmonic_with_size1_tail(grid3):
     torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
 
 
-def test_chunked_equals_whole_coherent(grid3):
-    """Coherent (node-coherent ``[B, T, H, N]``) chunking slices the SCENARIO axis ``B`` and
+def test_chunked_equals_whole_sequence(grid3):
+    """A sequence batch (``[B, T, H, N]``) chunks along the SCENARIO axis ``B`` and
     concatenates -> the same sequences as the whole solve, incl. a size-1 tail (7 / 3 ->
     3,3,1) that the solver returns without the leading scenario axis."""
-    from pgml.scenarios import CoherentSpectrumConfig
+    from pgml.scenarios import batch_from_values
 
-    cfg = CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5],
-        n_steps=4,
-        n_scenarios=7,
-        n_modes=2,
-        seed=0,
+    b, t = 7, 4
+    # a per-step fundamental and a per-step injection, so both carry the step axis
+    ramp = torch.linspace(0.5, 1.5, b * t, dtype=torch.float64).reshape(b, t)
+    batch = batch_from_values(
+        grid3,
+        n_samples=b,
+        n_steps=t,
+        p_w={10: ramp * 2.0e3, 11: ramp * 1.0e3},
+        harmonic_injection={
+            10: {
+                order: (ramp * 0.03, torch.zeros((b, t), dtype=torch.float64))
+                for order in (3, 5)
+            }
+        },
     )
-    whole = run_scenarios(grid3, cfg, dtype=CDT)
-    chunked = run_scenarios(grid3, cfg, dtype=CDT, chunk_size=3)
+    whole = run_scenarios(
+        grid3, batch, calculation="harmonic", harmonic_orders=[1, 3, 5], dtype=CDT
+    )
+    chunked = run_scenarios(
+        grid3,
+        batch,
+        calculation="harmonic",
+        harmonic_orders=[1, 3, 5],
+        dtype=CDT,
+        chunk_size=3,
+    )
     assert whole.v.ndim == 4  # [B, T, H, N]
-    assert chunked.v.shape == whole.v.shape == (7, 4, 3, grid3_n(grid3))
+    assert chunked.v.shape == whole.v.shape == (b, t, 3, grid3_n(grid3))
     torch.testing.assert_close(chunked.v, whole.v, rtol=1e-7, atol=1e-9)
 
 
