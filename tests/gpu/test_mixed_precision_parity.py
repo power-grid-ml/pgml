@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from pgml import defaults
 from pgml.grids import cigre_lv_full_grid, synthetic_feeder
 from pgml.schemas.grid_schema import Load
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
@@ -90,14 +91,29 @@ def test_mixed_precision_matches_full_precision_on_cuda():
 
 
 def test_per_unit_diagnostics_are_device_independent():
+    """Both criteria mean the same thing on both devices and stop at the same step.
+
+    What is device-independent is the MEASURE (the power base, the tolerance each
+    criterion is judged against) and the verdict, not the achieved value at the
+    stopping iterate: that value sits at the round-off floor of the solve, where the
+    summation order of the backend decides its last digits. Measured on CIGRE LV full
+    (RTX A2000, complex128): 1.4e-9 pu on the CPU against 6.0e-10 pu on CUDA, both far
+    below the 1e-8 pu the solve requested, at the same iteration count. So the achieved
+    mismatch is asserted against the REQUESTED tolerance on each device, and the two
+    solutions are compared to each other.
+    """
     grid, _ = cigre_lv_full_grid()
+    tol = float(defaults.get("solver.convergence.mismatch_pu"))
+    tol_update = float(defaults.get("solver.convergence.update_pu"))
     r_cpu = solve_power_flow(grid, dtype=CDT)
     r_gpu = solve_power_flow(grid, dtype=CDT, device=CUDA)
-    for attr in ("mismatch_max_pu", "update_max_pu", "s_base_va"):
-        assert getattr(r_cpu.diagnostics, attr) == pytest.approx(
-            getattr(r_gpu.diagnostics, attr), rel=1e-6, abs=1e-14
-        )
+    assert r_cpu.converged and r_gpu.converged
+    assert r_cpu.diagnostics.s_base_va == r_gpu.diagnostics.s_base_va
+    for diag in (r_cpu.diagnostics, r_gpu.diagnostics):
+        assert diag.mismatch_max_pu <= tol
+        assert diag.update_max_pu <= tol_update
     assert r_cpu.iterations == r_gpu.iterations
+    assert torch.allclose(r_cpu.v, r_gpu.v.cpu(), rtol=1e-9, atol=1e-7)
 
 
 def test_prepared_mixed_system_parity():
