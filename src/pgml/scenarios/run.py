@@ -138,6 +138,7 @@ def run_scenarios(
     harmonic_orders: Optional[Sequence[int]] = None,
     slack: str = "ideal",
     symmetry: Optional[str] = None,
+    load_shunt: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     chunk_size: Optional[int] = None,
@@ -168,6 +169,13 @@ def run_scenarios(
         ``"power_flow"`` (fundamental) or ``"harmonic"`` (requires ``harmonic_orders``).
     harmonic_orders:
         Orders for the harmonic calculation (e.g. ``[1, 5, 7]``).
+    load_shunt:
+        Harmonic device Norton shunt forwarded to
+        :func:`~pgml.solver.solve_harmonic_flow` (``"none"`` / ``"opendss"`` /
+        ``"motor"``; ``None`` = the documented modeling default). Harmonic calculation
+        only. A shunt derived from a PER-SCENARIO operating point makes ``Y(h)``
+        scenario-dependent, so each scenario is factored on its own — ``"none"`` keeps
+        the single shared factorization.
     symmetry:
         Calculation symmetry forwarded to the solver: ``None`` / ``"auto"`` (default;
         per-phase sampled operating points auto-promote to asymmetric), ``"symmetric"``
@@ -242,6 +250,7 @@ def run_scenarios(
                 operating_point=op,
                 harmonic_injection=inj,
                 node_sources=list(sources) or None,
+                load_shunt=load_shunt,
                 symmetry=symmetry,
                 dtype=dtype,
                 device=device,

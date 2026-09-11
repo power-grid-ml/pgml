@@ -28,11 +28,12 @@ Two purposes
 
 Two assumption modes (``mode=``)
 ---------------------------------
-- ``"matched"``: ``Set NeglectLoadY=Yes`` (pgml's harmonic model is a PURE per-device current
-  source at every order — no load Norton shunt is implemented, see
-  ``pgml.solver.harmonic_flow``'s ``include_load_shunt`` — so this is not merely a numerics
-  nicety, it is REQUIRED for the two engines to solve the same physical model), ``Rg=0 Xg=0``
-  on every line-like element (``Line``/``GenericBranch``/``Switch`` — ALL of them, including
+- ``"matched"``: the harmonic DEVICE model pgml solves, named by ``load_shunt`` — each
+  exported ``Load`` carries the resolved ``%SeriesRL`` (and ``puXharm``/``XRharm`` for the
+  motor model) of ``pgml.assembly._load_shunt``, or the circuit is solved with
+  ``Set NeglectLoadY=Yes`` for the pure current-source model; this is not merely a numerics
+  nicety, it is REQUIRED for the two engines to solve the same physical model. Also
+  ``Rg=0 Xg=0`` on every line-like element (``Line``/``GenericBranch``/``Switch`` — ALL of them, including
   the SEQUENCE-form ``Switch``, which picks up the same nonzero earth-return default; pgml's
   non-geometry harmonic line models carry no Carson earth-return correction at all; OpenDSS's
   default ``Rg``/``Xg`` are calibrated for IMPERIAL units and would otherwise add a spurious,
@@ -51,10 +52,10 @@ Two assumption modes (``mode=``)
   between the two harmonic engines — see the module's oracle test file for MEASURED figures
   (matched mode reaches ~1e-6 to 1e-9 relative on every tested case except one documented,
   irreducible model gap — see below).
-- ``"default"``: leaves OpenDSS's own defaults (``NeglectLoadY=No`` — the load Norton shunt
-  IS included in OpenDSS's harmonics but never in pgml's; earth-return ``Rg``/``Xg`` and
-  ``Vminpu``/``Vmaxpu`` at their defaults). Expect a DOCUMENTED divergence from these sources,
-  not a bug — this mode exists to characterize how far a "just point OpenDSS at the grid and
+- ``"default"``: leaves OpenDSS's own defaults (``NeglectLoadY=No`` with ``%SeriesRL=50`` on
+  every Load — pgml reaches the same device model with ``load_shunt="opendss"``, so what
+  remains in this mode is the earth-return ``Rg``/``Xg`` and the ``Vminpu``/``Vmaxpu``
+  band). Expect a DOCUMENTED divergence from these sources, not a bug — this mode exists to characterize how far a "just point OpenDSS at the grid and
   solve" study would drift from pgml's own reduced model, not to be tight (measured: several
   hundred percent relative on triplen harmonics of a Dyn feeder, driven almost entirely by the
   earth-return term dominating the zero-sequence path — see ``opendss_scenario_oracle``'s test
@@ -153,6 +154,7 @@ import numpy as np
 import torch
 
 from pgml.assembly import node_phase_index
+from pgml.assembly._load_shunt import resolve_harmonic_shunt, resolve_shunt_model_name
 from pgml.errors import ConversionError, InputError
 from pgml.evaluation._util import to_float
 from pgml.evaluation.oracles.opendss_oracle import (
@@ -294,6 +296,7 @@ class ExportedCircuit:
 
     grid: Grid
     mode: str
+    load_shunt: str
     busname: dict
     node_order: list
     rowmap: list
@@ -731,7 +734,36 @@ def _dss_load_model(a) -> tuple:
     )
 
 
-def _emit_pq_element(dss, name, bus, n, kv, kw, kvar, conn, model, zipv) -> None:
+def _harmonic_shunt_properties(a, load_shunt: str) -> str:
+    """DSS ``Load`` properties reproducing pgml's harmonic shunt for appliance ``a``.
+
+    ``%SeriesRL`` carries the series/parallel split and ``puXharm``/``XRharm`` the motor
+    series branch, so a matched-mode circuit solves the SAME harmonic device model pgml
+    does (``pgml.assembly._load_shunt``). OpenDSS's ``NeglectLoadY`` is a global solution
+    option, so a device that switches its own shunt off while the run keeps one has no
+    OpenDSS representation and is refused rather than silently diverging.
+    """
+    if load_shunt == "none":
+        return ""  # the circuit carries Set NeglectLoadY=Yes instead.
+    spec = resolve_harmonic_shunt(a, load_shunt)
+    if spec.kind == "none":
+        raise ConversionError(
+            f"appliance {a.id}: harmonic_model switches this device's harmonic shunt "
+            "off while the run carries one; OpenDSS's NeglectLoadY is a GLOBAL "
+            "solution option with no per-Load equivalent, so this combination has no "
+            "OpenDSS representation."
+        )
+    props = f" %SeriesRL={spec.series_rl_fraction * 100.0:.10g}"
+    if spec.kind == "motor":
+        props += (
+            f" puXharm={spec.motor_x_harm_pu:.10g} XRharm={spec.motor_xr_harm:.10g}"
+        )
+    return props
+
+
+def _emit_pq_element(
+    dss, name, bus, n, kv, kw, kvar, conn, model, zipv, harmonic=""
+) -> None:
     """Emit a native DSS ``Load`` element (see ``_ApplianceExport``'s docstring for why
     EVERY injection appliance -- including a pgml ``Generator``/``Storage`` -- exports as
     a ``Load``, with a negated P/Q for the generation-type ones).
@@ -749,7 +781,7 @@ def _emit_pq_element(dss, name, bus, n, kv, kw, kvar, conn, model, zipv) -> None
     dss.Text.Command(
         f"New Load.{name} phases={n} bus1={bus} kV={kv:.10g} kW={kw:.10g} "
         f"kvar={kvar:.10g} conn={conn} model={model} spectrum={_FLAT_SPECTRUM_NAME} "
-        f"Vminpu=0.0001 Vmaxpu=10000"
+        f"Vminpu=0.0001 Vmaxpu=10000{harmonic}"
     )
     if zipv is not None:
         zstr = " ".join(f"{v:.10g}" for v in zipv)
@@ -757,7 +789,14 @@ def _emit_pq_element(dss, name, bus, n, kv, kw, kvar, conn, model, zipv) -> None
 
 
 def _export_injection_appliance(
-    dss, a, node, busname: dict, *, name_prefix: str, sign: float = 1.0
+    dss,
+    a,
+    node,
+    busname: dict,
+    *,
+    name_prefix: str,
+    sign: float = 1.0,
+    harmonic: str = "",
 ) -> _ApplianceExport:
     """Export a Load/Generator/Storage appliance as native DSS ``Load`` element(s).
 
@@ -815,6 +854,7 @@ def _export_injection_appliance(
             "delta",
             model,
             zipv,
+            harmonic,
         )
         return _ApplianceExport(
             kind="whole",
@@ -860,6 +900,7 @@ def _export_injection_appliance(
             "wye",
             model,
             zipv,
+            harmonic,
         )
         elements[ph] = name
     return _ApplianceExport(
@@ -982,7 +1023,11 @@ def _extract_voltages(dss, rowmap: list, n: int) -> np.ndarray:
 # Full-circuit export (public)
 # ---------------------------------------------------------------------------
 def export_grid_to_opendss(
-    grid: Grid, *, mode: str = "matched", circuit_name: str = "pgml_scenario_oracle"
+    grid: Grid,
+    *,
+    mode: str = "matched",
+    load_shunt: Optional[str] = None,
+    circuit_name: str = "pgml_scenario_oracle",
 ) -> ExportedCircuit:
     """Export ``grid`` as a genuine, independent OpenDSS circuit (own opendssdirect engine).
 
@@ -997,10 +1042,19 @@ def export_grid_to_opendss(
     grid:
         A materialised (no unresolved ``type_ref``) :class:`~pgml.schemas.grid_schema.Grid`.
     mode:
-        ``"matched"`` (default) sets ``NeglectLoadY=Yes`` and ``Rg=Xg=0`` on every line —
-        the model pgml's own harmonic solver implements. ``"default"`` leaves OpenDSS's own
-        defaults (a load Norton shunt at harmonics, imperial-calibrated earth return) — see
-        the module docstring for what to expect from each.
+        ``"matched"`` (default) exports the harmonic device model ``load_shunt`` names and
+        sets ``Rg=Xg=0`` on every line — the model pgml's own harmonic solver solves.
+        ``"default"`` leaves OpenDSS's own defaults (``NeglectLoadY=No`` with
+        ``%SeriesRL=50`` on every Load, imperial-calibrated earth return) — see the module
+        docstring for what to expect from each.
+    load_shunt:
+        The harmonic device shunt the circuit should carry in ``"matched"`` mode, as in
+        :func:`pgml.solver.solve_harmonic_flow` (``None`` = the documented modeling
+        default). ``"none"`` issues ``Set NeglectLoadY=Yes`` (a pure current source);
+        ``"opendss"`` / ``"motor"`` issue ``Set NeglectLoadY=No`` and write each device's
+        resolved ``%SeriesRL`` (and ``puXharm``/``XRharm``) onto its exported ``Load``, so
+        both engines solve the same device admittance. Ignored in ``"default"`` mode, which
+        is OpenDSS's own choice by definition.
     circuit_name:
         The DSS ``Circuit`` name.
 
@@ -1012,6 +1066,7 @@ def export_grid_to_opendss(
     """
     if mode not in ("matched", "default"):
         raise InputError(f"mode must be 'matched' or 'default', got {mode!r}.")
+    shunt = resolve_shunt_model_name(load_shunt)
     import opendssdirect as dss
 
     f0 = float(grid.base_frequency_hz)
@@ -1101,18 +1156,23 @@ def export_grid_to_opendss(
         if not a.in_service or isinstance(a, Source):
             continue
         node = node_by_id[int(a.node)]
-        if isinstance(a, Load):
-            loads[int(a.id)] = _export_injection_appliance(
-                dss, a, node, busname, name_prefix="lo", sign=1.0
+        if isinstance(a, (Load, Generator, Storage)):
+            prefix = {Load: "lo", Generator: "ge", Storage: "st"}[type(a)]
+            exported = _export_injection_appliance(
+                dss,
+                a,
+                node,
+                busname,
+                name_prefix=prefix,
+                sign=1.0 if isinstance(a, Load) else -1.0,
+                harmonic=(
+                    _harmonic_shunt_properties(a, shunt) if mode == "matched" else ""
+                ),
             )
-        elif isinstance(a, Generator):
-            generators[int(a.id)] = _export_injection_appliance(
-                dss, a, node, busname, name_prefix="ge", sign=-1.0
-            )
-        elif isinstance(a, Storage):
-            generators[int(a.id)] = _export_injection_appliance(
-                dss, a, node, busname, name_prefix="st", sign=-1.0
-            )
+            if isinstance(a, Load):
+                loads[int(a.id)] = exported
+            else:
+                generators[int(a.id)] = exported
         elif isinstance(a, ShuntAppliance):
             _export_shunt(
                 dss,
@@ -1134,7 +1194,10 @@ def export_grid_to_opendss(
     kv_str = ", ".join(f"{k:.6g}" for k in sorted(kv_bases))
     dss.Text.Command(f"Set VoltageBases=[{kv_str}]")
     dss.Text.Command("Calcvoltagebases")
-    dss.Text.Command("Set NeglectLoadY=" + ("Yes" if mode == "matched" else "No"))
+    # In matched mode the device model is pgml's (NeglectLoadY=Yes only for the pure
+    # current-source model); in default mode it is OpenDSS's own (NeglectLoadY=No).
+    neglect = "Yes" if (mode == "matched" and shunt == "none") else "No"
+    dss.Text.Command(f"Set NeglectLoadY={neglect}")
     # OpenDSS's default snap-solve convergence tolerance (1e-4 relative on the mismatch)
     # is loose enough to be visible in a pgml-vs-OpenDSS comparison at fundamental (it
     # scales with system size/loading -- measured up to ~2e-6 relative on a 12-node
@@ -1158,6 +1221,7 @@ def export_grid_to_opendss(
     return ExportedCircuit(
         grid=grid,
         mode=mode,
+        load_shunt=shunt,
         busname=busname,
         node_order=node_order,
         rowmap=rowmap,
@@ -1316,6 +1380,7 @@ def run_opendss_scenarios(
     *,
     harmonic_orders: Sequence[int],
     mode: str = "matched",
+    load_shunt: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
 ) -> ScenarioResult:
     """Run a realized :class:`~pgml.scenarios.SampledScenarios` batch through a live OpenDSS
@@ -1340,8 +1405,9 @@ def run_opendss_scenarios(
         :func:`pgml.scenarios.sample_coherent_spectra` (accepted as-is; never re-sampled).
     harmonic_orders:
         Orders to solve; order 1 is always included even if omitted.
-    mode:
-        ``"matched"`` or ``"default"`` — see :func:`export_grid_to_opendss`.
+    mode, load_shunt:
+        ``"matched"`` or ``"default"``, and the harmonic device shunt the matched circuit
+        carries — see :func:`export_grid_to_opendss`.
     dtype:
         Complex dtype of the returned ``ScenarioResult.v`` (this oracle itself is a plain
         double-precision numpy computation; ``dtype`` only controls the final cast, matching
@@ -1363,7 +1429,7 @@ def run_opendss_scenarios(
     is_coherent = "time_s" in sampled.samples
     t_steps = int(sampled.samples["time_s"].shape[-1]) if is_coherent else 1
 
-    circuit = export_grid_to_opendss(grid, mode=mode)
+    circuit = export_grid_to_opendss(grid, mode=mode, load_shunt=load_shunt)
     _attach_spectra(dss, circuit, sampled, orders)
 
     v_out = np.zeros((b, t_steps, len(orders), n), dtype=complex)
@@ -1431,6 +1497,7 @@ def write_opendss_dataset(
     *,
     harmonic_orders: Sequence[int],
     mode: str = "matched",
+    load_shunt: Optional[str] = None,
     layout: str = "wide",
     dtype: torch.dtype = torch.complex128,
 ) -> Path:
@@ -1439,6 +1506,7 @@ def write_opendss_dataset(
     engine provenance so it is never mistaken for a pgml-generated dataset.
 
     ``meta.json`` gains: ``engine="opendss"``, ``oracle_mode`` (``"matched"``/``"default"``),
+    ``oracle_load_shunt`` (the harmonic device model the circuit carried),
     ``opendssdirect_version``, ``opendss_engine_version`` (``Basic.Version()``'s full string —
     the DSS C-API library + underlying OpenDSS SVN revision). The dataset is otherwise
     byte-for-byte the same layout :func:`pgml.scenarios.read_dataset` and every downstream
@@ -1447,20 +1515,26 @@ def write_opendss_dataset(
     from pgml.scenarios import write_dataset
 
     result = run_opendss_scenarios(
-        grid, sampled, harmonic_orders=harmonic_orders, mode=mode, dtype=dtype
+        grid,
+        sampled,
+        harmonic_orders=harmonic_orders,
+        mode=mode,
+        load_shunt=load_shunt,
+        dtype=dtype,
     )
     out = write_dataset(result, path, layout=layout)
-    _stamp_provenance(out, mode=mode)
+    _stamp_provenance(out, mode=mode, load_shunt=resolve_shunt_model_name(load_shunt))
     return out
 
 
-def _stamp_provenance(path, *, mode: str) -> None:
+def _stamp_provenance(path, *, mode: str, load_shunt: str) -> None:
     import opendssdirect as dss
 
     meta_path = Path(path) / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["engine"] = "opendss"
     meta["oracle_mode"] = mode
+    meta["oracle_load_shunt"] = load_shunt
     meta["opendssdirect_version"] = getattr(dss, "__version__", None)
     meta["opendss_engine_version"] = dss.Basic.Version()
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
@@ -1534,6 +1608,7 @@ def compare_to_pgml(
     *,
     harmonic_orders: Sequence[int],
     mode: str = "matched",
+    load_shunt: Optional[str] = None,
     out_dir=None,
     slack: str = "norton",
     symmetry: Optional[str] = None,
@@ -1548,6 +1623,9 @@ def compare_to_pgml(
     (``sqrt(mean(|V_opendss|^2))`` over the batch), each as mean/p95/max — the numeric
     cross-validation deliverable. Optionally writes ``opendss_comparison.json``/``.csv`` to
     ``out_dir``.
+
+    ``load_shunt`` selects the harmonic device shunt BOTH engines carry (``None`` = the
+    documented modeling default), so the comparison stays a numeric one.
 
     ``slack`` defaults to ``"norton"``, NOT pgml's own library default (``"ideal"``): an
     OpenDSS ``Vsource`` always behaves as a finite-impedance Thevenin source (its ``R1``/
@@ -1570,7 +1648,12 @@ def compare_to_pgml(
 
     orders = sorted(set(int(h) for h in harmonic_orders) | {1})
     oracle = run_opendss_scenarios(
-        grid, sampled, harmonic_orders=orders, mode=mode, dtype=dtype
+        grid,
+        sampled,
+        harmonic_orders=orders,
+        mode=mode,
+        load_shunt=load_shunt,
+        dtype=dtype,
     )
     pgml_result = run_scenarios(
         grid,
@@ -1579,6 +1662,7 @@ def compare_to_pgml(
         harmonic_orders=orders,
         slack=slack,
         symmetry=symmetry,
+        load_shunt=load_shunt,
         dtype=dtype,
     )
     v_ref = oracle.v.detach().cpu().numpy()
