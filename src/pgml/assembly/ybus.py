@@ -274,8 +274,18 @@ def assemble_ybus(
     shunts (loads/generators folded as constant impedance at nominal voltage) PLUS
     the source Norton (Thévenin) shunt. The nonlinear (const-P / ZIP) power flow
     instead uses :func:`assemble_network_ybus` + :func:`device_current_injections`
-    (see ``assembly/CONTEXT.md``). The IEEE33 / tiny-grid oracle tests keep using
-    this function as their regression suite, so its behaviour is UNCHANGED.
+    (see ``assembly/CONTEXT.md``).
+
+    The folded device shunt is the OPERATING POINT expressed as an admittance: its
+    conductance ``P/|V0|^2`` is a resistance and stays flat with frequency, while its
+    susceptance ``-Q/|V0|^2`` is the equivalent reactive element and scales like one
+    (``* h`` where the device is capacitive, ``/ h`` where it is inductive) — the
+    parallel R-L / R-C branch of the classical harmonic load model. The fold is exact
+    at ``f0``; it is a MODEL of the device at other frequencies, derived from P and Q
+    and not from a measured harmonic impedance. The harmonic power flow
+    (:func:`pgml.solver.solve_harmonic_flow`) does not fold devices at all: it
+    assembles :func:`assemble_network_ybus` and treats every device as a current
+    source, so use that function for a harmonic network matrix.
 
     Parameters
     ----------
@@ -1260,18 +1270,48 @@ def _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides):
 
 
 # ---- const-Z load / generator ---------------------------------------------
+def _const_z_frequency_scaling(y_elem, f, f0: float, cdt) -> Tensor:
+    """Scale a const-Z element admittance ``[*b, K, P]`` over frequency -> ``[*b, H, K, P]``.
+
+    The conductance stays flat; the susceptance scales as the reactive element it
+    represents at the operating point (``B*h`` where it is capacitive, ``B/h`` where it
+    is inductive). The two branches are selected with ``clamp``, so the result is exact
+    at ``h = 1`` and differentiable in the operating-point power.
+    """
+    rdt = _rdtype(cdt)
+    h = (f / f0).to(rdt).reshape(-1)[:, None, None]  # [H,1,1]
+    g = y_elem.real.unsqueeze(-3)  # [*b,1,K,P]
+    b0 = y_elem.imag.unsqueeze(-3)  # [*b,1,K,P]
+    b = torch.clamp(b0, min=0.0) * h + torch.clamp(b0, max=0.0) / h
+    return torch.complex(g.expand_as(b), b).to(cdt)
+
+
 def _stamp_const_z_loads(
     grid, f, y, index, cdt, rdt, device, operating_point, param_overrides, asymmetric
 ):
     """Fold each Load/Generator as a connection-aware const-Z shunt.
 
-    The internal per-ELEMENT admittance ``y_elem = conj(P_k + jQ_k)/|V0|^2`` is
-    mapped to a nodal block ``M^T diag(y_elem) M`` via the terminal incidence ``M``
-    (``_incidence``): WYE-to-ground reduces to ``M = I`` (the historical diagonal
-    stamp, bit-exact); WYE-with-neutral uses ``[I|-1]`` (the neutral row receives
-    the phase return); DELTA-3 uses the circulant difference. ``asymmetric=False``
-    forces the equal split inside ``resolve_operating_power``. ``V0`` is L-N for WYE
-    and L-L for DELTA (:func:`phase_voltage_magnitude`).
+    The internal per-ELEMENT admittance at the operating point is
+    ``y_elem = conj(P_k + jQ_k)/|V0|^2`` and is mapped to a nodal block
+    ``M^T diag(y_elem) M`` via the terminal incidence ``M`` (``_incidence``):
+    WYE-to-ground reduces to ``M = I`` (the historical diagonal stamp, bit-exact);
+    WYE-with-neutral uses ``[I|-1]`` (the neutral row receives the phase return);
+    DELTA-3 uses the circulant difference. ``asymmetric=False`` forces the equal split
+    inside ``resolve_operating_power``. ``V0`` is L-N for WYE and L-L for DELTA
+    (:func:`phase_voltage_magnitude`).
+
+    Frequency dependence: the CONDUCTANCE ``G = P/|V0|^2`` is frequency-flat (a
+    resistance), while the SUSCEPTANCE ``B = -Q/|V0|^2`` is the equivalent reactive
+    element at the operating point and scales like it::
+
+        B(h) = B(f0) * h    where B(f0) > 0  (capacitive, Q < 0 -> a fixed C)
+        B(h) = B(f0) / h    where B(f0) < 0  (inductive,  Q > 0 -> a fixed L)
+
+    which is the parallel R-L / R-C branch of the classical harmonic load model. The
+    operating point is preserved EXACTLY at ``h = 1`` (both forms reduce to ``B(f0)``),
+    so the fundamental load flow is unchanged; the split by the sign of ``B`` is
+    built from ``clamp`` so it stays differentiable in P and Q. Frequencies must be
+    positive (an inductive shunt diverges at DC).
     """
     loads = [
         a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
@@ -1304,12 +1344,12 @@ def _stamp_const_z_loads(
         y_elem_k = torch.stack(
             [t.broadcast_to(*lead, t.shape[-1]) for t in elem_list], -2
         )
-        # Y_block = M^T diag(y_elem) M  -> [*b, K, n_used, n_used].
-        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_k, m_c)
-        # Insert the frequency axis: [*b, H, K, n_used, n_used].
-        block = block.unsqueeze(-4).expand(
-            *block.shape[:-3], f.shape[0], *block.shape[-3:]
+        # Frequency-dependent element admittance: [*b, H, K, n_elem].
+        y_elem_hk = _const_z_frequency_scaling(
+            y_elem_k, f, float(grid.base_frequency_hz), cdt
         )
+        # Y_block = M^T diag(y_elem) M  -> [*b, H, K, n_used, n_used].
+        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_hk, m_c)
         rows = used_rows(grp, index, device)  # [K, n_used]
         y = scatter_blocks_into(y, block, rows, rows)
     return y
