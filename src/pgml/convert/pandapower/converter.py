@@ -102,6 +102,7 @@ from typing import Any, Optional
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
+    ZeroSequenceDefaults,
     build_generator,
     build_line_from_sequence,
     build_load,
@@ -109,6 +110,7 @@ from pgml.convert._common import (
     build_source,
     make_metadata,
     phases_for,
+    resolve_converted_line_models,
     warn_dropped_elements,
 )
 from pgml.errors import ConversionError
@@ -670,6 +672,7 @@ def to_grid(
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     gen_mode: GenMode = GenMode.DROP,
     gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
+    harmonic_line_model: Optional[str] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -783,6 +786,7 @@ def to_grid(
     # with it).
     open_line_switches, open_trafo_switches = _open_switch_targets(net)
 
+    zero_sequence = ZeroSequenceDefaults()
     branches: list = []
     for pp_idx, row in net.line.iterrows():
         if not bool(row.get("in_service", True)):
@@ -828,6 +832,8 @@ def to_grid(
             x0 /= parallel
         if c0 is not None:
             c0 *= parallel
+        if phase_mode is PhaseMode.THREE_PHASE:
+            zero_sequence.note(r0=r0, x0=x0, c0=c0)
 
         branches.append(
             build_line_from_sequence(
@@ -1359,6 +1365,10 @@ def to_grid(
             name=str(getattr(net, "name", "") or "pandapower_import"),
             description=description,
         ),
+    )
+    zero_sequence.warn(_logger, tool="pandapower")
+    resolve_converted_line_models(
+        grid, _logger, tool="pandapower", requested=harmonic_line_model
     )
     return grid, id_map
 

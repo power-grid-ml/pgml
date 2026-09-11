@@ -169,6 +169,139 @@ def _stamp_transformer_numpy(
                 y[all_rows[i], all_rows[j]] += y_node[i, j]
 
 
+def _numpy_skin_multiplier(r1: float, f0: float, f: float) -> float:
+    """Skin-effect resistance multiplier ``m(f)`` of a conductor whose ``R(f0) = r1``.
+
+    An INDEPENDENT formulation of ``pgml.geometry.sequence.skin_resistance_multiplier``:
+    the internal impedance of a round conductor is
+    ``Zint = (1+j)*sqrt(Rdc*f*mu0)/2 * I0(alpha)/I1(alpha)`` with
+    ``alpha = (1+j)*sqrt(f*mu0/Rdc)``, evaluated here with ``scipy.special.iv`` instead
+    of the differentiable continued fraction, and ``Rdc`` found by the same contraction
+    (``Re(Zint(Rdc, f0)) = r1``). ``m(f) = Re(Zint(f))/Re(Zint(f0))``, so ``m(f0) = 1``.
+    """
+    import scipy.special as sp
+
+    mu0 = 4.0e-7 * math.pi
+
+    def re_zint(rdc: float, freq: float) -> float:
+        alpha = (1.0 + 1.0j) * math.sqrt(freq * mu0 / rdc)
+        i0i1 = 1.0 + 0.0j if abs(alpha) > 35.0 else sp.iv(0, alpha) / sp.iv(1, alpha)
+        return ((1.0 + 1.0j) * i0i1 * cmath.sqrt(complex(rdc * freq * mu0)) / 2.0).real
+
+    rdc = r1
+    for _ in range(40):
+        rdc = max(rdc + (r1 - re_zint(rdc, f0)), 1e-12)
+    return re_zint(rdc, f) / re_zint(rdc, f0)
+
+
+def _numpy_line_series_z(b: Line, h: int, f0: float) -> np.ndarray:
+    """Series impedance matrix ``Z(h)`` ``[P, P]`` (Ohm) of one line, per its model.
+
+    An INDEPENDENT transcription of the line models of ``pgml.assembly.ybus``, written
+    straight from the equations in ``docs/pgml/modeling/harmonic-line-model.md``:
+
+    - ``None`` / ``naive``: ``Z(h) = R + j*h*2*pi*f0*L``.
+    - ``positive_sequence``: the skin multiplier scales the CONDUCTOR part of ``R``
+      (diagonal minus mean mutual); the mutual entries, which carry the earth return,
+      are left alone.
+    - ``sequence_aware``: ``Z_abc(f0)`` is split into ``Z1``/``Z0``, each frequency
+      corrected on its own (``Z1`` earth-free; ``Z0`` with the Carson earth-return
+      resistance and the configured ``X0`` law) and recombined.
+    """
+    from pgml import defaults as _d
+
+    w0 = 2.0 * math.pi * f0
+    length = to_float(b.length_m)
+    p = len(b.from_phases)
+    r_mat = (
+        np.array(
+            [
+                [to_float(b.series_resistance_ohm_per_m[i][j]) for j in range(p)]
+                for i in range(p)
+            ]
+        )
+        * length
+    )
+    l_mat = (
+        np.array(
+            [
+                [to_float(b.series_inductance_h_per_m[i][j]) for j in range(p)]
+                for i in range(p)
+            ]
+        )
+        * length
+    )
+    model = b.harmonic_line_model
+    skin = b.harmonic_skin_effect
+    if skin is None:
+        skin = bool(_d.get("line.harmonic_model.skin_effect"))
+
+    if model == "sequence_aware":
+        if p != 3:
+            raise ValueError(f"Line {b.id}: sequence_aware needs 3 phases.")
+        z = r_mat + 1j * w0 * l_mat
+        zs = np.mean(np.diag(z))
+        zm = (z.sum() - np.trace(z)) / 6.0
+        z1, z0 = zs - zm, zs + 2.0 * zm
+        er = b.earth_return
+        coeff = getattr(er, "resistance_coeff_ohm_per_m_per_hz", None)
+        if coeff is None:
+            coeff = _d.get("line.earth_return.resistance_coeff_ohm_per_m_per_hz")
+        kx = getattr(er, "reactance_coeff_ohm_per_m_per_hz", None)
+        if kx is None:
+            kx = _d.get("line.earth_return.reactance_coeff_ohm_per_m_per_hz")
+        law = getattr(er, "x0_frequency", None) or _d.get(
+            "line.earth_return.x0_frequency"
+        )
+        expo = getattr(er, "x0_exponent", None)
+        if expo is None:
+            expo = _d.get("line.earth_return.x0_exponent")
+        inc = getattr(er, "r0_includes_earth_return", None)
+        if inc is None:
+            inc = _d.get("line.zero_sequence.r0_includes_earth_return")
+        coeff, kx, expo = (
+            to_float(coeff) * length,
+            to_float(kx) * length,
+            to_float(expo),
+        )
+
+        m1 = _numpy_skin_multiplier(z1.real, f0, h * f0) if skin else 1.0
+        z1_h = complex(z1.real * m1, z1.imag * h)
+        r0_cond = z0.real - 3.0 * coeff * f0 if inc else z0.real
+        r_earth = 3.0 * coeff * (h * f0) if inc else 3.0 * coeff * (h * f0 - f0)
+        m0 = _numpy_skin_multiplier(r0_cond, f0, h * f0) if skin else 1.0
+        x0_h = z0.imag * h**expo
+        if law == "carson_sublinear":
+            x0_h -= 1.5 * kx * f0 * h * math.log(h)
+        z0_h = complex(r0_cond * m0 + r_earth, x0_h)
+        z_self, z_mut = (z0_h + 2.0 * z1_h) / 3.0, (z0_h - z1_h) / 3.0
+        return np.where(np.eye(3, dtype=bool), z_self, z_mut)
+
+    mult = 1.0
+    if model == "positive_sequence" and skin:
+        self_ = np.mean(np.diag(r_mat))
+        mutual = 0.0 if p == 1 else (r_mat.sum() - np.trace(r_mat)) / (p * (p - 1))
+        mult = _numpy_skin_multiplier(self_ - mutual, f0, h * f0)
+    elif model is None and b.resistance_frequency is not None:
+        law = getattr(b.resistance_frequency.multiplier, "law", None)
+        if law == "carson_skin_multiplier":
+            params = b.resistance_frequency.multiplier.params
+            mult = to_float(b.resistance_frequency.multiplier.base_value) * (
+                _numpy_skin_multiplier(
+                    to_float(params["r1_ohm_per_m"]) * length,
+                    to_float(params["f0_hz"]),
+                    h * f0,
+                )
+            )
+        elif getattr(b.resistance_frequency.multiplier, "kind", None) == "constant":
+            mult = to_float(b.resistance_frequency.multiplier.value)
+    r_earth_mat = np.zeros_like(r_mat)
+    if p > 1 and mult != 1.0:
+        off = r_mat * (1.0 - np.eye(p))
+        r_earth_mat = off + np.diag(off.sum(axis=1) / (p - 1))
+    return (r_mat - r_earth_mat) * mult + r_earth_mat + 1j * h * w0 * l_mat
+
+
 def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
     """Build the full per-harmonic Y-bus (numpy) mirroring pgml's assembly.
 
@@ -241,8 +374,7 @@ def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
             if b.shunt_capacitance_f_per_m is not None
             else np.zeros((p, p))
         )
-        z_mat = r_mat + 1j * h * w0 * l_mat
-        ys = np.linalg.inv(z_mat)
+        ys = np.linalg.inv(_numpy_line_series_z(b, h, f0))
         ysh = 1j * h * w0 * c_mat
         half_ysh = 0.5 * ysh
         for i_ph, (fr, to) in enumerate(zip(fr_rows, to_rows)):
@@ -411,14 +543,12 @@ def numpy_harmonic_profiles(
             if not (isinstance(b, Line) and getattr(b, "in_service", True)):
                 continue
             length = to_float(b.length_m)
-            r = to_float(b.series_resistance_ohm_per_m[0][0]) * length
-            ind = to_float(b.series_inductance_h_per_m[0][0]) * length
             c = (
                 to_float(b.shunt_capacitance_f_per_m[0][0]) * length
                 if b.shunt_capacitance_f_per_m
                 else 0.0
             )
-            ys = 1.0 / (r + 1j * h * w0 * ind)
+            ys = 1.0 / complex(_numpy_line_series_z(b, h, f0)[0, 0])
             ysh = 1j * h * w0 * c
             fr = index.row(b.from_node, Phase.A)
             to = index.row(b.to_node, Phase.A)

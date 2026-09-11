@@ -346,9 +346,15 @@ class TestCigreLvLiveOracleThreePhaseSeqAware:
             opendss_harmonic_voltages(grid, None, ORDERS, slack="thevenin")
 
     def test_plain_grid_raises(self) -> None:
-        """Plain R/X grid (no geometry, no seq-aware tags) raises ValueError."""
-        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
-        # No synthesize_grid_geometry or apply_default_harmonic_model called
+        """A grid with no geometry and no resolved line model raises ValueError.
+
+        The converter resolves the model for its own lines, so the unresolved state has
+        to be asked for explicitly (``harmonic_line_model="none"``); this oracle path
+        needs either a conductor geometry or the sequence-aware model.
+        """
+        grid, _ = cigre_lv_full_grid(
+            phase_mode=self.PHASE_MODE, harmonic_line_model="none"
+        )
         with pytest.raises(ValueError, match="conductor_geometry|sequence_aware"):
             opendss_harmonic_voltages(grid, None, ORDERS)
 

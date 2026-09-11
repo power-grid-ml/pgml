@@ -31,8 +31,10 @@ from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
+    Line,
     Phase,
     WindingConnection,
+    _has_resistance_law,
 )
 
 logger = logging.getLogger("pgml")
@@ -155,9 +157,51 @@ def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:
             "ASYMMETRIC (per-phase)" if asymmetric else "SYMMETRIC (balanced split)",
         )
 
+    log_line_models(grid)
+
+
+def log_line_models(grid: Grid) -> None:
+    """INFO-log which frequency-dependent line model each line uses.
+
+    A line whose ``harmonic_line_model`` is still unresolved is assembled from its
+    stored parameters (constant ``R``, ``X`` proportional to ``h``), which is the naive
+    model the modeling defaults deliberately do not choose — so an unresolved line is
+    logged as a WARNING naming the entry point that resolves it. Converted grids are
+    resolved at conversion time; a hand-built grid is resolved by
+    ``pgml.geometry.apply_default_harmonic_model``.
+    """
+    lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
+    if not lines:
+        return
+    counts: dict[str, int] = {}
+    for ln in lines:
+        name = ln.harmonic_line_model or (
+            "explicit resistance_frequency"
+            if _has_resistance_law(ln.resistance_frequency)
+            else "unresolved"
+        )
+        counts[name] = counts.get(name, 0) + 1
+    logger.info(
+        "pgml: %d line harmonic model(s): %s.",
+        len(lines),
+        ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
+    )
+    n_unresolved = counts.get("unresolved", 0)
+    if n_unresolved:
+        logger.warning(
+            "pgml: %d of %d lines have no harmonic line model and are assembled from "
+            "their stored parameters (R constant, X proportional to h). Above the "
+            "fundamental this is the naive model; apply the documented default with "
+            "pgml.geometry.apply_default_harmonic_model(grid) (the converters do it "
+            "for you) or set Line.harmonic_line_model.",
+            n_unresolved,
+            len(lines),
+        )
+
 
 __all__ = [
     "resolve_asymmetric",
     "resolve_connection",
     "log_modeling_summary",
+    "log_line_models",
 ]

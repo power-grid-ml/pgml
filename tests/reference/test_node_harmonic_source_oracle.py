@@ -69,7 +69,12 @@ INJECTION_PHASES = (Phase.A,)
 SOURCE_POWER_VA = 1e6
 
 # Tolerances
-ATOL_NUMPY = 1e-10  # pure-numpy oracle vs pgml (empirically ~1e-12 V)
+# Pure-numpy oracle vs pgml. The oracle reimplements the line models from the
+# equations, including the Bessel skin multiplier via `scipy.special.iv` instead of
+# pgml's differentiable continued fraction, so the parity floor is the agreement of the
+# two Bessel implementations (~2e-8 V on ~240 V here, i.e. ~1e-10 relative) rather than
+# machine precision. Any genuine formula error is orders of magnitude larger.
+ATOL_NUMPY = 1e-6
 ATOL_OPENDSS_GEOM = 1e-7  # geometry-path live OpenDSS (empirically ~1e-11 V;
 #                            reuse existing geometry-path tolerance)
 ATOL_OPENDSS_SEQ = 5.0  # sequence-aware 3-phase path: ~3.7 V at MV-bus phases B/C.

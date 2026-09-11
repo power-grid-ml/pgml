@@ -123,6 +123,7 @@ from pgml.convert._common import (
     build_source,
     make_metadata,
     phases_for,
+    resolve_converted_line_models,
     thevenin_from_z,
     warn_dropped_elements,
 )
@@ -172,7 +173,10 @@ _SQRT3 = math.sqrt(3.0)
 
 
 def to_grid(
-    dss: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV
+    dss: Any,
+    *,
+    phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
+    harmonic_line_model: Optional[str] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -189,6 +193,16 @@ def to_grid(
         entry of the DSS matrix). ``THREE_PHASE`` emits the real DSS phases (incl.
         ``Phase.N`` for neutral conductors), full n×n line matrices, balanced
         3-phase Thevenin sources, and load ``connection`` from ``IsDelta()``.
+    harmonic_line_model:
+        Frequency-dependent line model written to every converted R/X line
+        (``"sequence_aware"``, ``"positive_sequence"``, ``"naive"``, or ``"none"`` to
+        leave the lines unresolved). ``None`` (default) takes the modeling defaults
+        ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
+        logged once. OpenDSS recomputes its own line constants at every harmonic and
+        exports only the fundamental matrices, so the model that reproduces that
+        frequency behaviour has to be chosen here. An OpenDSS matrix already contains
+        the earth-return resistance in its mutual entries at ``f0``, so such a grid is
+        the case for ``Line.earth_return.r0_includes_earth_return = True``.
 
     Returns
     -------
@@ -1271,6 +1285,9 @@ def to_grid(
         branches=branches,
         appliances=appliances,
         metadata=make_metadata(name="opendss_import", description=description),
+    )
+    resolve_converted_line_models(
+        grid, _logger, tool="OpenDSS", requested=harmonic_line_model
     )
     return grid, id_map
 
