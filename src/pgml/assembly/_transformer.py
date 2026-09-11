@@ -51,10 +51,11 @@ Per-side building blocks (``P == 3``):
     blocks lose their zero sequence).
   * a grounded zigzag's own self block stays ``y·I`` — the winding presents a
     LOW-impedance zero-sequence path to ground on its own side (the classic
-    grounding-transformer property). The path's value equals the positive-
-    sequence leakage here; the true zero-sequence leakage of a zigzag (set by
-    the half-coil geometry) is typically smaller and would need an explicit
-    zero-sequence override, which is not consumed yet.
+    grounding-transformer property). Its VALUE comes from the zero-sequence
+    leakage: set ``Transformer.zero_sequence`` (or the
+    ``transformer.zero_sequence.*`` default ratios) and the per-phase leakage
+    becomes the symmetric-component matrix, so the zigzag's true Z0 — typically
+    well below Z1, set by the half-coil geometry — is carried on that path.
 
 Clock realisation. The IEC clock number ``c`` (LV lags HV by ``c·30°``) is
 realised entirely by constant topology: each delta / zigzag winding contributes
@@ -92,6 +93,12 @@ off-nominal-tap pi — while the zero sequence is now modelled correctly.
 The magnetizing (core-loss) shunt ``y_m`` is added to the HV terminal phase
 diagonal directly (referred to the HV line voltage), outside the leakage
 incidence transform.
+
+The leakage itself may be SEQUENCE-AWARE: when the zero-sequence leakage differs
+from the positive-sequence one, ``Y_winding``'s per-phase identity ``I_P`` is
+replaced by the symmetric-component matrix built from (Z1, Z0)
+(:func:`sequence_leakage_matrices`), so the zero-sequence PATH stays topological
+while its VALUE is the transformer's own Z0.
 
 All matrices ``N`` are real, constant topology (no autograd through ``N``);
 ``Y_winding`` carries the differentiable ``y`` and ``τ`` so gradients flow to the
@@ -283,9 +290,86 @@ def resolve_vector_group(t, n_phases: Optional[int] = None) -> VectorGroup:
     return vg
 
 
-def group_key(vg: VectorGroup, p: int) -> tuple:
-    """Hashable key grouping transformers that share one incidence ``N``."""
-    return (vg.from_side.kind, vg.to_side.kind, vg.clock, p)
+def group_key(vg: VectorGroup, p: int, sequence_aware: bool = False) -> tuple:
+    """Hashable key grouping transformers that share one incidence ``N``.
+
+    ``sequence_aware`` separates units whose leakage is a per-phase MATRIX (Z0 != Z1)
+    from those carrying a scalar leakage, because the two build differently shaped
+    winding primitives and cannot be stacked together.
+    """
+    return (vg.from_side.kind, vg.to_side.kind, vg.clock, p, bool(sequence_aware))
+
+
+def zero_sequence_leakage_ratios() -> tuple[float, float]:
+    """Return ``(r0_over_r1, x0_over_x1)`` of the leakage from ``pgml.defaults``.
+
+    The documented fallback (``transformer.zero_sequence.*``, both 1.0 = Z0 = Z1) used
+    when a :class:`~pgml.schemas.grid_schema.Transformer` carries no explicit
+    ``zero_sequence`` override.
+    """
+    return (
+        float(defaults.get("transformer.zero_sequence.r0_over_r1")),
+        float(defaults.get("transformer.zero_sequence.x0_over_x1")),
+    )
+
+
+def is_sequence_aware(t, p: int) -> bool:
+    """True when a transformer's leakage must be stamped as a per-phase MATRIX.
+
+    Only a 3-phase unit has a zero sequence, and only a unit whose zero-sequence
+    leakage differs from its positive-sequence leakage needs the matrix form: with
+    ``Z0 == Z1`` the symmetric-component split has a zero mutual term and the scalar
+    stamp is the identical (and bit-exact) primitive.
+    """
+    if p != 3:
+        return False
+    if getattr(t, "zero_sequence", None) is not None:
+        return True
+    return zero_sequence_leakage_ratios() != (1.0, 1.0)
+
+
+def zero_sequence_leakage(t, r1: Tensor, l1: Tensor, two_pi_f0: float) -> tuple:
+    """Return the zero-sequence leakage ``(R0, L0)`` of a transformer.
+
+    ``Transformer.zero_sequence`` (``TransformerZeroSeq``: ``r0_ohm`` and ``x0_ohm``,
+    the reactance at ``f0``) wins; otherwise the positive-sequence pair is scaled by
+    the documented ``transformer.zero_sequence.*`` ratios. The reference side is the
+    one the positive-sequence fields use (the TO-side / LV winding coil), so the two
+    enter the winding primitive on the same basis.
+
+    Differentiable: ``r1``/``l1`` are tensors and the returned pair is formed from them
+    (ratio path) or from the schema values (override path), never through a python
+    float on the tape.
+    """
+    zs = getattr(t, "zero_sequence", None)
+    if zs is not None:
+        r0 = torch.as_tensor(zs.r0_ohm, dtype=r1.dtype, device=r1.device)
+        x0 = torch.as_tensor(zs.x0_ohm, dtype=l1.dtype, device=l1.device)
+        return r0, x0 / two_pi_f0
+    r_ratio, x_ratio = zero_sequence_leakage_ratios()
+    return r1 * r_ratio, l1 * x_ratio
+
+
+def sequence_leakage_matrices(
+    r1: Tensor, l1: Tensor, r0: Tensor, l0: Tensor, p: int
+) -> tuple[Tensor, Tensor]:
+    """Per-phase leakage ``(R, L)`` matrices ``[P, P]`` from the sequence pair.
+
+    Applies the symmetric-component identity used everywhere else in pgml::
+
+        Q_self   = (Q0 + 2*Q1) / 3
+        Q_mutual = (Q0 -   Q1) / 3
+
+    to the leakage resistance and inductance, giving a symmetric circulant matrix whose
+    positive- (and negative-) sequence eigenvalue is the positive-sequence value and
+    whose zero-sequence eigenvalue is the zero-sequence value. Device and dtype follow
+    ``r1``; differentiable in all four inputs.
+    """
+    eye = torch.eye(p, dtype=r1.dtype, device=r1.device)
+    off = torch.ones((p, p), dtype=r1.dtype, device=r1.device) - eye
+    r_self, r_mut = (r0 + 2.0 * r1) / 3.0, (r0 - r1) / 3.0
+    l_self, l_mut = (l0 + 2.0 * l1) / 3.0, (l0 - l1) / 3.0
+    return r_self * eye + r_mut * off, l_self * eye + l_mut * off
 
 
 # ---------------------------------------------------------------------------
@@ -454,19 +538,38 @@ def nominal_turns_ratio(vg: VectorGroup, u_from: Tensor, u_to: Tensor) -> Tensor
 def winding_leakage_block(y_se: Tensor, tau: Tensor, n_block: Tensor) -> Tensor:
     """Leakage nodal block ``Nᵀ·Y_winding·N`` ``[H, K, 2P, 2P]`` (complex).
 
-    ``y_se`` ``[H, K]`` is the leakage admittance referred to the TO-side coil;
-    ``tau`` ``[K]`` the coil turns ratio; ``n_block`` ``[2P, 2P]`` the (real,
+    ``y_se`` is the leakage admittance referred to the TO-side coil, either as a
+    per-unit-phase SCALAR ``[H, K]`` (one value on every phase, ``Z0 == Z1``) or as a
+    per-phase MATRIX ``[H, K, P, P]`` (the symmetric-component form built by
+    :func:`sequence_leakage_matrices`, so the zero sequence carries its own value).
+    ``tau`` ``[K]`` is the coil turns ratio; ``n_block`` ``[2P, 2P]`` the (real,
     constant) block incidence.
+
+    Both forms build the same winding primitive, with ``I_P`` replaced by the per-phase
+    admittance matrix::
+
+        Y_winding = [[ Y/tau^2 , -Y/tau ],
+                     [ -Y/tau  ,    Y   ]]
+
+    The incidence transform then distributes it over the bus rows, so a delta or zigzag
+    winding still blocks the zero sequence and a grounded-wye winding still carries it —
+    now with its own value.
     """
     p = n_block.shape[0] // 2
     cdt = y_se.dtype
     tau_c = tau.to(cdt)[None, :]  # [1,K]
-    a = y_se / (tau_c * tau_c)  # [H,K]  HV-HV
-    b = -(y_se / tau_c)  # [H,K]         HV-LV / LV-HV
-    d = y_se  # [H,K]                    LV-LV
-    eye = torch.eye(p, dtype=cdt, device=y_se.device)
-    top = torch.cat([a[..., None, None] * eye, b[..., None, None] * eye], dim=-1)
-    bot = torch.cat([b[..., None, None] * eye, d[..., None, None] * eye], dim=-1)
+    if y_se.dim() == 2:
+        eye = torch.eye(p, dtype=cdt, device=y_se.device)
+        y_mat = y_se[..., None, None] * eye  # [H,K,P,P]
+        tau_b = tau_c[..., None, None]  # [1,K,1,1]
+    else:
+        y_mat = y_se  # [H,K,P,P]
+        tau_b = tau_c[..., None, None]
+    a = y_mat / (tau_b * tau_b)  # HV-HV
+    b = -(y_mat / tau_b)  # HV-LV / LV-HV
+    d = y_mat  # LV-LV
+    top = torch.cat([a, b], dim=-1)
+    bot = torch.cat([b, d], dim=-1)
     y_w = torch.cat([top, bot], dim=-2)  # [H,K,2P,2P]
 
     nt = n_block.t().to(cdt)
@@ -480,6 +583,10 @@ __all__ = [
     "resolve_vector_group",
     "group_key",
     "block_incidence",
+    "is_sequence_aware",
     "nominal_turns_ratio",
+    "sequence_leakage_matrices",
     "winding_leakage_block",
+    "zero_sequence_leakage",
+    "zero_sequence_leakage_ratios",
 ]

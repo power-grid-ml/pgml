@@ -508,6 +508,23 @@ def to_grid(
             wdg_pct_r.append(float(dss.Transformers.R()))
             wdg_tap.append(float(dss.Transformers.Tap()))
             wdg_is_delta.append(bool(dss.Transformers.IsDelta()))
+            # A per-winding neutral earthing impedance puts 3*Z_N in series with the
+            # zero sequence. pgml stamps windings SOLIDLY grounded (its assembly
+            # rejects a finite GroundingImpedance), so converting this silently would
+            # understate the zero-sequence impedance of exactly the path the winding
+            # topology opens. DSS defaults are `Rneut = -1` ("not set") and
+            # `Xneut = 0`; an explicit `Rneut = 0` is solid grounding and converts.
+            r_neut = float(dss.Transformers.Rneut())
+            x_neut = float(dss.Transformers.Xneut())
+            if r_neut > 0.0 or x_neut != 0.0:
+                raise ConversionError(
+                    f"OpenDSS transformer '{trafo_name}' winding {w} has a neutral "
+                    f"earthing impedance (Rneut={r_neut:g} Ohm, Xneut={x_neut:g} "
+                    "Ohm); pgml stamps transformer windings solidly grounded, so "
+                    "this would silently drop 3*Z_N from the zero-sequence path. "
+                    "Remove Rneut/Xneut (or set Rneut=0 Xneut=0 for a solidly "
+                    "grounded neutral)."
+                )
         xhl_pct = float(dss.Transformers.Xhl())
 
         dss.Text.Command(f"? Transformer.{trafo_name}.%noloadloss")

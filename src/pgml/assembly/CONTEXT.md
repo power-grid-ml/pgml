@@ -60,7 +60,8 @@ Module: `pgml.assembly`
     | "series_inductance_h_per_m" | "shunt_capacitance_f_per_m" |
     "shunt_conductance_s_per_m")`, `("source", id, "resistance_ohm" |
     "inductance_h")`, `("transformer", id, "series_resistance_ohm" |
-    "series_inductance_h" | "tap_magnitude")` (tap.shift_deg selects the discrete
+    "series_inductance_h" | "tap_magnitude" | "zero_sequence_resistance_ohm" |
+    "zero_sequence_inductance_h")` (tap.shift_deg selects the discrete
     vector-group clock, not a gradient leaf),
     `("switch", id, "resistance_ohm" | "inductance_h")`,
     `("generic_branch", id, "series_resistance_ohm" | "series_inductance_h")`.
@@ -164,23 +165,48 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   `Y_winding = [[(y/τ²)I, −(y/τ)I],[−(y/τ)I, y I]]`; the constant real incidence
   `N = blockdiag(N_hv, N_lv)` maps coil voltages to bus phase rows — `wye_grounded → I3`,
   `delta → M = [[1,-1,0],[0,1,-1],[-1,0,1]]` (or `Mᵀ`, clock-selected), ungrounded
-  `wye → I − 11ᵀ/3`. A delta winding BLOCKS the zero sequence (`M·[1,1,1]=0`, traps
-  triplen harmonics) and supplies the intrinsic √3 magnitude + ±30° clock shift, so the
-  NOMINAL ratio comes from `u_rated_from/to_v` + connections and `tap.ratio_magnitude`
-  is the OFF-NOMINAL tap only (`tap.shift_deg = clock·30`). Magnetizing
-  `y_m = G_m + j·(−1/(2π f L_m))` is added to the HV terminal diagonal directly.
+  `wye → I − 11ᵀ/3`, `zigzag`/`zigzag_grounded` → the normalised limb difference
+  `Z = (I − C)/√3` applied to the OTHER side's block (`Ñ_other = Z·N_other`), its own
+  side keeping the plain star block. A delta or zigzag winding BLOCKS the zero sequence
+  (`M·[1,1,1]=0`, `Z·[1,1,1]=0`, traps triplen harmonics) and contributes an intrinsic
+  ±30° clock shift (delta also the √3 magnitude), so the NOMINAL ratio comes from
+  `u_rated_from/to_v` + connections and `tap.ratio_magnitude` is the OFF-NOMINAL tap only
+  (`tap.shift_deg = clock·30`). Magnetizing `y_m = G_m + j·(−1/(2π f L_m))` is added to
+  the HV terminal diagonal directly, OUTSIDE the incidence transform (a documented
+  placement deviation from OpenDSS's internal T — `docs/pgml/modeling/transformer.md`).
   - `from_connection`/`to_connection` resolve via `resolve_vector_group` (explicit, else
-    config `transformer.vector_group.*`, default Dyn11). Supported clocks: Dyn → 1/11,
-    wye-wye/delta-delta → 0/6 (others raise NotImplementedError); clock 6 (a 180° group,
-    Yy6/Dd6) is a reversed LV winding polarity, realised as `−N_lv` (flips the coupling
-    blocks' sign, self blocks unchanged); zigzag and non-solid
-    `*_grounding` not modelled yet. `P==1` (single-phase / positive-sequence equivalent)
-    folds the group into a complex scalar tap `t = (u_from/u_to)·tap_mag·e^{jθ}` and uses
-    the textbook off-nominal-tap pi — reducing EXACTLY to the 3-phase positive sequence.
-  - Differentiable w.r.t. R, L and the off-nominal tap magnitude; the discrete vector
-    group / clock selects the constant `N`. `param_overrides` keys unchanged
-    (`series_resistance_ohm`/`series_inductance_h`/`tap_magnitude`); `tap_shift_deg` is
-    no longer a continuous (gradient) leaf — it selects the clock.
+    config `transformer.vector_group.*`, default Dyn11). EVERY winding pairing except
+    zigzag-zigzag is modelled, at EVERY clock of the pairing's parity: an odd number of
+    delta/zigzag windings (Dy, Yd, Yz, Zy) admits odd clocks only, an even number (Yy, Dd,
+    Dz, Zd) even clocks only, and a parity mismatch raises `ModelingError`. The winding
+    orientation / cyclic permutation `C^m` / polarity combination that realises a
+    requested clock is selected by matching the candidate's positive-sequence rotation
+    against `clock·30°` (`_incidence_pair`); clock 6 is the reversed LV polarity
+    `−N_lv`. A zigzag winding IS modelled (the limb-difference incidence above); a finite
+    `from_grounding`/`to_grounding` (non-solid neutral) raises rather than being silently
+    ignored. `P==1` (single-phase / positive-sequence equivalent) folds the group into a
+    complex scalar tap `t = (u_from/u_to)·tap_mag·e^{jθ}` on the textbook
+    off-nominal-tap pi (with `k_ll = 3` when the TO winding is delta, the coil-vs-terminal
+    referral) — reducing EXACTLY to the 3-phase positive sequence.
+  - ZERO-SEQUENCE LEAKAGE VALUE: a 3-phase unit whose zero-sequence leakage differs from
+    its positive-sequence one (an explicit `Transformer.zero_sequence`, or a non-unit
+    `transformer.zero_sequence.{r0_over_r1,x0_over_x1}` default) carries a per-phase
+    leakage MATRIX instead of a scalar — the symmetric-component split
+    `Z_self=(Z0+2·Z1)/3`, `Z_mutual=(Z0−Z1)/3` (`sequence_leakage_matrices`), inverted as
+    a matrix inside `winding_leakage_block`. The zero-sequence PATH stays pure topology,
+    so a YNyn three-limb core and a grounded zigzag carry their true Z0 while a delta
+    still blocks it. `Z0 == Z1` keeps the scalar stamp bit-for-bit; the group key
+    (`group_key(vg, p, sequence_aware)`) separates the two forms.
+  - WINDING-RESISTANCE FREQUENCY LAW: `R(f) = R · m(f) · (f/f0 if harmonic_xr_constant
+    else 1)`, with `m(f)` the shared `ResistanceFrequencyModel` multiplier
+    (`_resistance_multiplier`, the same helper the line path uses) and
+    `harmonic_xr_constant` = OpenDSS's `XRConst` (R ∝ h, holding X/R constant with
+    frequency). Both default to no change (X ∝ h at fixed R).
+  - Differentiable w.r.t. R, L, the zero-sequence R0/L0 and the off-nominal tap
+    magnitude; the discrete vector group / clock selects the constant `N`.
+    `param_overrides` keys: `series_resistance_ohm`/`series_inductance_h`/`tap_magnitude`
+    plus `zero_sequence_resistance_ohm`/`zero_sequence_inductance_h`; `tap_shift_deg` is
+    not a continuous (gradient) leaf — it selects the clock.
 - Build by scatter-add of primitive blocks into Y via `_scatter.scatter_blocks_into`
   (clone + `index_add_` along a flattened N*N axis with linear index `row*N+col`;
   accumulates duplicates; the scattered VALUES are differentiable, the indices are
@@ -190,8 +216,11 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
 ## Implementation notes / linear-assembly simplifications
 - `ShuntReactor` (a `BranchBase`) is stamped as a single-terminal shunt at its
   `from_node`/`from_phases` only.
-- `ResistanceFrequencyModel` skin-effect multiplier: only `constant` is wired
-  (analytic falls back to `base_value`); curve/equation laws are not yet implemented.
+- `ResistanceFrequencyModel` multiplier (`_resistance_multiplier`, shared by the line and
+  transformer stamps): `constant`, `analytic` with `law="carson_skin_multiplier"` (the
+  differentiable Bessel skin curve; any other analytic law falls back to `base_value`) and
+  `curve` (piecewise-linear, constant extrapolation) are wired; an `equation` law is not
+  implemented and yields 1.0.
 - Line/transformer `type_ref` must already be MATERIALISED before assembly (the
   resolver is a separate component); assembly reads explicit params only.
 

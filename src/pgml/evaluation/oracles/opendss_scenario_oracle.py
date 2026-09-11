@@ -617,11 +617,11 @@ def _export_transformer(dss, t: Transformer, busname: dict, f0: float) -> None:
             )
     if t.zero_sequence is not None:
         raise ConversionError(
-            f"Transformer {t.id}: an explicit zero_sequence override is not "
-            "exported -- pgml.assembly does not yet consume it (the "
-            "zero-sequence path is always topology-derived), so exporting a "
-            "matching OpenDSS override is not possible without diverging from "
-            "what pgml actually solves."
+            f"Transformer {t.id}: an explicit zero_sequence leakage has no OpenDSS "
+            "equivalent -- a DSS two-winding Transformer has no zero-sequence "
+            "impedance input (its zero sequence IS the positive-sequence winding "
+            "impedance seen through the winding topology), so the exported circuit "
+            "would solve a different model than pgml, which consumes the override."
         )
 
     w0 = 2.0 * math.pi * f0
