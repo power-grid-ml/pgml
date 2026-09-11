@@ -13,7 +13,8 @@ High-level entry points (the stable, public surface):
 
 Lower-level / optional surfaces are reached via their subpackages (so a minimal core
 install need not import the extras): :mod:`pgml.solver` (raw differentiable tensors),
-:mod:`pgml.scenarios` (batched data generation), :mod:`pgml.convert`,
+:mod:`pgml.scenarios` (batched data generation), :mod:`pgml.dispatch` (storage
+state of charge), :mod:`pgml.convert`,
 :mod:`pgml.evaluation`, :mod:`pgml.schemas`, :mod:`pgml.defaults` (modeling defaults),
 :mod:`pgml.assembly`, :mod:`pgml.geometry`, :mod:`pgml.topology` (dependency-free graph
 helpers), :mod:`pgml.grids` (reference grid builders, needs the ``convert`` extra).
@@ -24,7 +25,7 @@ from __future__ import annotations
 import logging as _logging
 
 #: Library version (single source of truth; the build reads this).
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Library logging convention: emit on the ``pgml`` logger and attach a NullHandler so
 # importing pgml never prints "No handlers could be found". Applications opt in by

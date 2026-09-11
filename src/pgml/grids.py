@@ -307,40 +307,6 @@ def synthetic_feeder(
     )
 
 
-def se_benchmark_scenario_config(grid, *, n_samples: int, seed: int, orders=None):
-    """The canonical randomized state-estimation benchmark sampling recipe.
-
-    A thin front door onto :func:`pgml.scenarios.se_random_scenario_config`, which holds
-    the calibrated recipe (correlated load levels, per-phase unbalance, a slack-voltage
-    draw, IEC 61000-3-2-referenced emission with per-order phase diversity, and the PV
-    inverter signature on a grid built by :func:`add_pv_systems`). Sharing that one
-    builder is what keeps the benchmark, the workflow datasets and the multi-grid corpus
-    from drifting apart.
-
-    Parameters
-    ----------
-    grid:
-        The benchmark grid (read for its appliance mix).
-    n_samples, seed:
-        Batch size and sampling seed.
-    orders:
-        Injected harmonic orders; ``None`` uses :data:`LOAD_HARMONIC_ORDERS`.
-
-    Returns
-    -------
-    pgml.scenarios.ScenarioConfig
-        The sampling template.
-    """
-    from pgml.scenarios import se_random_scenario_config
-
-    return se_random_scenario_config(
-        grid,
-        orders=LOAD_HARMONIC_ORDERS if orders is None else orders,
-        n_samples=n_samples,
-        seed=seed,
-    )
-
-
 __all__ = [
     "CONVERTER_SPECTRUM",
     "LOAD_HARMONIC_ORDERS",
@@ -349,6 +315,5 @@ __all__ = [
     "cigre_lv_full_grid",
     "cigre_lv_geometry_grid",
     "add_pv_systems",
-    "se_benchmark_scenario_config",
     "synthetic_feeder",
 ]

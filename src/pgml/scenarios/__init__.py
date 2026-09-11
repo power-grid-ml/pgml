@@ -1,19 +1,26 @@
 """pgml.scenarios — reproducible, config-driven batched scenario sampling.
 
-A serializable `ScenarioConfig` (+ seed) deterministically defines a batch of
-realized operating points; `sample` draws them (independent / Sobol-QMC / LHS) and
-`run_scenarios` solves the whole batch at once via the batched solver. The goal is
-generating ML training data in controlled distributions, reproducibly.
+A batch of scenarios is a set of per-component DELTAS on one grid: what a spec names
+varies, everything else keeps the grid's nominal value. This subpackage owns that batch
+contract end to end — how a batch is declared, drawn, solved and persisted — and nothing
+about which variations a particular study should draw.
 
-Additional sweep helpers:
+Three ways to produce a batch:
 
-- ``NodeInjectionSweepConfig(node_ids, phases, orders, magnitudes_pu, phases_deg,
-  source_power_va, kind="voltage")`` — serializable config for a per-node harmonic
-  "error"-source sweep (one node per scenario). Build from a spectrum dict via
-  :meth:`~NodeInjectionSweepConfig.from_spectrum`.
-- ``run_node_injection_sweep(grid, config, *, slack, dtype, device) ->
-  ScenarioResult`` — sweeps the per-node ``NodeHarmonicSource`` over
-  ``config.node_ids`` (all nodes if ``None``), returns ``v [B, H, N]``.
+- A serializable config plus its seed: :class:`ScenarioConfig` (random / Sobol-QMC draws
+  over declared :class:`ParameterSpec` quantities) or :class:`CartesianConfig` (explicit
+  product of discrete levels). Saving the config reproduces the batch exactly.
+- An excitation primitive: :func:`perturbation_sweep` (one operating-point error per
+  target), :func:`spectrum_sweep` (one injected spectrum per target),
+  :func:`run_node_injection_sweep` (a per-node disturbance source), or
+  :func:`build_background_sources` (an upstream supply-side background).
+- Explicit values: :func:`batch_from_values` takes tensors you already have and returns
+  the same :class:`SampledScenarios` the samplers do.
+
+:func:`run_scenarios` solves any of them in one batched solve (the solver broadcasts the
+leading scenario dimension), and :func:`write_dataset` / :func:`read_dataset` persist the
+result as a self-describing parquet dataset. A downstream generator plugs its own recipe
+in through the :class:`ScenarioSpec` protocol — an object with ``sample(grid)``.
 
 See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
 """
@@ -21,27 +28,14 @@ See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
 from __future__ import annotations
 
 from .batch import batch_from_values, broadcast_operating_point
-from .composition import (
-    CompositionDraw,
-    resolve_composed_ids,
-    sample_device_composition,
-)
 from .config import (
-    DEVICE_LIBRARY_VERSION,
+    BackgroundHarmonicConfig,
     CartesianAxis,
     CartesianConfig,
-    ClassCount,
-    CoherentSpectrumConfig,
-    BackgroundHarmonicConfig,
-    CompositionConfig,
     Constant,
-    ConsumerComposition,
     Correlation,
-    DeviceClassSpec,
-    DeviceState,
     Distribution,
     LatentFactor,
-    LoadProfileConfig,
     LogNormal,
     LogUniform,
     NodeInjectionSweepConfig,
@@ -52,17 +46,14 @@ from .config import (
     Selector,
     SpectrumSweepConfig,
     Uniform,
-    composition_silent_orders,
-    default_compositions,
-    default_device_classes,
+)
+from .emission import (
+    LOADING_FLOOR,
+    affine_emission_correction,
+    phase_slope_shift,
 )
 from .en50160 import en50160_limit, en50160_limits, en50160_provenance
-from .harmonics import (
-    build_background_sources,
-    sample_coherent_spectra,
-    spectrum_sweep,
-)
-from .profiles import apply_load_profiles, load_profile_factors
+from .harmonics import build_background_sources, spectrum_sweep
 from .iec61000_3_2 import (
     iec61000_3_2_device_caps,
     iec61000_3_2_fraction,
@@ -79,20 +70,6 @@ from .persistence import (
     read_dataset,
     write_dataset,
 )
-from .emission import (
-    LOADING_FLOOR,
-    affine_emission_correction,
-    phase_slope_shift,
-)
-from .presets import (
-    EMISSION_FLOOR,
-    EMISSION_FLOOR_PHASE_DEG,
-    EMISSION_PHASE_SLOPE_DEG,
-    HIGH_ACTIVITY_START_TIME,
-    SE_PRESET_VERSION,
-    se_coherent_scenario_config,
-    se_random_scenario_config,
-)
 from .perturbation import perturbation_sweep
 from .run import ScenarioResult, ScenarioSpec, run_scenarios
 from .sampler import (
@@ -103,12 +80,69 @@ from .sampler import (
     sample,
     unit_samples,
 )
-from .storage import (
-    StorageDispatchResult,
-    dispatch_storage,
-    integrate_soc,
-    storage_operating_point,
+
+#: Constructs that used to live here and now belong to the package that calibrates them.
+#: Looked up by the module ``__getattr__`` below so an old import fails with the new home
+#: instead of a bare ``ImportError``.
+_MOVED = {
+    name: "the scenario-composition recipes of the learning package"
+    for name in (
+        "CoherentSpectrumConfig",
+        "LoadProfileConfig",
+        "CompositionConfig",
+        "CompositionDraw",
+        "DeviceState",
+        "DeviceClassSpec",
+        "ClassCount",
+        "ConsumerComposition",
+        "DEVICE_LIBRARY_VERSION",
+        "SE_PRESET_VERSION",
+        "HIGH_ACTIVITY_START_TIME",
+        "EMISSION_FLOOR",
+        "EMISSION_FLOOR_PHASE_DEG",
+        "EMISSION_PHASE_SLOPE_DEG",
+        "composition_silent_orders",
+        "default_device_classes",
+        "default_compositions",
+        "se_random_scenario_config",
+        "se_coherent_scenario_config",
+        "sample_coherent_spectra",
+        "sample_device_composition",
+        "resolve_composed_ids",
+        "load_profile_factors",
+        "apply_load_profiles",
+    )
+}
+_MOVED.update(
+    dict.fromkeys(
+        (
+            "StorageDispatchResult",
+            "integrate_soc",
+            "dispatch_storage",
+            "storage_operating_point",
+        ),
+        "pgml.dispatch",
+    )
 )
+
+
+def __getattr__(name: str):
+    """Point an import of a relocated name at its new home.
+
+    Device populations, calibrated emission ranges and load-profile models are modeling
+    choices of a study rather than properties of the engine, so they live with the study.
+    Storage dispatch moved to :mod:`pgml.dispatch`, where a reader looks for device time
+    coupling.
+    """
+    if name in _MOVED:
+        raise ImportError(
+            f"{name!r} is no longer part of pgml.scenarios; it now lives in "
+            f"{_MOVED[name]}. pgml.scenarios keeps the batch contract (ScenarioConfig, "
+            "CartesianConfig, SpectrumSweepConfig, BackgroundHarmonicConfig, "
+            "batch_from_values, run_scenarios, write_dataset) and the standards tables."
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Canonical __module__ for public re-exports (avoids autodoc duplicate warnings).
 for _name in [
@@ -125,14 +159,7 @@ for _name in [
     "ScenarioConfig",
     "CartesianAxis",
     "CartesianConfig",
-    "CoherentSpectrumConfig",
-    "LoadProfileConfig",
-    "DeviceState",
-    "DeviceClassSpec",
-    "ClassCount",
-    "ConsumerComposition",
     "BackgroundHarmonicConfig",
-    "CompositionConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -143,8 +170,6 @@ for _name in [
 SampledScenarios.__module__ = __name__
 ScenarioResult.__module__ = __name__
 LoadedDataset.__module__ = __name__
-StorageDispatchResult.__module__ = __name__
-CompositionDraw.__module__ = __name__
 
 __all__ = [
     "Uniform",
@@ -160,29 +185,10 @@ __all__ = [
     "ScenarioConfig",
     "CartesianAxis",
     "CartesianConfig",
-    "CoherentSpectrumConfig",
-    "LoadProfileConfig",
-    "DeviceState",
-    "DeviceClassSpec",
-    "ClassCount",
-    "ConsumerComposition",
     "BackgroundHarmonicConfig",
-    "CompositionConfig",
-    "CompositionDraw",
-    "DEVICE_LIBRARY_VERSION",
-    "composition_silent_orders",
-    "default_device_classes",
-    "default_compositions",
-    "SE_PRESET_VERSION",
-    "HIGH_ACTIVITY_START_TIME",
-    "EMISSION_FLOOR",
-    "EMISSION_FLOOR_PHASE_DEG",
-    "EMISSION_PHASE_SLOPE_DEG",
     "LOADING_FLOOR",
     "affine_emission_correction",
     "phase_slope_shift",
-    "se_random_scenario_config",
-    "se_coherent_scenario_config",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -195,13 +201,8 @@ __all__ = [
     "broadcast_operating_point",
     "unit_samples",
     "nominal_power",
-    "sample_coherent_spectra",
     "spectrum_sweep",
     "build_background_sources",
-    "sample_device_composition",
-    "resolve_composed_ids",
-    "load_profile_factors",
-    "apply_load_profiles",
     "perturbation_sweep",
     "run_node_injection_sweep",
     "en50160_limits",
@@ -220,8 +221,4 @@ __all__ = [
     "SCENARIO_CONFIG_TYPES",
     "ScenarioResult",
     "run_scenarios",
-    "StorageDispatchResult",
-    "integrate_soc",
-    "dispatch_storage",
-    "storage_operating_point",
 ]

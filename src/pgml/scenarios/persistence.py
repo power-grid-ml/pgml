@@ -81,7 +81,6 @@ _META = "meta.json"
 SCENARIO_CONFIG_TYPES = {
     "ScenarioConfig": _cfg.ScenarioConfig,
     "CartesianConfig": _cfg.CartesianConfig,
-    "CoherentSpectrumConfig": _cfg.CoherentSpectrumConfig,
     "Perturbation": _cfg.Perturbation,
     "SpectrumSweepConfig": _cfg.SpectrumSweepConfig,
     "NodeInjectionSweepConfig": _cfg.NodeInjectionSweepConfig,

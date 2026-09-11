@@ -39,7 +39,6 @@ from pgml.schemas.grid_schema import (
 from .emission import LOADING_FLOOR, affine_emission_correction, phase_slope_shift
 from .config import (
     CartesianConfig,
-    CoherentSpectrumConfig,
     NodeInjectionSweepConfig,
     ParameterSpec,
     Perturbation,
@@ -87,7 +86,9 @@ class SampledScenarios:
     n_samples:
         Batch size ``B``.
     config:
-        The originating config (provenance / reproducibility).
+        The originating config — any pydantic model, including one a downstream generator
+        defines (provenance / reproducibility; serialized into the dataset sidecar by
+        :func:`~pgml.scenarios.write_dataset`). ``None`` for a batch built without one.
     node_sources:
         Realized :class:`~pgml.solver.NodeHarmonicSource` entries — pass to
         ``solve_harmonic_flow(node_sources=...)``. Holds the upstream background of
@@ -126,10 +127,7 @@ class SampledScenarios:
     operating_point: dict
     samples: dict
     n_samples: int
-    config: (
-        "ScenarioConfig | CartesianConfig | CoherentSpectrumConfig | Perturbation | "
-        "SpectrumSweepConfig | NodeInjectionSweepConfig"
-    )
+    config: object
     harmonic_injection: dict = field(default_factory=dict)
     node_sources: list = field(default_factory=list)
     perturbations: list = field(default_factory=list)

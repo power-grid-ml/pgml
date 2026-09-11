@@ -30,7 +30,7 @@ Both defaults are backward-compatible; assembly enforces the semantics.)
     Curves use the generic tensor-capable `Characteristic` (x_values/y_values, linear/cubic).
     `Storage`: signed `p_nom_w` (>0 discharge/inject), plus inert energy-state fields
     (`energy_capacity_wh`, `soc`, `soc_min/max`, `efficiency_charge/discharge`, `p_rated_w`)
-    consumed only by `pgml.scenarios` dispatch. `consumer_type` is now the closed
+    consumed only by `pgml.dispatch`. `consumer_type` is now the closed
     `ConsumerType` enum (str-enum; `"pv"` etc. still validate; ML categorical, no physics).
     Control is honored by the NONLINEAR solve (`device_current_injections`); the linear
     const-Z assembler uses the base P/Q.
@@ -57,8 +57,10 @@ Both defaults are backward-compatible; assembly enforces the semantics.)
   BranchResult (i_from_*, i_to_*), InjectionResult (`injection_kind` covers
   load/generator/storage/source/shunt); optional per-phase P/Q/S;
   indexed by frequency_hz; phasors as (real, imag).
-- `scenario_schema.py` — realized inputs: Scenario, *OperatingPoint,
-  RealizedSpectrumPoint, ParameterPerturbation.
+- `scenario_schema.py` — realized inputs: Scenario (the batch's identity + provenance),
+  ParameterPerturbation (injected ground truth). The realized operating points and
+  spectra themselves are tensors, not rows: `pgml.scenarios.SampledScenarios` carries
+  them and `write_dataset` persists them columnar in `samples.parquet`.
 
 Invariants every consumer must honor:
 - Per-phase arrays align to the component's `phases` tuple (and from_/to_phases).

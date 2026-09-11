@@ -1452,10 +1452,9 @@ class Storage(InjectionAppliance):
     (``energy_capacity_wh``, ``soc``, ``soc_min``/``soc_max``, the charge/discharge
     efficiencies, ``p_rated_w``) are INERT in the solve — they are not read by the
     assembler or the solver, matching pandapower ``storage.soc_percent`` and the OpenDSS
-    ``Storage`` element. State-of-charge integration and the dispatch rule live in the
-    time-series / scenario layer (``pgml.scenarios``), which resolves them into the
-    per-step ``p_nom_w`` / operating point the solver consumes. See
-    ``docs/pgml/modeling/der-pv-storage.md`` section 4.4.
+    ``Storage`` element. State-of-charge integration and the dispatch rule live in
+    :mod:`pgml.dispatch`, which resolves them into the per-step ``p_nom_w`` / operating
+    point the solver consumes. See ``docs/pgml/modeling/der-pv-storage.md`` section 4.4.
     """
 
     component: Literal["storage"] = "storage"
