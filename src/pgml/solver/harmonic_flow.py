@@ -228,18 +228,17 @@ def solve_harmonic_flow(
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.
     harmonic_orders:
         Iterable of integer orders to solve (e.g. ``[1, 5, 7]``; 1 = fundamental).
-    slack, method, operating_point, tol, tol_update_pu, s_base_va, max_iter, dtype,
-    device, enforce_q_limits:
-        Passed to the fundamental :func:`solve_power_flow`. ``enforce_q_limits``
-        bounds a voltage-regulating generator's reactive power at the fundamental
-        (``None`` -> the documented default); regulation is a fundamental-frequency
-        concept, so it has no effect on the harmonic orders, where such a machine is
-        the same Norton current source as any other generator. Use ``method="newton"``
+    slack, method, operating_point, tol, tol_update_pu, s_base_va, enforce_q_limits, max_iter, dtype, device:
+        Passed to the fundamental :func:`solve_power_flow`. Use ``method="newton"``
         for a stiff inverter control loop (Volt-VAr / Volt-Watt), where the
         current-injection fixed point can oscillate. The convergence tolerances are
         PER UNIT (power mismatch / voltage update) and apply to the nonlinear
         fundamental only: every harmonic order is a direct linear solve with no
         iteration and therefore no convergence criterion of its own.
+        ``enforce_q_limits`` bounds a voltage-regulating generator's reactive power
+        (``None`` -> the documented default); regulation is a fundamental-frequency
+        concept, so it has no effect on the harmonic orders, where such a machine is
+        the same Norton current source as any other generator.
     precision:
         Working precision of the linear algebra, as in :func:`solve_power_flow`:
         ``"full"`` (default) or ``"mixed"`` (complex64 factorization refined against
