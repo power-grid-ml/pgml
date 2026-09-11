@@ -661,7 +661,18 @@ def _opt_float(row: Any, column: str) -> Optional[float]:
     return None if math.isnan(f) else f
 
 
-def _tap_ratio_magnitude(row: Any) -> float:
+#: Sentinel distinguishing an ABSENT ``tap_changer_type`` column (a pandapower < 3.0
+#: net, whose taps are always applied) from a present-but-unset value (pandapower >= 3
+#: ignores the tap position of such a row).
+_COLUMN_ABSENT = object()
+
+#: ``tap_changer_type`` values whose tap pandapower applies as a voltage RATIO change.
+#: ``"Symmetrical"`` differs from ``"Ratio"`` only through ``tap_step_degree``, which is
+#: rejected below, so both reduce to the same real ratio here.
+_RATIO_CHANGER_TYPES = ("ratio", "symmetrical")
+
+
+def _tap_ratio_magnitude(row: Any, label: str = "trafo") -> float:
     """Off-nominal tap ratio from pandapower's ``tap_*`` columns (1.0 = no tap).
 
     ``delta = (tap_pos - tap_neutral) * tap_step_percent / 100``. Verified against a
@@ -673,11 +684,22 @@ def _tap_ratio_magnitude(row: Any) -> float:
     (``ratio_magnitude = 1 / (1 + delta)``).
 
     Any of ``tap_pos``/``tap_neutral``/``tap_step_percent``/``tap_side`` missing (NaN
-    or absent) means no tap-changer is configured -> returns 1.0. Only a plain
-    ratio changer is modelled by the schema's real-valued ``ratio_magnitude``:
-    an ideal / angle-shifting tap raises, whether declared through pandapower 3's
-    ``tap_changer_type`` column (anything but ``"Ratio"``), the legacy
-    ``tap_phase_shifter`` boolean, or a nonzero ``tap_step_degree``.
+    or absent) means no tap-changer is configured -> returns 1.0.
+
+    ``tap_changer_type`` decides WHETHER the tap is applied, following pandapower 3's
+    own rule (``pandapower.build_branch._calc_nominal_ratio_from_dataframe``): a
+    ``"Ratio"`` or ``"Symmetrical"`` changer moves the tapped side's nominal voltage
+    by ``delta``, an ``"Ideal"`` changer shifts the angle only, and a row whose type
+    is UNSET (NaN / empty) has NO tap applied at all — its ``tap_pos`` is ignored,
+    however far from neutral it sits. This converter reproduces that: an unset type
+    with an off-neutral tap position returns 1.0 and logs a WARNING naming the
+    transformer, so a dropped tap is never silent. A net that predates the column
+    (pandapower < 3.0, where the column is absent entirely) keeps the legacy
+    behaviour and applies the tap.
+
+    Only a real-valued ratio tap is modelled by the schema's ``ratio_magnitude``: an
+    ideal / angle-shifting tap raises, whether declared through ``tap_changer_type``,
+    the legacy ``tap_phase_shifter`` boolean, or a nonzero ``tap_step_degree``.
     """
     step_deg = _opt_float(row, "tap_step_degree")
     if step_deg is not None and abs(step_deg) > 1.0e-9:
@@ -686,18 +708,44 @@ def _tap_ratio_magnitude(row: Any) -> float:
             "tap) is not supported; only a real-valued off-nominal tap ratio is "
             "modelled."
         )
-    changer_type = row.get("tap_changer_type", None) if hasattr(row, "get") else None
+    changer_type = (
+        row.get("tap_changer_type", _COLUMN_ABSENT)
+        if hasattr(row, "get")
+        else _COLUMN_ABSENT
+    )
+    column_absent = changer_type is _COLUMN_ABSENT
+    if column_absent or changer_type is None:
+        changer_type = ""
     if isinstance(changer_type, float) and math.isnan(changer_type):
-        changer_type = None
-    if changer_type is not None and str(changer_type).strip().lower() not in (
-        "",
-        "none",
-        "ratio",
-    ):
+        changer_type = ""
+    type_name = str(changer_type).strip().lower()
+    if type_name in ("none",):
+        type_name = ""
+    if type_name and type_name not in _RATIO_CHANGER_TYPES:
         raise ConversionError(
-            f"pandapower trafo: tap_changer_type={changer_type!r} is not supported; "
-            "only a real-valued off-nominal ratio tap ('Ratio') is modelled."
+            f"pandapower {label}: tap_changer_type={changer_type!r} is not supported; "
+            "only a real-valued off-nominal ratio tap ('Ratio'/'Symmetrical') is "
+            "modelled."
         )
+    if not type_name and not column_absent:
+        # pandapower >= 3 applies no tap without a changer type, whatever tap_pos says.
+        tap_pos = _opt_float(row, "tap_pos")
+        tap_neutral = _opt_float(row, "tap_neutral")
+        if (
+            tap_pos is not None
+            and tap_neutral is not None
+            and abs(tap_pos - tap_neutral) > 0.0
+        ):
+            _logger.warning(
+                "pandapower %s: tap_pos=%g is %g step(s) off neutral but "
+                "tap_changer_type is not set, so the tap is NOT applied (pandapower's "
+                "own solve ignores it too). Set tap_changer_type='Ratio' on the source "
+                "net if the tap is meant to act.",
+                label,
+                tap_pos,
+                tap_pos - tap_neutral,
+            )
+        return 1.0
     phase_shifter = (
         row.get("tap_phase_shifter", False) if hasattr(row, "get") else False
     )
@@ -1063,7 +1111,7 @@ def to_grid(
                     if b_m > 0.0:
                         l_m = 1.0 / (two_pi_f0 * b_m * parallel)
 
-            tap_ratio = _tap_ratio_magnitude(row)
+            tap_ratio = _tap_ratio_magnitude(row, f"trafo {pp_idx}")
 
             tx_phases = phases_for(phase_mode)
             branches.append(
