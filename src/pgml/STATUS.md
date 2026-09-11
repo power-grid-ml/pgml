@@ -347,7 +347,11 @@ results are never read as more physical than they are. Details live in `docs/pgm
   `asym_gen`, `link`, `transformer_tap_regulator`; OpenDSS items under D above.
   pandapower ideal phase-shifter taps raise, and a tap position whose
   `tap_changer_type` is unset is dropped with a WARNING (pandapower ignores it too).
-  pgm has no voltage-controlled generator component to map.
+  NOT YET mapped: power-grid-model's `voltage_regulator` component (1.13+; it makes a
+  `sym_gen`/`asym_gen`/`sym_load`/`asym_load` a PV terminal through
+  `regulated_object` + `u_ref`, with `q_min`/`q_max` declared but not yet enforced by
+  pgm itself) — the schema side is ready, the mapping and its oracle run need an
+  environment with a working power-grid-model core.
 
 ## Conventions a contributor must respect (full list + the package map: root `CONTEXT.md`)
 

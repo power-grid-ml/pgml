@@ -86,8 +86,9 @@ calls `to_grid(net)` with no `phase_mode` and stays green.
   the default `gen_mode=GenMode.VOLTAGE_REGULATING` (`vm_pu` -> setpoint,
   `min/max_q_mvar` -> limits, rows on one bus merged) and OpenDSS
   `Generator model=3` (`Vpu` -> setpoint re-referred to the bus base,
-  `Maxkvar`/`Minkvar` -> limits). pgm has no voltage-controlled generator component
-  to map (its `sym_gen` is PQ only). See the per-source CONTEXT files;
+  `Maxkvar`/`Minkvar` -> limits). power-grid-model's own `voltage_regulator`
+  component (1.13+: `regulated_object` + `u_ref`, with `q_min`/`q_max` declared but
+  not yet enforced by pgm) is NOT mapped yet. See the per-source CONTEXT files;
 - every other non-empty pgm component (`transformer`, `three_winding_transformer`,
   `shunt`, `asym_gen`, `link`, `transformer_tap_regulator`) triggers a
   `warn_dropped_elements` WARNING — nothing is dropped silently;

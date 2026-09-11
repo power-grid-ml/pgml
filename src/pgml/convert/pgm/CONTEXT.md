@@ -3,6 +3,21 @@
 Converts a power-grid-model ``input_data`` dict (structured numpy arrays) to a
 schema ``Grid`` and an ``id_map``.  Pure function; no side effects.
 
+## Not mapped yet: `voltage_regulator` (a PV terminal)
+
+power-grid-model 1.13 added a `voltage_regulator` component that makes an existing
+`sym_gen`/`asym_gen`/`sym_load`/`asym_load` a PV terminal: `regulated_object` (the
+appliance id), `status`, `u_ref` (required; per unit of the regulated node's
+`u_rated`, the same base as `source.u_ref`) and the optional `q_min`/`q_max`
+(declared in the input schema, but pgm's own limit handling is still marked as
+future work in its validation source). pgml's schema side is ready — the mapping is
+`u_ref -> Generator.voltage_regulation.v_set_pu`, `q_min`/`q_max -> q_min_var`/
+`q_max_var`, regulating the positive-sequence magnitude — but it is NOT implemented
+here yet, because it cannot be validated without a working power-grid-model core in
+the environment. pgm validates that every regulator and source on ONE node carries
+the same `u_ref`, which matches pgml's refusal of a regulating generator on a Source
+node and of two regulating generators on one node.
+
 ## Public API
 
 ```python
