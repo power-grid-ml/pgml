@@ -158,7 +158,10 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   `torch.linalg.inv`); shunt `Y_sh = G + jB` split half to each terminal diagonal.
 - LINE harmonic models (`_line_block_groups` dispatches on the typed
   `Line.harmonic_line_model`, grouping lines by model + skin flag + phase count):
-  `conductor_geometry` -> the Carson/Deri `_geometry_block_groups`; `sequence_aware` ->
+  `conductor_geometry` -> the Carson/Deri `_geometry_block_groups`, which reads the
+  conductor internal-inductance model from `line.geometry.internal_inductance` at
+  ASSEMBLY time (so a defaults override applies without reimporting) and passes it to
+  `line_constants`; `sequence_aware` ->
   `_sequence_aware_block_groups` (`Z_abc(f0)` -> `Z1`/`Z0`, each frequency-corrected,
   recombined; the per-line `earth_return` coefficients are stacked into tensors so a
   tensor coefficient keeps its gradient, while the DISCRETE options — skin flag,
@@ -168,7 +171,9 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   earth-return path, which the skin multiplier must NOT scale) and `m(h)` either the
   line's own positive-sequence skin curve (`positive_sequence`), 1 (`naive`) or the
   `resistance_frequency` law (unresolved model). A line whose model is unresolved is
-  assembled from its stored parameters and reported by `log_line_models`.
+  assembled from its stored parameters and reported by `log_line_models`, which also
+  WARNS (`log_synthesized_geometry_radius`) when a radius-based internal-inductance model
+  meets a synthesized geometry whose radius is a placeholder (`synth_unphysical`).
 - Single-terminal shunt (ShuntReactor / ShuntAppliance):
   `Y(h) = G + 1/(j·2πh f0 L) + j·2πh f0 C`; the inductive term only where
   `inductance_h` is set (grouped separately because it needs a matrix inverse).
@@ -275,6 +280,10 @@ contains no device fold at all and is the harmonic path.
 - `log_line_models(grid)` — the line-model part of that summary, plus a WARNING naming
   `apply_default_harmonic_model` when a line's `harmonic_line_model` is still unresolved
   (such a line is assembled from its stored parameters, i.e. the naive model above f0).
+- `log_synthesized_geometry_radius(lines)` — WARNS when `line.geometry.internal_inductance`
+  is anything but `gmr` while some line carries a synthesized geometry tagged
+  `synth_unphysical`: those geometries keep the modeling-default radius as a placeholder,
+  and every other internal-inductance model reads it. Called from `log_line_models`.
 
 `_incidence.py` — the terminal incidence model wired into `_stamp_const_z_loads` +
 `device_current_injections`. A constant real `M [n_elem, n_used]` maps used node-rows
