@@ -400,21 +400,6 @@ def _build_geometry_circuit_stub(grid: Grid, busname: dict) -> None:
     dss.Text.Command("Solve")
 
 
-def _get_stub_norton_from_dss() -> complex:
-    """Read the actual stub Vsource Norton admittance from the active DSS circuit.
-
-    Returns ``YPrim[0, 0]`` of ``Vsource.Source`` (the positive-terminal Norton
-    contribution at the current frequency, including Carson corrections).
-    """
-    import opendssdirect as dss
-
-    dss.Circuit.SetActiveElement("Vsource.Source")
-    yp = np.array(dss.CktElement.YPrim())
-    n = int(round((len(yp) / 2) ** 0.5))
-    yy = (yp[0::2] + 1j * yp[1::2]).reshape(n, n)
-    return complex(yy[0, 0])
-
-
 def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
     """Build an OpenDSS stub circuit for the sequence-aware 3-phase path.
 
