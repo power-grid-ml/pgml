@@ -13,10 +13,9 @@ Oracle setup
   the capability circle), while pandapower's DEFAULT ``enforce_q_lims=False``
   ignores them entirely and lets a PV bus deliver whatever Q holds the setpoint.
 - ``net.shunt`` is taken out of service in BOTH tools wherever a benchmark carries
-  one. The converter does not read ``net.shunt`` at all (an open coverage gap), so
-  leaving the shunts in would fold that gap into every number here and hide what
-  the ``gen`` mapping itself is worth. ``case9`` carries no shunt, so its
-  comparison is against the untouched benchmark.
+  one, so that the numbers here measure the ``gen`` mapping alone (the shunts
+  themselves convert exactly; see ``tests/convert/test_pandapower_pv_bus_shunt.py``).
+  ``case9`` carries no shunt, so its comparison is against the untouched benchmark.
 - ``method="newton"``: the current-injection fixed point does not contract on a
   stiff droop.
 
@@ -167,8 +166,8 @@ def test_case118_gen_conversion_recovers_the_operating_point():
     assert _median(v_dev) < 4.0e-2, f"median |V| deviation {_median(v_dev):.3e} pu"
     assert max(a_dev) < 2.5, f"angle deviation {max(a_dev):.3e} deg"
 
-    # The default (gen dropped) is not a usable operating point for this grid.
-    dropped, _ = to_grid(net)
+    # Dropping the gen table is not a usable operating point for this grid.
+    dropped, _ = to_grid(net, gen_mode=GenMode.DROP)
     result = solve_power_flow(
         dropped,
         slack="ideal",
