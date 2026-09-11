@@ -108,6 +108,27 @@ def _batched_operating_point(grid: Grid, batch: int) -> tuple[dict, torch.Tensor
     return op, scale
 
 
+def _set_jacobian_budget(budget_mb: float) -> None:
+    """Override ``solver.ift.jacobian_budget_mb`` through the documented defaults hook.
+
+    The budget is a shipped modeling default, so it is changed the way any default is
+    changed — a project-level override file plus :func:`pgml.defaults.reload` — rather than
+    by reaching into the solver.
+    """
+    import copy
+    import tempfile
+
+    import yaml
+
+    from pgml import defaults
+
+    data = copy.deepcopy(defaults.defaults())
+    data["solver"]["ift"]["jacobian_budget_mb"]["value"] = float(budget_mb)
+    path = Path(tempfile.mkdtemp(prefix="pgml-budget-")) / "defaults.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    defaults.reload(str(path))
+
+
 def _sync(device) -> None:
     if device is not None and device.type == "cuda":
         torch.cuda.synchronize()
@@ -240,11 +261,7 @@ def main() -> None:
     }
     for budget_mb in args.budget_mb:
         if budget_mb is not None:
-            import pgml.solver.power_flow as pf_mod
-
-            pf_mod._ift_jacobian_budget_bytes = lambda *a, _b=budget_mb, **k: int(
-                _b * 1024 * 1024
-            )
+            _set_jacobian_budget(budget_mb)
         for name in args.grids:
             grid = GRIDS[name]()
             for batch in args.batch:
