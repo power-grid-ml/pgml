@@ -212,11 +212,11 @@ source:
       |Z| of the upstream-grid Thevenin/Norton series impedance at the source's rated
       voltage, used when the converted source is near-ideal. Larger = weaker grid = more
       harmonic voltage at the source bus and more cross-feeder coupling.
-  rx_ratio:
+  xr_ratio:
     value: 10.0
-    units: "ratio X/R (not R/X)"
+    units: "ratio X/R"
     description: >
-      X/R ratio of the source series impedance (R = |Z|/sqrt(1+rx^2), X = rx*R). ~10 is
+      X/R ratio of the source series impedance (R = |Z|/sqrt(1+xr^2), X = xr*R). ~10 is
       typical for a stiff MV grid. NOT the same convention as the short-circuit-input
       converter's `rx_ratio` (`SourceShortCircuitInput.rx_ratio`, consumed by
       `pgml.convert._common.thevenin_from_sk`): that one is R/X (the reciprocal of this

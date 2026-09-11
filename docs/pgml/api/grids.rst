@@ -39,7 +39,7 @@ Grid builders
   The stock pandapower ext-grid converts to a near-ideal source that short-circuits the
   bus at harmonics; ``source_impedance_ohm`` applies a finite upstream-grid impedance so
   harmonics are not fully absorbed at the slack. Passing ``0`` keeps the converted
-  near-ideal source; the R/X split is controlled by the config key ``source.rx_ratio``.
+  near-ideal source; the X/R split is controlled by the config key ``source.xr_ratio``.
 
 Synthetic feeder (solver scaling benchmarks)
 ------------------------------------------------

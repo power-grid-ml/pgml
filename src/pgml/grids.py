@@ -77,7 +77,7 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     The stock pandapower ext-grid converts to a near-ideal source (R~1e-6 Ohm) which
     short-circuits the bus at harmonics; a FINITE series impedance is applied so the
     source does not fully absorb injected harmonics (``source_impedance_ohm`` is ``|Z|``
-    at the source's rated voltage, ``source.rx_ratio`` for the X/R split — config
+    at the source's rated voltage, ``source.xr_ratio`` for the X/R split — config
     defaults under ``source.*``). Larger = weaker upstream grid = more cross-feeder
     coupling.
 
@@ -110,9 +110,9 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
         else float(source_impedance_ohm)
     )
     if z > 0.0:
-        rx = float(_defaults.get("source.rx_ratio"))
-        r = z / math.sqrt(1.0 + rx * rx)
-        ll = (rx * r) / (2.0 * math.pi * float(grid.base_frequency_hz))  # X = 2*pi*f0*L
+        xr = float(_defaults.get("source.xr_ratio"))
+        r = z / math.sqrt(1.0 + xr * xr)
+        ll = (xr * r) / (2.0 * math.pi * float(grid.base_frequency_hz))  # X = 2*pi*f0*L
         for a in grid.appliances:
             if isinstance(a, Source):
                 p = len(a.phases)

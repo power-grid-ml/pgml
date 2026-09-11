@@ -44,7 +44,7 @@ requires an env var to be set.
   0.7788`; `phase_spacing_m` seeds the equilateral 3-phase synthesis fit).
 - `line.zero_sequence.{r0_over_r1, x0_over_x1, c0_over_c1}` — zero/positive-sequence
   ratios used by the converter when only a positive-sequence impedance is given.
-- `source.{series_impedance_ohm, rx_ratio}` — default slack series impedance synthesis.
+- `source.{series_impedance_ohm, xr_ratio}` — default slack series impedance synthesis.
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
