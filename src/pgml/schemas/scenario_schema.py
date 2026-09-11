@@ -1,53 +1,38 @@
-"""Realized simulation INPUTS (rev 1).
+"""Realized simulation INPUTS: the scenario identity and its injected perturbations.
 
-The per-step operating points, realized harmonic spectra, and deliberate
-parameter perturbations that were fed into a simulation. Kept SEPARATE from
-results (:mod:`pgml.schemas.result_schema`) and from the static grid
-(:mod:`pgml.schemas.grid_schema`), linked by integer ids, so a surrogate /
-inverse model can join inputs to outputs by (scenario, component, step) without
-the grid description carrying time-varying state.
+What was fed into a simulation, kept SEPARATE from results
+(:mod:`pgml.schemas.result_schema`) and from the static grid
+(:mod:`pgml.schemas.grid_schema`) and linked by integer ids, so a surrogate or inverse
+model joins inputs to outputs by (scenario, component, step) without the grid description
+carrying time-varying state.
 
 **Conventions**
 
-*Inputs, not results.* These are the realized values applied during simulation:
-the actual operating-point P/Q (from the profile service, NOT the nameplate
-ratings in the grid schema), the actual harmonic spectrum injected at each step
-(after any random/distribution sampling), and any injected parameter errors. They
-are the ground-truth INPUT side for learning input/output relations and for
-parameter recovery.
+*Inputs, not results.* These are the values applied during simulation, not derived from
+it: the ground-truth INPUT side for learning input/output relations and for parameter
+recovery.
 
-*Authoring-natural forms.* Unlike results (which use real/imag for ML), inputs
-are stored in their natural setpoint forms: P [W] / Q [var] for loads &
-generators; reference voltage magnitude + angle for sources; spectra as magnitude
-relative to the fundamental + phase, per harmonic (consistent with grid-schema
-spectra). A downstream adapter converts to whatever encoding a model needs.
+*The realized values themselves are tensors, not rows.* A batch's realized operating
+points and harmonic spectra are carried by
+:class:`pgml.scenarios.SampledScenarios` and persisted as the columnar
+``samples.parquet`` of :func:`pgml.scenarios.write_dataset`, which is the form a training
+pipeline reads. This module holds what does not fit a tensor column: the scenario's own
+identity and provenance, and the deliberate parameter perturbations that are ground truth
+for the inverse problem.
 
-*Per phase, per step, per frequency (spectra).* Operating points are per step;
-realized spectra add a ``frequency_hz`` axis (interharmonic-ready, matching the
-result schema). All per-phase arrays align to an explicit ``phases`` tuple.
-
-*Sign/reference.* Operating-point P/Q use the appliance's natural sense: a load's
-``p_w`` is consumption (positive), a generator's ``p_w`` is production (positive)
--- the component kind disambiguates, since these are setpoints, not signed flows.
+*Sign/reference.* Setpoints use the appliance's natural sense: a load's ``p_w`` is
+consumption (positive), a generator's ``p_w`` is production (positive) — the component
+kind disambiguates, since these are setpoints, not signed flows.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Optional
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
-from .grid_schema import GridModel, Phase, si_field
-
-
-def _check_phase_lengths(phases: tuple, **named) -> None:
-    n = len(phases)
-    for name, val in named.items():
-        if val is not None and len(val) != n:
-            raise ValueError(
-                f"`{name}` length ({len(val)}) must match phase count ({n})."
-            )
+from .grid_schema import GridModel, si_field
 
 
 # =============================================================================
@@ -83,109 +68,7 @@ class Scenario(GridModel):
 
 
 # =============================================================================
-# 2. Realized operating points (per step)
-# =============================================================================
-class LoadOperatingPoint(GridModel):
-    """Realized per-phase P/Q of a load at one step (the actual operating point,
-    not the nameplate rating)."""
-
-    scenario_id: int = Field(description="Loose ref to Scenario.id.")
-    load_id: int = Field(description="Loose ref to the grid load id.")
-    step: int = Field(description="Step index.")
-    phases: tuple[Phase, ...] = Field(description="Connected phases, array order.")
-    p_w: tuple[float, ...] = si_field(
-        "Per-phase active power consumed.", short="W", long="watt"
-    )
-    q_var: tuple[float, ...] = si_field(
-        "Per-phase reactive power consumed.", short="var", long="var"
-    )
-
-    @model_validator(mode="after")
-    def _check(self) -> "LoadOperatingPoint":
-        _check_phase_lengths(self.phases, p_w=self.p_w, q_var=self.q_var)
-        return self
-
-
-class GeneratorOperatingPoint(GridModel):
-    """Realized per-phase P/Q of a generator at one step (production positive)."""
-
-    scenario_id: int = Field(description="Loose ref to Scenario.id.")
-    generator_id: int = Field(description="Loose ref to the grid generator id.")
-    step: int = Field(description="Step index.")
-    phases: tuple[Phase, ...] = Field(description="Connected phases, array order.")
-    p_w: tuple[float, ...] = si_field(
-        "Per-phase active power produced.", short="W", long="watt"
-    )
-    q_var: tuple[float, ...] = si_field(
-        "Per-phase reactive power produced.", short="var", long="var"
-    )
-
-    @model_validator(mode="after")
-    def _check(self) -> "GeneratorOperatingPoint":
-        _check_phase_lengths(self.phases, p_w=self.p_w, q_var=self.q_var)
-        return self
-
-
-class SourceOperatingPoint(GridModel):
-    """Realized per-phase reference voltage setpoint of a source at one step."""
-
-    scenario_id: int = Field(description="Loose ref to Scenario.id.")
-    source_id: int = Field(description="Loose ref to the grid source id.")
-    step: int = Field(description="Step index.")
-    phases: tuple[Phase, ...] = Field(description="Connected phases, array order.")
-    u_ref_v: tuple[float, ...] = si_field(
-        "Per-phase reference voltage magnitude.", short="V", long="volt"
-    )
-    u_angle_deg: tuple[float, ...] = si_field(
-        "Per-phase reference voltage angle.", short="deg", long="degree"
-    )
-
-    @model_validator(mode="after")
-    def _check(self) -> "SourceOperatingPoint":
-        _check_phase_lengths(
-            self.phases, u_ref_v=self.u_ref_v, u_angle_deg=self.u_angle_deg
-        )
-        return self
-
-
-# =============================================================================
-# 3. Realized harmonic spectra (per step, per frequency)
-# =============================================================================
-class RealizedSpectrumPoint(GridModel):
-    """The harmonic spectrum actually injected by a parent (load/generator/source)
-    at one step and frequency — i.e. the concrete content after any random /
-    distribution sampling of the grid_schema Spectrum. Magnitudes are relative to
-    the fundamental injection, per phase (consistent with grid_schema)."""
-
-    scenario_id: int = Field(description="Loose ref to Scenario.id.")
-    parent_kind: Literal["load", "generator", "source"] = Field(
-        description="Owning component kind."
-    )
-    parent_id: int = Field(description="Loose ref to the parent component id.")
-    step: int = Field(description="Step index.")
-    frequency_hz: float = si_field(
-        "Frequency of this spectral line.", short="Hz", long="hertz", gt=0.0
-    )
-    phases: tuple[Phase, ...] = Field(description="Connected phases, array order.")
-    magnitude_pu: tuple[float, ...] = si_field(
-        "Per-phase magnitude as a fraction of the fundamental injection.",
-        short="pu",
-        long="per unit of fundamental",
-    )
-    phase_deg: tuple[float, ...] = si_field(
-        "Per-phase phase relative to the fundamental.", short="deg", long="degree"
-    )
-
-    @model_validator(mode="after")
-    def _check(self) -> "RealizedSpectrumPoint":
-        _check_phase_lengths(
-            self.phases, magnitude_pu=self.magnitude_pu, phase_deg=self.phase_deg
-        )
-        return self
-
-
-# =============================================================================
-# 4. Injected parameter perturbations (ground truth for inverse problems)
+# 2. Injected parameter perturbations (ground truth for inverse problems)
 # =============================================================================
 class ParameterPerturbation(GridModel):
     """A deliberate perturbation of a grid parameter recorded as ground truth, for
@@ -217,9 +100,5 @@ class ParameterPerturbation(GridModel):
 
 __all__ = [
     "Scenario",
-    "LoadOperatingPoint",
-    "GeneratorOperatingPoint",
-    "SourceOperatingPoint",
-    "RealizedSpectrumPoint",
     "ParameterPerturbation",
 ]

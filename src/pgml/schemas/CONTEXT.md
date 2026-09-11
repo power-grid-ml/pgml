@@ -18,11 +18,12 @@ Revision history (what each bump added, and what it means for data written befor
   phase-to-phase bank; zigzag rejected). Both defaults are backward-compatible; assembly
   enforces the semantics.
 - Rev 0.0.6 — the harmonic line model, the inductive shunt, the source background
-  distortion and the PV terminal, in detail below.
+  distortion, the PV terminal, and four unused realized-value models dropped from
+  `scenario_schema`, in detail below.
 
 ## Migrating a 0.0.5 grid JSON to 0.0.6
 
-A grid written under 0.0.5 loads under 0.0.6. Four things happen, in order of how much
+A grid written under 0.0.5 loads under 0.0.6. Five things happen, in order of how much
 attention they need:
 
 1. **Nothing at all for the new optional fields.** `Line.harmonic_line_model`,
@@ -52,6 +53,14 @@ attention they need:
 4. **One-way compatibility.** A grid written under 0.0.6 that actually USES a new field
    cannot be read by an older pgml (`extra="forbid"` rejects the unknown key). This is
    the usual direction of this contract.
+5. **Four realized-value models are gone from `scenario_schema`.**
+   `LoadOperatingPoint`, `GeneratorOperatingPoint`, `SourceOperatingPoint` and
+   `RealizedSpectrumPoint` are removed. Nothing constructed, read or persisted them: a
+   realized operating point is a tensor in `pgml.scenarios.SampledScenarios` and a column
+   in `samples.parquet`, never a row of these types. No stored file contains them, so
+   there is nothing to migrate; code that imported the names gets an `ImportError` and
+   should read the tensors or the parquet columns instead. `Scenario` and
+   `ParameterPerturbation` are unchanged.
 
 Two 0.0.5 fields that existed but were not consumed now ARE consumed, which changes the
 RESULT of a grid that set them (no migration is possible or needed — the stored value was
@@ -108,7 +117,7 @@ assembly consumes (a docstring / unit-metadata change; no field, name or value c
     Curves use the generic tensor-capable `Characteristic` (x_values/y_values, linear/cubic).
     `Storage`: signed `p_nom_w` (>0 discharge/inject), plus inert energy-state fields
     (`energy_capacity_wh`, `soc`, `soc_min/max`, `efficiency_charge/discharge`, `p_rated_w`)
-    consumed only by `pgml.scenarios` dispatch. `consumer_type` is now the closed
+    consumed only by `pgml.dispatch`. `consumer_type` is now the closed
     `ConsumerType` enum (str-enum; `"pv"` etc. still validate; ML categorical, no physics).
     Control is honored by the NONLINEAR solve (`device_current_injections`); the linear
     const-Z assembler uses the base P/Q.
@@ -149,8 +158,10 @@ assembly consumes (a docstring / unit-metadata change; no field, name or value c
   BranchResult (i_from_*, i_to_*), InjectionResult (`injection_kind` covers
   load/generator/storage/source/shunt); optional per-phase P/Q/S;
   indexed by frequency_hz; phasors as (real, imag).
-- `scenario_schema.py` — realized inputs: Scenario, *OperatingPoint,
-  RealizedSpectrumPoint, ParameterPerturbation.
+- `scenario_schema.py` — realized inputs: Scenario (the batch's identity + provenance),
+  ParameterPerturbation (injected ground truth). The realized operating points and
+  spectra themselves are tensors, not rows: `pgml.scenarios.SampledScenarios` carries
+  them and `write_dataset` persists them columnar in `samples.parquet`.
 
 Invariants every consumer must honor:
 - Per-phase arrays align to the component's `phases` tuple (and from_/to_phases).

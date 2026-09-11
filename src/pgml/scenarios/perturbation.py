@@ -27,11 +27,11 @@ from pgml.schemas.grid_schema import Grid
 from pgml.schemas.scenario_schema import ParameterPerturbation
 
 from .config import Perturbation, Selector
-from .sampler import SampledScenarios, _nominal
+from .sampler import SampledScenarios, nominal_power
 
 _F64 = torch.float64
 
-# (field key, operating_point key, parameter_path, unit, _Nominal attribute)
+# (field key, operating_point key, parameter_path, unit, NominalPower attribute)
 _FIELDS = {
     "p": ("p_w", "p_nom_w", "W", "p_total"),
     "q": ("q_var", "q_nom_var", "var", "q_total"),
@@ -78,7 +78,7 @@ def perturbation_sweep(
             "perturbation_sweep selector matched no in-service components."
         )
     b = len(ids)
-    nominal = _nominal(grid)
+    nominal = nominal_power(grid)
     kind = selector.component
     fkeys = ["p", "q"] if perturbation.field == "pq" else [perturbation.field]
 

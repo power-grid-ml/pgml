@@ -52,14 +52,13 @@ from pgml.evaluation.oracles.opendss_scenario_oracle import (  # noqa: E402
 )
 from pgml.grids import synthetic_feeder  # noqa: E402
 from pgml.scenarios import (  # noqa: E402
-    CoherentSpectrumConfig,
     ParameterSpec,
     ScenarioConfig,
     Selector,
     Uniform,
+    batch_from_values,
     read_dataset,
     sample,
-    sample_coherent_spectra,
 )
 from pgml.schemas.grid_schema import (  # noqa: E402
     ComplexTap,
@@ -128,16 +127,41 @@ def _snapshot_config() -> ScenarioConfig:
     )
 
 
-def _coherent_config() -> CoherentSpectrumConfig:
-    """A small node-coherent batch: B=2 scenarios, T=3 steps."""
-    return CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5],
-        n_steps=3,
-        n_scenarios=2,
-        n_modes=2,
-        seed=0,
-        harmonic_reference=None,  # absolute pu (clamped to 1.0); no IEC/EN reference needed
+#: Batch shape of the sequence cases: 2 scenarios of 3 steps each.
+_SEQ_B, _SEQ_T = 2, 3
+
+
+def _sequence_batch(grid, *, profiled: bool = False):
+    """A per-step sequence batch: ``[B, T]`` injections, optionally a ``[B, T]`` fundamental.
+
+    The magnitudes and the per-step fundamental vary over BOTH axes, so a consumer that
+    indexed the step axis by scenario (or dropped it) disagrees with the reference tool
+    instead of quietly averaging. Built from explicit values, which is what the engine
+    offers for a step axis it does not generate itself.
+    """
+    b, t = _SEQ_B, _SEQ_T
+    load_ids = [a.id for a in grid.appliances if isinstance(a, Load) and a.in_service]
+    # a distinct ramp per (scenario, step), and a distinct phase per device
+    ramp = torch.linspace(0.4, 1.0, b * t, dtype=torch.float64).reshape(b, t)
+    injection = {
+        cid: {
+            order: (
+                ramp * (0.02 + 0.01 * k),
+                torch.full((b, t), 15.0 * k, dtype=torch.float64),
+            )
+            for order in (3, 5)
+        }
+        for k, cid in enumerate(load_ids)
+    }
+    nameplate = {a.id: float(a.p_nom_w) for a in grid.appliances if a.id in load_ids}
+    p_w = {cid: ramp * nameplate[cid] for cid in load_ids} if profiled else None
+    return batch_from_values(
+        grid,
+        n_samples=b,
+        n_steps=t,
+        p_w=p_w,
+        harmonic_injection=injection,
+        shared_samples={"time_s": torch.arange(t, dtype=torch.float64) * 3600.0},
     )
 
 
@@ -303,16 +327,16 @@ def test_dataset_roundtrip_and_provenance_snapshot(tmp_path):
     assert torch.allclose(loaded.v, result.v)
 
 
-def test_dataset_roundtrip_and_provenance_coherent(tmp_path):
+def test_dataset_roundtrip_and_provenance_sequence(tmp_path):
     grid = _grid()
-    sampled = sample_coherent_spectra(grid, _coherent_config())
+    sampled = _sequence_batch(grid)
     result = run_opendss_scenarios(
         grid, sampled, harmonic_orders=_ORDERS, mode="matched"
     )
-    assert result.v.shape == (2, 3, len(_ORDERS), result.index.size)
+    assert result.v.shape == (_SEQ_B, _SEQ_T, len(_ORDERS), result.index.size)
 
     out = write_opendss_dataset(
-        grid, sampled, tmp_path / "ds_coherent", harmonic_orders=_ORDERS, mode="matched"
+        grid, sampled, tmp_path / "ds_sequence", harmonic_orders=_ORDERS, mode="matched"
     )
     meta = json.loads((out / "meta.json").read_text())
     assert meta["engine"] == "opendss"
@@ -345,14 +369,15 @@ def test_matched_mode_snapshot_agrees_with_pgml(tmp_path):
 
 
 @pytest.mark.slow
-def test_matched_mode_coherent_agrees_with_pgml():
+def test_matched_mode_sequence_agrees_with_pgml():
+    """A ``[B, T]`` harmonic injection against a ``[B]`` fundamental agrees with OpenDSS."""
     grid = _grid()
-    sampled = sample_coherent_spectra(grid, _coherent_config())
+    sampled = _sequence_batch(grid)
     report = compare_to_pgml(grid, sampled, harmonic_orders=_ORDERS, mode="matched")
     assert report["opendss_converged"] and report["pgml_converged"]
     for h, stats in report["per_order"].items():
         assert stats["rel_max"] < _MATCHED_REL_TOL, (
-            f"order {h}: matched-mode (coherent) relative error {stats['rel_max']:.3e} "
+            f"order {h}: matched-mode (sequence) relative error {stats['rel_max']:.3e} "
             f"exceeds {_MATCHED_REL_TOL:.0e}."
         )
 
@@ -669,35 +694,23 @@ def test_delta_shunt_export_emits_delta_capacitor():
 
 
 # ---------------------------------------------------------------------------
-# Coherent batch with a LoadProfileConfig (per-step [B, T] operating point)
+# Sequence batch with a per-step [B, T] operating point
 # ---------------------------------------------------------------------------
 @pytest.mark.slow
-def test_coherent_with_load_profile_matched_tight():
-    """A per-STEP ``[B, T]`` operating point (LoadProfileConfig) agrees with pgml."""
-    from pgml.scenarios import LoadProfileConfig
-
+def test_sequence_with_per_step_fundamental_matched_tight():
+    """A per-STEP ``[B, T]`` operating point agrees with pgml order by order."""
     grid = _grid()
-    cfg = CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5],
-        n_steps=3,
-        n_scenarios=2,
-        seed=7,
-        step_size_s=3600.0,
-        profile=LoadProfileConfig(),
-        start_time="2026-06-01T00:00:00",
-    )
-    sampled = sample_coherent_spectra(grid, cfg)
+    sampled = _sequence_batch(grid, profiled=True)
     op = sampled.operating_point
     assert any(
         hasattr(v.get("p_w"), "ndim") and v["p_w"].ndim == 2 for v in op.values()
-    ), "the profile should lift the operating point to a per-step [B, T] shape"
+    ), "the batch should carry a per-step [B, T] fundamental"
 
     report = compare_to_pgml(grid, sampled, harmonic_orders=[1, 3, 5], mode="matched")
     assert report["opendss_converged"] and report["pgml_converged"]
     for h, stats in report["per_order"].items():
         assert stats["rel_max"] < _MATCHED_REL_TOL, (
-            f"order {h}: coherent-with-profile matched-mode error {stats['rel_max']:.3e} "
+            f"order {h}: per-step fundamental matched-mode error {stats['rel_max']:.3e} "
             f"exceeds {_MATCHED_REL_TOL:.0e} -- the per-step [B, T] operating point "
             "slicing must index by step, not just by scenario."
         )

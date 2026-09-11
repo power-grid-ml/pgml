@@ -1,6 +1,6 @@
 [workspace]
 name = "pgml"
-version = "0.2.0"
+version = "0.3.0"
 description = "Differentiable, GPU-ready harmonic power flow for power grids"
 channels = ["https://prefix.dev/conda-forge"]
 platforms = ["linux-64", "win-64"]

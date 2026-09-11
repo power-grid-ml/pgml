@@ -49,8 +49,8 @@ start there.)
 3. **solver** solves `Y(f)·V(f)=I(f)` (linear) or the nonlinear const-P/ZIP problem
    (current-injection fixed point or Newton, IFT gradients) → phasor **result**.
 4. **convert** turns pandapower / OpenDSS / power-grid-model nets into a `Grid`; **scenarios**
-   batches the inputs (ML training data); **evaluation** compares results to those reference
-   libraries.
+   declares and solves a BATCH of input deltas on one grid and persists it (ML training
+   data); **evaluation** compares results to those reference libraries.
 
 The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTEXT.md`.
 
@@ -114,12 +114,17 @@ full behavioral rule is in `CLAUDE.md`.
 2. Geometry → impedance differentiable path (Carson/Deri, skin effect). **Done** — bit-exact
    vs OpenDSS.
 3. Full harmonic range; validate harmonic results vs OpenDSS (IEEE-33 + CIGRE LV). **Done.**
-4. Batching/scale (`pgml.scenarios`): reproducible QMC/cartesian + correlated + EN 50160 +
-   parquet. **Done** — including cross-grid batching (`pgml.multigrid.merge_grids`
-   disjoint-union solves) and switch-state batching (`branch_states`); the production
-   GPU data-generation scale decision remains open (`src/pgml/STATUS.md` §A).
+4. Batching/scale (`pgml.scenarios`): a declared batch of input deltas — reproducible
+   QMC/cartesian sampling, explicit values (`batch_from_values`), the excitation sweeps, the
+   standards-referenced emission, parquet persistence. **Done** — including cross-grid
+   batching (`pgml.multigrid.merge_grids` disjoint-union solves) and switch-state batching
+   (`branch_states`); the production GPU data-generation scale decision remains open
+   (`src/pgml/STATUS.md` §A).
 5. Harmonic state estimation and the inverse (parameter recovery) path build on this
-   package's public API. **Out of scope for this repository.**
+   package's public API. **Out of scope for this repository** — including the scenario
+   RECIPES a learning task needs (device populations, calibrated emission ranges, load
+   profiles). A downstream generator plugs into `run_scenarios` through the `ScenarioSpec`
+   protocol (an object with `sample(grid)`), so the engine stays free of them.
 
 ## Commands
 
