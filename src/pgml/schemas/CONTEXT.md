@@ -2,29 +2,73 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
-`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.5"`) stamps the contract version
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.6"`) stamps the contract version
 into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
 minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
-while the library is < 1.0.0); bump the patch/minor on any contract change. (Rev 0.0.4: the
-dataset sidecar `meta.json` additionally records per-run convergence — `converged` +
-`failed_scenarios` — a persistence-contract addition; the three schema modules are unchanged.
-Rev 0.0.5: `InjectionAppliance.return_path` — "auto"/"neutral"/"ground" WYE return-conductor
-override, default "auto" = the historical node-level rule; `ShuntAppliance.connection` —
-WYE (default, phase-to-ground) or DELTA (cyclic phase-to-phase bank), zigzag rejected.
-Both defaults are backward-compatible; assembly enforces the semantics.)
+while the library is < 1.0.0); bump the patch/minor on any contract change.
 
-Pending contract changes awaiting the next `SCHEMA_VERSION` bump: `Source.spectrum` is
-REMOVED (upstream/background distortion is an operating-point quantity carried by
-`pgml.solver.NodeHarmonicSource` / `pgml.scenarios`' `BackgroundHarmonicConfig`, never by
-the grid description). A persisted `Source` that still carries the key loads unchanged: a
-before-validator drops it, with a WARNING when the value is non-null (a null carries no
-information and is dropped silently). Any OTHER unknown field still raises. The same
-before-validator runs on keyword construction, so downstream code that still writes
-`Source(..., spectrum=None)` keeps working (verified against `pghub`'s ding0 loader); it
-should drop the argument anyway, and a non-null value there now warns.
+Revision history (what each bump added, and what it means for data written before it):
+
+- Rev 0.0.4 — the dataset sidecar `meta.json` additionally records per-run convergence
+  (`converged` + `failed_scenarios`), a persistence-contract addition; the three schema
+  modules are unchanged.
+- Rev 0.0.5 — `InjectionAppliance.return_path` ("auto"/"neutral"/"ground" WYE
+  return-conductor override, default "auto" = the historical node-level rule) and
+  `ShuntAppliance.connection` (WYE default, phase-to-ground, or DELTA cyclic
+  phase-to-phase bank; zigzag rejected). Both defaults are backward-compatible; assembly
+  enforces the semantics.
+- Rev 0.0.6 — the harmonic line model, the inductive shunt, the source background
+  distortion and the PV terminal, in detail below.
+
+## Migrating a 0.0.5 grid JSON to 0.0.6
+
+A grid written under 0.0.5 loads under 0.0.6. Four things happen, in order of how much
+attention they need:
+
+1. **Nothing at all for the new optional fields.** `Line.harmonic_line_model`,
+   `Line.harmonic_skin_effect`, `Line.earth_return`, `ShuntReactor.inductance_h`,
+   `ShuntAppliance.inductance_h` and `Generator.voltage_regulation` are optional and
+   default to `None`, and every consumer treats `None` as the pre-0.0.6 behaviour: the
+   line is assembled from its stored R/X exactly as before, the shunt has no inductive
+   path, the generator is a plain PQ injection. No stored value changes and no result
+   moves.
+2. **Legacy harmonic-line-model tags migrate, with a warning.** A `Line` carrying
+   `tags["harmonic_line_model"]`, `tags["seq_skin"]` or `tags["seq_earth_coeff"]` has
+   them moved onto the typed fields by a `mode="before"` validator, which emits a
+   `UserWarning` naming the line and removes the keys from `tags`. The physics is
+   preserved (`"sequence_aware"` + `seq_skin="false"` + a `seq_earth_coeff` float becomes
+   `harmonic_line_model="sequence_aware"`, `harmonic_skin_effect=False`,
+   `earth_return.resistance_coeff_ohm_per_m_per_hz=<the float>`). An UNRECOGNISED model
+   name now raises instead of silently selecting the naive model. Re-persisting the grid
+   clears the warning.
+3. **`Source.spectrum` is dropped.** The field is REMOVED (upstream / background
+   distortion is an operating-point quantity carried by `pgml.solver.NodeHarmonicSource`
+   or `pgml.scenarios`' `BackgroundHarmonicConfig`, never by the grid description). A
+   persisted `Source` that still carries the key loads: a before-validator drops it, with
+   a WARNING when the value is non-null and silently when it is null (every grid written
+   by pgml has `"spectrum": null`). Any OTHER unknown field still raises. The same
+   before-validator runs on keyword construction, so downstream code that still writes
+   `Source(..., spectrum=None)` keeps working; it should drop the argument.
+4. **One-way compatibility.** A grid written under 0.0.6 that actually USES a new field
+   cannot be read by an older pgml (`extra="forbid"` rejects the unknown key). This is
+   the usual direction of this contract.
+
+Two 0.0.5 fields that existed but were not consumed now ARE consumed, which changes the
+RESULT of a grid that set them (no migration is possible or needed — the stored value was
+always meant to be used):
+
+- `Transformer.zero_sequence` now carries the zero-sequence leakage VALUE into the stamp
+  (it was ignored, so such a unit silently used `Z0 = Z1`). No converter emitted it before
+  0.0.6, so no grid in the ecosystem is affected.
+- `Transformer.harmonic_xr_constant` and `Transformer.resistance_frequency` now select the
+  winding-resistance frequency law (`R(f) = R·m(f)·(f/f0 if the unit holds X/R constant
+  else 1)`). The OpenDSS converter has always written `harmonic_xr_constant` from
+  `XRConst`, so an OpenDSS-imported grid with `XRConst=Yes` changes its harmonic result.
+  The shipped defaults (`False` and a constant multiplier) reproduce the old behaviour.
+
 `TransformerZeroSeq`'s documented reference side is corrected from "HV" to "the to-side
 (LV) winding coil" — the side the positive-sequence leakage fields use and the side
-assembly consumes (a docstring/unit-metadata change; no field, name or value changes).
+assembly consumes (a docstring / unit-metadata change; no field, name or value changes).
 
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),
