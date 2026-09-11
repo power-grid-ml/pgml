@@ -222,3 +222,62 @@ source:
       `pgml.convert._common.thevenin_from_sk`): that one is R/X (the reciprocal of this
       one), matching power-grid-model's own `rx_ratio` field. Converting a value between
       the two means inverting it, not copying it.
+
+# Nonlinear-solve convergence and working precision. The engine solves in SI units, so
+# every convergence measure is normalised before it is compared with a tolerance: the
+# power mismatch by `s_base_va`, the voltage update by each node's line-to-neutral rated
+# voltage. That makes one tolerance mean the same thing on a 400 V LV node and on a
+# 20 kV node, and makes an iteration count comparable with pandapower / power-grid-model.
+solver:
+  convergence:
+    mismatch_pu:
+      value: 1.0e-8
+      units: "per unit of s_base_va (apparent-power mismatch)"
+      description: >
+        PRIMARY convergence criterion of the nonlinear power flow: the largest nodal
+        apparent-power mismatch |V_i * conj(F_i)| / s_base_va over the free (non-slack)
+        rows, where F = Y*V + I_device(V) - I_slack. 1e-8 pu is pandapower's default
+        (`tolerance_mva` on a 1 MVA base) and the same order as power-grid-model's
+        `error_tolerance`, so iteration counts are comparable across the three tools.
+        The achievable value is bounded below by the cancellation error of Y*V, which the
+        solver estimates per row from the working precision and reports; a tolerance
+        below that floor logs a warning and the floor governs.
+    update_pu:
+      value: 1.0e-8
+      units: "per unit of each node's line-to-neutral rated voltage"
+      description: >
+        SECONDARY convergence criterion: the largest per-row voltage update
+        |V_new - V_old| / V_LN(node) of the current-injection fixed point (or of the
+        Newton step). Both criteria must hold. Per-row normalisation makes the measure
+        independent of the voltage level and of the number of rows, so a multi-voltage
+        grid or an ensemble of grids solved in one system is judged exactly like a single
+        feeder. power-grid-model uses the same quantity (max voltage deviation in pu).
+    s_base_va:
+      value: 1.0e+6
+      units: "VA"
+      description: >
+        Apparent-power base of the per-unit power mismatch. 1 MVA matches pandapower's
+        default `sn_mva`, so the mismatch tolerance carries the same meaning there.
+        A grid-specific base (e.g. the transformer rating) only rescales the criterion.
+  precision:
+    complex64_cond_warn:
+      value: 1.0e+4
+      units: "condition number of the factored system"
+      description: >
+        Estimated condition number above which a plain complex64 solve logs a one-time
+        WARNING. The relative error of a single-precision solve grows like
+        cond * eps_single (eps_single ~ 1.2e-7), so at cond = 1e4 about four digits are
+        already lost. SI-unit feeders reach cond 1e6 to 1e9, hence the recommended recipe:
+        solve at complex128, or at complex128 with precision="mixed" (single-precision
+        factorization refined against double-precision residuals), and store complex64.
+    refine_steps:
+      value: 2
+      units: "count"
+      description: >
+        Iterative-refinement steps applied by a mixed-precision solve: the solution of
+        the single-precision factorization is corrected with residuals formed at the
+        working precision, x <- x + A_single^-1 (b - A*x). Each step multiplies the
+        relative error by about cond * eps_single, so two steps recover double-precision
+        accuracy for cond up to ~1e5 and are the documented default; the nonlinear
+        outer iteration (itself a residual correction) continues the refinement beyond
+        that.
