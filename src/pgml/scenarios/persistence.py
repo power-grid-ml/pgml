@@ -25,7 +25,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import numpy as np
 import polars as pl
@@ -73,8 +73,12 @@ _VOLTAGES = "voltages.parquet"
 _SAMPLES = "samples.parquet"
 _META = "meta.json"
 
-# config types we can reconstruct on read (by class name).
-_CONFIG_TYPES = {
+#: The config classes :func:`read_dataset` reconstructs without being told, keyed by the
+#: ``config_type`` string :func:`write_dataset` records. A dataset whose config class is
+#: defined elsewhere is reconstructed by passing ``config_types=`` (the class name the
+#: producer wrote, mapped to the class), so reading never imports a foreign module on a
+#: guess.
+SCENARIO_CONFIG_TYPES = {
     "ScenarioConfig": _cfg.ScenarioConfig,
     "CartesianConfig": _cfg.CartesianConfig,
     "CoherentSpectrumConfig": _cfg.CoherentSpectrumConfig,
@@ -106,10 +110,12 @@ class LoadedDataset:
     perturbations:
         Ground-truth ``ParameterPerturbation`` rows as dicts (empty if none).
     meta:
-        The full sidecar dict (config_json, seed, dims, layout, …), including the
-        generation provenance (``config_hash``, ``provenance``,
-        ``device_library_version``, ``standards``). A dataset written before those were
-        stamped simply lacks the keys — reading is unaffected.
+        The full sidecar dict (``config_json``, ``seed``, ``dims``, ``layout``, the time
+        axis ``n_steps`` / ``step_size_s`` / ``t0_unix_s``, the config owner
+        ``config_module`` / ``config_class``, …) including the generation provenance
+        (``config_hash``, ``provenance``, ``standards``, and the producer's own
+        ``extra_provenance``). A dataset written before a key was stamped simply lacks it
+        — reading is unaffected.
     converged:
         ``True`` iff every scenario's solve converged; ``None`` for a dataset written
         before convergence metadata was persisted (validity unknown).
@@ -136,18 +142,26 @@ def _np(t: Tensor, dtype=np.float64) -> np.ndarray:
     return t.detach().to("cpu").numpy().astype(dtype, copy=False)
 
 
-def _canonical(v: Tensor) -> tuple[Tensor, int, int, int, int]:
-    """Reshape ``v`` to ``[B, T, H, N]`` (inserting singleton T/H by ndim)."""
-    if v.ndim == 2:  # [B, N] power flow
-        b, n = v.shape
-        return v.reshape(b, 1, 1, n), b, 1, 1
-    if v.ndim == 3:  # [B, H, N] harmonic
-        b, h, n = v.shape
-        return v.reshape(b, 1, h, n), b, 1, h
-    if v.ndim == 4:  # [B, T, H, N] coherent
-        b, t, h, n = v.shape
-        return v, b, t, h
-    raise InputError(f"ScenarioResult.v must be 2-4 dims, got {v.ndim}.")
+def _canonical(
+    v: Tensor, *, n_samples: int, n_steps: int, n_freq: int, n_rows: int
+) -> tuple[Tensor, int, int, int]:
+    """Reshape ``v`` to ``[B, T, H, N]`` from the DECLARED batch and index dimensions.
+
+    The rank of ``v`` alone is ambiguous: ``[B, T, N]`` (a sequence power flow) and
+    ``[B, H, N]`` (a snapshot harmonic run) are the same rank and would record one axis as
+    the other. The batch declares ``B`` and ``T``, the result index declares ``N``, and the
+    frequency vector declares ``H``, so the layout is read off the declarations and only
+    checked against the element count.
+    """
+    dims = (int(n_samples), int(n_steps), int(n_freq), int(n_rows))
+    expected = dims[0] * dims[1] * dims[2] * dims[3]
+    if v.numel() != expected:
+        raise InputError(
+            f"ScenarioResult.v has {v.numel()} elements, which does not match the "
+            f"declared layout B={dims[0]}, T={dims[1]}, H={dims[2]}, N={dims[3]} "
+            f"({expected} elements); v has shape {tuple(v.shape)}."
+        )
+    return v.reshape(dims), dims[0], dims[1], dims[2]
 
 
 def _long_dataframe(vre, vim, dims, node_ids, phase_codes, freqs) -> "pl.DataFrame":
@@ -207,22 +221,41 @@ def _array_col(arr2d: np.ndarray) -> pl.Series:
     )
 
 
-def _write_samples(samples: dict, b: int, path: Path, comp: str) -> dict:
-    """Write per-scenario (B-leading) samples; return shapes/dtypes + shared (non-B)."""
+def _real_array(name: str, t: Tensor) -> np.ndarray:
+    """A detached numpy view of one sample record, in its NATURAL dtype (int vs float)."""
+    arr = t.detach().to("cpu").numpy()
+    if np.issubdtype(arr.dtype, np.complexfloating):
+        # A float64 cast would silently DROP the imaginary part (and the
+        # shared-sample JSON path cannot encode complex at all).
+        raise InputError(
+            f"sample column {name!r} is complex-valued; the parquet sample "
+            "layout stores real columns only — split into real/imag (or "
+            "magnitude/phase) columns before persisting."
+        )
+    return arr
+
+
+def _write_samples(
+    samples: dict, shared_records: dict, b: int, path: Path, comp: str
+) -> dict:
+    """Write the per-scenario sample columns; return shapes/dtypes + the shared block.
+
+    ``shared_records`` are the records the batch DECLARED as batch-shared
+    (:attr:`~pgml.scenarios.SampledScenarios.shared_samples`) and go to the sidecar
+    regardless of their shape. An undeclared record is classified by its leading
+    dimension, which is what a dataset written before the declaration existed relies on;
+    a record of length ``B`` that is not per-scenario (a device-id column on a grid with
+    as many devices as scenarios) can only be told apart by declaring it.
+    """
     cols: dict = {"scenario": np.arange(b, dtype=np.int64)}
     shapes: dict = {}
     dtypes: dict = {}
     shared: dict = {}
+    for name, t in shared_records.items():
+        arr = _real_array(name, t)
+        shared[name] = {"data": arr.tolist(), "dtype": str(t.dtype)}
     for name, t in samples.items():
-        arr = t.detach().to("cpu").numpy()  # NATURAL dtype (preserve int vs float)
-        if np.issubdtype(arr.dtype, np.complexfloating):
-            # A float64 cast would silently DROP the imaginary part (and the
-            # shared-sample JSON path cannot encode complex at all).
-            raise InputError(
-                f"sample column {name!r} is complex-valued; the parquet sample "
-                "layout stores real columns only — split into real/imag (or "
-                "magnitude/phase) columns before persisting."
-            )
+        arr = _real_array(name, t)
         if arr.ndim >= 1 and arr.shape[0] == b:
             flat = arr.reshape(b, -1)
             cols[name] = _array_col(flat) if flat.shape[1] > 1 else flat[:, 0]
@@ -233,6 +266,26 @@ def _write_samples(samples: dict, b: int, path: Path, comp: str) -> dict:
     if len(cols) > 1:
         pl.DataFrame(cols).write_parquet(path / _SAMPLES, compression=comp)
     return {"sample_shapes": shapes, "sample_dtypes": dtypes, "shared_samples": shared}
+
+
+def _step_size_s(config) -> Optional[float]:
+    """The sequence step size in seconds, when the config declares one."""
+    value = getattr(config, "step_size_s", None)
+    return None if value is None else float(value)
+
+
+def _t0_unix_s(sampled) -> Optional[float]:
+    """Absolute epoch seconds of the first step, from the batch's own time record.
+
+    Recorded so a consumer reads the dataset's time axis from the sidecar instead of
+    re-deriving it from a generator-specific config field.
+    """
+    record = sampled.shared_samples.get(
+        "time_unix_s", sampled.samples.get("time_unix_s")
+    )
+    if record is None or record.numel() == 0:
+        return None
+    return float(record.detach().to("cpu").reshape(-1)[0])
 
 
 #: Length of the printable config fingerprint. 16 hex digits (64 bits) make an
@@ -262,20 +315,18 @@ def generation_provenance() -> dict:
     """Everything a generated dataset should record beyond its config and seed.
 
     Two datasets written from a byte-identical config and seed can still differ
-    numerically — because the code changed, because the shipped device library was
-    recalibrated, or because a ``PGML_*`` environment override replaced a standards
-    table. Returns a JSON-ready dict with the code provenance (commit + dirty flag +
-    versions), the device-library version, and the active EN 50160 / IEC 61000-3-2
-    tables with their content hashes.
+    numerically — because the code changed, or because a ``PGML_*`` environment override
+    replaced a standards table. Returns a JSON-ready dict with the code provenance
+    (commit + dirty flag + versions) and the active EN 50160 / IEC 61000-3-2 tables with
+    their content hashes. A generator with its own versioned inputs (a calibrated recipe,
+    a device library) adds them through ``write_dataset(provenance=...)``.
     """
     from ..provenance import code_provenance
-    from .config import DEVICE_LIBRARY_VERSION
     from .en50160 import en50160_provenance
     from .iec61000_3_2 import iec61000_3_2_provenance
 
     return {
         "provenance": code_provenance(),
-        "device_library_version": DEVICE_LIBRARY_VERSION,
         "standards": {
             "en50160": en50160_provenance(),
             "iec61000_3_2": iec61000_3_2_provenance(),
@@ -290,6 +341,7 @@ def write_dataset(
     layout: str = "wide",
     compression: str = "zstd",
     also_csv: bool = False,
+    provenance: Optional[dict] = None,
 ) -> Path:
     """Write a :class:`ScenarioResult` to a parquet dataset directory.
 
@@ -306,6 +358,12 @@ def write_dataset(
     also_csv:
         Additionally write the tidy long voltages to ``voltages.csv`` (regardless of
         ``layout``) for manual inspection — not the primary format, just a convenience.
+    provenance:
+        The caller's own generation stamps, recorded in ``meta.json`` under
+        ``extra_provenance`` (JSON-serializable values only). This is where a generator
+        records what its config does not capture — the version of a calibrated recipe or
+        of a device library whose defaults would change the data without changing the
+        config. :func:`generation_provenance` covers what pgml itself contributes.
 
     Returns
     -------
@@ -317,12 +375,18 @@ def write_dataset(
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
 
-    v4, b, t, h = _canonical(result.v)
-    n = v4.shape[-1]
-    vre, vim = _np(v4.real), _np(v4.imag)
     node_ids = _np(result.index.node_ids, np.int64)
     phase_codes = _np(result.index.phase_codes, np.int64)
     freqs = _np(result.frequencies_hz) if result.frequencies_hz is not None else None
+    v4, b, t, h = _canonical(
+        result.v,
+        n_samples=result.sampled.n_samples,
+        n_steps=result.sampled.n_steps,
+        n_freq=1 if freqs is None else len(freqs),
+        n_rows=len(node_ids),
+    )
+    n = v4.shape[-1]
+    vre, vim = _np(v4.real), _np(v4.imag)
 
     if layout == "long":
         _write_long(
@@ -336,7 +400,9 @@ def write_dataset(
         )
 
     sampled = result.sampled
-    sample_meta = _write_samples(sampled.samples, b, path, compression)
+    sample_meta = _write_samples(
+        sampled.samples, sampled.shared_samples, b, path, compression
+    )
 
     cfg = sampled.config
     # Reproducibility provenance: the schema contract version + the environment that
@@ -348,7 +414,7 @@ def write_dataset(
         _pgml_version = pgml.__version__
     except Exception:  # pragma: no cover - defensive
         _pgml_version = None
-    config_json = cfg.model_dump_json()
+    config_json = None if cfg is None else cfg.model_dump_json()
     meta = {
         "schema_version": SCHEMA_VERSION,
         "pgml_version": _pgml_version,
@@ -362,16 +428,22 @@ def write_dataset(
         "v_dtype": str(result.v.dtype),
         "dims": {"B": b, "T": t, "H": h, "N": n},
         "n_samples": sampled.n_samples,
+        "n_steps": int(sampled.n_steps),
+        "step_size_s": _step_size_s(cfg),
+        "t0_unix_s": _t0_unix_s(sampled),
         "frequencies_hz": freqs.tolist() if freqs is not None else None,
         "node_ids": node_ids.tolist(),
         "phase_codes": phase_codes.tolist(),
-        "config_type": type(cfg).__name__,
+        "config_type": None if cfg is None else type(cfg).__name__,
+        "config_module": None if cfg is None else type(cfg).__module__,
+        "config_class": None if cfg is None else type(cfg).__qualname__,
         "config_json": config_json,
-        "config_hash": config_hash(config_json),
+        "config_hash": None if config_json is None else config_hash(config_json),
         "seed": getattr(cfg, "seed", None),
         "perturbations": [p.model_dump() for p in sampled.perturbations],
         "converged": bool(result.converged),
         "failed_scenarios": [int(i) for i in result.failed_states],
+        "extra_provenance": dict(provenance or {}),
         **generation_provenance(),
         **sample_meta,
     }
@@ -388,7 +460,9 @@ def write_dataset(
     return path
 
 
-def read_dataset(path) -> LoadedDataset:
+def read_dataset(
+    path, *, config_types: Optional[Mapping[str, type]] = None
+) -> LoadedDataset:
     """Reload a dataset written by :func:`write_dataset` (layout-agnostic).
 
     Both ``"wide"`` and ``"long"`` layouts produce an identical
@@ -400,6 +474,13 @@ def read_dataset(path) -> LoadedDataset:
     path:
         Dataset directory written by :func:`write_dataset` (must contain
         ``voltages.parquet``, ``meta.json``, and optionally ``samples.parquet``).
+    config_types:
+        Additional ``{class_name: class}`` entries for reconstructing the stored config,
+        merged over :data:`SCENARIO_CONFIG_TYPES`. A dataset generated by a config class
+        this package does not define reads back as a plain dict unless its class is named
+        here; reconstruction is explicit because reading a dataset must not import a
+        module chosen by the file's contents. The sidecar records
+        ``config_module`` / ``config_class`` so the owner is identifiable.
 
     Returns
     -------
@@ -450,12 +531,15 @@ def read_dataset(path) -> LoadedDataset:
         if meta["frequencies_hz"] is not None
         else None
     )
-    cfg_cls = _CONFIG_TYPES.get(meta["config_type"])
-    config = (
-        cfg_cls.model_validate_json(meta["config_json"])
-        if cfg_cls is not None
-        else json.loads(meta["config_json"])
-    )
+    known = {**SCENARIO_CONFIG_TYPES, **(config_types or {})}
+    cfg_cls = known.get(meta["config_type"])
+    config_json = meta["config_json"]
+    if config_json is None:
+        config = None
+    elif cfg_cls is not None:
+        config = cfg_cls.model_validate_json(config_json)
+    else:
+        config = json.loads(config_json)
     converged = meta.get("converged")
     return LoadedDataset(
         v=v,
@@ -473,6 +557,7 @@ def read_dataset(path) -> LoadedDataset:
 
 __all__ = [
     "LoadedDataset",
+    "SCENARIO_CONFIG_TYPES",
     "write_dataset",
     "read_dataset",
     "config_hash",

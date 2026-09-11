@@ -98,6 +98,29 @@ class SampledScenarios:
         Ground-truth :class:`~pgml.schemas.scenario_schema.ParameterPerturbation` rows
         for a :func:`~pgml.scenarios.perturbation.perturbation_sweep` (which scenario
         perturbed which component, nominal vs perturbed value); empty otherwise.
+    n_steps:
+        Length ``T`` of the STEP axis. ``1`` (default) is a snapshot batch, whose
+        voltages come back as ``[B, N]`` / ``[B, H, N]``; ``T > 1`` declares a sequence
+        batch whose per-step injections / operating points are ``[B, T]`` and whose
+        voltages come back as ``[B, T, H, N]``. Declared by the builder rather than
+        inferred from a tensor rank, so the run and the persistence layer agree on the
+        rank of the result before anything is solved.
+    shared_samples:
+        Records that have NO leading scenario axis (``{name: Tensor}``) — a step-axis
+        timestamp vector, a device-id column, a per-device constant. Kept apart from
+        ``samples`` because the persistence layer has to know which records are
+        per-scenario columns and which are one value for the whole batch; a record
+        whose length happens to equal ``B`` is indistinguishable from a per-scenario
+        column by shape alone.
+
+    Both record dicts are read back merged into one ``samples`` mapping by
+    :func:`~pgml.scenarios.read_dataset`, so a consumer sees the same keys it was given.
+
+    Reserved record keys (a consumer may rely on them being present with this meaning):
+    ``time_s`` ``[T]`` relative step time in seconds, ``time_unix_s`` ``[T]`` absolute
+    epoch seconds, and per injection-writing spec or config ``<key>_mag`` /
+    ``<key>_phase`` (the REALIZED injection, per unit of the device's own fundamental
+    current and degrees) over the device axis ``<key>_device_ids``.
     """
 
     operating_point: dict
@@ -110,15 +133,113 @@ class SampledScenarios:
     harmonic_injection: dict = field(default_factory=dict)
     node_sources: list = field(default_factory=list)
     perturbations: list = field(default_factory=list)
+    n_steps: int = 1
+    shared_samples: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        """``(B,)`` for a snapshot batch, ``(B, T)`` for a sequence batch."""
+        return (
+            (self.n_samples,) if self.n_steps == 1 else (self.n_samples, self.n_steps)
+        )
+
+    @property
+    def all_samples(self) -> dict:
+        """Per-scenario and batch-shared records in one mapping.
+
+        The same view :func:`~pgml.scenarios.read_dataset` returns, for code that wants
+        every record by name and does not care which axis it has.
+        """
+        return {**self.samples, **self.shared_samples}
+
+    def validate(self, grid: Optional[Grid] = None) -> None:
+        """Check the batch against its declared shape (raises :class:`InputError`).
+
+        Shape-only, so it is cheap enough to run on construction: the batch axes of
+        every operating-point and harmonic-injection tensor must broadcast against
+        ``batch_shape`` (a leading axis of ``1`` or ``B``, a step axis of ``1`` or
+        ``T``), and a record name may not be declared both per-scenario and shared.
+        With a ``grid`` it additionally resolves every component id the batch writes
+        to against that grid's in-service appliances. Called by
+        :func:`~pgml.scenarios.run_scenarios` with the grid it is about to solve, so a
+        batch built against a different grid fails before the solver sees it.
+        """
+        if self.n_samples < 1:
+            raise InputError(f"n_samples must be >= 1, got {self.n_samples}.")
+        if self.n_steps < 1:
+            raise InputError(f"n_steps must be >= 1, got {self.n_steps}.")
+        both = set(self.samples) & set(self.shared_samples)
+        if both:
+            raise InputError(
+                f"sample record(s) {sorted(both)} are declared both per-scenario "
+                "(`samples`) and batch-shared (`shared_samples`); a record is one or "
+                "the other."
+            )
+        for cid, entry in self.operating_point.items():
+            for key, value in entry.items():
+                for part in value if isinstance(value, (list, tuple)) else (value,):
+                    self._check_batch_axes(part, f"operating_point[{cid}][{key!r}]")
+        for cid, per_order in self.harmonic_injection.items():
+            for order, pair in per_order.items():
+                for which, part in zip(("magnitude", "phase"), pair):
+                    self._check_batch_axes(
+                        part, f"harmonic_injection[{cid}][{order}] {which}"
+                    )
+        for src in self.node_sources:
+            for order, pair in getattr(src, "spectrum", {}).items():
+                for which, part in zip(("magnitude", "phase"), pair):
+                    self._check_batch_axes(
+                        part, f"node_sources[node {src.node_id}][{order}] {which}"
+                    )
+        if grid is not None:
+            self._check_ids(grid)
+
+    def _check_batch_axes(self, value, what: str) -> None:
+        """One tensor's leading axes must broadcast against ``batch_shape``."""
+        if not isinstance(value, Tensor) or value.ndim == 0:
+            return  # a scalar / nameplate passthrough broadcasts over the whole batch
+        allowed = self.batch_shape
+        for axis, (size, expected) in enumerate(zip(value.shape, allowed)):
+            if size not in (1, expected):
+                raise InputError(
+                    f"{what} has shape {tuple(value.shape)}, which does not broadcast "
+                    f"against the declared batch shape {allowed} (axis {axis} is "
+                    f"{size}, expected 1 or {expected})."
+                )
+
+    def _check_ids(self, grid: Grid) -> None:
+        """Every component the batch writes to must be an in-service appliance."""
+        known = {a.id for a in grid.appliances if getattr(a, "in_service", True)}
+        unknown = sorted(
+            (set(self.operating_point) | set(self.harmonic_injection)) - known
+        )
+        if unknown:
+            raise InputError(
+                f"scenario batch writes to component id(s) {unknown}, which are not "
+                "in-service appliances of the grid being solved."
+            )
 
 
-class _Nominal(NamedTuple):
-    """Nominal nameplate power of one Load/Generator (totals + per-phase split).
+class NominalPower(NamedTuple):
+    """Nominal nameplate power of one injection appliance (totals + per-phase split).
 
     Entries keep the schema's float/tensor duality: a tensor-valued nameplate
     (``p_nom_w`` as an autograd leaf) passes through UNTOUCHED so a
     ``mode="scale"`` operating point stays differentiable w.r.t. the grid's own
     rated power.
+
+    Attributes
+    ----------
+    p_total, q_total:
+        Nameplate active / reactive power (W, var) — a python float or a 0-d tensor.
+    p_pp, q_pp:
+        Per-phase nameplate shares (the stored per-phase nameplate when the appliance
+        has one, else the total split equally), one entry per connected phase.
+    n:
+        Connected phase count.
     """
 
     p_total: object  # float or 0-d array-like
@@ -128,22 +249,37 @@ class _Nominal(NamedTuple):
     n: int  # phase count
 
 
-def _unit_samples(b: int, d: int, method: str, seed: int) -> Tensor:
-    """``[b, d]`` quasi-/pseudo-random samples in ``[0, 1)`` (float64, deterministic)."""
+def unit_samples(n: int, d: int, *, method: str = "sobol", seed: int = 0) -> Tensor:
+    """``[n, d]`` unit-cube samples in ``[0, 1)`` (float64, CPU, deterministic).
+
+    The one transform entry point every sampling path shares: a column of ``u`` goes
+    through a distribution's ``icdf`` to become a realized value, so quasi-Monte-Carlo
+    and plain RNG differ only in how ``u`` is filled.
+
+    Parameters
+    ----------
+    n, d:
+        Batch size and number of dimensions (one per independent draw).
+    method:
+        ``"sobol"`` (scrambled Sobol sequence, the recommended space-filling default),
+        ``"lhs"`` (Latin hypercube) or ``"independent"`` (plain uniform RNG).
+    seed:
+        Seeds the engine; the same ``(n, d, method, seed)`` returns identical samples.
+    """
     if method == "sobol":
         eng = torch.quasirandom.SobolEngine(dimension=d, scramble=True, seed=seed)
-        return eng.draw(b, dtype=torch.float64)
+        return eng.draw(n, dtype=torch.float64)
     gen = torch.Generator().manual_seed(seed)
     if method == "independent":
-        return torch.rand((b, d), generator=gen, dtype=torch.float64)
+        return torch.rand((n, d), generator=gen, dtype=torch.float64)
     if method == "lhs":
-        # Latin hypercube: per dim a random permutation of the b strata + jitter.
-        u = torch.empty((b, d), dtype=torch.float64)
-        strata = torch.arange(b, dtype=torch.float64)
+        # Latin hypercube: per dim a random permutation of the n strata + jitter.
+        u = torch.empty((n, d), dtype=torch.float64)
+        strata = torch.arange(n, dtype=torch.float64)
         for j in range(d):
-            perm = torch.randperm(b, generator=gen)
-            jitter = torch.rand(b, generator=gen, dtype=torch.float64)
-            u[:, j] = (strata[perm] + jitter) / b
+            perm = torch.randperm(n, generator=gen)
+            jitter = torch.rand(n, generator=gen, dtype=torch.float64)
+            u[:, j] = (strata[perm] + jitter) / n
         return u
     raise InputError(f"Unknown sampling method {method!r}.")
 
@@ -328,9 +464,14 @@ def _scalar_passthrough(x):
     return x if hasattr(x, "detach") or hasattr(x, "__array__") else float(x)
 
 
-def _nominal(grid: Grid) -> dict:
-    """``{id: _Nominal}`` per in-service injection appliance (totals + per-phase)."""
-    out: dict[int, _Nominal] = {}
+def nominal_power(grid: Grid) -> dict:
+    """``{appliance_id: NominalPower}`` for every injection appliance of ``grid``.
+
+    The nameplate a ``mode="scale"`` operating point multiplies, and the denominator
+    the emission law's loading ratio reads. Tensor-valued nameplates pass through
+    untouched, so a scaled operating point stays differentiable w.r.t. the rated power.
+    """
+    out: dict[int, NominalPower] = {}
     for a in grid.appliances:
         if not isinstance(a, InjectionAppliance):
             continue
@@ -349,7 +490,7 @@ def _nominal(grid: Grid) -> dict:
             if a.q_nom_per_phase_var is not None
             else [q_total / n for _ in range(n)]
         )
-        out[a.id] = _Nominal(p_total, q_total, p_pp, q_pp, n)
+        out[a.id] = NominalPower(p_total, q_total, p_pp, q_pp, n)
     return out
 
 
@@ -395,7 +536,12 @@ def _coefficient_column(value, b: int, like: Tensor) -> Tensor:
 
 
 def _record_realized_injections(
-    built: dict, harm_layouts: list, u: Tensor, samples: dict, loading: dict
+    built: dict,
+    harm_layouts: list,
+    u: Tensor,
+    samples: dict,
+    loading: dict,
+    shared: dict,
 ) -> None:
     """Record the REALIZED per-device injection of every ``h_mag`` spec into ``samples``.
 
@@ -410,7 +556,8 @@ def _record_realized_injections(
     - ``"<spec>_phase"`` ``[B, n_dev, n_ord]`` — the phase in degrees that goes with it
       (an ``h_phase`` spec's draw where one covers the device and order, otherwise the
       angle seeded from the device's stored spectrum);
-    - ``"<spec>_device_ids"`` ``[n_dev]`` — the device ids of the middle axis;
+    - ``"<spec>_device_ids"`` ``[n_dev]`` — the device ids of the middle axis, a
+      batch-shared record (no leading scenario axis);
     - ``"<spec>_loading"`` ``[B, n_dev]`` — the loading the emission law read for each
       device (its drawn active power over the nameplate, ``1`` where no power spec
       varied it), so the magnitude-to-loading relation the dataset carries is auditable.
@@ -439,7 +586,7 @@ def _record_realized_injections(
             )
         samples[f"{spec.name}_mag"] = torch.stack(mags, dim=1)  # [B, n_dev, n_ord]
         samples[f"{spec.name}_phase"] = torch.stack(phases, dim=1)
-        samples[f"{spec.name}_device_ids"] = torch.tensor(lay.ids, dtype=torch.long)
+        shared[f"{spec.name}_device_ids"] = torch.tensor(lay.ids, dtype=torch.long)
         samples[f"{spec.name}_loading"] = torch.stack(
             [
                 _coefficient_column(loading.get(cid, 1.0), b, u).to(torch.float64)
@@ -525,6 +672,7 @@ def _harmonic_injections(
     harm_layouts: list,
     u: Tensor,
     samples: dict,
+    shared: dict,
     operating_point: Optional[dict] = None,
     nominal: Optional[dict] = None,
     seed: int = 0,
@@ -638,11 +786,11 @@ def _harmonic_injections(
             built,
             laws,
             operating_point or {},
-            nominal if nominal is not None else _nominal(grid),
+            nominal if nominal is not None else nominal_power(grid),
             int(u.shape[0]),
             u,
         )
-    _record_realized_injections(built, harm_layouts, u, samples, loading)
+    _record_realized_injections(built, harm_layouts, u, samples, loading, shared)
     return {cid: {o: tuple(mp) for o, mp in d.items()} for cid, d in built.items()}
 
 
@@ -650,12 +798,13 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
     """Sample ``config.n_samples`` realized operating points from ``grid`` (reproducible)."""
     factor_index, op_layouts, harm_layouts, dim = _resolve(grid, config)
     b = config.n_samples
-    u = _unit_samples(b, dim, config.method, config.seed)  # [B, D] in [0,1)
+    u = unit_samples(b, dim, method=config.method, seed=config.seed)  # [B, D]
 
     factor_z = {name: _norm_icdf(u[:, idx]) for name, idx in factor_index.items()}
-    nominal = _nominal(grid)
+    nominal = nominal_power(grid)
     operating_point: dict = {}
     samples: dict = {}
+    shared: dict = {}
 
     for lay in op_layouts:
         spec = lay.spec
@@ -716,7 +865,14 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
 
     harmonic_injection = (
         _harmonic_injections(
-            grid, harm_layouts, u, samples, operating_point, nominal, seed=config.seed
+            grid,
+            harm_layouts,
+            u,
+            samples,
+            shared,
+            operating_point,
+            nominal,
+            seed=config.seed,
         )
         if harm_layouts
         else {}
@@ -728,6 +884,7 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
         config=config,
         harmonic_injection=harmonic_injection,
         node_sources=_background_sources(grid, config, b),
+        shared_samples=shared,
     )
 
 
@@ -782,7 +939,7 @@ def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:
     if combos.ndim == 1:
         combos = combos.unsqueeze(-1)
 
-    nominal = _nominal(grid)
+    nominal = nominal_power(grid)
     operating_point: dict = {}
     samples: dict = {}
     for i, (ax, ids) in enumerate(resolved):
@@ -802,4 +959,11 @@ def cartesian_sample(grid: Grid, config: CartesianConfig) -> SampledScenarios:
     )
 
 
-__all__ = ["SampledScenarios", "sample", "cartesian_sample"]
+__all__ = [
+    "SampledScenarios",
+    "NominalPower",
+    "sample",
+    "cartesian_sample",
+    "unit_samples",
+    "nominal_power",
+]

@@ -244,7 +244,8 @@ def test_mode_bank_seed_none_is_byte_identical(grid3):
     a = sample_coherent_spectra(grid3, _ccfg())
     b = sample_coherent_spectra(grid3, _ccfg(mode_bank_seed=None))
     torch.testing.assert_close(
-        a.samples["harmonics_mode_base_mag"], b.samples["harmonics_mode_base_mag"]
+        a.all_samples["harmonics_mode_base_mag"],
+        b.all_samples["harmonics_mode_base_mag"],
     )
     torch.testing.assert_close(a.samples["harmonics_mode"], b.samples["harmonics_mode"])
     torch.testing.assert_close(
@@ -257,14 +258,14 @@ def test_mode_bank_seed_pins_distinct_bank(grid3):
     held_out = sample_coherent_spectra(grid3, _ccfg(mode_bank_seed=999))
     # A distinct fingerprint bank while every other setting is shared.
     assert (
-        base.samples["harmonics_mode_base_mag"]
-        - held_out.samples["harmonics_mode_base_mag"]
+        base.all_samples["harmonics_mode_base_mag"]
+        - held_out.all_samples["harmonics_mode_base_mag"]
     ).abs().max() > 1e-6
     # and it is itself reproducible.
     again = sample_coherent_spectra(grid3, _ccfg(mode_bank_seed=999))
     torch.testing.assert_close(
-        held_out.samples["harmonics_mode_base_mag"],
-        again.samples["harmonics_mode_base_mag"],
+        held_out.all_samples["harmonics_mode_base_mag"],
+        again.all_samples["harmonics_mode_base_mag"],
     )
 
 

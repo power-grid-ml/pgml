@@ -28,11 +28,8 @@ from torch import Tensor
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 
-from .composition import (
-    lift_operating_point_to_bt,
-    resolve_composed_ids,
-    sample_device_composition,
-)
+from .batch import broadcast_operating_point
+from .composition import resolve_composed_ids, sample_device_composition
 from .config import (
     BackgroundHarmonicConfig,
     CoherentSpectrumConfig,
@@ -52,6 +49,27 @@ _F64 = torch.float64
 # the two independent, so the realized ``harmonic_injection`` is byte-identical with and
 # without ``config.parameters`` (reproducible reconstruction from config + seed).
 _OP_CUBE_SEED_OFFSET = 0x9E3779B9  # 2654435769; golden-ratio mix
+
+
+def _split_shared(samples: dict, name: str, resampled: bool) -> dict:
+    """Pop the records that carry NO leading scenario axis out of ``samples``.
+
+    A sequence batch records a step-time vector, the device-id columns of its attribution
+    blocks, the member roster and (unless it is redrawn per scenario) the fingerprint bank
+    once for the whole batch. Declaring them keeps the persistence layer from having to
+    guess from a leading dimension that may coincide with the scenario count.
+    """
+    keys = [
+        "time_s",
+        "time_unix_s",
+        f"{name}_device_ids",
+        f"{name}_profile_device_ids",
+        f"{name}_agg_ids",
+        f"{name}_roster_p_rated",
+    ]
+    if not resampled:
+        keys.append(f"{name}_mode_base_mag")
+    return {key: samples.pop(key) for key in keys if key in samples}
 
 
 def _markov_path(
@@ -83,7 +101,7 @@ def _ar1(shape: tuple, rho: float, gen: torch.Generator) -> Tensor:
 
 def _sample_operating_specs(
     grid: Grid, config: CoherentSpectrumConfig, b: int
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, dict]:
     """Draw the coherent config's fundamental operating-point specs, once per scenario.
 
     Reuses the :class:`ScenarioConfig` sampler (Sobol unit cube, copula correlation,
@@ -96,7 +114,7 @@ def _sample_operating_specs(
     when the config has no ``parameters``.
     """
     if not config.parameters:
-        return {}, {}
+        return {}, {}, {}
     op_seed = (int(config.seed) + _OP_CUBE_SEED_OFFSET) & 0x7FFFFFFF
     inner = ScenarioConfig(
         n_samples=b,
@@ -106,7 +124,7 @@ def _sample_operating_specs(
         factors=list(config.factors),
     )
     drawn = sample(grid, inner)
-    return drawn.operating_point, drawn.samples
+    return drawn.operating_point, drawn.samples, drawn.shared_samples
 
 
 def sample_coherent_spectra(
@@ -299,7 +317,7 @@ def sample_coherent_spectra(
 
     # Optional per-scenario fundamental operating point (load / PV / slack-voltage specs).
     # Drawn on a separate stream (above) so the harmonic fingerprint is untouched.
-    operating_point, op_samples = _sample_operating_specs(grid, config, b)
+    operating_point, op_samples, op_shared = _sample_operating_specs(grid, config, b)
     samples.update(op_samples)
 
     # Optional TIME-VARYING fundamental profile: lift the per-scenario operating point
@@ -322,7 +340,7 @@ def sample_coherent_spectra(
     if comp is not None:
         draw = sample_device_composition(grid, config)
         if draw.operating_point:
-            operating_point = lift_operating_point_to_bt(operating_point, b, t)
+            operating_point = broadcast_operating_point(operating_point, b, t)
             operating_point.update(draw.operating_point)
             harmonic_injection.update(draw.harmonic_injection)
             samples.update(draw.samples)
@@ -346,6 +364,8 @@ def sample_coherent_spectra(
         if config.background is not None
         else []
     )
+    shared = _split_shared(samples, nm, config.resample_modes_per_scenario)
+    shared.update(op_shared)
     return SampledScenarios(
         operating_point=operating_point,
         samples=samples,
@@ -353,6 +373,8 @@ def sample_coherent_spectra(
         config=config,
         harmonic_injection=harmonic_injection,
         node_sources=node_sources,
+        n_steps=t,
+        shared_samples=shared,
     )
 
 

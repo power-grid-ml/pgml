@@ -68,7 +68,7 @@ def test_realized_magnitude_is_recorded_post_reference(grid3):
     assert torch.allclose(s.samples["hm"], torch.full_like(s.samples["hm"], 2.0))
     mag = s.samples["hm_mag"]
     assert mag.shape == (16, 2, 2)  # [B, n_dev, n_ord]
-    assert s.samples["hm_device_ids"].tolist() == [10, 11]
+    assert s.all_samples["hm_device_ids"].tolist() == [10, 11]
     for j, cid in enumerate([10, 11]):
         for o, order in enumerate([3, 5]):
             realized = 2.0 * en50160_limit(order)
@@ -169,7 +169,7 @@ def test_realized_columns_survive_a_dataset_round_trip(grid3):
         loaded = read_dataset(write_dataset(result, tmp))
 
     for key in ("hm", "hm_mag", "hm_phase", "hm_device_ids"):
-        torch.testing.assert_close(loaded.samples[key], result.sampled.samples[key])
+        torch.testing.assert_close(loaded.samples[key], result.sampled.all_samples[key])
 
 
 # =============================================================================
@@ -357,7 +357,7 @@ def test_every_path_records_a_mag_phase_pair_on_a_device_axis():
     )
 
     for samples, key, ids in (
-        (fingerprint.samples, "harmonics", "harmonics_device_ids"),
+        (fingerprint.all_samples, "harmonics", "harmonics_device_ids"),
         (composed.samples, "harmonics_composed", "harmonics_agg_ids"),
     ):
         mag, phase = samples[f"{key}_mag"], samples[f"{key}_phase"]

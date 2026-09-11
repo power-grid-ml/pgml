@@ -764,38 +764,8 @@ def sample_device_composition(
     return CompositionDraw(operating_point, harmonic_injection, samples, composed_ids)
 
 
-def lift_operating_point_to_bt(op: dict, b: int, t: int) -> dict:
-    """Broadcast a mixed ``[B]`` / ``[B, T]`` operating point to a uniform ``[B, T]``.
-
-    Composed loads carry a per-step ``[B, T]`` fundamental; any ``[B]`` per-scenario entry
-    (a ``parameters`` draw on a non-composed device) is expanded to ``[B, T]`` (constant
-    over the sequence) and a ``[B]`` source ``u_ref_scale`` promoted to ``[B, 1]`` so every
-    device shares one leading batch. Absent entries (nominal) and scalars broadcast in the
-    solver and are left untouched. Not mutated — a new dict is returned."""
-
-    def _lift(x):
-        if isinstance(x, Tensor) and x.ndim == 1 and x.shape[0] == b:
-            return x.unsqueeze(-1).expand(b, t).contiguous()
-        return x
-
-    out: dict = {}
-    for cid, entry in op.items():
-        ne: dict = {}
-        for k, v in entry.items():
-            if k == "u_ref_scale":
-                tv = torch.as_tensor(v)
-                ne[k] = tv.unsqueeze(-1) if tv.ndim == 1 else tv
-            elif k in ("p_per_phase_w", "q_per_phase_var"):
-                ne[k] = [_lift(x) for x in v]
-            else:
-                ne[k] = _lift(v)
-        out[cid] = ne
-    return out
-
-
 __all__ = [
     "CompositionDraw",
     "sample_device_composition",
     "resolve_composed_ids",
-    "lift_operating_point_to_bt",
 ]

@@ -113,7 +113,7 @@ def test_profile_none_leaves_fingerprint_byte_identical(grid3):
                 s1.harmonic_injection[cid][order][1],
             )
     for key in ("harmonics_mode", "harmonics_mag", "harmonics_phase", "time_s", "pq"):
-        assert torch.equal(s0.samples[key], s1.samples[key]), key
+        assert torch.equal(s0.all_samples[key], s1.all_samples[key]), key
 
 
 def test_profile_deterministic_per_seed(grid3):
@@ -216,8 +216,8 @@ def test_operating_point_gains_step_axis(grid3):
     assert s.operating_point[10]["p_w"].shape == (6, 8)
     assert s.operating_point[10]["q_var"].shape == (6, 8)
     assert s.samples["harmonics_profile_factor"].shape == (6, 2, 8)
-    assert s.samples["harmonics_profile_device_ids"].tolist() == [10, 11]
-    assert s.samples["time_unix_s"].shape == (8,)
+    assert s.all_samples["harmonics_profile_device_ids"].tolist() == [10, 11]
+    assert s.all_samples["time_unix_s"].shape == (8,)
 
 
 def test_profile_composes_with_pq_parameter(grid3):
@@ -299,13 +299,13 @@ def test_profiled_dataset_round_trip(grid3):
     # absolute epoch seconds survive as float64 (large-magnitude shared sample)
     torch.testing.assert_close(
         loaded.samples["time_unix_s"],
-        res.sampled.samples["time_unix_s"],
+        res.sampled.all_samples["time_unix_s"],
         rtol=0,
         atol=0,
     )
     torch.testing.assert_close(
         loaded.samples["harmonics_profile_device_ids"],
-        res.sampled.samples["harmonics_profile_device_ids"],
+        res.sampled.all_samples["harmonics_profile_device_ids"],
     )
     assert isinstance(loaded.config, CoherentSpectrumConfig)
     assert loaded.config.profile is not None

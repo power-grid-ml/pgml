@@ -179,9 +179,10 @@ def test_coherent_shapes_and_timestamps(grid3):
     s = sample_coherent_spectra(grid3, _ccfg(step_size_s=900.0))
     assert s.samples["harmonics_mode"].shape == (8, 2, 24)  # [B, n_dev, T]
     assert s.samples["harmonics_mag"].shape == (8, 2, 3, 24)  # [B, n_dev, n_ord, T]
-    assert s.samples["harmonics_device_ids"].tolist() == [10, 11]
+    assert s.all_samples["harmonics_device_ids"].tolist() == [10, 11]
     torch.testing.assert_close(
-        s.samples["time_s"][:3], torch.tensor([0.0, 900.0, 1800.0], dtype=torch.float64)
+        s.all_samples["time_s"][:3],
+        torch.tensor([0.0, 900.0, 1800.0], dtype=torch.float64),
     )
     mag, phase = s.harmonic_injection[10][5]
     assert mag.shape == (8, 24)  # [B, T]

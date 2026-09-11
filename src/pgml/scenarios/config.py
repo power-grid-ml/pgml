@@ -15,13 +15,16 @@ training data).
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal, Optional, Union
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 
 from pgml.schemas.grid_schema import Phase
+
+if TYPE_CHECKING:  # the sampler imports this module, so the batch type is a forward ref
+    from .sampler import SampledScenarios
 
 _U_EPS = 1e-7  # clamp unit samples off {0,1} so Gaussian-tail icdf stays finite.
 
@@ -393,6 +396,16 @@ class ScenarioConfig(_Base):
     #: (see :class:`BackgroundHarmonicConfig`). ``None`` (default) = no background.
     background: Optional["BackgroundHarmonicConfig"] = None
 
+    #: No implied calculation: the harmonic orders to solve are the caller's choice, since
+    #: a config may vary harmonic magnitudes, fundamental power, or both.
+    harmonic_orders: ClassVar[Optional[list[int]]] = None
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Draw this config's batch from ``grid`` (see :func:`~pgml.scenarios.sample`)."""
+        from .sampler import sample
+
+        return sample(grid, self)
+
 
 # =============================================================================
 # Cartesian-product (grid-sweep) batches
@@ -416,6 +429,15 @@ class CartesianConfig(_Base):
     """A reproducible (deterministic, no RNG) cartesian-product batch (pgm-style)."""
 
     axes: list[CartesianAxis] = Field(min_length=1)
+
+    #: A cartesian sweep varies operating points only; the calculation is the caller's.
+    harmonic_orders: ClassVar[Optional[list[int]]] = None
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Enumerate the product batch (see :func:`~pgml.scenarios.cartesian_sample`)."""
+        from .sampler import cartesian_sample
+
+        return cartesian_sample(grid, self)
 
 
 # =============================================================================
@@ -480,6 +502,17 @@ class SpectrumSweepConfig(_Base):
             magnitudes_pu=[float(spectrum[o][0]) for o in orders],
             phases_deg=[float(spectrum[o][1]) for o in orders],
         )
+
+    @property
+    def harmonic_orders(self) -> list[int]:
+        """The solved order set this sweep implies: the fundamental plus ``orders``."""
+        return [1, *self.orders]
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Build the diagonal sweep (see :func:`~pgml.scenarios.spectrum_sweep`)."""
+        from .harmonics import spectrum_sweep
+
+        return spectrum_sweep(grid, self)
 
     @model_validator(mode="after")
     def _check(self) -> "SpectrumSweepConfig":
@@ -1207,10 +1240,12 @@ class BackgroundHarmonicConfig(_Base):
 
     Every device behind a common supply sees the same background distortion, so the part
     of a measured harmonic that its own fundamental does not explain is largely SHARED
-    across the devices rather than private to each. Bench measurements of six inverter
-    racks driven together show 54-93 % of that unexplained emission to be common to all of
-    them within an acquisition, which a per-device emission model cannot produce: the
-    common part comes from the network upstream, not from the devices.
+    across the devices rather than private to each. In an unpublished in-house measurement
+    of six inverter racks on one low-voltage laboratory supply, driven together, 54-93 % of
+    that unexplained emission was common to all of them within an acquisition — a share a
+    per-device emission model cannot produce, because the common part comes from the
+    network upstream rather than from the devices. That observation is why this
+    construct exists; it fixes none of the levels below, which are all the caller's.
 
     Realised as the Thevenin source of ``docs/pgml/modeling/error-injection.md``,
     present in EVERY scenario rather than swept one node at a time as
@@ -1446,6 +1481,17 @@ class CoherentSpectrumConfig(_Base):
     #: makes the intent explicit; leaving an order silent by accident raises.
     allow_silent_orders: tuple[int, ...] = ()
 
+    @property
+    def harmonic_orders(self) -> list[int]:
+        """The solved order set a fingerprint sequence implies: fundamental + ``orders``."""
+        return [1, *self.orders]
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Draw the sequences (see :func:`~pgml.scenarios.sample_coherent_spectra`)."""
+        from .harmonics import sample_coherent_spectra
+
+        return sample_coherent_spectra(grid, self)
+
     @model_validator(mode="after")
     def _check(self) -> "CoherentSpectrumConfig":
         if any(o < 2 for o in self.orders):
@@ -1568,7 +1614,7 @@ __all__ = [
 
 
 def _example() -> "ScenarioConfig":
-    """A representative, valid batch: load P/Q scaling + EN 50160-referenced harmonics."""
+    """A representative, valid batch: load P/Q scaling + IEC 61000-3-2 emission draws."""
     return ScenarioConfig(
         n_samples=256,
         seed=0,
@@ -1588,7 +1634,7 @@ def _example() -> "ScenarioConfig":
                 field="h_mag",
                 mode="absolute",
                 orders=[3, 5, 7],
-                harmonic_reference="en50160",
+                harmonic_reference="iec61000-3-2",
             ),
         ],
     )

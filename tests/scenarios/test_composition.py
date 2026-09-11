@@ -245,9 +245,9 @@ def test_composition_leaves_disjoint_fingerprint_byte_identical():
                 s_comp.harmonic_injection[11][order][k],
             )
     for key in ("harmonics_mode", "harmonics_mag", "harmonics_phase", "time_s"):
-        assert torch.equal(s_no.samples[key], s_comp.samples[key]), key
+        assert torch.equal(s_no.all_samples[key], s_comp.all_samples[key]), key
     # the composition covered load 10 (excluded from the fingerprint)
-    assert 10 not in s_comp.samples["harmonics_device_ids"].tolist()
+    assert 10 not in s_comp.all_samples["harmonics_device_ids"].tolist()
     assert 10 in s_comp.harmonic_injection
 
 
@@ -569,11 +569,12 @@ def test_composed_dataset_round_trip():
             loaded.samples[key], res.sampled.samples[key], rtol=0, atol=0
         )
     torch.testing.assert_close(
-        loaded.samples["harmonics_agg_ids"], res.sampled.samples["harmonics_agg_ids"]
+        loaded.samples["harmonics_agg_ids"],
+        res.sampled.all_samples["harmonics_agg_ids"],
     )
     torch.testing.assert_close(
         loaded.samples["harmonics_roster_p_rated"],
-        res.sampled.samples["harmonics_roster_p_rated"],
+        res.sampled.all_samples["harmonics_roster_p_rated"],
         rtol=0,
         atol=0,
     )

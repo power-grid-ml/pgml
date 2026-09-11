@@ -1325,8 +1325,8 @@ def run_opendss_scenarios(
     index = node_phase_index(grid)
     n = index.size
     b = int(sampled.n_samples)
-    is_coherent = "time_s" in sampled.samples
-    t_steps = int(sampled.samples["time_s"].shape[-1]) if is_coherent else 1
+    t_steps = int(sampled.n_steps)
+    is_sequence = t_steps > 1
 
     circuit = export_grid_to_opendss(grid, mode=mode)
     _attach_spectra(dss, circuit, sampled, orders)
@@ -1338,10 +1338,10 @@ def run_opendss_scenarios(
         for bi in range(b):
             for ti in range(t_steps):
                 _apply_operating_point(
-                    dss, circuit, sampled, bi, ti if is_coherent else None
+                    dss, circuit, sampled, bi, ti if is_sequence else None
                 )
                 _apply_harmonic_spectra(
-                    dss, circuit, sampled, bi, ti if is_coherent else None
+                    dss, circuit, sampled, bi, ti if is_sequence else None
                 )
                 dss.Text.Command("Set Mode=Snap")
                 dss.Text.Command("Solve")
@@ -1373,7 +1373,7 @@ def run_opendss_scenarios(
                         v_out[bi, ti, k] = _extract_voltages(dss, circuit.rowmap, n)
 
     v_tensor = torch.tensor(v_out, dtype=dtype)
-    if not is_coherent:
+    if not is_sequence:
         v_tensor = v_tensor[:, 0]  # [B, H, N]
     freqs = torch.tensor([h * f0 for h in orders], dtype=torch.float64)
     return ScenarioResult(

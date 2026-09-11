@@ -20,6 +20,7 @@ See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
 
 from __future__ import annotations
 
+from .batch import batch_from_values, broadcast_operating_point
 from .composition import (
     CompositionDraw,
     resolve_composed_ids,
@@ -56,7 +57,11 @@ from .config import (
     default_device_classes,
 )
 from .en50160 import en50160_limit, en50160_limits, en50160_provenance
-from .harmonics import sample_coherent_spectra, spectrum_sweep
+from .harmonics import (
+    build_background_sources,
+    sample_coherent_spectra,
+    spectrum_sweep,
+)
 from .profiles import apply_load_profiles, load_profile_factors
 from .iec61000_3_2 import (
     iec61000_3_2_device_caps,
@@ -67,6 +72,7 @@ from .iec61000_3_2 import (
 )
 from .node_injection import run_node_injection_sweep
 from .persistence import (
+    SCENARIO_CONFIG_TYPES,
     LoadedDataset,
     config_hash,
     generation_provenance,
@@ -88,8 +94,15 @@ from .presets import (
     se_random_scenario_config,
 )
 from .perturbation import perturbation_sweep
-from .run import ScenarioResult, run_scenarios
-from .sampler import SampledScenarios, cartesian_sample, sample
+from .run import ScenarioResult, ScenarioSpec, run_scenarios
+from .sampler import (
+    NominalPower,
+    SampledScenarios,
+    cartesian_sample,
+    nominal_power,
+    sample,
+    unit_samples,
+)
 from .storage import (
     StorageDispatchResult,
     dispatch_storage,
@@ -174,10 +187,17 @@ __all__ = [
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
     "SampledScenarios",
+    "NominalPower",
+    "ScenarioSpec",
     "sample",
     "cartesian_sample",
+    "batch_from_values",
+    "broadcast_operating_point",
+    "unit_samples",
+    "nominal_power",
     "sample_coherent_spectra",
     "spectrum_sweep",
+    "build_background_sources",
     "sample_device_composition",
     "resolve_composed_ids",
     "load_profile_factors",
@@ -197,6 +217,7 @@ __all__ = [
     "config_hash",
     "generation_provenance",
     "LoadedDataset",
+    "SCENARIO_CONFIG_TYPES",
     "ScenarioResult",
     "run_scenarios",
     "StorageDispatchResult",

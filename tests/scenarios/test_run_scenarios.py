@@ -212,17 +212,52 @@ def test_differentiable_through_batch(grid3):
 
 
 def test_scenario_failures_map_step_indices_to_scenarios():
-    """Coherent [B, T] convergence masks flatten over B*T; failed indices must
+    """Sequence [B, T] convergence masks flatten over B*T; failed indices must
     come back as SCENARIO indices (deduplicated), not step indices."""
     from pgml.scenarios.run import _scenario_failures
 
-    v_coherent = torch.zeros(4, 3, 2, 5, dtype=CDT)  # [B=4, T=3, H, N]
+    v_sequence = torch.zeros(4, 3, 2, 5, dtype=CDT)  # [B=4, T=3, H, N]
     # steps 0..2 -> scenario 0; steps 3..5 -> scenario 1; step 11 -> scenario 3
-    assert _scenario_failures((0, 2, 4, 11), v_coherent, True) == (0, 1, 3)
+    assert _scenario_failures((0, 2, 4, 11), v_sequence, 3) == (0, 1, 3)
     # a single-scenario sequence [T, H, N]: any failed step fails scenario 0
     v_single = torch.zeros(3, 2, 5, dtype=CDT)
-    assert _scenario_failures((1,), v_single, True) == (0,)
-    assert _scenario_failures((), v_single, True) == ()
-    # non-coherent runs pass through untouched
+    assert _scenario_failures((1,), v_single, 3) == (0,)
+    assert _scenario_failures((), v_single, 3) == ()
+    # snapshot batches pass through untouched
     v_flat = torch.zeros(4, 5, dtype=CDT)
-    assert _scenario_failures((1, 3), v_flat, False) == (1, 3)
+    assert _scenario_failures((1, 3), v_flat, 1) == (1, 3)
+
+
+def test_any_object_with_sample_is_a_spec(grid3):
+    """``run_scenarios`` plugs into a spec protocol, not a closed set of config classes."""
+    from pgml.scenarios import ScenarioSpec, batch_from_values
+
+    class HalfAndDouble:
+        """A minimal generator: two scenarios around the nameplate at one order."""
+
+        harmonic_orders = (1, 5)
+
+        def sample(self, grid):
+            b = 2
+            return batch_from_values(
+                grid,
+                n_samples=b,
+                p_w={10: torch.tensor([1.0e3, 4.0e3], dtype=torch.float64)},
+                harmonic_injection={10: {5: (torch.full((b,), 0.05), torch.zeros(b))}},
+            )
+
+    spec = HalfAndDouble()
+    assert isinstance(spec, ScenarioSpec)
+    res = run_scenarios(grid3, spec, dtype=CDT)
+    # the hint switched the calculation to harmonic and supplied the order set
+    assert res.frequencies_hz is not None and res.v.shape == (2, 2, res.v.shape[-1])
+
+
+def test_a_spec_without_sample_is_rejected(grid3):
+    """A wrong argument must name the contract it failed, not fail deep in the solver."""
+    import pytest
+
+    from pgml.errors import InputError
+
+    with pytest.raises(InputError, match="scenario spec"):
+        run_scenarios(grid3, object())

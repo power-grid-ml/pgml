@@ -128,7 +128,7 @@ def test_the_realized_magnitude_follows_each_devices_own_loading(grid3):
     order = torch.argsort(lam[:, 0])
     assert mag[order[0], 0, 0] > mag[order[-1], 0, 0]
     # …and the injection the solver receives IS the realized value
-    dev_id = int(s.samples["hm_device_ids"][0])
+    dev_id = int(s.all_samples["hm_device_ids"][0])
     inj_mag, inj_phase = s.harmonic_injection[dev_id][3]
     assert torch.allclose(inj_mag.to(torch.float64), mag[:, 0, 0].to(torch.float64))
 
