@@ -9,10 +9,10 @@ no element taken out of service, no approximation parameter to tune.
 
 Tolerances and what limits them
 -------------------------------
-``case9``, ``case39`` and ``case57`` agree to machine precision (1e-15 pu), so the
-tolerance is the solver's own convergence, not a modelling gap. ``case14`` and
-``case30`` land at ~1e-11 pu: that is pandapower's own ``tolerance_mva=1e-10``
-mismatch translated into voltage, not a pgml deviation.
+``case9``, ``case39`` and ``case57`` agree to 4.4e-16, 1.8e-15 and 3.1e-15 pu
+respectively, so the tolerance is the solver's own convergence, not a modelling gap.
+``case14`` and ``case30`` land at 6.2e-12 and 8.9e-12 pu: that is pandapower's own
+``tolerance_mva=1e-10`` mismatch translated into voltage, not a pgml deviation.
 
 ``case118`` and ``case300`` carry transformers with a NONZERO ``i0_percent`` (4 and 18
 of them; the MATPOWER branch charging susceptance of a ratio branch, which
@@ -20,9 +20,9 @@ of them; the MATPOWER branch charging susceptance of a ratio branch, which
 branch on the external HV terminal, OUTSIDE the winding-incidence transform, where
 pandapower splits it across the pi-model — a documented topological deviation
 (``docs/pgml/modeling/transformer.md``). That, and nothing else, sets their residual:
-with ``i0_percent`` zeroed in BOTH tools the same two benchmarks agree to 1e-15 pu
-(asserted below), which is what pins the deviation on the magnetizing branch rather
-than on the PV-bus row or the shunt conversion.
+with ``i0_percent`` zeroed in BOTH tools the same two benchmarks agree to 6.7e-16 and
+3.0e-14 pu (asserted below), which is what pins the deviation on the magnetizing
+branch rather than on the PV-bus row or the shunt conversion.
 
 Reactive limits
 ---------------
@@ -125,7 +125,7 @@ class TestQuick:
 
         The earlier Volt-VAr approximation settled on the collapsed low-voltage
         branch here (0.49 pu off, every machine pinned at its reactive limit); the
-        exact row pair reproduces pandapower to machine precision.
+        exact row pair reproduces pandapower to 1.8e-15 pu.
         """
         out = _compare(pn.case39, qlim=False)
         assert out["n_gen"] == 9
