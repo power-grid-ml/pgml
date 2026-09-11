@@ -129,9 +129,11 @@ calls `to_grid(net)` with no `phase_mode` and stays green.
   `Maxkvar`/`Minkvar` -> limits). power-grid-model's own `voltage_regulator`
   component (1.13+: `regulated_object` + `u_ref`, with `q_min`/`q_max` declared but
   not yet enforced by pgm) is NOT mapped yet. See the per-source CONTEXT files;
-- every other non-empty pgm component (`transformer`, `three_winding_transformer`,
-  `shunt`, `asym_gen`, `link`, `transformer_tap_regulator`) triggers a
-  `warn_dropped_elements` WARNING — nothing is dropped silently;
+- pgm `link` (a perfect connection) converts to an ideal closed `Switch` whose terminal
+  rows the solve collapses exactly (`pgml.assembly.fusion_map`);
+- every other non-empty pgm component (`three_winding_transformer`, `shunt`, `asym_gen`,
+  `transformer_tap_regulator`) triggers a `warn_dropped_elements` WARNING — nothing is
+  dropped silently;
 - ASYMMETRIC loads captured: pandapower `net.asymmetric_load` -> `connection=WYE`
   (`type=="wye"`) or `DELTA`, `p_nom_per_phase_w=(p_a,p_b,p_c)*1e6`,
   `q_nom_per_phase_var=(q_a,q_b,q_c)*1e6`; pgm `asym_load` -> `p_specified`/

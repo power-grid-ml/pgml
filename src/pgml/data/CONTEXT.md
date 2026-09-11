@@ -74,6 +74,21 @@ requires an env var to be set.
   the leakage impedance when a Transformer carries no explicit `zero_sequence` override
   (both 1.0 = Z0 = Z1). Read by `pgml.assembly._transformer.zero_sequence_leakage`; the
   zero-sequence PATH always comes from the winding connections.
+- `branch.zero_impedance` — `fuse` (default) / `error`: how a solve treats an in-service
+  branch whose series impedance is exactly zero. `fuse` collapses its terminal node-phase
+  rows into one row of the solved system (exact bus fusion) and reports the result on the
+  original node ids; `error` refuses it by name. Resolved by
+  `pgml.assembly._fusion.resolve_fusion` (every assembler and solve entry point); a branch
+  under a `branch_states` sweep is never fused and raises under either policy.
+- `branch.near_ideal_series_resistance_ohm` — the stand-in resistance (1e-4 Ohm) for an
+  ideal branch that has to remain STAMPED: under `zero_impedance: error`, or for a switch
+  whose state a sweep toggles. Named by the gate's message; not exact (it adds a voltage
+  drop and raises that row's admittance scale, and with it the achievable mismatch floor).
+- `branch.switch_model` — `ideal` (default) / `near_ideal`: what a CONVERTER writes for a
+  closed switch whose source library gives no impedance (a pandapower bus-bus switch with
+  `z_ohm = 0`, which pandapower itself solves by fusing the two buses). `ideal` reproduces
+  that treatment exactly; `near_ideal` keeps the switch stamped and logs the deviation.
+  Read by `pgml.convert.pandapower.converter._closed_switch_resistance_ohm`.
 
 ## Resolution precedence (highest first; `resolve(key, explicit, converted)`)
 1. **explicit** — a value the user set on the component / grid (ALWAYS wins).
@@ -86,3 +101,6 @@ requires an env var to be set.
 - `geometry/synthesis.py`: `_DEFAULT_HEIGHT`, `_DEFAULT_RADIUS`, `_DEFAULT_EARTH_RHO`,
   and the `apply_*` model/skin/earth-coeff defaults.
 - `convert/_common.py`: zero-sequence ratios. `evaluation/oracles/grids.py`: source impedance.
+- `assembly/_fusion.py`: `branch.zero_impedance`; `solver/power_flow.py` +
+  `convert/pandapower/converter.py`: `branch.near_ideal_series_resistance_ohm` /
+  `branch.switch_model`.

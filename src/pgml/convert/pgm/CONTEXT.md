@@ -55,6 +55,7 @@ has NO runtime dependency on the ``power_grid_model`` package itself (it reads
 {
     "node":           {pgm_node_id: Node.id, ...},
     "line":           {pgm_line_id: Line.id, ...},
+    "link":           {pgm_link_id: Switch.id, ...},   # a perfect connection
     "transformer":    {pgm_transformer_id: Transformer.id, ...},
     "sym_load":       {pgm_load_id: Load.id, ...},
     "asym_load":      {pgm_load_id: Load.id, ...},  # THREE_PHASE only
@@ -69,6 +70,20 @@ has NO runtime dependency on the ``power_grid_model`` package itself (it reads
   transformers, status for loads/sources).
 - ``slack_v_complex``: taken from the first in-service source; complex phasor in
   SI volts (line-to-line), ready to pass as ``v_fixed`` to ``solve_harmonic``.
+
+### `link` — a perfect connection, converted to an ideal closed `Switch`
+
+power-grid-model's `link` is a zero-impedance connection between two nodes, which its own
+solver realises with a very large stand-in admittance (1e6 per unit). It converts to a
+closed `Switch` with `resistance_ohm = inductance_h = 0`, whose terminal node-phase rows
+the solve collapses exactly (`pgml.assembly.fusion_map`), so pgml carries no stand-in at
+all. An out-of-service link (`from_status`/`to_status == 0`) is not converted. Measured
+against power-grid-model 1.13 on a source–link–line–load feeder: node voltages agree to
+3.5e-9 pu and the link's own current to 6.0e-9 relative, both residuals being the
+reference's stand-in drop (7.0e-5 V across the link, which fusion makes exactly zero).
+power-grid-model reports a symmetric calculation in three-phase quantities, so its link
+current is the pgml single-phase-equivalent conductor current divided by `sqrt(3)`
+(`tests/reference/test_switch_fusion_pgm.py`).
 
 ### Parameter conventions
 

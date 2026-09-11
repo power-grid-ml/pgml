@@ -124,6 +124,7 @@ from pgml.schemas.grid_schema import (
     LoadModel,
     Provenance,
     SourceConvention,
+    Switch,
     Transformer,
     TransformerZeroSeq,
     WindingConnection,
@@ -202,6 +203,7 @@ def to_grid(
 
         - ``"node"``         : ``{pgm_id: Node.id}``
         - ``"line"``         : ``{pgm_id: Line.id}``
+        - ``"link"``         : ``{pgm_id: Switch.id}`` (a perfect connection)
         - ``"transformer"``  : ``{pgm_id: Transformer.id}``
         - ``"sym_load"``     : ``{pgm_id: Load.id}``
         - ``"asym_load"``    : ``{pgm_id: Load.id}`` (THREE_PHASE only)
@@ -296,6 +298,39 @@ def to_grid(
                 x0=x0,
                 c0=c0,
                 g1=g1,
+                provenance=_PROVENANCE,
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # 2b. Links (a perfect connection) -> ideal closed Switch               #
+    # ------------------------------------------------------------------ #
+    # power-grid-model's `link` is a zero-impedance connection between two nodes,
+    # which it solves with a very large (1e6 pu) stand-in admittance. The exact
+    # equivalent is an ideal closed Switch, whose terminal rows the solve collapses
+    # (`branch.zero_impedance`), so the two tools describe the same network and pgml
+    # carries no stand-in at all.
+    id_map.setdefault("link", {})
+    for row in input_data.get("link", []):
+        if int(row["from_status"]) == 0 or int(row["to_status"]) == 0:
+            continue  # out-of-service: no connection at all
+        pgm_id = int(row["id"])
+        from_pgm = int(row["from_node"])
+        to_pgm = int(row["to_node"])
+        if from_pgm not in id_map["node"] or to_pgm not in id_map["node"]:
+            continue
+        link_id = _id.next()
+        id_map["link"][pgm_id] = link_id
+        link_phases = phases_for(phase_mode)
+        branches.append(
+            Switch(
+                id=link_id,
+                name=f"link_{pgm_id}",
+                from_node=id_map["node"][from_pgm],
+                to_node=id_map["node"][to_pgm],
+                from_phases=link_phases,
+                to_phases=link_phases,
+                closed=True,
                 provenance=_PROVENANCE,
             )
         )
@@ -637,7 +672,6 @@ def to_grid(
                 "three_winding_transformer",
                 "shunt",
                 "asym_gen",
-                "link",
                 "transformer_tap_regulator",
             )
         },
