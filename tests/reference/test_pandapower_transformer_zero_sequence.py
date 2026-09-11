@@ -161,17 +161,26 @@ class TestZeroSequenceLeakageConversion:
             math.sqrt(z0**2 - r0**2), rel=1e-12
         )
 
-    def test_absent_vk0_warns_for_a_grounded_pairing(self, caplog) -> None:
+    def test_absent_vk0_warns_once_with_the_count_and_ids(self, caplog) -> None:
+        """The fallback is reported ONCE per conversion, naming every transformer."""
         net, _, _ = _build_net("YNyn", 0.5)
         net.trafo.loc[0, "vk0_percent"] = float("nan")
+        # A second, identical unit: the warning must still be a single record.
+        net.trafo.loc[1] = net.trafo.loc[0]
         with caplog.at_level("WARNING"):
             grid, _ = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
-        xfmr = next(b for b in grid.branches if isinstance(b, Transformer))
-        assert xfmr.zero_sequence is None
-        assert any(
-            "trafo 0" in r.message and "zero-sequence" in r.message
-            for r in caplog.records
-        )
+        for branch in grid.branches:
+            if isinstance(branch, Transformer):
+                assert branch.zero_sequence is None
+        notices = [r for r in caplog.records if "vk0_percent" in r.message]
+        assert len(notices) == 1
+        assert "2 pandapower trafo(s) 0, 1" in notices[0].message
+
+    def test_present_vk0_does_not_warn(self, caplog) -> None:
+        net, _, _ = _build_net("YNyn", 0.5)
+        with caplog.at_level("WARNING"):
+            to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
+        assert not [r for r in caplog.records if "vk0_percent" in r.message]
 
     def test_unmodelled_zero_sequence_refinements_warn(self, caplog) -> None:
         """A finite zero-sequence magnetizing branch is named, not silently dropped."""

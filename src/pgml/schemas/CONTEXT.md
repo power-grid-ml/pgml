@@ -20,6 +20,9 @@ the grid description). A persisted `Source` that still carries the key loads unc
 before-validator drops it, with a WARNING when the value is non-null (a null carries no
 information and is dropped silently). Any OTHER unknown field still raises. Downstream code
 that CONSTRUCTS a `Source` with `spectrum=None` must drop that argument.
+`TransformerZeroSeq`'s documented reference side is corrected from "HV" to "the to-side
+(LV) winding coil" — the side the positive-sequence leakage fields use and the side
+assembly consumes (a docstring/unit-metadata change; no field, name or value changes).
 
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),

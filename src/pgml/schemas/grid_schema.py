@@ -731,21 +731,23 @@ class GroundingImpedance(GridModel):
 
 
 class TransformerZeroSeq(GridModel):
-    """Explicit zero-sequence leakage impedance VALUE override, referred to HV. The
-    zero-sequence PATH is always derived from winding connections + clock; this
-    overrides only the value. None => Z0 = Z1 connected per topology."""
+    """Explicit zero-sequence leakage impedance VALUE override, on the SAME reference
+    as the positive-sequence leakage (the to-side/LV winding coil). The zero-sequence
+    PATH is always derived from winding connections + clock; this overrides only the
+    value. None => the configured `transformer.zero_sequence.*` ratios (Z0 = Z1 by
+    default), connected per topology."""
 
     r0_ohm: Num = si_field(
         "Zero-sequence series resistance.",
         short="Ohm",
         long="ohm",
-        reference="referred to HV side",
+        reference="referred to the to-side (LV) winding coil",
     )
     x0_ohm: Num = si_field(
-        "Zero-sequence series reactance at f0.",
+        "Zero-sequence series reactance at f0. L0 = x0_ohm/(2*pi*f0); X0(h) = 2*pi*h*f0*L0.",
         short="Ohm",
         long="ohm",
-        reference="referred to HV side",
+        reference="referred to the to-side (LV) winding coil",
     )
 
 

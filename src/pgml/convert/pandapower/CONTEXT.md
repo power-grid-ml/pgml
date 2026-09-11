@@ -398,8 +398,9 @@ rule, droop physics) and `tests/reference/test_pandapower_gen_volt_var.py` (live
   `Z = vk0% · Z_base_LV` formula the positive sequence uses applies, including the
   TO-side delta coil factor and the `parallel` divide). A zero or absent `vk0_percent` is
   pandapower's own "use the positive-sequence value", which is pgml's
-  `transformer.zero_sequence.*` default; a grounded-wye/zigzag pairing that falls back
-  logs a WARNING. NOT modelled, each named in a WARNING when set: `mag0_percent`/`mag0_rx`
+  `transformer.zero_sequence.*` default; the grounded-wye/zigzag units that fall back are
+  reported in ONE WARNING per conversion carrying the count and their indices
+  (`_warn_defaulted_zero_sequence`). NOT modelled, each named in a WARNING when set: `mag0_percent`/`mag0_rx`
   (a finite zero-sequence MAGNETIZING impedance — the three-limb-core path through tank
   and air), `si0_hv_partial` (the HV/LV split of the zero-sequence leakage inside a T) and
   `xn_ohm`/`rn_ohm` (a neutral earthing impedance, `3·Z_N` in series).

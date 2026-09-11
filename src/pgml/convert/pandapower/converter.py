@@ -664,6 +664,7 @@ def _transformer_zero_sequence(
     from_connection: WindingConnection,
     to_connection: WindingConnection,
     pp_idx: Any,
+    defaulted: list,
 ) -> Optional[TransformerZeroSeq]:
     """Zero-sequence leakage override from ``vk0_percent``/``vkr0_percent``.
 
@@ -689,6 +690,9 @@ def _transformer_zero_sequence(
     - ``xn_ohm``/``rn_ohm`` — a neutral earthing impedance (``3*Z_N`` in series with the
       zero sequence). pgml stamps windings solidly grounded and rejects a finite
       ``GroundingImpedance``.
+
+    A grounded pairing with no usable ``vk0_percent`` appends its index to ``defaulted``
+    instead of logging; :func:`_warn_defaulted_zero_sequence` reports the whole set once.
     """
     vk0 = _opt_float(row, "vk0_percent")
     vkr0 = _opt_float(row, "vkr0_percent")
@@ -718,13 +722,10 @@ def _transformer_zero_sequence(
 
     if vk0 is None or vk0 <= 0.0:
         if grounded:
-            _logger.warning(
-                "pandapower trafo %s has a grounded-wye/zigzag winding (a "
-                "zero-sequence path) but no vk0_percent; assuming the documented "
-                "`transformer.zero_sequence.*` ratios (Z0 = Z1 by default). A "
-                "three-limb core YNyn unit typically has X0/X1 of 0.3-1.0.",
-                pp_idx,
-            )
+            # Collected and reported ONCE per conversion (see `warn_defaulted_zero_
+            # sequence`): a network of identical Dyn units would otherwise log the same
+            # sentence for every transformer.
+            defaulted.append(pp_idx)
         return None
 
     z0_ll = vk0 / 100.0 * z_base_lv
@@ -733,6 +734,24 @@ def _transformer_zero_sequence(
     return TransformerZeroSeq(
         r0_ohm=coil_factor * r0_ll / parallel,
         x0_ohm=coil_factor * x0_ll / parallel,
+    )
+
+
+def _warn_defaulted_zero_sequence(defaulted: list) -> None:
+    """Report the transformers whose zero-sequence leakage fell back to the defaults.
+
+    One WARNING per conversion, carrying the count and the pandapower indices, so a feeder
+    with many identical Dyn units does not repeat the same sentence per transformer.
+    """
+    if not defaulted:
+        return
+    _logger.warning(
+        "%d pandapower trafo(s) %s have a grounded-wye/zigzag winding (a zero-sequence "
+        "path) but no vk0_percent; their zero-sequence leakage assumes the documented "
+        "`transformer.zero_sequence.*` ratios (Z0 = Z1 by default). A three-limb core "
+        "YNyn unit typically has X0/X1 of 0.3-1.0.",
+        len(defaulted),
+        ", ".join(str(i) for i in defaulted),
     )
 
 
@@ -1058,6 +1077,7 @@ def to_grid(
     # precision with the factor applied, and are wrong by 3x without it --    #
     # see `tests/reference/test_pandapower_grid_matrix.py`.                   #
     # ------------------------------------------------------------------ #
+    zero_seq_defaulted: list = []
     if hasattr(net, "trafo") and len(net.trafo):
         for pp_idx, row in net.trafo.iterrows():
             if not bool(row.get("in_service", True)):
@@ -1144,6 +1164,7 @@ def to_grid(
                 from_connection=from_connection,
                 to_connection=to_connection,
                 pp_idx=pp_idx,
+                defaulted=zero_seq_defaulted,
             )
 
             tx_phases = phases_for(phase_mode)
@@ -1171,6 +1192,8 @@ def to_grid(
                     provenance=_PROVENANCE,
                 )
             )
+
+    _warn_defaulted_zero_sequence(zero_seq_defaulted)
 
     # ------------------------------------------------------------------ #
     # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).      #
