@@ -123,7 +123,13 @@ def test_mixed_precision_needs_a_complex128_working_dtype(ieee33):
 
 
 def test_refined_linear_solve_reaches_double_precision():
-    """The refinement itself: a deliberately ill-conditioned system, solved twice."""
+    """The refinement itself: a deliberately ill-conditioned system, solved twice.
+
+    The ill conditioning here is pure SCALING (one row multiplied by 1e5, the decade
+    spread a stiff source row gives an SI feeder), so it also pins what equilibration
+    does with it: the condition estimate of the matrix AS ASSEMBLED is above 1e4, and of
+    the same matrix as FACTORED (equilibrated, the default) below 1e3.
+    """
     n = 40
     torch.manual_seed(0)
     a = torch.randn(n, n, dtype=CDT) + n * torch.eye(n, dtype=CDT)
@@ -135,7 +141,8 @@ def test_refined_linear_solve_reaches_double_precision():
     rel = lambda x: float((x - exact).abs().max() / exact.abs().max())  # noqa: E731
     assert rel(single) > 1.0e-9  # single precision loses most digits here
     assert rel(refined) < 1.0e-13  # refinement recovers them
-    assert estimate_condition(lu_factor_system(a)) > 1.0e4
+    assert estimate_condition(lu_factor_system(a, equilibrate="off")) > 1.0e4
+    assert estimate_condition(lu_factor_system(a)) < 1.0e3
 
 
 def test_plain_complex64_warns_once_on_an_ill_conditioned_system(ieee33, caplog):

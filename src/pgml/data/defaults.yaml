@@ -500,3 +500,48 @@ solver:
         accuracy for cond up to ~1e5 and are the documented default; the nonlinear
         outer iteration (itself a residual correction) continues the refinement beyond
         that.
+  equilibration:
+    mode:
+      value: "symmetric"
+      units: "name: off | symmetric | row_column"
+      description: >
+        Diagonal equilibration applied around every factorization of a linear system
+        (the nodal admittance, the Newton state Jacobian, the implicit-function adjoint).
+        An SI-unit admittance matrix spans decades — a stiff source row near 1e5 S next to
+        a low-voltage cable row near 1e-2 S — so it is badly SCALED rather than
+        intrinsically ill-conditioned, and a rescaling removes most of the condition
+        number. "symmetric" is van der Sluis scaling d_i = |Y_ii|^-1/2 applied as the
+        congruence D Y D: it keeps symmetry and sparsity, reads only the diagonal, and is
+        within sqrt(n) of the best condition number any diagonal scaling can reach.
+        "row_column" is the two-sided LAPACK xGEEQU variant (row max-norms, then column
+        max-norms), which needs a pass over the whole matrix and is unavailable on the
+        block-diagonal backend. "off" factors the matrix as assembled. The scaling is
+        undone on the solution, so results, reported quantities and gradients are
+        unchanged; what changes is the conditioning of the factored system, the meaning of
+        the condition estimate, and the robustness of a single-precision factorization.
+    power_of_two:
+      value: true
+      units: "boolean"
+      description: >
+        Round every equilibration scale factor to a power of two. The scaled matrix
+        D Y D is then exact in binary floating point, so the equilibration introduces no
+        rounding error of its own and cannot move a solution it was only meant to
+        condition; the cost is at most a factor 2 per scale factor (4 in the condition
+        number), which is negligible against the decades it removes. Set to false to use
+        the unrounded scales.
+  ift:
+    jacobian_budget_mb:
+      value: 1024.0
+      units: "MiB"
+      description: >
+        Memory budget for building the block-diagonal real state Jacobian of the
+        implicit-function (gradient) path and of the dense Newton direction. The
+        vectorized build differentiates the batched residual in one call, which replicates
+        the residual's [B, N, N] admittance once per output row and therefore peaks at
+        B^2 * 2N^3 * itemsize bytes; the budget decides how many scenarios are built at a
+        time (the solver falls back to a column-by-column build costing 2N
+        Jacobian-vector products and O(B*(2N)^2) memory when a single scenario already
+        exceeds it). 1 GiB keeps the fast whole-batch build for small systems and small
+        batches, bounds the peak monotonically in the batch size, and fits alongside the
+        forward solve on a 12 GB accelerator. Raise it on a larger card to keep the
+        vectorized build at larger batches; lower it to leave more room for the forward.

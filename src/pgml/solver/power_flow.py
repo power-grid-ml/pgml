@@ -72,12 +72,13 @@ from pgml.assembly import (
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
-from pgml.assembly.ybus import _stamp_sources, flatten_plan_batch
+from pgml.assembly.ybus import _stamp_sources, flatten_plan_batch, select_plan_batch
 from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
 from ._pv_bus import PVTerminals, active_power_mismatch, collect_pv_terminals
+from .equilibration import equilibrated_lu_factor, resolve_equilibration
 from .harmonic import (
     estimate_condition,
     lu_factor_system,
@@ -1206,6 +1207,7 @@ def _woodbury_pieces(
     factor_backend,
     block_rows,
     precision="full",
+    equilibrate="off",
 ):
     """Base admittance, slack current and the per-state low-rank update of a sweep.
 
@@ -1238,6 +1240,7 @@ def _woodbury_pieces(
         block_rows=block_rows,
         precision=precision,
         refine_steps=0,  # the nonlinear outer iteration IS the refinement loop
+        equilibrate=equilibrate,
     )
     return (
         LowRankOperator(y_base, u, c, u),
@@ -1312,6 +1315,7 @@ class PowerFlowSystem:
     static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
     network_fp: str = ""  # network_fingerprint(grid) at prepare time
     precision: str = "full"  # working precision of the cached factorization
+    equilibration: str = "off"  # equilibration of the cached factorization
 
 
 def prepare_power_flow(
@@ -1326,6 +1330,7 @@ def prepare_power_flow(
     branch_states_method: str = "assemble",
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
+    equilibrate: Optional[str] = None,
 ) -> PowerFlowSystem:
     """Assemble + factor the operating-point-independent power-flow system once.
 
@@ -1336,13 +1341,21 @@ def prepare_power_flow(
     (:func:`pgml.solver.harmonic.lu_factor_system`; ``linear_solver``,
     ``block_rows`` and ``branch_states_method`` as in :func:`solve_power_flow`).
     Pass the result as ``solve_power_flow(..., system=...)`` to skip that work on
-    every subsequent call — with the SAME ``branch_states_method`` and ``precision``
-    (``precision="mixed"`` caches single-precision factors, so the consuming solve must
-    run its residual-correction iteration).
+    every subsequent call — with the SAME ``branch_states_method``, ``precision`` and
+    ``equilibrate`` (``precision="mixed"`` caches single-precision factors, so the
+    consuming solve must run its residual-correction iteration; ``equilibrate`` decides
+    which matrix the cached factors belong to).
+
+    ``equilibrate`` is the diagonal equilibration of the factored system
+    (:mod:`pgml.solver.equilibration`; ``None`` -> the documented default
+    ``solver.equilibration.mode``). The cached factorization holds the SCALED matrix plus
+    the scale factors that undo it, so a consuming solve still hands in SI injections and
+    reads SI voltages.
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
     resolve_precision(precision, _cdtype(dtype))
+    eq_mode = resolve_equilibration(equilibrate)
     _validate_block_solver(linear_solver, block_rows)
     use_woodbury = _validate_branch_states_method(branch_states_method, branch_states)
     check_branch_impedances(grid)
@@ -1385,6 +1398,7 @@ def prepare_power_flow(
                 factor_backend,
                 block_rows,
                 precision,
+                eq_mode,
             )
         else:
             y_eff, i_slack = _y_eff_and_islack(
@@ -1398,6 +1412,7 @@ def prepare_power_flow(
                 precision=precision,
                 # The nonlinear outer iteration IS the refinement loop.
                 refine_steps=0,
+                equilibrate=eq_mode,
             )
     return PowerFlowSystem(
         index=index,
@@ -1411,6 +1426,7 @@ def prepare_power_flow(
         static_leaves=tuple(leaves),
         network_fp=network_fingerprint(grid),
         precision=precision,
+        equilibration=eq_mode,
     )
 
 
@@ -1437,6 +1453,7 @@ def solve_power_flow(
     branch_states_method: str = "assemble",
     system: Optional[PowerFlowSystem] = None,
     enforce_q_limits: Optional[bool] = None,
+    equilibrate: Optional[str] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -1593,6 +1610,21 @@ def solve_power_flow(
         still rebuilds the per-state admittance differentiably through the IFT, so
         gradients (including gradients w.r.t. the state values) are unchanged. It
         requires ``branch_states`` and ``method="current_injection"``.
+    equilibrate:
+        Diagonal equilibration of every linear system this solve factors
+        (:mod:`pgml.solver.equilibration`): the admittance of the fixed point, the real
+        state Jacobian of a Newton step, and the adjoint system of the gradient path.
+        ``None`` (default) resolves the documented default
+        ``solver.equilibration.mode`` (``"symmetric"``, van der Sluis scaling
+        ``d_i = |A_ii|^{-1/2}``), ``"row_column"`` selects the two-sided variant, and
+        ``"off"`` factors every matrix as assembled. The scaling is applied around each
+        factorization and undone on its solution, so voltages, currents, residuals,
+        tolerances and gradients are unchanged; what changes is the conditioning of the
+        factored systems (measured: the condition number of the fundamental free block
+        falls from 1.4e5 to 1.3e4 on a 2016-row network and from 4.6e4 to 2.1e3 on
+        three-phase CIGRE LV, and at harmonic order 13 from 5.7e8 to 1.5e3 on IEEE-33),
+        and therefore the robustness of a single-precision factorization and the meaning
+        of the reported condition estimate.
     enforce_q_limits:
         Whether a voltage-regulating generator's ``q_min_var`` / ``q_max_var`` bound
         its reactive output. ``None`` (default) reads
@@ -1640,6 +1672,7 @@ def solve_power_flow(
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
     tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
     resolve_precision(precision, _cdtype(dtype))
+    eq_mode = resolve_equilibration(equilibrate)
     if criticality not in ("auto", "always", "never"):
         raise InputError(
             f"Unsupported criticality {criticality!r} (use 'auto'/'always'/'never')."
@@ -1659,6 +1692,14 @@ def solve_power_flow(
     use_woodbury = _validate_branch_states_method(
         branch_states_method, branch_states, method
     )
+    if system is not None and system.equilibration != eq_mode:
+        raise InputError(
+            f"The provided PowerFlowSystem was prepared with equilibrate="
+            f"{system.equilibration!r} but the solve requests {eq_mode!r}: the cached "
+            "factorization holds the scaled matrix and the scale factors that undo it, "
+            "so prepare and solve must agree. Re-prepare the system, or pass the same "
+            "equilibrate to both."
+        )
     if system is not None and system.precision != precision:
         raise InputError(
             f"The provided PowerFlowSystem was prepared with precision="
@@ -1740,6 +1781,7 @@ def solve_power_flow(
                     linear_solver=linear_solver,
                     on_disconnected="ignore",
                     enforce_q_limits=enforce_q_limits,
+                    equilibrate=eq_mode,
                 )
                 return _expand_zeroed_result(grid, sub_res)
 
@@ -1944,6 +1986,7 @@ def solve_power_flow(
             cdt,
             state_residual_complex=frc,
             pv=pv_state,
+            equilibrate=eq_mode,
         )
         return rc, frc, rr
 
@@ -1981,6 +2024,7 @@ def solve_power_flow(
                 fixed_rows,
                 v_fixed if vf is None else vf,
                 branch_states,
+                eq_mode,
             )
 
         if pv_state is None:
@@ -2050,6 +2094,7 @@ def solve_power_flow(
                     max_iter,
                     newton_solver,
                     precision,
+                    eq_mode,
                 )
             return _newton_from_starts(
                 rr,
@@ -2086,6 +2131,7 @@ def solve_power_flow(
                     factor_backend,
                     block_rows,
                     precision,
+                    eq_mode,
                 )
             solve_system = PowerFlowSystem(
                 index=index,
@@ -2098,6 +2144,7 @@ def solve_power_flow(
                 factorization=upd,
                 static_leaves=tuple(leaves),
                 precision=precision,
+                equilibration=eq_mode,
             )
         return _current_injection_forward(
             grid,
@@ -2119,6 +2166,7 @@ def solve_power_flow(
             solve_system,
             block_rows,
             precision,
+            eq_mode,
         )
 
     # ----- the solve, plus PV-to-PQ switching rounds where a reactive limit binds ---
@@ -2302,6 +2350,7 @@ def _current_injection_forward(
     system=None,
     block_rows=None,
     precision="full",
+    equilibrate="off",
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
@@ -2423,6 +2472,7 @@ def _current_injection_forward(
                 # The outer iteration below IS the refinement loop, so the inner solve
                 # needs no refinement of its own.
                 refine_steps=0,
+                equilibrate=equilibrate,
             )
         )
         mixed = precision == "mixed"
@@ -2517,6 +2567,7 @@ def _linear_const_z_init(
     fixed_rows,
     v_fixed,
     branch_states=None,
+    equilibrate="off",
 ):
     """OpenDSS-style warm start: the LINEAR const-Z solution (one linear solve).
 
@@ -2567,7 +2618,13 @@ def _linear_const_z_init(
     else:
         i_init = torch.zeros(y_lin.shape[-1], dtype=y_lin.dtype, device=device)  # [N]
     with torch.no_grad():
-        v0 = solve_harmonic(y_lin, i_init, fixed_rows=fixed_rows, v_fixed=v_fixed)
+        v0 = solve_harmonic(
+            y_lin,
+            i_init,
+            fixed_rows=fixed_rows,
+            v_fixed=v_fixed,
+            equilibrate=equilibrate,
+        )
     if drop_freq_axis:
         v0 = v0.squeeze(-2)  # [1, N] -> [N]: the frequency axis, known positionally
     return v0
@@ -2855,7 +2912,14 @@ def _newton_forward(
             if linear_solver == "matrix_free":
                 dx = _newton_dir_matrix_free(res_one, x, r, b, fd_eps)
             else:
-                dx = _newton_dir_dense(res_all, x, r, precision=precision)
+                dx = _newton_dir_dense(
+                    res_all,
+                    x,
+                    r,
+                    precision=precision,
+                    equilibrate=getattr(real_res, "equilibration", "off"),
+                    cdt=cdt,
+                )
             # PER-ELEMENT backtracking on each scenario's residual infinity-norm
             # (global robustness): a hard scenario halves only its own step.
             r0 = r.abs().amax(dim=-1)  # [b]
@@ -2922,6 +2986,7 @@ def _newton_forward_sequential(
     max_iter,
     linear_solver,
     precision="full",
+    equilibrate="off",
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
@@ -2954,7 +3019,14 @@ def _newton_forward_sequential(
 
         pv_i = None if pv is None else pv.slice(i)
         rr_i = _make_real_residual(
-            build_system, rc_i, fixed_rows, _vfixed_i, n, cdt, pv=pv_i
+            build_system,
+            rc_i,
+            fixed_rows,
+            _vfixed_i,
+            n,
+            cdt,
+            pv=pv_i,
+            equilibrate=equilibrate,
         )
         (
             v_i,
@@ -3014,29 +3086,113 @@ def _newton_forward_sequential(
     )
 
 
-def _batched_state_jacobian(batched_state_res, x_flat: Tensor) -> Tensor:
+def _vectorized_jacobian_peak_bytes(chunk: int, n: int, cdt: torch.dtype) -> int:
+    """Peak allocation of a vectorized state-Jacobian build over ``chunk`` scenarios.
+
+    ``torch.autograd.functional.jacobian(..., vectorize=True)`` vmaps the backward over
+    the output basis, so every intermediate of the residual is replicated once per
+    output row. The dominant intermediate is the ``[chunk, N, N]`` admittance of the
+    residual's matrix-vector product, and there are ``chunk * 2N`` output rows, so the
+    peak is ``chunk² * 2N³ * itemsize``. The formula is not a fit: it reproduces the
+    allocator's own requests (a 294-row grid at chunk 4 asks for 13.0 GB, at chunk 16 for
+    208 GB), which is why the build has to be budgeted rather than chosen by the size of
+    its RESULT (``[chunk, 2N, chunk, 2N]``, a factor ``4N`` smaller).
+    """
+    itemsize = torch.empty(0, dtype=cdt).element_size()
+    return int(chunk) * int(chunk) * 2 * int(n) ** 3 * itemsize
+
+
+def _jacobian_chunk(b: int, n: int, cdt: torch.dtype, budget_bytes: int) -> int:
+    """Largest scenario chunk whose vectorized Jacobian build fits ``budget_bytes``."""
+    per_unit = _vectorized_jacobian_peak_bytes(1, n, cdt)
+    if per_unit <= 0:
+        return b
+    return max(0, min(b, int(math.isqrt(max(budget_bytes // per_unit, 0)))))
+
+
+def _ift_jacobian_budget_bytes(budget_mb: Optional[float] = None) -> int:
+    """Memory budget of the state-Jacobian build [bytes] (documented default)."""
+    mb = (
+        float(defaults.get("solver.ift.jacobian_budget_mb"))
+        if budget_mb is None
+        else float(budget_mb)
+    )
+    return int(mb * 1024 * 1024)
+
+
+def _ift_adjoint_cache_bytes() -> int:
+    """Largest adjoint factorization kept for repeated products [bytes]."""
+    return int(float(defaults.get("solver.ift.adjoint_factor_cache_mb")) * 1024 * 1024)
+
+
+def _plan_residual(plan):
+    """``F_c(V) = Y V + I_device(V) − I_slack`` from a precomputed injection plan.
+
+    The state residual the Jacobian differentiates, with the plan's (detached) powers as
+    constants: used where the plan has been reshaped or indexed to match the scenario
+    axis the Jacobian runs over.
+    """
+
+    def residual(v: Tensor, y_eff: Tensor, i_slack: Tensor) -> Tensor:
+        return _apply_y(y_eff, v) + injections_from_plan(plan, v).squeeze(-2) - i_slack
+
+    return residual
+
+
+def _batched_state_jacobian(
+    batched_state_res,
+    x_flat: Tensor,
+    *,
+    cdt: torch.dtype = torch.complex128,
+    res_for_rows=None,
+    budget_bytes: Optional[int] = None,
+) -> Tensor:
     """Block-diagonal real state Jacobian ``J = dR/dx`` ``[B, 2N, 2N]``.
 
-    ``batched_state_res`` maps ``x [B, 2N] -> R [B, 2N]`` where ``R[k]`` depends
-    only on ``x[k]``, so the full Jacobian is block diagonal (the off-diagonal
-    cross terms are zero). Two ways to get the blocks:
+    ``batched_state_res`` maps ``x [B, 2N] -> R [B, 2N]`` where ``R[k]`` depends only on
+    ``x[k]``, so the full Jacobian is block diagonal (the off-diagonal cross terms are
+    zero) and only the ``B`` diagonal blocks are built. Three ways to build them, chosen
+    by a MEMORY BUDGET (``solver.ift.jacobian_budget_mb``) against the measured peak of
+    the vectorized build (:func:`_vectorized_jacobian_peak_bytes`):
 
-    - small ``B``: differentiate the batched map once (vectorized) and slice the
-      diagonal — fast, but the intermediate is ``[B, 2N, B, 2N]`` (O(B²) memory);
-    - large ``B``: build the diagonal column-by-column with ``2N`` batched JVPs —
-      O(B) memory, using the SAME batch-aligned residual (correct for every batch
-      source, incl. batched device params / operating points).
+    - whole batch vectorized: differentiate the batched map once and slice the diagonal.
+      Fastest, and the reason a single-scenario gradient costs about as much as the
+      forward solve, but its intermediate grows with ``B²·2N³``;
+    - CHUNKED vectorized: the same build over as many scenarios at a time as the budget
+      allows, which needs ``res_for_rows(rows)`` — a factory giving the residual of a
+      batch SLICE (the caller owns the slicing of its system tensors, injection plan and
+      regulating terminals);
+    - column-by-column: ``2N`` batched JVPs of the whole batch, ``O(B·(2N)²)`` memory and
+      the only choice when one scenario's vectorized build already exceeds the budget.
 
-    Both avoid vmap, which does not compose with the assembly's ``index_add_``
-    scatter. Shared by the Newton forward and the IFT backward.
+    So the materialised memory is bounded by the budget plus the ``[B, 2N, 2N]`` result,
+    monotonically in ``B``, instead of growing quadratically in it. All three avoid vmap
+    over the ASSEMBLY, which does not compose with its ``index_add_`` scatter. Shared by
+    the Newton forward and the implicit-function backward.
     """
     b, twon = x_flat.shape
-    if b * b * twon * twon <= _IFT_DENSE_JAC_MAX_ELEMS:
+    n = twon // 2
+    budget = _ift_jacobian_budget_bytes() if budget_bytes is None else int(budget_bytes)
+    chunk = _jacobian_chunk(b, n, cdt, budget)
+
+    def _vectorized(res, x: Tensor) -> Tensor:
+        k = x.shape[0]
         jac_full = torch.autograd.functional.jacobian(
-            batched_state_res, x_flat, create_graph=False, vectorize=True
-        )  # [B, 2N, B, 2N]
-        idx_b = torch.arange(b, device=x_flat.device)
-        return jac_full[idx_b, :, idx_b, :]  # [B, 2N, 2N]
+            res, x, create_graph=False, vectorize=True
+        )  # [k, 2N, k, 2N]
+        idx = torch.arange(k, device=x.device)
+        return jac_full[idx, :, idx, :]  # [k, 2N, 2N]
+
+    if chunk >= b:
+        return _vectorized(batched_state_res, x_flat)
+    if chunk >= 1 and res_for_rows is not None:
+        blocks = []
+        for start in range(0, b, chunk):
+            rows = torch.arange(
+                start, min(start + chunk, b), device=x_flat.device, dtype=torch.int64
+            )
+            blocks.append(_vectorized(res_for_rows(rows), x_flat.index_select(0, rows)))
+        return torch.cat(blocks, dim=0)  # [B, 2N, 2N]
     cols = []
     for j in range(twon):
         tangent = torch.zeros_like(x_flat)
@@ -3048,19 +3204,32 @@ def _batched_state_jacobian(batched_state_res, x_flat: Tensor) -> Tensor:
     return torch.stack(cols, dim=-1)  # [B, 2N, 2N]
 
 
-def _newton_dir_dense(batched_state_res, x, r, *, precision: str = "full") -> Tensor:
+def _newton_dir_dense(
+    batched_state_res,
+    x,
+    r,
+    *,
+    precision: str = "full",
+    equilibrate: str = "off",
+    cdt: torch.dtype = torch.complex128,
+) -> Tensor:
     """Dense Newton direction ``Δx`` solving ``J Δx = −R`` per batch element.
 
     ``precision="mixed"`` solves the Jacobian system in single precision (an inexact
     Newton direction: the residual and the step stay at the working precision, so the
     iteration converges to the same solution with a slightly degraded rate).
+    ``equilibrate`` diagonally scales the Jacobian around its factorization
+    (:mod:`pgml.solver.equilibration`) and undoes the scaling on the step, which matters
+    most for the single-precision direction: the real state Jacobian of an SI-unit system
+    mixes rows whose entries are admittances with rows whose entries are voltages.
     """
-    j = _batched_state_jacobian(batched_state_res, x)  # [b, 2N, 2N]
-    if precision == "mixed":
-        sdt = torch.float32
-        dx = torch.linalg.solve(j.to(sdt), -r.unsqueeze(-1).to(sdt)).squeeze(-1)
-        return dx.to(r.dtype)
-    return torch.linalg.solve(j, -r.unsqueeze(-1)).squeeze(-1)  # [b, 2N]
+    j = _batched_state_jacobian(batched_state_res, x, cdt=cdt)  # [b, 2N, 2N]
+    fac = equilibrated_lu_factor(
+        j,
+        mode=equilibrate,
+        factor_dtype=torch.float32 if precision == "mixed" else None,
+    )
+    return fac.solve(-r)  # [b, 2N]
 
 
 def _newton_dir_matrix_free(res_one, x, r, b, fd_eps) -> Tensor:
@@ -3102,6 +3271,7 @@ def _make_real_residual(
     cdt: torch.dtype,
     state_residual_complex=None,
     pv: Optional[PVTerminals] = None,
+    equilibrate: str = "off",
 ):
     """Return a closure ``R(x) -> [*b, 2N]`` real residual with slack pinning.
 
@@ -3184,16 +3354,28 @@ def _make_real_residual(
     real_residual.state_rc = state_rc
     real_residual.build_system = build_system
     real_residual.pv = pv
+    # The equilibration the gradient path applies to its adjoint solve (the forward's
+    # own choice, so turning it off turns it off everywhere).
+    real_residual.equilibration = equilibrate
     return real_residual
 
 
 class _IFTPowerFlow(torch.autograd.Function):
     """Attach the IFT gradient to a detached converged ``V*``.
 
-    ``forward`` returns ``V*`` unchanged. ``backward`` builds the real
-    ``[2N, 2N]`` Jacobian of the real residual at ``V*``, solves the adjoint
-    ``J^T λ = grad_x`` (one solve per batch system), then forms the parameter
-    gradients ``-(dR/dθ)^T λ`` via a single vjp of the residual at ``V*``.
+    ``forward`` returns ``V*`` unchanged. ``backward`` is a VECTOR-Jacobian product, so
+    it never needs the full Jacobian of the solve: it builds the real ``[B, 2N, 2N]``
+    block-diagonal state Jacobian of the residual at ``V*`` (budgeted,
+    :func:`_batched_state_jacobian`), solves the single adjoint system ``J^T λ = grad_x``
+    against its equilibrated factorization, then forms the parameter gradients
+    ``-(dR/dθ)^T λ`` with one vjp of the residual at ``V*``.
+
+    The factorization is CACHED on the autograd node, so a caller that asks for several
+    products of the same solve — a full output Jacobian built row by row, or any second
+    backward under ``retain_graph=True`` — pays one back-substitution per further output
+    vector instead of rebuilding and re-factoring the Jacobian each time. The cache is
+    kept only while the factors stay under ``solver.ift.adjoint_factor_cache_mb``, so a
+    large batched solve does not pin a big factorization to the graph.
 
     The captured ``*leaves`` are the true autograd leaves. A Grid field may be a
     derived expression (``q_nom_var = p * k``) sharing history with the outer
