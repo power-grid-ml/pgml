@@ -317,7 +317,6 @@ __all__ = [
     "positive_sequence_z",
     "two_conductor_geometry",
     "two_conductor_loop_z",
-    "fortescue_matrix",
     "phase_to_sequence",
     "sequence_impedances",
     "carson_earth_resistance",
