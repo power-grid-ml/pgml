@@ -545,3 +545,14 @@ solver:
         batches, bounds the peak monotonically in the batch size, and fits alongside the
         forward solve on a 12 GB accelerator. Raise it on a larger card to keep the
         vectorized build at larger batches; lower it to leave more room for the forward.
+    adjoint_factor_cache_mb:
+      value: 256.0
+      units: "MiB"
+      description: >
+        Largest LU factorization of the state Jacobian that the gradient path keeps
+        cached for REPEATED vector-Jacobian products of the same solve (building a full
+        output Jacobian row by row, or any second backward pass with retain_graph).
+        Caching turns every further product into one back-substitution instead of a
+        complete Jacobian rebuild and factorization; above this size the factors are
+        rebuilt per product instead, so a large batched solve does not hold a big
+        factorization alive for the lifetime of the graph.

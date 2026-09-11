@@ -3392,6 +3392,9 @@ class _IFTPowerFlow(torch.autograd.Function):
         ctx.rdt = rdt
         ctx.cdt = cdt
         ctx.num_leaves = len(leaves)
+        # Filled by the first backward; reused by every further vector-Jacobian product
+        # of this node (see the class docstring).
+        ctx.adjoint_factorization = None
         ctx.save_for_backward(v_star, *leaves)
         return v_star
 
@@ -3427,32 +3430,20 @@ class _IFTPowerFlow(torch.autograd.Function):
             islack_flat.expand(b, n) if islack_flat.shape[0] == 1 else islack_flat
         )
 
-        # Real state Jacobian J = dR/dx at x*, per batch system. The batched residual
-        # R[k] depends only on x[k], so the Jacobian is block diagonal. Two ways to get
-        # the [B, 2N, 2N] blocks (the off-diagonal cross terms are zero):
-        #   - small B: differentiate the batched map (vectorized) and slice the diagonal
-        #     — fast, but the intermediate is [B, 2N, B, 2N] (O(B²) memory);
-        #   - large B: build the diagonal column-by-column with 2N batched JVPs — O(B)
-        #     memory, and uses the SAME batch-aligned residual (so it stays correct for
-        #     EVERY batch source, incl. batched device params / operating points).
-        # Both avoid vmap, which does not compose with the assembly's index_add_ scatter.
-
         # The state Jacobian runs over a SINGLE flattened [B*T] scenario axis, but a
         # per-step (profiled) operating point gives the plan a [B, T] power batch. Flatten
         # that plan's power to match so each flattened row keeps its own scenario power
         # (a no-op for a scalar / already-1-D operating-point batch — the plan broadcasts).
-        rc_flat = None
         state_rc = getattr(real_res, "state_rc", None)
         plan = getattr(state_rc, "plan", None)
-        if plan is not None and len(lead) > 1:
-            flat_plan = flatten_plan_batch(plan, lead)
-
-            def rc_flat(v, y_eff, i_slack, _p=flat_plan):
-                return (
-                    _apply_y(y_eff, v)
-                    + injections_from_plan(_p, v).squeeze(-2)
-                    - i_slack
-                )
+        flat_plan = (
+            flatten_plan_batch(plan, lead)
+            if (plan is not None and len(lead) > 1)
+            else plan
+        )
+        rc_flat = (
+            _plan_residual(flat_plan) if (plan is not None and len(lead) > 1) else None
+        )
 
         # The voltage-regulating terminals' setpoints / limits carry the same scenario
         # batch, so they are collapsed onto the flattened axis alongside the plan.
@@ -3471,11 +3462,49 @@ class _IFTPowerFlow(torch.autograd.Function):
                 pv_state=pv_flat,
             )  # [B, 2N]
 
-        j_batched = _batched_state_jacobian(batched_state_res, x_flat)  # [B, 2N, 2N]
-        # Adjoint: J^T λ = grad_x  ->  λ = J^{-T} grad_x  (batched solve).
-        lam_flat = torch.linalg.solve(
-            j_batched.transpose(-1, -2), gx_flat.unsqueeze(-1)
-        ).squeeze(-1)  # [B, 2N]
+        def res_for_rows(rows: Tensor):
+            """The same residual restricted to a CHUNK of the flattened scenario axis.
+
+            Every batch-carrying piece is indexed with the same rows — the per-scenario
+            admittance and slack current, the injection plan's powers, and the regulating
+            terminals' setpoints / limits — so a chunk's Jacobian block is identical to
+            the corresponding block of the whole-batch build.
+            """
+            y_c = y_flat.index_select(0, rows)
+            is_c = islack_flat.index_select(0, rows)
+            rc_c = (
+                _plan_residual(select_plan_batch(flat_plan, rows, batch_size=b))
+                if flat_plan is not None
+                else None
+            )
+            pv_c = pv_flat.select(rows) if pv_flat is not None else None
+
+            def res(xb):
+                return state_residual(
+                    xb,
+                    y_c.real,
+                    y_c.imag,
+                    is_c.real,
+                    is_c.imag,
+                    rc=rc_c,
+                    pv_state=pv_c,
+                )
+
+            return res
+
+        # Adjoint: J^T λ = grad_x  ->  λ = J^{-T} grad_x, ONE solve against the
+        # equilibrated factorization of the block-diagonal state Jacobian, reused across
+        # repeated vector-Jacobian products of this same solve.
+        fac = ctx.adjoint_factorization
+        if fac is None or fac.lu.shape[:-1] != (b, twon):
+            j_batched = _batched_state_jacobian(
+                batched_state_res, x_flat, cdt=ctx.cdt, res_for_rows=res_for_rows
+            )  # [B, 2N, 2N]
+            fac = equilibrated_lu_factor(j_batched, mode=real_res.equilibration)
+            if fac.lu.numel() * fac.lu.element_size() <= _ift_adjoint_cache_bytes():
+                ctx.adjoint_factorization = fac
+            del j_batched
+        lam_flat = fac.solve(gx_flat, adjoint=True)  # [B, 2N]
         lam = lam_flat.reshape(*lead, twon) if lead else lam_flat.reshape(twon)
 
         # grad_theta = -(dR/dθ)^T λ via a single residual vjp at x* (θ tracking).
@@ -3526,11 +3555,6 @@ class _IFTPowerFlow(torch.autograd.Function):
 # Diagnostic thresholds — flagging only, NOT modelling decisions.
 _DIAG_VBAND_PU = (0.8, 1.2)  # |V|/V_LN outside this band is flagged
 _DIAG_VBLOWUP = 5.0  # |V|/V_LN above this (or non-finite) = diverged iterate
-# Above this many elements, the IFT backward's dense [B,2N,B,2N] state Jacobian is
-# replaced by an O(B) column-by-column JVP build (avoids the B² memory blow-up at the
-# cost of 2N batched JVPs). ~2e8 real elems = ~1.6 GB at float64.
-_IFT_DENSE_JAC_MAX_ELEMS = 2 * 10**8
-
 _DIAG_TOP_K = 5  # worst offenders / critical nodes reported
 _DIAG_COND_SINGULAR = 1.0e8  # Jacobian condition number above this ~ near-singular
 _DIAG_MAX_2N = 4000  # skip the dense criticality SVD above this real-state size
