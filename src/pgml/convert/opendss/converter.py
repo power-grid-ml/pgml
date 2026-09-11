@@ -696,14 +696,21 @@ def to_grid(
             ret = dss.Vsources.Next()
             continue
 
-        # Read R1/X1 via text command (Vsources API doesn't expose them directly)
-        dss.Text.Command(f"? Vsource.{vsrc_name}.r1")
-        r1_str = dss.Text.Result().strip()
-        dss.Text.Command(f"? Vsource.{vsrc_name}.x1")
-        x1_str = dss.Text.Result().strip()
+        # Read R1/X1/R0/X0 via text command (the Vsources API doesn't expose them
+        # directly). A DSS Vsource always carries all four: they are derived from
+        # `MVAsc3`/`MVAsc1`/`X1R1`/`X0R0` (or set explicitly, or via `Z1`/`Z0`/
+        # `puZ1`/`puZ0`), and the element's own Yprim is built from the
+        # symmetric-component identity Zs=(Z0+2*Z1)/3, Zm=(Z0-Z1)/3 -- exactly the
+        # identity `build_source` applies, so the per-phase matrix transfers 1:1.
+        def _vsource_ohm(prop: str) -> float:
+            dss.Text.Command(f"? Vsource.{vsrc_name}.{prop}")
+            raw = dss.Text.Result().strip()
+            return float(raw) if raw else 0.0
 
-        r1_ohm = float(r1_str) if r1_str else 0.0
-        x1_ohm = float(x1_str) if x1_str else 0.0
+        r1_ohm = _vsource_ohm("r1")
+        x1_ohm = _vsource_ohm("x1")
+        r0_ohm = _vsource_ohm("r0")
+        x0_ohm = _vsource_ohm("x0")
         r_s, l_s = thevenin_from_z(r1_ohm, x1_ohm, two_pi_f0)
 
         # A non-negligible Thevenin impedance is silently UNUSED under the
@@ -759,6 +766,10 @@ def to_grid(
                 r_ohm=r_s,
                 l_h=l_s,
                 native_phases=native_src_phases,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"OpenDSS Vsource '{vsrc_name}'",
             )
         )
 

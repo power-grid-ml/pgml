@@ -62,9 +62,10 @@ Two assumption modes (``mode=``)
 
 Exporter coverage
 ------------------
-Converted: ``Source`` (balanced, diagonal — i.e. uncoupled — Thevenin only; the FIRST
-in-service ``Source`` becomes the DSS ``Circuit``'s own slack, any further ones export as
-additional ``Vsource`` elements with a warning), ``Line``/``GenericBranch`` (explicit
+Converted: ``Source`` (balanced, symmetric-circulant Thevenin — the positive- and
+zero-sequence pair is recovered from the per-phase matrix and exported as the Vsource's
+``R1``/``X1``/``R0``/``X0``; the FIRST in-service ``Source`` becomes the DSS ``Circuit``'s
+own slack, any further ones export as additional ``Vsource`` elements with a warning), ``Line``/``GenericBranch`` (explicit
 Rmatrix/Xmatrix/Cmatrix, phase-permuted terminals via independent ``from_phases``/
 ``to_phases`` bus suffixes), ``Transformer`` (native two-winding element; the 3-phase
 vector-group clock is realised via ``LeadLag`` + a cyclic TO-side bus rotation, reusing the
@@ -90,7 +91,8 @@ Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
   ``opendss_geometry_systemy``) already gives bit-exact Carson-geometry parity for that case.
 - An unresolved ``type_ref`` on a ``Line``/``Transformer`` — materialise against
   ``Grid.types`` before exporting (this module never reads the catalog).
-- A ``Source`` with off-diagonal (phase-coupled) Thevenin impedance, or non-balanced
+- A ``Source`` whose Thevenin matrix is not symmetric-circulant (unequal diagonal or
+  unequal off-diagonal terms), or non-balanced
   per-phase magnitude/120°-spacing — an OpenDSS ``Vsource`` models a symmetric,
   uncoupled positive/zero-sequence source only.
 - ``Transformer`` ``ZIGZAG``/``ZIGZAG_GROUNDED`` windings — no OpenDSS ``Transformer``
@@ -308,19 +310,35 @@ def _source_params(src: Source, f0: float) -> dict:
     n = len(src.phases)
     r_mat = src.resistance_ohm
     l_mat = src.inductance_h
+    w0 = 2.0 * math.pi * f0
+    # A 3-phase source Thevenin is a symmetric circulant matrix (self on the
+    # diagonal, one mutual term off it) whenever Z0 != Z1 — exactly the form an
+    # OpenDSS Vsource builds from its own R1/X1/R0/X0 (verified live: its Yprim
+    # inverts to Zs=(Z0+2*Z1)/3, Zm=(Z0-Z1)/3). Recover the sequence pair from
+    # the matrix instead of refusing it; only a matrix that is NOT of that form
+    # (an unbalanced or non-circulant source) is unrepresentable.
+    z_self = complex(to_float(r_mat[0][0]), w0 * to_float(l_mat[0][0]))
+    z_mutual = (
+        complex(0.0, 0.0)
+        if n < 2
+        else complex(to_float(r_mat[0][1]), w0 * to_float(l_mat[0][1]))
+    )
     for i in range(n):
         for j in range(n):
-            if i != j and (
-                abs(to_float(r_mat[i][j])) > 1e-9 or abs(to_float(l_mat[i][j])) > 1e-9
-            ):
+            z_ij = complex(to_float(r_mat[i][j]), w0 * to_float(l_mat[i][j]))
+            want = z_self if i == j else z_mutual
+            scale = max(abs(z_self), 1e-12)
+            if abs(z_ij - want) > 1e-9 * scale:
                 raise ConversionError(
-                    f"Source {src.id}: off-diagonal (phase-coupled) Thevenin "
-                    "impedance is not representable by an OpenDSS Vsource "
-                    "(R1/X1/R0/X0 sequence parameters model a symmetric, "
-                    "uncoupled source only)."
+                    f"Source {src.id}: the Thevenin impedance matrix is not "
+                    "symmetric-circulant (equal diagonal, one equal off-diagonal "
+                    "term), so it has no OpenDSS Vsource equivalent — a Vsource's "
+                    "R1/X1/R0/X0 always build a symmetric sequence source."
                 )
-    r1 = to_float(r_mat[0][0])
-    x1 = 2.0 * math.pi * f0 * to_float(l_mat[0][0])
+    z1 = z_self - z_mutual
+    z0 = z_self + 2.0 * z_mutual
+    r1 = z1.real
+    x1 = z1.imag
     u0 = to_float(src.u_ref_v[0])
     ang0 = to_float(src.u_angle_deg[0])
     if n >= 3:
@@ -351,14 +369,23 @@ def _source_params(src: Source, f0: float) -> dict:
         "angle": ang0,
         "r1": r1,
         "x1": x1,
+        "r0": z0.real,
+        "x0": z0.imag,
         "bus_suffix": _bus_conductor_str(src.phases),
     }
+
+
+def _vsource_seq0(p: dict) -> str:
+    """``r0=/x0=`` clause of a Vsource command (empty below 3 phases)."""
+    if p["phases"] < 3:
+        return ""
+    return f" r0={p['r0']:.10g} x0={p['x0']:.10g}"
 
 
 def _emit_vsource(
     dss, cmd_prefix: str, name: str, bus: str, p: dict, f0: float
 ) -> None:
-    seq0 = f" r0={p['r1']:.10g} x0={p['x1']:.10g}" if p["phases"] >= 3 else ""
+    seq0 = _vsource_seq0(p)
     dss.Text.Command(
         f"{cmd_prefix}.{name} basekv={p['basekv']:.10g} phases={p['phases']} "
         f"bus1={bus} pu={p['pu']:.10g} angle={p['angle']:.10g} frequency={f0:.10g} "
@@ -1001,7 +1028,7 @@ def export_grid_to_opendss(
         )
     src0 = sources[0]
     p0 = _source_params(src0, f0)
-    seq0 = f" r0={p0['r1']:.10g} x0={p0['x1']:.10g}" if p0["phases"] >= 3 else ""
+    seq0 = _vsource_seq0(p0)
     dss.Text.Command(
         f"New Circuit.{circuit_name} basekv={p0['basekv']:.10g} phases={p0['phases']} "
         f"bus1={busname[int(src0.node)]}.{p0['bus_suffix']} pu={p0['pu']:.10g} "

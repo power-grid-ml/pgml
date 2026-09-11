@@ -591,6 +591,60 @@ def _opt_float(row: Any, column: str) -> Optional[float]:
     return None if math.isnan(f) else f
 
 
+def _ext_grid_zero_sequence(
+    row: Any, u_rated_v: float, pp_idx: Any
+) -> tuple[Optional[float], Optional[float]]:
+    """Zero-sequence ext_grid Thevenin ``(R0 [Ohm], X0 [Ohm] at f0)``, or ``(None, None)``.
+
+    pandapower's own unbalanced power flow (``runpp_3ph``) models the external grid
+    as an IDEAL positive-sequence slack plus a zero-sequence SHUNT at the slack bus
+    (``pandapower.pd2ppc_zero._add_ext_grid_sc_impedance_zero``)::
+
+        X1 = (U_LL^2 / S_sc) / sqrt(1 + rx_max^2)      (per-phase, c = 1 here)
+        X0 = x0x_max * X1
+        R0 = r0x0_max * X0
+
+    pgml keeps the POSITIVE-sequence Thevenin near-ideal for a pandapower ext_grid
+    (the same ideal slack pandapower's own power flow uses, balanced and
+    unbalanced) and carries the zero-sequence value as an absolute impedance, so
+    the converted source reproduces pandapower's zero-sequence boundary while the
+    positive sequence stays pinned at ``vm_pu``. pandapower multiplies its own
+    value by the IEC short-circuit voltage factor ``c = 1.1`` even in power-flow
+    mode; pgml stores the physical impedance (``c = 1``), so pandapower's internal
+    zero-sequence shunt is exactly 1.1x pgml's.
+
+    Returns ``(None, None)`` when the ext_grid carries no usable short-circuit data
+    (``s_sc_max_mva``/``rx_max``/``x0x_max`` missing or NaN — pandapower's own
+    defaults), which leaves the documented ``source.zero_sequence.*`` ratio
+    fallback (and its WARNING) in charge.
+    """
+    s_sc_mva = _opt_float(row, "s_sc_max_mva")
+    rx_max = _opt_float(row, "rx_max")
+    x0x_max = _opt_float(row, "x0x_max")
+    r0x0_max = _opt_float(row, "r0x0_max")
+    if s_sc_mva is None or rx_max is None or s_sc_mva <= 0.0:
+        if x0x_max is not None or r0x0_max is not None:
+            _logger.warning(
+                "pandapower ext_grid %s carries zero-sequence ratios "
+                "(x0x_max=%s, r0x0_max=%s) but no positive-sequence short-circuit "
+                "data (s_sc_max_mva / rx_max), so the absolute zero-sequence "
+                "source impedance cannot be derived; falling back to the "
+                "`source.zero_sequence.*` ratios on the near-ideal Thevenin.",
+                pp_idx,
+                x0x_max,
+                r0x0_max,
+            )
+        return None, None
+    if x0x_max is None and r0x0_max is None:
+        return None, None
+
+    z1 = (u_rated_v**2) / (s_sc_mva * 1.0e6)
+    x1 = z1 / math.sqrt(1.0 + rx_max**2)
+    x0 = (x0x_max if x0x_max is not None else 1.0) * x1
+    r0 = (r0x0_max if r0x0_max is not None else rx_max) * x0
+    return r0, x0
+
+
 def _tap_ratio_magnitude(row: Any) -> float:
     """Off-nominal tap ratio from pandapower's ``tap_*`` columns (1.0 = no tap).
 
@@ -1080,6 +1134,8 @@ def to_grid(
                 math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg))
             )
 
+        r0_ohm, x0_ohm = _ext_grid_zero_sequence(row, u_rated_v, pp_idx)
+
         appliances.append(
             build_source(
                 id=src_id,
@@ -1090,6 +1146,10 @@ def to_grid(
                 u_angle_deg=va_deg,
                 r_ohm=_TINY_R,
                 l_h=_TINY_L,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"pandapower ext_grid {pp_idx}",
             )
         )
 

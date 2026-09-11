@@ -440,6 +440,17 @@ def to_grid(
 
         r_s, l_s = thevenin_from_sk(u_rated_v, sk_va, rx_ratio, two_pi_f0)
 
+        # power-grid-model's `z01_ratio` scales the COMPLEX positive-sequence
+        # impedance: Z0 = z01_ratio * Z1, so R0/R1 = X0/X1 = z01_ratio (verified
+        # against a live asymmetric power flow: the back-calculated source Z0
+        # matches `z01_ratio * Z1` to 3e-13 relative). An unset / non-finite value
+        # falls back to the documented `source.zero_sequence.*` ratios.
+        z01 = _opt_field(row, "z01_ratio")
+        r0_ohm = x0_ohm = None
+        if z01 is not None and z01 > 0.0:
+            r0_ohm = z01 * r_s
+            x0_ohm = z01 * l_s * two_pi_f0
+
         src_id = _id.next()
         id_map["source"][pgm_id] = src_id
 
@@ -458,6 +469,10 @@ def to_grid(
                 u_angle_deg=u_ref_angle_deg,
                 r_ohm=r_s,
                 l_h=l_s,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"power-grid-model source {pgm_id}",
             )
         )
 

@@ -395,11 +395,29 @@ rule, droop physics) and `tests/reference/test_pandapower_gen_volt_var.py` (live
   applied to every network), but not full fidelity either.
 - `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
   `asymmetric_sgen`: not converted (`warn_dropped_elements`).
-- ext_grid zero/negative-sequence source impedance (`r0x0_max`/`x0x_max`) is not
-  read; the `Source`'s zero-sequence impedance equals its positive-sequence value.
-  Irrelevant to `slack="ideal"` solves (the slack fixes the exact 3-phase phasor
-  set regardless of any Thevenin impedance) but relevant if a `norton`-mode slack
-  or a short-circuit study is ever added.
+- ext_grid NEGATIVE-sequence source impedance is not represented separately: the
+  converted `Source` is one physical Thevenin with `Z2 = Z1` (a passive upstream
+  network), whereas pandapower's own `runpp_3ph` pins the positive sequence as an
+  ideal slack and puts its short-circuit impedance in the NEGATIVE-sequence network
+  only. The converter follows pandapower's positive-sequence behaviour (near-ideal
+  `Z1 = 1e-6` Ohm), so the negative-sequence boundary differs by that
+  short-circuit impedance — negligible for a stiff feed, visible on a weak one
+  (measured 5e-6 pu on the 2-bus case of
+  `tests/reference/test_pandapower_source_zero_sequence.py` at `s_sc_max_mva = 1000`).
+- ext_grid ZERO-sequence source impedance IS read: `x0x_max`/`r0x0_max` together
+  with `s_sc_max_mva`/`rx_max` give `X0 = x0x_max * X1`, `R0 = r0x0_max * X0` with
+  `X1 = (U_LL^2/S_sc)/sqrt(1+rx_max^2)`, carried into the `Source`'s per-phase
+  matrix through `Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`
+  (`_ext_grid_zero_sequence`). pandapower multiplies its OWN zero-sequence shunt by
+  the IEC voltage factor `c = 1.1` even in power-flow mode
+  (`pd2ppc_zero._add_ext_grid_sc_impedance_zero`); pgml stores the physical
+  impedance (`c = 1`), so pandapower's internal value is exactly 1.1x pgml's
+  (asserted in the oracle test). Without the short-circuit columns (pandapower's
+  own default: NaN) the documented `source.zero_sequence.*` ratios apply and a
+  WARNING names the ext_grid. Irrelevant to `slack="ideal"` solves (the slack fixes
+  the exact 3-phase phasor set regardless of any Thevenin impedance); it shapes
+  `slack="norton"` solves and every harmonic order, where the source is a Norton
+  shunt.
 - An ideal phase-shifter tap (`tap_step_degree` nonzero, or `tap_phase_shifter`
   True) is not modelled and raises `ConversionError`.
 

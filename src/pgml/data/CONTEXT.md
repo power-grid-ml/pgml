@@ -45,10 +45,18 @@ requires an env var to be set.
 - `line.zero_sequence.{r0_over_r1, x0_over_x1, c0_over_c1}` — zero/positive-sequence
   ratios used by the converter when only a positive-sequence impedance is given.
 - `source.{series_impedance_ohm, rx_ratio}` — default slack series impedance synthesis.
+- `source.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of a
+  3-phase `Source` Thevenin when the dataset carries no native zero-sequence data (both
+  1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). Read by
+  `pgml.convert._common.source_zero_sequence_ratios`; a fallback logs a WARNING.
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
   `docs/pgml/modeling/transformer.md`.
+- `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of
+  the leakage impedance when a Transformer carries no explicit `zero_sequence` override
+  (both 1.0 = Z0 = Z1). Read by `pgml.assembly._transformer.zero_sequence_leakage`; the
+  zero-sequence PATH always comes from the winding connections.
 
 ## Resolution precedence (highest first; `resolve(key, explicit, converted)`)
 1. **explicit** — a value the user set on the component / grid (ALWAYS wins).

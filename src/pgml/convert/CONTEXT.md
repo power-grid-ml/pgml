@@ -47,14 +47,32 @@ API:
   `thevenin_from_sk(u_rated_v, sk_va, rx_ratio, two_pi_f0) -> (R, L)` — source
   Thevenin from an explicit impedance / from short-circuit power + R/X ratio (the
   latter moved verbatim from the pgm converter; same fallback floors).
+- `source_zero_sequence_ratios() -> (r0_over_r1, x0_over_x1)` — the documented
+  `source.zero_sequence.*` fallback ratios for a source's zero-sequence Thevenin.
 - `make_metadata(name, description) -> GridMetadata`.
 - Emit helpers (the single place the phase decision + per-phase mapping live):
   `build_node`, `build_load`, `build_generator` (generation-positive PQ, for
   pp `sgen` / pgm `sym_gen`), `warn_dropped_elements` (the loud-drop contract),
-  `build_source`, `build_line_from_sequence`,
+  `build_source` (now `build_source(..., r0_ohm=None, x0_ohm=None, two_pi_f0=None,
+  element=None)` — see the source zero-sequence note below), `build_line_from_sequence`,
   `build_line_from_matrices`. `build_line_from_matrices` takes explicit n x n
   R/L/C(/G) matrices + a `phases` tuple — implemented and unit-tested for the
   OpenDSS converter (pp/pgm route through `build_line_from_sequence`).
+
+**Source zero-sequence Thevenin (THREE_PHASE).** `build_source` builds the per-phase
+Thevenin matrix from the positive- AND zero-sequence pair with the same symmetric-component
+identity the line path uses (`Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`), applied to the
+A/B/C rows only (an explicit `Phase.N` conductor stays diagonal). Callers pass native
+`r0_ohm`/`x0_ohm` plus `two_pi_f0`; with either missing, the documented
+`source.zero_sequence.{r0_over_r1, x0_over_x1}` ratios apply and a WARNING names the
+element. `Z0 == Z1` returns the plain diagonal matrix bit-for-bit, so a dataset without
+zero-sequence data converts exactly as before. Under `SINGLE_PHASE_EQUIV` the zero sequence
+does not exist and `r0_ohm`/`x0_ohm` are ignored. Native reads: OpenDSS `Vsource.R0/X0`
+(absolute Ohm; a DSS Vsource always carries them, derived from `MVAsc1`/`X0R0`),
+power-grid-model `source.z01_ratio` (`Z0 = z01_ratio * Z1`, complex scaling, so
+`R0/R1 = X0/X1`), pandapower `ext_grid.x0x_max`/`r0x0_max` together with
+`s_sc_max_mva`/`rx_max` (`X0 = x0x_max * X1`, `R0 = r0x0_max * X0`, physical `c = 1`; see
+the pandapower ledger for the `c = 1.1` difference).
 
 **Zero-sequence assumption (THREE_PHASE line expansion).** When a positive-sequence
 line is expanded to abc and the dataset has no native zero-sequence data, the

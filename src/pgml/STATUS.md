@@ -261,8 +261,17 @@ results are never read as more physical than they are. Details live in `docs/pgm
 - **Load harmonic behaviour.** Pure current-source injection (≡ `NeglectLoadY=yes`); the
   frequency-dependent load Norton shunt (damping near resonances) raises when requested
   (item C). Resonance magnitudes are conservative (undamped) at load-heavy buses.
-- **Sources.** Zero-sequence source impedance = positive-sequence value (no converter
-  reads `r0x0_max`/`z01_ratio`) — `docs/pgml/modeling/conventions.md` §6.
+- **Sources.** The per-phase Thevenin is sequence-aware: converters read the native
+  zero-sequence data (OpenDSS `Vsource.R0`/`X0`, power-grid-model `source.z01_ratio`,
+  pandapower `ext_grid.x0x_max`/`r0x0_max` with `s_sc_max_mva`/`rx_max`) into the
+  symmetric-component self/mutual split; without it the documented
+  `source.zero_sequence.*` ratios apply (1.0 = Z0 = Z1) and a WARNING names the element.
+  NEGATIVE sequence is always `Z2 = Z1` (a passive upstream network); a rotating-machine
+  source with `Z2 != Z1` would need the third circulant entry. pandapower's own
+  `runpp_3ph` instead pins the positive sequence and puts the short-circuit impedance in
+  the negative-sequence network, and scales its zero-sequence shunt by the IEC factor
+  `c = 1.1` — both differences are quantified in
+  `tests/reference/test_pandapower_source_zero_sequence.py`.
 - **PV (voltage-regulating) buses.** There is no PV-bus appliance: a bus whose voltage
   MAGNITUDE is regulated with reactive power free (pandapower `net.gen`, OpenDSS
   `Generator model=3`) needs a mixed residual row pair `[P-balance; |V|² − V_set²]` in

@@ -65,7 +65,7 @@ for the `u_rated_v` fix below (which does not change the IEEE 33-bus numbers).
 |-------------|-------------------------|--------------------------------------------|
 | Line        | `Line`                  | 1- or multi-phase; n×n R/X/C from matrix API; `to_phases` carries a phase-permuted terminal independently of `from_phases` |
 | Transformer | `Transformer`           | Two-winding only; see below                |
-| Vsource     | `Source`                | R1/X1 via text commands; `thevenin_from_z`; warns if non-negligible (see below) |
+| Vsource     | `Source`                | R1/X1/R0/X0 via text commands; `thevenin_from_z` + the sequence->phase split; warns if non-negligible (see below) |
 | Load        | `Load`                  | kW/kvar total; `IsDelta()` -> `connection`; `Loads.Model()` -> `LoadModel`/`ZipCoefficients`; WYE `return_path` from the return conductor (see below) |
 | Capacitor   | `ShuntAppliance`        | WYE (solidly grounded) or DELTA (phase-to-phase bank); see below |
 | Reactor     | `ShuntAppliance`        | WYE (solidly grounded, uncoupled) or DELTA (phase-to-phase bank); see below |
@@ -454,6 +454,7 @@ a fresh 60 Hz default.
 | `Vsources.BasekV()*PU` [kV] | `Source.u_ref_v` [V]      | × 1000                   |
 | `Vsource.r1` [Ω]       | `Source.resistance_ohm`         | via `thevenin_from_z`        |
 | `Vsource.x1/(2πf₀)` [H] | `Source.inductance_h`         | via `thevenin_from_z`        |
+| `Vsource.r0`/`x0` [Ω]  | `Source.resistance_ohm`/`inductance_h` off-diagonal | `Z_self=(Z0+2·Z1)/3`, `Z_mutual=(Z0−Z1)/3` — the same identity the DSS Vsource's own Yprim uses (3-phase only) |
 | `Loads.kW()` [kW]      | `Load.p_nom_w` [W]              | × 1000                       |
 | `Loads.kvar()` [kVAR]  | `Load.q_nom_var` [VAR]          | × 1000                       |
 

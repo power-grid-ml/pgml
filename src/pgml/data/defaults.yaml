@@ -196,8 +196,67 @@ transformer:
         For a transformer with explicit connections the clock is read from tap.shift_deg
         (rounded to the nearest 30 deg) instead.
 
+  # Zero-sequence leakage VALUE of a two-winding transformer whose `zero_sequence`
+  # override is not set. The zero-sequence PATH always comes from the winding
+  # connections + clock (a delta or zigzag winding blocks it); these ratios set only the
+  # VALUE carried on that path, through the same symmetric-component identity the line
+  # and source paths use: Z_self=(Z0+2*Z1)/3, Z_mutual=(Z0-Z1)/3 on the winding leakage
+  # admittance. An explicit `Transformer.zero_sequence` always wins. Converting a source
+  # that DOES supply zero-sequence data (pandapower `vk0_percent`/`vkr0_percent`) reads
+  # it instead; a grounded-wye pairing that falls back to these ratios logs a WARNING.
+  zero_sequence:
+    r0_over_r1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed R0/R1 of the leakage impedance when a transformer carries no explicit
+        `zero_sequence` override. 1.0 (Z0 = Z1) is what OpenDSS's and power-grid-model's
+        two-winding transformer models imply -- neither has a zero-sequence leakage
+        input, so their zero sequence sees the positive-sequence winding impedance
+        through the winding topology.
+    x0_over_x1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed X0/X1 of the leakage impedance when a transformer carries no explicit
+        `zero_sequence` override (1.0 = Z0 = Z1). A THREE-LIMB core YNyn unit has
+        X0/X1 ~ 0.3-1.0 (the zero-sequence flux closes through tank and air, not the
+        core); a five-limb or shell-type unit is close to 1.0. A zigzag grounding
+        transformer has X0/X1 well below 1 by design.
+
 # Upstream-grid (slack Source) modeling.
 source:
+  # Assumed zero-sequence/positive-sequence ratios of the Source's Thevenin impedance,
+  # used ONLY when a source is expanded to a genuine 3-phase (abc) Thevenin and the
+  # dataset carries no native zero-sequence data (pandapower `ext_grid.x0x_max` /
+  # `r0x0_max`, power-grid-model `source.z01_ratio`, OpenDSS `Vsource.R0`/`X0`). The
+  # per-phase matrix follows the same symmetric-component identity the line path uses:
+  # Z_self=(Z0+2*Z1)/3, Z_mutual=(Z0-Z1)/3. Native data always wins; falling back to
+  # these ratios logs a WARNING naming the source. The zero-sequence source impedance
+  # only matters where zero-sequence current can actually reach the source (a 4-wire
+  # feeder fed directly by the source, or a grounded-wye HV winding between them); a
+  # delta HV winding blocks it.
+  zero_sequence:
+    r0_over_r1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed R0/R1 of the source Thevenin when the dataset has no zero-sequence data.
+        1.0 (Z0 = Z1) is the value power-grid-model (`z01_ratio`) and pandapower
+        (`x0x_max`) themselves default to, i.e. the assumption of a solidly grounded
+        upstream network. A network whose zero-sequence path runs through an additional
+        transformer or an impedance-earthed neutral has R0/R1 > 1 -- set the native field
+        (or raise this ratio) for a study where triplen/residual current reaches the
+        source.
+    x0_over_x1:
+      value: 1.0
+      units: "ratio"
+      description: >
+        Assumed X0/X1 of the source Thevenin when the dataset has no zero-sequence data
+        (1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). X0/X1
+        of a real feeding network ranges from ~1 (solidly grounded, close ground source)
+        to >10 (remote or impedance-earthed ground source).
+
   # Finite series (short-circuit) impedance for a Source whose converter gave a
   # near-ideal value (e.g. the stock pandapower CIGRE LV ext-grid -> R~1e-6 Ohm, which
   # short-circuits the bus at harmonics). Builders like cigre_lv_full_grid apply this so
