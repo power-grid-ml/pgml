@@ -34,11 +34,12 @@ from pgml.geometry.synthesis import (
     apply_default_harmonic_model,
     apply_positive_sequence_harmonic_model,
 )
-from pgml.schemas.grid_schema import Line
 from pgml.solver import solve_harmonic_flow
 
 from pgml import evaluation as ev
 from pgml.evaluation import oracles as ref
+
+from _common import _strip_geometry
 
 CDT = torch.complex128
 ORDERS_3D = [5, 7, 11, 13]
@@ -58,13 +59,6 @@ def _pgml_harmonic_y_labeled(grid, index, h, label):
         grid, f, yb, index, _cdtype(CDT), _rdtype(CDT), torch.device("cpu"), None
     )
     return ev.labeled_matrix(yb, index, label=label)
-
-
-def _strip_geometry(grid):
-    for b in grid.branches:
-        if isinstance(b, Line):
-            b.conductor_geometry = None
-    return grid
 
 
 def run_feeder(name: str, builder, out_dir: Path) -> None:

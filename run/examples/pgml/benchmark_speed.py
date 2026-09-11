@@ -77,6 +77,7 @@ from pgml.assembly import node_phase_index
 from pgml.convert.pandapower import PhaseMode
 from pgml.evaluation.oracles.grids import cigre_lv_full_grid, ieee33_geometry_grid
 from pgml.geometry.synthesis import synthesize_grid_geometry
+from pgml.grids import add_pv_systems
 from pgml.schemas.grid_schema import Generator, Load
 from pgml.scenarios import (
     ParameterSpec,
@@ -105,36 +106,6 @@ SEED = 0
 # Example outputs are anchored at the repository root (not the cwd), so a run writes
 # under the untracked data root at data/pgml/evaluation_output/.
 _OUT = Path(__file__).resolve().parents[3] / "data" / "pgml" / "evaluation_output"
-
-
-def add_pv_systems(grid, *, fraction: float = 0.5) -> int:
-    """Attach a PV generator (unity power factor) to a fraction of the load nodes.
-
-    Each PV unit mirrors its host load's node/phases and is rated at half the load's
-    nameplate active power. Returns the number of PV systems added. The harmonic content
-    of the PV inverters is supplied by the scenario (an EN 50160-bounded ``h_mag`` spec),
-    so no stored spectrum is attached here.
-    """
-    loads = [a for a in grid.appliances if isinstance(a, Load) and a.in_service]
-    next_id = max((a.id for a in grid.appliances), default=0) + 1
-    added = 0
-    for k, ld in enumerate(loads):
-        if (k % max(1, round(1.0 / fraction))) != 0:
-            continue
-        grid.appliances.append(
-            Generator(
-                id=next_id,
-                name=f"pv_{ld.id}",
-                node=ld.node,
-                phases=ld.phases,
-                p_nom_w=0.5 * float(ld.p_nom_w),
-                q_nom_var=0.0,
-                consumer_type="pv",
-            )
-        )
-        next_id += 1
-        added += 1
-    return added
 
 
 def build_ieee33():
