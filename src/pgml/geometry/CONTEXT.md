@@ -66,9 +66,11 @@ internal + geometric, earth return lives only in `Z0`. So `X1(h) = X1·h` (geome
 - `skin_resistance_multiplier(r1, f0, freqs) -> m[*B, H]` (`m(f0)=1`): Bessel `I0/I1`
   internal-resistance growth, earth term dropped. `fit_equivalent_rdc(r1, f0, freqs_ref)`.
 - `two_conductor_geometry(r1, x1, f0, *, radius_m, ...) -> dict` + `two_conductor_loop_z(geom,
-  freqs) -> Z[H]`: a PHYSICAL go/return Carson loop (reuses `series_impedance`); earth
-  cancels in the `[1,-1]` loop transform -> physical GMR/spacing for any X1, agrees with
-  `positive_sequence_z` (residual ~earth coupling, ≲2% to h≈25).
+  freqs) -> Z[H]`: a PHYSICAL go/return Carson loop (reuses `series_impedance` with
+  `internal_inductance="gmr"` PINNED, matching `positive_sequence_z`'s strictly
+  frequency-proportional reactance); earth cancels in the `[1,-1]` loop transform ->
+  physical GMR/spacing for any X1, agrees with `positive_sequence_z` (residual ~earth
+  coupling, ≲2% to h≈25).
 - `phase_to_sequence(z_phase[*,3,3]) -> [*,3,3]` (Fortescue `A⁻¹ Z A`);
   `sequence_impedances(z) -> (Z0, Z1, Z2)` diagonal — shows 3-phase geometry keeps earth
   return only in `Z0`.
