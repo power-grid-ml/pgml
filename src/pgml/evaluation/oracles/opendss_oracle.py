@@ -432,10 +432,13 @@ def _dss_earth_params(
     The stub writes the TOTAL impedance onto a ``length=1 units=m`` line, so the earth
     terms are likewise per whole line. ``Xg=0`` is emitted when the pgml line scales
     ``X0`` linearly (``x0_frequency='linear'``), which is OpenDSS's way of switching the
-    earth-return reactance correction off.
+    earth-return reactance correction off, and BOTH are zero for a line that is not on the
+    ``sequence_aware`` model, since no other lumped model adds an earth-return term.
     """
     from pgml import defaults as _d
 
+    if getattr(line, "harmonic_line_model", None) != "sequence_aware":
+        return 0.0, 0.0, float(_d.get("line.earth_return.resistivity_ohm_m"))
     er = getattr(line, "earth_return", None)
     rc = getattr(er, "resistance_coeff_ohm_per_m_per_hz", None)
     if rc is None:
