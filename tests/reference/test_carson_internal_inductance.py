@@ -22,8 +22,7 @@ Three references are used here, each pinning a different claim:
 
 Tolerances: the OpenDSS comparisons are bounded by the physical constants (pgml uses the
 SI ``mu0``, OpenDSS truncates it to ``12.56637e-7``, 4.9e-8 relative), so 2e-7 with
-headroom; the scipy comparison is bounded by the 40-term continued fraction, measured at
-1e-13 relative.
+headroom; the scipy comparison is at floating point, measured at 4.6e-16 relative.
 """
 
 from __future__ import annotations
@@ -164,7 +163,8 @@ def test_internal_impedance_matches_analytic_solid_round_conductor():
     With ``Rdc = rho_c/(pi*a^2)`` this is algebraically the form pgml evaluates,
     ``(1+j)*(I0/I1)(alpha)*sqrt(Rdc*f*mu0)/2`` with ``alpha = (1+j)*sqrt(f*mu0/Rdc)``.
     scipy's ``iv`` is an independent evaluation of the Bessel functions, so this test
-    validates both the algebra and the continued fraction. Measured 1e-14 relative.
+    validates both the algebra and the continued fraction. Measured 4.6e-16 relative
+    (floating point) over 1 Hz to 10 kHz.
     """
     iv = pytest.importorskip("scipy.special").iv
     a = 0.0102
@@ -177,7 +177,7 @@ def test_internal_impedance_matches_analytic_solid_round_conductor():
         torch.tensor([rdc], dtype=CDT), torch.tensor(freqs, dtype=CDT)
     )[0].numpy()
     rel = np.abs(z_pgml - z_ref) / np.abs(z_ref)
-    assert rel.max() < 1e-12, f"max rel {rel.max():.2e}"
+    assert rel.max() < 1e-13, f"max rel {rel.max():.2e}"
 
 
 def test_internal_reactance_ratio_starts_at_one_and_decays():
