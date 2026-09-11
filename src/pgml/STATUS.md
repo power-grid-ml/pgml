@@ -272,8 +272,11 @@ R-L split; validate the resonance vs OpenDSS. **Where.** `solver/harmonic_flow.p
 - **Per-node harmonic-source sweeps** (`run_node_injection_sweep`) loop one solve per
   node; batch the target-row index (`[B, P]` scatter) to lift the loop.
 - **Transformer (assembly)**: non-solid neutral grounding (`GroundingImpedance`) and
-  zigzag-zigzag pairings raise `ModelingError`; the `TransformerZeroSeq` VALUE override is
-  not consumed (consume it to close the cross-tool Z0 gap).
+  zigzag-zigzag pairings raise `ModelingError`. What remains open on the zero sequence is
+  the MAGNETIZING branch (pandapower `mag0_percent`/`mag0_rx`, power-grid-model
+  `i0_zero_sequence`/`p0_zero_sequence`) and the HV/LV split of the zero-sequence leakage
+  inside a T (pandapower `si0_hv_partial`); the converter names both in a WARNING rather
+  than dropping them silently.
 - **Transformer (solver)**: a fully ungrounded secondary island has no absolute
   zero-sequence reference (line-to-line-correct, absolutely-undetermined voltages as
   load → 0); a reference injection / per-island pin would close it.
