@@ -3091,24 +3091,40 @@ def _vectorized_jacobian_peak_bytes(chunk: int, n: int, cdt: torch.dtype) -> int
     """Peak allocation of a vectorized state-Jacobian build over ``chunk`` scenarios.
 
     ``torch.autograd.functional.jacobian(..., vectorize=True)`` vmaps the backward over
-    the output basis, so every intermediate of the residual is replicated once per
-    output row. The dominant intermediate is the ``[chunk, N, N]`` admittance of the
-    residual's matrix-vector product, and there are ``chunk * 2N`` output rows, so the
-    peak is ``chunk² * 2N³ * itemsize``. The formula is not a fit: it reproduces the
-    allocator's own requests (a 294-row grid at chunk 4 asks for 13.0 GB, at chunk 16 for
-    208 GB), which is why the build has to be budgeted rather than chosen by the size of
-    its RESULT (``[chunk, 2N, chunk, 2N]``, a factor ``4N`` smaller).
+    the output basis. What that replicates is the BROADCAST admittance: a batch of
+    scenarios shares one network, so the residual expands ``[1, N, N]`` to
+    ``[chunk, N, N]``, and vmap materialises that expansion once per output row — there
+    are ``chunk * 2N`` of them, hence ``chunk² * 2N³ * itemsize``.
+
+    The formula is not a fit. It reproduces the allocator's own request exactly: a
+    294-row grid at chunk 4 asks for 13 011 038 208 bytes, which is
+    ``16 * 2 * 294³ * 16``. A chunk of ONE is the exception and is cheap — with a single
+    scenario there is no broadcast to materialise, and the measured host peak of a
+    1176-row grid's single-scenario build is a few hundred MiB against the 52 GB this
+    formula would imply. So ``chunk=1`` is always affordable, and the quadratic term
+    governs every larger chunk. Returns 0 for ``chunk <= 1``.
     """
+    if int(chunk) <= 1:
+        return 0
     itemsize = torch.empty(0, dtype=cdt).element_size()
     return int(chunk) * int(chunk) * 2 * int(n) ** 3 * itemsize
 
 
 def _jacobian_chunk(b: int, n: int, cdt: torch.dtype, budget_bytes: int) -> int:
-    """Largest scenario chunk whose vectorized Jacobian build fits ``budget_bytes``."""
-    per_unit = _vectorized_jacobian_peak_bytes(1, n, cdt)
-    if per_unit <= 0:
+    """Scenarios to build the state Jacobian for at a time, under ``budget_bytes``.
+
+    Returns the largest chunk whose vectorized build fits the budget
+    (:func:`_vectorized_jacobian_peak_bytes`), never more than the batch. ``1`` means the
+    per-scenario build, which carries no broadcast and is therefore always affordable;
+    ``0`` (a non-positive budget) asks for the column-by-column build instead, which
+    costs ``2N`` Jacobian-vector products and ``O(B·(2N)²)`` memory.
+    """
+    if budget_bytes <= 0:
+        return 0
+    per_pair = _vectorized_jacobian_peak_bytes(2, n, cdt) // 4  # the c² coefficient
+    if per_pair <= 0:
         return b
-    return max(0, min(b, int(math.isqrt(max(budget_bytes // per_unit, 0)))))
+    return max(1, min(b, int(math.isqrt(max(budget_bytes // per_pair, 0)))))
 
 
 def _ift_jacobian_budget_bytes(budget_mb: Optional[float] = None) -> int:
@@ -3160,11 +3176,13 @@ def _batched_state_jacobian(
       Fastest, and the reason a single-scenario gradient costs about as much as the
       forward solve, but its intermediate grows with ``B²·2N³``;
     - CHUNKED vectorized: the same build over as many scenarios at a time as the budget
-      allows, which needs ``res_for_rows(rows)`` — a factory giving the residual of a
+      allows — down to ONE, which carries no broadcast and is therefore always
+      affordable. It needs ``res_for_rows(rows)``, a factory giving the residual of a
       batch SLICE (the caller owns the slicing of its system tensors, injection plan and
       regulating terminals);
-    - column-by-column: ``2N`` batched JVPs of the whole batch, ``O(B·(2N)²)`` memory and
-      the only choice when one scenario's vectorized build already exceeds the budget.
+    - column-by-column: ``2N`` batched JVPs of the whole batch, ``O(B·(2N)²)`` memory. Used
+      when no slice factory is available (the Newton direction) or when the budget is set
+      to zero.
 
     So the materialised memory is bounded by the budget plus the ``[B, 2N, 2N]`` result,
     monotonically in ``B``, instead of growing quadratically in it. All three avoid vmap

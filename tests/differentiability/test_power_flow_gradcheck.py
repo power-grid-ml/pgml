@@ -207,13 +207,14 @@ def test_jacobian_chunk_follows_the_memory_budget():
     import pgml.solver.power_flow as pf_mod
 
     n, cdt = 33, torch.complex128
-    per_one = pf_mod._vectorized_jacobian_peak_bytes(1, n, cdt)
-    assert per_one == 2 * n**3 * 16
-    assert pf_mod._jacobian_chunk(64, n, cdt, 10 * per_one) == 3  # floor(sqrt(10))
-    assert pf_mod._jacobian_chunk(2, n, cdt, 10 * per_one) == 2  # capped by the batch
-    assert pf_mod._jacobian_chunk(64, n, cdt, per_one // 2) == 0  # column-wise
-    # The peak grows quadratically in the chunk, which is what the budget must see.
-    assert pf_mod._vectorized_jacobian_peak_bytes(4, n, cdt) == 16 * per_one
+    coeff = 2 * n**3 * 16  # the c^2 coefficient of the peak
+    assert pf_mod._vectorized_jacobian_peak_bytes(4, n, cdt) == 16 * coeff
+    assert pf_mod._vectorized_jacobian_peak_bytes(1, n, cdt) == 0  # no broadcast at all
+    assert pf_mod._jacobian_chunk(64, n, cdt, 10 * coeff) == 3  # floor(sqrt(10))
+    assert pf_mod._jacobian_chunk(2, n, cdt, 10 * coeff) == 2  # capped by the batch
+    # A budget below one PAIR still allows the per-scenario build (nothing to broadcast).
+    assert pf_mod._jacobian_chunk(64, n, cdt, coeff // 2) == 1
+    assert pf_mod._jacobian_chunk(64, n, cdt, 0) == 0  # column-by-column
 
 
 def test_finite_difference_spot_check_load_p():
