@@ -6,7 +6,8 @@ to the source so tests can align components).
 
 Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.md):
 - [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-      gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
+      gen_mode=GenMode.VOLTAGE_REGULATING,
+      gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
       harmonic_line_model=None) -> (Grid, id_map)` — this file, below.
 - [x] `convert.pgm.to_grid(input_data, *, base_frequency_hz=50.0,
       load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
@@ -119,13 +120,18 @@ calls `to_grid(net)` with no `phase_mode` and stays green.
 - standard balanced `net.load` / `sym_load`: `connection=None` (resolves to WYE from
   config), no per-phase split (the symmetric/auto calc splits the total equally);
 - static generators: pandapower `sgen` and pgm `sym_gen` -> `Generator`
-  (generation-positive nameplate; id_map buckets `"sgen"` / `"sym_gen"`); pandapower's
-  voltage-controlled `gen` converts only under the opt-in
-  `gen_mode=GenMode.VOLT_VAR_APPROX` (a `Generator` carrying a `VoltVarControl` droop —
-  see `pandapower/CONTEXT.md`); every other
-  non-empty pgm component (`transformer`, `three_winding_transformer`, `shunt`,
-  `asym_gen`, `link`, `transformer_tap_regulator`) triggers a `warn_dropped_elements`
-  WARNING — nothing is dropped silently;
+  (generation-positive nameplate; id_map buckets `"sgen"` / `"sym_gen"`);
+- VOLTAGE-REGULATING generators (PV terminals) -> a `Generator` carrying a
+  `VoltageRegulation` block, which the solver holds exactly: pandapower `gen` under
+  the default `gen_mode=GenMode.VOLTAGE_REGULATING` (`vm_pu` -> setpoint,
+  `min/max_q_mvar` -> limits, rows on one bus merged) and OpenDSS
+  `Generator model=3` (`Vpu` -> setpoint re-referred to the bus base,
+  `Maxkvar`/`Minkvar` -> limits). power-grid-model's own `voltage_regulator`
+  component (1.13+: `regulated_object` + `u_ref`, with `q_min`/`q_max` declared but
+  not yet enforced by pgm) is NOT mapped yet. See the per-source CONTEXT files;
+- every other non-empty pgm component (`transformer`, `three_winding_transformer`,
+  `shunt`, `asym_gen`, `link`, `transformer_tap_regulator`) triggers a
+  `warn_dropped_elements` WARNING — nothing is dropped silently;
 - ASYMMETRIC loads captured: pandapower `net.asymmetric_load` -> `connection=WYE`
   (`type=="wye"`) or `DELTA`, `p_nom_per_phase_w=(p_a,p_b,p_c)*1e6`,
   `q_nom_per_phase_var=(q_a,q_b,q_c)*1e6`; pgm `asym_load` -> `p_specified`/
@@ -156,22 +162,25 @@ grid, id_map = to_grid(net)
 ### Signature
 ```
 to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-        gen_mode=GenMode.DROP, gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
+        gen_mode=GenMode.VOLTAGE_REGULATING,
+        gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
         harmonic_line_model=None)
     -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function. Converts a (materialised) pandapower network to a schema `Grid`
 and an `id_map` dictionary.  Handles: `bus`, `line`, `load`, `asymmetric_load`,
-`ext_grid`, `trafo`, bus-bus `switch`, and `sgen` (-> `Generator`,
-generation-positive). `gen` (a PV bus) is DROPPED by default and converted only
-under the explicit `gen_mode=GenMode.VOLT_VAR_APPROX`, which APPROXIMATES the PV
-bus with a steep Volt-VAr droop centred on `vm_pu` (steepness
-`gen_volt_var_slope_pu`, default 500) and saturating at `min/max_q_mvar` — it holds
-|V| near, not at, the setpoint; a row on the `ext_grid` bus (or flagged `slack`) is
-skipped. Every OTHER non-empty element table (`shunt`, `trafo3w`, `impedance`,
-`ward`, `xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, and `gen` under
-the default mode) triggers a WARNING naming the kind and count — nothing is dropped
+`ext_grid`, `trafo`, bus-bus `switch`, `sgen` (-> `Generator`,
+generation-positive), `shunt` (-> a WYE `ShuntAppliance`: `G` from `p_mw`, `C` from
+`-q_mvar/(2*pi*f0)`, referred to the shunt's own `vn_kv`) and `gen` (a PV bus). `gen`
+converts by default as the EXACT PV terminal
+(`gen_mode=GenMode.VOLTAGE_REGULATING`: a `Generator` with a `VoltageRegulation`
+block; rows on one bus merge; a row on the `ext_grid` bus is skipped);
+`GenMode.VOLT_VAR_APPROX` keeps the earlier steep-Volt-VAr-droop approximation
+(steepness `gen_volt_var_slope_pu`, default 500) and `GenMode.DROP` leaves the table
+unread. Every OTHER non-empty element table (`trafo3w`, `impedance`, `ward`,
+`xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, and `gen` under
+`GenMode.DROP`) triggers a WARNING naming the kind and count — nothing is dropped
 silently.
 
 ### id_map format
@@ -181,7 +190,8 @@ silently.
     "line":     {pp_line_index: Line.id, ...},
     "load":     {pp_load_index: Load.id, ...},
     "sgen":     {pp_sgen_index: Generator.id, ...},
-    "gen":      {pp_gen_index: Generator.id, ...},   # empty unless gen_mode=VOLT_VAR_APPROX
+    "gen":      {pp_gen_index: Generator.id, ...},   # empty under gen_mode=DROP
+    "shunt":    {pp_shunt_index: ShuntAppliance.id, ...},
     "ext_grid": {pp_extgrid_index: Source.id, ...},
     "slack_v_complex": complex,   # phasor V (line-to-line, V) for ideal-slack solve
 }

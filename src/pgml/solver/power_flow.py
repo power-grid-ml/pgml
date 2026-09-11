@@ -77,6 +77,7 @@ from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
+from ._pv_bus import PVTerminals, active_power_mismatch, collect_pv_terminals
 from .harmonic import (
     estimate_condition,
     lu_factor_system,
@@ -754,6 +755,11 @@ class PowerFlowResult:
     failed_states:
         Flat indices of the batch elements that did NOT converge (empty when all
         converged or unbatched). The companion log record names them with details.
+    regulation:
+        :class:`VoltageRegulationResult` when the grid carries voltage-regulating
+        generators (PV terminals), else ``None``: the solved reactive injection of
+        each regulating generator and which of them ended up pinned at a reactive
+        limit.
     """
 
     v: Tensor
@@ -764,6 +770,35 @@ class PowerFlowResult:
     diagnostics: Optional[ConvergenceDiagnostics] = None
     converged_mask: Optional[Tensor] = None
     failed_states: tuple[int, ...] = ()
+    regulation: Optional[VoltageRegulationResult] = None
+
+
+@dataclass(frozen=True)
+class VoltageRegulationResult:
+    """Solved state of the voltage-regulating generators (the PV terminals).
+
+    Attributes
+    ----------
+    q_var:
+        Generator id -> solved TOTAL reactive injection ``[*batch]`` [var], in the
+        generator convention (positive = injected). Recovered from the converged
+        residual (``Q = Q_pinned - Im(conj(V) F_c)`` summed over the unit's phases);
+        autograd-free, like :class:`ConvergenceDiagnostics`.
+    regulating:
+        Generator id -> bool ``[*batch]``: ``True`` where the terminal holds its
+        voltage setpoint, ``False`` where a reactive limit binds and the unit was
+        solved as a PQ injection pinned at that limit.
+    switch_rounds:
+        Number of PV-to-PQ switching rounds performed beyond the first solve (0 when
+        no limit bound or enforcement is off).
+    enforce_q_limits:
+        Whether reactive limits were enforced in this solve.
+    """
+
+    q_var: dict[int, Tensor]
+    regulating: dict[int, Tensor]
+    switch_rounds: int
+    enforce_q_limits: bool
 
 
 @dataclass
@@ -1401,6 +1436,7 @@ def solve_power_flow(
     branch_states: Optional[dict] = None,
     branch_states_method: str = "assemble",
     system: Optional[PowerFlowSystem] = None,
+    enforce_q_limits: Optional[bool] = None,
 ) -> PowerFlowResult:
     """Solve the const-P / ZIP fundamental power flow (differentiable, batched).
 
@@ -1557,6 +1593,16 @@ def solve_power_flow(
         still rebuilds the per-state admittance differentiably through the IFT, so
         gradients (including gradients w.r.t. the state values) are unchanged. It
         requires ``branch_states`` and ``method="current_injection"``.
+    enforce_q_limits:
+        Whether a voltage-regulating generator's ``q_min_var`` / ``q_max_var`` bound
+        its reactive output. ``None`` (default) reads
+        ``appliance.generator.enforce_q_limits`` from :mod:`pgml.defaults` (``True``).
+        Enforcement is the standard PV-to-PQ switching: a unit whose required
+        reactive power leaves its band is re-solved as a PQ injection pinned at the
+        violated limit and released when its terminal voltage crosses the setpoint
+        from the other side. ``False`` solves every regulating terminal unbounded,
+        which is what pandapower's ``runpp(enforce_q_lims=False)`` default does. Read
+        only when the grid carries a regulating generator.
     system:
         Optional :class:`PowerFlowSystem` from :func:`prepare_power_flow` — the
         operating-point-independent solve state (index, ``Y_eff``, slack rows,
@@ -1573,8 +1619,18 @@ def solve_power_flow(
     PowerFlowResult
         ``v`` complex ``[*batch, N]`` (DIFFERENTIABLE via the IFT), the index, the
         iteration count, the achieved per-unit power mismatch (``residual``), the
-        convergence flag, and a :class:`ConvergenceDiagnostics` reporting both criteria
-        in per unit and in SI units.
+        convergence flag, a :class:`ConvergenceDiagnostics` reporting both criteria in
+        per unit and in SI units, and — for a grid with voltage-regulating generators —
+        a :class:`VoltageRegulationResult` with each unit's solved reactive power and
+        bus type.
+
+    Notes
+    -----
+    A grid with a voltage-regulating generator (a
+    :class:`~pgml.schemas.grid_schema.VoltageRegulation` block, i.e. a PV terminal) is
+    always solved by Newton: the regulated row pair replaces a current-balance row,
+    which the current-injection fixed point has no setpoint to iterate on. Such a
+    solve logs the method switch.
     """
     if method not in ("current_injection", "newton"):
         raise ModelingError(
@@ -1683,6 +1739,7 @@ def solve_power_flow(
                     criticality=criticality,
                     linear_solver=linear_solver,
                     on_disconnected="ignore",
+                    enforce_q_limits=enforce_q_limits,
                 )
                 return _expand_zeroed_result(grid, sub_res)
 
@@ -1850,109 +1907,153 @@ def solve_power_flow(
         residual_complex.plan = plan
         return residual_complex
 
-    residual_complex = make_residual_complex(operating_point)
-    fast_residual_complex = make_fast_residual_complex(operating_point)
-    real_res = _make_real_residual(
-        build_system,
-        residual_complex,
-        fixed_rows,
-        v_fixed_fn,
-        n,
+    # ----- voltage-regulating terminals (PV buses) --------------------------
+    # Their residual row pair (active balance + |V|² − V_set²) replaces the terminal's
+    # current-balance rows, so the fixed-point iteration — which has no voltage
+    # setpoint to iterate on — cannot solve them: route such a grid to Newton.
+    pv = collect_pv_terminals(
+        grid,
+        index,
+        rdt,
         cdt,
-        state_residual_complex=fast_residual_complex,
+        device,
+        operating_point,
+        enforce_q_limits=enforce_q_limits,
     )
+    if pv is not None and method != "newton":
+        _log.warning(
+            "solve_power_flow: the grid has %d voltage-regulating generator(s) (PV "
+            "terminal(s)); solving with method='newton' instead of %r. The regulated "
+            "row pair replaces a current-balance row, which the current-injection "
+            "fixed point cannot iterate on.",
+            pv.n_terminals,
+            method,
+        )
+        method = "newton"
+
+    def build_residuals(op, pv_state):
+        """The three residual forms for one operating point + PV active set."""
+        rc = make_residual_complex(op)
+        frc = make_fast_residual_complex(op)
+        rr = _make_real_residual(
+            build_system,
+            rc,
+            fixed_rows,
+            v_fixed_fn,
+            n,
+            cdt,
+            state_residual_complex=frc,
+            pv=pv_state,
+        )
+        return rc, frc, rr
+
+    op_eff = (
+        operating_point if pv is None else pv.pinned_operating_point(operating_point)
+    )
+    residual_complex, fast_residual_complex, real_res = build_residuals(op_eff, pv)
 
     # Per-row per-unit bases of both convergence criteria (the voltage base is each
     # node's line-to-neutral rated voltage, as in the flat start and the diagnostics).
     v_base = _node_voltage_bases(grid, index, rdt, device)
 
     # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
-    if method == "newton":
-        # OpenDSS-style warm start: the LINEAR const-Z solution, then Newton on the
-        # full const-P / ZIP residual. Newton's quadratic convergence and far larger
-        # convergence region reach solutions the current-injection fixed point cannot
-        # (e.g. near the loadability nose — see
-        # ``run/examples/current_injection_convergence.py``).
-        bsize = _operating_point_batch_size(operating_point)
-        if bsize > 1:
-            # A batched operating point solves SEQUENTIALLY per scenario: the
-            # per-scenario ``jacobian(vectorize=True)`` (one vectorized call per
-            # scenario) is measurably faster than a batch-native block-diagonal
-            # build — the O(B²·(2N)²) full-map Jacobian does not fit, and the O(B)
-            # column-by-column alternative costs 2N JVP evaluations per Newton
-            # step (4x slower than this loop at B=64/N=180). Newton is the
-            # hard-grid / near-nose solver — for bulk batches prefer the
-            # vectorized current-injection method.
-            (
-                v_star,
-                iterations,
-                residual_norm,
-                converged,
-                update_history,
-                y_eff0,
-                i_slack0,
-                converged_mask,
-                residual_vec,
-                update_max_pu,
-                update_norm_v,
-                fc_star,
-            ) = _newton_forward_sequential(
+    def _newton_warm_starts(op, pv_state, vf=None):
+        """Newton warm starts to try, in order.
+
+        Without voltage-regulating terminals there is exactly one (the const-Z
+        solution, built lazily) — the historical path. With them, the balanced
+        nominal start that sits ON the setpoints is added, and the order is decided
+        by the const-Z seed itself: a COLLAPSED const-Z profile (a node below half
+        its nominal) is a poor Newton start on a regulated grid, so the nominal start
+        goes first and the const-Z seed stays as the fallback.
+        """
+
+        def const_z():
+            return _linear_const_z_init(
                 grid,
                 f0,
                 index,
                 dtype,
                 device,
                 slack,
-                operating_point,
+                op,
                 param_overrides,
                 fixed_rows,
-                v_fixed,
-                v_fixed_fn,
-                build_system,
-                make_fast_residual_complex,
-                bsize,
-                n,
-                rdt,
-                cdt,
-                v_base,
-                tol,
-                tol_update_pu,
-                s_base_va,
-                max_iter,
-                newton_solver,
+                v_fixed if vf is None else vf,
                 branch_states,
-                precision,
             )
-        else:
-            v_init = _linear_const_z_init(
+
+        if pv_state is None:
+            return [const_z]
+
+        def nominal():
+            return _pv_nominal_init(
                 grid,
-                f0,
                 index,
-                dtype,
+                pv_state,
+                rdt,
+                cdt,
                 device,
-                slack,
-                operating_point,
-                param_overrides,
                 fixed_rows,
-                v_fixed,
-                branch_states,
+                v_fixed if vf is None else vf,
             )
-            (
-                v_star,
-                iterations,
-                residual_norm,
-                converged,
-                update_history,
-                y_eff0,
-                i_slack0,
-                converged_mask,
-                residual_vec,
-                update_max_pu,
-                update_norm_v,
-                fc_star,
-            ) = _newton_forward(
-                real_res,
-                v_init,
+
+        seed = const_z()
+        if _seed_is_collapsed(grid, index, seed, rdt, device):
+            _log.info(
+                "solve_power_flow: the const-impedance warm start collapses below "
+                "%.2f pu somewhere; starting Newton from the balanced nominal profile "
+                "at the voltage setpoints instead (the const-Z seed stays as a "
+                "fallback).",
+                _SEED_COLLAPSE_PU,
+            )
+            return [nominal, lambda: seed]
+        return [lambda: seed, nominal]
+
+    def run_forward(op, rr, frc, pv_state):
+        """One forward solve at a fixed operating point and PV active set."""
+        if method == "newton":
+            # OpenDSS-style warm start: the LINEAR const-Z solution, then Newton on the
+            # full const-P / ZIP residual. Newton's quadratic convergence and far larger
+            # convergence region reach solutions the current-injection fixed point cannot
+            # (e.g. near the loadability nose — see
+            # ``run/examples/current_injection_convergence.py``).
+            bsize = _operating_point_batch_size(op)
+            if bsize > 1:
+                # A batched operating point solves SEQUENTIALLY per scenario: the
+                # per-scenario ``jacobian(vectorize=True)`` (one vectorized call per
+                # scenario) is measurably faster than a batch-native block-diagonal
+                # build — the O(B²·(2N)²) full-map Jacobian does not fit, and the O(B)
+                # column-by-column alternative costs 2N JVP evaluations per Newton
+                # step (4x slower than this loop at B=64/N=180). Newton is the
+                # hard-grid / near-nose solver — for bulk batches prefer the
+                # vectorized current-injection method.
+                return _newton_forward_sequential(
+                    grid,
+                    index,
+                    device,
+                    slack,
+                    op,
+                    fixed_rows,
+                    build_system,
+                    make_fast_residual_complex,
+                    _newton_warm_starts,
+                    bsize,
+                    pv_state,
+                    n,
+                    rdt,
+                    cdt,
+                    v_base,
+                    tol,
+                    tol_update_pu,
+                    s_base_va,
+                    max_iter,
+                    newton_solver,
+                    precision,
+                )
+            return _newton_from_starts(
+                rr,
+                _newton_warm_starts(op, pv_state),
                 n,
                 rdt,
                 cdt,
@@ -1966,7 +2067,6 @@ def solve_power_flow(
                 precision,
                 fixed_rows,
             )
-    else:
         solve_system = system
         if use_woodbury and solve_system is None:
             # One base assembly + factorization for the whole sweep; each state is a
@@ -1999,26 +2099,13 @@ def solve_power_flow(
                 static_leaves=tuple(leaves),
                 precision=precision,
             )
-        (
-            v_star,
-            iterations,
-            residual_norm,
-            converged,
-            update_history,
-            y_eff0,
-            i_slack0,
-            converged_mask,
-            residual_vec,
-            update_max_pu,
-            update_norm_v,
-            fc_star,
-        ) = _current_injection_forward(
+        return _current_injection_forward(
             grid,
             index,
             build_system,
             fixed_rows,
             v_fixed,
-            fast_residual_complex.plan,
+            frc.plan,
             n,
             rdt,
             cdt,
@@ -2034,13 +2121,77 @@ def solve_power_flow(
             precision,
         )
 
+    # ----- the solve, plus PV-to-PQ switching rounds where a reactive limit binds ---
+    # Each round is one complete solve at a FIXED active set (which terminals regulate,
+    # which are pinned at a limit), so the residual the IFT differentiates is exactly
+    # the converged configuration's. The decision between rounds reads converged values
+    # and is off-tape by construction.
+    switch_rounds = 0
+    while True:
+        (
+            v_star,
+            iterations,
+            residual_norm,
+            converged,
+            update_history,
+            y_eff0,
+            i_slack0,
+            converged_mask,
+            residual_vec,
+            update_max_pu,
+            update_norm_v,
+            fc_star,
+        ) = run_forward(op_eff, real_res, fast_residual_complex, pv)
+        if pv is None or not pv.enforce_q_limits:
+            break
+        if not converged:
+            # A reactive-limit decision reads the converged reactive power; taken at a
+            # non-converged iterate it would switch on noise (and pay another full
+            # solve per round). Stop with what the solve reached and report it.
+            _log.warning(
+                "solve_power_flow: the solve did not converge, so the reactive-limit "
+                "(PV-to-PQ) switching stopped after %d round(s) with %s.",
+                switch_rounds,
+                pv.describe_state(),
+            )
+            break
+        pv_next, changed = pv.switch(
+            _nodal_residual(fast_residual_complex, v_star, y_eff0, i_slack0), v_star
+        )
+        if not changed:
+            break
+        if switch_rounds + 1 >= pv.max_rounds:
+            _log.warning(
+                "solve_power_flow: the reactive-limit (PV-to-PQ) switching did not "
+                "settle in %d rounds; keeping the last consistent solve (%s). Widen "
+                "the hysteresis (pgml.defaults appliance.generator."
+                "q_limit_hysteresis_pu) or check for a generator whose limit and "
+                "setpoint are incompatible.",
+                pv.max_rounds,
+                pv.describe_state(),
+            )
+            break
+        switch_rounds += 1
+        pv = pv_next
+        op_eff = pv.pinned_operating_point(operating_point)
+        residual_complex, fast_residual_complex, real_res = build_residuals(op_eff, pv)
+
+    # At a regulating row the forward's residual carries the SUBSTITUTED row pair
+    # (active balance + setpoint), not the nodal current mismatch, so the reported
+    # mismatch and the reactive-power readout use the nodal residual instead.
+    fc_nodal = (
+        fc_star
+        if pv is None
+        else _nodal_residual(fast_residual_complex, v_star, y_eff0, i_slack0)
+    )
+
     # Convergence diagnostics at V* (autograd-free; the criticality analysis builds the
     # IFT real Jacobian only when the solve did not converge).
     diagnostics = _build_diagnostics(
         grid,
         index,
         v_star,
-        fc_star,
+        fc_nodal,
         v_base,
         s_base_va,
         real_res,
@@ -2054,6 +2205,7 @@ def solve_power_flow(
         rdt,
         device,
         criticality,
+        pv,
     )
 
     if leaves:
@@ -2083,6 +2235,24 @@ def solve_power_flow(
             f" — {cause}" if cause else "",
         )
 
+    regulation = None
+    if pv is not None:
+        with torch.no_grad():
+            regulation = VoltageRegulationResult(
+                q_var=pv.required_q(fc_nodal, v_star),
+                regulating=pv.regulating_mask(),
+                switch_rounds=switch_rounds,
+                enforce_q_limits=pv.enforce_q_limits,
+            )
+        _log.info(
+            "solve_power_flow: %d voltage-regulating terminal(s) solved (%s) in %d "
+            "switching round(s); reactive limits %s.",
+            pv.n_terminals,
+            pv.describe_state(),
+            switch_rounds,
+            "enforced" if pv.enforce_q_limits else "NOT enforced",
+        )
+
     return PowerFlowResult(
         v=v_out,
         index=index,
@@ -2092,6 +2262,7 @@ def solve_power_flow(
         diagnostics=diagnostics,
         converged_mask=cmask_out,
         failed_states=failed_states,
+        regulation=regulation,
     )
 
 
@@ -2322,6 +2493,18 @@ def _current_injection_forward(
     )
 
 
+def _nodal_residual(fast_residual_complex, v_star, y_eff0, i_slack0) -> Tensor:
+    """The complex nodal mismatch ``F_c = Y_eff V* + I_device(V*) - I_slack`` at ``V*``.
+
+    The forward's own residual output carries the SUBSTITUTED row pair at a
+    voltage-regulating terminal (active-power balance and the voltage setpoint), so the
+    reactive-power readout and the reported mismatch need the plain nodal residual.
+    Autograd-free: one injection-plan evaluation plus one matrix-vector product.
+    """
+    with torch.no_grad():
+        return fast_residual_complex(v_star, y_eff0, i_slack0)
+
+
 def _linear_const_z_init(
     grid,
     f0,
@@ -2388,6 +2571,119 @@ def _linear_const_z_init(
     if drop_freq_axis:
         v0 = v0.squeeze(-2)  # [1, N] -> [N]: the frequency axis, known positionally
     return v0
+
+
+def _pv_nominal_init(
+    grid, index, pv: PVTerminals, rdt, cdt, device, fixed_rows, v_fixed
+) -> Tensor:
+    """Balanced nominal warm start with every regulated row AT its setpoint.
+
+    Each row starts at its own node's line-to-neutral nominal magnitude (so a grid
+    spanning several voltage levels starts at ~1 pu everywhere, unlike a start built
+    from the source's magnitude), with the standard positive-sequence phase rotation,
+    neutral rows at 0 V, ideal-slack rows at their reference magnitude, and every
+    voltage-regulating row at ``v_set``. This is the classical flat start of a
+    transmission solve; it is the SECOND Newton start tried for a grid with PV
+    terminals, because the const-Z seed (:func:`_linear_const_z_init`) wins on
+    load-dominated networks while this one wins where the const-Z fold depresses the
+    profile far from the regulated operating point. Detached — a warm start never
+    enters the gradient.
+    """
+    with torch.no_grad():
+        phase_codes = index.phase_codes.to(device)
+        ang = torch.tensor(
+            [0.0, -2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0, 0.0],
+            dtype=rdt,
+            device=device,
+        )[phase_codes]
+        n = index.size
+        mag = _node_voltage_bases(grid, index, rdt, device) * (
+            1.0 - (phase_codes == 3).to(rdt)
+        )  # [N]
+        rows, vset = pv.setpoint_volts()  # [R], [*b, R]
+        pieces = [(rows, vset.to(rdt))]
+        if fixed_rows is not None and v_fixed is not None:
+            pieces.append((fixed_rows, v_fixed.abs().to(rdt)))
+        lead = torch.broadcast_shapes(*[tuple(t.shape[:-1]) for _r, t in pieces])
+        mag = mag.broadcast_to(*lead, n).clone()
+        for r, val in pieces:
+            mag = mag.scatter(
+                -1,
+                r.expand(*lead, r.shape[-1]),
+                val.broadcast_to(*lead, r.shape[-1]),
+            )
+        return torch.polar(mag, ang).to(cdt)
+
+
+#: A const-Z warm start below this fraction of a node's nominal magnitude is a
+#: COLLAPSED seed (the const-impedance fold of a load that is large against its local
+#: impedance), far outside any steady-state operating point and a poor Newton start.
+_SEED_COLLAPSE_PU = 0.5
+
+
+def _seed_is_collapsed(grid, index, v_seed: Tensor, rdt, device) -> bool:
+    """True if a warm start leaves any live row below :data:`_SEED_COLLAPSE_PU`."""
+    with torch.no_grad():
+        bases = _node_voltage_bases(grid, index, rdt, device).clamp_min(1e-12)
+        pu = v_seed.reshape(-1, index.size).abs() / bases[None, :]
+        live = (index.phase_codes.to(device) != 3)[None, :]
+        return bool((pu[live] < _SEED_COLLAPSE_PU).any())
+
+
+def _newton_from_starts(
+    real_res,
+    v_inits,
+    n,
+    rdt,
+    cdt,
+    device,
+    v_base,
+    tol_mismatch_pu,
+    tol_update_pu,
+    s_base_va,
+    max_iter,
+    linear_solver,
+    precision="full",
+    fixed_rows=None,
+):
+    """Newton from each warm start in turn until one converges; best result wins.
+
+    A single start is the historical path (identical result, one call). With more
+    than one, a start that fails to converge is followed by the next one and the
+    restart is logged; if none converges the attempt with the smallest final per-unit
+    power mismatch is returned, so the diagnostics describe the best iterate reached.
+    Returns the 12-tuple of :func:`_newton_forward`.
+    """
+    best = None
+    for attempt, make_init in enumerate(v_inits):
+        out = _newton_forward(
+            real_res,
+            make_init(),
+            n,
+            rdt,
+            cdt,
+            device,
+            v_base,
+            tol_mismatch_pu,
+            tol_update_pu,
+            s_base_va,
+            max_iter,
+            linear_solver,
+            precision,
+            fixed_rows,
+        )
+        if out[3]:
+            if attempt:
+                _log.info(
+                    "solve_power_flow: Newton converged on warm start %d of %d "
+                    "(earlier start(s) did not converge).",
+                    attempt + 1,
+                    len(v_inits),
+                )
+            return out
+        if best is None or float(out[2]) < float(best[2]):
+            best = out
+    return best
 
 
 _NEWTON_MAX_BACKTRACK = 20  # line-search step halvings before accepting the Newton step
@@ -2606,19 +2902,16 @@ def _newton_forward(
 
 def _newton_forward_sequential(
     grid,
-    f0,
     index,
-    dtype,
     device,
     slack,
     operating_point,
-    param_overrides,
     fixed_rows,
-    v_fixed,
-    v_fixed_fn,
     build_system,
     make_fast_residual_complex,
+    warm_starts,
     bsize,
+    pv,
     n,
     rdt,
     cdt,
@@ -2628,20 +2921,20 @@ def _newton_forward_sequential(
     s_base_va,
     max_iter,
     linear_solver,
-    branch_states=None,
     precision="full",
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
-    Newton's const-Z warm start and per-element Jacobian are single-grid (the residual
+    Newton's warm starts and per-element Jacobian are single-grid (the residual
     closes over the operating point), so a batched operating point is handled by slicing
     it per scenario, running the proven single-grid forward, and stacking the detached
     ``V*`` ``[B, N]``. The IFT backward (full op, batch-aligned, block-diagonal) attaches
     batched gradients to the stacked result, so this is forward-only sequencing — the
     differentiability is unchanged. The per-scenario residual comes from
     ``make_fast_residual_complex`` (one detached injection plan per slice — the
-    detached forward needs only ``dR/dx``). Returns the same 12-tuple as
-    :func:`_newton_forward`.
+    detached forward needs only ``dR/dx``), and the voltage-regulating terminals are
+    sliced the same way (per-scenario setpoints and active set). Returns the same
+    12-tuple as :func:`_newton_forward`.
     """
     v_list, conv_list, mis_list, upd_list, updv_list, fc_list = [], [], [], [], [], []
     iterations = 0
@@ -2659,19 +2952,9 @@ def _newton_forward_sequential(
                 return None
             return _slack_rows_and_vref(grid, index, rdt, cdt, device, op)[1]
 
-        rr_i = _make_real_residual(build_system, rc_i, fixed_rows, _vfixed_i, n, cdt)
-        v_init_i = _linear_const_z_init(
-            grid,
-            f0,
-            index,
-            dtype,
-            device,
-            slack,
-            op_i,
-            param_overrides,
-            fixed_rows,
-            _vfixed_i(),
-            branch_states,
+        pv_i = None if pv is None else pv.slice(i)
+        rr_i = _make_real_residual(
+            build_system, rc_i, fixed_rows, _vfixed_i, n, cdt, pv=pv_i
         )
         (
             v_i,
@@ -2686,9 +2969,9 @@ def _newton_forward_sequential(
             upd_i,
             updv_i,
             fc_i,
-        ) = _newton_forward(
+        ) = _newton_from_starts(
             rr_i,
-            v_init_i,
+            warm_starts(op_i, pv_i, _vfixed_i()),
             n,
             rdt,
             cdt,
@@ -2818,6 +3101,7 @@ def _make_real_residual(
     n: int,
     cdt: torch.dtype,
     state_residual_complex=None,
+    pv: Optional[PVTerminals] = None,
 ):
     """Return a closure ``R(x) -> [*b, 2N]`` real residual with slack pinning.
 
@@ -2832,6 +3116,11 @@ def _make_real_residual(
     differentiate w.r.t. ``x`` alone, so a plan-based residual with detached
     parameter tensors is exact there; the full ``real_residual`` keeps the
     differentiable ``residual_complex`` for the ``dR/dθ`` vjp.
+
+    ``pv`` (optional) are the voltage-regulating terminals: their row pair is
+    substituted (active balance + voltage setpoint) before the slack pinning, in both
+    the full and the state residual, so the Newton step, the IFT Jacobian and the
+    adjoint all see the PV equations (:mod:`pgml.solver._pv_bus`).
     """
     state_rc = (
         state_residual_complex
@@ -2839,7 +3128,11 @@ def _make_real_residual(
         else residual_complex
     )
 
-    def _pin_and_split(fc: Tensor, v: Tensor, x: Tensor) -> Tensor:
+    def _pin_and_split(
+        fc: Tensor, v: Tensor, x: Tensor, pv_state: Optional[PVTerminals]
+    ) -> Tensor:
+        if pv_state is not None:
+            fc = pv_state.transform(fc, v)
         v_fixed = v_fixed_fn() if v_fixed_fn is not None else None
         if fixed_rows is not None and v_fixed is not None:
             vf = v_fixed.to(dtype=cdt, device=x.device)  # [S]
@@ -2859,7 +3152,7 @@ def _make_real_residual(
         v = torch.complex(v_re, v_im).to(cdt)  # [*b, N]
         y_eff, i_slack = build_system()
         fc = residual_complex(v, y_eff, i_slack)  # [*b, N] complex (all rows)
-        return _pin_and_split(fc, v, x)
+        return _pin_and_split(fc, v, x, pv)
 
     def state_residual(
         x: Tensor,
@@ -2869,13 +3162,15 @@ def _make_real_residual(
         islack_im: Tensor,
         *,
         rc=None,
+        pv_state: Optional[PVTerminals] = None,
     ) -> Tensor:
         """Real residual at FIXED (real-split) system tensors — for the state Jacobian.
 
         ``jacrev`` rejects complex inputs, so the (constant) system tensors are
         passed as real/imag pairs and recombined here. Only ``x`` is differentiated.
         ``rc`` overrides the complex state residual (the IFT backward passes a
-        flattened-plan variant when the state batch is collapsed to one dim).
+        flattened-plan variant when the state batch is collapsed to one dim), and
+        ``pv_state`` the regulating terminals (flattened the same way).
         """
         v_re = x[..., :n]
         v_im = x[..., n:]
@@ -2883,11 +3178,12 @@ def _make_real_residual(
         y_eff = torch.complex(y_re, y_im).to(cdt)
         i_slack = torch.complex(islack_re, islack_im).to(cdt)
         fc = (rc if rc is not None else state_rc)(v, y_eff, i_slack)
-        return _pin_and_split(fc, v, x)
+        return _pin_and_split(fc, v, x, pv if pv_state is None else pv_state)
 
     real_residual.state_residual = state_residual
     real_residual.state_rc = state_rc
     real_residual.build_system = build_system
+    real_residual.pv = pv
     return real_residual
 
 
@@ -2976,6 +3272,12 @@ class _IFTPowerFlow(torch.autograd.Function):
                     - i_slack
                 )
 
+        # The voltage-regulating terminals' setpoints / limits carry the same scenario
+        # batch, so they are collapsed onto the flattened axis alongside the plan.
+        pv_flat = getattr(real_res, "pv", None)
+        if pv_flat is not None and len(lead) > 1:
+            pv_flat = pv_flat.flatten_batch(lead)
+
         def batched_state_res(xb):
             return state_residual(
                 xb,
@@ -2984,6 +3286,7 @@ class _IFTPowerFlow(torch.autograd.Function):
                 islack_flat.real,
                 islack_flat.imag,
                 rc=rc_flat,
+                pv_state=pv_flat,
             )  # [B, 2N]
 
         j_batched = _batched_state_jacobian(batched_state_res, x_flat)  # [B, 2N, 2N]
@@ -3088,13 +3391,19 @@ def _build_diagnostics(
     rdt,
     device,
     criticality: str = "auto",
+    pv: Optional[PVTerminals] = None,
 ) -> "ConvergenceDiagnostics":
     """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence).
 
-    ``fc_star`` is the nodal residual ``F = Y_eff V* + I_device(V*) - I_slack`` the
-    forward already formed for its per-unit convergence test, so the diagnostics add no
-    further solve or assembly; the per-unit criterion VALUES come from the forward and
-    are reported next to their SI counterparts.
+    ``fc_star`` is the nodal residual ``F = Y_eff V* + I_device(V*) - I_slack`` at
+    ``V*``, so the diagnostics add no further solve or assembly; the per-unit criterion
+    VALUES come from the forward and are reported next to their SI counterparts.
+
+    ``pv`` (the voltage-regulating terminals) makes the reported nodal mismatch
+    meaningful at a regulated row: the RAW current mismatch there is the reactive
+    current the generator supplies, so a REGULATING row reports the ACTIVE component
+    ``|Re(conj(V) F_c)| / |V|`` — the part its row pair enforces — while a row pinned
+    at a reactive limit keeps its full mismatch.
     """
     n = index.size
     vmin, vmax = _DIAG_VBAND_PU
@@ -3104,7 +3413,15 @@ def _build_diagnostics(
         lead = v_star.shape[:-1]
         b = int(torch.tensor(lead).prod().item()) if lead else 1
         vflat = v_star.reshape(b, n)
-        fc_abs = fc_star.reshape(b, n).abs().clone()
+        # A batched solve can carry a size-one scenario axis that the residual's own
+        # reshape collapsed (``[B, 1, N]`` voltages against a ``[B, N]`` residual), so
+        # the residual is realigned to the voltage's batch shape before it is read
+        # per row — `active_power_mismatch` broadcasts against ``v_star``.
+        fc_rows = fc_star.reshape(v_star.shape)
+        mismatch = (
+            fc_rows.abs() if pv is None else active_power_mismatch(pv, fc_rows, v_star)
+        )
+        fc_abs = mismatch.reshape(b, n).clone()
         if fixed_rows is not None and fixed_rows.numel() > 0:
             fc_abs[:, fixed_rows] = 0.0  # slack rows absorb mismatch by construction
         bases = v_base.clamp_min(1e-12)

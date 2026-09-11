@@ -68,6 +68,20 @@ assembly consumes (a docstring/unit-metadata change; no field, name or value cha
     `ConsumerType` enum (str-enum; `"pv"` etc. still validate; ML categorical, no physics).
     Control is honored by the NONLINEAR solve (`device_current_injections`); the linear
     const-Z assembler uses the base P/Q.
+  - VOLTAGE REGULATION (a PV terminal): `Generator` additionally carries an optional
+    `voltage_regulation: VoltageRegulation` — `v_set_pu` (PosNum, per unit of the HOST
+    NODE's rated voltage, default 1.0), `q_min_var`/`q_max_var` (Optional[Num], TOTAL
+    over the phases, injection-positive, `None` = unbounded) and `regulated`
+    (`RegulatedQuantity`: `positive_sequence` (default) | `per_phase`). MUTUALLY
+    EXCLUSIVE with `control` (validated): a control law states Q as a function of the
+    voltage, regulation states the voltage and leaves Q implicit. All three numeric
+    fields keep the float/tensor duality, so `dV/dv_set` and `dV/dq_limit` flow through
+    the IFT. Consumed by `solve_power_flow` (the terminal's reactive power-balance row
+    becomes `|V|² − V_set²`, solved by Newton with PV-to-PQ switching for the limits —
+    `solver/_pv_bus.py`, `solver/CONTEXT.md`); the linear const-Z assembler and the
+    harmonic orders h>1 use the base P/Q as before. Written by the pandapower
+    (`net.gen`) and OpenDSS (`Generator model=3`) converters. Backward-compatible: the
+    field defaults to `None` and a persisted grid without it is unchanged.
   - Measurement instrumentation (rev 0.0.3): `Grid.measurement_devices:
     list[MeasurementDevice]` — INERT metadata (never on the autograd tape, plain floats
     only; nothing here enters assembly or the solver). A `MeasurementDevice` is

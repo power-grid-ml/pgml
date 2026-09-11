@@ -113,6 +113,7 @@ import logging
 import math
 from typing import Any, Optional
 
+from pgml.assembly._params import phase_voltage_magnitude
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
@@ -139,6 +140,7 @@ from pgml.schemas.grid_schema import (
     SourceConvention,
     Storage,
     Transformer,
+    VoltageRegulation,
     WindingConnection,
     ZipCoefficients,
 )
@@ -257,6 +259,16 @@ def to_grid(
       :class:`~pgml.schemas.grid_schema.ShuntAppliance`, WYE (solidly grounded) by
       default or DELTA when the DSS element is delta-connected (per-leg G/C from
       OpenDSS's own resolved per-leg ``Cuf``/``R``/``X``).
+    - A ``Generator`` with ``model=3`` (constant P, constant ``|V|``) is a PV
+      terminal and converts to a
+      :class:`~pgml.schemas.grid_schema.Generator` carrying a
+      :class:`~pgml.schemas.grid_schema.VoltageRegulation` block: ``Vpu`` becomes
+      the setpoint (re-referred from the generator's own ``kV`` rating to the host
+      node's rated voltage) and ``Maxkvar``/``Minkvar`` the reactive limits, which
+      OpenDSS always resolves (from ``kVA`` and ``PF`` when not given). Every other
+      ``model`` converts as a PQ injection. A DELTA-connected ``model=3`` generator
+      raises :class:`~pgml.errors.ConversionError` (the regulated row pair is
+      modelled for a WYE terminal).
     """
     f0_hz: float = float(dss.Solution.Frequency())
     two_pi_f0 = 2.0 * math.pi * f0_hz
@@ -336,6 +348,7 @@ def to_grid(
         )
 
     id_map["bus"] = dict(bus_name_to_node_id)
+    node_by_id = {nd.id: nd for nd in nodes}
 
     # ---------------------------------------------------------------------- #
     # 2. Lines                                                                #
@@ -1137,6 +1150,17 @@ def to_grid(
         p_w = float(dss.Generators.kW()) * 1_000.0
         q_var = float(dss.Generators.kvar()) * 1_000.0
 
+        node = node_by_id[bus_name_to_node_id[gen_bus_name]]
+        regulation = _generator_voltage_regulation(
+            dss,
+            gen_name,
+            n_phases=n_phases,
+            node=node,
+            connection=conn,
+        )
+        if regulation is not None:
+            q_var = 0.0  # a regulating machine's reactive power is solved, not set
+
         gen_id = _id.next()
         id_map["generator"][gen_name] = gen_id
         gen_obj = build_generator(
@@ -1148,6 +1172,7 @@ def to_grid(
             q_total_var=q_var,
             connection=conn,
             native_phases=tuple(gen_phases),
+            voltage_regulation=regulation,
         )
         if phase_mode is PhaseMode.THREE_PHASE and not is_delta:
             rp = _resolve_wye_return_path(
@@ -1657,6 +1682,56 @@ def _shunt_phase_conductors(dss: Any, n_phases: int) -> Optional[list[Phase]]:
     if any(c == 0 for c in conductors):
         return None
     return [_phase_num_to_enum(c) for c in conductors]
+
+
+def _generator_voltage_regulation(dss, gen_name: str, *, n_phases, node, connection):
+    """``VoltageRegulation`` of an OpenDSS ``Generator``, or ``None`` for a PQ model.
+
+    OpenDSS ``model=3`` is the PV terminal: constant ``kW``, constant ``|V|`` at the
+    per-unit setpoint ``Vpu``, with the reactive power free between ``Minkvar`` and
+    ``Maxkvar`` (OpenDSS resolves both from ``kVA`` and ``PF`` when they are not
+    given, and enforces them). Every other ``model`` is a PQ injection.
+
+    ``Vpu`` is per unit of the GENERATOR's own ``kV`` rating -- line-to-line for a
+    two- or three-phase machine, line-to-neutral for a single-phase one (the OpenDSS
+    ``Load``/``Generator`` convention) -- while the schema's ``v_set_pu`` is per unit
+    of the HOST NODE's rated voltage, so the setpoint is re-referred through the two
+    line-to-neutral bases. A DELTA machine raises: the regulated row pair is modelled
+    for a WYE terminal (see :mod:`pgml.solver`).
+    """
+    if int(float(dss.Properties.Value("Model"))) != 3:
+        return None
+    if connection is WindingConnection.DELTA:
+        raise ConversionError(
+            f"OpenDSS generator {gen_name} is delta-connected with model=3 "
+            "(constant |V|). Voltage regulation is modelled for a WYE terminal only "
+            "-- a delta element's reactive current is shared between two node rows, "
+            "so the regulated row pair cannot be formed. Connect it in wye, or use a "
+            "PQ generator model."
+        )
+    v_pu_dss = float(dss.Properties.Value("Vpu"))
+    gen_kv = float(dss.Properties.Value("kV"))
+    # Generator kV: L-L for >= 2 phases, L-N for a single-phase machine.
+    gen_base_ln_v = gen_kv * 1_000.0 / (_SQRT3 if n_phases >= 2 else 1.0)
+    node_base_ln_v = float(phase_voltage_magnitude(node.u_rated_v, len(node.phases)))
+    v_set_pu = v_pu_dss * gen_base_ln_v / node_base_ln_v
+    if abs(gen_base_ln_v - node_base_ln_v) > 1.0e-6 * node_base_ln_v:
+        _logger.info(
+            "OpenDSS generator %s is rated %.4g kV on a %.4g kV bus; its model=3 "
+            "setpoint Vpu=%.5f is re-referred to the bus base as v_set_pu=%.5f.",
+            gen_name,
+            gen_kv,
+            node_base_ln_v * _SQRT3 / 1_000.0
+            if len(node.phases) >= 3
+            else node_base_ln_v / 1_000.0,
+            v_pu_dss,
+            v_set_pu,
+        )
+    return VoltageRegulation(
+        v_set_pu=v_set_pu,
+        q_min_var=float(dss.Properties.Value("Minkvar")) * 1_000.0,
+        q_max_var=float(dss.Properties.Value("Maxkvar")) * 1_000.0,
+    )
 
 
 def _build_shunt_appliance(

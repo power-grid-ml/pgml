@@ -35,7 +35,7 @@ from pgml.solver import solve_power_flow  # noqa: E402
 CDT = torch.complex128
 
 
-def _pp_net(*, with_sgen: bool, with_shunt: bool = False):
+def _pp_net(*, with_sgen: bool, with_motor: bool = False, with_shunt: bool = False):
     net = pp.create_empty_network(f_hz=50.0)
     b0 = pp.create_bus(net, vn_kv=20.0)
     b1 = pp.create_bus(net, vn_kv=20.0)
@@ -55,6 +55,8 @@ def _pp_net(*, with_sgen: bool, with_shunt: bool = False):
         pp.create_sgen(net, bus=b1, p_mw=0.3, q_mvar=0.05)
     if with_shunt:
         pp.create_shunt(net, bus=b1, q_mvar=-0.1, p_mw=0.0)
+    if with_motor:
+        pp.create_motor(net, bus=b1, pn_mech_mw=0.1, cos_phi=0.9)
     return net
 
 
@@ -81,12 +83,13 @@ class TestPandapowerSgen:
         assert v_with > v_without
 
     def test_unread_table_warns(self, caplog):
+        """``motor`` is not read by the converter, so it is reported loudly."""
         with caplog.at_level("WARNING", logger="pgml"):
-            pp_to_grid(_pp_net(with_sgen=False, with_shunt=True))
+            pp_to_grid(_pp_net(with_sgen=False, with_motor=True))
         assert any(
-            "shunt" in r.message and "NOT converted" in r.message
+            "motor" in r.message and "NOT converted" in r.message
             for r in caplog.records
-        ), f"expected a shunt drop warning, got: {[r.message for r in caplog.records]}"
+        ), f"expected a motor drop warning, got: {[r.message for r in caplog.records]}"
 
 
 class TestPgmSymGen:
