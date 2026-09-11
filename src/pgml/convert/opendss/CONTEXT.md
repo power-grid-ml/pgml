@@ -245,6 +245,13 @@ ConsumerType.BATTERY`.
 
 ### Vsource impedance under the default ideal slack
 
+**Magnetizing-branch placement.** OpenDSS attaches the whole core branch to its LAST
+winding's terminal (winding 2 = the to/LV side for a standard import), verified on a live
+`Yprim` difference. pgml's shipped default puts it on the from/HV terminal
+(`transformer.magnetizing_placement = from_terminal`), a ~2e-4 pu deviation at a realistic
+0.5 % magnetizing current; `transformer.magnetizing_placement = to_terminal` reproduces
+OpenDSS below 1e-9 pu (`tests/reference/test_opendss_magnetizing_placement.py`).
+
 A non-negligible Thevenin impedance (`R1`/`X1`, read for `thevenin_from_z`)
 is silently UNUSED under pgml's default `slack="ideal"` (`solve_power_flow`/
 `solve_harmonic` pins the bus voltage exactly at `u_ref_v` regardless of
@@ -454,6 +461,9 @@ a fresh 60 Hz default.
 | `Vsources.BasekV()*PU` [kV] | `Source.u_ref_v` [V]      | × 1000                   |
 | `Vsource.r1` [Ω]       | `Source.resistance_ohm`         | via `thevenin_from_z`        |
 | `Vsource.x1/(2πf₀)` [H] | `Source.inductance_h`         | via `thevenin_from_z`        |
+| `Transformer.%imag` | `magnetizing_inductance_h` | `B_m = %imag/100 · S/u_hv²` — DSS's `%imag` IS the core susceptance in percent of the winding base admittance, NOT a total no-load current (no Pythagorean subtraction of `%noloadloss`) |
+| `Transformer.%noloadloss` | `magnetizing_conductance_s` | `G_m = %noloadloss/100 · S/u_hv²` |
+| `Transformer.Rneut`/`Xneut` | — | a winding neutral earthing impedance raises `ConversionError` (pgml stamps windings solidly grounded) |
 | `Vsource.r0`/`x0` [Ω]  | `Source.resistance_ohm`/`inductance_h` off-diagonal | `Z_self=(Z0+2·Z1)/3`, `Z_mutual=(Z0−Z1)/3` — the same identity the DSS Vsource's own Yprim uses (3-phase only) |
 | `Loads.kW()` [kW]      | `Load.p_nom_w` [W]              | × 1000                       |
 | `Loads.kvar()` [kVAR]  | `Load.q_nom_var` [VAR]          | × 1000                       |

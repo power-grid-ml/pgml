@@ -196,6 +196,31 @@ transformer:
         For a transformer with explicit connections the clock is read from tap.shift_deg
         (rounded to the nearest 30 deg) instead.
 
+  # WHERE the magnetizing (core) shunt y_m = G_m + jB_m is attached. The schema stores it
+  # referred to the HV/from side; the three reference engines attach it in three different
+  # places, which is a genuinely different topology (not a referral difference): the
+  # magnetizing current either does or does not see the leakage drop of a winding.
+  #   - OpenDSS attaches the whole branch to the LAST winding's terminal (winding 2, i.e.
+  #     the to/LV side for a standard import), on that winding's base. Verified on a live
+  #     `Yprim`: the magnetizing contribution appears ONLY in the winding-2 diagonal.
+  #   - power-grid-model splits it half onto its `Y_tt` (to side) and half (through the
+  #     tap) onto `Y_ff` (from side).
+  #   - pandapower keeps it on the LV base inside its pi shunt.
+  # `from_terminal` (the default) is the conservative choice for a study driven from the HV
+  # side: core loss is then independent of loading. Pick `to_terminal` to reproduce an
+  # OpenDSS circuit exactly, or `split` to reproduce power-grid-model.
+  magnetizing_placement:
+    value: from_terminal
+    units: "enum{from_terminal, to_terminal, split}"
+    description: >
+      Terminal the magnetizing shunt is stamped on: `from_terminal` = the HV/from phase
+      diagonal (default), `to_terminal` = the LV/to diagonal with the branch referred
+      through the squared rated-voltage ratio (OpenDSS's own placement), `split` = half on
+      each terminal, each referred to its own side (power-grid-model's placement). The
+      VALUE is always `magnetizing_conductance_s`/`magnetizing_inductance_h` as stored,
+      i.e. referred to the from side. Typical residual between the choices: ~2e-4 pu of the
+      transformer admittance at a realistic 0.5 % magnetizing current.
+
   # Zero-sequence leakage VALUE of a two-winding transformer whose `zero_sequence`
   # override is not set. The zero-sequence PATH always comes from the winding
   # connections + clock (a delta or zigzag winding blocks it); these ratios set only the

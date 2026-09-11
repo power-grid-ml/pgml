@@ -59,6 +59,14 @@ API:
   R/L/C(/G) matrices + a `phases` tuple — implemented and unit-tested for the
   OpenDSS converter (pp/pgm route through `build_line_from_sequence`).
 
+**Transformer zero-sequence leakage.** `Transformer.zero_sequence` (the leakage VALUE on
+the topology-derived zero-sequence path) is emitted by the pandapower converter from
+`vk0_percent`/`vkr0_percent`, and by the pgm converter for a grounded-zigzag winding,
+where power-grid-model hardcodes `Z0 = 0.1·Z1` (`transformer.hpp`). OpenDSS has no
+zero-sequence transformer input, so an OpenDSS import leaves the field unset and the
+documented `transformer.zero_sequence.*` ratios apply (1.0 = Z0 = Z1, OpenDSS's own
+model).
+
 **Source zero-sequence Thevenin (THREE_PHASE).** `build_source` builds the per-phase
 Thevenin matrix from the positive- AND zero-sequence pair with the same symmetric-component
 identity the line path uses (`Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`), applied to the

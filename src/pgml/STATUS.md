@@ -259,9 +259,19 @@ results are never read as more physical than they are. Details live in `docs/pgm
   being OpenDSS's anti-float shunt). `resistance_frequency` accepts a constant, the
   Carson skin law or a sampled curve, the same multiplier the line path uses. No
   eddy-current/stray-loss curve is shipped as a default, and no saturation/inrush
-  (steady-state tool). The magnetizing branch sits at the EXTERNAL HV terminal vs
-  OpenDSS's internal "T" — ~1e-3 pu on a live comparison
-  (`docs/pgml/modeling/transformer.md`).
+  (steady-state tool).
+- **Transformer, magnetizing placement.** A documented modeling choice,
+  `transformer.magnetizing_placement`: `from_terminal` (shipped default — the HV/from
+  phase diagonal, so core loss is independent of loading), `to_terminal` (OpenDSS's own
+  placement: it attaches the whole branch to its LAST winding's terminal, verified on a
+  live `Yprim` difference) or `split` (power-grid-model's: half on each terminal). Measured
+  against a live OpenDSS solve on a 500 kVA 20/0.4 kV unit (Dyn and YNyn, 0-500 kW load):
+  `to_terminal` agrees to 3e-10…2e-9 pu, while the `from_terminal` default deviates by
+  9.2e-5 pu at i0 = 0.1 %, 2.2e-4 pu at 0.5 % and 8.2e-4 pu at 2 %, and `split` by half of
+  that. `split` reproduces power-grid-model to machine precision
+  (`tests/reference/test_opendss_magnetizing_placement.py`,
+  `tests/reference/test_pgm_transformer.py`). No zero-sequence-specific magnetizing branch
+  exists for any placement.
 - **Transformer, construction.** All winding pairings except zigzag-zigzag, at every clock
   of the pairing's parity; non-solid neutral grounding raises (fail loud). The
   zero-sequence leakage VALUE is `Transformer.zero_sequence` when set (read from

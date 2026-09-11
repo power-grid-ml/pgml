@@ -123,10 +123,15 @@ from pgml.schemas.grid_schema import (
     Provenance,
     SourceConvention,
     Transformer,
+    TransformerZeroSeq,
     WindingConnection,
 )
 
 _logger = logging.getLogger("pgml")
+
+#: power-grid-model's hardcoded zero-sequence series factor for a grounded
+#: zigzag winding (`transformer.hpp`: `z0_series = (1/y_series)*0.1 + ...`).
+_PGM_ZIGZAG_Z0_FACTOR = 0.1
 
 # pgm `WindingType` int values (not imported from `power_grid_model` -- the
 # converter treats pgm `input_data` as a plain numpy-structured-array format, with
@@ -386,6 +391,21 @@ def to_grid(
         from_grounding = _grounding_impedance(row, "from")
         to_grounding = _grounding_impedance(row, "to")
 
+        # Zero-sequence leakage VALUE. power-grid-model has no zero-sequence u_k input:
+        # its zero sequence uses the positive-sequence winding impedance through the
+        # winding topology, EXCEPT for a zigzag winding, whose own zero-sequence series
+        # impedance it hardcodes as 0.1*Z1 (`transformer.hpp`:
+        # `z0_series = (1/y_series)*0.1 + 3*z_grounding`, an empirical stand-in for the
+        # half-coil zero-sequence leakage of a grounding transformer). Carrying that
+        # factor makes a converted zigzag unit reproduce power-grid-model's own
+        # unbalanced result instead of presenting Z0 = Z1 on the zigzag side.
+        zero_sequence = None
+        if WindingConnection.ZIGZAG_GROUNDED in (from_connection, to_connection):
+            zero_sequence = TransformerZeroSeq(
+                r0_ohm=_PGM_ZIGZAG_Z0_FACTOR * r_coil,
+                x0_ohm=_PGM_ZIGZAG_Z0_FACTOR * x_coil,
+            )
+
         trafo_id = _id.next()
         id_map["transformer"][pgm_id] = trafo_id
         tx_phases = phases_for(phase_mode)
@@ -407,6 +427,7 @@ def to_grid(
                 series_inductance_h=x_coil / two_pi_f0,
                 magnetizing_conductance_s=g_m,
                 magnetizing_inductance_h=l_m,
+                zero_sequence=zero_sequence,
                 tap=ComplexTap(
                     ratio_magnitude=ratio_magnitude, shift_deg=float(clock * 30)
                 ),

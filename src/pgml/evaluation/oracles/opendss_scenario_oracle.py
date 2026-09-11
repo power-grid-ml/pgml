@@ -562,7 +562,15 @@ def _transformer_pct_r_xhl(
 def _transformer_magnetizing_pct(
     t: Transformer, w0: float, u_from_kv: float, kva_ref: float
 ) -> Optional[tuple]:
-    """``(pct_noloadloss, pct_imag)`` or ``None`` when the unit has no magnetizing branch."""
+    """``(pct_noloadloss, pct_imag)`` or ``None`` when the unit has no magnetizing branch.
+
+    OpenDSS's ``%noloadloss`` and ``%imag`` are the REAL and IMAGINARY parts of the core
+    admittance separately, each in percent of the winding base admittance, so they map
+    one-to-one onto ``G_m`` and ``B_m`` with no Pythagorean step. Per-unit values are
+    base-invariant, so the percentages computed on the from-side base are the ones DSS
+    needs even though it attaches the branch to its last winding's terminal (a
+    PLACEMENT difference, see ``transformer.magnetizing_placement``).
+    """
     g_m = to_float(t.magnetizing_conductance_s)
     u_hv_v = u_from_kv * 1000.0
     pfe_w = g_m * u_hv_v**2
@@ -572,10 +580,9 @@ def _transformer_magnetizing_pct(
         else 0.0
     )
     q_nl = b_m * u_hv_v**2
-    s_nl = math.hypot(pfe_w, q_nl)
     s_rated = kva_ref * 1000.0
-    if s_rated > 0.0 and (pfe_w > 0.0 or s_nl > 0.0):
-        return pfe_w / s_rated * 100.0, s_nl / s_rated * 100.0
+    if s_rated > 0.0 and (pfe_w > 0.0 or q_nl > 0.0):
+        return pfe_w / s_rated * 100.0, q_nl / s_rated * 100.0
     return None
 
 

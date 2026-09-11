@@ -393,6 +393,16 @@ rule, droop physics) and `tests/reference/test_pandapower_gen_volt_var.py` (live
   admittance is dropped along with the element, unlike pandapower's own
   auxiliary-bus model. Not a silent gap (`_open_switch_targets` is unconditional,
   applied to every network), but not full fidelity either.
+- trafo ZERO-SEQUENCE leakage IS read: `vk0_percent`/`vkr0_percent` become
+  `Transformer.zero_sequence` (per-unit values are base-invariant, so the same
+  `Z = vk0% · Z_base_LV` formula the positive sequence uses applies, including the
+  TO-side delta coil factor and the `parallel` divide). A zero or absent `vk0_percent` is
+  pandapower's own "use the positive-sequence value", which is pgml's
+  `transformer.zero_sequence.*` default; a grounded-wye/zigzag pairing that falls back
+  logs a WARNING. NOT modelled, each named in a WARNING when set: `mag0_percent`/`mag0_rx`
+  (a finite zero-sequence MAGNETIZING impedance — the three-limb-core path through tank
+  and air), `si0_hv_partial` (the HV/LV split of the zero-sequence leakage inside a T) and
+  `xn_ohm`/`rn_ohm` (a neutral earthing impedance, `3·Z_N` in series).
 - `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
   `asymmetric_sgen`: not converted (`warn_dropped_elements`).
 - ext_grid NEGATIVE-sequence source impedance is not represented separately: the

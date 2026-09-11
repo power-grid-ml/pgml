@@ -562,19 +562,22 @@ def to_grid(
         x_lv_ohm = x_ll_ohm * _lv_coil_factor
         l_lv_h = x_lv_ohm / two_pi_f0
 
-        # Magnetizing shunt referred to the HV terminal (same derivation the
-        # pandapower converter uses for pfe_kw/i0_percent -> G_m/B_m).
+        # Magnetizing shunt, referred to the HV/from terminal (the schema's
+        # convention). OpenDSS's two percentages are the REAL and IMAGINARY parts of
+        # the core admittance separately, each in percent of the winding's base
+        # admittance: `%noloadloss` -> G, `%imag` -> B. They are NOT a loss plus a
+        # TOTAL no-load current (pandapower's `pfe_kw` + `i0_percent` convention,
+        # where B = sqrt(I0^2 - G^2)), so no Pythagorean subtraction applies here.
+        # Verified on a live `Yprim` difference (magnetizing on minus off): the
+        # contribution is exactly `(%noloadloss + j*(-%imag))/100 * S/u^2` at the
+        # LAST winding's terminal, for `%imag` above AND below `%noloadloss`.
         pfe_w = noloadloss_pct / 100.0 * s_rated_va
         g_m = pfe_w / (u_rated_from_v**2) if pfe_w > 0.0 else 0.0
         l_m: Optional[float] = None
         if imag_pct > 0.0:
-            i0_amp = imag_pct / 100.0 * s_rated_va / u_rated_from_v
-            s_nl = u_rated_from_v * i0_amp
-            q_nl_sq = s_nl**2 - pfe_w**2
-            if q_nl_sq > 0.0:
-                b_m = math.sqrt(q_nl_sq) / (u_rated_from_v**2)
-                if b_m > 0.0:
-                    l_m = 1.0 / (two_pi_f0 * b_m)
+            b_m = imag_pct / 100.0 * s_rated_va / (u_rated_from_v**2)
+            if b_m > 0.0:
+                l_m = 1.0 / (two_pi_f0 * b_m)
 
         from_bus_name, from_phase_list, from_grounded, from_rotation = (
             _parse_transformer_winding_bus(bus_names_raw[0], n_phases)

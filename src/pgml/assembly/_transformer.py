@@ -90,9 +90,14 @@ The ``√3`` then cancels against ``M`` so the assembled positive-sequence block
 identical to ``y/n_LL²`` (HV self) and ``y/n_LL`` (coupling) — the historical
 off-nominal-tap pi — while the zero sequence is now modelled correctly.
 
-The magnetizing (core-loss) shunt ``y_m`` is added to the HV terminal phase
-diagonal directly (referred to the HV line voltage), outside the leakage
-incidence transform.
+The magnetizing (core-loss) shunt ``y_m`` is attached to a terminal phase diagonal
+directly (referred to the HV line voltage), outside the leakage incidence
+transform. WHICH terminal is the documented modeling choice
+``transformer.magnetizing_placement`` (:func:`magnetizing_placement`): the
+``from_terminal`` default, ``to_terminal`` (OpenDSS attaches the whole branch to
+its last winding's terminal) or ``split`` (power-grid-model puts half on each).
+The three differ in whether the magnetizing current sees a winding's leakage
+drop, so they are different topologies, not different referrals.
 
 The leakage itself may be SEQUENCE-AWARE: when the zero-sequence leakage differs
 from the positive-sequence one, ``Y_winding``'s per-phase identity ``I_P`` is
@@ -298,6 +303,53 @@ def group_key(vg: VectorGroup, p: int, sequence_aware: bool = False) -> tuple:
     winding primitives and cannot be stacked together.
     """
     return (vg.from_side.kind, vg.to_side.kind, vg.clock, p, bool(sequence_aware))
+
+
+#: Allowed `transformer.magnetizing_placement` values (see `data/defaults.yaml`).
+MAGNETIZING_PLACEMENTS = ("from_terminal", "to_terminal", "split")
+
+
+def magnetizing_placement() -> str:
+    """Return the configured magnetizing-shunt placement (validated).
+
+    One of :data:`MAGNETIZING_PLACEMENTS`: ``from_terminal`` (default — the HV/from
+    phase diagonal), ``to_terminal`` (the LV/to diagonal, referred through the squared
+    rated-voltage ratio; OpenDSS's own placement) or ``split`` (half on each terminal;
+    power-grid-model's placement). An unrecognised value raises rather than silently
+    falling back.
+    """
+    value = str(defaults.get("transformer.magnetizing_placement"))
+    if value not in MAGNETIZING_PLACEMENTS:
+        raise ModelingError(
+            f"transformer.magnetizing_placement {value!r} is not a modelled placement "
+            f"(expected one of {MAGNETIZING_PLACEMENTS})."
+        )
+    return value
+
+
+def magnetizing_blocks(
+    y_m: Tensor, ratio_line: Tensor, p: int, placement: str
+) -> Tensor:
+    """Magnetizing shunt as a ``[H, K, 2P, 2P]`` block for the requested placement.
+
+    ``y_m`` ``[H, K]`` is the shunt admittance as stored (referred to the FROM/HV side);
+    ``ratio_line`` ``[K]`` the rated LINE-voltage ratio ``u_from/u_to`` used to refer it
+    to the TO side (``y_m · ratio_line²``). The returned block is zero outside the
+    terminal diagonal(s) the placement selects.
+    """
+    cdt = y_m.dtype
+    eye = torch.eye(p, dtype=cdt, device=y_m.device)
+    n2 = (ratio_line.to(cdt) ** 2)[None, :]  # [1,K]
+    if placement == "from_terminal":
+        from_share, to_share = y_m, torch.zeros_like(y_m)
+    elif placement == "to_terminal":
+        from_share, to_share = torch.zeros_like(y_m), y_m * n2
+    else:  # "split"
+        from_share, to_share = 0.5 * y_m, 0.5 * y_m * n2
+    zeros = torch.zeros_like(from_share)[..., None, None] * eye
+    top = torch.cat([from_share[..., None, None] * eye, zeros], dim=-1)
+    bot = torch.cat([zeros, to_share[..., None, None] * eye], dim=-1)
+    return torch.cat([top, bot], dim=-2)
 
 
 def zero_sequence_leakage_ratios() -> tuple[float, float]:
@@ -584,6 +636,9 @@ __all__ = [
     "group_key",
     "block_incidence",
     "is_sequence_aware",
+    "MAGNETIZING_PLACEMENTS",
+    "magnetizing_blocks",
+    "magnetizing_placement",
     "nominal_turns_ratio",
     "sequence_leakage_matrices",
     "winding_leakage_block",

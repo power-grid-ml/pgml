@@ -53,6 +53,10 @@ requires an env var to be set.
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
   `docs/pgml/modeling/transformer.md`.
+- `transformer.magnetizing_placement` — `from_terminal` (default) / `to_terminal` /
+  `split`: which terminal the magnetizing shunt is stamped on (OpenDSS uses its last
+  winding's terminal, power-grid-model splits it half/half). Resolved by
+  `pgml.assembly._transformer.magnetizing_placement`; an unknown value raises.
 - `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of
   the leakage impedance when a Transformer carries no explicit `zero_sequence` override
   (both 1.0 = Z0 = Z1). Read by `pgml.assembly._transformer.zero_sequence_leakage`; the

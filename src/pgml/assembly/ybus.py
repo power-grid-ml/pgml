@@ -58,6 +58,8 @@ from ._transformer import (
     block_incidence,
     group_key as _xfmr_group_key,
     is_sequence_aware as _xfmr_is_sequence_aware,
+    magnetizing_blocks,
+    magnetizing_placement,
     nominal_turns_ratio,
     resolve_vector_group,
     sequence_leakage_matrices,
@@ -1183,8 +1185,14 @@ def _transformer_block_groups(
       ``harmonic_xr_constant`` is OpenDSS's ``XRConst``, which holds X/R constant with
       frequency by scaling R with the order. Both default to no change (``m = 1``,
       ``XRConst = No``), i.e. X ∝ h at fixed R.
-    - Magnetizing shunt ``y_m = G_m + jB_m`` added to the HV terminal phase
-      diagonal directly (referred to the HV line voltage).
+    - Magnetizing shunt ``y_m = G_m + jB_m`` added to a TERMINAL phase diagonal
+      directly (outside the incidence transform), referred to the HV line voltage as
+      stored. The terminal is the documented modeling choice
+      ``transformer.magnetizing_placement``: ``from_terminal`` (default, the HV
+      diagonal), ``to_terminal`` (the LV diagonal through the squared rated-voltage
+      ratio — OpenDSS's own placement) or ``split`` (half on each —
+      power-grid-model's). The three are different topologies: they differ in whether
+      the magnetizing current sees a winding's leakage drop.
 
     Differentiable w.r.t. series R, L, the zero-sequence R0/L0 and the off-nominal tap
     magnitude; the discrete vector-group connections / clock select the constant
@@ -1216,11 +1224,11 @@ def _transformer_block_groups(
 
     two_pi_f = (2.0 * torch.pi) * f  # [H]
     two_pi_f0 = 2.0 * torch.pi * float(grid.base_frequency_hz)
+    placement = magnetizing_placement()
     for (_fk, _tk, _clock, p, sequence_aware), group in by_key.items():
         vg0 = vgs[id(group[0])]
-        eye_p = torch.eye(p, dtype=cdt, device=device)
 
-        yse_list, ratio_list, ym_list = [], [], []
+        yse_list, ratio_list, ym_list, nline_list = [], [], [], []
         zr_list, zl_list, rmult_list = [], [], []  # sequence-aware matrix path
         for t in group:
             vg = vgs[id(t)]
@@ -1273,6 +1281,9 @@ def _transformer_block_groups(
             )
             u_from = torch.as_tensor(t.u_rated_from_v, dtype=rdt, device=device)
             u_to = torch.as_tensor(t.u_rated_to_v, dtype=rdt, device=device)
+            # Rated LINE-voltage ratio: refers the magnetizing shunt (stored on the
+            # from/HV side) to the to/LV terminal for the to_terminal / split placements.
+            nline_list.append(u_from / u_to)
             if p == 1:
                 # Single-phase / positive-sequence equivalent: the vector group is
                 # folded into a complex line-to-line ratio (magnitude n_LL, exact
@@ -1323,11 +1334,11 @@ def _transformer_block_groups(
             n_block = block_incidence(vg0, p, rdt, device)  # [2P,2P]
             block = winding_leakage_block(y_se, ratio, n_block)  # [H,K,2P,2P]
 
-        # Magnetizing shunt on the HV terminal diagonal (outside the incidence).
+        # Magnetizing shunt on a terminal diagonal (outside the incidence transform);
+        # `transformer.magnetizing_placement` picks the terminal (see `_transformer`).
         ym = torch.stack(ym_list, dim=1)  # [H,K]
-        ym_hv = ym[:, :, None, None] * eye_p  # [H,K,P,P]
-        ym_full = torch.nn.functional.pad(ym_hv, (0, p, 0, p))  # [H,K,2P,2P]
-        block = block + ym_full
+        n_line = torch.stack(nline_list, dim=0)  # [K]
+        block = block + magnetizing_blocks(ym, n_line, p, placement)
 
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
