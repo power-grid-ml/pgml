@@ -293,6 +293,24 @@ class TestLoadabilityContinuation:
         with pytest.raises(InputError):
             loadability_limit(_two_bus(1000.0), ramp="generation")
 
+    def test_the_default_ramp_is_the_load_only_one(self) -> None:
+        """``ramp=None`` resolves the documented default, which is the textbook ramp.
+
+        On a feeder with generation the default decides a reported number, so it is
+        pinned here and in ``solver.loadability.ramp`` rather than in the signature.
+        """
+        from pgml import defaults
+
+        assert defaults.get("solver.loadability.ramp") == "load"
+        nose = _nose_power()
+        grid = _two_bus_with_generation(0.8 * nose, 0.3 * nose)
+        kw = dict(slack="ideal", lambda_max=4.0, lambda_step=0.1, dtype=CDT)
+        res = loadability_limit(grid, **kw)
+        assert res.ramp == "load"
+        assert res.breaking_lambda == pytest.approx(
+            loadability_limit(grid, ramp="load", **kw).breaking_lambda
+        )
+
     def test_breaking_lambda_is_a_lower_bound_on_the_nose(self) -> None:
         """The corrector fails before the singularity, so tightening it moves λ* UP.
 

@@ -556,3 +556,15 @@ solver:
         complete Jacobian rebuild and factorization; above this size the factors are
         rebuilt per product instead, so a large batched solve does not hold a big
         factorization alive for the lifetime of the graph.
+  loadability:
+    ramp:
+      value: "load"
+      units: "name: load | all"
+      description: >
+        What the loadability analysis' scaling factor lambda multiplies. "load" scales the
+        loads only and holds generation at its nameplate value — the textbook
+        continuation-power-flow ramp, and what a published loadability or P-V curve means.
+        "all" scales every injecting device, loads and generation together, which is the
+        joint ramp of a whole operating point; on a feeder with substantial generation the
+        two limits differ materially, because ramping generation with the load offsets the
+        voltage drop the ramp is meant to create.

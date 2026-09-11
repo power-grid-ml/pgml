@@ -3978,7 +3978,8 @@ def loadability_limit(
     s_base_va: Optional[float] = None,
     max_iter: int = 50,
     top_k: int = 5,
-    ramp: str = "all",
+    ramp: Optional[str] = None,
+    equilibrate: Optional[str] = None,
 ) -> LoadabilityResult:
     """Step-and-bisect continuation: the largest ``λ`` whose power flow still solves.
 
@@ -3999,15 +4000,18 @@ def loadability_limit(
     Jacobian figures reported at that ``λ`` describe the last converged point, which is
     near the nose, not the singular point itself.
 
-    ``ramp`` chooses WHAT ``λ`` multiplies:
+    ``ramp`` chooses WHAT ``λ`` multiplies (``None`` resolves the documented default
+    ``solver.loadability.ramp``):
 
-    - ``"all"`` (default) — every injecting device: loads AND generators / storage scale
-      together (a joint ramp of the whole operating point, the quantity a scenario sweep
-      of a distribution feeder usually wants).
-    - ``"load"`` — loads only, with generation held at its nameplate value: the textbook
-      continuation-power-flow load ramp. On a feeder with substantial generation the two
-      give different limits, because ramping generation with the load offsets the drop
-      the ramp is meant to create.
+    - ``"load"`` (the default) — loads only, with generation held at its nameplate
+      value: the textbook continuation-power-flow load ramp, and what "loadability" means
+      in the literature.
+    - ``"all"`` — every injecting device: loads AND generators / storage scale together,
+      a joint ramp of the whole operating point. On a feeder with substantial generation
+      the two give different limits, because ramping generation with the load offsets the
+      drop the ramp is meant to create (measured on a two-bus feeder with generation at
+      0.3 of the nose power: 1.625 for ``"load"``, 2.0 for ``"all"``, both the closed-form
+      value of their own ramp).
 
     At the breaking ``λ`` the SVD of the power-flow Jacobian localizes the approaching
     collapse:
@@ -4027,12 +4031,15 @@ def loadability_limit(
     """
     if slack not in ("ideal", "norton"):
         raise InputError(f"Unsupported slack {slack!r} (use 'ideal' or 'norton').")
+    if ramp is None:
+        ramp = str(defaults.get("solver.loadability.ramp"))
     if ramp not in ("all", "load"):
         raise InputError(
-            f"Unsupported ramp {ramp!r}: 'all' scales every injecting device (loads and "
-            "generators together), 'load' scales loads only and holds generation at its "
-            "nameplate value (the textbook continuation-power-flow ramp)."
+            f"Unsupported ramp {ramp!r}: 'load' scales loads only and holds generation "
+            "at its nameplate value (the textbook continuation-power-flow ramp), 'all' "
+            "scales every injecting device (loads and generators together)."
         )
+    eq_mode = resolve_equilibration(equilibrate)
     tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
     check_branch_impedances(grid)
     check_connectivity(grid)
@@ -4095,7 +4102,9 @@ def loadability_limit(
                 i_dev = i_dev + injections_from_plan(plan_fixed, v).squeeze(-2)
             return _apply_y(y, v) + i_dev - islack
 
-        return _make_real_residual(build_system, rc, fixed_rows, v_fixed_fn, n, cdt)
+        return _make_real_residual(
+            build_system, rc, fixed_rows, v_fixed_fn, n, cdt, equilibrate=eq_mode
+        )
 
     import logging
 
@@ -4106,7 +4115,13 @@ def loadability_limit(
         with torch.no_grad():
             y0, islack0 = build_system()
             # y0 carries no frequency axis, so the const-Z start keeps islack0's shape.
-            v_good = solve_harmonic(y0, islack0, fixed_rows=fixed_rows, v_fixed=v_fixed)
+            v_good = solve_harmonic(
+                y0,
+                islack0,
+                fixed_rows=fixed_rows,
+                v_fixed=v_fixed,
+                equilibrate=eq_mode,
+            )
         lam_good, trace, total_iters = 0.0, [0.0], 0
         nose_found = False
         lam = lambda_step
