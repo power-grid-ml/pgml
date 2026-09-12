@@ -1386,7 +1386,8 @@ def _stamp_const_z_loads(
     The internal per-ELEMENT admittance at the operating point is
     ``y_elem = conj(P_k + jQ_k)/|V0|^2`` and is mapped to a nodal block
     ``M^T diag(y_elem) M`` via the terminal incidence ``M`` (``_incidence``):
-    WYE-to-ground reduces to ``M = I`` (the historical diagonal stamp, bit-exact);
+    WYE-to-ground reduces to ``M = I`` (the historical diagonal stamp, reproduced
+    exactly);
     WYE-with-neutral uses ``[I|-1]`` (the neutral row receives the phase return);
     DELTA-3 uses the circulant difference. ``asymmetric=False`` forces the equal split
     inside ``resolve_operating_power``. ``V0`` is L-N for WYE and L-L for DELTA

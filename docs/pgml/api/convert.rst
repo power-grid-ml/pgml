@@ -177,10 +177,18 @@ Element coverage
 
 ``bus``, ``line``, ``trafo`` (two-winding, vector-group and tap-changer aware),
 bus-bus ``switch``, ``load`` (including the four-column ZIP percentages),
-``asymmetric_load`` and ``sgen`` convert. ``gen`` converts only in the opt-in mode
-below. Every remaining non-empty table — ``shunt``, ``trafo3w``, ``impedance``,
+``asymmetric_load``, ``sgen``, ``gen`` (see ``gen_mode`` below) and ``shunt`` convert.
+``ext_grid`` converts with its zero-sequence short-circuit data (``x0x_max``,
+``r0x0_max``).  Every remaining non-empty table — ``trafo3w``, ``impedance``,
 ``ward`` / ``xward``, ``dcline``, ``storage``, ``motor``, ``asymmetric_sgen`` —
 raises a WARNING naming the kind and count; nothing is dropped silently.
+
+A ``shunt`` row becomes a fixed WYE :class:`~pgml.schemas.grid_schema.ShuntAppliance`,
+``G`` from ``p_mw`` and ``C`` from ``−q_mvar/(2πf₀)``, both referred to the row's own
+``vn_kv``.  An INDUCTIVE shunt (``q_mvar > 0``) therefore becomes a negative capacitance:
+exact at the fundamental, but its susceptance magnitude rises with frequency where a real
+reactor's falls as ``1/h``, so harmonic results at such a bus are not faithful.  The
+converter warns and names the count.
 
 .. _convert-pandapower-gen-mode:
 
@@ -189,16 +197,24 @@ Voltage-controlled generators — ``gen_mode``
 
 ``net.gen`` is pandapower's **PV bus**: fixed active power, regulated voltage
 magnitude ``vm_pu``, reactive power free between ``min_q_mvar`` and
-``max_q_mvar``. pgml's appliance model has no PV bus — that needs a mixed residual
-row pair ``[P-balance; |V|² − V_set²]`` in the power-flow solver plus a schema
-field for the setpoint (see :doc:`/pgml/modeling/der-pv-storage` §4.5). The
-``gen_mode`` keyword therefore selects:
+``max_q_mvar``.  pgml models it exactly, through the residual row pair
+``[P-balance; |V|² − V_set²]`` and a
+:class:`~pgml.schemas.grid_schema.VoltageRegulation` block on the generator (see
+:doc:`/pgml/modeling/der-pv-storage`).  The ``gen_mode`` keyword selects:
+
+``GenMode.VOLTAGE_REGULATING``
+    The default.  Each in-service row becomes a
+    :class:`~pgml.schemas.grid_schema.Generator` carrying a
+    :class:`~pgml.schemas.grid_schema.VoltageRegulation` block, so the solver holds
+    ``vm_pu`` and solves the reactive power within the row's limits.  Rows on one bus are
+    merged into a single terminal.  Against ``pp.runpp`` on the MATPOWER benchmarks the
+    converged voltages agree to between 4.4e-16 and 8.9e-12 pu, and the generator reactive
+    powers to 7.9e-9 Mvar.
 
 ``GenMode.DROP``
-    The default. ``net.gen`` is not read and is reported as a dropped element. A
-    transmission benchmark whose generators live in ``net.gen`` (MATPOWER
-    ``case118``, ``case39``, …) then converts to loads plus a slack, and its
-    operating point is **not** the source network's.
+    ``net.gen`` is not read and is reported as a dropped element.  A transmission benchmark
+    whose generators live in ``net.gen`` (MATPOWER ``case118``, ``case39``, …) then converts
+    to loads plus a slack, and its operating point is **not** the source network's.
 
 ``GenMode.VOLT_VAR_APPROX``
     Each in-service row becomes a
@@ -218,8 +234,8 @@ field for the setpoint (see :doc:`/pgml/modeling/der-pv-storage` §4.5). The
     limitation is conditioning, not steady-state accuracy — outside the
     ``1/slope``-wide band the droop's ``dQ/d|V|`` is zero, so on a heavily loaded
     transmission network the solve can settle on the collapsed low-voltage branch.
-    Reduce the steepness when that happens. Measured accuracy and the honest
-    verdict: ``src/pgml/convert/pandapower/CONTEXT.md``.
+    Reduce the steepness when that happens.  Use this mode to model a real
+    droop-controlled DER, not to import a transmission benchmark.
 
 .. automodule:: pgml.convert.pandapower
    :members:
@@ -228,8 +244,19 @@ field for the setpoint (see :doc:`/pgml/modeling/der-pv-storage` §4.5). The
 pgml.convert.pgm
 -----------------
 
-Convert a `power-grid-model <https://power-grid-model.readthedocs.io/>`_
+Convert a `power-grid-model <https://power-grid-model.readthedocs.io/en/stable/>`_
 ``input_data`` dict to a :class:`~pgml.schemas.Grid`.
+
+``node``, ``line``, ``transformer``, ``link``, ``sym_load``, ``asym_load``, ``sym_gen`` and
+``source`` convert; ``source.z01_ratio`` is read into the Thévenin's zero-sequence split.
+A ``link`` is power-grid-model's perfect connection, and it converts to an ideal closed
+:class:`~pgml.schemas.grid_schema.Switch` that the solve collapses exactly — on a
+source-link-line-load feeder the node voltages agree with power-grid-model to 3.5e-9 pu and
+the link's own current to 6.0e-9 relative, both residuals being the reference's own
+stand-in drop.  ``asym_gen``, ``shunt``, ``three_winding_transformer`` and
+``transformer_tap_regulator`` are not read and are reported as dropped elements.
+``voltage_regulator``, power-grid-model's own PV terminal, is not mapped yet, although the
+pgml side of the mapping exists.
 
 .. automodule:: pgml.convert.pgm
    :members:
@@ -238,8 +265,8 @@ Convert a `power-grid-model <https://power-grid-model.readthedocs.io/>`_
 pgml.convert.opendss
 ---------------------
 
-Convert an OpenDSS circuit (via `opendssdirect
-<https://opendssdirect.readthedocs.io/>`_) to a :class:`~pgml.schemas.Grid`.
+Convert an OpenDSS circuit (via `OpenDSSDirect.py
+<https://dss-extensions.org/OpenDSSDirect.py/>`_) to a :class:`~pgml.schemas.Grid`.
 
 .. automodule:: pgml.convert.opendss
    :members:

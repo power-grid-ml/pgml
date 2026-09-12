@@ -1,98 +1,121 @@
-# OpenDSS harmonic model — exact conventions (empirically verified)
+# OpenDSS harmonic conventions
 
-The OpenDSS harmonic conventions that pgml's differentiable harmonic power flow reproduces and
-validates against.
-The spectrum phase convention below was derived EMPIRICALLY by running OpenDSS
-(opendssdirect 0.9.4) on a 1-phase test circuit and reading the injected currents
-and per-order bus voltages off monitors — not from docs, so it is trustworthy.
+The conventions pgml's harmonic power flow reproduces, and the numbers they were checked
+against. The spectrum phase convention was derived by running OpenDSS on a single-phase test
+circuit and reading the injected currents and per-order bus voltages off monitors, rather than
+from documentation.
 
-## How harmonic flow works (OpenDSS `Solve mode=harmonics`)
-1. A base (fundamental) power flow is solved first. Each power-conversion element's
-   FUNDAMENTAL current phasor `I1` is recorded (magnitude + angle).
-2. For each spectrum order `h`, every element with a `Spectrum` becomes a HARMONIC
-   CURRENT SOURCE injecting `I_h` (below). The network is LINEAR per harmonic:
-   `Y(h) · V(h) = I(h)`, solved once per order.
-3. `Vsource` is held at ZERO harmonic voltage (a short behind its Thévenin Z), i.e.
-   it contributes only its Norton shunt `Y_s(h)` — unless it has its own spectrum.
-4. Network impedances scale with frequency: `X(h) = h·X1`, `R` fixed (unless
-   `XRConst=yes`), `B(h) = h·B1`. This matches our `assemble_network_ybus`
-   (`X=2πfL`, `B=2πfC` at `f=h·f0`).
+## How the harmonic solve proceeds
 
-## Spectrum -> harmonic current injection (THE key convention)
-For a device with fundamental current `I1 = |I1|∠a1` and a Spectrum whose order `h`
-entry is `(mag_h, ang_h)` (mag in %, the fundamental entry is `(mag_1, ang_1)`):
+1. A fundamental power flow is solved first, and every power-conversion element's fundamental
+   current phasor `I1` is recorded, magnitude and angle.
+2. For each spectrum order, every element carrying a spectrum becomes a harmonic current
+   source. The network is linear per order, so `Y(h)·V(h) = I(h)` is solved once per order.
+3. A voltage source is held at zero harmonic voltage, a short behind its Thévenin impedance,
+   so it contributes only its Norton shunt unless it carries a spectrum of its own. pgml
+   expresses the same thing with a `NodeHarmonicSource` at the source's node rather than a
+   spectrum on the source element.
+4. Network impedances scale with frequency, `X(h) = h·X1` and `B(h) = h·B1` with `R` fixed
+   unless `XRConst=yes`. pgml's assembly matches this through `X = 2πfL` and `B = 2πfC` at
+   `f = h·f₀`. A transformer's `XRConst` is carried per element in `harmonic_xr_constant`,
+   which the OpenDSS reader writes and the harmonic assembly consumes, so such a unit gets
+   `R ∝ h`; `transformer.harmonic_resistance.law` sets the policy globally.
 
-    |I_h| = (mag_h / mag_1) · |I1|
-    arg(I_h) = ang_h + h · (a1 − ang_1)              [degrees]
+## Spectrum to harmonic current
 
-i.e. the spectrum is defined relative to its OWN declared fundamental angle `ang_1`;
-it is rotated so its fundamental aligns with the actual `a1`, and that base rotation
-`(a1 − ang_1)` is multiplied by `h` for order `h` (a fixed time-shift of the
-waveform = `h·Δ` phase at harmonic `h`). Equivalently
-`arg(I_h) = ang_h − h·ang_1 + h·a1`.
+For a device with fundamental current `I1 = |I1|∠a1` and a spectrum whose order `h` entry is
+`(mag_h, ang_h)`, with `(mag_1, ang_1)` the declared fundamental entry:
 
-**Empirical check** (load 2 kW + 0.5 kvar at 230 V, spectrum
-`h=[1,5,7] %mag=[100,20,14] angle=[10,30,55]`, `NeglectLoadY=yes`):
-`I1 = 9.23355 ∠ −15.0374°`. Predicted vs OpenDSS injected current:
-| h | pred \|I_h\| = (mag_h/100)·\|I1\| | OpenDSS \|I_h\| | pred ∠ = ang_h+h·(a1−10) | OpenDSS ∠ |
+```text
+|I_h|    = (mag_h / mag_1) * |I1|
+arg(I_h) = ang_h + h * (a1 - ang_1)        [degrees]
+```
+
+The spectrum is defined relative to its own declared fundamental angle. It is rotated so that
+its fundamental aligns with the actual `a1`, and that base rotation is multiplied by `h` for
+order `h`, which is what a fixed time shift of the waveform does. The magnitude uses the
+fundamental current, not the power.
+
+Measured on a 2 kW, 0.5 kvar load at 230 V with a spectrum at orders 1, 5 and 7, magnitudes
+100, 20 and 14 %, angles 10, 30 and 55°, and `NeglectLoadY=yes`. The fundamental current came
+out as `I1 = 9.23355 ∠ −15.0374°`.
+
+| h | predicted `(mag_h/100)·|I1|` | OpenDSS magnitude | predicted angle | OpenDSS angle |
 |---|---|---|---|---|
 | 1 | 9.23355 | 9.23355 | −15.037 | −15.037 |
 | 5 | 1.84671 | 1.84671 | −95.185 | −95.187 |
 | 7 | 1.29270 | 1.29270 | −120.259 | −120.262 |
-Exact to 3 decimals. `|I_h|` uses the fundamental CURRENT magnitude (not power).
 
-## Load Norton shunt at harmonics (`NeglectLoadY`)
-- `NeglectLoadY=yes` -> load is a PURE current source (no shunt). This is the clean
-  first validation target.
-- Default (`no`) -> the spectrum current source is in PARALLEL with a shunt
-  admittance `Y_load(h)` derived from the fundamental P,Q and voltage, split between
-  a SERIES R-L and a PARALLEL R-L branch by `%SeriesRL` (our
-  `HarmonicShuntModel.series_rl_fraction`); a motor branch uses `puXharm`/`XRharm`.
-  EXACT split formula is NOT yet pinned here — derive it (empirically from the
-  `with_loadY` oracle below, or from the OpenDSS source) when implementing the shunt
-  refinement. Our `HarmonicShuntModel` carries the needed params.
+## The device Norton shunt (`NeglectLoadY`, `%SeriesRL`)
 
-## Reference oracle (single-phase, `f0=50 Hz`)
-Circuit: `Vsource` (basekv=0.23, Z1: R1=0.1, X1=0.1 Ω) → `Line.l1` (R=0.5, X=0.5 Ω,
-C=0, length 1 m) → `Load.ld1` (kv=0.23, 2 kW, 0.5 kvar, model=1) with
-`Spectrum h=[1,5,7] %mag=[100,20,14] angle=[0,0,0]`. `I1 = 9.23355 ∠ −15.0374°`.
+At orders `h > 1` an OpenDSS `Load` is a harmonic current source in parallel with a shunt
+admittance derived from its fundamental operating point. `Load.pas`
+(`TLoadObj.CalcYPrimMatrix`) splits that admittance between a series and a parallel R-L branch,
+with `s = %SeriesRL/100`:
 
-Per-order load-bus voltage `V_ld(h)` (re/im → mag∠deg):
-| h | NeglectLoadY=yes | with load shunt (default) |
+```text
+Y_eq     = conj(P_ph + jQ_ph) / V_ph**2
+Y_par(h) = (1 - s)*Re(Y_eq) + j*(1 - s)*Im(Y_eq)/h
+Z_ser    = 1/(s*Y_eq),   Z_ser(h) = Re(Z_ser) + j*h*Im(Z_ser)
+Y(h)     = Y_par(h) + 1/Z_ser(h)
+```
+
+`P_ph` and `Q_ph` are the specified power divided by the phase count, and `V_ph` the rated
+voltage: `kV*1000` for a one-phase or delta load, `kV*1000/sqrt(3)` for a wye load of two or
+three phases. The split is exact at the fundamental, `Y_par(1) + Y_ser(1) = Y_eq` for any `s`,
+and only sets how the shunt rolls off with frequency. The parallel branch keeps its full
+conductance at every order while the series branch's admittance falls roughly as `1/h`, so
+`%SeriesRL=0` damps most and `%SeriesRL=100` least. `puXharm > 0` replaces the derived series
+impedance by a fixed blocked-rotor reactance `X = kV**2*1000/(kVA*s)*puXharm` with
+`Z_ser = X/XRharm + jX`.
+
+`Set NeglectLoadY=Yes` replaces the whole shunt by `EPSILON = 1e-12 S`, a pure current source.
+The measured `YPrim` under that option is `1.0e-12 + 0j`, or `2.0e-12` on a delta diagonal.
+There is no residual load admittance.
+
+pgml implements all three models: `load_shunt="opendss"`, the default, reproducing OpenDSS's
+`NeglectLoadY=No` with `%SeriesRL=50`; `"motor"`; and `"none"`, which is `NeglectLoadY=Yes`.
+The per-element admittance agrees with a live OpenDSS `Load`'s own `YPrim` to 4.7e-16 relative
+for a one-phase wye, a three-phase wye and a three-phase delta load, at `%SeriesRL` 0, 50 and
+100 and with the motor branch. Two conventions differ from a naive reading and are worth
+repeating: the voltage is the rated one, and the susceptance of the parallel branch is divided
+by `h` whatever the sign of `Q`, because OpenDSS models it as R parallel L. pgml derives `P`
+and `Q` from the power the device actually draws at the converged fundamental solution rather
+than from the specified power, which is identical for a constant-power device and 6e-5 to
+1e-4 pu of nominal apart for a const-Z, const-I or ZIP one.
+
+`HarmonicShuntModel` is the per-device override of the shunt; the default lives in
+`appliance.harmonic_shunt.*`. A generation-sign device carries no shunt under the shipped
+`appliance.harmonic_shunt.generation_model`, because the load expression would give it a
+negative conductance; see [DER models](../../der-pv-storage.md).
+
+## A single-phase oracle
+
+A source with `basekv=0.23` and `R1=X1=0.1 Ω` feeds a line with `R=X=0.5 Ω` and no
+capacitance, which feeds a 2 kW, 0.5 kvar load with a spectrum at orders 1, 5 and 7 at 100, 20
+and 14 % and zero angles, at 50 Hz. The fundamental current is `I1 = 9.23355 ∠ −15.0374°`.
+
+| h | `NeglectLoadY=yes` | with the load shunt |
 |---|---|---|
 | 1 | 223.24690 ∠ −1.004° | 223.24690 ∠ −1.004° |
 | 5 | 5.51315 ∠ −178.200° | 5.24266 ∠ 177.953° |
 | 7 | 5.30916 ∠ 154.807° | 5.01599 ∠ 149.937° |
 
-The eventual test should build this SAME circuit in our schema (1-phase node, Line,
-Source, Load with a `StaticSpectrum`), run our harmonic flow, and compare to OpenDSS
-RUN LIVE (like the pandapower/pgm oracle tests) — start with the `NeglectLoadY=yes`
-(pure current-source) case, then add the shunt.
+Both columns are covered by `tests/reference/test_opendss_load_shunt.py`, which drives a live
+OpenDSS engine at `%SeriesRL` 0, 50 and 100 and with the motor branch.
 
-## KNOWN discrepancy: OpenDSS harmonic LINE impedance (Carson earth-return)
-Verified empirically (forced `BuildYMatrix` at 250 Hz, read `SystemY`): OpenDSS's
-line SERIES impedance at the 5th harmonic is `Z_line(250) = 0.572 + j2.409 Ω`, NOT
-the simple `R + j·h·X = 0.5 + j2.5 Ω` — R RISES (0.5→0.572) and X scales
-SUB-linearly (2.5→2.409). This is OpenDSS's frequency-dependent earth-return
-(Carson) line model, applied even to sequence-defined (R1/X1) lines.
+## Line impedance at harmonics
 
-Our model (and `assemble_network_ybus`) uses the STANDARD simple harmonic line
-scaling: `X(h)=2π·h·f0·L` (∝ h), `R` constant. This is a valid, common harmonic
-model, but it does NOT match OpenDSS's Carson-corrected impedance — the per-order
-bus voltages differ by ~2.5% (h=5) growing with `h`. EXACT OpenDSS parity needs the
-geometry/Carson path (POSTPONED per the roadmap). So:
-- The harmonic INJECTION convention (above) is OpenDSS-exact and is what we validate.
-- The harmonic VOLTAGE oracle match is BALLPARK-only until Carson lands; the rigorous
-  correctness test is an independent numpy reimplementation of the simple model.
-Additionally, `NeglectLoadY=yes` still leaves a residual load Norton admittance in
-OpenDSS's harmonic Y (the const-power load's linearised `Y=conj(S)/|V|²`), a second
-small contributor to the voltage gap (our `include_load_shunt=False` omits it).
+OpenDSS recomputes line impedance at every frequency with an earth-return and skin-effect
+model, and it does so even for a sequence-defined line. At the fifth harmonic a 0.5 + j0.5 Ω
+line comes back as 0.572 + j2.409 Ω rather than 0.5 + j2.5 Ω. The resistance rises and the
+reactance scales sub-linearly.
 
-## Schema gaps
-None blocking for the current-source model: `StaticSpectrum`/`HarmonicComponent`
-(order, magnitude_pu = fraction of fundamental, phase_deg) carry the spectrum, and
-`HarmonicShuntModel` carries the shunt params. NOTE for the differentiable path:
-`HarmonicComponent` fields are plain floats (tensor-duality deferred); the
-harmonic-flow API should accept a SCENARIO-OVERRIDABLE per-device harmonic-injection
-argument (tensor-friendly), analogous to `operating_point` for P/Q, so scenarios can
-vary harmonic injections differentiably without editing the stored Spectrum.
+Matching that needs the conductor-geometry path, where pgml's Carson/Deri model agrees with
+OpenDSS to 4.8e-8 relative on the same geometry, see
+[Carson line constants](carson.md). A line given as R and X is scaled analytically instead,
+and {doc}`../../harmonic-line-model` explains the available models and which OpenDSS setup
+each one corresponds to.
+
+The injection convention above is exact and is what the harmonic path validates against. A
+voltage comparison is only as good as the line model both sides use.

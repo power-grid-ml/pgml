@@ -17,8 +17,8 @@ implementations.
   :class:`~pgml.evaluation.HarmonicProfile`, :class:`~pgml.evaluation.LabeledMatrix`)
   and builder functions that consume solver results, including the shared row-building
   primitive :func:`~pgml.evaluation.harmonic_profile_from_array` (a plain complex
-  ``[H, N]`` array in, a :class:`~pgml.evaluation.HarmonicProfile` out — the solver-result
-  path here and the ML estimator/dataset path in ``pgl.evaluation`` both delegate to it)
+  ``[H, N]`` array in, a :class:`~pgml.evaluation.HarmonicProfile` out, so a solved
+  result and an externally supplied array plot through the same path)
   and :func:`~pgml.evaluation.node_numbering` (the zero-based display numbering used by
   :func:`~pgml.evaluation.plot_grid_graph` and, optionally, by
   :func:`~pgml.evaluation.data.row_labels`).
@@ -115,10 +115,9 @@ Reference builders and oracle functions
 regression testing, plus the reference-grid builders re-exported from :mod:`pgml.grids`
 (see :doc:`grids` for the canonical documentation of
 :func:`~pgml.grids.ieee33_geometry_grid`, :func:`~pgml.grids.cigre_lv_geometry_grid`,
-:func:`~pgml.grids.cigre_lv_full_grid`, :func:`~pgml.grids.add_pv_systems`, and
-:func:`~pgml.grids.se_benchmark_scenario_config`) — ``from pgml.evaluation.oracles import
-cigre_lv_full_grid`` and ``from pgml.grids import cigre_lv_full_grid`` import the identical
-function.
+:func:`~pgml.grids.cigre_lv_full_grid` and :func:`~pgml.grids.add_pv_systems`) —
+``from pgml.evaluation.oracles import cigre_lv_full_grid`` and ``from pgml.grids import
+cigre_lv_full_grid`` import the identical function.
 
 Harmonic oracle functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -195,22 +194,30 @@ per scenario (and per step, for a node-coherent batch). Two assumption modes
 control how closely the exported circuit matches pgml's own reduced harmonic
 model:
 
-- ``mode="matched"`` (default) sets ``NeglectLoadY=Yes`` (pgml's harmonic
-  solver has no load Norton shunt at all), ``Rg=Xg=0`` on every line-like
-  element (pgml's non-geometry line models carry no Carson earth-return
-  correction), a tight snap-solve tolerance, and an effectively unbounded
-  ``Vminpu``/``Vmaxpu`` band on every load (pgml's load laws apply at any
-  voltage, unlike OpenDSS's default clipping band). This isolates genuine
-  numeric agreement between the two harmonic engines — measured (2026-07
-  comparison campaign) at roughly 1e-8 to 1e-9 relative voltage error on
-  single-phase feeder cases and roughly 1e-6 on the three-phase CIGRE LV
-  benchmark, with one documented, bounded exception (the triplen orders under
-  ``mode="default"``, below).
-- ``mode="default"`` leaves OpenDSS's own defaults (load Norton shunt
-  included, imperial-calibrated earth return, the default voltage-clip band)
-  — a deliberate, documented divergence characterizing how far a naive
-  "just point OpenDSS at the grid" study would drift from pgml's reduced
-  model, not a bug.
+- ``mode="matched"`` (default) exports the harmonic DEVICE model the solve itself
+  uses, named by ``load_shunt``: each ``Load`` carries the resolved ``%SeriesRL``
+  (and ``puXharm`` / ``XRharm`` for the motor model), or the circuit is solved with
+  ``Set NeglectLoadY=Yes`` for the pure current-source model.  It also sets
+  ``Rg=Xg=0`` on every line-like element (pgml's non-geometry line models carry no
+  Carson earth-return correction), a tight snap-solve tolerance, and an effectively
+  unbounded ``Vminpu`` / ``Vmaxpu`` band on every load (pgml's load laws apply at any
+  voltage, unlike OpenDSS's default clipping band).  This isolates genuine numeric
+  agreement between the two harmonic engines, measured at roughly 1e-8 to 1e-9
+  relative voltage error on single-phase feeder cases and roughly 1e-6 on the
+  three-phase CIGRE LV benchmark.  ``NeglectLoadY`` is a GLOBAL OpenDSS option, so a
+  grid that mixes per-device shunt overrides cannot be matched device by device; the
+  exporter says so by name.
+- ``mode="default"`` leaves OpenDSS's own defaults (imperial-calibrated earth
+  return, the default voltage-clip band) — a deliberate, documented divergence
+  characterizing how far a naive "just point OpenDSS at the grid" study would
+  drift from a matched comparison.
+
+A grid carrying a generation device cannot be compared in ``mode="matched"``
+without setting ``appliance.harmonic_shunt.generation_model`` to ``"load_style"``:
+OpenDSS gives the exported negative-kW ``Load`` its own operating-point shunt,
+which pgml's shipped policy deliberately withholds from an injecting device.  The
+refusal names both ways out.  See the DER section of
+:doc:`/pgml/modeling/der-pv-storage`.
 
 ::
 
@@ -226,15 +233,17 @@ model:
     report = compare_to_pgml(grid, sampled, harmonic_orders=[1, 5, 7, 11])
     # report["per_order"][5]  ->  {"rel_mean": ..., "rel_p95": ..., "rel_max": ..., ...}
 
-    # An independent, provenance-stamped test set for pgl.
+    # An independent, provenance-stamped test set.
     write_opendss_dataset(grid, sampled, "data/opendss_testset", harmonic_orders=[1, 5, 7])
     # meta.json gains engine="opendss", oracle_mode, opendssdirect_version, ...
 
 :func:`~pgml.evaluation.oracles.compare_to_pgml` runs
 :func:`~pgml.evaluation.oracles.run_opendss_scenarios` (the ground truth) and
 :func:`pgml.scenarios.run_scenarios` on the *identical*
-:class:`~pgml.scenarios.SampledScenarios` and reports, per harmonic order, the
-absolute and RMS-relative voltage error. Its ``slack`` argument defaults to
+:class:`~pgml.scenarios.SampledScenarios` — from a
+:class:`~pgml.scenarios.ScenarioConfig`, from
+:func:`~pgml.scenarios.batch_from_values`, or from any scenario spec — and reports,
+per harmonic order, the absolute and RMS-relative voltage error. Its ``slack`` argument defaults to
 ``"norton"`` rather than pgml's own library default (``"ideal"``): an OpenDSS
 ``Vsource`` always behaves as a finite-impedance Thévenin source, so comparing
 against pgml's ideal-slack solve on a grid with non-negligible source
@@ -244,7 +253,7 @@ the OpenDSS-solved result through :func:`pgml.scenarios.write_dataset`
 unchanged and stamps ``meta.json`` with ``engine="opendss"`` plus the
 OpenDSS/``opendssdirect`` version, so a dataset generated this way is never
 mistaken for a pgml-generated one and reads back through
-:func:`pgml.scenarios.read_dataset` / any ``pgl`` data source unmodified.
+:func:`pgml.scenarios.read_dataset` unmodified.
 
 The exporter covers every branch and appliance type in the schema (a
 ``Generator``/``Storage`` exports as a negative-kW ``Load`` — a genuine
@@ -266,11 +275,9 @@ coverage and refusal list.
 Oracle subpackage reference
 ------------------------------
 
-:mod:`pgml.evaluation.oracles` is documented separately below (a package-level
-``automodule``, the same pattern used for ``pgl``'s multi-submodule re-exporting
-packages — see e.g. :doc:`/pgl/api/data`): unlike :mod:`pgml.evaluation` itself, it
-requires the ``oracles`` extra (``pandapower``/``opendssdirect``) and is never imported
-by the plotting side.
+:mod:`pgml.evaluation.oracles` is documented separately below, as one package-level
+``automodule``. Unlike :mod:`pgml.evaluation` itself it requires the ``oracles`` extra
+(``pandapower`` and ``opendssdirect``), and the plotting side never imports it.
 
 .. automodule:: pgml.evaluation.oracles
    :members:

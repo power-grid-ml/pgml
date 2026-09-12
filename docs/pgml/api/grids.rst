@@ -2,14 +2,13 @@ pgml.grids
 ==========
 
 Reference grid builders: pandapower → pgml :class:`~pgml.schemas.grid_schema.Grid`, with
-optional geometry, converter harmonic spectra, and a state-estimation benchmark recipe.
+optional conductor geometry and converter harmonic spectra.
 Also :func:`~pgml.grids.synthetic_feeder`, a schema-only synthetic feeder of arbitrary size
 for solver scaling and topology-batching studies.
 
 Most builders convert a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
-pandapower.  These are the suite's canonical INPUT grids — training-data generation,
-examples, and the oracle comparison tests all build on them — so they live in the core
-package rather than the evaluation oracles.  :mod:`pgml.evaluation.oracles.grids`
+pandapower.  They are the canonical input grids for the examples and the oracle
+comparison tests, so they live in the core package rather than the evaluation oracles.  :mod:`pgml.evaluation.oracles.grids`
 re-exports the builders unchanged for existing importers.
 
 Importing :mod:`pgml.grids` itself has no heavy dependency; each pandapower-backed builder
@@ -67,36 +66,21 @@ Synthetic feeder (solver scaling benchmarks)
   ``branch_states`` switch-state batching (see the "Topology / switch-state
   batching" section of :doc:`solver`).
 
-State-estimation benchmark
----------------------------
+Distributed generation and harmonic emission
+----------------------------------------------
 
 - :func:`~pgml.grids.add_pv_systems` — attaches a unity-power-factor PV
   :class:`~pgml.schemas.grid_schema.Generator` (tagged ``consumer_type="pv"``) to a
   fraction of a grid's load nodes, mirroring each host load's node/phases and rated at
   half its nameplate active power.
-- :func:`~pgml.grids.se_benchmark_scenario_config` — a thin front door onto the ONE
-  calibrated recipe every state-estimation generator in the suite shares
-  (:func:`pgml.scenarios.se_random_scenario_config`, see :doc:`scenarios`'s "Calibrated
-  state-estimation presets" section): correlated load levels through a shared latent, a
-  small per-phase unbalance, a slack-voltage draw, and a per-device IEC 61000-3-2-referenced
-  harmonic spectrum with per-order emission-phase diversity (orders
-  :data:`~pgml.grids.LOAD_HARMONIC_ORDERS`), plus — when the grid carries PV — one shared
-  irradiance scale for all PV plus a per-inverter harmonic signature (orders
-  :data:`~pgml.grids.PV_HARMONIC_ORDERS`)::
+- :data:`~pgml.grids.LOAD_HARMONIC_ORDERS` and :data:`~pgml.grids.PV_HARMONIC_ORDERS` —
+  the order sets a converter load and a PV inverter emit on, and
+  :data:`~pgml.grids.CONVERTER_SPECTRUM` the six-pulse spectrum the builders attach.
 
-      from pgml.grids import (
-          add_pv_systems, se_benchmark_scenario_config, cigre_lv_full_grid,
-      )
-
-      grid, _ = cigre_lv_full_grid()
-      add_pv_systems(grid, fraction=0.5)
-      cfg = se_benchmark_scenario_config(grid, n_samples=512, seed=0)
-
-  Sharing the ONE builder (rather than each caller assembling its own specs) is what keeps
-  this benchmark, the training-workflow datasets, and the multi-grid corpus from drifting
-  apart: the dataset-generation examples and the ``pgl`` test fixtures all build from it, so
-  what a state-estimation model trains on cannot silently diverge from what the documented
-  benchmark generates.
+The builders here produce input GRIDS.  How a BATCH over such a grid is drawn — which
+quantities vary, over what ranges — is a study's decision rather than the engine's: build one
+from :class:`~pgml.scenarios.ScenarioConfig`, or hand explicit values to
+:func:`~pgml.scenarios.batch_from_values`.  See :doc:`scenarios`.
 
 .. automodule:: pgml.grids
    :members:

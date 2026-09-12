@@ -23,20 +23,15 @@ reproduce.
 What consumes it
 -----------------
 
-Every persisted artifact in the suite that a reader might later need to tell apart from a
-sibling written under different code now carries this stamp:
+Write it alongside any artifact a reader might later need to tell apart from one written
+under different code.
 
-- :func:`~pgml.scenarios.generation_provenance` — folds :func:`~pgml.provenance.code_provenance`
-  into a dataset's ``meta.json`` alongside the device-library version and the active EN 50160 /
-  IEC 61000-3-2 standards tables (see :doc:`scenarios`'s "Generation provenance" section).
-- :class:`~pgl.data.MultiGridManifest` — stamps a multi-grid corpus's ``manifest.json`` the same
-  way (``provenance``, ``device_library_version``, ``standards``).
-- ``pgl.train.SEModule.on_save_checkpoint`` — stamps every Lightning checkpoint's
-  ``pgml_provenance`` key, so a checkpoint records which code trained it independently of its
-  ``pgl_config`` (see :doc:`/pgl/api/train`).
-- The suite's cluster submission pipeline (``run/cluster/submit.sh`` in the ``power-grid-suite`` repository)
-  appends a record — commit, dirty
-  flag, hosts, command line — to a run directory's own ``code_provenance.json`` at submit time.
+- :func:`~pgml.scenarios.generation_provenance` folds
+  :func:`~pgml.provenance.code_provenance` into a dataset's ``meta.json``, alongside the
+  active EN 50160 and IEC 61000-3-2 standards tables (see :doc:`scenarios`'s "Generation
+  provenance" section).
+- A downstream consumer stamps the same dict into its own manifests, model checkpoints and
+  run directories, so each of those records which code produced it.
 
 Resolving the commit without ``.git``
 --------------------------------------

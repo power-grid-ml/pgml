@@ -17,6 +17,9 @@ into a per-frequency complex nodal admittance matrix ``Y(f)``
   existing ``(node, phase)`` pair rather than a padded A/B/C/N grid.
 - Lines with ``conductor_geometry`` use the :mod:`pgml.geometry` Carson/Deri
   path; otherwise explicit R/L/G/C per metre are used.
+- A branch with exactly zero series impedance has no stamp; its terminal rows are
+  collapsed instead (see "Bus fusion" below), so the assembled system can be
+  smaller than the grid's own row count.
 
 Symmetric vs asymmetric calculation
 ------------------------------------
@@ -120,6 +123,60 @@ batching — see the ``branch_states`` section of :doc:`solver` for the
 solve-level behaviour (differentiable topology search, per-scenario
 connectivity checking) and :func:`~pgml.grids.synthetic_feeder`'s
 ``tie_switches`` for a ready-made grid to exercise it on.
+
+Bus fusion: the ideal (zero-impedance) branch
+-----------------------------------------------
+
+A branch whose series impedance is exactly zero — a closed switch with no impedance data, a
+bus coupler or jumper modelled as a zero-impedance line, a zero-length line — has no
+primitive admittance, because the nodal formulation inverts every branch's series impedance.
+What the element states is an equality: its two terminals carry the same voltage.  Under the
+documented default ``branch.zero_impedance: fuse`` the assembly imposes exactly that by
+collapsing the branch's terminal node-phase rows into ONE row of the matrix it builds.
+
+:func:`~pgml.assembly.fusion_map` returns the :class:`~pgml.assembly.FusionMap` for a grid
+(``None`` when the grid has no such branch), and
+:func:`~pgml.assembly.zero_impedance_branches` lists the candidates with the reason each one
+is or is not fusable.  :func:`~pgml.assembly.assemble_ybus` and
+:func:`~pgml.assembly.assemble_network_ybus` take ``fusion=`` as a map, ``True`` to build
+one, ``False`` to refuse, or ``None`` for the documented default, and the resulting
+:class:`~pgml.assembly.YBus` carries it.  A fused ``Y`` is ``[*batch, H, M, M]`` with ``M``
+the reduced row count.
+
+The map is a many-to-one row relabelling, so it is cheap and exact:
+
+- ``prolong(v_red)`` spreads an ``[..., M]`` reduced solution back to ``[..., N]`` by gather,
+  which is what every public result reports.
+- ``restrict(x_full)`` sums an ``[..., N]`` vector into ``[..., M]``, the adjoint of
+  ``prolong``, which is what the injections and the current balance use.
+- ``sample(x_full)`` takes the representative row of each group instead of summing, for a
+  quantity that is equal across a group rather than additive, such as the converged
+  fundamental voltage a harmonic assembly reads.
+- ``reduce_rows`` maps a row SET (the slack rows, a block partition) to the reduced layout,
+  and ``duplicate_rows`` reports which full rows share a reduced one.
+
+The reduced system satisfies ``Y_red = Pᵀ Y P`` with ``P`` the prolongation, so the fused
+solve is the exactly constrained one and not an approximation.  A zero-impedance branch that
+can be neither stamped nor fused is refused by name, with the fix stated: a
+:class:`~pgml.schemas.grid_schema.Transformer`, whose ratio and vector group relate its
+terminals by more than equality; a zero-series branch that still carries a shunt admittance; a
+branch the caller put under a ``branch_states`` sweep; and a branch between two nodes of
+different rated voltage, which is a data error.  A solve additionally refuses a fused group
+that would collapse two slack terminals or two regulating terminals into one row, which
+``duplicate_rows`` detects.  Two ideal branches in parallel leave a circulating current
+undetermined; they land in one group, the reported current split is the minimum-norm one, and
+the branch ids appear in ``indeterminate_branch_ids`` and in a warning.
+
+``param_overrides`` decides the question, because fusion reads the EFFECTIVE impedance.  A
+branch whose zero impedance is overridden by a finite leaf stays stamped and keeps its
+gradient; a substitution of zero fuses.
+
+:func:`~pgml.assembly.branch_currents` takes the same ``fusion=`` map and recovers the
+current through a fused branch from Kirchhoff's law at the fused node, optionally given the
+nodal injection ``i_inj=`` so that a device shunt contributes its share.  The gradient of a
+fused branch's own series parameters with respect to any output is structurally zero, since
+those parameters no longer enter the system; every other gradient is unchanged.  Tensors are
+int64 and follow ``FusionMap.to(device)``.
 
 Performance: precomputed injection plans
 -------------------------------------------
