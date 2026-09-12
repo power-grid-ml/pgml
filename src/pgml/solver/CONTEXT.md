@@ -483,9 +483,9 @@ verified empirically). New orchestration:
      batch costs `B·Hh` factorizations; `"nameplate"` uses the device's stored P, Q at its
      rated terminal voltage, so `Y(h)` stays `[Hh, N, N]` and one factorization per order
      serves the whole batch. Measured on a 294-row Kerber feeder at 13 orders, CPU,
-     complex128, sparse backend, batch 256: 72.8 against 1513 studies/s (21x), with the
-     no-shunt bound at 1992; on three-phase CIGRE LV (132 rows, dense) 322 against 4076
-     studies/s (13x), bound 4336. The price is a model error wherever a scenario's loading
+     complex128, sparse backend, batch 256: 66-73 against 1513-2008 studies/s (21-31x),
+     with the no-shunt bound at 1830-1992; on three-phase CIGRE LV (132 rows, dense)
+     282-322 against 4038-4076 studies/s (13-14x), bound 3606-4336. The price is a model error wherever a scenario's loading
      differs from nameplate — the shunt is then the nameplate load's, measured against a
      live OpenDSS carrying the scenario's own kW (IEEE-33, orders 3…25, pu of nominal):
      2.1e-4 at 0.5x and 6.7e-4 at 1.5x loading, and 4.1e-3 / 1.0e-2 with a 370 kvar bank

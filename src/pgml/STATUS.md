@@ -81,9 +81,9 @@ decisions. One entry per capability:
   chunks bounded by `solver.harmonic.system_budget_mb` (1024 scenarios of a 294-row grid at
   13 orders would otherwise ask for an 18 GB matrix). `load_shunt_basis="nameplate"` trades
   that for the nameplate load's shunt, which is scenario-independent: measured on CPU,
-  complex128, batch 256, 13 orders — 72.8 -> 1513 studies/s on the 294-row Kerber feeder
-  (sparse) and 322 -> 4076 on three-phase CIGRE LV (dense), against a no-shunt bound of
-  1992 and 4336 — at a harmonic-voltage error against a live OpenDSS carrying the
+  complex128, batch 256, 13 orders — 66-73 -> 1513-2008 studies/s on the 294-row Kerber
+  feeder (sparse) and 282-322 -> 4038-4076 on three-phase CIGRE LV (dense), i.e. the
+  no-shunt throughput — at a harmonic-voltage error against a live OpenDSS carrying the
   scenario's own kW of 2.1e-4 pu at half load, 6.7e-4 pu at 1.5x load and up to 1.0e-2 pu
   on a parallel resonance, where the shunt IS the damping.
 - **Voltage-regulating generators (PV terminals)** — a `Generator` with a
