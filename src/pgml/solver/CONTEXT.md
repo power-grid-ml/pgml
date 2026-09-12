@@ -698,10 +698,12 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   k=384). Voltages agree with the assemble path to ~1e-12 relative.
 - `prepare_power_flow(grid, *, slack, dtype, precision, device, param_overrides,
   branch_states, branch_states_method, linear_solver, block_rows, equilibrate)
-  -> PowerFlowSystem` (which also carries `row_abs_scale`, the `Σ_j |Y_ij| V_base,j` the
-  mismatch criterion's per-row floor is built from: a property of the network and the
-  rated voltages, so the prepared path no longer pays a full `|Y|` pass — 7.6 ms on a
-  1176-row feeder at complex128, CPU — on every solve) +
+  -> PowerFlowSystem` (which also carries the STRUCTURAL quantities a reusing solve would
+  otherwise rebuild per call: `row_abs_scale`, the `Σ_j |Y_ij| V_base,j` the mismatch
+  criterion's per-row floor is built from — a property of the network and the rated
+  voltages, so the prepared path pays no full `|Y|` pass (7.6 ms on a 1176-row feeder at
+  complex128, CPU) per solve; `full_index`, the grid's own N-row layout the result is
+  reported on; and `v_base`, the line-to-neutral per-unit base of every row) +
   `solve_power_flow(..., system=...)` — assembly + slack rows + factorization +
   grid-leaf walk once, reused across repeated solves (the `run_scenarios` chunk
   loop shares one system). Forward-only reuse: the IFT backward always rebuilds
@@ -923,7 +925,8 @@ system (`pgml.assembly.fusion_map`, `assembly/CONTEXT.md` rev 3) instead of refu
   symmetry, dtype, device, param_overrides, index) -> [*batch, Hh, N]` returns that
   shunt term, and `pgml.simulation.SolvedState.branch_currents()` subtracts it.
 
-`check_branch_impedances(grid, *, fusion=None, param_overrides=None) -> None` — the
+`check_branch_impedances(grid, *, fusion=None, param_overrides=None, zero_branches=None)
+-> None` — the
 pre-solve gate, which answers the STRUCTURAL question "is every in-service branch
 stampable?" when called with no map (unchanged behaviour, and the message now names exact
 bus fusion as a third way out next to the documented near-ideal series resistance
@@ -934,7 +937,10 @@ by more than equality), a zero-series branch that still carries a shunt admittan
 (fusing would drop that shunt), and a zero-impedance branch listed in `branch_states` (a
 swept branch is reached by scaling a stamped admittance; the two mechanisms are mutually
 exclusive by construction). `param_overrides` makes the check read the EFFECTIVE impedance
-the stamps will use. Values are read under `no_grad` (structural, never on the tape) and a
+the stamps will use, and `zero_branches` passes in the
+`pgml.assembly.zero_impedance_branches` list the caller already holds, so a solve walks
+the branch list ONCE for the map and the gate together instead of once per consumer.
+Values are read under `no_grad` (structural, never on the tape) and a
 `conductor_geometry` line is skipped (the geometry path always yields a finite impedance).
 
 # =====================================================================

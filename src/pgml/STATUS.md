@@ -288,6 +288,44 @@ per-device `R + jX` or a frequency curve) with its stamp. **Where.**
 
 ### D. Smaller follow-ups (no decision needed)
 
+- **The mismatch floor's `|Y|` pass on the one-shot path**: the per-row precision floor of
+  the power-mismatch criterion needs `Σ_j |Y_ij| V_base,j`, one read of the whole
+  admittance matrix per solve (measured inside a solve, complex128, CPU: 0.07 ms at 33 rows,
+  1.8 ms at 294, 59 ms at 2400, i.e. up to 18 % of a single unbatched solve). A prepared system
+  carries it (`PowerFlowSystem.row_abs_scale`), so a scenario run pays it once per grid;
+  a caller that solves one grid repeatedly through the one-shot entry point pays it per
+  call. Cheaper formulations were measured and do not pay: the bound `|Y| <= |Re| + |Im|`
+  (no square root) is 8x faster at 294 rows but only 10 % faster at 2400, because at that
+  size the pass is memory-bandwidth-bound rather than arithmetic-bound (isolated on a dense
+  matrix of the same size: 1.06 ms against 0.12 ms at 294 rows, 41 ms against 37 ms at 2400). The remedy is
+  either to document `prepare_power_flow` as the repeated-solve entry point or to derive
+  the row scale from the branch stamps during assembly. WHERE:
+  `src/pgml/solver/power_flow.py` (`_abs_row_scale`, `_PuConvergence`).
+- **The prepared system's staleness guard costs a grid serialization per solve**:
+  `solve_power_flow(system=...)` verifies `network_fingerprint(grid)`, which serializes
+  every branch to JSON — measured 0.18 ms at 33 rows, 1.5 ms at 294 and 4.9 ms at 2400,
+  which is 4 % to 11 % of a prepared solve (the path a scenario generator uses). The check
+  is what turns a silently stale factorization into an error, so it should not simply be
+  dropped; a cheaper witness (a mutation counter on the grid, or verifying once per
+  `(system, grid)` pair and accepting mutation between calls) is a contract decision,
+  and serializing the branch list in one pydantic call instead of per branch was measured
+  NOT to be faster. WHERE: `src/pgml/solver/power_flow.py`, `src/pgml/topology.py`.
+- **The Bessel skin multiplier above the fundamental**: the positive-sequence / sequence-
+  aware line model fits an equivalent `Rdc` with twelve fixed-point steps, each evaluating
+  a forty-term continued fraction, and then evaluates it once more per frequency. Measured
+  complex128, CPU, 13 orders: 4.9 ms for 32 lines, 10 ms for 294, 49 ms for 2400, of which
+  the fit is 3.2 ms at any size (it is complex-division bound). The fit converges to
+  machine precision in about five steps for distribution resistances, so `iters` is three
+  times what it needs, but reducing it moves the last bits of every harmonic impedance.
+  A per-grid cache is not available either: the multiplier is differentiable in `R1`, so a
+  parameter fit changes it on every call. WHERE: `src/pgml/geometry/sequence.py`
+  (`fit_equivalent_rdc`), `src/pgml/geometry/carson.py` (`i0_over_i1`).
+- **A harmonic study resolves the zero-impedance structure twice**: `solve_harmonic_flow`
+  resolves it for the study and its inner `solve_power_flow` resolves it again, because
+  `solve_power_flow` has no way to accept an already-resolved structure (`system=` is the
+  only such channel and it also carries a factorization). A structure-only hand-off would
+  save one branch walk per study (0.2 ms at 294 branches, 0.6 ms at 799). WHERE:
+  `src/pgml/solver/harmonic_flow.py`, `src/pgml/solver/power_flow.py`.
 - **Equilibrate the sparse backend without a dense pass**: the symmetric scaling writes one
   full `[N, N]` copy, which on the SuperLU path costs as much as the factorization itself
   (measured on a 1176-row feeder, complex128, CPU: 6.7 ms of scaling against a 7.0 ms

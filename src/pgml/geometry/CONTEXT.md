@@ -65,6 +65,12 @@ internal + geometric, earth return lives only in `Z0`. So `X1(h) = X1·h` (geome
   `R1·m_skin(h) + j·X1·(f/f0)`. `X` scales ∝ h to floating point; differentiable in R1/X1.
 - `skin_resistance_multiplier(r1, f0, freqs) -> m[*B, H]` (`m(f0)=1`): Bessel `I0/I1`
   internal-resistance growth, earth term dropped. `fit_equivalent_rdc(r1, f0, freqs_ref)`.
+  A request for the REFERENCE frequency alone returns ones directly: `m(f0)` is the exact
+  constant 1 for every `R1` (numerator and denominator are the same expression) with an
+  exactly zero derivative, and evaluating it anyway cost a twelve-step fit plus two
+  forty-term continued fractions — which is what every FUNDAMENTAL assembly of a feeder
+  with this line model was paying (4 ms of a 9.5 ms IEEE-33 solve, CPU, complex128). The
+  shortcut is skipped while `freqs` or `f0` carries a gradient.
 - `two_conductor_geometry(r1, x1, f0, *, radius_m, ...) -> dict` + `two_conductor_loop_z(geom,
   freqs) -> Z[H]`: a PHYSICAL go/return Carson loop (reuses `series_impedance` with
   `internal_inductance="gmr"` PINNED, matching `positive_sequence_z`'s strictly
