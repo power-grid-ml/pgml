@@ -76,7 +76,16 @@ decisions. One entry per capability:
   devices, orders and scenarios. Validated against a live OpenDSS `YPrim` to 4.7e-16
   relative and end to end to 1.6e-12 pu of nominal on IEEE-33, 1.3e-9 on the
   Carson-geometry feeder and 4.5e-9 on three-phase CIGRE LV, at `%SeriesRL` 0/50/100 and
-  with the motor branch.
+  with the motor branch. Because the shunt follows the scenario, so does `Y(h)`: a batch of
+  B scenarios costs B factorizations per order, and the system is assembled and factored in
+  chunks bounded by `solver.harmonic.system_budget_mb` (1024 scenarios of a 294-row grid at
+  13 orders would otherwise ask for an 18 GB matrix). `load_shunt_basis="nameplate"` trades
+  that for the nameplate load's shunt, which is scenario-independent: measured on CPU,
+  complex128, batch 256, 13 orders — 72.8 -> 1513 studies/s on the 294-row Kerber feeder
+  (sparse) and 322 -> 4076 on three-phase CIGRE LV (dense), against a no-shunt bound of
+  1992 and 4336 — at a harmonic-voltage error against a live OpenDSS carrying the
+  scenario's own kW of 2.1e-4 pu at half load, 6.7e-4 pu at 1.5x load and up to 1.0e-2 pu
+  on a parallel resonance, where the shunt IS the damping.
 - **Voltage-regulating generators (PV terminals)** — a `Generator` with a
   `VoltageRegulation` block (setpoint in per unit of the node rating, reactive limits,
   positive-sequence or per-phase regulated magnitude) has its terminal's REACTIVE

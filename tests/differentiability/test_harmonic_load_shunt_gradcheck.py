@@ -206,3 +206,71 @@ def test_assembled_system_carries_the_shunt_gradient():
     y.abs().sum().backward()
     assert p.grad is not None and torch.isfinite(p.grad).all()
     assert float(p.grad.abs().sum()) > 0.0
+
+
+def _solve_batched(p, *, budget_bytes=None, basis=None):
+    """A 3-scenario batched harmonic study, differentiable in the batched load power."""
+    import pgml.solver.harmonic_flow as hf
+
+    grid = _two_bus()
+    op = {30: {"p_w": p, "q_var": torch.full_like(p, 500.0)}}
+    kw = {} if basis is None else {"load_shunt_basis": basis}
+    if budget_bytes is not None:
+        orig = hf._harmonic_system_budget_bytes
+        hf._harmonic_system_budget_bytes = lambda: budget_bytes
+        try:
+            return solve_harmonic_flow(
+                grid, [1, 5, 7], dtype=CDT, operating_point=op, **kw
+            ).v.reshape(-1)
+        finally:
+            hf._harmonic_system_budget_bytes = orig
+    return solve_harmonic_flow(
+        grid, [1, 5, 7], dtype=CDT, operating_point=op, **kw
+    ).v.reshape(-1)
+
+
+def test_gradcheck_through_the_chunked_scenario_batch():
+    """A batch whose per-scenario ``Y(h)`` is assembled in chunks stays differentiable.
+
+    The chunked path concatenates per-chunk solves, so the gradient has to flow through
+    the concatenation into every chunk's own assembly and factorization.
+    """
+    p = torch.tensor([1500.0, 2000.0, 2500.0], dtype=torch.float64, requires_grad=True)
+    assert torch.autograd.gradcheck(
+        lambda x: _solve_batched(x, budget_bytes=1),
+        (p,),
+        eps=1e-4,
+        atol=1e-6,
+        rtol=1e-4,
+    )
+
+
+def test_chunked_and_whole_batch_gradients_agree():
+    """Chunking must not change the gradient, only the peak allocation."""
+
+    def grad(budget):
+        p = torch.tensor(
+            [1500.0, 2000.0, 2500.0], dtype=torch.float64, requires_grad=True
+        )
+        _solve_batched(p, budget_bytes=budget).abs().sum().backward()
+        return p.grad.detach().clone()
+
+    g_whole = grad(None)
+    g_chunked = grad(1)  # one scenario per chunk
+    assert torch.allclose(g_whole, g_chunked, rtol=1e-12, atol=0.0)
+
+
+def test_gradcheck_on_the_nameplate_basis():
+    """The nameplate basis keeps the scenario power on the tape through the injection.
+
+    ``Y(h)`` no longer depends on the scenario, but the harmonic current injection still
+    does, so the gradient w.r.t. a batched load power must stay exact.
+    """
+    p = torch.tensor([1500.0, 2000.0, 2500.0], dtype=torch.float64, requires_grad=True)
+    assert torch.autograd.gradcheck(
+        lambda x: _solve_batched(x, basis="nameplate"),
+        (p,),
+        eps=1e-4,
+        atol=1e-6,
+        rtol=1e-4,
+    )

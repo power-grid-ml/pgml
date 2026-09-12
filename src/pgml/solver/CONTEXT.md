@@ -330,7 +330,7 @@ verified empirically). New orchestration:
 
 - `solve_harmonic_flow(grid, harmonic_orders, *, slack="ideal", method="current_injection",
      operating_point=None, harmonic_injection=None, node_sources=None,
-     load_shunt=None, tol=None, tol_update_pu=None, s_base_va=None,
+     load_shunt=None, load_shunt_basis=None, tol=None, tol_update_pu=None, s_base_va=None,
      max_iter=100, dtype=torch.complex128, precision="full",
      device=None, symmetry=None, on_disconnected="raise", branch_states=None,
      branch_states_method="assemble", param_overrides=None, enforce_q_limits=None,
@@ -412,7 +412,8 @@ verified empirically). New orchestration:
   The nodal-injection input a fused branch's current recovery needs
   (`pgml.assembly.branch_currents(..., i_inj=…)`).
 - `assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point=None,
-     harmonic_injection=None, node_sources=None, load_shunt=None, symmetry=None,
+     harmonic_injection=None, node_sources=None, load_shunt=None, load_shunt_basis=None,
+     symmetry=None,
      dtype=torch.complex128, device=None, branch_states=None, param_overrides=None,
      fusion=None) -> (Y, I, index)`
   - Exposes the per-harmonic LINEAR system `Y(h) V(h) = I(h)` for orders `h > 1` —
@@ -458,10 +459,39 @@ verified empirically). New orchestration:
      `Mᵗ diag(y_elem) M` through the SAME incidence the injection uses
      (`pgml.assembly._load_shunt`, `_stamp_harmonic_load_shunt`). A per-device
      `HarmonicShuntModel` overrides the model; a per-scenario operating point makes
-     `Y(h)` `[*batch, Hh, N, N]`. A GENERATION device carries no shunt under the shipped
+     `Y(h)` `[*batch, Hh, N, N]`, which `load_shunt_basis` governs (below). A GENERATION device carries no shunt under the shipped
      `appliance.harmonic_shunt.generation_model = none` (the expression's conductance is
      negative for an injecting device), with one WARNING per solve naming how many were
      left as pure current sources.
+   - `load_shunt_basis` decides WHICH power and terminal voltage that `Y_eq` is built
+     from, and with it whether `Y(h)` is shared across a scenario batch:
+     `"operating_point"` (the shipped default `appliance.harmonic_shunt.basis`) uses this
+     scenario's power at the solved fundamental terminal voltage — what OpenDSS's own
+     `YPrim` does with its Load's specified kW/kvar — so `Y(h)` is `[B, Hh, N, N]` and a
+     batch costs `B·Hh` factorizations; `"nameplate"` uses the device's stored P, Q at its
+     rated terminal voltage, so `Y(h)` stays `[Hh, N, N]` and one factorization per order
+     serves the whole batch. Measured on a 294-row Kerber feeder at 13 orders, CPU,
+     complex128, sparse backend, batch 256: 72.8 against 1513 studies/s (21x), with the
+     no-shunt bound at 1992; on three-phase CIGRE LV (132 rows, dense) 322 against 4076
+     studies/s (13x), bound 4336. The price is a model error wherever a scenario's loading
+     differs from nameplate — the shunt is then the nameplate load's, measured against a
+     live OpenDSS carrying the scenario's own kW (IEEE-33, orders 3…25, pu of nominal):
+     2.1e-4 at 0.5x and 6.7e-4 at 1.5x loading, and 4.1e-3 / 1.0e-2 with a 370 kvar bank
+     that puts a parallel resonance at order 6.9, against 6e-13 … 3e-11 for the
+     operating-point basis. For a constant-power device the two bases are IDENTICAL at
+     nameplate loading (`Y_eq` reads the RATED voltage on both).
+   - The `"operating_point"` basis assembles and factors the batch in SCENARIO CHUNKS that
+     fit `solver.harmonic.system_budget_mb` (default 1 GiB, charged the matrix plus its
+     factorization): `_solve_harmonic_orders` / `_harmonic_chunk`. Without it, 1024
+     scenarios of a 294-row grid at 13 orders ask for an 18 GB matrix. Inside a chunk
+     there is no Python loop over orders or scenarios — one `lu_factor_system` call
+     factors every `(scenario, order)` system of the chunk, so the batched dense/CUDA path
+     is one call and the sparse path is one SuperLU per system — and a batched `Y(h)` now
+     honours `linear_solver` (it went through the dense direct solve before). Gradients
+     flow through the concatenation (`tests/differentiability/
+     test_harmonic_load_shunt_gradcheck.py` pins chunked == whole-batch gradients to
+     `rtol=1e-12`). A deeper-than-flat scenario batch or a batched `node_source` keeps the
+     whole-batch path.
    - `I(h)` = sum of per-device harmonic injections using the verified convention
      `|I_h|=(mag_h/mag_1)|I1|`, `arg(I_h)=ang_h + h·(arg(I1) − ang_1)` from each
      device's `Spectrum` (or the `harmonic_injection` override).

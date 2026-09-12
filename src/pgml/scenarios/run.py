@@ -155,6 +155,7 @@ def run_scenarios(
     slack: str = "ideal",
     symmetry: Optional[str] = None,
     load_shunt: Optional[str] = None,
+    load_shunt_basis: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     chunk_size: Optional[int] = None,
@@ -195,6 +196,12 @@ def run_scenarios(
         only. A shunt derived from a PER-SCENARIO operating point makes ``Y(h)``
         scenario-dependent, so each scenario is factored on its own — ``"none"`` keeps
         the single shared factorization.
+    load_shunt_basis:
+        Which power and terminal voltage that shunt is built from
+        (:func:`~pgml.solver.solve_harmonic_flow`): ``"operating_point"`` follows each
+        scenario, ``"nameplate"`` uses the device's stored P, Q at its rated voltage and
+        so keeps ONE factorization per order for the whole batch. ``None`` = the
+        documented modeling default ``appliance.harmonic_shunt.basis``.
     symmetry:
         Calculation symmetry forwarded to the solver: ``None`` / ``"auto"`` (default;
         per-phase sampled operating points auto-promote to asymmetric), ``"symmetric"``
@@ -269,6 +276,7 @@ def run_scenarios(
                 harmonic_injection=inj,
                 node_sources=list(sources) or None,
                 load_shunt=load_shunt,
+                load_shunt_basis=load_shunt_basis,
                 symmetry=symmetry,
                 dtype=dtype,
                 device=device,

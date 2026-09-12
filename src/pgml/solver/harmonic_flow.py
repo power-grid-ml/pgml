@@ -59,6 +59,7 @@ from typing import Literal, Optional, Sequence
 import torch
 from torch import Tensor
 
+from pgml import defaults
 from pgml.assembly import (
     FusionMap,
     NodePhaseIndex,
@@ -71,6 +72,7 @@ from pgml.assembly._load_shunt import (
     generation_shunt_is_neglected,
     harmonic_shunt_element_admittance,
     resolve_harmonic_shunt,
+    resolve_shunt_basis,
     resolve_shunt_model_name,
 )
 from pgml.assembly._params import phase_voltage_magnitude, resolve_operating_power
@@ -91,7 +93,7 @@ from pgml.schemas.grid_schema import (
 )
 
 from .equilibration import resolve_equilibration
-from .harmonic import lu_factor_system, solve_factored, solve_harmonic
+from .harmonic import lu_factor_system, solve_factored
 from .power_flow import (
     PowerFlowResult,
     _expand_zeroed_result,
@@ -227,6 +229,7 @@ def solve_harmonic_flow(
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
     load_shunt: Optional[str] = None,
+    load_shunt_basis: Optional[str] = None,
     tol: Optional[float] = None,
     tol_update_pu: Optional[float] = None,
     s_base_va: Optional[float] = None,
@@ -316,6 +319,18 @@ def solve_harmonic_flow(
         shunt is the dominant DAMPING term at a feeder parallel resonance and is
         derived from the CONVERGED fundamental operating point, so gradients flow
         from the harmonic voltages through it to P, Q and the network parameters.
+    load_shunt_basis:
+        Which power and terminal voltage the shunt admittance is built from.
+        ``"operating_point"`` uses the power the device draws in THIS scenario at the
+        solved fundamental terminal voltage, which is what OpenDSS's ``YPrim`` does with
+        its Load's specified kW/kvar; it makes ``Y(h)`` scenario-dependent, so a batch of
+        ``B`` scenarios needs ``B`` factorisations per order (and a ``[B, Hh, N, N]``
+        matrix, chunked against the documented memory budget
+        ``solver.harmonic.system_budget_mb``). ``"nameplate"`` uses the device's stored
+        P, Q at its rated terminal voltage, so ``Y(h)`` is the same for every scenario:
+        one factorisation per order for the whole batch, at the price of a shunt that
+        does not follow the loading. ``None`` (default) resolves the documented modeling
+        default ``appliance.harmonic_shunt.basis``; an unknown name raises.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
         ``"asymmetric"`` (``None`` -> config). Resolved ONCE here and threaded into
@@ -369,6 +384,7 @@ def solve_harmonic_flow(
         ``v`` complex ``[*batch, H, N]`` per requested order, frequencies, index, pf.
     """
     harmonic_shunt = resolve_shunt_model_name(load_shunt)
+    shunt_basis = resolve_shunt_basis(load_shunt_basis)
     orders = _integer_orders(harmonic_orders)
     fusion = resolve_fusion(
         grid, None, param_overrides=param_overrides, branch_states=branch_states
@@ -426,6 +442,7 @@ def solve_harmonic_flow(
                 harmonic_injection=harmonic_injection,
                 node_sources=node_sources,
                 load_shunt=harmonic_shunt,
+                load_shunt_basis=shunt_basis,
                 tol=tol,
                 tol_update_pu=tol_update_pu,
                 s_base_va=s_base_va,
@@ -492,7 +509,7 @@ def solve_harmonic_flow(
     harm = [h for h in orders if h != 1]
     v_by_order: dict[int, Tensor] = {1: _align_v1_batch_rank(v1, harmonic_injection)}
     if harm:
-        yh, ih, _ = assemble_harmonic_system(
+        vh = _solve_harmonic_orders(
             grid,
             harm,
             v1,
@@ -500,33 +517,21 @@ def solve_harmonic_flow(
             harmonic_injection=harmonic_injection,
             node_sources=node_sources,
             load_shunt=harmonic_shunt,
+            load_shunt_basis=shunt_basis,
             symmetry=sym_resolved,
             dtype=dtype,
             device=device,
             branch_states=branch_states,
             param_overrides=param_overrides,
             fusion=fusion,
+            backend=harmonic_backend,
+            # Each order is factored on the FUSED rows, so a block-diagonal ensemble's
+            # partition is mapped onto them as well.
+            block_rows=_reduce_block_rows(block_rows, fusion),
+            precision=precision,
+            equilibrate=eq_mode,
+            n_rows=index.size if fusion is None else fusion.index.size,
         )
-        # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
-        # case — the batch varies injections, not the network), factor each order ONCE
-        # and back-substitute the whole batch instead of re-factoring per scenario. A
-        # batched voltage node_source promotes Y(h) to [*batch, Hh, N, N]; that path keeps
-        # the per-element solve.
-        if yh.ndim == 3:
-            vh = solve_factored(
-                lu_factor_system(
-                    yh,
-                    backend=harmonic_backend,
-                    # Each order is factored on the FUSED rows, so a block-diagonal
-                    # ensemble's partition is mapped onto them as well.
-                    block_rows=_reduce_block_rows(block_rows, fusion),
-                    precision=precision,
-                    equilibrate=eq_mode,
-                ),
-                ih,
-            )
-        else:
-            vh = solve_harmonic(yh, ih, precision=precision, equilibrate=eq_mode)
         for k, h in enumerate(harm):
             # Each order is solved on the fused rows; report it on the grid's own.
             v_by_order[h] = (
@@ -542,6 +547,169 @@ def solve_harmonic_flow(
     return HarmonicFlowResult(
         v=v, frequencies_hz=frequencies_hz, index=index, pf=pf, fusion=fusion
     )
+
+
+def _harmonic_system_bytes(b: int, n_orders: int, n: int, cdt: torch.dtype) -> int:
+    """Bytes of a ``[b, Hh, N, N]`` harmonic system matrix at dtype ``cdt``."""
+    return b * n_orders * n * n * int(torch.empty((), dtype=cdt).element_size())
+
+
+def _harmonic_system_budget_bytes() -> int:
+    """The documented memory budget of one harmonic system chunk, in bytes."""
+    return int(
+        float(defaults.get("solver.harmonic.system_budget_mb")) * 1024.0 * 1024.0
+    )
+
+
+def _harmonic_chunk(b: int, n_orders: int, n: int, cdt: torch.dtype) -> int:
+    """How many scenarios' ``Y(h)`` fit the documented memory budget (at least one).
+
+    A device shunt on the ``"operating_point"`` basis makes ``Y(h)`` scenario-dependent,
+    so the assembled system is ``[B, Hh, N, N]``: 18 GB for 1024 scenarios of a 294-row
+    grid at 13 orders in complex128, which no host or accelerator absorbs. The budget
+    ``solver.harmonic.system_budget_mb`` decides how many scenarios are assembled and
+    solved at a time; one scenario is always attempted, because below that there is
+    nothing left to split.
+    """
+    # A chunk costs its matrix AND its factorization, which for a dense LU is a second
+    # copy of the same size (the sparse backend's SuperLU factors are smaller, so the
+    # dense cost bounds both).
+    per = 2 * _harmonic_system_bytes(1, n_orders, n, cdt)
+    return max(1, min(b, int(_harmonic_system_budget_bytes() // max(per, 1))))
+
+
+def _slice_batch(obj, sl: slice, b: int):
+    """``obj`` with every leading-batch axis of size ``b`` narrowed to ``sl``.
+
+    Slices the scenario axis of an ``operating_point`` or ``harmonic_injection``
+    mapping without touching anything else: a tensor whose leading dimension is the
+    batch is narrowed, a broadcast scalar or a ``[1, ...]`` tensor is passed through, and
+    per-element lists / tuples recurse. Autograd-safe (a basic slice is a view with a
+    gradient).
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, Tensor):
+        return obj[sl] if obj.ndim >= 1 and obj.shape[0] == b else obj
+    if isinstance(obj, dict):
+        return {k: _slice_batch(v, sl, b) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_slice_batch(e, sl, b) for e in obj)
+    return obj
+
+
+def _solve_harmonic_orders(
+    grid: Grid,
+    harm,
+    v1: Tensor,
+    *,
+    operating_point,
+    harmonic_injection,
+    node_sources,
+    load_shunt: str,
+    load_shunt_basis: str,
+    symmetry: str,
+    dtype: torch.dtype,
+    device,
+    branch_states,
+    param_overrides,
+    fusion,
+    backend: str,
+    block_rows,
+    precision: str,
+    equilibrate: str,
+    n_rows: int,
+) -> Tensor:
+    """Assemble and solve every harmonic order ``h > 1``, ``[*batch, Hh, N]``.
+
+    One factorization per order serves the whole scenario batch whenever ``Y(h)`` is
+    scenario-independent — the usual case, where a batch varies the injections and not
+    the network. A device shunt on the ``"operating_point"`` basis makes ``Y(h)``
+    per-scenario, and then the system is assembled and factored in SCENARIO CHUNKS that
+    fit ``solver.harmonic.system_budget_mb`` (:func:`_harmonic_chunk`): the batched
+    factorization stays one call per chunk on the dense and CUDA paths and one SuperLU
+    factorization per (scenario, order) on the sparse path, with no Python loop over
+    orders or scenarios inside a chunk. Gradients flow through the concatenation.
+
+    A deeper-than-flat scenario batch, a batched ``node_source`` or batched
+    ``branch_states`` keep the whole-batch path: their scenario axis is not the flat
+    leading axis the chunking narrows.
+    """
+
+    def solve_chunk(yh: Tensor, ih: Tensor) -> Tensor:
+        # Every system — one per order, or one per (scenario, order) — is factored by the
+        # requested backend in ONE call, so a batched Y(h) honours linear_solver instead
+        # of falling back to the dense direct solve.
+        return solve_factored(
+            lu_factor_system(
+                yh,
+                backend=backend,
+                block_rows=block_rows,
+                precision=precision,
+                equilibrate=equilibrate,
+            ),
+            ih,
+        )
+
+    def assemble(v1_in, op_in, inj_in):
+        return assemble_harmonic_system(
+            grid,
+            harm,
+            v1_in,
+            operating_point=op_in,
+            harmonic_injection=inj_in,
+            node_sources=node_sources,
+            load_shunt=load_shunt,
+            load_shunt_basis=load_shunt_basis,
+            symmetry=symmetry,
+            dtype=dtype,
+            device=device,
+            branch_states=branch_states,
+            param_overrides=param_overrides,
+            fusion=fusion,
+        )
+
+    b_scen = int(v1.shape[0]) if v1.ndim == 2 else 1
+    scenario_matrix = (
+        load_shunt != "none"
+        and load_shunt_basis == "operating_point"
+        and v1.ndim == 2
+        and b_scen > 1
+        and not node_sources
+    )
+    chunk = (
+        _harmonic_chunk(b_scen, len(harm), n_rows, _cdtype(dtype))
+        if scenario_matrix
+        else b_scen
+    )
+    if not scenario_matrix or chunk >= b_scen:
+        yh, ih, _ = assemble(v1, operating_point, harmonic_injection)
+        return solve_chunk(yh, ih)
+
+    _log.info(
+        "solve_harmonic_flow: the device shunt is built per scenario, so Y(h) is "
+        "[%d, %d, %d, %d] (%.1f MiB); assembling and factoring %d scenario(s) at a time "
+        "to stay inside the %.0f MiB budget (solver.harmonic.system_budget_mb). "
+        "load_shunt_basis='nameplate' keeps one factorization per order for the whole "
+        "batch instead.",
+        b_scen,
+        len(harm),
+        n_rows,
+        n_rows,
+        _harmonic_system_bytes(b_scen, len(harm), n_rows, _cdtype(dtype)) / 1024**2,
+        chunk,
+        _harmonic_system_budget_bytes() / 1024**2,
+    )
+    parts = []
+    for start in range(0, b_scen, chunk):
+        sl = slice(start, min(start + chunk, b_scen))
+        yh_c, ih_c = assemble(
+            v1[sl],
+            _slice_batch(operating_point, sl, b_scen),
+            _slice_batch(harmonic_injection, sl, b_scen),
+        )[:2]
+        parts.append(solve_chunk(yh_c, ih_c))
+    return torch.cat(parts, dim=0)
 
 
 def _expand_zeroed_harmonic_result(
@@ -585,6 +753,7 @@ def assemble_harmonic_system(
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
     load_shunt: Optional[str] = None,
+    load_shunt_basis: Optional[str] = None,
     symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
@@ -638,6 +807,18 @@ def assemble_harmonic_system(
         :func:`solve_harmonic_flow`). The shunt is derived from the operating point at
         the given ``v1``, so a per-scenario operating point or a batched ``v1``
         promotes ``Y`` to ``[*batch, Hh, N, N]``.
+    load_shunt_basis:
+        Which power and terminal voltage the shunt admittance is built from.
+        ``"operating_point"`` uses the power the device draws in THIS scenario at the
+        solved fundamental terminal voltage, which is what OpenDSS's ``YPrim`` does with
+        its Load's specified kW/kvar; it makes ``Y(h)`` scenario-dependent, so a batch of
+        ``B`` scenarios needs ``B`` factorisations per order (and a ``[B, Hh, N, N]``
+        matrix, chunked against the documented memory budget
+        ``solver.harmonic.system_budget_mb``). ``"nameplate"`` uses the device's stored
+        P, Q at its rated terminal voltage, so ``Y(h)`` is the same for every scenario:
+        one factorisation per order for the whole batch, at the price of a shunt that
+        does not follow the loading. ``None`` (default) resolves the documented modeling
+        default ``appliance.harmonic_shunt.basis``; an unknown name raises.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
         ``"asymmetric"`` (``None`` -> config), governing per-phase vs balanced load
@@ -730,6 +911,7 @@ def assemble_harmonic_system(
             cdt,
             rdt,
             device,
+            resolve_shunt_basis(load_shunt_basis),
         )
     ih = _harmonic_injections(
         grid,
@@ -852,6 +1034,7 @@ def assemble_harmonic_ybus(
     v1: Optional[Tensor] = None,
     operating_point: Optional[dict] = None,
     load_shunt: Optional[str] = None,
+    load_shunt_basis: Optional[str] = None,
     symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
@@ -879,8 +1062,11 @@ def assemble_harmonic_ybus(
         Iterable of integer orders ``h > 1`` (passing order 1 raises — the fundamental is the
         passive :func:`pgml.assembly.assemble_network_ybus` at ``f0`` with an ideal slack, not a
         Norton-shunted harmonic system).
-    v1, operating_point, load_shunt, symmetry:
-        The device-shunt inputs (same meaning as in :func:`assemble_harmonic_system`). With
+    v1, operating_point, load_shunt, load_shunt_basis, symmetry:
+        The device-shunt inputs (same meaning as in :func:`assemble_harmonic_system`;
+        ``load_shunt_basis="nameplate"`` builds the shunt from the stored P, Q at the rated
+        terminal voltage and ignores ``v1`` / ``operating_point`` altogether, which keeps
+        ``Y(h)`` scenario-independent). With
         the default ``v1=None`` there is no fundamental solution to read the operating point
         from, so every device is evaluated at its RATED terminal voltage — exact for a
         constant-power device, an approximation for a ZIP or inverter-controlled one, which is
@@ -961,6 +1147,7 @@ def assemble_harmonic_ybus(
             cdt,
             rdt,
             device,
+            resolve_shunt_basis(load_shunt_basis),
         )
     return yh, index
 
@@ -1392,6 +1579,7 @@ def _stamp_harmonic_load_shunt(
     cdt,
     rdt,
     device,
+    basis="operating_point",
 ):
     """Add every device's harmonic Norton shunt to ``Y(h)`` ``[*batch, Hh, N, N]``.
 
@@ -1416,12 +1604,23 @@ def _stamp_harmonic_load_shunt(
     :func:`assemble_harmonic_ybus`) evaluates every device at its RATED terminal
     voltage, which is exact for a constant-power device and an approximation for a
     ZIP / controlled one — such a device is named in a WARNING.
+
+    ``basis="nameplate"`` does the same deliberately and additionally ignores the
+    ``operating_point``: the shunt is then built from the device's STORED P, Q at its
+    rated terminal voltage, so ``Y(h)`` is independent of the scenario and a batch needs
+    one factorisation per order instead of one per scenario and order. The model error
+    that buys is the shunt of the nameplate load rather than of this scenario's load.
     """
     loads = [
         a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
     ]
     if not loads:
         return yh
+    if basis == "nameplate":
+        # The nameplate basis is exactly the no-fundamental evaluation, applied on
+        # purpose: the device's stored power at its rated terminal voltage.
+        v1 = None
+        operating_point = None
     node_map = {nd.id: nd for nd in grid.nodes}
     h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
     rated_only = []
@@ -1504,10 +1703,13 @@ def _stamp_harmonic_load_shunt(
     if rated_only:
         _log.warning(
             "harmonic load shunt: %d voltage-dependent device(s) %s evaluated at their "
-            "RATED terminal voltage (no fundamental solution given); pass the "
-            "fundamental voltage for the exact operating point.",
+            "RATED terminal voltage (%s); pass the fundamental voltage with "
+            "load_shunt_basis='operating_point' for the exact operating point.",
             len(rated_only),
             rated_only[:10],
+            "the nameplate basis"
+            if basis == "nameplate"
+            else "no fundamental solution given",
         )
     if generation_free:
         _log.warning(
@@ -1531,6 +1733,7 @@ def _harmonic_shunt_currents(
     *,
     operating_point: Optional[dict] = None,
     load_shunt: Optional[str] = None,
+    load_shunt_basis: Optional[str] = None,
     symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
@@ -1548,7 +1751,9 @@ def _harmonic_shunt_currents(
     (zero-impedance) branch, for instance.
 
     ``v1`` is the converged fundamental ``[*batch, N]`` (the shunt is derived from the
-    operating point there), ``vh`` the solved harmonic voltages ``[*batch, Hh, N]`` for
+    operating point there, unless ``load_shunt_basis="nameplate"`` builds it from the
+    stored P, Q at the rated terminal voltage), ``vh`` the solved harmonic voltages
+    ``[*batch, Hh, N]`` for
     the SAME orders, both in the row layout of ``index`` (default: the grid's full
     node-phase layout). Differentiable in ``v1``, ``vh`` and the device powers; batched;
     device and dtype follow the inputs.
@@ -1581,6 +1786,7 @@ def _harmonic_shunt_currents(
         cdt,
         rdt,
         device,
+        resolve_shunt_basis(load_shunt_basis),
     )  # [*batch, Hh, N, N]
     return torch.einsum("...hij,...hj->...hi", y_shunt, vh.to(cdt))
 

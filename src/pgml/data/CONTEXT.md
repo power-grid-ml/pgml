@@ -34,7 +34,7 @@ requires an env var to be set.
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
   `docs/pgml/modeling/asymmetric.md`.
 - `appliance.harmonic_shunt.{model, series_rl_fraction, motor_x_harm_pu, motor_xr_harm,
-  generation_model}` — the harmonic device Norton shunt every injection appliance carries
+  basis, generation_model}` — the harmonic device Norton shunt every injection appliance carries
   at orders `h > 1` (`none` / `opendss` / `motor`; `opendss` is the shipped value and
   OpenDSS's own). `generation_model` (shipped `none`) is the separate policy for a
   GENERATION-sign device: the load expression's conductance is negative for an injecting
@@ -43,6 +43,14 @@ requires an env var to be set.
   `pgml.assembly._load_shunt.{resolve_shunt_model_name, resolve_harmonic_shunt,
   generation_shunt_is_neglected}`; per-device override `Load/Generator/Storage
   .harmonic_model`; per-run override `solve_harmonic_flow(load_shunt=...)`.
+  `basis` (shipped `operating_point`) is which power and terminal voltage the shunt is
+  built from, and therefore whether `Y(h)` is shared across a scenario batch:
+  `operating_point` follows this scenario (as OpenDSS's `YPrim` follows its Load's kW),
+  `nameplate` uses the stored P, Q at the rated voltage and keeps one factorization per
+  order for the whole batch. Resolved by
+  `pgml.assembly._load_shunt.resolve_shunt_basis`; per-run override
+  `solve_harmonic_flow(load_shunt_basis=...)` / `SimulationConfig.load_shunt_basis` /
+  `run_scenarios(load_shunt_basis=...)`.
 - `line.harmonic_model.{three_phase, single_phase, skin_effect}` — which
   frequency-dependent line model is written to `Line.harmonic_line_model` for an R/X line
   (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =
@@ -118,6 +126,11 @@ requires an env var to be set.
   state-Jacobian build of the gradient path and the dense Newton direction, and the largest
   adjoint factorization kept for repeated vector-Jacobian products. Read by
   `pgml.solver.power_flow._ift_jacobian_budget_bytes` / `_ift_adjoint_cache_bytes`.
+- `solver.harmonic.system_budget_mb` — the memory budget of one scenario chunk of the
+  assembled harmonic system. A device shunt on the `operating_point` basis makes `Y(h)`
+  per-scenario, so the system is `[B, H, N, N]`; the budget (charged the matrix plus its
+  factorization) decides how many scenarios are assembled and factored at a time. Read by
+  `pgml.solver.harmonic_flow._harmonic_system_budget_bytes` / `_harmonic_chunk`.
 - `solver.loadability.ramp` — what the loadability analysis' λ multiplies (`load`, the
   textbook continuation ramp, or `all`). Read by `pgml.solver.loadability_limit`.
 - `branch.near_ideal_series_resistance_ohm` — the stand-in an ideal (zero-impedance) branch

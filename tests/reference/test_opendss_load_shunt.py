@@ -61,7 +61,7 @@ from pgml.schemas.grid_schema import (
     ShuntAppliance,
     ZipCoefficients,
 )
-from pgml.solver import solve_harmonic_flow
+from pgml.solver import solve_harmonic_flow, solve_power_flow
 
 pytest.importorskip("opendssdirect")
 pytestmark = pytest.mark.opendss
@@ -870,3 +870,170 @@ def test_matched_mode_refuses_a_generation_device_while_the_run_carries_a_shunt(
 
     with pytest.raises(ConversionError, match="GENERATION device"):
         export_grid_to_opendss(_pv_feeder(), mode="matched", load_shunt="opendss")
+
+
+# ---------------------------------------------------------------------------
+# the shunt's power basis: this scenario's load, or the device's nameplate
+# ---------------------------------------------------------------------------
+def _scaled_grid(grid, scale: float):
+    """A copy of ``grid`` with every Load's P and Q multiplied by ``scale``."""
+    out = grid.model_copy(deep=True)
+    for i, a in enumerate(out.appliances):
+        if isinstance(a, Load):
+            out.appliances[i] = a.model_copy(
+                update={
+                    "p_nom_w": float(a.p_nom_w) * scale,
+                    "q_nom_var": float(a.q_nom_var or 0.0) * scale,
+                }
+            )
+    return out
+
+
+def _compare_scaled(name: str, variant: str, *, scale: float, basis: str, bank=False):
+    """``(max |Δ|V(h)||, fundamental deviation)`` at a scenario loading of ``scale``.
+
+    pgml solves the NAMEPLATE grid with an ``operating_point`` that scales every load;
+    OpenDSS solves the circuit whose ``Load`` elements carry the scaled kW/kvar, so its
+    own ``YPrim`` follows the scenario. The difference between the two shunt bases is
+    therefore exactly the model difference under test.
+    """
+    load_shunt, override, props = VARIANTS[variant]
+    grid = _build_grid(name, bank=bank)
+    _set_override(grid, override)
+    orders = _orders_for(grid, name)
+    op = {
+        int(a.id): {
+            "p_w": float(a.p_nom_w) * scale,
+            "q_var": float(a.q_nom_var or 0.0) * scale,
+        }
+        for a in grid.appliances
+        if isinstance(a, Load)
+    }
+    res = solve_harmonic_flow(
+        grid,
+        orders,
+        slack="norton",
+        dtype=CDT,
+        load_shunt=load_shunt,
+        load_shunt_basis=basis,
+        operating_point=op,
+    )
+    assert res.pf.converged
+    v_pgml = res.v.numpy()
+    base_v = base_voltage_per_row(grid).numpy()
+    v_dss = _dss_harmonic_voltages(
+        _scaled_grid(grid, scale), load_shunt, props, orders, False
+    )
+    live = np.abs(v_pgml[orders.index(1)]) > 0.1 * base_v
+    fundamental = float(
+        (np.abs(np.abs(v_pgml[orders.index(1)]) - np.abs(v_dss[1])) / base_v)[
+            live
+        ].max()
+    )
+    worst = 0.0
+    for k, h in enumerate(orders):
+        if h == 1:
+            continue
+        d = np.abs(np.abs(v_pgml[k]) - np.abs(v_dss[h])) / base_v
+        worst = max(worst, float(d[live].max()))
+    return worst, fundamental
+
+
+@pytest.mark.parametrize("scale", [0.5, 1.5])
+def test_operating_point_basis_follows_a_scenario_exactly(scale):
+    """The default basis reproduces OpenDSS at any scenario loading.
+
+    OpenDSS derives its ``Load``'s ``YPrim`` from the kW/kvar the element carries, so a
+    scenario that scales the load scales the shunt. The ``operating_point`` basis does the
+    same and agrees to the solve's own floor: measured max ``|d|V(h)||`` of 6.1e-13 pu of
+    nominal at half load and 3.3e-11 pu at 1.5x load on IEEE-33, with the fundamental at
+    8.1e-11 and 1.1e-09 pu (CPU, complex128).
+    """
+    worst, fundamental = _compare_scaled(
+        "ieee33_rx", "series_rl_50", scale=scale, basis="operating_point"
+    )
+    assert fundamental < 1e-8, f"fundamental moved: {fundamental:.2e} pu"
+    assert worst < 1e-6, f"scale={scale}: max |d|V_h|| = {worst:.2e} pu"
+
+
+@pytest.mark.parametrize(
+    "scale,bank,lo,hi",
+    [
+        (0.5, False, 1e-4, 5e-4),
+        (1.5, False, 3e-4, 2e-3),
+        (0.5, True, 2e-3, 1e-2),
+        (1.5, True, 5e-3, 3e-2),
+    ],
+)
+def test_nameplate_basis_costs_the_shunt_of_the_loading_difference(scale, bank, lo, hi):
+    """The nameplate basis keeps Y(h) scenario-independent at a stated model error.
+
+    The shunt is then the nameplate load's, so a scenario at half load is over-damped and
+    one at 1.5x load under-damped. Measured against the same live OpenDSS circuit that
+    carries the scenario's own kW (IEEE-33, orders 3 to 25, max ``|d|V(h)|`` in pu of
+    nominal, CPU, complex128): 2.07e-04 at 0.5x and 6.67e-04 at 1.5x off resonance, and
+    4.07e-03 / 1.05e-02 with the 370 kvar bank that puts a parallel resonance at order
+    6.9, where the shunt IS the damping. That is eight orders of magnitude above the
+    operating-point basis and of the same order as the difference between carrying the
+    shunt and leaving it out, so the basis is a modeling decision and not a refinement.
+    The fundamental is untouched either way (the shunt exists only above it).
+    """
+    worst, fundamental = _compare_scaled(
+        "ieee33_rx", "series_rl_50", scale=scale, basis="nameplate", bank=bank
+    )
+    assert fundamental < 1e-8, f"fundamental moved: {fundamental:.2e} pu"
+    assert lo < worst < hi, f"scale={scale} bank={bank}: {worst:.2e} pu"
+
+
+def test_nameplate_basis_is_exact_at_nameplate_loading():
+    """At the loading the shunt is built from, the two bases agree exactly.
+
+    Not a tautology, but a consequence of the model: ``Y_eq = conj(S)/V_rated^2`` is
+    evaluated at the RATED voltage on both bases, so for a constant-power device the only
+    difference is WHICH S it uses. A voltage-dependent (ZIP or inverter-controlled) device
+    does differ, because its S is a function of the terminal voltage, which the nameplate
+    basis takes as rated.
+    """
+    name_worst, _ = _compare_scaled(
+        "ieee33_rx", "series_rl_50", scale=1.0, basis="nameplate"
+    )
+    op_worst, _ = _compare_scaled(
+        "ieee33_rx", "series_rl_50", scale=1.0, basis="operating_point"
+    )
+    assert name_worst == op_worst < 1e-6
+
+
+def test_nameplate_basis_keeps_one_factorization_for_a_scenario_batch():
+    """Y(h) is scenario-independent on the nameplate basis, per-scenario on the default.
+
+    The shape of the assembled system is the contract: ``[H, N, N]`` serves the whole
+    batch, ``[B, H, N, N]`` does not.
+    """
+    from pgml.solver.harmonic_flow import assemble_harmonic_system
+
+    grid = _build_grid("ieee33_rx")
+    loads = [a for a in grid.appliances if isinstance(a, Load)]
+    scale = torch.tensor([0.5, 1.0, 1.5], dtype=torch.float64)
+    op = {
+        int(a.id): {
+            "p_w": float(a.p_nom_w) * scale,
+            "q_var": float(a.q_nom_var or 0.0) * scale,
+        }
+        for a in loads
+    }
+    pf = solve_power_flow(grid, slack="norton", operating_point=op, dtype=CDT)
+    orders = [3, 5, 7]
+    y_op, _, _ = assemble_harmonic_system(
+        grid, orders, pf.v, operating_point=op, load_shunt="opendss"
+    )
+    y_np, _, _ = assemble_harmonic_system(
+        grid,
+        orders,
+        pf.v,
+        operating_point=op,
+        load_shunt="opendss",
+        load_shunt_basis="nameplate",
+    )
+    n = node_phase_index(grid).size
+    assert tuple(y_op.shape) == (3, len(orders), n, n)
+    assert tuple(y_np.shape) == (len(orders), n, n)

@@ -272,6 +272,14 @@ above, and the one the harmonic solver uses). Internal API:
 `resolve_harmonic_shunt(appliance, model) -> ResolvedHarmonicShunt` (device override >
 run-level model > defaults file; `"none"` at run level wins over every device, which is
 OpenDSS's global `NeglectLoadY`),
+`SHUNT_BASES = ("operating_point", "nameplate")` +
+`resolve_shunt_basis(basis) -> str` (`None` -> the modeling default
+`appliance.harmonic_shunt.basis`, shipped `operating_point`: the shunt is built from the
+power the device draws in THIS scenario at the solved fundamental terminal voltage, which
+is what OpenDSS's `YPrim` does with its Load's specified kW/kvar. `nameplate` builds it
+from the device's stored P, Q at the rated terminal voltage, which keeps `Y(h)`
+scenario-independent — one factorization per order for a whole batch — at a model error
+measured in `solver/CONTEXT.md`),
 `GENERATION_SHUNT_MODELS = ("none", "load_style")` +
 `generation_shunt_is_neglected(appliance) -> bool` (the documented default
 `appliance.harmonic_shunt.generation_model`, shipped `none`: a GENERATION-sign device

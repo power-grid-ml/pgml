@@ -367,3 +367,93 @@ class TestSolverOptions:
             grid, [1, 5], slack="norton", dtype=CDT, on_disconnected="zero"
         )
         assert zeroed.v.shape[-1] == len(grid.nodes)
+
+
+class TestScenarioBatchedSystem:
+    """A per-scenario ``Y(h)`` is assembled and factored in budgeted chunks."""
+
+    ORDERS = [1, 3, 5]
+
+    @staticmethod
+    def _batched_op(scales):
+        return {
+            2: {
+                "p_w": torch.tensor([P_LOAD * s for s in scales], dtype=torch.float64),
+                "q_var": torch.tensor(
+                    [Q_LOAD * s for s in scales], dtype=torch.float64
+                ),
+            }
+        }
+
+    def _solve(self, op, **kw):
+        return solve_harmonic_flow(
+            _grid(),
+            self.ORDERS,
+            slack="norton",
+            dtype=CDT,
+            operating_point=op,
+            load_shunt="opendss",
+            **kw,
+        )
+
+    def test_chunked_solve_equals_the_whole_batch(self, monkeypatch):
+        """Chunking is an implementation detail: the voltages must be identical.
+
+        The device shunt on the default basis makes ``Y(h)`` per scenario, so a batch is
+        assembled and factored in chunks that fit ``solver.harmonic.system_budget_mb``.
+        """
+        import pgml.solver.harmonic_flow as hf
+
+        op = self._batched_op([0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 0.3])
+        whole = self._solve(op)
+        assert tuple(whole.v.shape) == (7, len(self.ORDERS), 2)  # [B, H, N]
+        monkeypatch.setattr(hf, "_harmonic_system_budget_bytes", lambda: 1)
+        chunked = self._solve(op)
+        assert tuple(chunked.v.shape) == tuple(whole.v.shape)
+        assert float((chunked.v - whole.v).abs().max()) == 0.0
+
+    def test_the_budget_decides_the_chunk_size(self):
+        """One scenario is always attempted, and a generous budget keeps one chunk."""
+        import pgml.solver.harmonic_flow as hf
+
+        n_orders, n = 12, 294
+        per = 2 * hf._harmonic_system_bytes(1, n_orders, n, CDT)
+        assert hf._harmonic_chunk(1024, n_orders, n, CDT) >= 1
+        assert hf._harmonic_chunk(4, n_orders, n, CDT) == 4  # 1 GiB default fits four
+        # 18 GB for 1024 scenarios of a 294-row grid at 13 orders is the case the budget
+        # exists for: the default must not select the whole batch.
+        assert hf._harmonic_chunk(1024, n_orders, n, CDT) < 1024
+        assert hf._harmonic_chunk(1024, n_orders, n, CDT) == (
+            hf._harmonic_system_budget_bytes() // per
+        )
+
+    def test_the_nameplate_basis_needs_no_chunking(self, monkeypatch):
+        """On the nameplate basis ``Y(h)`` is shared, so the budget never binds."""
+        import pgml.solver.harmonic_flow as hf
+
+        calls = []
+        orig = hf._harmonic_chunk
+        monkeypatch.setattr(
+            hf,
+            "_harmonic_chunk",
+            lambda *a, **k: calls.append(a) or orig(*a, **k),
+        )
+        op = self._batched_op([0.5, 1.0, 1.5])
+        res = self._solve(op, load_shunt_basis="nameplate")
+        assert tuple(res.v.shape) == (3, len(self.ORDERS), 2)
+        assert calls == []
+
+    def test_a_scenario_batch_matches_the_single_scenario_studies(self):
+        """Per-scenario systems: each scenario's voltages equal its own study's."""
+        scales = [0.5, 1.0, 1.5]
+        batched = self._solve(self._batched_op(scales))
+        for k, s in enumerate(scales):
+            single = solve_harmonic_flow(
+                _grid(),
+                self.ORDERS,
+                slack="norton",
+                dtype=CDT,
+                operating_point={2: {"p_w": P_LOAD * s, "q_var": Q_LOAD * s}},
+                load_shunt="opendss",
+            )
+            assert float((batched.v[k] - single.v).abs().max()) < 1e-12

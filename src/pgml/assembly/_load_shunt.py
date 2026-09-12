@@ -67,6 +67,10 @@ HARMONIC_SHUNT_MODELS = ("none", "opendss", "motor")
 #: What a generation-sign device carries (``appliance.harmonic_shunt.generation_model``).
 GENERATION_SHUNT_MODELS = ("none", "load_style")
 
+#: Which power / terminal voltage the shunt is built from
+#: (``appliance.harmonic_shunt.basis``).
+SHUNT_BASES = ("operating_point", "nameplate")
+
 
 @dataclass(frozen=True)
 class ResolvedHarmonicShunt:
@@ -104,6 +108,26 @@ def resolve_shunt_model_name(model: Optional[str]) -> str:
         raise InputError(
             f"unknown harmonic load-shunt model {name!r}; use one of "
             f"{', '.join(repr(m) for m in HARMONIC_SHUNT_MODELS)}."
+        )
+    return str(name)
+
+
+def resolve_shunt_basis(basis: Optional[str]) -> str:
+    """Validate the shunt's power basis (``None`` -> the documented default).
+
+    ``"operating_point"`` builds the shunt from the power the device draws in this
+    scenario at the solved fundamental terminal voltage, which is what OpenDSS's own
+    ``YPrim`` does with its Load's specified kW/kvar. ``"nameplate"`` builds it from the
+    device's stored P, Q at its rated terminal voltage, which makes ``Y(h)`` independent
+    of the scenario — one factorisation per order for a whole batch instead of one per
+    scenario and order — at the price of a shunt that does not follow the loading.
+    ``None`` resolves ``appliance.harmonic_shunt.basis``; an unknown name raises.
+    """
+    name = _cfg("appliance.harmonic_shunt.basis") if basis is None else basis
+    if name not in SHUNT_BASES:
+        raise InputError(
+            f"unknown harmonic shunt basis {name!r}; use one of "
+            f"{', '.join(repr(m) for m in SHUNT_BASES)}."
         )
     return str(name)
 
@@ -290,9 +314,11 @@ def _complex(re: Tensor, im: Tensor) -> Tensor:
 __all__ = [
     "GENERATION_SHUNT_MODELS",
     "HARMONIC_SHUNT_MODELS",
+    "SHUNT_BASES",
     "ResolvedHarmonicShunt",
     "generation_shunt_is_neglected",
     "resolve_shunt_model_name",
+    "resolve_shunt_basis",
     "resolve_harmonic_shunt",
     "harmonic_shunt_element_admittance",
 ]

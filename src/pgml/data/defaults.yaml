@@ -103,6 +103,26 @@ appliance:
       description: >
         X/R of the `motor` model's series reactance at the fundamental (OpenDSS
         `XRharm`, same default), i.e. Zs = X/xr + jX before the order scaling.
+    basis:
+      value: operating_point
+      units: "enum{operating_point, nameplate}"
+      description: >
+        Which power and terminal voltage the shunt admittance Yeq = conj(S)/V_rated^2 is
+        built from. `operating_point` (the default) uses the power the device actually
+        draws in THIS scenario at the solved fundamental terminal voltage, so the shunt
+        follows a scenario batch exactly as OpenDSS's own YPrim follows its Load's
+        specified kW/kvar. `nameplate` uses the device's stored (nameplate) P, Q at its
+        rated terminal voltage, which makes Y(h) independent of the scenario: one
+        factorisation per harmonic order serves the whole batch instead of one per
+        scenario and order, and the assembled matrix stays [H, N, N] instead of
+        [B, H, N, N]. The cost is a model error wherever a scenario's loading differs
+        from nameplate: the shunt is then that of the nameplate load, i.e. the damping is
+        too strong for a lightly loaded scenario and too weak for a heavily loaded one.
+        Measured on IEEE-33 and three-phase CIGRE LV against a live OpenDSS that carries
+        the scenario's own kW, the deviation of the harmonic voltages grows roughly
+        linearly with the load deviation and with the sharpness of any resonance; the
+        numbers are in the reference test that pins both bases
+        (tests/reference/test_opendss_load_shunt.py).
     generation_model:
       value: none
       units: "enum{none, load_style}"
@@ -701,6 +721,23 @@ solver:
         condition; the cost is at most a factor 2 per scale factor (4 in the condition
         number), which is negligible against the decades it removes. Set to false to use
         the unrounded scales.
+  harmonic:
+    system_budget_mb:
+      value: 1024.0
+      units: "MiB"
+      description: >
+        Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The
+        device harmonic shunt on the `operating_point` basis depends on the scenario, so
+        the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a
+        294-row grid at 13 orders in complex128. The budget decides how many scenarios are
+        assembled and factored at a time, which bounds the peak allocation independently
+        of the batch size (at least one scenario is always attempted); it is charged the
+        matrix AND its factorisation, which for a dense LU is a second copy of the same
+        size. It has no effect
+        when Y(h) is scenario-independent — no device shunt, or the `nameplate` shunt
+        basis — where one factorization per order serves the whole batch. 1 GiB keeps a
+        single chunk for a small grid or a small batch and fits alongside the fundamental
+        solve on a 12 GB accelerator.
   ift:
     jacobian_budget_mb:
       value: 1024.0

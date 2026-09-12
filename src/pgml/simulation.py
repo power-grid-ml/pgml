@@ -47,6 +47,7 @@ from .solver import solve_harmonic_flow, solve_power_flow
 Calculation = Literal["power_flow", "harmonic"]
 Slack = Literal["ideal", "norton"]
 LoadShunt = Literal["none", "opendss", "motor"]
+LoadShuntBasis = Literal["operating_point", "nameplate"]
 Symmetry = Literal["auto", "symmetric", "asymmetric"]
 _DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
 
@@ -87,6 +88,14 @@ class SimulationConfig(BaseModel):
         "reactance), or 'none' (pure current source, OpenDSS NeglectLoadY=Yes). None = "
         "the documented default appliance.harmonic_shunt.model. A device's own "
         "harmonic_model overrides the choice per device.",
+    )
+    load_shunt_basis: Optional[LoadShuntBasis] = Field(
+        default=None,
+        description="Which power and terminal voltage the harmonic shunt is built from: "
+        "'operating_point' (this scenario's power at the solved fundamental voltage, so "
+        "Y(h) is per scenario) or 'nameplate' (the device's stored P, Q at its rated "
+        "voltage, so one Y(h) per order serves a whole scenario batch). None = the "
+        "documented default appliance.harmonic_shunt.basis.",
     )
     tol: Optional[float] = Field(
         default=None,
@@ -331,6 +340,7 @@ class SolvedState:
                     [order],
                     operating_point=self.config.operating_point,
                     load_shunt=self.config.load_shunt,
+                    load_shunt_basis=self.config.load_shunt_basis,
                     symmetry=self.config.symmetry,
                     dtype=self.dtype,
                     device=self.device,
@@ -603,6 +613,7 @@ def simulate(
             harmonic_injection=harmonic_injection,
             node_sources=node_sources,
             load_shunt=config.load_shunt,
+            load_shunt_basis=config.load_shunt_basis,
             tol=config.tol,
             tol_update_pu=config.tol_update_pu,
             s_base_va=config.s_base_va,
