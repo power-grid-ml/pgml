@@ -3,10 +3,12 @@
 Public API
 ----------
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, operating_point,
-  harmonic_injection, node_sources, include_load_shunt, tol, max_iter, dtype,
-  device, symmetry) -> HarmonicFlowResult``
+  harmonic_injection, node_sources, load_shunt, tol, tol_update_pu,
+  s_base_va, max_iter, dtype, precision, device, symmetry, param_overrides)
+  -> HarmonicFlowResult``
 - ``assemble_harmonic_system(grid, harmonic_orders, v1, *, operating_point,
-  harmonic_injection, node_sources, symmetry, dtype, device) -> (Y, I, index)`` —
+  harmonic_injection, node_sources, symmetry, dtype, device, param_overrides)
+  -> (Y, I, index)`` —
   the assembled per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders
   ``h > 1`` (the building block of :func:`solve_harmonic_flow`'s harmonic slices),
   so ``r(V) = Y(h)·V − I(h)`` is the physics-consistency residual.
@@ -57,13 +59,26 @@ from typing import Literal, Optional, Sequence
 import torch
 from torch import Tensor
 
-from pgml.assembly import NodePhaseIndex, assemble_network_ybus, node_phase_index
+from pgml.assembly import (
+    FusionMap,
+    NodePhaseIndex,
+    assemble_network_ybus,
+    node_phase_index,
+)
+from pgml.assembly._fusion import resolve_fusion
 from pgml.assembly._incidence import build_incidence, group_appliances, used_rows
+from pgml.assembly._load_shunt import (
+    generation_shunt_is_neglected,
+    harmonic_shunt_element_admittance,
+    resolve_harmonic_shunt,
+    resolve_shunt_model_name,
+)
 from pgml.assembly._params import phase_voltage_magnitude, resolve_operating_power
+from pgml.assembly._scatter import scatter_blocks_into
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
-from pgml.assembly.ybus import _stamp_sources
-from pgml.errors import InputError, ModelingError
+from pgml.assembly.ybus import _override, _stamp_sources
+from pgml.errors import InputError
 from pgml.assembly._control import resolve_injection_power
 from pgml.schemas.grid_schema import (
     Grid,
@@ -75,10 +90,13 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
 )
 
+from .equilibration import resolve_equilibration
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 from .power_flow import (
     PowerFlowResult,
     _expand_zeroed_result,
+    _reduce_block_rows,
+    check_branch_impedances,
     check_connectivity,
     solve_power_flow,
 )
@@ -130,12 +148,17 @@ class HarmonicFlowResult:
         harmonic orders are direct linear solves, so all convergence telemetry —
         :attr:`converged`, :attr:`converged_mask`, :attr:`failed_states` — comes from
         the fundamental and is re-exposed here for convenience.
+    fusion:
+        The :class:`~pgml.assembly.FusionMap` the solve collapsed zero-impedance
+        branches with, else ``None``. ``v`` and ``index`` are the grid's FULL row
+        layout at every order.
     """
 
     v: Tensor
     frequencies_hz: Tensor
     index: NodePhaseIndex
     pf: PowerFlowResult
+    fusion: Optional[FusionMap] = None
 
     @property
     def converged(self) -> bool:
@@ -203,14 +226,24 @@ def solve_harmonic_flow(
     operating_point: Optional[dict] = None,
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
-    include_load_shunt: bool = False,
-    tol: float = 1e-10,
+    load_shunt: Optional[str] = None,
+    tol: Optional[float] = None,
+    tol_update_pu: Optional[float] = None,
+    s_base_va: Optional[float] = None,
     max_iter: int = 100,
     dtype: torch.dtype = torch.complex128,
+    precision: str = "full",
     device: Optional[torch.device] = None,
     symmetry: Optional[str] = None,
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
+    branch_states_method: str = "assemble",
+    param_overrides: Optional[dict] = None,
+    enforce_q_limits: Optional[bool] = None,
+    linear_solver: str = "auto",
+    block_rows: Optional[Sequence[Tensor]] = None,
+    criticality: str = "auto",
+    equilibrate: Optional[str] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -220,10 +253,30 @@ def solve_harmonic_flow(
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.
     harmonic_orders:
         Iterable of integer orders to solve (e.g. ``[1, 5, 7]``; 1 = fundamental).
-    slack, method, operating_point, tol, max_iter, dtype, device:
+    slack, method, operating_point, tol, tol_update_pu, s_base_va, enforce_q_limits, max_iter, dtype, device:
         Passed to the fundamental :func:`solve_power_flow`. Use ``method="newton"``
         for a stiff inverter control loop (Volt-VAr / Volt-Watt), where the
-        current-injection fixed point can oscillate.
+        current-injection fixed point can oscillate. The convergence tolerances are
+        PER UNIT (power mismatch / voltage update) and apply to the nonlinear
+        fundamental only: every harmonic order is a direct linear solve with no
+        iteration and therefore no convergence criterion of its own.
+        ``enforce_q_limits`` bounds a voltage-regulating generator's reactive power
+        (``None`` -> the documented default); regulation is a fundamental-frequency
+        concept, so it has no effect on the harmonic orders, where such a machine is
+        the same Norton current source as any other generator.
+    precision:
+        Working precision of the linear algebra, as in :func:`solve_power_flow`:
+        ``"full"`` (default) or ``"mixed"`` (complex64 factorization refined against
+        complex128 residuals). It applies to the fundamental solve AND to every
+        per-order harmonic solve, which is a direct solve and therefore gets the
+        classic iterative refinement of :func:`pgml.solver.lu_factor_system`.
+    param_overrides:
+        Optional differentiability hook ``{(component_kind, element_id, field): tensor}``
+        substituting network (R/L/C/Z) or device (P/Q) parameters, exactly as in
+        :func:`solve_power_flow` and :func:`pgml.assembly.assemble_ybus`. It reaches the
+        fundamental solve, the per-order admittance ``Y(h)``, the source stamp, and the
+        device powers behind each harmonic injection, so a gradient w.r.t. an overridden
+        parameter flows into every order.
     harmonic_injection:
         Optional SCENARIO override of per-device spectra, tensor-friendly so
         scenarios can vary harmonic injections differentiably. Format:
@@ -245,25 +298,58 @@ def solve_harmonic_flow(
         exactly). Each is a Thevenin voltage source (stamps a resistive shunt ``Y_s``
         on the node-phase diagonal + a Norton current ``I_N``) or a Norton current
         source (``I_N`` only), per ``docs/pgml/modeling/error-injection.md``. Multiple
-        simultaneous sources are allowed. When ``None`` (default), behavior is
-        byte-identical to today. ``source_power_va`` and the spectrum may carry
+        simultaneous sources are allowed. ``None`` (default) injects no node
+        harmonic sources. ``source_power_va`` and the spectrum may carry
         leading SCENARIO batch dims (differentiable; a batched voltage source's
         ``Y_s`` makes ``Y(h)`` ``[*batch, H, N, N]``).
-    include_load_shunt:
-        ``False`` (default) = OpenDSS ``NeglectLoadY`` pure current-source model.
-        ``True`` (load Norton shunt from ``HarmonicShuntModel``) is NOT yet
-        implemented (the exact OpenDSS shunt split is unpinned) and raises.
+    load_shunt:
+        Which harmonic Norton shunt each Load/Generator/Storage carries in PARALLEL
+        with its harmonic current source: ``"opendss"`` (the operating-point
+        admittance ``conj(S)/V_rated^2`` split into a series and a parallel R-L
+        branch, OpenDSS's own default), ``"motor"`` (the same with a fixed
+        blocked-rotor series reactance) or ``"none"`` (a pure current source at every
+        order, OpenDSS ``Set NeglectLoadY=Yes``). ``None`` (default) resolves the
+        documented modeling default ``appliance.harmonic_shunt.model``; an unknown
+        name raises. A device's own ``harmonic_model``
+        (:class:`~pgml.schemas.grid_schema.HarmonicShuntModel`) overrides the choice
+        per device, except under ``"none"``, which carries no shunt anywhere. The
+        shunt is the dominant DAMPING term at a feeder parallel resonance and is
+        derived from the CONVERGED fundamental operating point, so gradients flow
+        from the harmonic voltages through it to P, Q and the network parameters.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
         ``"asymmetric"`` (``None`` -> config). Resolved ONCE here and threaded into
         the fundamental :func:`solve_power_flow` (single log) and the harmonic
         injection power resolution.
+    linear_solver, block_rows:
+        The inner factorization backend, as in :func:`solve_power_flow`, applied to the
+        nonlinear FUNDAMENTAL solve AND to every per-order harmonic solve (each order is
+        one direct solve of ``Y(h) V(h) = I(h)``, which has the same sparsity and the same
+        row partition as the fundamental system). ``"auto"`` (default) takes the sparse
+        SuperLU factorization on large CPU systems and the batched dense torch LU
+        otherwise; ``"dense"`` / ``"sparse"`` force the choice, and ``"block"`` with
+        ``block_rows`` factors a block-diagonal ensemble member by member.
+        ``"matrix_free"`` is a Newton-only option of the fundamental solve and leaves the
+        harmonic orders on the automatic choice.
+    criticality:
+        When the fundamental solve runs its Jacobian criticality analysis, as in
+        :func:`solve_power_flow` (``"auto"`` / ``"always"`` / ``"never"``).
+    equilibrate:
+        Diagonal equilibration of every factored system, as in
+        :func:`solve_power_flow`: the fundamental admittance, the Newton Jacobian, the
+        gradient path's adjoint, and each harmonic order's ``Y(h)``. ``None`` (default)
+        resolves ``solver.equilibration.mode``. The harmonic orders are where it matters
+        most: ``Y(h)``'s condition number grows with the order (measured on IEEE-33 at
+        order 13: 8.0e8 as assembled, 1.5e3 equilibrated), because the series reactances
+        scale with ``h`` while the diagonal collects shunt terms that do not.
     on_disconnected:
         Pre-solve connectivity handling, as in :func:`solve_power_flow`:
         ``"raise"`` (default) raises :class:`~pgml.errors.ConnectivityError` when a
         (node, phase) row has no path to an in-service source; ``"zero"`` solves the
         energized sub-grid and reports 0 V on the disconnected rows at every order
-        (full-grid row layout preserved); ``"ignore"`` skips the check.
+        (full-grid row layout preserved); ``"ignore"`` skips the check. The check runs
+        HERE, once, for the whole harmonic study (the inner fundamental solve is then
+        told not to repeat it); no policy silently disables it.
     branch_states:
         Optional topology / switch-state batching ``{branch_id: state}``, as in
         :func:`solve_power_flow`: the state (float / 0-d / ``[*batch]`` tensor,
@@ -271,30 +357,48 @@ def solve_harmonic_flow(
         fundamental AND every harmonic order, so one batched call solves every
         switch configuration end to end. ``on_disconnected="zero"`` is unsupported
         with states (the fundamental solve enforces this).
+    branch_states_method:
+        How the FUNDAMENTAL solve reaches each switch state (``"assemble"`` /
+        ``"woodbury"``, as in :func:`solve_power_flow`). The harmonic orders always
+        assemble their own per-state ``Y(h)``: a Woodbury update is built from one
+        frequency's stamps, so it does not carry to another order.
 
     Returns
     -------
     HarmonicFlowResult
         ``v`` complex ``[*batch, H, N]`` per requested order, frequencies, index, pf.
     """
-    if include_load_shunt:
-        raise ModelingError(
-            "include_load_shunt=True (harmonic load Norton shunt) is not yet "
-            "implemented; the exact OpenDSS shunt split is unpinned. Use False "
-            "(pure current-source / NeglectLoadY model)."
-        )
-
+    harmonic_shunt = resolve_shunt_model_name(load_shunt)
     orders = _integer_orders(harmonic_orders)
+    fusion = resolve_fusion(
+        grid, None, param_overrides=param_overrides, branch_states=branch_states
+    )
+    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
             "(use 'raise'/'zero'/'ignore')."
         )
+    eq_mode = resolve_equilibration(equilibrate)
+    # The harmonic orders are direct solves of a system with the same sparsity and row
+    # partition as the fundamental one, so they take the same backend. "matrix_free" is a
+    # Newton option of the fundamental solve only and leaves them on the automatic choice.
+    harmonic_backend = (
+        linear_solver if linear_solver in ("dense", "sparse", "block") else "auto"
+    )
+    # The connectivity policy is executed exactly ONCE, here, for the whole study; the
+    # inner fundamental solve is then told to skip the repeat. ``inner_on_disconnected``
+    # makes that explicit instead of leaving a silent "ignore" in the call below.
+    inner_on_disconnected = "ignore"
     if on_disconnected == "raise":
         if branch_states is None:
             check_connectivity(grid)
-        # With branch_states the (possibly per-scenario) check runs inside the
-        # fundamental solve_power_flow call below.
+        else:
+            # A per-scenario topology has no single connectivity verdict: the check is
+            # vectorized over the state batch inside the fundamental solve, so the policy
+            # is forwarded rather than run here.
+            inner_on_disconnected = "raise"
+
     elif on_disconnected == "zero":
         if branch_states is not None:
             raise InputError(
@@ -321,22 +425,31 @@ def solve_harmonic_flow(
                 operating_point=operating_point,
                 harmonic_injection=harmonic_injection,
                 node_sources=node_sources,
-                include_load_shunt=include_load_shunt,
+                load_shunt=harmonic_shunt,
                 tol=tol,
+                tol_update_pu=tol_update_pu,
+                s_base_va=s_base_va,
                 max_iter=max_iter,
                 dtype=dtype,
+                precision=precision,
                 device=device,
                 symmetry=symmetry,
                 on_disconnected="ignore",
+                param_overrides=param_overrides,
+                enforce_q_limits=enforce_q_limits,
+                branch_states_method=branch_states_method,
+                linear_solver=linear_solver,
+                criticality=criticality,
+                equilibrate=eq_mode,
             )
-            return _expand_zeroed_harmonic_result(grid, sub_res)
+            return _expand_zeroed_harmonic_result(grid, sub_res, fusion)
 
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
     index = node_phase_index(grid)
 
     # Resolve calculation symmetry ONCE; thread the canonical string into the
-    # fundamental PF (which emits the single modeling-summary log).
+    # fundamental PF (which emits the single modeling-summary log, and the fusion one).
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
 
@@ -348,12 +461,22 @@ def solve_harmonic_flow(
         method=method,
         operating_point=operating_point,
         tol=tol,
+        tol_update_pu=tol_update_pu,
+        s_base_va=s_base_va,
         max_iter=max_iter,
         dtype=dtype,
+        precision=precision,
         device=device,
         symmetry=sym_resolved,
-        on_disconnected=("ignore" if branch_states is None else on_disconnected),
+        on_disconnected=inner_on_disconnected,
         branch_states=branch_states,
+        branch_states_method=branch_states_method,
+        param_overrides=param_overrides,
+        enforce_q_limits=enforce_q_limits,
+        linear_solver=linear_solver,
+        block_rows=block_rows,
+        criticality=criticality,
+        equilibrate=eq_mode,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -376,10 +499,13 @@ def solve_harmonic_flow(
             operating_point=operating_point,
             harmonic_injection=harmonic_injection,
             node_sources=node_sources,
+            load_shunt=harmonic_shunt,
             symmetry=sym_resolved,
             dtype=dtype,
             device=device,
             branch_states=branch_states,
+            param_overrides=param_overrides,
+            fusion=fusion,
         )
         # Norton mode -> [*batch, Hh, N]. When Y(h) is scenario-independent (the usual
         # case — the batch varies injections, not the network), factor each order ONCE
@@ -387,11 +513,25 @@ def solve_harmonic_flow(
         # batched voltage node_source promotes Y(h) to [*batch, Hh, N, N]; that path keeps
         # the per-element solve.
         if yh.ndim == 3:
-            vh = solve_factored(lu_factor_system(yh), ih)
+            vh = solve_factored(
+                lu_factor_system(
+                    yh,
+                    backend=harmonic_backend,
+                    # Each order is factored on the FUSED rows, so a block-diagonal
+                    # ensemble's partition is mapped onto them as well.
+                    block_rows=_reduce_block_rows(block_rows, fusion),
+                    precision=precision,
+                    equilibrate=eq_mode,
+                ),
+                ih,
+            )
         else:
-            vh = solve_harmonic(yh, ih)
+            vh = solve_harmonic(yh, ih, precision=precision, equilibrate=eq_mode)
         for k, h in enumerate(harm):
-            v_by_order[h] = vh[..., k, :]
+            # Each order is solved on the fused rows; report it on the grid's own.
+            v_by_order[h] = (
+                fusion.prolong(vh[..., k, :]) if fusion is not None else vh[..., k, :]
+            )
 
     n = index.size
     cols = [v_by_order[h] for h in orders]
@@ -399,17 +539,20 @@ def solve_harmonic_flow(
     cols = [c.broadcast_to(*bshape, n) for c in cols]
     v = torch.stack(cols, dim=-2)  # [*batch, H, N]
     frequencies_hz = torch.as_tensor([h * f0 for h in orders], dtype=rdt, device=device)
-    return HarmonicFlowResult(v=v, frequencies_hz=frequencies_hz, index=index, pf=pf)
+    return HarmonicFlowResult(
+        v=v, frequencies_hz=frequencies_hz, index=index, pf=pf, fusion=fusion
+    )
 
 
 def _expand_zeroed_harmonic_result(
-    grid: Grid, res: HarmonicFlowResult
+    grid: Grid, res: HarmonicFlowResult, fusion=None
 ) -> HarmonicFlowResult:
     """Scatter a sub-grid harmonic solution back to the full grid (0 V dead rows).
 
     The ``on_disconnected="zero"`` reassembly at every order: rows absent from the
     energized sub-grid report 0 V in ``v`` and in the embedded fundamental
     :class:`PowerFlowResult`. Out-of-place ``index_copy`` (gradients preserved).
+    ``fusion`` is the FULL grid's map (see :func:`_expand_zeroed_result`).
     """
     full_index = node_phase_index(grid)
     sub_index = res.index
@@ -428,7 +571,8 @@ def _expand_zeroed_harmonic_result(
         v=v_full,
         frequencies_hz=res.frequencies_hz,
         index=full_index,
-        pf=_expand_zeroed_result(grid, res.pf),
+        pf=_expand_zeroed_result(grid, res.pf, fusion),
+        fusion=fusion,
     )
 
 
@@ -440,10 +584,13 @@ def assemble_harmonic_system(
     operating_point: Optional[dict] = None,
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
+    load_shunt: Optional[str] = None,
     symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     branch_states: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
+    fusion: Optional[object] = None,
 ) -> tuple[Tensor, Tensor, NodePhaseIndex]:
     """Assemble the per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders ``h > 1``.
 
@@ -455,9 +602,10 @@ def assemble_harmonic_system(
     downstream package uses to form that residual without re-deriving the assembly.
 
     ``Y(h)`` is the passive network admittance at ``h·f0``
-    (:func:`pgml.assembly.assemble_network_ybus`) plus the source Norton shunt — the
-    source is held at zero harmonic voltage (no ideal slack at harmonics) unless a
-    ``node_sources`` voltage source stamps a shunt. ``I(h)`` is the sum of each
+    (:func:`pgml.assembly.assemble_network_ybus`) plus the source Norton shunt plus each
+    device's harmonic shunt (``load_shunt``) — the source is held at zero harmonic
+    voltage (no ideal slack at harmonics) unless a ``node_sources`` voltage source
+    stamps a shunt. ``I(h)`` is the sum of each
     device's harmonic current injection (:func:`_harmonic_injections`) plus any
     ``node_sources`` Norton/Thevenin current. The fundamental voltage ``v1`` enters
     ``I(h)`` through each device's fundamental terminal current
@@ -474,7 +622,8 @@ def assemble_harmonic_system(
         and is solved nonlinearly by :func:`solve_power_flow`; passing 1 here raises).
     v1:
         Converged fundamental node voltage ``[*batch, N]`` complex (typically
-        ``solve_power_flow(grid, ...).v``). Aligned to the returned ``index`` layout.
+        ``solve_power_flow(grid, ...).v``), in the grid's FULL node-phase layout —
+        which is the layout a result reports, fused or not.
     operating_point:
         Optional scenario P/Q override, forwarded to the harmonic-injection power
         resolution (same meaning as in :func:`solve_harmonic_flow`).
@@ -484,6 +633,11 @@ def assemble_harmonic_system(
     node_sources:
         Optional per-node Thevenin/Norton harmonic disturbance sources (see
         :class:`NodeHarmonicSource`), applied at the requested orders.
+    load_shunt:
+        Which device Norton shunt enters ``Y(h)`` (same meaning and default as in
+        :func:`solve_harmonic_flow`). The shunt is derived from the operating point at
+        the given ``v1``, so a per-scenario operating point or a batched ``v1``
+        promotes ``Y`` to ``[*batch, Hh, N, N]``.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
         ``"asymmetric"`` (``None`` -> config), governing per-phase vs balanced load
@@ -497,18 +651,31 @@ def assemble_harmonic_system(
         :func:`pgml.assembly.assemble_ybus`) — MUST match the states the
         fundamental ``v1`` was solved with. A batched state promotes ``Y`` to
         ``[*batch, Hh, N, N]``.
+    param_overrides:
+        Optional parameter substitution ``{(component_kind, element_id, field): tensor}``
+        (see :func:`pgml.assembly.assemble_ybus`), reaching ``Y(h)``, the source stamp and
+        the device powers behind the harmonic injection — the same hook
+        :func:`solve_power_flow` takes, so an override used for the fundamental can be
+        reused here unchanged and gradients flow to it at every order.
+    fusion:
+        Exact bus fusion of the zero-impedance branches (see
+        :func:`pgml.assembly.assemble_ybus`). A zero-impedance branch is an ideal
+        conductor at EVERY frequency, so one map serves the fundamental and every
+        harmonic order. ``v1`` stays in the full layout; the returned ``Y`` / ``I`` and
+        ``index`` are the reduced one.
 
     Returns
     -------
     Y:
         Complex ``[Hh, N, N]`` (one slice per requested order) — or ``[*batch, Hh,
-        N, N]`` if a BATCHED voltage ``node_source`` or batched ``branch_states``
-        promotes it.
+        N, N]`` if a batched device shunt, a BATCHED voltage ``node_source`` or batched
+        ``branch_states`` promotes it.
     I:
         Complex ``[*batch, Hh, N]`` harmonic nodal current injection.
     index:
-        The compact :class:`NodePhaseIndex` describing the row layout of ``v1`` /
-        ``Y`` / ``I``.
+        The compact :class:`NodePhaseIndex` describing the row layout of ``Y`` / ``I``
+        (the REDUCED layout when ``fusion`` applies; ``fusion.prolong`` maps a solved
+        ``V(h)`` back to the grid's full rows).
     """
     orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
@@ -520,19 +687,50 @@ def assemble_harmonic_system(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
-    index = node_phase_index(grid)
+    fused = resolve_fusion(
+        grid, fusion, param_overrides=param_overrides, branch_states=branch_states
+    )
+    index = fused.index if fused is not None else node_phase_index(grid)
     if device is None:
         device = v1.device
+    if fused is not None and v1.shape[-1] == fused.full_index.size:
+        # The fundamental comes in the full layout; a fused group's rows share one
+        # voltage, so reading the representative row is exact.
+        v1 = fused.sample(v1)
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
 
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
     yh = assemble_network_ybus(
-        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+        grid,
+        freqs,
+        dtype=dtype,
+        device=device,
+        branch_states=branch_states,
+        param_overrides=param_overrides,
+        fusion=fused,
     ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
-    yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
+    yh = _stamp_sources(
+        grid, fvec, yh, index, cdt, rdt, device, param_overrides
+    )  # [Hh, N, N]
+    harmonic_shunt = resolve_shunt_model_name(load_shunt)
+    if harmonic_shunt != "none":
+        yh = _stamp_harmonic_load_shunt(
+            grid,
+            yh,
+            v1,
+            index,
+            orders,
+            operating_point,
+            harmonic_shunt,
+            param_overrides,
+            asymmetric,
+            cdt,
+            rdt,
+            device,
+        )
     ih = _harmonic_injections(
         grid,
         v1,
@@ -544,27 +742,129 @@ def assemble_harmonic_system(
         rdt,
         device,
         asymmetric,
+        param_overrides,
     )  # [*batch, Hh, N]
     if node_sources:
         yh, ih = _apply_node_sources(
             node_sources, grid, v1, index, orders, yh, ih, cdt, rdt, device
         )
-    return yh, ih, index
+    return _align_y_batch_rank(yh, v1, harmonic_injection), ih, index
+
+
+def _align_y_batch_rank(
+    yh: Tensor, v1: Tensor, harmonic_injection: Optional[dict]
+) -> Tensor:
+    """Right-pad a BATCHED ``Y(h)``'s scenario dims to the injection's batch rank.
+
+    A scenario-dependent ``Y(h)`` (a device shunt or a voltage node source driven by a
+    per-scenario operating point) carries the FUNDAMENTAL's batch ``[*vbatch, Hh, N,
+    N]``, while a node-coherent harmonic injection carries a deeper ``[B, T]`` batch in
+    ``I(h)``. Inserting the missing singleton step axes just before the order axis lets
+    one matrix per scenario serve every step of that scenario. A no-op for an unbatched
+    ``Y`` (which broadcasts anyway) and for the snapshot / nominal cases.
+    """
+    if yh.ndim <= 3:
+        return yh
+    extra = _injection_batch_rank(harmonic_injection) - (v1.ndim - 1)
+    for _ in range(max(0, extra)):
+        yh = yh.unsqueeze(-4)
+    return yh
+
+
+def harmonic_injections(
+    grid: Grid,
+    v1: Tensor,
+    harmonic_orders,
+    *,
+    operating_point: Optional[dict] = None,
+    harmonic_injection: Optional[dict] = None,
+    node_sources: Optional[Sequence[NodeHarmonicSource]] = None,
+    symmetry: Optional[str] = None,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+    index: Optional[NodePhaseIndex] = None,
+) -> Tensor:
+    """The harmonic nodal current injection ``I(h)`` ``[*batch, Hh, N]`` alone.
+
+    The RHS half of :func:`assemble_harmonic_system`, without assembling ``Y(h)``: each
+    injecting device's connection-aware harmonic current from its converged fundamental
+    terminal current and its spectrum, plus the Norton current of every
+    CURRENT-kind :class:`NodeHarmonicSource`. Differentiable in ``v1``, the device
+    powers and the spectra.
+
+    ``index`` defaults to the grid's full node-phase layout, which is also the layout
+    ``v1`` is expected in; pass a reduced (fused) index to obtain the injection summed
+    onto the fused rows. A VOLTAGE-kind node source is refused here: it is a Thevenin
+    branch to ground, i.e. an admittance as well as a current, so it belongs to the
+    system assembly (:func:`assemble_harmonic_system`) and not to an injection vector.
+    """
+    orders = _integer_orders(harmonic_orders)
+    if any(h == 1 for h in orders):
+        raise InputError(
+            "harmonic_injections covers the orders h > 1; the fundamental's nodal "
+            "injection is the device current of the nonlinear solve "
+            "(pgml.assembly.device_current_injections)."
+        )
+    voltage_kinds = [
+        src for src in (node_sources or []) if getattr(src, "kind", None) == "voltage"
+    ]
+    if voltage_kinds:
+        raise InputError(
+            "harmonic_injections cannot represent a voltage-kind NodeHarmonicSource "
+            f"(node {voltage_kinds[0].node_id}): a Thevenin background source adds a "
+            "shunt admittance as well as a current, so it is part of the harmonic "
+            "system (assemble_harmonic_system), not of the injection vector."
+        )
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    if device is None:
+        device = v1.device
+    idx = index if index is not None else node_phase_index(grid)
+    asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
+    ih = _harmonic_injections(
+        grid,
+        v1,
+        idx,
+        orders,
+        operating_point,
+        harmonic_injection,
+        cdt,
+        rdt,
+        device,
+        asymmetric,
+        param_overrides,
+    )
+    if node_sources:
+        zero_y = torch.zeros(
+            (len(orders), idx.size, idx.size), dtype=cdt, device=device
+        )
+        _, ih = _apply_node_sources(
+            node_sources, grid, v1, idx, orders, zero_y, ih, cdt, rdt, device
+        )
+    return ih
 
 
 def assemble_harmonic_ybus(
     grid: Grid,
     harmonic_orders,
     *,
+    v1: Optional[Tensor] = None,
+    operating_point: Optional[dict] = None,
+    load_shunt: Optional[str] = None,
+    symmetry: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     branch_states: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
+    fusion: Optional[object] = None,
 ) -> tuple[Tensor, NodePhaseIndex]:
     """The harmonic system MATRIX ``Y(h)`` for orders ``h > 1`` — no injection RHS assembled.
 
     Returns exactly the ``Y(h)`` of :func:`assemble_harmonic_system` (the passive network
-    admittance :func:`pgml.assembly.assemble_network_ybus` plus the source Norton shunt, so the
-    matrix is non-singular at the harmonics), WITHOUT the data-derived current ``I(h)``. This is
+    admittance :func:`pgml.assembly.assemble_network_ybus` plus the source Norton shunt plus
+    each device's harmonic shunt, so the matrix is non-singular at the harmonics), WITHOUT
+    the data-derived current ``I(h)``. This is
     the operator a physics-informed decoder learns to invert: it predicts the nodal injection
     ``I_pred(h)`` and reconstructs ``V(h) = solve_harmonic(Y(h), I_pred(h))`` — a self-consistency
     that uses ONLY the (differentiable) grid description, never a ground-truth injection. ``Y`` is
@@ -579,6 +879,14 @@ def assemble_harmonic_ybus(
         Iterable of integer orders ``h > 1`` (passing order 1 raises — the fundamental is the
         passive :func:`pgml.assembly.assemble_network_ybus` at ``f0`` with an ideal slack, not a
         Norton-shunted harmonic system).
+    v1, operating_point, load_shunt, symmetry:
+        The device-shunt inputs (same meaning as in :func:`assemble_harmonic_system`). With
+        the default ``v1=None`` there is no fundamental solution to read the operating point
+        from, so every device is evaluated at its RATED terminal voltage — exact for a
+        constant-power device, an approximation for a ZIP or inverter-controlled one, which is
+        named in a WARNING. Pass the converged ``v1`` (or use
+        :func:`assemble_harmonic_system`) to reproduce :func:`solve_harmonic_flow`'s matrix
+        exactly. ``load_shunt="none"`` returns the pure network + source matrix.
     dtype, device:
         Complex dtype and device for the assembled matrix (``device=None`` -> CPU). Honoured
         throughout; gradients flow w.r.t. the network parameters on the live tape.
@@ -586,12 +894,19 @@ def assemble_harmonic_ybus(
         Optional topology / switch-state mask ``{branch_id: state}`` (see
         :func:`pgml.assembly.assemble_ybus`); a batched state promotes ``Y`` to
         ``[*batch, Hh, N, N]``.
+    param_overrides:
+        Optional parameter substitution (see :func:`pgml.assembly.assemble_ybus`),
+        applied to the network admittance and the source stamp.
+    fusion:
+        Exact bus fusion of the zero-impedance branches (see
+        :func:`pgml.assembly.assemble_ybus`); the returned ``index`` is then the reduced
+        row layout of ``Y``.
 
     Returns
     -------
     Y:
-        Complex ``[Hh, N, N]`` (one slice per requested order; batched
-        ``branch_states`` prepend their scenario dims).
+        Complex ``[Hh, N, N]`` (one slice per requested order; a batched device shunt or
+        batched ``branch_states`` prepend their scenario dims).
     index:
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y``.
     """
@@ -601,20 +916,52 @@ def assemble_harmonic_ybus(
             "assemble_harmonic_ybus assembles the LINEAR harmonic orders h > 1; order 1 is "
             "the fundamental (assemble_network_ybus at f0 with an ideal slack)."
         )
+    harmonic_shunt = resolve_shunt_model_name(load_shunt)
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
     f0 = float(grid.base_frequency_hz)
-    index = node_phase_index(grid)
+    fused = resolve_fusion(
+        grid, fusion, param_overrides=param_overrides, branch_states=branch_states
+    )
+    index = fused.index if fused is not None else node_phase_index(grid)
     if device is None:
         device = torch.device("cpu")
+    if fused is not None and v1 is not None and v1.shape[-1] == fused.full_index.size:
+        # A caller's fundamental comes in the grid's full layout, which the device shunt
+        # reads through the REDUCED index; a fused group's rows share one voltage, so
+        # reading the representative row is exact.
+        v1 = fused.sample(v1)
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
     yh = assemble_network_ybus(
-        grid, freqs, dtype=dtype, device=device, branch_states=branch_states
+        grid,
+        freqs,
+        dtype=dtype,
+        device=device,
+        branch_states=branch_states,
+        param_overrides=param_overrides,
+        fusion=fused,
     ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
-    yh = _stamp_sources(grid, fvec, yh, index, cdt, rdt, device, None)  # [Hh, N, N]
+    yh = _stamp_sources(
+        grid, fvec, yh, index, cdt, rdt, device, param_overrides
+    )  # [Hh, N, N]
+    if harmonic_shunt != "none":
+        yh = _stamp_harmonic_load_shunt(
+            grid,
+            yh,
+            v1,
+            index,
+            orders,
+            operating_point,
+            harmonic_shunt,
+            param_overrides,
+            resolve_asymmetric(grid, operating_point, mode=symmetry),
+            cdt,
+            rdt,
+            device,
+        )
     return yh, index
 
 
@@ -788,6 +1135,82 @@ def _align_v1_batch_rank(v1: Tensor, harmonic_injection: Optional[dict]) -> Tens
     return v1
 
 
+def _element_terminal_voltage(m_c: Tensor, rows: Tensor, v1: Tensor) -> Tensor:
+    """Per-ELEMENT terminal voltage ``V_term = M @ V_used`` ``[*vbatch, n_elem]``.
+
+    ``m_c`` is the group's complex incidence ``[n_elem, n_used]``, ``rows`` the
+    device's global ``used_rows`` ``[n_used]``: WYE-ground reads the phase rows,
+    WYE-neutral the phase-minus-neutral difference, DELTA-3 the line-to-line
+    difference.
+    """
+    v_used = v1.index_select(-1, rows).to(m_c.dtype)  # [*vbatch, n_used]
+    return torch.einsum("eu,...u->...e", m_c, v_used)
+
+
+def _effective_element_power(
+    a,
+    grp,
+    node_map,
+    vt: Tensor,
+    operating_point,
+    param_overrides,
+    asymmetric: bool,
+    cdt,
+    rdt,
+    device,
+) -> Tensor:
+    """Per-ELEMENT complex power the device draws at the fundamental ``[*batch, n_elem]``.
+
+    The load-convention signed power (``+`` for a :class:`~pgml.schemas.grid_schema
+    .Load`, ``-`` for a Generator/Storage) the device ACTUALLY draws at the converged
+    fundamental terminal voltage ``vt``: the control-resolved ``(P, Q)`` for an
+    inverter-controlled device, the ZIP-scaled ``S0*(z*r^2 + i*r + p)`` at
+    ``r = |V_term|/V0`` for a voltage-dependent ``load_model``, and the base operating
+    point for the const-power default — exactly as the nonlinear fundamental solve
+    resolves it (:func:`pgml.assembly.device_current_injections`). Both the harmonic
+    current injection and the harmonic shunt are built from this one quantity, so they
+    cannot describe different operating points. Differentiable in P, Q and (through the
+    voltage-dependent laws) in ``vt``.
+    """
+    sign = 1.0 if isinstance(a, Load) else -1.0
+    p_list, q_list = resolve_operating_power(a, operating_point, asymmetric=asymmetric)
+    p_t = torch.stack([_as_rt(x, rdt, device) for x in p_list], dim=-1)  # [*b,n_elem]
+    q_t = torch.stack([_as_rt(x, rdt, device) for x in q_list], dim=-1)
+    # Same parameter-substitution hook the fundamental solve uses, so a differentiable
+    # P/Q override drives the harmonic path too (the override replaces the whole
+    # per-element vector, as in the assembly).
+    kind = "load" if isinstance(a, Load) else "generator"
+    p_t = _override(param_overrides, (kind, a.id, "p_nom_per_phase_w"), p_t)
+    q_t = _override(param_overrides, (kind, a.id, "q_nom_per_phase_var"), q_t)
+
+    lm = getattr(a, "load_model", None)
+    if getattr(a, "control", None) is None and (
+        lm is None or lm is LoadModel.CONST_POWER
+    ):
+        return torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
+
+    is_delta = grp.connection == WindingConnection.DELTA
+    v0 = phase_voltage_magnitude(
+        node_map[a.node].u_rated_v,
+        len(node_map[a.node].phases),
+        line_to_line=is_delta,
+    )
+    if getattr(a, "control", None) is not None:
+        v_pu = (torch.abs(vt) / v0).unsqueeze(-2)  # [*vbatch, 1, n_elem]
+        p_eff, q_eff = resolve_injection_power(
+            a.control, p_t, v_pu, rdt=rdt, device=device
+        )
+        return torch.complex(sign * p_eff.squeeze(-2), sign * q_eff.squeeze(-2)).to(cdt)
+
+    from pgml.assembly.ybus import _zip_coeffs
+
+    zip_p, zip_q = _zip_coeffs(a, rdt, device)  # [3] constants
+    r = torch.abs(vt) / v0  # [*vbatch, n_elem]
+    scale_p = zip_p[0] * r * r + zip_p[1] * r + zip_p[2]
+    scale_q = zip_q[0] * r * r + zip_q[1] * r + zip_q[2]
+    return torch.complex(sign * p_t * scale_p, sign * q_t * scale_q).to(cdt)
+
+
 def _harmonic_injections(
     grid,
     v1,
@@ -799,6 +1222,7 @@ def _harmonic_injections(
     rdt,
     device,
     asymmetric=True,
+    param_overrides=None,
 ) -> Tensor:
     """Per-device, connection-aware harmonic nodal current injection ``[*batch, Hh, N]``.
 
@@ -847,58 +1271,23 @@ def _harmonic_injections(
             )
             if elem_spectra is None:
                 continue  # device injects no harmonics.
-            sign = 1.0 if isinstance(a, Load) else -1.0
-            p_list, q_list = resolve_operating_power(
-                a, operating_point, asymmetric=asymmetric
-            )
-            p_t = torch.stack(
-                [_as_rt(x, rdt, device) for x in p_list], dim=-1
-            )  # [*b,n_elem]
-            q_t = torch.stack([_as_rt(x, rdt, device) for x in q_list], dim=-1)
-
             rows = rows_grp[ki]  # [n_used]
-            v_used = v1.index_select(-1, rows).to(cdt)  # [*vbatch, n_used]
-            # V_term[..., e] = sum_u M[e,u] V_used[..., u].
-            vt = torch.einsum("eu,...u->...e", m_c, v_used)  # [*vbatch, n_elem]
-
+            vt = _element_terminal_voltage(m_c, rows, v1)  # [*vbatch, n_elem]
             # The harmonic current scales from the FUNDAMENTAL current the device
-            # actually draws. For a controlled inverter that is the control-resolved
-            # (P, Q) at the converged fundamental voltage; for a voltage-dependent
-            # load model it is the ZIP-scaled power S_eff = S0 * (z*r^2 + i*r + p)
-            # at r = |V_term|/V0 — both exactly as the nonlinear fundamental solve
-            # resolves them (device_current_injections), so the injected spectrum is
-            # anchored to the current the device actually carries at order 1.
-            lm = getattr(a, "load_model", None)
-            if getattr(a, "control", None) is not None:
-                is_delta = grp.connection == WindingConnection.DELTA
-                v0 = phase_voltage_magnitude(
-                    node_map[a.node].u_rated_v,
-                    len(node_map[a.node].phases),
-                    line_to_line=is_delta,
-                )
-                v_pu = (torch.abs(vt) / v0).unsqueeze(-2)  # [*vbatch, 1, n_elem]
-                p_eff, q_eff = resolve_injection_power(
-                    a.control, p_t, v_pu, rdt=rdt, device=device
-                )
-                s0 = torch.complex(
-                    sign * p_eff.squeeze(-2), sign * q_eff.squeeze(-2)
-                ).to(cdt)  # [*b, n_elem]
-            elif lm is not None and lm is not LoadModel.CONST_POWER:
-                from pgml.assembly.ybus import _zip_coeffs
-
-                is_delta = grp.connection == WindingConnection.DELTA
-                v0 = phase_voltage_magnitude(
-                    node_map[a.node].u_rated_v,
-                    len(node_map[a.node].phases),
-                    line_to_line=is_delta,
-                )
-                zip_p, zip_q = _zip_coeffs(a, rdt, device)  # [3] constants
-                r = torch.abs(vt) / v0  # [*vbatch, n_elem]
-                scale_p = zip_p[0] * r * r + zip_p[1] * r + zip_p[2]
-                scale_q = zip_q[0] * r * r + zip_q[1] * r + zip_q[2]
-                s0 = torch.complex(sign * p_t * scale_p, sign * q_t * scale_q).to(cdt)
-            else:
-                s0 = torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
+            # actually draws, so the injected spectrum is anchored to the current the
+            # device carries at order 1.
+            s0 = _effective_element_power(
+                a,
+                grp,
+                node_map,
+                vt,
+                operating_point,
+                param_overrides,
+                asymmetric,
+                cdt,
+                rdt,
+                device,
+            )  # [*batch, n_elem]
             # Guard the conj(vt) divide for a dead/disconnected terminal (vt == 0)
             # or a gradcheck perturbation toward zero: mask the DENOMINATOR before
             # dividing (so conj(s0)/0 never enters the graph), then mask the RESULT
@@ -985,6 +1374,215 @@ def _harmonic_injections(
         # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add).
         out = out.index_add(-1, rows, -i_used)
     return out  # [*batch, Hh, N]
+
+
+# ---------------------------------------------------------------------------
+# harmonic device shunt (OpenDSS load model) — assembly/_load_shunt.py
+# ---------------------------------------------------------------------------
+def _stamp_harmonic_load_shunt(
+    grid,
+    yh,
+    v1,
+    index,
+    harm_orders,
+    operating_point,
+    harmonic_shunt,
+    param_overrides,
+    asymmetric,
+    cdt,
+    rdt,
+    device,
+):
+    """Add every device's harmonic Norton shunt to ``Y(h)`` ``[*batch, Hh, N, N]``.
+
+    Connection-aware exactly like the harmonic current injection: the per-ELEMENT
+    admittance ``y_elem(h)`` of :func:`pgml.assembly._load_shunt
+    .harmonic_shunt_element_admittance` is mapped to the nodal block
+    ``M^T diag(y_elem(h)) M`` with the SAME terminal incidence ``M``
+    (:mod:`pgml.assembly._incidence`), so a WYE-ground device stamps a diagonal, a
+    WYE-neutral device returns through the neutral row, and a DELTA device puts each
+    leg admittance on both of its phase diagonals (reproducing OpenDSS's delta
+    ``YPrim``, whose diagonal reads ``2*Y_leg``).
+
+    ``harmonic_shunt`` is the validated run-level model name; each device's own
+    ``harmonic_model`` may override it (:func:`pgml.assembly._load_shunt
+    .resolve_harmonic_shunt`). The element power is the one the device draws at the
+    fundamental (:func:`_effective_element_power`), so ``Y(h)`` depends on the
+    fundamental solution ``v1`` for a voltage-dependent device and gradients flow from
+    the harmonic voltages through the shunt to P, Q and ``v1``. A per-scenario
+    operating point therefore promotes ``Y(h)`` to ``[*batch, Hh, N, N]``.
+
+    ``v1 = None`` (no fundamental solution available, as in
+    :func:`assemble_harmonic_ybus`) evaluates every device at its RATED terminal
+    voltage, which is exact for a constant-power device and an approximation for a
+    ZIP / controlled one — such a device is named in a WARNING.
+    """
+    loads = [
+        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
+    ]
+    if not loads:
+        return yh
+    node_map = {nd.id: nd for nd in grid.nodes}
+    h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
+    rated_only = []
+    generation_free = [a.id for a in loads if generation_shunt_is_neglected(a)]
+    for grp in group_appliances(loads, node_map):
+        specs = [resolve_harmonic_shunt(a, harmonic_shunt) for a in grp.appliances]
+        keep = [ki for ki, sp in enumerate(specs) if sp.kind != "none"]
+        if not keep:
+            continue
+        is_delta = grp.connection == WindingConnection.DELTA
+        m_c = build_incidence(grp, rdt, device).to(cdt)  # [n_elem, n_used]
+        rows_grp = used_rows(grp, index, device)  # [K, n_used]
+        s_list, v_list = [], []
+        for ki in keep:
+            a = grp.appliances[ki]
+            node = node_map[a.node]
+            v0 = phase_voltage_magnitude(
+                node.u_rated_v, len(node.phases), line_to_line=is_delta
+            )
+            v0_t = _as_rt(v0, rdt, device)
+            if v1 is None:
+                # Rated-voltage terminal: exact for a constant-power device.
+                vt = torch.polar(
+                    v0_t.expand(grp.n_elem),
+                    torch.zeros(grp.n_elem, dtype=rdt, device=device),
+                ).to(cdt)
+                if getattr(a, "control", None) is not None or (
+                    getattr(a, "load_model", None) not in (None, LoadModel.CONST_POWER)
+                ):
+                    rated_only.append(a.id)
+            else:
+                vt = _element_terminal_voltage(m_c, rows_grp[ki], v1)
+            s_list.append(
+                _effective_element_power(
+                    a,
+                    grp,
+                    node_map,
+                    vt,
+                    operating_point,
+                    param_overrides,
+                    asymmetric,
+                    cdt,
+                    rdt,
+                    device,
+                )
+            )
+            v_list.append(v0_t)
+        # Stack the kept devices at -2: [*batch, K, n_elem]; a device without a batched
+        # override broadcasts its nominal power into the common scenario batch.
+        lead = torch.broadcast_shapes(*[t.shape[:-1] for t in s_list])
+        s_elem = torch.stack([t.broadcast_to(*lead, t.shape[-1]) for t in s_list], -2)
+        v_rated = torch.stack(v_list, -1).unsqueeze(-1)  # [K, 1]
+        series_rl = torch.as_tensor(
+            [specs[ki].series_rl_fraction for ki in keep], dtype=rdt, device=device
+        ).unsqueeze(-1)
+        motor_x_pu = torch.as_tensor(
+            [specs[ki].motor_x_harm_pu for ki in keep], dtype=rdt, device=device
+        ).unsqueeze(-1)
+        motor_xr = torch.as_tensor(
+            [specs[ki].motor_xr_harm for ki in keep], dtype=rdt, device=device
+        ).unsqueeze(-1)
+        # Apparent-power base of the motor reactance: the element's own power for a WYE
+        # device (one single-phase element per phase), the device total for a DELTA one.
+        motor_s_base = (
+            torch.abs(s_elem.sum(-1, keepdim=True)) if is_delta else torch.abs(s_elem)
+        )
+        y_elem = harmonic_shunt_element_admittance(
+            s_elem,
+            v_rated,
+            h_vec,
+            series_rl,
+            motor_x_pu=motor_x_pu,
+            motor_xr=motor_xr,
+            motor_s_base=motor_s_base,
+            cdtype=cdt,
+        )  # [*batch, Hh, K, n_elem]
+        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem, m_c)
+        rows = rows_grp[torch.as_tensor(keep, dtype=torch.int64, device=device)]
+        yh = scatter_blocks_into(yh, block, rows, rows)
+    if rated_only:
+        _log.warning(
+            "harmonic load shunt: %d voltage-dependent device(s) %s evaluated at their "
+            "RATED terminal voltage (no fundamental solution given); pass the "
+            "fundamental voltage for the exact operating point.",
+            len(rated_only),
+            rated_only[:10],
+        )
+    if generation_free:
+        _log.warning(
+            "harmonic device shunt: %d generation device(s) %s carry NO shunt and stay "
+            "pure harmonic current sources (appliance.harmonic_shunt.generation_model = "
+            "'none'): the load expression conj(S)/V_rated^2 has a negative conductance "
+            "for an injecting device. Set that default to 'load_style' to apply it "
+            "anyway (OpenDSS's negative-kW Load idiom), or give the device the motor "
+            "model.",
+            len(generation_free),
+            generation_free[:10],
+        )
+    return yh
+
+
+def _harmonic_shunt_currents(
+    grid: Grid,
+    v1: Tensor,
+    vh: Tensor,
+    harmonic_orders,
+    *,
+    operating_point: Optional[dict] = None,
+    load_shunt: Optional[str] = None,
+    symmetry: Optional[str] = None,
+    dtype: torch.dtype = torch.complex128,
+    device: Optional[torch.device] = None,
+    param_overrides: Optional[dict] = None,
+    index: Optional[NodePhaseIndex] = None,
+) -> Tensor:
+    """The current the devices' harmonic Norton shunts DRAW, ``[*batch, Hh, N]``.
+
+    ``Y_shunt(h) V(h)`` for the shunt model ``load_shunt`` selects (``None`` = the
+    documented default; ``"none"`` returns zeros): the part of each device's harmonic
+    nodal current that :func:`assemble_harmonic_system` carries on the LEFT-hand side,
+    inside ``Y(h)``. The DEVICE-side nodal current at order ``h`` is therefore
+    :func:`harmonic_injections` MINUS this term, which is what a nodal current balance
+    outside the solve needs — the recovery of the current through a fused
+    (zero-impedance) branch, for instance.
+
+    ``v1`` is the converged fundamental ``[*batch, N]`` (the shunt is derived from the
+    operating point there), ``vh`` the solved harmonic voltages ``[*batch, Hh, N]`` for
+    the SAME orders, both in the row layout of ``index`` (default: the grid's full
+    node-phase layout). Differentiable in ``v1``, ``vh`` and the device powers; batched;
+    device and dtype follow the inputs.
+    """
+    orders = _integer_orders(harmonic_orders)
+    if any(h == 1 for h in orders):
+        raise InputError(
+            "_harmonic_shunt_currents covers the orders h > 1; the fundamental's "
+            "device current is the nonlinear solve's own "
+            "(pgml.assembly.device_current_injections)."
+        )
+    harmonic_shunt = resolve_shunt_model_name(load_shunt)
+    cdt = _cdtype(dtype)
+    rdt = _rdtype(dtype)
+    if device is None:
+        device = vh.device
+    idx = index if index is not None else node_phase_index(grid)
+    if harmonic_shunt == "none":
+        return torch.zeros(vh.shape, dtype=cdt, device=device)
+    y_shunt = _stamp_harmonic_load_shunt(
+        grid,
+        torch.zeros((len(orders), idx.size, idx.size), dtype=cdt, device=device),
+        v1,
+        idx,
+        orders,
+        operating_point,
+        harmonic_shunt,
+        param_overrides,
+        resolve_asymmetric(grid, operating_point, mode=symmetry),
+        cdt,
+        rdt,
+        device,
+    )  # [*batch, Hh, N, N]
+    return torch.einsum("...hij,...hj->...hi", y_shunt, vh.to(cdt))
 
 
 # ---------------------------------------------------------------------------
@@ -1149,6 +1747,7 @@ __all__ = [
     "solve_harmonic_flow",
     "assemble_harmonic_system",
     "assemble_harmonic_ybus",
+    "harmonic_injections",
     "HarmonicFlowResult",
     "NodeHarmonicSource",
 ]

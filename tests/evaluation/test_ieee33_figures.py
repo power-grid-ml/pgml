@@ -13,13 +13,26 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandapower as pp
-import pandapower.networks as pn
+import pytest
 import torch
 
-from pgml.assembly import assemble_network_ybus, assemble_ybus, node_phase_index
-from pgml.convert.pandapower import to_grid
-from pgml.evaluation import (
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+    import pandapower.networks as pn
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.assembly import assemble_network_ybus, assemble_ybus, node_phase_index  # noqa: E402
+from pgml.convert.pandapower import to_grid  # noqa: E402
+from pgml.evaluation import (  # noqa: E402
     labeled_matrix,
     plot_voltage_profile,
     plot_ybus_difference,
@@ -27,8 +40,8 @@ from pgml.evaluation import (
     save_figure,
     voltage_profile,
 )
-from pgml.evaluation import oracles as ref
-from pgml.solver import solve_power_flow
+from pgml.evaluation import oracles as ref  # noqa: E402
+from pgml.solver import solve_power_flow  # noqa: E402
 
 CDT = torch.complex128
 

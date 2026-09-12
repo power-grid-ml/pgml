@@ -8,7 +8,7 @@ admittance matrices.
 Build an OpenDSS circuit from pgml's synthesized conductor data, read ``SystemY(h)``
 at each harmonic, and solve with pgml-consistent injection.  Parity: ~1e-11 V.
 
-**Sequence-aware path** (three-phase grids tagged ``harmonic_line_model=sequence_aware``):
+**Sequence-aware path** (three-phase grids with ``harmonic_line_model='sequence_aware'``):
 Build an OpenDSS circuit with R1/X1/R0/X0 lines (from the 3×3 phase matrices);
 transformer contributions are overwritten with pgml's own formulas.  Parity: ~1e-8 V.
 
@@ -44,8 +44,12 @@ from pgml.evaluation.data import HarmonicProfile, LabeledMatrix, row_labels
 from pgml.evaluation.topology import distance_from_slack
 from pgml.evaluation.oracles.numpy_oracle import (
     _apply_node_sources_numpy,
+    _is_ideal_branch,
+    _stamp_device_shunts_numpy,
     _stamp_transformer_numpy,
+    fusion_prolongation,
     numpy_harmonic_voltages,
+    solve_with_fusion,
 )
 
 
@@ -105,7 +109,8 @@ def build_opendss_geometry_circuit(grid, *, slack_node: Optional[int] = None) ->
     Emits the slack Vsource (Thévenin from the :class:`Source`) and one WireData +
     LineGeometry + Line per geometry line, using the SAME synthesized conductor data
     pgml uses — so OpenDSS's ``SystemY(h)`` equals pgml's harmonic ``Y(h)`` up to the
-    Carson model (which is bit-exact). No loads (harmonic injection is applied
+    Carson model (which agrees to ~5e-8 relative, the SI-vs-truncated ``mu0`` constant).
+    No loads (harmonic injection is applied
     externally). Returns ``{node_id: dss_bus_name}``. DERI earth model (OpenDSS default).
     """
     import opendssdirect as dss
@@ -206,6 +211,9 @@ def opendss_geometry_harmonic_profiles(
     index = hres.index
     f0 = float(grid.base_frequency_hz)
     freqs = hres.frequencies_hz.detach().cpu().numpy()
+    # An ideal (zero-impedance) branch is in neither engine's admittance: its terminals
+    # are one electrical node, which the dense prolongation expresses.
+    p_fuse = fusion_prolongation(grid, index)
     dssY = opendss_geometry_systemy(grid, index, orders, slack_node=slack_node)
     dist = distance_from_slack(grid, slack_node)
     v = hres.v.detach().cpu().numpy()  # [H, N]
@@ -214,7 +222,7 @@ def opendss_geometry_harmonic_profiles(
         k = int(np.argmin(np.abs(freqs - h * f0)))
         vp = v[k]
         i_inj = _pgml_harmonic_y(grid, index, h) @ vp
-        vd = np.linalg.solve(dssY[int(h)], i_inj)
+        vd = solve_with_fusion(dssY[int(h)], i_inj, p_fuse)
         ds, mags, angs, nids = [], [], [], []
         for node in grid.nodes:
             row = index.row(int(node.id), Phase.A)
@@ -400,19 +408,44 @@ def _build_geometry_circuit_stub(grid: Grid, busname: dict) -> None:
     dss.Text.Command("Solve")
 
 
-def _get_stub_norton_from_dss() -> complex:
-    """Read the actual stub Vsource Norton admittance from the active DSS circuit.
+def _dss_earth_params(
+    line: Line, f0: float, length_m: float
+) -> tuple[float, float, float]:
+    """OpenDSS ``(Rg, Xg, rho)`` reproducing ONE pgml line's earth-return model.
 
-    Returns ``YPrim[0, 0]`` of ``Vsource.Source`` (the positive-terminal Norton
-    contribution at the current frequency, including Carson corrections).
+    OpenDSS frequency-corrects a sequence-defined line as ``R += Rg*(h-1)`` and
+    ``X = h*(X - 0.5*KXg*ln(h))`` per matrix entry, with
+    ``KXg = Xg/ln(658.5*sqrt(rho/f0))`` — i.e. exactly pgml's lumped zero-sequence
+    model with ``Rg = resistance_coeff*f0`` and ``KXg = reactance_coeff*f0``. Its own
+    defaults (``Rg=0.01805``, ``Xg=0.155081``) are the physical Carson values at 60 Hz
+    in ohms per 1000 ft and are reinterpreted in the line's ``units``, so they are
+    passed explicitly here.
+
+    The stub writes the TOTAL impedance onto a ``length=1 units=m`` line, so the earth
+    terms are likewise per whole line. ``Xg=0`` is emitted when the pgml line scales
+    ``X0`` linearly (``x0_frequency='linear'``), which is OpenDSS's way of switching the
+    earth-return reactance correction off, and BOTH are zero for a line that is not on the
+    ``sequence_aware`` model, since no other lumped model adds an earth-return term.
     """
-    import opendssdirect as dss
+    from pgml import defaults as _d
 
-    dss.Circuit.SetActiveElement("Vsource.Source")
-    yp = np.array(dss.CktElement.YPrim())
-    n = int(round((len(yp) / 2) ** 0.5))
-    yy = (yp[0::2] + 1j * yp[1::2]).reshape(n, n)
-    return complex(yy[0, 0])
+    if getattr(line, "harmonic_line_model", None) != "sequence_aware":
+        return 0.0, 0.0, float(_d.get("line.earth_return.resistivity_ohm_m"))
+    er = getattr(line, "earth_return", None)
+    rc = getattr(er, "resistance_coeff_ohm_per_m_per_hz", None)
+    if rc is None:
+        rc = _d.get("line.earth_return.resistance_coeff_ohm_per_m_per_hz")
+    kx = getattr(er, "reactance_coeff_ohm_per_m_per_hz", None)
+    if kx is None:
+        kx = _d.get("line.earth_return.reactance_coeff_ohm_per_m_per_hz")
+    law = getattr(er, "x0_frequency", None) or _d.get("line.earth_return.x0_frequency")
+    rho = float(_d.get("line.earth_return.resistivity_ohm_m"))
+    rg = to_float(rc) * f0 * length_m
+    if law == "carson_sublinear":
+        xg = to_float(kx) * f0 * math.log(658.5 * math.sqrt(rho / f0)) * length_m
+    else:
+        xg = 0.0
+    return rg, xg, rho
 
 
 def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
@@ -449,6 +482,11 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
     p_src = len(src.phases)
 
     dss.Text.Command("Clear")
+    # Every element's BASE frequency comes from DefaultBaseFrequency (60 Hz out of the
+    # box), and OpenDSS scales a sequence-defined line's reactance by f/basefreq. On a
+    # 50 Hz grid an unset base frequency therefore reports 5/6 of the line reactance the
+    # grid actually stores, at every order including the fundamental.
+    dss.Text.Command(f"Set DefaultBaseFrequency={f0:.10g}")
     ph_conn = ".".join(str(k + 1) for k in range(p_src))
     dss.Text.Command(
         f"New Circuit.pgml_live phases={p_src} basekv={kv_slack} "
@@ -531,10 +569,12 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
             x0 = z0.imag
             c1 = np.diag(c_mat).mean()
             c0 = c_mat.sum() / 3.0
+            rg, xg, rho = _dss_earth_params(ln, f0, length)
             dss.Text.Command(
                 f"New Line.l{ln.id} phases=3 bus1={bus1} bus2={bus2} "
                 f"r1={r1:.10g} x1={x1:.10g} c1={c1 * 1e9:.10g} "
                 f"r0={r0:.10g} x0={x0:.10g} c0={c0 * 1e9:.10g} "
+                f"rg={rg:.10g} xg={xg:.10g} rho={rho:.10g} "
                 "length=1 units=m"
             )
         else:
@@ -573,19 +613,26 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
                 "length=1 units=m"
             )
 
-    # Switches: model as pure-R Lines (x1=0 => no Carson correction, safe to include)
+    # Switches: model as pure-R Lines (x1=0 => no Carson correction, safe to include).
+    # An IDEAL switch has no impedance to write: its two terminals are one electrical
+    # node, which the dense bus fusion of the comparison expresses instead.
     for b in grid.branches:
         if not (isinstance(b, Switch) and b.in_service and b.closed):
+            continue
+        if _is_ideal_branch(b):
             continue
         p = len(b.from_phases)
         ph_suffix = ".".join(str(k + 1) for k in range(p))
         bus1 = f"{busname[b.from_node]}.{ph_suffix}"
         bus2 = f"{busname[b.to_node]}.{ph_suffix}"
         r_sw = to_float(b.resistance_ohm)
+        # rg/xg = 0: a switch is a lumped contact resistance with no earth-return path,
+        # so OpenDSS must not frequency-correct it (its defaults would add ~0.018 Ohm
+        # per order on a `units=m length=1` element).
         dss.Text.Command(
             f"New Line.sw{b.id} phases={p} bus1={bus1} bus2={bus2} "
             f"r1={r_sw:.10g} x1=0.0 c1=0.0 r0={r_sw:.10g} x0=0.0 c0=0.0 "
-            "length=1 units=m"
+            "rg=0 xg=0 length=1 units=m"
         )
 
     # Voltage bases: use only the slack node kV (LV nodes are isolated without transformers)
@@ -616,6 +663,8 @@ def _stamp_non_line_elements_no_source(
     w0 = 2.0 * math.pi * f0
 
     for b in grid.branches:
+        if _is_ideal_branch(b):
+            continue  # an ideal conductor: no stamp, its rows are fused instead
         if isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed:
             p = len(b.from_phases)
             fr_rows = index.rows(b.from_node)
@@ -715,11 +764,11 @@ def _is_geometry_grid(grid: Grid) -> bool:
 
 
 def _is_sequence_aware_grid(grid: Grid) -> bool:
-    """True if any in-service line is tagged ``harmonic_line_model=sequence_aware``."""
+    """True if any in-service line selected ``harmonic_line_model='sequence_aware'``."""
     return any(
         isinstance(b, Line)
         and b.in_service
-        and (b.tags or {}).get("harmonic_line_model") == "sequence_aware"
+        and b.harmonic_line_model == "sequence_aware"
         for b in grid.branches
     )
 
@@ -738,6 +787,7 @@ def opendss_harmonic_voltages(
     v1: Optional[np.ndarray] = None,
     operating_point: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
+    load_shunt: Optional[str] = None,
 ) -> np.ndarray:
     """Live OpenDSS harmonic oracle for full multi-voltage-level grids.
 
@@ -759,7 +809,7 @@ def opendss_harmonic_voltages(
     (``R const, X∝h, complex tap``).  The resulting Y-bus matches pgml's
     assembled Y at Carson-line precision (~1e-14 relative for lines).
 
-    **Three-phase sequence-aware path** (lines tagged ``harmonic_line_model=sequence_aware``):
+    **Three-phase sequence-aware path** (lines with ``harmonic_line_model='sequence_aware'``):
 
     In this path OpenDSS supplies ONLY the LINE admittance.  A full OpenDSS
     circuit is built whose Lines are defined via ``R1/X1/R0/X0`` derived from the
@@ -793,7 +843,7 @@ def opendss_harmonic_voltages(
     grid:
         Materialised :class:`~pgml.schemas.grid_schema.Grid`.  Must be one of:
         (a) a single-phase grid with ``conductor_geometry`` on all lines, or
-        (b) a three-phase grid with ``harmonic_line_model=sequence_aware`` tags.
+        (b) a three-phase grid with ``harmonic_line_model='sequence_aware'`` lines.
         Grids with neither path raise ``ValueError``.
     harmonic_injection:
         Per-device harmonic-current spec
@@ -813,6 +863,12 @@ def opendss_harmonic_voltages(
         Optional per-device operating-point override.  Currently used only when
         ``v1 is None`` (passed to the internal linear fundamental solve).
         Accepted for API compatibility with the scenario example scripts.
+    load_shunt:
+        Device harmonic shunt model (``"none"`` / ``"opendss"`` / ``"motor"``; ``None`` =
+        the documented modeling default), as in
+        :func:`pgml.solver.solve_harmonic_flow`. It is stamped with the oracles' OWN
+        formula (:func:`pgml.evaluation.oracles.numpy_oracle._device_shunt_numpy`), so
+        this oracle stays a LINE-model comparison with the device model held equal.
     node_sources:
         Optional sequence of :class:`~pgml.solver.NodeHarmonicSource` — per-node
         harmonic disturbance sources applied ONLY at ``h > 1``.  These are stamped
@@ -855,7 +911,9 @@ def opendss_harmonic_voltages(
         )
 
     from pgml.assembly import node_phase_index
+    from pgml.assembly._load_shunt import resolve_shunt_model_name
 
+    shunt = resolve_shunt_model_name(load_shunt)
     orders_list = [int(h) for h in orders]
     index = node_phase_index(grid)
     n = index.size
@@ -869,7 +927,7 @@ def opendss_harmonic_voltages(
         raise ValueError(
             "opendss_harmonic_voltages requires either (a) all lines to carry "
             "conductor_geometry (single-phase Carson path) or (b) lines tagged "
-            "harmonic_line_model=sequence_aware (3-phase sequence-aware path). "
+            "harmonic_line_model='sequence_aware' (3-phase sequence-aware path). "
             "For plain R/X grids without these tags, use numpy_harmonic_voltages."
         )
 
@@ -1060,10 +1118,16 @@ def opendss_harmonic_voltages(
         else:
             _stamp_transformers_only(y_out, grid, h, index)
         _stamp_source_nortons(y_out, grid, h, index)
+        # The device harmonic shunt, from the same independent formula the numpy oracle
+        # uses, so the comparison stays a LINE-model comparison.
+        _stamp_device_shunts_numpy(y_out, grid, index, h, shunt, operating_point)
 
         return y_out
 
     # --- Per-order solve ---
+    # An ideal (zero-impedance) branch is in neither engine's admittance: its terminals
+    # are one electrical node, which the dense prolongation expresses.
+    p_fuse = fusion_prolongation(grid, index)
     result_slices: list[np.ndarray] = []
     for h in orders_list:
         if h == 1:
@@ -1079,7 +1143,7 @@ def opendss_harmonic_voltages(
         if node_sources:
             _apply_node_sources_numpy(grid, node_sources, v1_eff, index, h, y_h, i_h)
 
-        result_slices.append(np.linalg.solve(y_h, i_h))
+        result_slices.append(solve_with_fusion(y_h, i_h, p_fuse))
 
     return np.stack(result_slices, axis=0)  # [H, N]
 
@@ -1186,7 +1250,7 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     ----------
     grid:
         Materialised three-phase :class:`~pgml.schemas.grid_schema.Grid` whose
-        lines carry ``harmonic_line_model=sequence_aware`` tags.
+        lines carry ``harmonic_line_model='sequence_aware'``.
     busname:
         ``{node_id: dss_bus_name}`` mapping built by the caller.
     """
@@ -1267,19 +1331,25 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
                 "length=1 units=m"
             )
 
-    # Switches: pure-R Lines (no Carson correction at X=0).
+    # Switches: pure-R Lines (no Carson correction at X=0). An IDEAL switch is not a
+    # DSS element: its terminals are one electrical node (see `fusion_prolongation`).
     for b in grid.branches:
         if not (isinstance(b, Switch) and b.in_service and b.closed):
+            continue
+        if _is_ideal_branch(b):
             continue
         p = len(b.from_phases)
         ph_suffix = ".".join(str(k + 1) for k in range(p))
         bus1 = f"{busname[b.from_node]}.{ph_suffix}"
         bus2 = f"{busname[b.to_node]}.{ph_suffix}"
         r_sw = to_float(b.resistance_ohm)
+        # rg/xg = 0: a switch is a lumped contact resistance with no earth-return path,
+        # so OpenDSS must not frequency-correct it (its defaults would add ~0.018 Ohm
+        # per order on a `units=m length=1` element).
         dss.Text.Command(
             f"New Line.sw{b.id} phases={p} bus1={bus1} bus2={bus2} "
             f"r1={r_sw:.10g} x1=0.0 c1=0.0 r0={r_sw:.10g} x0=0.0 c0=0.0 "
-            "length=1 units=m"
+            "rg=0 xg=0 length=1 units=m"
         )
 
     # Transformers: REAL OpenDSS Transformer elements.
@@ -1376,6 +1446,7 @@ def opendss_dyn_transformer_harmonic_voltages(
     slack: str = "norton",
     v1: Optional[np.ndarray] = None,
     operating_point: Optional[dict] = None,
+    load_shunt: Optional[str] = None,
 ) -> np.ndarray:
     """Live OpenDSS harmonic oracle using REAL OpenDSS Transformer elements.
 
@@ -1408,7 +1479,7 @@ def opendss_dyn_transformer_harmonic_voltages(
     ----------
     grid:
         Materialised three-phase :class:`~pgml.schemas.grid_schema.Grid`.
-        Lines must carry ``harmonic_line_model=sequence_aware`` tags (the same
+        Lines must carry ``harmonic_line_model='sequence_aware'`` (the same
         prerequisite as :func:`opendss_harmonic_voltages`).
     harmonic_injection:
         Per-device harmonic-current spec
@@ -1453,11 +1524,13 @@ def opendss_dyn_transformer_harmonic_voltages(
     if not _is_sequence_aware_grid(grid):
         raise ValueError(
             "opendss_dyn_transformer_harmonic_voltages requires lines tagged "
-            "harmonic_line_model=sequence_aware (three-phase seq-aware path)."
+            "harmonic_line_model='sequence_aware' (three-phase seq-aware path)."
         )
 
     from pgml.assembly import node_phase_index
+    from pgml.assembly._load_shunt import resolve_shunt_model_name
 
+    shunt = resolve_shunt_model_name(load_shunt)
     orders_list = [int(h) for h in orders]
     index = node_phase_index(grid)
     n = index.size
@@ -1611,10 +1684,14 @@ def opendss_dyn_transformer_harmonic_voltages(
                 rj = rowmap_dss_to_pgml[slack_dss_rows[pj]]
                 y_out[ri, rj] -= y_stub_block[pi, pj]
         _stamp_source_nortons(y_out, grid, h, index)
+        _stamp_device_shunts_numpy(y_out, grid, index, h, shunt, operating_point)
 
         return y_out
 
     # --- Per-order solve ---
+    # An ideal (zero-impedance) branch is in neither engine's admittance: its terminals
+    # are one electrical node, which the dense prolongation expresses.
+    p_fuse = fusion_prolongation(grid, index)
     result_slices: list[np.ndarray] = []
     for h in orders_list:
         if h == 1:
@@ -1622,7 +1699,7 @@ def opendss_dyn_transformer_harmonic_voltages(
             continue
         y_h = _build_harmonic_ybus_with_real_trafo(h)
         i_h = _build_injection(h)
-        result_slices.append(np.linalg.solve(y_h, i_h))
+        result_slices.append(solve_with_fusion(y_h, i_h, p_fuse))
 
     return np.stack(result_slices, axis=0)  # [H, N]
 

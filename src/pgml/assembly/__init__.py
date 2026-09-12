@@ -13,13 +13,22 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
   param_overrides=None, branch_states=None) -> YBus`` — PASSIVE-network
   ``Y_net`` (no loads, no source Norton); the nonlinear power-flow assembler.
 - ``branch_currents(grid, v, frequencies_hz, index, *, dtype, device,
-  param_overrides=None, branch_states=None) -> list[BranchCurrent]`` — per-branch
-  terminal currents from solved node voltages (``branch_states`` must match
-  the assembly the voltages were solved with).
+  param_overrides=None, branch_states=None, fusion=None, i_inj=None)
+  -> list[BranchCurrent]`` — per-branch terminal currents from solved node voltages
+  (``branch_states`` must match the assembly the voltages were solved with; a FUSED
+  branch's current comes from Kirchhoff's law at the fused node).
+- ``fusion_map(grid, *, param_overrides=None, branch_states=None) -> FusionMap | None``
+  — exact bus fusion of the zero-impedance branches (ideal closed switches, jumpers):
+  their terminal node-phase rows collapse into one row of the solved system, and
+  ``FusionMap.prolong`` maps the reduced solution back to the grid's full row layout.
 - ``branch_stamp_blocks(grid, frequencies_hz, branch_ids, index, *, dtype,
   device, param_overrides=None) -> list[BranchStampBlock]`` — the primitive
   admittance block and global rows of each named branch (the incidence structure
   a low-rank admittance update needs; see :mod:`pgml.solver.lowrank`).
+- ``phase_voltage_magnitude(u_rated_v, n_phases, *, line_to_line=False) -> float`` —
+  the nominal ELEMENT voltage magnitude behind every per-unit quantity: line-to-neutral
+  for a wye connection on a node whose ``u_rated_v`` is line-to-line, the full
+  line-to-line value for a delta one.
 - ``build_injections(grid, frequencies_hz, index, *, dtype, device,
   operating_point, param_overrides=None) -> Tensor`` — Norton ``I`` ``[*batch, H, N]``.
 - ``device_current_injections(grid, v, index, frequencies_hz, *, dtype, device,
@@ -36,6 +45,13 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
 
 from __future__ import annotations
 
+from ._fusion import (
+    FusionMap,
+    ZeroImpedanceBranch,
+    fusion_map,
+    zero_impedance_branches,
+)
+from ._params import phase_voltage_magnitude
 from .index import NodePhaseIndex, base_voltage_per_row, node_phase_index
 from .ybus import (
     BranchCurrent,
@@ -56,6 +72,8 @@ from .ybus import (
 # package path rather than the private sub-module, avoiding "duplicate object
 # description" warnings when viewcode and autodoc both traverse the codebase.
 NodePhaseIndex.__module__ = __name__
+FusionMap.__module__ = __name__
+ZeroImpedanceBranch.__module__ = __name__
 YBus.__module__ = __name__
 BranchCurrent.__module__ = __name__
 BranchStampBlock.__module__ = __name__
@@ -64,7 +82,12 @@ InjectionPlan.__module__ = __name__
 __all__ = [
     "NodePhaseIndex",
     "node_phase_index",
+    "FusionMap",
+    "ZeroImpedanceBranch",
+    "fusion_map",
+    "zero_impedance_branches",
     "base_voltage_per_row",
+    "phase_voltage_magnitude",
     "YBus",
     "BranchCurrent",
     "BranchStampBlock",

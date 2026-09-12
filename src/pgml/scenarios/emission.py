@@ -17,11 +17,11 @@ affine geometry.
 
 The functions here express those laws as CORRECTIONS on the proportional emission
 ``I_h = r_h * I_1`` the generators draw, so the rated operating point is untouched and a
-zero floor reproduces the proportional law bit-for-bit. The composition path
-(:mod:`pgml.scenarios.composition`) and the randomized recipe
-(:mod:`pgml.scenarios.sampler` through the ``h_floor`` / ``h_floor_phase`` / ``h_slope``
-:class:`~pgml.scenarios.ParameterSpec` fields) apply the same functions, so one definition
-serves both. See ``docs/pgml/modeling/harmonic-emission.md``.
+zero floor reproduces the proportional law bit-for-bit. The sampler applies them through
+the ``h_floor`` / ``h_floor_phase`` / ``h_slope``
+:class:`~pgml.scenarios.ParameterSpec` fields (:mod:`pgml.scenarios.sampler`), and a
+generator that composes an aggregate out of member devices applies the same functions per
+member, so one definition serves both.
 """
 
 from __future__ import annotations

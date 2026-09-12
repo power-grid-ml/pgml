@@ -6,12 +6,12 @@ Public API
 
 Two slack / reference modes, both differentiable:
 
-1. **Norton (default, ``fixed_rows=None``)**: sources are already stamped as a
+1. Norton (default, ``fixed_rows=None``): sources are already stamped as a
    shunt ``Y_s`` plus a Norton current ``I_s`` by ``assembly/``, so ``Y`` is
    non-singular and ``v = torch.linalg.solve(Y, I)``. The slack voltage equals
    ``u_ref`` only up to the drop across ``Z_s`` (matches OpenDSS Vsource).
 
-2. **Ideal slack (``fixed_rows`` + ``v_fixed``)**: hold
+2. Ideal slack (``fixed_rows`` + ``v_fixed``): hold
    ``v[..., fixed_rows] = v_fixed`` exactly via a partitioned (Schur) solve
    ``v_free = Y_ff^-1 (I_free - Y_fs v_fixed)`` and reassemble the full ``v`` with
    gather/scatter (no in-place on tracked tensors). Matches pandapower / pgm.
@@ -24,6 +24,7 @@ CPU and CUDA; honors the input complex dtype (complex128 for gradcheck).
 
 from __future__ import annotations
 
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -32,7 +33,17 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 
+from pgml import defaults
 from pgml.errors import ComputationError, InputError
+
+from .equilibration import (
+    equilibrate_matrix,
+    equilibration_scales,
+    resolve_equilibration,
+)
+
+#: Working complex dtype -> the single-precision dtype a mixed-precision factorization uses.
+_SINGLE_COMPLEX = {torch.complex128: torch.complex64, torch.complex64: torch.complex64}
 
 
 def solve_harmonic(
@@ -41,6 +52,8 @@ def solve_harmonic(
     *,
     fixed_rows: Optional[Tensor] = None,
     v_fixed: Optional[Tensor] = None,
+    precision: str = "full",
+    equilibrate: Optional[str] = None,
 ) -> Tensor:
     """Solve ``Y V = I`` per frequency, batched, complex, differentiable.
 
@@ -58,6 +71,26 @@ def solve_harmonic(
         Complex tensor of the fixed voltages, broadcastable to
         ``[*batch, H, len(fixed_rows)]`` (e.g. ``[len(fixed_rows)]`` for a constant
         slack across all frequencies/batches).
+    precision:
+        Working precision of the linear algebra. ``"full"`` (default) solves at
+        ``y_bus``'s own dtype. ``"mixed"`` factors a complex64 copy of the system and
+        refines the solution against residuals formed at complex128
+        (:func:`lu_factor_system`), which keeps the accuracy of a complex128 solve
+        while doing the factorization and back-substitution in single precision; it
+        requires a complex128 ``y_bus``. The recommended recipe for an ill-conditioned
+        SI-unit feeder is complex128 with ``precision="mixed"``, or plain complex128;
+        a plain complex64 solve loses about ``cond(Y) * 1.2e-7`` of relative accuracy.
+    equilibrate:
+        Diagonal equilibration of the system around the solve
+        (:mod:`pgml.solver.equilibration`): ``None`` (default) resolves the documented
+        default ``solver.equilibration.mode``, ``"symmetric"`` is van der Sluis scaling
+        ``d_i = |Y_ii|^{-1/2}`` applied as the congruence ``D Y D``, ``"row_column"``
+        the two-sided variant, ``"off"`` solves the matrix as handed in. The scaling is
+        applied around the factorization and undone on the solution, so the returned
+        voltages, their units and their gradients are unchanged; what changes is the
+        conditioning of the factored system. An SI-unit admittance spans decades: at
+        harmonic order 13 the equilibrated condition number of a 33-row feeder measures
+        5.6e2 against 5.7e8 unscaled.
 
     Returns
     -------
@@ -73,14 +106,23 @@ def solve_harmonic(
         y = y_bus
         i = i_inj
 
-    if fixed_rows is None:
-        v = _solve_norton(y, i)
+    eq_mode = resolve_equilibration(equilibrate)
+    if precision != "full":
+        # The refined solve lives in the factor-once path; one factorization per
+        # (batch, frequency) system, exactly as the direct solve would form it.
+        resolve_precision(precision, y_bus.dtype)
+        fac = lu_factor_system(
+            y, fixed_rows=fixed_rows, precision=precision, equilibrate=eq_mode
+        )
+        v = solve_factored(fac, i, v_fixed=v_fixed)
+    elif fixed_rows is None:
+        v = _solve_norton(y, i, eq_mode)
     else:
         if v_fixed is None:
             raise InputError(
                 "Ideal-slack mode requires `v_fixed` when `fixed_rows` is given."
             )
-        v = _solve_ideal_slack(y, i, fixed_rows, v_fixed)
+        v = _solve_ideal_slack(y, i, fixed_rows, v_fixed, eq_mode)
 
     if unbatched:
         v = v.reshape(-1)
@@ -123,9 +165,9 @@ def solve_anchored(
     that factorization stable, and the physics block never passes through normal equations
     (no ``\kappa(Y)^2`` squaring there) — but ``\kappa(G)`` itself grows with
     ``w \cdot \sigma_{\max}(Y^{-1})^2``, so callers should scale anchor weights relative to
-    ``Y`` (e.g. by a typical singular value, as the pgl consumer does). Anchor weights are
-    cast to the real dtype paired with ``y_bus``'s complex dtype (complex64 and complex128
-    both supported).
+    ``Y`` (e.g. by a typical singular value, as a downstream state-estimation consumer
+    does). Anchor weights are cast to the real dtype paired with ``y_bus``'s complex
+    dtype (complex64 and complex128 both supported).
 
     Parameters
     ----------
@@ -467,24 +509,29 @@ class AnchoredSystem:
         return v_full.reshape(-1) if unbatched else v_full
 
 
-def _solve_norton(y: Tensor, i: Tensor) -> Tensor:
+def _solve_norton(y: Tensor, i: Tensor, eq_mode: str = "off") -> Tensor:
     """Dense solve ``v = Y^-1 I`` broadcasting over leading dims and H.
 
     ``torch.linalg.solve`` wants the RHS as a column; we expand to ``[..., N, 1]``
     and squeeze back to ``[..., N]``. Broadcasting between ``y`` and ``i`` is done
     explicitly so a 1-D-per-frequency RHS lines up with a batched matrix.
+    ``eq_mode`` equilibrates the matrix around the solve
+    (:mod:`pgml.solver.equilibration`) and undoes the scaling on the solution, so the
+    returned voltage is the solution of the system as handed in.
     """
     # Broadcast leading (all but last 2 of y) against i's leading (all but last).
     batch = torch.broadcast_shapes(y.shape[:-2], i.shape[:-1])
     n = y.shape[-1]
     y_b = y.broadcast_to(*batch, n, n)
     i_b = i.broadcast_to(*batch, n)
-    v = torch.linalg.solve(y_b, i_b.unsqueeze(-1)).squeeze(-1)
-    return v
+    y_hat, d_row, d_col = equilibrate_matrix(y_b, mode=eq_mode)
+    rhs = i_b if d_row is None else i_b * d_row
+    v = torch.linalg.solve(y_hat, rhs.unsqueeze(-1)).squeeze(-1)
+    return v if d_col is None else v * d_col
 
 
 def _solve_ideal_slack(
-    y: Tensor, i: Tensor, fixed_rows: Tensor, v_fixed: Tensor
+    y: Tensor, i: Tensor, fixed_rows: Tensor, v_fixed: Tensor, eq_mode: str = "off"
 ) -> Tensor:
     """Partitioned (Schur) solve holding ``v[..., fixed_rows] = v_fixed`` exactly.
 
@@ -518,7 +565,14 @@ def _solve_ideal_slack(
     vf_b = vf.broadcast_to(*batch, s)
 
     rhs = i_free - torch.matmul(y_fs, vf_b.unsqueeze(-1)).squeeze(-1)  # [..., F]
-    v_free = torch.linalg.solve(y_ff, rhs.unsqueeze(-1)).squeeze(-1)  # [..., F]
+    # Equilibrate the free block around the solve and undo the scaling after it
+    # (:mod:`pgml.solver.equilibration`); the slack coupling stays in SI units
+    # because it is applied to the right-hand side before the scaling.
+    y_hat, d_row, d_col = equilibrate_matrix(y_ff, mode=eq_mode)
+    rhs_hat = rhs if d_row is None else rhs * d_row
+    v_free = torch.linalg.solve(y_hat, rhs_hat.unsqueeze(-1)).squeeze(-1)  # [..., F]
+    if d_col is not None:
+        v_free = v_free * d_col
 
     # Reassemble: scatter v_free at free_rows and vf_b at fixed_rows.
     v_full = torch.zeros(*batch, n, dtype=y.dtype, device=y.device)
@@ -722,26 +776,16 @@ class _SparseSolveFn(torch.autograd.Function):
     def backward(ctx, grad_v: Tensor):
         (v,) = ctx.saved_tensors
         handle = ctx.handle
-        m = handle.m
         fb = handle.fb
-        nfb = len(fb)
         lam = handle.solve(grad_v, trans="H")  # [*batch, m]
         grad_rhs = (
             _sum_to_shape(lam, ctx.rhs_shape) if ctx.needs_input_grad[1] else None
         )
-        grad_y = None
-        if ctx.needs_input_grad[0]:
-            batch = torch.broadcast_shapes(fb, v.shape[:-1], lam.shape[:-1])
-            fb_numel = 1
-            for sz in fb:
-                fb_numel *= sz
-            nb = len(batch)
-            n_sb = nb - nfb
-            perm = list(range(n_sb, nb)) + list(range(n_sb)) + [nb]  # [*fb, *sb, m]
-            lam_g = lam.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
-            v_g = v.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
-            gy = -torch.einsum("fki,fkj->fij", lam_g, v_g.conj())  # [fb_numel, m, m]
-            grad_y = _sum_to_shape(gy.reshape(*fb, m, m), ctx.y_shape)
+        grad_y = (
+            _linear_solve_grad_matrix(lam, v, fb, ctx.y_shape)
+            if ctx.needs_input_grad[0]
+            else None
+        )
         return grad_y, grad_rhs, None
 
 
@@ -836,24 +880,63 @@ class _BlockLU:
         *,
         solve_blocks: Optional[Sequence[Tensor]] = None,
         m: Optional[int] = None,
+        factor_dtype: Optional[torch.dtype] = None,
+        scale: Optional[Tensor] = None,
     ) -> None:
         self.fb = tuple(y.shape[:-2])
         self.m = int(y.shape[-1]) if m is None else int(m)
         self.device = y.device
         # An empty tensor carrying the factorization's leading batch / dtype /
         # device (the block factors carry an extra bucket axis, so they cannot
-        # stand in for it).
+        # stand in for it). It reports the WORKING dtype, which a mixed-precision
+        # factorization keeps even though its factors are single precision.
         self.batch_ref = y.new_empty((*self.fb, 0, 0))
         self.buckets: list[tuple[Tensor, Tensor, Tensor]] = []
+        #: Per bucket: (solve-space positions, full-precision diagonal blocks) — the
+        #: block-diagonal matvec a mixed-precision residual needs.
+        self.blocks_full: list[tuple[Tensor, Tensor]] = []
         pairs = _size_buckets(blocks, blocks if solve_blocks is None else solve_blocks)
         for rows, pos in pairs:
             # [*fb, B, n, n]: gathered straight from ``y`` — no [N, N] intermediate.
             sub = y[..., rows.unsqueeze(-1), rows.unsqueeze(-2)]
-            lu, piv = torch.linalg.lu_factor(sub)
+            if scale is not None:
+                # Diagonal equilibration commutes with the block structure: block k's
+                # sub-matrix is scaled by its own rows' factors, so the [N, N] scaled
+                # matrix is never materialised (``scale`` is in the FULL row space).
+                d = scale.index_select(-1, rows.reshape(-1)).reshape(
+                    *scale.shape[:-1], *rows.shape
+                )
+                sub = sub * d.unsqueeze(-1) * d.unsqueeze(-2)
+            lu, piv = torch.linalg.lu_factor(
+                sub if factor_dtype is None else sub.to(factor_dtype)
+            )
             self.buckets.append((pos, lu, piv))
+            self.blocks_full.append((pos, sub))
         self.n_blocks = sum(int(pos.shape[0]) for pos, _, _ in self.buckets)
 
-    def solve(self, rhs: Tensor) -> Tensor:
+    def apply(self, x: Tensor, *, adjoint: bool = False) -> Tensor:
+        """Block-diagonal matvec ``A x`` (``Aᴴ x`` when ``adjoint``) at full precision.
+
+        The counterpart of :meth:`solve` for a residual ``b − A x``: each bucket
+        gathers its blocks' entries of ``x``, multiplies by its stored diagonal
+        blocks, and scatters back. Rows outside every block carry no admittance in
+        this factorization and contribute 0, exactly as the solve assumes.
+        """
+        batch = torch.broadcast_shapes(self.fb, x.shape[:-1])
+        x_b = x.broadcast_to(*batch, self.m)
+        out = torch.zeros(*batch, self.m, dtype=x_b.dtype, device=x_b.device)
+        for pos, sub in self.blocks_full:
+            nb, blk = int(pos.shape[0]), int(pos.shape[1])
+            flat = pos.reshape(-1)
+            cols = x_b.index_select(-1, flat).reshape(*batch, nb, blk, 1)
+            a = sub.mH if adjoint else sub
+            prod = torch.matmul(a.to(x_b.dtype), cols).squeeze(-1)  # [*batch, nb, blk]
+            out = out.scatter(
+                -1, flat.expand(*batch, nb * blk), prod.reshape(*batch, nb * blk)
+            )
+        return out
+
+    def solve(self, rhs: Tensor, *, adjoint: bool = False) -> Tensor:
         """Back-substitute ``rhs`` ``[*batch, m]`` against the per-block factors.
 
         Each bucket gathers its blocks' entries out of the right-hand side, folds
@@ -862,7 +945,8 @@ class _BlockLU:
         scatters the block solutions back into the full vector. Loops over BUCKETS
         (one iteration per distinct block size), never over blocks. Returns
         ``[*batch, m]`` with ``batch = broadcast(fb, rhs batch)``, the same shape
-        the dense backend gives.
+        the dense backend gives. ``adjoint`` solves with the conjugate-transposed
+        factors (the adjoint of the block-diagonal solve).
         """
         batch = torch.broadcast_shapes(self.fb, rhs.shape[:-1])
         rhs_b = rhs.broadcast_to(*batch, self.m)
@@ -873,27 +957,37 @@ class _BlockLU:
         for pos, lu, piv in self.buckets:
             nb, blk = int(pos.shape[0]), int(pos.shape[1])
             flat = pos.reshape(-1)
-            cols = rhs_b.index_select(-1, flat).reshape(*batch, nb, blk)
+            cols = rhs_b.index_select(-1, flat).to(lu.dtype).reshape(*batch, nb, blk)
             if fb_numel == 1:
                 # One factorization per block: every leading dim of the RHS is
                 # just another column of it.
                 sol = _lu_solve_shared(
-                    lu.reshape(nb, blk, blk), piv.reshape(nb, blk), cols
+                    lu.reshape(nb, blk, blk),
+                    piv.reshape(nb, blk),
+                    cols,
+                    adjoint=adjoint,
                 )
             else:
                 # Distinct factorizations per frequency / scenario topology: the
                 # bucket axis extends the factorization's own batch.
-                sol = _lu_solve_shared(lu, piv, cols)
+                sol = _lu_solve_shared(lu, piv, cols, adjoint=adjoint)
             out = out.scatter(
                 -1,
                 flat.expand(*batch, nb * blk),
-                sol.reshape(*batch, nb * blk),
+                sol.reshape(*batch, nb * blk).to(out.dtype),
             )
         return out
 
     @classmethod
     def for_free_rows(
-        cls, y: Tensor, blocks: Sequence[Tensor], free_mask: Tensor, free_rows: Tensor
+        cls,
+        y: Tensor,
+        blocks: Sequence[Tensor],
+        free_mask: Tensor,
+        free_rows: Tensor,
+        *,
+        factor_dtype: Optional[torch.dtype] = None,
+        scale: Optional[Tensor] = None,
     ) -> "_BlockLU":
         """Factor the FREE-row sub-block of every block (ideal slack).
 
@@ -924,7 +1018,204 @@ class _BlockLU:
             free_blocks,
             solve_blocks=free_pos,
             m=int(free_rows.numel()),
+            factor_dtype=factor_dtype,
+            scale=scale,
         )
+
+
+# ---------------------------------------------------------------------------
+# mixed precision: single-precision factors + refinement at the working dtype
+# ---------------------------------------------------------------------------
+def resolve_precision(precision: str, dtype: torch.dtype) -> tuple[str, torch.dtype]:
+    """Validate ``precision`` against the working ``dtype``; return it with the factor dtype.
+
+    ``"full"`` factors at the working dtype. ``"mixed"`` factors a complex64 copy and
+    refines the solution against residuals formed at the working dtype, which only buys
+    accuracy when the working dtype is WIDER than the factorization — so it requires
+    complex128 and refuses a complex64 working dtype instead of silently doing nothing.
+    """
+    if precision not in ("full", "mixed"):
+        raise InputError(
+            f"Unsupported precision {precision!r} (use 'full' or 'mixed')."
+        )
+    if precision == "full":
+        return precision, dtype
+    if dtype != torch.complex128:
+        raise InputError(
+            "precision='mixed' needs a complex128 working dtype: it factors a "
+            "complex64 copy of the system and recovers complex128 accuracy from "
+            "residuals formed at the working precision, which a complex64 working "
+            f"dtype cannot provide (got {dtype}). Pass dtype=torch.complex128 with "
+            "precision='mixed' for the single-precision factorization, or keep "
+            "dtype=torch.complex64 with precision='full' for the plain "
+            "single-precision solve."
+        )
+    return precision, _SINGLE_COMPLEX[dtype]
+
+
+def _matmul_shared(mat: Tensor, x: Tensor, *, adjoint: bool = False) -> Tensor:
+    """``A x`` (``Aᴴ x`` when ``adjoint``) reading a SHARED ``A`` exactly once.
+
+    ``mat`` is ``[*fb, m, m]`` and ``x`` is ``[*scenario, *fb, m]``. When a single
+    matrix serves the whole batch, the scenario dims are folded into the rows of ONE
+    GEMM so the matrix is read once instead of per scenario (memory-bandwidth bound at
+    large ``m``); a genuinely batched ``mat`` keeps the batched matmul.
+    """
+    m = mat.shape[-1]
+    a = mat.mH if adjoint else mat
+    batch = torch.broadcast_shapes(a.shape[:-2], x.shape[:-1])
+    x_b = x.broadcast_to(*batch, m).to(a.dtype)
+    if a.reshape(-1, m, m).shape[0] == 1:
+        prod = torch.matmul(x_b.reshape(-1, m), a.reshape(m, m).mT)
+        return prod.reshape(*batch, m)
+    return torch.matmul(a.broadcast_to(*batch, m, m), x_b.unsqueeze(-1)).squeeze(-1)
+
+
+def _factor_solve(
+    fac: "FactoredSystem", rhs: Tensor, *, adjoint: bool = False
+) -> Tensor:
+    """One back-substitution against the factors, whichever backend holds them."""
+    if fac.backend == "sparse":
+        return fac.sparse.solve(rhs, trans=("H" if adjoint else "N"))
+    if fac.backend == "block":
+        return fac.block.solve(rhs, adjoint=adjoint)
+    return _lu_solve_shared(fac.lu, fac.piv, rhs.to(fac.lu.dtype), adjoint=adjoint)
+
+
+def _factor_matvec(
+    fac: "FactoredSystem", x: Tensor, *, adjoint: bool = False
+) -> Tensor:
+    """``A x`` (``Aᴴ x``) with the factored matrix at the WORKING precision."""
+    if fac.backend == "block":
+        return fac.block.apply(x, adjoint=adjoint)
+    return _matmul_shared(fac.y_mat, x, adjoint=adjoint)
+
+
+def _refined_solve(
+    fac: "FactoredSystem", rhs: Tensor, *, adjoint: bool = False
+) -> Tensor:
+    """Mixed-precision solve: single-precision factors, working-precision residuals.
+
+    Classic iterative refinement. The single-precision back-substitution gives a
+    solution whose relative error is about ``cond(A) * eps_single``; each correction
+    ``x <- x + A_s^{-1}(b - A x)``, with the residual formed at the working precision,
+    multiplies that error by the same factor, so a few steps reach the working
+    precision's own accuracy floor ``cond(A) * eps_work`` whenever
+    ``cond(A) * eps_single < 1``. The step count is FIXED (no data-dependent exit), so
+    the routine is branch-free on GPU and has no host synchronisation.
+    """
+    work = fac.work_dtype or rhs.dtype
+    x = _factor_solve(fac, rhs, adjoint=adjoint).to(work)
+    if fac.refine_steps:
+        rhs_w = rhs.to(work)
+        for _ in range(fac.refine_steps):
+            r = rhs_w - _factor_matvec(fac, x, adjoint=adjoint)
+            x = x + _factor_solve(fac, r, adjoint=adjoint).to(work)
+    return x
+
+
+def _linear_solve_grad_matrix(
+    lam: Tensor, v: Tensor, fb: tuple, y_shape: tuple
+) -> Tensor:
+    """``grad_A = -(λ vᴴ)`` of a linear solve, accumulated per factorization.
+
+    ``lam`` is the adjoint solution ``A⁻ᴴ grad_x`` and ``v`` the forward solution. The
+    scenario batch is folded into a single matmul axis so a per-scenario ``[m, m]``
+    outer product is never materialised: the backward memory is the size of ``A``.
+    """
+    m = v.shape[-1]
+    nfb = len(fb)
+    fb_numel = 1
+    for sz in fb:
+        fb_numel *= sz
+    batch = torch.broadcast_shapes(fb, v.shape[:-1], lam.shape[:-1])
+    nb = len(batch)
+    n_sb = nb - nfb
+    perm = list(range(n_sb, nb)) + list(range(n_sb)) + [nb]  # [*fb, *sb, m]
+    lam_g = lam.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
+    v_g = v.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
+    gy = -torch.einsum("fki,fkj->fij", lam_g, v_g.conj())  # [fb_numel, m, m]
+    return _sum_to_shape(gy.reshape(*fb, m, m), y_shape)
+
+
+class _MixedPrecisionSolveFn(torch.autograd.Function):
+    """``V = A⁻¹ RHS`` through single-precision factors, with the exact linear adjoint.
+
+    Forward runs :func:`_refined_solve`. Backward is the adjoint of a linear solve —
+    ``λ = A⁻ᴴ grad_V`` by the SAME refined solve (so the gradient carries the refined
+    accuracy, not the single-precision factorization's), ``grad_RHS = λ`` and
+    ``grad_A = -λ Vᴴ``. Differentiating the refinement ITERATION instead would push the
+    gradient through the single-precision rounding of every step; the analytic adjoint
+    keeps it exact, which is what a float64 ``gradcheck`` measures.
+    """
+
+    @staticmethod
+    def forward(ctx, y_mat: Optional[Tensor], rhs: Tensor, fac: "FactoredSystem"):
+        with torch.no_grad():
+            v = _refined_solve(fac, rhs)
+        ctx.fac = fac
+        ctx.save_for_backward(v)
+        ctx.rhs_shape = tuple(rhs.shape)
+        ctx.y_shape = None if y_mat is None else tuple(y_mat.shape)
+        return v
+
+    @staticmethod
+    def backward(ctx, grad_v: Tensor):
+        (v,) = ctx.saved_tensors
+        fac = ctx.fac
+        lam = _refined_solve(fac, grad_v, adjoint=True)
+        grad_rhs = (
+            _sum_to_shape(lam, ctx.rhs_shape) if ctx.needs_input_grad[1] else None
+        )
+        grad_y = None
+        if ctx.needs_input_grad[0]:
+            fb = tuple(fac._fb_tensor.shape[:-2])
+            grad_y = _linear_solve_grad_matrix(lam, v, fb, ctx.y_shape)
+        return grad_y, grad_rhs, None
+
+
+def estimate_condition(fac: "FactoredSystem", *, iters: int = 5) -> float:
+    """Estimated 1-norm condition number of the factored matrix (a LOWER bound).
+
+    ``cond_1(A) = ‖A‖_1 ‖A⁻¹‖_1`` with ``‖A⁻¹‖_1`` from Hager's power method: starting
+    from a uniform vector, alternate ``A⁻¹`` and ``A⁻ᴴ`` solves against the cached
+    factorization (``iters`` of each, no new factorization) and take the largest
+    ``‖A⁻¹ x‖_1 / ‖x‖_1`` seen. The result underestimates the true condition number, as
+    every norm estimator of this family does, and is used to decide whether a
+    single-precision solve can still be trusted — not as a published quantity.
+
+    The quantity is the condition number of the matrix as FACTORED, i.e. of the
+    EQUILIBRATED system when equilibration is on (the default). That is the number the
+    precision decision needs: it is the conditioning the factorization actually sees.
+    For the condition number of the matrix as assembled, factor it with
+    ``equilibrate="off"``.
+
+    Returns ``inf`` for a singular factorization and ``nan`` when the factored matrix is
+    not available as a tensor (the block backend keeps only its diagonal blocks).
+    """
+    if fac.y_mat is None:
+        return float("nan")
+    with torch.no_grad():
+        a = fac.y_mat.reshape(-1, fac.y_mat.shape[-1], fac.y_mat.shape[-1])[0]
+        m = a.shape[-1]
+        norm_a = float(a.abs().sum(dim=-2).max())  # max absolute column sum
+        x = torch.full((m,), 1.0 / m, dtype=a.dtype, device=a.device)
+        norm_inv = 0.0
+        for _ in range(max(1, iters)):
+            y = _refined_solve(fac, x)
+            norm_y = float(y.abs().sum())
+            norm_inv = max(norm_inv, norm_y / max(float(x.abs().sum()), 1e-300))
+            if not math.isfinite(norm_y) or norm_y == 0.0:
+                break
+            # Hager's next probe: the unit-phase pattern of the current iterate pushed
+            # through the adjoint solve (a subgradient of the 1-norm), then the unit
+            # vector of its largest entry — whose image is a column of A^-1.
+            xi = y / y.abs().clamp_min(1e-300)
+            z = _refined_solve(fac, xi, adjoint=True)
+            j = int(z.abs().argmax())
+            x = torch.zeros_like(x)
+            x[j] = 1.0
+        return norm_a * norm_inv
 
 
 @dataclass
@@ -949,6 +1240,20 @@ class FactoredSystem:
     - ``"block"`` — one batched dense LU per diagonal block of a BLOCK-DIAGONAL
       system (:class:`_BlockLU`, ``block`` holds the per-bucket factors), the CUDA
       path for an ensemble of independent grids: O(Σ n_k³) instead of O((Σ n_k)³).
+
+    Two working precisions, orthogonal to the backend (``precision`` in
+    :func:`lu_factor_system`): ``"full"`` factors at the matrix's own dtype, while
+    ``"mixed"`` factors a complex64 copy and recovers complex128 accuracy by
+    iterative refinement against residuals formed at the working dtype
+    (``refine_steps`` corrections, :func:`back_substitute`).
+
+    EQUILIBRATION (``equilibrate`` in :func:`lu_factor_system`, on by default): what is
+    factored is the SCALED matrix ``Â = D_r A D_c`` (:mod:`pgml.solver.equilibration`),
+    and ``scale_row`` / ``scale_col`` are the factors :func:`back_substitute` applies to
+    the right-hand side and the solution, so every consumer keeps handing in SI
+    right-hand sides and reading SI solutions. ``y_mat`` is the matrix as FACTORED
+    (scaled), which is what the mixed-precision residual and
+    :func:`estimate_condition` must use.
     """
 
     mode: str  # "norton" | "ideal"
@@ -960,17 +1265,30 @@ class FactoredSystem:
     y_fs: Optional[Tensor] = None  # [*, F, S] for the ideal-slack RHS correction
     backend: str = "dense"  # "dense" | "sparse" | "block"
     sparse: Optional[_SciPySparseLU] = None
-    y_mat: Optional[Tensor] = None  # sparse backend: the factored matrix (autograd)
+    y_mat: Optional[Tensor] = (
+        None  # the factored matrix at the WORKING dtype (autograd)
+    )
     block: Optional[_BlockLU] = None  # block backend: the per-bucket factors
+    precision: str = "full"  # "full" | "mixed" (single-precision factors + refinement)
+    refine_steps: int = 0  # mixed: residual corrections at the working dtype
+    work_dtype: Optional[torch.dtype] = None  # mixed: the working complex dtype
+    equilibration: str = "off"  # "off" | "symmetric" | "row_column"
+    scale_row: Optional[Tensor] = None  # [*fb, m] real, applied to the RHS
+    scale_col: Optional[Tensor] = None  # [*fb, m] real, applied to the solution
 
     @property
     def _fb_tensor(self) -> Tensor:
-        """The tensor carrying the factorization's leading batch / dtype / device."""
-        if self.backend == "dense":
-            return self.lu
+        """The tensor carrying the factorization's leading batch / dtype / device.
+
+        Always reports the WORKING dtype: a mixed-precision factorization holds
+        single-precision factors, but every right-hand side, slack reference and
+        solution it answers lives at the working precision.
+        """
+        if self.y_mat is not None:
+            return self.y_mat
         if self.backend == "block":
             return self.block.batch_ref
-        return self.y_mat
+        return self.lu
 
 
 def _resolve_backend(
@@ -999,12 +1317,37 @@ def _resolve_backend(
     return "dense"
 
 
+def _block_equilibration_scale(y_bus: Tensor, eq_mode: str) -> Optional[Tensor]:
+    """Symmetric equilibration scale of a block-diagonal system, in the FULL row space.
+
+    The block backend never materialises the matrix it factors (it gathers each
+    diagonal block straight out of ``y_bus``), so the scale is built from the diagonal
+    and indexed per block. That is exactly van der Sluis scaling; the two-sided
+    ``"row_column"`` variant would need the row and column maxima of the free-row
+    matrix, which this backend does not form, so it is refused by name.
+    """
+    if eq_mode == "off":
+        return None
+    if eq_mode != "symmetric":
+        raise InputError(
+            f"equilibrate={eq_mode!r} is unavailable with backend='block': the "
+            "block-diagonal factorization never materialises the matrix it factors, so "
+            "only the diagonal ('symmetric', the documented default) scaling can be "
+            "built for it. Use equilibrate='symmetric' or 'off' with backend='block'."
+        )
+    d_row, _ = equilibration_scales(y_bus, mode=eq_mode)
+    return d_row
+
+
 def lu_factor_system(
     y_bus: Tensor,
     *,
     fixed_rows: Optional[Tensor] = None,
     backend: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
+    precision: str = "full",
+    refine_steps: Optional[int] = None,
+    equilibrate: Optional[str] = None,
 ) -> FactoredSystem:
     """Factor ``Y`` (Norton) or the free block ``Y_ff`` (ideal slack) for repeated solves.
 
@@ -1029,13 +1372,76 @@ def lu_factor_system(
     The row partition is taken on trust — any admittance OUTSIDE the listed blocks is
     ignored by the factorization, so only pass blocks that are galvanically
     independent. ``"auto"`` never resolves to ``"block"``.
+
+    ``precision`` picks the working precision of the FACTORIZATION, independently of the
+    backend: ``"full"`` (default) factors at ``y_bus``'s own dtype, while ``"mixed"``
+    factors a complex64 copy and recovers complex128 accuracy in
+    :func:`back_substitute` by ``refine_steps`` iterative-refinement corrections against
+    residuals formed at the working dtype (``refine_steps=None`` -> the documented
+    default ``solver.precision.refine_steps``). Mixed precision needs a complex128
+    ``y_bus``; it trades the memory of keeping the matrix at complex128 for a
+    factorization and back-substitution in single precision, which is the dominant cost
+    of a large dense solve (and of every CUDA solve, where double precision runs at a
+    fraction of the single-precision rate). Gradients flow through the exact linear-solve
+    adjoint (:class:`_MixedPrecisionSolveFn`), so the refined solve is differentiable
+    w.r.t. the matrix and the right-hand side at the working precision; the block
+    backend keeps only its diagonal blocks and therefore refuses a mixed-precision
+    factorization of a matrix that requires grad.
+
+    ``equilibrate`` selects the diagonal equilibration applied AROUND the factorization
+    (:mod:`pgml.solver.equilibration`; ``None`` -> the documented default
+    ``solver.equilibration.mode``, ``"off"`` to factor the matrix as handed in). What is
+    factored is then ``Â = D_r A D_c``, and :func:`back_substitute` scales every
+    right-hand side by ``D_r`` and every solution by ``D_c``, so the factorization
+    answers the SI system exactly as before — including the Woodbury low-rank path, which
+    reads ``A^{-1}U`` through the same entry point. The default ``"symmetric"`` mode
+    (van der Sluis, ``d_i = |A_ii|^{-1/2}``) reads only the diagonal and costs one scaled
+    copy of the matrix; ``"row_column"`` additionally needs one pass over the whole
+    matrix and is rejected for ``backend="block"``, whose free-row matrix is never
+    materialised.
     """
     n = y_bus.shape[-1]
+    eq_mode = resolve_equilibration(equilibrate)
     resolved = _resolve_backend(backend, y_bus, block_rows)
     blocks = (
         _validate_block_rows(block_rows, n, y_bus.device) if resolved == "block" else []
     )
+    precision, factor_dtype = resolve_precision(precision, y_bus.dtype)
+    mixed = precision == "mixed"
+    if mixed:
+        if refine_steps is None:
+            refine_steps = int(defaults.get("solver.precision.refine_steps"))
+        if resolved == "block" and y_bus.requires_grad:
+            raise InputError(
+                "precision='mixed' with backend='block' is forward-only: the "
+                "block-diagonal factorization keeps only its diagonal blocks, so the "
+                "refined solve cannot attach a gradient to the full matrix. Use "
+                "precision='full' for a differentiable block solve, or the dense / "
+                "sparse backend for a differentiable mixed-precision solve."
+            )
+    kw = {
+        "precision": precision,
+        "refine_steps": int(refine_steps or 0) if mixed else 0,
+        "work_dtype": y_bus.dtype,
+        "equilibration": eq_mode,
+    }
+    fac_dtype = factor_dtype if mixed else None
     if fixed_rows is None:
+        if resolved == "block":
+            d_full = _block_equilibration_scale(y_bus, eq_mode)
+            return FactoredSystem(
+                "norton",
+                None,
+                None,
+                n,
+                backend="block",
+                block=_BlockLU(y_bus, blocks, factor_dtype=fac_dtype, scale=d_full),
+                scale_row=d_full,
+                scale_col=d_full,
+                **kw,
+            )
+        y_hat, d_row, d_col = equilibrate_matrix(y_bus, mode=eq_mode)
+        kw_eq = {"scale_row": d_row, "scale_col": d_col}
         if resolved == "sparse":
             return FactoredSystem(
                 "norton",
@@ -1043,15 +1449,13 @@ def lu_factor_system(
                 None,
                 n,
                 backend="sparse",
-                sparse=_SciPySparseLU(y_bus),
-                y_mat=y_bus,
+                sparse=_SciPySparseLU(y_hat if not mixed else y_hat.to(factor_dtype)),
+                y_mat=y_hat,
+                **kw_eq,
+                **kw,
             )
-        if resolved == "block":
-            return FactoredSystem(
-                "norton", None, None, n, backend="block", block=_BlockLU(y_bus, blocks)
-            )
-        lu, piv = torch.linalg.lu_factor(y_bus)
-        return FactoredSystem("norton", lu, piv, n)
+        lu, piv = torch.linalg.lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
+        return FactoredSystem("norton", lu, piv, n, y_mat=y_hat, **kw_eq, **kw)
     fixed_rows = fixed_rows.to(device=y_bus.device, dtype=torch.int64)
     all_rows = torch.arange(n, device=y_bus.device)
     mask = torch.ones(n, dtype=torch.bool, device=y_bus.device).index_fill(
@@ -1061,7 +1465,11 @@ def lu_factor_system(
     y_fs = _index_2d(y_bus, free_rows, fixed_rows)
     if resolved == "block":
         # The free-row sub-block of each block, gathered straight from ``y_bus``:
-        # the dense free-free block [F, F] is never materialised.
+        # the dense free-free block [F, F] is never materialised. The equilibration
+        # scale is built in the FULL row space for the same reason and restricted to
+        # the free rows for the right-hand side / solution scaling.
+        d_full = _block_equilibration_scale(y_bus, eq_mode)
+        d_free = None if d_full is None else d_full.index_select(-1, free_rows)
         return FactoredSystem(
             "ideal",
             None,
@@ -1071,9 +1479,16 @@ def lu_factor_system(
             fixed_rows,
             y_fs,
             backend="block",
-            block=_BlockLU.for_free_rows(y_bus, blocks, mask, free_rows),
+            block=_BlockLU.for_free_rows(
+                y_bus, blocks, mask, free_rows, factor_dtype=fac_dtype, scale=d_full
+            ),
+            scale_row=d_free,
+            scale_col=d_free,
+            **kw,
         )
     y_ff = _index_2d(y_bus, free_rows, free_rows)
+    y_hat, d_row, d_col = equilibrate_matrix(y_ff, mode=eq_mode)
+    kw_eq = {"scale_row": d_row, "scale_col": d_col}
     if resolved == "sparse":
         return FactoredSystem(
             "ideal",
@@ -1084,14 +1499,20 @@ def lu_factor_system(
             fixed_rows,
             y_fs,
             backend="sparse",
-            sparse=_SciPySparseLU(y_ff),
-            y_mat=y_ff,
+            sparse=_SciPySparseLU(y_hat if not mixed else y_hat.to(factor_dtype)),
+            y_mat=y_hat,
+            **kw_eq,
+            **kw,
         )
-    lu, piv = torch.linalg.lu_factor(y_ff)
-    return FactoredSystem("ideal", lu, piv, n, free_rows, fixed_rows, y_fs)
+    lu, piv = torch.linalg.lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
+    return FactoredSystem(
+        "ideal", lu, piv, n, free_rows, fixed_rows, y_fs, y_mat=y_hat, **kw_eq, **kw
+    )
 
 
-def _lu_solve_shared(lu: Tensor, piv: Tensor, rhs: Tensor) -> Tensor:
+def _lu_solve_shared(
+    lu: Tensor, piv: Tensor, rhs: Tensor, *, adjoint: bool = False
+) -> Tensor:
     """Solve ``LU x = rhs`` reusing ONE factorization across a whole scenario batch.
 
     ``lu`` / ``piv`` carry the factorization's own batch ``*fb`` (``lu`` is
@@ -1105,6 +1526,8 @@ def _lu_solve_shared(lu: Tensor, piv: Tensor, rhs: Tensor) -> Tensor:
     per-scenario LU broadcast would cost — the difference between fitting and OOMing for a
     large batch (a ``[B, H, N, N]`` LU tile dwarfs the ``[B, H, N]`` solution). Fully
     differentiable; returns ``[*scenario, *fb, m]`` (same shape ``solve`` would give).
+    ``adjoint`` solves ``Aᴴ x = rhs`` with the same factors (no re-factorization) — the
+    adjoint system of a linear solve.
     """
     m = lu.shape[-1]
     fb = tuple(lu.shape[:-2])
@@ -1124,7 +1547,7 @@ def _lu_solve_shared(lu: Tensor, piv: Tensor, rhs: Tensor) -> Tensor:
         lu_k = lu.reshape(m, m)
         piv_k = piv.reshape(m)
         cols = rhs_b.reshape(k, m).transpose(0, 1).contiguous()  # [m, k]
-        sol = torch.linalg.lu_solve(lu_k, piv_k, cols)  # [m, k]
+        sol = torch.linalg.lu_solve(lu_k, piv_k, cols, adjoint=adjoint)  # [m, k]
         return sol.transpose(0, 1).reshape(*batch, m)
 
     # Distinct factorizations along the trailing ``nfb`` dims of ``batch`` (== ``fb``);
@@ -1139,7 +1562,7 @@ def _lu_solve_shared(lu: Tensor, piv: Tensor, rhs: Tensor) -> Tensor:
     cols = rhs_b.permute(*perm).reshape(
         *fb, m, k
     )  # [*fb, m, K] (contiguous after reshape)
-    sol = torch.linalg.lu_solve(lu, piv, cols)  # [*fb, m, K]
+    sol = torch.linalg.lu_solve(lu, piv, cols, adjoint=adjoint)  # [*fb, m, K]
     sol = sol.reshape(*fb, m, *sb)
     inv = list(range(nfb + 1, nfb + 1 + n_sb)) + list(range(nfb)) + [nfb]
     return sol.permute(*inv)  # [*scenario, *fb, m]
@@ -1154,12 +1577,30 @@ def back_substitute(fac: FactoredSystem, rhs: Tensor) -> Tensor:
     the single dispatch point every factored solve — plain
     (:func:`solve_factored`) or low-rank-updated
     (:func:`pgml.solver.lowrank.solve_factored_updated`) — goes through.
+
+    A ``"mixed"``-precision factorization back-substitutes in single precision and
+    corrects the solution with residuals formed at the working dtype
+    (:func:`_refined_solve`), which reaches the working precision's accuracy; gradients
+    come from the exact linear-solve adjoint of that refined solve.
+
+    An EQUILIBRATED factorization (the default, see :func:`lu_factor_system`) factored
+    ``Â = D_r A D_c``, so this scales the right-hand side by ``D_r`` on the way in and
+    the solution by ``D_c`` on the way out: the caller hands in and reads back SI
+    quantities, and the composite map is exactly ``A^{-1}``. Both multiplications stay
+    on the autograd tape, so gradients w.r.t. the matrix and the right-hand side are
+    unchanged (the scale factors themselves are constants of the differentiation).
     """
-    if fac.backend == "sparse":
-        return _SparseSolveFn.apply(fac.y_mat, rhs, fac.sparse)
-    if fac.backend == "block":
-        return fac.block.solve(rhs)
-    return _lu_solve_shared(fac.lu, fac.piv, rhs)
+    if fac.scale_row is not None:
+        rhs = rhs * fac.scale_row
+    if fac.precision == "mixed":
+        out = _MixedPrecisionSolveFn.apply(fac.y_mat, rhs, fac)
+    elif fac.backend == "sparse":
+        out = _SparseSolveFn.apply(fac.y_mat, rhs, fac.sparse)
+    elif fac.backend == "block":
+        out = fac.block.solve(rhs)
+    else:
+        out = _lu_solve_shared(fac.lu, fac.piv, rhs)
+    return out if fac.scale_col is None else out * fac.scale_col
 
 
 def ideal_slack_rhs(
@@ -1230,6 +1671,8 @@ __all__ = [
     "lu_factor_system",
     "solve_factored",
     "FactoredSystem",
+    "estimate_condition",
+    "resolve_precision",
     # shared building blocks of a factored solve (reused by pgml.solver.lowrank)
     "back_substitute",
     "ideal_slack_rhs",

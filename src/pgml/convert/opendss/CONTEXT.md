@@ -65,7 +65,7 @@ for the `u_rated_v` fix below (which does not change the IEEE 33-bus numbers).
 |-------------|-------------------------|--------------------------------------------|
 | Line        | `Line`                  | 1- or multi-phase; n×n R/X/C from matrix API; `to_phases` carries a phase-permuted terminal independently of `from_phases` |
 | Transformer | `Transformer`           | Two-winding only; see below                |
-| Vsource     | `Source`                | R1/X1 via text commands; `thevenin_from_z`; warns if non-negligible (see below) |
+| Vsource     | `Source`                | R1/X1/R0/X0 via text commands; `thevenin_from_z` + the sequence->phase split; warns if non-negligible (see below) |
 | Load        | `Load`                  | kW/kvar total; `IsDelta()` -> `connection`; `Loads.Model()` -> `LoadModel`/`ZipCoefficients`; WYE `return_path` from the return conductor (see below) |
 | Capacitor   | `ShuntAppliance`        | WYE (solidly grounded) or DELTA (phase-to-phase bank); see below |
 | Reactor     | `ShuntAppliance`        | WYE (solidly grounded, uncoupled) or DELTA (phase-to-phase bank); see below |
@@ -224,6 +224,28 @@ harmonic studies are not. See
 `Generators.kW()`/`.kvar()`), `IsDelta()` -> `connection`, bus/phases via
 `_parse_appliance_bus_connection`.
 
+A `model=3` Generator (constant kW, constant |V| — OpenDSS's PV bus) additionally
+carries a `VoltageRegulation` block (`_generator_voltage_regulation`), which the
+solver holds exactly (`solver/_pv_bus.py`):
+
+| DSS property | Our schema field | Notes |
+|---|---|---|
+| `Model` | — | `3` -> a regulating terminal; every other model stays a PQ injection |
+| `Vpu` | `VoltageRegulation.v_set_pu` | per unit of the MACHINE's `kV` rating (L-L for >= 2 phases, L-N for 1), re-referred to the HOST NODE's rated voltage through the two L-N bases; a mismatch between the two ratings is logged at INFO |
+| `Maxkvar` / `Minkvar` | `q_max_var` / `q_min_var` | `*1e3`. OpenDSS always resolves both (from `kVA` and `PF` when not given) and enforces them, so they are read as finite limits |
+| `kvar` | — | not read for `model=3` (`q_nom_var = 0.0`): the reactive power is solved |
+
+Properties outside the `Generators` accessor set (`Model`, `Vpu`, `Maxkvar`,
+`Minkvar`) are read through `dss.Properties.Value` on the active element. A
+DELTA-connected `model=3` machine raises `ConversionError` — the regulated row pair is
+formed for a WYE terminal. Measured against a live solve on a two-bus 20 kV feeder
+(`tests/reference/test_opendss_pv_bus.py`, opendssdirect 0.9.4, `Tolerance=1e-10`):
+a regulating machine agrees to 6.6e-10 pu / 4.2e-4 kvar (pgml 4 Newton iterations,
+OpenDSS 108 of its own), one pinned at a reactive limit to 1.7e-13 pu / 1.3e-8 kvar.
+OpenDSS's own `model=3` loop starts from the PREVIOUS solution, so a cold solve can
+hit `MaxIter` where a repeated one converges; the test brings the machine up as a PQ
+injection first, and the oracle pins only the two limit cases for that reason.
+
 **PVSystem** converts the same way with `consumer_type=ConsumerType.PV`;
 `PVsystems.kW()`/`.kvar()` report the PRESENT solved output (after OpenDSS's
 own Pmpp/irradiance/pf/kVA-limit derating), so no extra derating arithmetic
@@ -244,6 +266,13 @@ directly: `energy_capacity_wh = kWhrated*1000`, `soc = %stored/100`,
 ConsumerType.BATTERY`.
 
 ### Vsource impedance under the default ideal slack
+
+**Magnetizing-branch placement.** OpenDSS attaches the whole core branch to its LAST
+winding's terminal (winding 2 = the to/LV side for a standard import), verified on a live
+`Yprim` difference. pgml's shipped default puts it on the from/HV terminal
+(`transformer.magnetizing_placement = from_terminal`), a ~2e-4 pu deviation at a realistic
+0.5 % magnetizing current; `transformer.magnetizing_placement = to_terminal` reproduces
+OpenDSS below 1e-9 pu (`tests/reference/test_opendss_magnetizing_placement.py`).
 
 A non-negligible Thevenin impedance (`R1`/`X1`, read for `thevenin_from_z`)
 is silently UNUSED under pgml's default `slack="ideal"` (`solve_power_flow`/
@@ -454,6 +483,10 @@ a fresh 60 Hz default.
 | `Vsources.BasekV()*PU` [kV] | `Source.u_ref_v` [V]      | × 1000                   |
 | `Vsource.r1` [Ω]       | `Source.resistance_ohm`         | via `thevenin_from_z`        |
 | `Vsource.x1/(2πf₀)` [H] | `Source.inductance_h`         | via `thevenin_from_z`        |
+| `Transformer.%imag` | `magnetizing_inductance_h` | `B_m = %imag/100 · S/u_hv²` — DSS's `%imag` IS the core susceptance in percent of the winding base admittance, NOT a total no-load current (no Pythagorean subtraction of `%noloadloss`) |
+| `Transformer.%noloadloss` | `magnetizing_conductance_s` | `G_m = %noloadloss/100 · S/u_hv²` |
+| `Transformer.Rneut`/`Xneut` | — | a winding neutral earthing impedance raises `ConversionError` (pgml stamps windings solidly grounded) |
+| `Vsource.r0`/`x0` [Ω]  | `Source.resistance_ohm`/`inductance_h` off-diagonal | `Z_self=(Z0+2·Z1)/3`, `Z_mutual=(Z0−Z1)/3` — the same identity the DSS Vsource's own Yprim uses (3-phase only) |
 | `Loads.kW()` [kW]      | `Load.p_nom_w` [W]              | × 1000                       |
 | `Loads.kvar()` [kVAR]  | `Load.q_nom_var` [VAR]          | × 1000                       |
 

@@ -8,9 +8,9 @@ description) ships *inside* the package under ``pgml/data/defaults.yaml`` and is
 installed wheel.
 
 These are *internal* modeling defaults, not user run configuration. The user-facing,
-serializable run schemas live elsewhere — per package — and reuse the word "config":
-:mod:`pgml.scenarios.config` (data generation), ``pgl.config`` (training),
-``pgg.config`` (generation).
+serializable run schema for data generation is :mod:`pgml.scenarios.config`; downstream
+packages that train models or generate grids on top of this engine follow the same
+"config" naming convention for their own run schemas.
 
 Public API
 ----------

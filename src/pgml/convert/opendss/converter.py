@@ -47,18 +47,16 @@ The converter therefore always applies ``u_rated_v = kVBase * sqrt(3) * 1000``.
 For the canonical IEEE 33-bus (single-phase positive-sequence circuit built with
 ``phases=1`` and ``basekv=12.66 kV``): OpenDSS stores ``kVBase = 12.66/sqrt(3) =
 7.31 kV``.  Applying ``* sqrt(3) * 1000`` recovers ``12660 V``, matching the
-pandapower reference.  The old converter stored ``kVBase * 1000 = 7309 V``
-(L-N), which was a factor-of-sqrt(3) error in the const-Z shunt for load-flow
-studies.  The Y-bus oracle test (passive network, no loads) was unaffected; the
-load-flow path (``solve_power_flow``) is corrected by this fix.
+pandapower reference; using ``kVBase`` directly (7309 V, L-N) would introduce a
+factor-of-sqrt(3) error into the const-Z load shunt for load-flow studies, though
+the passive Y-bus oracle test (no loads) is insensitive to it.
 
 ``phase_mode`` controls the node/branch representation:
 
 - ``SINGLE_PHASE_EQUIV`` (default): every node/branch is ``phases=(Phase.A,)``;
-  lines carry 1x1 matrices (the ``[0][0]`` element of the DSS matrix).  This is
-  byte-identical to the historical converter output (except for the ``u_rated_v``
-  fix above, which does not change the IEEE 33-bus numbers because that circuit uses
-  single-phase elements with kVBase == kV_LL).
+  lines carry 1x1 matrices (the ``[0][0]`` element of the DSS matrix). For the
+  IEEE 33-bus circuit (single-phase elements with ``kVBase == kV_LL``) this
+  matches the pandapower reference exactly.
 - ``THREE_PHASE``: nodes carry their real DSS phases (incl. ``Phase.N`` when the
   bus has a neutral conductor); lines carry the full n×n matrices from
   ``Lines.RMatrix()/XMatrix()/CMatrix()``; sources become balanced 3-phase
@@ -115,6 +113,7 @@ import logging
 import math
 from typing import Any, Optional
 
+from pgml.assembly._params import phase_voltage_magnitude
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
@@ -125,6 +124,7 @@ from pgml.convert._common import (
     build_source,
     make_metadata,
     phases_for,
+    resolve_converted_line_models,
     thevenin_from_z,
     warn_dropped_elements,
 )
@@ -140,6 +140,7 @@ from pgml.schemas.grid_schema import (
     SourceConvention,
     Storage,
     Transformer,
+    VoltageRegulation,
     WindingConnection,
     ZipCoefficients,
 )
@@ -174,7 +175,10 @@ _SQRT3 = math.sqrt(3.0)
 
 
 def to_grid(
-    dss: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV
+    dss: Any,
+    *,
+    phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
+    harmonic_line_model: Optional[str] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -191,6 +195,16 @@ def to_grid(
         entry of the DSS matrix). ``THREE_PHASE`` emits the real DSS phases (incl.
         ``Phase.N`` for neutral conductors), full n×n line matrices, balanced
         3-phase Thevenin sources, and load ``connection`` from ``IsDelta()``.
+    harmonic_line_model:
+        Frequency-dependent line model written to every converted R/X line
+        (``"sequence_aware"``, ``"positive_sequence"``, ``"naive"``, or ``"none"`` to
+        leave the lines unresolved). ``None`` (default) takes the modeling defaults
+        ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
+        logged once. OpenDSS recomputes its own line constants at every harmonic and
+        exports only the fundamental matrices, so the model that reproduces that
+        frequency behaviour has to be chosen here. An OpenDSS matrix already contains
+        the earth-return resistance in its mutual entries at ``f0``, so such a grid is
+        the case for ``Line.earth_return.r0_includes_earth_return = True``.
 
     Returns
     -------
@@ -224,8 +238,9 @@ def to_grid(
       count -- nothing is dropped silently (see :func:`warn_dropped_elements`).
       Two-winding ``Transformer`` elements convert to
       :class:`~pgml.schemas.grid_schema.Transformer` (winding 1 = HV/from,
-      winding 2 = LV/to; solidly grounded wye or delta windings only; see
-      the module CONTEXT.md for the full field mapping and scope).
+      winding 2 = LV/to; solidly grounded wye or delta windings only).
+      Three-winding transformers and zigzag windings raise
+      :class:`~pgml.errors.ConversionError`.
     - ``First()``/``Next()`` class iterators already skip DISABLED elements
       (verified empirically against opendssdirect 0.9.4); every element loop
       below therefore only ever sees in-service elements without an explicit
@@ -244,6 +259,16 @@ def to_grid(
       :class:`~pgml.schemas.grid_schema.ShuntAppliance`, WYE (solidly grounded) by
       default or DELTA when the DSS element is delta-connected (per-leg G/C from
       OpenDSS's own resolved per-leg ``Cuf``/``R``/``X``).
+    - A ``Generator`` with ``model=3`` (constant P, constant ``|V|``) is a PV
+      terminal and converts to a
+      :class:`~pgml.schemas.grid_schema.Generator` carrying a
+      :class:`~pgml.schemas.grid_schema.VoltageRegulation` block: ``Vpu`` becomes
+      the setpoint (re-referred from the generator's own ``kV`` rating to the host
+      node's rated voltage) and ``Maxkvar``/``Minkvar`` the reactive limits, which
+      OpenDSS always resolves (from ``kVA`` and ``PF`` when not given). Every other
+      ``model`` converts as a PQ injection. A DELTA-connected ``model=3`` generator
+      raises :class:`~pgml.errors.ConversionError` (the regulated row pair is
+      modelled for a WYE terminal).
     """
     f0_hz: float = float(dss.Solution.Frequency())
     two_pi_f0 = 2.0 * math.pi * f0_hz
@@ -323,6 +348,7 @@ def to_grid(
         )
 
     id_map["bus"] = dict(bus_name_to_node_id)
+    node_by_id = {nd.id: nd for nd in nodes}
 
     # ---------------------------------------------------------------------- #
     # 2. Lines                                                                #
@@ -375,9 +401,9 @@ def to_grid(
 
         if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
             # Positive-sequence equivalent. A genuinely 1-phase DSS line (the
-            # IEEE 33-bus oracle) keeps the exact [0][0] entry (byte-identical
-            # to the historical converter); a coupled multi-phase line is
-            # reduced to its POSITIVE-SEQUENCE impedance Z1 = Z_self - Z_mutual
+            # IEEE 33-bus oracle) keeps the exact [0][0] entry; a coupled
+            # multi-phase line is reduced to its POSITIVE-SEQUENCE impedance
+            # Z1 = Z_self - Z_mutual
             # (mean diagonal minus mean off-diagonal, applied independently to
             # R and L) rather than the self impedance alone -- using the self
             # entry ignores the mutual coupling entirely and overstates the
@@ -509,6 +535,23 @@ def to_grid(
             wdg_pct_r.append(float(dss.Transformers.R()))
             wdg_tap.append(float(dss.Transformers.Tap()))
             wdg_is_delta.append(bool(dss.Transformers.IsDelta()))
+            # A per-winding neutral earthing impedance puts 3*Z_N in series with the
+            # zero sequence. pgml stamps windings SOLIDLY grounded (its assembly
+            # rejects a finite GroundingImpedance), so converting this silently would
+            # understate the zero-sequence impedance of exactly the path the winding
+            # topology opens. DSS defaults are `Rneut = -1` ("not set") and
+            # `Xneut = 0`; an explicit `Rneut = 0` is solid grounding and converts.
+            r_neut = float(dss.Transformers.Rneut())
+            x_neut = float(dss.Transformers.Xneut())
+            if r_neut > 0.0 or x_neut != 0.0:
+                raise ConversionError(
+                    f"OpenDSS transformer '{trafo_name}' winding {w} has a neutral "
+                    f"earthing impedance (Rneut={r_neut:g} Ohm, Xneut={x_neut:g} "
+                    "Ohm); pgml stamps transformer windings solidly grounded, so "
+                    "this would silently drop 3*Z_N from the zero-sequence path. "
+                    "Remove Rneut/Xneut (or set Rneut=0 Xneut=0 for a solidly "
+                    "grounded neutral)."
+                )
         xhl_pct = float(dss.Transformers.Xhl())
 
         dss.Text.Command(f"? Transformer.{trafo_name}.%noloadloss")
@@ -546,19 +589,22 @@ def to_grid(
         x_lv_ohm = x_ll_ohm * _lv_coil_factor
         l_lv_h = x_lv_ohm / two_pi_f0
 
-        # Magnetizing shunt referred to the HV terminal (same derivation the
-        # pandapower converter uses for pfe_kw/i0_percent -> G_m/B_m).
+        # Magnetizing shunt, referred to the HV/from terminal (the schema's
+        # convention). OpenDSS's two percentages are the REAL and IMAGINARY parts of
+        # the core admittance separately, each in percent of the winding's base
+        # admittance: `%noloadloss` -> G, `%imag` -> B. They are NOT a loss plus a
+        # TOTAL no-load current (pandapower's `pfe_kw` + `i0_percent` convention,
+        # where B = sqrt(I0^2 - G^2)), so no Pythagorean subtraction applies here.
+        # Verified on a live `Yprim` difference (magnetizing on minus off): the
+        # contribution is exactly `(%noloadloss + j*(-%imag))/100 * S/u^2` at the
+        # LAST winding's terminal, for `%imag` above AND below `%noloadloss`.
         pfe_w = noloadloss_pct / 100.0 * s_rated_va
         g_m = pfe_w / (u_rated_from_v**2) if pfe_w > 0.0 else 0.0
         l_m: Optional[float] = None
         if imag_pct > 0.0:
-            i0_amp = imag_pct / 100.0 * s_rated_va / u_rated_from_v
-            s_nl = u_rated_from_v * i0_amp
-            q_nl_sq = s_nl**2 - pfe_w**2
-            if q_nl_sq > 0.0:
-                b_m = math.sqrt(q_nl_sq) / (u_rated_from_v**2)
-                if b_m > 0.0:
-                    l_m = 1.0 / (two_pi_f0 * b_m)
+            b_m = imag_pct / 100.0 * s_rated_va / (u_rated_from_v**2)
+            if b_m > 0.0:
+                l_m = 1.0 / (two_pi_f0 * b_m)
 
         from_bus_name, from_phase_list, from_grounded, from_rotation = (
             _parse_transformer_winding_bus(bus_names_raw[0], n_phases)
@@ -697,14 +743,21 @@ def to_grid(
             ret = dss.Vsources.Next()
             continue
 
-        # Read R1/X1 via text command (Vsources API doesn't expose them directly)
-        dss.Text.Command(f"? Vsource.{vsrc_name}.r1")
-        r1_str = dss.Text.Result().strip()
-        dss.Text.Command(f"? Vsource.{vsrc_name}.x1")
-        x1_str = dss.Text.Result().strip()
+        # Read R1/X1/R0/X0 via text command (the Vsources API doesn't expose them
+        # directly). A DSS Vsource always carries all four: they are derived from
+        # `MVAsc3`/`MVAsc1`/`X1R1`/`X0R0` (or set explicitly, or via `Z1`/`Z0`/
+        # `puZ1`/`puZ0`), and the element's own Yprim is built from the
+        # symmetric-component identity Zs=(Z0+2*Z1)/3, Zm=(Z0-Z1)/3 -- exactly the
+        # identity `build_source` applies, so the per-phase matrix transfers 1:1.
+        def _vsource_ohm(prop: str) -> float:
+            dss.Text.Command(f"? Vsource.{vsrc_name}.{prop}")
+            raw = dss.Text.Result().strip()
+            return float(raw) if raw else 0.0
 
-        r1_ohm = float(r1_str) if r1_str else 0.0
-        x1_ohm = float(x1_str) if x1_str else 0.0
+        r1_ohm = _vsource_ohm("r1")
+        x1_ohm = _vsource_ohm("x1")
+        r0_ohm = _vsource_ohm("r0")
+        x0_ohm = _vsource_ohm("x0")
         r_s, l_s = thevenin_from_z(r1_ohm, x1_ohm, two_pi_f0)
 
         # A non-negligible Thevenin impedance is silently UNUSED under the
@@ -760,6 +813,10 @@ def to_grid(
                 r_ohm=r_s,
                 l_h=l_s,
                 native_phases=native_src_phases,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"OpenDSS Vsource '{vsrc_name}'",
             )
         )
 
@@ -955,14 +1012,16 @@ def to_grid(
     # string into `bus1=busname.k` / `bus2=busname.0` because no `bus2=` was
     # given, which `_grounded_shunt_phases` recognises the same way.
     #
-    # CAVEAT (documented, not modeled): the C-based susceptance model
-    # (`B(h)=2*pi*h*f0*C`) is exact ONLY at h=1 (fundamental) -- a genuinely
-    # inductive reactor's true susceptance `-1/(h*2*pi*f0*L)` DECREASES with
-    # frequency, while the fixed-C model INCREASES linearly with h (the wrong
-    # trend). The schema has no inductive shunt-to-ground primitive (its
-    # `ShuntReactor` branch type stores conductance + capacitance only, no
-    # inductance), so this is the best available representation; load-flow
-    # (fundamental-only) studies are exact, harmonic studies are not.
+    # The reactance is carried by `ShuntAppliance.inductance_h` (stamp term
+    # `1/(j*2*pi*h*f0*L)`), so the susceptance magnitude correctly FALLS as `1/h`
+    # instead of rising with `h` as a fixed-capacitance representation would. An
+    # OpenDSS Reactor is a SERIES R+jX branch, and its frequency behaviour is
+    # `1/(R + j*h*X)`; pgml's shunt primitive is the parallel form
+    # `G + 1/(j*2*pi*h*f0*L) + j*2*pi*h*f0*C`, so the two agree exactly when `R = 0`
+    # (the usual case, and OpenDSS's own default) and differ in the LOSS term only when
+    # `R > 0`: the parallel conductance stays flat where the series one decays as
+    # `1/h^2`. That case is converted as the `f0`-equivalent parallel pair with a
+    # warning, because |Y| is then dominated by the conductance at high orders.
     ret = dss.Reactors.First()
     while ret:
         reactor_name = dss.Reactors.Name().lower()
@@ -1018,12 +1077,28 @@ def to_grid(
             continue
 
         z_ohm = complex(r_ohm, x_ohm)
-        if z_ohm == 0.0:
-            g_scalar, c_scalar = 0.0, 0.0
-        else:
-            y_s = 1.0 / z_ohm
+        g_scalar, c_scalar, l_scalar = 0.0, 0.0, None
+        if z_ohm != 0.0:
+            y_s = 1.0 / z_ohm  # = G_eq + j*B_eq at f0
             g_scalar = y_s.real
-            c_scalar = y_s.imag / two_pi_f0
+            if y_s.imag > 0.0:  # net capacitive: B = 2*pi*f0*C
+                c_scalar = y_s.imag / two_pi_f0
+            elif y_s.imag < 0.0:  # net inductive: B = -1/(2*pi*f0*L)
+                l_scalar = -1.0 / (two_pi_f0 * y_s.imag)
+            if r_ohm != 0.0 and x_ohm != 0.0:
+                _logger.warning(
+                    "OpenDSS Reactor '%s' has R=%g and X=%g in SERIES; pgml's shunt "
+                    "primitive is the parallel G/L/C form, so the conversion is the "
+                    "equivalent parallel pair at f0 (exact at the fundamental). Above "
+                    "it the susceptance trend is right but the LOSS term stays flat "
+                    "where a series R+jX branch decays as 1/h^2 -- at X/R=%.3g the "
+                    "admittance magnitude differs noticeably from OpenDSS's by h=13. "
+                    "Use R=0 for an exact harmonic representation.",
+                    reactor_name,
+                    r_ohm,
+                    x_ohm,
+                    abs(x_ohm / r_ohm),
+                )
 
         reactor_id = _id.next()
         id_map["reactor"][reactor_name] = reactor_id
@@ -1036,6 +1111,7 @@ def to_grid(
                 native_phases=tuple(phase_list),
                 conductance_s=g_scalar,
                 capacitance_f=c_scalar,
+                inductance_h=l_scalar,
                 connection=connection,
             )
         )
@@ -1074,6 +1150,17 @@ def to_grid(
         p_w = float(dss.Generators.kW()) * 1_000.0
         q_var = float(dss.Generators.kvar()) * 1_000.0
 
+        node = node_by_id[bus_name_to_node_id[gen_bus_name]]
+        regulation = _generator_voltage_regulation(
+            dss,
+            gen_name,
+            n_phases=n_phases,
+            node=node,
+            connection=conn,
+        )
+        if regulation is not None:
+            q_var = 0.0  # a regulating machine's reactive power is solved, not set
+
         gen_id = _id.next()
         id_map["generator"][gen_name] = gen_id
         gen_obj = build_generator(
@@ -1085,6 +1172,7 @@ def to_grid(
             q_total_var=q_var,
             connection=conn,
             native_phases=tuple(gen_phases),
+            voltage_regulation=regulation,
         )
         if phase_mode is PhaseMode.THREE_PHASE and not is_delta:
             rp = _resolve_wye_return_path(
@@ -1273,6 +1361,9 @@ def to_grid(
         appliances=appliances,
         metadata=make_metadata(name="opendss_import", description=description),
     )
+    resolve_converted_line_models(
+        grid, _logger, tool="OpenDSS", requested=harmonic_line_model
+    )
     return grid, id_map
 
 
@@ -1433,11 +1524,10 @@ def _positive_sequence_scalar(mat_per_m_flat: list[float], n: int) -> float:
     """Reduce a flat n x n per-length matrix to its positive-sequence scalar.
 
     For a genuinely single-conductor line (``n == 1``) this is exactly the
-    ``[0][0]`` entry (byte-identical to the historical converter). For a
-    coupled multi-phase line, the positive-sequence quantity is
-    ``Z1 = Z_self - Z_mutual`` (mean diagonal minus mean off-diagonal) --
-    using the self entry alone (the historical bug) ignores the mutual
-    coupling and overstates the positive-sequence impedance. The identical
+    ``[0][0]`` entry. For a coupled multi-phase line, the positive-sequence
+    quantity is ``Z1 = Z_self - Z_mutual`` (mean diagonal minus mean
+    off-diagonal) -- using the self entry alone ignores the mutual coupling
+    and overstates the positive-sequence impedance. The identical
     reduction applied to the Maxwell C matrix gives ``C1 = C_self - C_mutual``;
     C's off-diagonal entries are NEGATIVE (mutual coupling reduces net
     charge), so subtracting them INCREASES C1 above C_self, which is the
@@ -1534,11 +1624,11 @@ def _resolve_wye_return_path(
 
     - an explicit ``Phase.N`` tie (``.4``) -> ``'neutral'`` (require the neutral);
     - solidly grounded (no explicit tie) on a node that ALSO carries ``Phase.N``
-      -> ``'ground'`` (the return stays at true ground despite the shared neutral —
-      previously an inexpressible, warned mismatch);
+      -> ``'ground'`` (the return stays at true ground even though the node also
+      carries a shared neutral);
     - otherwise (a 3-wire node, or a non-neutral explicit conductor) -> ``'auto'``,
-      which reduces to ground when the node has no ``Phase.N`` and matches pgml's
-      historical node-level routing when it does.
+      which resolves to ground when the node has no ``Phase.N`` and to the
+      neutral when it does.
     """
     if explicit_return == Phase.N:
         return "neutral"
@@ -1594,6 +1684,56 @@ def _shunt_phase_conductors(dss: Any, n_phases: int) -> Optional[list[Phase]]:
     return [_phase_num_to_enum(c) for c in conductors]
 
 
+def _generator_voltage_regulation(dss, gen_name: str, *, n_phases, node, connection):
+    """``VoltageRegulation`` of an OpenDSS ``Generator``, or ``None`` for a PQ model.
+
+    OpenDSS ``model=3`` is the PV terminal: constant ``kW``, constant ``|V|`` at the
+    per-unit setpoint ``Vpu``, with the reactive power free between ``Minkvar`` and
+    ``Maxkvar`` (OpenDSS resolves both from ``kVA`` and ``PF`` when they are not
+    given, and enforces them). Every other ``model`` is a PQ injection.
+
+    ``Vpu`` is per unit of the GENERATOR's own ``kV`` rating -- line-to-line for a
+    two- or three-phase machine, line-to-neutral for a single-phase one (the OpenDSS
+    ``Load``/``Generator`` convention) -- while the schema's ``v_set_pu`` is per unit
+    of the HOST NODE's rated voltage, so the setpoint is re-referred through the two
+    line-to-neutral bases. A DELTA machine raises: the regulated row pair is modelled
+    for a WYE terminal (see :mod:`pgml.solver`).
+    """
+    if int(float(dss.Properties.Value("Model"))) != 3:
+        return None
+    if connection is WindingConnection.DELTA:
+        raise ConversionError(
+            f"OpenDSS generator {gen_name} is delta-connected with model=3 "
+            "(constant |V|). Voltage regulation is modelled for a WYE terminal only "
+            "-- a delta element's reactive current is shared between two node rows, "
+            "so the regulated row pair cannot be formed. Connect it in wye, or use a "
+            "PQ generator model."
+        )
+    v_pu_dss = float(dss.Properties.Value("Vpu"))
+    gen_kv = float(dss.Properties.Value("kV"))
+    # Generator kV: L-L for >= 2 phases, L-N for a single-phase machine.
+    gen_base_ln_v = gen_kv * 1_000.0 / (_SQRT3 if n_phases >= 2 else 1.0)
+    node_base_ln_v = float(phase_voltage_magnitude(node.u_rated_v, len(node.phases)))
+    v_set_pu = v_pu_dss * gen_base_ln_v / node_base_ln_v
+    if abs(gen_base_ln_v - node_base_ln_v) > 1.0e-6 * node_base_ln_v:
+        _logger.info(
+            "OpenDSS generator %s is rated %.4g kV on a %.4g kV bus; its model=3 "
+            "setpoint Vpu=%.5f is re-referred to the bus base as v_set_pu=%.5f.",
+            gen_name,
+            gen_kv,
+            node_base_ln_v * _SQRT3 / 1_000.0
+            if len(node.phases) >= 3
+            else node_base_ln_v / 1_000.0,
+            v_pu_dss,
+            v_set_pu,
+        )
+    return VoltageRegulation(
+        v_set_pu=v_set_pu,
+        q_min_var=float(dss.Properties.Value("Minkvar")) * 1_000.0,
+        q_max_var=float(dss.Properties.Value("Maxkvar")) * 1_000.0,
+    )
+
+
 def _build_shunt_appliance(
     *,
     id: int,
@@ -1603,6 +1743,7 @@ def _build_shunt_appliance(
     native_phases: tuple[Phase, ...],
     conductance_s: float,
     capacitance_f: float,
+    inductance_h: Optional[float] = None,
     connection: WindingConnection = WindingConnection.WYE,
 ) -> ShuntAppliance:
     """Build a :class:`~pgml.schemas.grid_schema.ShuntAppliance`, mode-resolved.
@@ -1617,6 +1758,10 @@ def _build_shunt_appliance(
     Under ``THREE_PHASE`` the (balanced) per-leg value is repeated across every
     phase the element carries; ``connection`` (WYE default, or DELTA for a
     phase-to-phase bank) sets the topology.
+
+    ``inductance_h`` (an inductive leg, e.g. a Reactor) follows the same per-phase
+    repetition; its positive-sequence delta equivalent DIVIDES by three, because the
+    admittance of an inductance is inverse in ``L``.
     """
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         phases = phases_for(mode)
@@ -1624,6 +1769,8 @@ def _build_shunt_appliance(
             # Positive-sequence equivalent of a balanced delta bank: Y_wye = 3·Y_leg.
             conductance_s = conductance_s * 3.0
             capacitance_f = capacitance_f * 3.0
+            if inductance_h is not None:
+                inductance_h = inductance_h / 3.0
         return ShuntAppliance(
             id=id,
             name=name,
@@ -1631,6 +1778,9 @@ def _build_shunt_appliance(
             phases=phases,
             conductance_s=[conductance_s] * len(phases),
             capacitance_f=[capacitance_f] * len(phases),
+            inductance_h=(
+                None if inductance_h is None else [inductance_h] * len(phases)
+            ),
         )
     phases = phases_for(mode, native=native_phases)
     n = len(phases)
@@ -1641,6 +1791,7 @@ def _build_shunt_appliance(
         phases=phases,
         conductance_s=[conductance_s] * n,
         capacitance_f=[capacitance_f] * n,
+        inductance_h=(None if inductance_h is None else [inductance_h] * n),
         connection=connection,
     )
 
@@ -1678,9 +1829,9 @@ def _resolve_load_model(
       but these codes couple them in ways outside that model) -- falls back
       to ``CONST_POWER`` with a warning naming the model.
 
-    Returns ``(None, None)`` for model 1 (the schema default already IS
-    ``CONST_POWER``, keeping the historical byte-identical output when no
-    caller ever needed to distinguish "unset" from "explicitly const-power").
+    Returns ``(None, None)`` for model 1, since the schema default is already
+    ``CONST_POWER`` and there is no need to distinguish an unset ``load_model``
+    from one explicitly set to constant power.
     """
     model_code = int(dss.Loads.Model())
     if model_code == 1:

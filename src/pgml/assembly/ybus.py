@@ -23,6 +23,7 @@ differentiable path (loops are only over the fixed set of component KINDS).
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
@@ -30,6 +31,7 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 
+from pgml.defaults import get as _cfg
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     GenericBranch,
@@ -48,6 +50,14 @@ from pgml.schemas.grid_schema import (
 )
 
 from ._control import resolve_injection_power
+from ._fusion import (
+    FusionMap,
+    describe_unfusable,
+    fused_branch_currents,
+    log_fusion_summary,
+    resolve_fusion,
+    zero_impedance_branches,
+)
 from ._incidence import (
     build_incidence,
     cyclic_delta_incidence,
@@ -57,9 +67,16 @@ from ._incidence import (
 from ._transformer import (
     block_incidence,
     group_key as _xfmr_group_key,
+    harmonic_resistance_law,
+    is_sequence_aware as _xfmr_is_sequence_aware,
+    magnetizing_blocks,
+    magnetizing_placement,
+    resistance_scales_with_order,
     nominal_turns_ratio,
     resolve_vector_group,
+    sequence_leakage_matrices,
     winding_leakage_block,
+    zero_sequence_leakage,
 )
 from ._params import (
     const_z_shunt_admittance,
@@ -77,6 +94,8 @@ from ._stamps import (
 )
 from .index import NodePhaseIndex, node_phase_index
 
+_log = logging.getLogger("pgml")
+
 
 @dataclass(frozen=True)
 class YBus:
@@ -88,14 +107,21 @@ class YBus:
         Complex tensor ``[*batch, H, N, N]`` (or ``[N, N]`` if a single grid and a
         single frequency were requested and ``squeeze`` applies).
     index:
-        The :class:`NodePhaseIndex` describing the compact row layout.
+        The :class:`NodePhaseIndex` describing the compact row layout of ``Y`` — the
+        grid's full layout, or the REDUCED one when ``fusion`` is set.
     frequencies_hz:
         Real tensor ``[H]`` of the absolute frequencies the Y was built at.
+    fusion:
+        The :class:`~pgml.assembly._fusion.FusionMap` applied, or ``None`` when the
+        grid has no zero-impedance branch to collapse. When set, ``Y``'s rows are the
+        fused ones (``index is fusion.index``, ``N == fusion.size``) and
+        ``fusion.prolong`` maps a solution back to the grid's full row layout.
     """
 
     Y: Tensor
     index: NodePhaseIndex
     frequencies_hz: Tensor
+    fusion: Optional[FusionMap] = None
 
 
 # ---------------------------------------------------------------------------
@@ -265,16 +291,27 @@ def assemble_ybus(
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
     branch_states: Optional[dict] = None,
+    fusion: Optional[object] = None,
 ) -> YBus:
     """Assemble the LINEAR (const-Z) complex nodal admittance ``Y(f)``.
 
-    This is the **linear-model** assembler: it equals
+    This is the linear-model assembler: it equals
     :func:`assemble_network_ybus` (the passive network) PLUS the const-Z device
     shunts (loads/generators folded as constant impedance at nominal voltage) PLUS
     the source Norton (Thévenin) shunt. The nonlinear (const-P / ZIP) power flow
     instead uses :func:`assemble_network_ybus` + :func:`device_current_injections`
-    (see ``assembly/CONTEXT.md``). The IEEE33 / tiny-grid oracle tests keep using
-    this function as their regression suite, so its behaviour is UNCHANGED.
+    (see ``assembly/CONTEXT.md``).
+
+    The folded device shunt is the OPERATING POINT expressed as an admittance: its
+    conductance ``P/|V0|^2`` is a resistance and stays flat with frequency, while its
+    susceptance ``-Q/|V0|^2`` is the equivalent reactive element and scales like one
+    (``* h`` where the device is capacitive, ``/ h`` where it is inductive) — the
+    parallel R-L / R-C branch of the classical harmonic load model. The fold is exact
+    at ``f0``; it is a MODEL of the device at other frequencies, derived from P and Q
+    and not from a measured harmonic impedance. The harmonic power flow
+    (:func:`pgml.solver.solve_harmonic_flow`) does not fold devices at all: it
+    assembles :func:`assemble_network_ybus` and treats every device as a current
+    source, so use that function for a harmonic network matrix.
 
     Parameters
     ----------
@@ -309,13 +346,21 @@ def assemble_ybus(
         intermediate values scale the admittance continuously and stay
         differentiable). A batched state promotes ``Y`` to ``[*batch, H, N, N]``,
         so one assembly covers a whole batch of switch configurations.
+    fusion:
+        Exact bus fusion of zero-impedance branches. ``None`` (default) resolves the
+        documented policy ``branch.zero_impedance``; ``False`` refuses a
+        zero-impedance branch by name instead of collapsing it; a
+        :class:`~pgml.assembly._fusion.FusionMap` uses that map (the way a solve shares
+        one map across its orders). When fusion applies, ``Y`` is the REDUCED system
+        ``P^T Y P`` and the returned ``index`` is the reduced layout.
 
     Returns
     -------
     YBus
         ``Y`` complex ``[H, N, N]`` (``[N, N]`` if ``H == 1`` and a scalar
         frequency was passed; ``[*batch, H, N, N]`` with batched
-        ``branch_states``), the :class:`NodePhaseIndex`, and the frequencies.
+        ``branch_states``), the :class:`NodePhaseIndex` of its rows, the frequencies,
+        and the :class:`~pgml.assembly._fusion.FusionMap` when one applied.
     """
     if device is None and isinstance(frequencies_hz, Tensor):
         device = frequencies_hz.device
@@ -325,7 +370,10 @@ def assemble_ybus(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    index = node_phase_index(grid)
+    fused = resolve_fusion(
+        grid, fusion, param_overrides=param_overrides, branch_states=branch_states
+    )
+    index = fused.index if fused is not None else node_phase_index(grid)
     n = index.size
 
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
@@ -333,12 +381,13 @@ def assemble_ybus(
     # call; solve_power_flow logs its own, and harmonic_flow delegates its log to
     # solve_power_flow — so no double logging across the public entry points).
     log_modeling_summary(grid, asymmetric=asymmetric)
+    log_fusion_summary(fused)
 
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
 
     # Passive network (shared with assemble_network_ybus).
     y = _stamp_network(
-        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states
+        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states, fused
     )
     # Linear-model device folding: source Norton + const-Z loads/gens.
     y = _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides)
@@ -362,7 +411,7 @@ def assemble_ybus(
     )
     if scalar_freq and y.ndim == 3:
         y = y.reshape(n, n)
-    return YBus(Y=y, index=index, frequencies_hz=f)
+    return YBus(Y=y, index=index, frequencies_hz=f, fusion=fused)
 
 
 def assemble_network_ybus(
@@ -373,12 +422,13 @@ def assemble_network_ybus(
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    fusion: Optional[object] = None,
 ) -> YBus:
     """Assemble the PASSIVE-NETWORK nodal admittance ``Y_net(f)``.
 
     Contains ONLY the passive network: lines, transformers, switches, shunt
     reactors, generic branches, and :class:`ShuntAppliance` (a fixed linear
-    shunt). It does **not** stamp loads/generators and does **not** fold the
+    shunt). It does NOT stamp loads/generators and does NOT fold the
     source as a Norton shunt — both are handled on the RHS by the nonlinear
     power-flow path (:func:`device_current_injections` and the slack handling in
     :func:`pgml.solver.solve_power_flow`).
@@ -389,16 +439,18 @@ def assemble_network_ybus(
 
     Parameters
     ----------
-    grid, frequencies_hz, dtype, device, param_overrides, branch_states:
+    grid, frequencies_hz, dtype, device, param_overrides, branch_states, fusion:
         Identical meaning to :func:`assemble_ybus` (no ``operating_point`` — there
-        is no device folding here). ``branch_states`` masks/batches branch stamps.
+        is no device folding here). ``branch_states`` masks/batches branch stamps;
+        ``fusion`` collapses zero-impedance branches into single rows.
 
     Returns
     -------
     YBus
         ``Y`` complex ``[H, N, N]`` (``[N, N]`` for a scalar frequency;
         ``[*batch, H, N, N]`` with batched ``branch_states``), the
-        :class:`NodePhaseIndex`, and the frequencies.
+        :class:`NodePhaseIndex` of its rows, the frequencies, and the
+        :class:`~pgml.assembly._fusion.FusionMap` when one applied.
     """
     if device is None and isinstance(frequencies_hz, Tensor):
         device = frequencies_hz.device
@@ -408,12 +460,15 @@ def assemble_network_ybus(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    index = node_phase_index(grid)
+    fused = resolve_fusion(
+        grid, fusion, param_overrides=param_overrides, branch_states=branch_states
+    )
+    index = fused.index if fused is not None else node_phase_index(grid)
     n = index.size
 
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
     y = _stamp_network(
-        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states
+        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states, fused
     )
 
     scalar_freq = (
@@ -423,11 +478,36 @@ def assemble_network_ybus(
     )
     if scalar_freq and y.ndim == 3:
         y = y.reshape(n, n)
-    return YBus(Y=y, index=index, frequencies_hz=f)
+    return YBus(Y=y, index=index, frequencies_hz=f, fusion=fused)
+
+
+def _unfused_view(grid: Grid, fusion) -> Grid:
+    """A shallow grid view without the fused branches (same nodes, same catalog).
+
+    A fused branch has no primitive admittance to stamp — its physics is the row
+    collapse itself — so the stamp builders never see it. Dropping it from a shallow
+    ``model_copy`` keeps every parameter tensor (and its autograd identity) shared with
+    the original grid.
+    """
+    if fusion is None or not fusion.fused_branch_ids:
+        return grid
+    drop = set(fusion.fused_branch_ids)
+    return grid.model_copy(
+        update={"branches": [b for b in grid.branches if int(b.id) not in drop]}
+    )
 
 
 def _stamp_network(
-    grid, f, y, index, cdt, rdt, device, param_overrides, branch_states=None
+    grid,
+    f,
+    y,
+    index,
+    cdt,
+    rdt,
+    device,
+    param_overrides,
+    branch_states=None,
+    fusion=None,
 ):
     """Accumulate every PASSIVE contribution into ``y`` (shared assembler core).
 
@@ -440,8 +520,12 @@ def _stamp_network(
 
     ``branch_states`` scales each listed branch's primitive block by its state
     (:func:`_group_states`) before scattering; a batched state promotes ``y`` to
-    ``[*batch, H, N, N]`` through the scatter's broadcast.
+    ``[*batch, H, N, N]`` through the scatter's broadcast. With a ``fusion`` map the
+    builders run on the grid WITHOUT its fused branches and index through the reduced
+    layout, which accumulates ``P^T Y P`` directly (the fused rows' scatter targets
+    coincide) without ever forming the full system.
     """
+    grid = _unfused_view(grid, fusion)
     for stamp in _BRANCH_STAMPS:
         for group, block, rows, cols in stamp.builder(
             grid, f, index, cdt, rdt, device, param_overrides, branch_states
@@ -474,8 +558,8 @@ def _series_terminal_indices(
 
 
 def _is_sequence_aware(line) -> bool:
-    """A line opted into the sequence-aware harmonic model (UNBALANCED studies)."""
-    return (line.tags or {}).get("harmonic_line_model") == "sequence_aware"
+    """A line that selected the sequence-aware harmonic model (UNBALANCED studies)."""
+    return line.harmonic_line_model == "sequence_aware"
 
 
 @_branch_stamp("line")
@@ -483,6 +567,12 @@ def _line_block_groups(
     grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
 ):
     """Yield ``(group, block, rows, cols)`` for every line group (all three paths).
+
+    Every path produces a LUMPED pi branch — ``Z = z·length``, ``Y = y·length`` with the
+    shunt split half to each terminal, no hyperbolic long-line correction and no
+    distributed-parameter model. Frequency-domain steady state only: no standing or
+    travelling waves. Accurate for distribution feeders over the harmonic range; split a
+    long line into segments when the electrical length stops being small.
 
     Explicit-R/L/C lines go through the matrix path; lines carrying a
     ``conductor_geometry`` go through the Carson/Deri geometry path; lines tagged
@@ -506,7 +596,14 @@ def _line_block_groups(
     seq_lines = [b for b in flow_lines if _is_sequence_aware(b)]
     if rx_lines:
         yield from _line_rx_block_groups(
-            rx_lines, f, index, cdt, rdt, device, param_overrides
+            rx_lines,
+            f,
+            index,
+            cdt,
+            rdt,
+            device,
+            param_overrides,
+            f0=float(grid.base_frequency_hz),
         )
     if seq_lines:
         yield from _sequence_aware_block_groups(
@@ -515,6 +612,54 @@ def _line_block_groups(
     yield from _geometry_block_groups(
         grid, f, index, cdt, rdt, device, param_overrides, branch_states
     )
+
+
+def _sequence_aware_options(line) -> tuple:
+    """DISCRETE sequence-aware model options of one line (the batching group key).
+
+    ``(skin, x0_frequency, r0_includes_earth_return)``, each resolved from the line's
+    typed fields and falling back to the modeling defaults (``pgml.defaults``). These
+    select code paths, so they group lines; the numeric coefficients do not (see
+    :func:`_earth_field`).
+    """
+    from pgml.geometry import sequence as _seq
+
+    er = line.earth_return
+    skin = line.harmonic_skin_effect
+    if skin is None:
+        skin = _cfg("line.harmonic_model.skin_effect")
+    x0_frequency = getattr(er, "x0_frequency", None) or _seq.X0_FREQUENCY
+    r0_inc = getattr(er, "r0_includes_earth_return", None)
+    if r0_inc is None:
+        r0_inc = _seq.R0_INCLUDES_EARTH_RETURN
+    return bool(skin), str(x0_frequency), bool(r0_inc)
+
+
+#: Modeling-default keys of the numeric earth-return coefficients, by field name.
+_EARTH_DEFAULT_KEY = {
+    "resistance_coeff_ohm_per_m_per_hz": (
+        "line.earth_return.resistance_coeff_ohm_per_m_per_hz"
+    ),
+    "reactance_coeff_ohm_per_m_per_hz": (
+        "line.earth_return.reactance_coeff_ohm_per_m_per_hz"
+    ),
+    "x0_exponent": "line.earth_return.x0_exponent",
+}
+
+
+def _earth_field(lines, field: str, rdt: torch.dtype, device) -> Tensor:
+    """Stack one numeric earth-return coefficient over a line group -> ``[K]``.
+
+    Each line's :class:`~pgml.schemas.grid_schema.EarthReturnModel` value is used when
+    set (a python float OR a tensor, so gradients flow), else the modeling default.
+    """
+    vals = []
+    for ln in lines:
+        v = getattr(ln.earth_return, field, None) if ln.earth_return else None
+        if v is None:
+            v = _cfg(_EARTH_DEFAULT_KEY[field])
+        vals.append(_geom_scalar(v, rdt, device))
+    return torch.stack(vals, 0)
 
 
 def _sequence_aware_block_groups(
@@ -529,26 +674,24 @@ def _sequence_aware_block_groups(
     model an asymmetric 4-wire study needs. Differentiable in R/L; the shunt ``C`` keeps
     the usual ``B∝h`` split.
     """
-    from pgml.geometry.sequence import CARSON_EARTH_R_PER_HZ, sequence_aware_phase_z
+    from pgml.geometry.sequence import sequence_aware_phase_z
 
     f0 = float(grid.base_frequency_hz)
     two_pi_f0 = 2.0 * math.pi * f0
     two_pi_f = (2.0 * torch.pi) * f  # [H]
 
-    # Group by (skin, earth coeff) so each batched call shares its model options.
+    # Group by the DISCRETE model options (skin flag, reactance law, R0 convention) so
+    # each batched call shares them; the numeric earth coefficients stay per line and
+    # are stacked into tensors, so a tensor coefficient keeps its gradient.
     by_opts: dict[tuple, list] = {}
     for ln in lines:
-        if len(ln.from_phases) != 3:
-            raise ValueError(
-                f"Line {ln.id}: harmonic_line_model=sequence_aware requires a 3-phase "
-                f"line (got {len(ln.from_phases)} phases); it is a Z1/Z0 model."
-            )
-        tags = ln.tags or {}
-        skin = tags.get("seq_skin", "true") == "true"
-        coeff = float(tags.get("seq_earth_coeff", CARSON_EARTH_R_PER_HZ))
-        by_opts.setdefault((skin, coeff), []).append(ln)
+        by_opts.setdefault(_sequence_aware_options(ln), []).append(ln)
 
-    for (skin, coeff), group in by_opts.items():
+    for opts, group in by_opts.items():
+        skin, x0_frequency, r0_includes_earth = opts
+        coeff = _earth_field(group, "resistance_coeff_ohm_per_m_per_hz", rdt, device)
+        coeff_x = _earth_field(group, "reactance_coeff_ohm_per_m_per_hz", rdt, device)
+        x0_exponent = _earth_field(group, "x0_exponent", rdt, device)
         r_list, l_list, c_list, len_list = [], [], [], []
         for ln in group:
             r_list.append(
@@ -592,6 +735,10 @@ def _sequence_aware_block_groups(
             f,
             skin=skin,
             earth_resistance_coeff=coeff,
+            earth_reactance_coeff=coeff_x,
+            x0_frequency=x0_frequency,
+            x0_exponent=x0_exponent,
+            r0_includes_earth_return=r0_includes_earth,
         )  # [K,H,3,3]  Ω/m
 
         z_len = (z_abc * length[:, None, None, None]).to(cdt)  # [K,H,3,3]
@@ -643,7 +790,12 @@ def _geom_conductor_arrays(ln, rdt, device):
 def _geometry_block_groups(
     grid, f, index, cdt, rdt, device, param_overrides, branch_states=None
 ):
-    """Yield ``(group, block, rows, cols)`` for geometry (Carson/Deri) lines."""
+    """Yield ``(group, block, rows, cols)`` for geometry (Carson/Deri) lines.
+
+    The conductor internal-inductance model is read from the modeling defaults
+    (``line.geometry.internal_inductance``) at assembly time, so a project-level
+    defaults override applies without reimporting the package.
+    """
     glines = [
         b
         for b in grid.branches
@@ -679,7 +831,15 @@ def _geometry_block_groups(
         RHO, LEN = torch.stack(rhos), torch.stack(lengths)  # [K]
 
         z, c = line_constants(
-            X, Y, GMR, RDC, RAD, RHO, f, nph
+            X,
+            Y,
+            GMR,
+            RDC,
+            RAD,
+            RHO,
+            f,
+            nph,
+            internal_inductance=_cfg("line.geometry.internal_inductance"),
         )  # Z[K,H,P,P] Ω/m, C[K,P,P] F/m
         z_len = (z * LEN[:, None, None, None]).to(cdt)
         ys_adm = torch.linalg.inv(z_len).transpose(0, 1)  # [H,K,P,P] series admittance
@@ -698,22 +858,38 @@ def _geometry_block_groups(
         yield group, block, rows, cols
 
 
-def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
-    by_p: dict[int, list] = {}
+def _line_rx_block_groups(
+    lines, f, index, cdt, rdt, device, param_overrides, *, f0: float
+):
+    """Yield ``(group, block, rows, cols)`` for explicit-R/L/C lines.
+
+    Covers the ``naive`` and ``positive_sequence`` models and lines whose
+    ``harmonic_line_model`` is still unresolved (assembled from their stored
+    parameters). The series resistance at harmonic ``h`` is::
+
+        R(h) = m(h) * (R - R_earth) + R_earth
+
+    where ``R_earth`` holds the off-diagonal (mutual) entries and, on its diagonal, each
+    row's mean mutual. On a multi-phase line the mutual resistance IS the earth-return
+    term (Carson: it is common to the self and mutual entries), so the skin-effect
+    multiplier ``m(h)`` scales the CONDUCTOR part only; a 1-phase line has no mutual and
+    keeps ``R(h) = m(h) * R``. ``m(h)`` is the Bessel skin curve of the line's
+    positive-sequence resistance for ``positive_sequence`` (differentiable in ``R``),
+    ``1`` for ``naive``, and the line's ``resistance_frequency`` law otherwise.
+    """
+    by_opts: dict[tuple, list] = {}
     for ln in lines:
-        by_p.setdefault(len(ln.from_phases), []).append(ln)
-    for p, group in by_p.items():
-        r_list, l_list, g_list, c_list, mult_list = [], [], [], [], []
+        by_opts.setdefault(_rx_options(ln), []).append(ln)
+    for (p, model, skin), group in by_opts.items():
+        r_list, l_list, g_list, c_list, mult_list, r_pm_list = [], [], [], [], [], []
         for ln in group:
             length = ln.length_m
-            r0 = (
-                _override(
-                    param_overrides,
-                    ("line", ln.id, "series_resistance_ohm_per_m"),
-                    _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
-                )
-                * length
+            r_pm = _override(
+                param_overrides,
+                ("line", ln.id, "series_resistance_ohm_per_m"),
+                _real_matrix(ln.series_resistance_ohm_per_m, rdt, device),
             )
+            r0 = r_pm * length
             ind = (
                 _override(
                     param_overrides,
@@ -741,19 +917,32 @@ def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
                 )
             else:
                 cond = torch.zeros((p, p), dtype=rdt, device=device)
+            r_pm_list.append(r_pm)
             r_list.append(r0)
             l_list.append(ind)
             g_list.append(cond)
             c_list.append(cap)
-            mult_list.append(_resistance_multiplier(ln, f, rdt, device))  # [H]
+            if model is None:
+                mult_list.append(_resistance_multiplier(ln, f, rdt, device))  # [H]
         r = torch.stack(r_list, 0)  # [K,P,P]
         ind = torch.stack(l_list, 0)
         g = torch.stack(g_list, 0)
         c = torch.stack(c_list, 0)
-        rmult = torch.stack(mult_list, 1)  # [H,K]
-        rmult = rmult[:, :, None, None]  # [H,K,1,1]
+        r_earth = _mutual_resistance(r)  # [K,P,P] (zeros for P == 1)
+        if model is None:
+            rmult = torch.stack(mult_list, 1)[:, :, None, None]  # [H,K,1,1]
+        elif model == "positive_sequence" and skin:
+            from pgml.geometry.sequence import skin_resistance_multiplier
 
-        ys = series_admittance_matrix(r, ind, f, cdt, r_mult=rmult)  # [H,K,P,P]
+            r1 = _positive_sequence_resistance(torch.stack(r_pm_list, 0))  # [K]
+            rmult = skin_resistance_multiplier(r1, f0, f)  # [K,H]
+            rmult = rmult.transpose(0, 1)[:, :, None, None]  # [H,K,1,1]
+        else:  # naive / positive_sequence without skin: R constant
+            rmult = torch.ones((f.shape[0], 1, 1, 1), dtype=rdt, device=device)
+
+        ys = series_admittance_matrix(
+            r - r_earth, ind, f, cdt, r_mult=rmult, r_unscaled=r_earth
+        )  # [H,K,P,P]
         series_block = pi_series_blocks(ys)  # [H,K,2P,2P]
 
         # Shunt admittance split half to each terminal diagonal block.
@@ -770,15 +959,58 @@ def _line_rx_block_groups(lines, f, index, cdt, rdt, device, param_overrides):
         yield group, block, rows, cols
 
 
+def _rx_options(line) -> tuple:
+    """``(n_phases, harmonic_line_model, skin)`` batching key of an explicit-R/L/C line."""
+    model = line.harmonic_line_model
+    skin = line.harmonic_skin_effect
+    if model == "positive_sequence" and skin is None:
+        skin = _cfg("line.harmonic_model.skin_effect")
+    return len(line.from_phases), model, bool(skin)
+
+
+def _mutual_resistance(r: Tensor) -> Tensor:
+    """Earth-return part of a resistance matrix ``[K,P,P]``: the mutual entries.
+
+    Off-diagonal entries are kept as they are; each diagonal entry becomes its row's
+    mean mutual (for the circulant matrix of a transposed line that is exactly the
+    mutual resistance ``Rg``). Returns zeros for a single-phase line, which has no
+    mutual and therefore no earth-return component in its stored ``R``.
+    """
+    p = r.shape[-1]
+    if p == 1:
+        return torch.zeros_like(r)
+    eye = torch.eye(p, dtype=r.dtype, device=r.device)
+    off = r * (1.0 - eye)  # [K,P,P]
+    row_mean = off.sum(-1) / (p - 1)  # [K,P]
+    return off + row_mean.unsqueeze(-1) * eye
+
+
+def _positive_sequence_resistance(r: Tensor) -> Tensor:
+    """Positive-sequence resistance ``[K]`` of per-metre resistance matrices ``[K,P,P]``.
+
+    ``mean(diagonal) - mean(off-diagonal)``: the mutual entries are the earth-return
+    term, so the resistance a balanced (positive-sequence) current sees is the
+    difference. Matches :func:`pgml.geometry.synthesis._line_representative_r1`.
+    """
+    p = r.shape[-1]
+    diag = r.diagonal(dim1=-2, dim2=-1)  # [K,P]
+    self_ = diag.mean(-1)  # [K]
+    if p == 1:
+        return self_
+    mutual = (r.sum((-2, -1)) - diag.sum(-1)) / (p * (p - 1))  # [K]
+    return self_ - mutual
+
+
 def _resistance_multiplier(line, f, rdt, device) -> Tensor:
     """Per-frequency resistance multiplier m(f) ``[H]`` from ResistanceFrequencyModel.
 
     Supported multipliers:
-    - ``constant`` -> its scalar value (M1 default).
+    - ``constant`` -> its scalar value (the default; 1.0 means no skin effect).
     - ``analytic`` with ``law == "carson_skin_multiplier"`` -> the differentiable
       positive-sequence skin-effect curve (``pgml.geometry.sequence``), the Bessel
       ``I0/I1`` internal-resistance growth WITHOUT the earth-return floor; ``params``
-      carry ``r1_ohm_per_m`` and ``f0_hz`` (see ``synthesize_positive_sequence_*``).
+      carry ``r1_ohm_per_m`` and ``f0_hz`` (see
+      :func:`pgml.geometry.synthesis.positive_sequence_resistance_model`).
       Other analytic laws fall back to ``base_value``.
     - ``curve`` -> linear interpolation of the sampled multiplier (constant
       extrapolation outside the sampled band).
@@ -968,17 +1200,27 @@ def _shunt_reactor_block_groups(
     ]
     if not reactors:
         return
-    by_p: dict[int, list] = {}
+    # Group by phase count AND by whether the reactor has an inductive path: the
+    # inductive term needs a matrix inverse, so it cannot share a batch with a
+    # purely capacitive/conductive shunt.
+    by_p: dict[tuple, list] = {}
     for sr in reactors:
-        by_p.setdefault(len(sr.from_phases), []).append(sr)
-    for p, group in by_p.items():
+        by_p.setdefault((len(sr.from_phases), sr.inductance_h is not None), []).append(
+            sr
+        )
+    for (_p, inductive), group in by_p.items():
         g_list, c_list = [], []
         for sr in group:
             g_list.append(_real_matrix(sr.conductance_s, rdt, device))
             c_list.append(_real_matrix(sr.capacitance_f, rdt, device))
         g = torch.stack(g_list, 0)
         c = torch.stack(c_list, 0)
-        block = shunt_admittance_matrix(g, c, f, cdt)  # [H,K,P,P]
+        ind = (
+            torch.stack([_real_matrix(sr.inductance_h, rdt, device) for sr in group], 0)
+            if inductive
+            else None
+        )
+        block = shunt_admittance_matrix(g, c, f, cdt, ind=ind)  # [H,K,P,P]
         rows, cols = _shunt_node_indices(group, index, device, terminal="from")
         yield group, block, rows, cols
 
@@ -986,13 +1228,15 @@ def _shunt_reactor_block_groups(
 def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides):
     """Stamp every in-service :class:`ShuntAppliance` (fixed linear shunt).
 
-    WYE (default): each per-phase ``y = G + jB`` connects its phase to ground (the
-    historical diagonal stamp). DELTA: element ``k`` connects phase ``k`` to phase
-    ``(k+1) % n`` cyclic with ``y_k = G_k + j·2π f C_k``, stamped ``M^T diag(y) M``
-    via the same :func:`cyclic_delta_incidence` convention the DELTA load uses (``+y``
-    on both leg diagonals, ``-y`` off-diagonal). Both are frequency-correct at every
-    harmonic order and differentiable w.r.t. ``G``/``C`` (the incidence ``M`` is a
-    topology constant).
+    Each per-phase element is ``y(h) = G + j·2π h f0 C + 1/(j·2π h f0 L)`` (the
+    inductive term only where ``inductance_h`` is set — an inductive shunt's
+    susceptance magnitude falls as ``1/h`` where a capacitive one rises as ``h``).
+    WYE (default): each element connects its phase to ground (the historical diagonal
+    stamp). DELTA: element ``k`` connects phase ``k`` to phase ``(k+1) % n`` cyclic,
+    stamped ``M^T diag(y) M`` via the same :func:`cyclic_delta_incidence` convention the
+    DELTA load uses (``+y`` on both leg diagonals, ``-y`` off-diagonal). Both are
+    frequency-correct at every harmonic order and differentiable w.r.t. ``G``/``C``/``L``
+    (the incidence ``M`` is a topology constant).
     """
     shunts = [
         a for a in grid.appliances if isinstance(a, ShuntAppliance) and a.in_service
@@ -1001,8 +1245,10 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
         return y
     by_key: dict[tuple, list] = {}
     for sh in shunts:
-        by_key.setdefault((sh.connection, len(sh.phases)), []).append(sh)
-    for (conn, p), group in by_key.items():
+        by_key.setdefault(
+            (sh.connection, len(sh.phases), sh.inductance_h is not None), []
+        ).append(sh)
+    for (conn, p, inductive), group in by_key.items():
         rows, cols = _shunt_node_indices(group, index, device, terminal="node")
         if conn == WindingConnection.DELTA:
             m_c = cyclic_delta_incidence(p, rdt, device).to(cdt)  # [p, p]
@@ -1024,6 +1270,19 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
             b = two_pi_f[:, None, None] * c[None]  # [H, K, p] (B = 2*pi*f*C)
             g_b = g[None].expand_as(b)  # [H, K, p]
             y_elem = torch.complex(g_b.to(rdt), b.to(rdt)).to(cdt)  # [H, K, p]
+            if inductive:
+                ind = torch.stack(
+                    [
+                        torch.as_tensor(sh.inductance_h, dtype=rdt, device=device)
+                        for sh in group
+                    ],
+                    0,
+                )  # [K, p]
+                z_l = torch.complex(
+                    torch.zeros_like(b).to(rdt),
+                    (two_pi_f[:, None, None] * ind[None]).to(rdt),
+                ).to(cdt)  # j*2*pi*f*L  [H, K, p]
+                y_elem = y_elem + 1.0 / z_l
             # Y_block = M^T diag(y_elem) M  -> [H, K, p, p].
             block = torch.einsum("ei,hke,ej->hkij", m_c, y_elem, m_c)
         else:  # WYE (phase-to-ground) — historical diagonal stamp
@@ -1041,7 +1300,20 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
                 )
             g = torch.stack(g_list, 0)
             c = torch.stack(c_list, 0)
-            block = shunt_admittance_matrix(g, c, f, cdt)
+            ind = (
+                torch.stack(
+                    [
+                        torch.diag(
+                            torch.as_tensor(sh.inductance_h, dtype=rdt, device=device)
+                        )
+                        for sh in group
+                    ],
+                    0,
+                )
+                if inductive
+                else None
+            )
+            block = shunt_admittance_matrix(g, c, f, cdt, ind=ind)
         y = scatter_blocks_into(y, block, rows, cols)
     return y
 
@@ -1090,18 +1362,48 @@ def _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides):
 
 
 # ---- const-Z load / generator ---------------------------------------------
+def _const_z_frequency_scaling(y_elem, f, f0: float, cdt) -> Tensor:
+    """Scale a const-Z element admittance ``[*b, K, P]`` over frequency -> ``[*b, H, K, P]``.
+
+    The conductance stays flat; the susceptance scales as the reactive element it
+    represents at the operating point (``B*h`` where it is capacitive, ``B/h`` where it
+    is inductive). The two branches are selected with ``clamp``, so the result is exact
+    at ``h = 1`` and differentiable in the operating-point power.
+    """
+    rdt = _rdtype(cdt)
+    h = (f / f0).to(rdt).reshape(-1)[:, None, None]  # [H,1,1]
+    g = y_elem.real.unsqueeze(-3)  # [*b,1,K,P]
+    b0 = y_elem.imag.unsqueeze(-3)  # [*b,1,K,P]
+    b = torch.clamp(b0, min=0.0) * h + torch.clamp(b0, max=0.0) / h
+    return torch.complex(g.expand_as(b), b).to(cdt)
+
+
 def _stamp_const_z_loads(
     grid, f, y, index, cdt, rdt, device, operating_point, param_overrides, asymmetric
 ):
     """Fold each Load/Generator as a connection-aware const-Z shunt.
 
-    The internal per-ELEMENT admittance ``y_elem = conj(P_k + jQ_k)/|V0|^2`` is
-    mapped to a nodal block ``M^T diag(y_elem) M`` via the terminal incidence ``M``
-    (``_incidence``): WYE-to-ground reduces to ``M = I`` (the historical diagonal
-    stamp, bit-exact); WYE-with-neutral uses ``[I|-1]`` (the neutral row receives
-    the phase return); DELTA-3 uses the circulant difference. ``asymmetric=False``
-    forces the equal split inside ``resolve_operating_power``. ``V0`` is L-N for WYE
-    and L-L for DELTA (:func:`phase_voltage_magnitude`).
+    The internal per-ELEMENT admittance at the operating point is
+    ``y_elem = conj(P_k + jQ_k)/|V0|^2`` and is mapped to a nodal block
+    ``M^T diag(y_elem) M`` via the terminal incidence ``M`` (``_incidence``):
+    WYE-to-ground reduces to ``M = I`` (the historical diagonal stamp, bit-exact);
+    WYE-with-neutral uses ``[I|-1]`` (the neutral row receives the phase return);
+    DELTA-3 uses the circulant difference. ``asymmetric=False`` forces the equal split
+    inside ``resolve_operating_power``. ``V0`` is L-N for WYE and L-L for DELTA
+    (:func:`phase_voltage_magnitude`).
+
+    Frequency dependence: the CONDUCTANCE ``G = P/|V0|^2`` is frequency-flat (a
+    resistance), while the SUSCEPTANCE ``B = -Q/|V0|^2`` is the equivalent reactive
+    element at the operating point and scales like it::
+
+        B(h) = B(f0) * h    where B(f0) > 0  (capacitive, Q < 0 -> a fixed C)
+        B(h) = B(f0) / h    where B(f0) < 0  (inductive,  Q > 0 -> a fixed L)
+
+    which is the parallel R-L / R-C branch of the classical harmonic load model. The
+    operating point is preserved EXACTLY at ``h = 1`` (both forms reduce to ``B(f0)``),
+    so the fundamental load flow is unchanged; the split by the sign of ``B`` is
+    built from ``clamp`` so it stays differentiable in P and Q. Frequencies must be
+    positive (an inductive shunt diverges at DC).
     """
     loads = [
         a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
@@ -1134,12 +1436,12 @@ def _stamp_const_z_loads(
         y_elem_k = torch.stack(
             [t.broadcast_to(*lead, t.shape[-1]) for t in elem_list], -2
         )
-        # Y_block = M^T diag(y_elem) M  -> [*b, K, n_used, n_used].
-        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_k, m_c)
-        # Insert the frequency axis: [*b, H, K, n_used, n_used].
-        block = block.unsqueeze(-4).expand(
-            *block.shape[:-3], f.shape[0], *block.shape[-3:]
+        # Frequency-dependent element admittance: [*b, H, K, n_elem].
+        y_elem_hk = _const_z_frequency_scaling(
+            y_elem_k, f, float(grid.base_frequency_hz), cdt
         )
+        # Y_block = M^T diag(y_elem) M  -> [*b, H, K, n_used, n_used].
+        block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem_hk, m_c)
         rows = used_rows(grp, index, device)  # [K, n_used]
         y = scatter_blocks_into(y, block, rows, rows)
     return y
@@ -1162,13 +1464,40 @@ def _transformer_block_groups(
     so ``tap.ratio_magnitude`` is the OFF-NOMINAL tap only. See
     :mod:`pgml.assembly._transformer` for the full derivation.
 
-    - Leakage admittance ``y_se = (R + jX(f))^-1`` (scalar per phase, X(f)=2πfL),
-      referred to the TO-side (LV) coil, carried through the incidence transform.
-    - Magnetizing shunt ``y_m = G_m + jB_m`` added to the HV terminal phase
-      diagonal directly (referred to the HV line voltage).
+    - Leakage admittance ``y_se = (R + jX(f))^-1`` (X(f)=2πfL), referred to the
+      TO-side (LV) coil, carried through the incidence transform. A 3-phase unit whose
+      ZERO-sequence leakage differs from its positive-sequence one (an explicit
+      ``Transformer.zero_sequence``, or a non-unit ``transformer.zero_sequence.*``
+      default) carries a per-phase leakage MATRIX instead of a scalar: the
+      symmetric-component split ``Z_self=(Z0+2·Z1)/3``, ``Z_mutual=(Z0−Z1)/3``
+      (:func:`pgml.assembly._transformer.sequence_leakage_matrices`). The zero-sequence
+      PATH still comes from the winding topology — a delta or zigzag winding blocks it
+      whatever the value is — so a YNyn three-limb core and a grounding zigzag now carry
+      their true Z0, while ``Z0 == Z1`` keeps the scalar stamp (with the matrix form
+      reproducing it to 3e-16 relative, measured on a YNyn unit).
+    - Winding-resistance frequency law: ``R(f) = R · m(f) · (f/f0 if
+      harmonic_xr_constant else 1)``. ``m(f)`` is the shared
+      :class:`~pgml.schemas.grid_schema.ResistanceFrequencyModel` multiplier (constant,
+      the Carson skin law, or a sampled curve — the same helper the line path uses);
+      ``harmonic_xr_constant`` is OpenDSS's ``XRConst``, which holds X/R constant with
+      frequency by scaling R with the order. Which transformers follow it is the
+      documented ``transformer.harmonic_resistance.law`` choice (``element`` = the
+      per-transformer flag, the default; ``constant`` / ``xr_constant`` force one law).
+      Both default to no change (``m = 1``, ``XRConst = No``), i.e. X ∝ h at fixed R.
+    - Magnetizing shunt ``y_m = G_m + jB_m`` added to a TERMINAL phase diagonal
+      directly (outside the incidence transform), referred to the HV line voltage as
+      stored. The terminal is the documented modeling choice
+      ``transformer.magnetizing_placement``: ``from_terminal`` (default, the HV
+      diagonal), ``to_terminal`` (the LV diagonal through the squared rated-voltage
+      ratio — OpenDSS's own placement) or ``split`` (half on each —
+      power-grid-model's). The three are different topologies: they differ in whether
+      the magnetizing current sees a winding's leakage drop.
 
-    Differentiable w.r.t. series R, L and the off-nominal tap magnitude; the
-    discrete vector-group connections / clock select the constant incidence ``N``.
+    Differentiable w.r.t. series R, L, the zero-sequence R0/L0 and the off-nominal tap
+    magnitude; the discrete vector-group connections / clock select the constant
+    incidence ``N``. ``param_overrides`` keys: ``("transformer", id,
+    "series_resistance_ohm" | "series_inductance_h" | "tap_magnitude" |
+    "zero_sequence_resistance_ohm" | "zero_sequence_inductance_h")``.
 
     Shared primitive builder for the Y-bus stamp (which scatters each block) and
     :func:`branch_currents` (which multiplies it with the terminal voltage). The
@@ -1186,16 +1515,21 @@ def _transformer_block_groups(
     by_key: dict[tuple, list] = {}
     vgs: dict[int, object] = {}
     for t in xfmrs:
-        vg = resolve_vector_group(t, n_phases=len(t.from_phases))
+        p_t = len(t.from_phases)
+        vg = resolve_vector_group(t, n_phases=p_t)
         vgs[id(t)] = vg
-        by_key.setdefault(_xfmr_group_key(vg, len(t.from_phases)), []).append(t)
+        key = _xfmr_group_key(vg, p_t, _xfmr_is_sequence_aware(t, p_t))
+        by_key.setdefault(key, []).append(t)
 
     two_pi_f = (2.0 * torch.pi) * f  # [H]
-    for (_fk, _tk, _clock, p), group in by_key.items():
+    two_pi_f0 = 2.0 * torch.pi * float(grid.base_frequency_hz)
+    placement = magnetizing_placement()
+    resistance_law = harmonic_resistance_law()
+    for (_fk, _tk, _clock, p, sequence_aware), group in by_key.items():
         vg0 = vgs[id(group[0])]
-        eye_p = torch.eye(p, dtype=cdt, device=device)
 
-        yse_list, ratio_list, ym_list = [], [], []
+        yse_list, ratio_list, ym_list, nline_list = [], [], [], []
+        zr_list, zl_list, rmult_list = [], [], []  # sequence-aware matrix path
         for t in group:
             vg = vgs[id(t)]
             r = _override(
@@ -1208,9 +1542,37 @@ def _transformer_block_groups(
                 ("transformer", t.id, "series_inductance_h"),
                 torch.as_tensor(t.series_inductance_h, dtype=rdt, device=device),
             )
-            x = two_pi_f * ell  # [H]
-            z = torch.complex(r.to(rdt).expand_as(x), x.to(rdt)).to(cdt)  # [H]
-            yse_list.append(1.0 / z)  # [H]
+            # Winding-resistance frequency law (the same `ResistanceFrequencyModel`
+            # multiplier the line path uses) times the OpenDSS `XRConst` law: with
+            # `harmonic_xr_constant` the resistance scales with the order so X/R stays
+            # constant, instead of X growing with h at fixed R.
+            rmult = _resistance_multiplier(t, f, rdt, device)  # [H]
+            if resistance_scales_with_order(t, resistance_law):
+                rmult = rmult * (f / float(grid.base_frequency_hz))
+            if sequence_aware:
+                # Zero-sequence leakage VALUE on the topology-derived zero-sequence
+                # PATH: the per-phase leakage becomes the symmetric-component matrix,
+                # carried through the same winding-incidence transform.
+                r0_default, l0_default = zero_sequence_leakage(t, r, ell, two_pi_f0)
+                r0 = _override(
+                    param_overrides,
+                    ("transformer", t.id, "zero_sequence_resistance_ohm"),
+                    r0_default,
+                )
+                l0 = _override(
+                    param_overrides,
+                    ("transformer", t.id, "zero_sequence_inductance_h"),
+                    l0_default,
+                )
+                r_mat, l_mat = sequence_leakage_matrices(r, ell, r0, l0, p)
+                zr_list.append(r_mat)
+                zl_list.append(l_mat)
+                rmult_list.append(rmult)
+            else:
+                x = two_pi_f * ell  # [H]
+                r_f = (r * rmult).to(rdt)  # [H]
+                z = torch.complex(r_f.expand_as(x), x.to(rdt)).to(cdt)  # [H]
+                yse_list.append(1.0 / z)  # [H]
 
             tap_mag = _override(
                 param_overrides,
@@ -1219,6 +1581,9 @@ def _transformer_block_groups(
             )
             u_from = torch.as_tensor(t.u_rated_from_v, dtype=rdt, device=device)
             u_to = torch.as_tensor(t.u_rated_to_v, dtype=rdt, device=device)
+            # Rated LINE-voltage ratio: refers the magnetizing shunt (stored on the
+            # from/HV side) to the to/LV terminal for the to_terminal / split placements.
+            nline_list.append(u_from / u_to)
             if p == 1:
                 # Single-phase / positive-sequence equivalent: the vector group is
                 # folded into a complex line-to-line ratio (magnitude n_LL, exact
@@ -1245,7 +1610,17 @@ def _transformer_block_groups(
             bm = -1.0 / (two_pi_f * lm_t)  # [H]; lm=inf -> 0
             ym_list.append(torch.complex(gm.expand_as(bm), bm).to(cdt))  # [H]
 
-        y_se = torch.stack(yse_list, dim=1)  # [H,K]
+        if sequence_aware:
+            # [H,K,P,P] = ((R(f) + j*2*pi*f*L)^-1) per phase pair (matrix inverse).
+            y_se = series_admittance_matrix(
+                torch.stack(zr_list, 0),
+                torch.stack(zl_list, 0),
+                f,
+                cdt,
+                r_mult=torch.stack(rmult_list, 1)[:, :, None, None],  # [H,K,1,1]
+            )
+        else:
+            y_se = torch.stack(yse_list, dim=1)  # [H,K]
         ratio = torch.stack(ratio_list, dim=0)  # [K]
         if p == 1:
             # The schema stores the leakage referred to the TO-side COIL; the
@@ -1259,11 +1634,11 @@ def _transformer_block_groups(
             n_block = block_incidence(vg0, p, rdt, device)  # [2P,2P]
             block = winding_leakage_block(y_se, ratio, n_block)  # [H,K,2P,2P]
 
-        # Magnetizing shunt on the HV terminal diagonal (outside the incidence).
+        # Magnetizing shunt on a terminal diagonal (outside the incidence transform);
+        # `transformer.magnetizing_placement` picks the terminal (see `_transformer`).
         ym = torch.stack(ym_list, dim=1)  # [H,K]
-        ym_hv = ym[:, :, None, None] * eye_p  # [H,K,P,P]
-        ym_full = torch.nn.functional.pad(ym_hv, (0, p, 0, p))  # [H,K,2P,2P]
-        block = block + ym_full
+        n_line = torch.stack(nline_list, dim=0)  # [K]
+        block = block + magnetizing_blocks(ym, n_line, p, placement)
 
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
@@ -1363,6 +1738,8 @@ def branch_currents(
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    fusion: Optional[FusionMap] = None,
+    i_inj: Optional[Tensor] = None,
 ) -> list[BranchCurrent]:
     """Per-branch terminal currents from solved node voltages.
 
@@ -1410,6 +1787,20 @@ def branch_currents(
         listed branch's primitive block is scaled by its state, so an open
         (state 0) branch reports zero current and a batched state yields
         per-scenario currents.
+    fusion:
+        The :class:`~pgml.assembly._fusion.FusionMap` the solve used, if any. A FUSED
+        branch has no primitive block to multiply, so its current comes from
+        Kirchhoff's law at the fused node instead: the currents of the fused branches
+        meeting at a fused row carry exactly what the rest of the network leaves there.
+        ``v`` and ``index`` must then be the FULL (unreduced) layout — which is what a
+        result reports.
+    i_inj:
+        The nodal current injection ``[*batch, H, N]`` (or broadcastable) the solve
+        used, in the full row layout, needed ONLY to recover the current through a
+        fused branch: the devices and sources sitting on a fused node are part of that
+        node's current balance. ``None`` assumes zero injection at the fused rows,
+        which is exact for a fused node that carries no appliance and logs a warning
+        when one does.
 
     Returns
     -------
@@ -1417,7 +1808,8 @@ def branch_currents(
         One :class:`BranchCurrent` per in-service branch, in ``grid.branches``
         order. ``i_from`` / ``i_to`` are complex ``[*batch, H, P]`` (the leading
         ``*batch`` matching ``v``'s broadcast; a scalar/length-1 frequency keeps a
-        singleton H axis).
+        singleton H axis). For a fused branch ``i_to == -i_from`` exactly (an ideal
+        conductor has no shunt path).
     """
     if device is None:
         device = v.device
@@ -1437,15 +1829,23 @@ def branch_currents(
     if v.shape[-2] != h:
         v = v.expand(*v.shape[:-2], h, n)
 
+    if fusion is not None and n != fusion.full_index.size:
+        raise InputError(
+            f"branch_currents: with a fusion map, v / index must be the FULL row "
+            f"layout (N={fusion.full_index.size}); got N={n}. Prolong the reduced "
+            "solution first (fusion.prolong)."
+        )
+
     # Iterate the SAME branch-stamp registry the Y-bus assembly does: each builder
     # yields (group, block, rows, cols) — the exact primitive block the stamp
     # scatters — so the currents are consistent with Y to machine precision (KCL).
     # rows == cols here; the block is multiplied with the gathered terminal voltage.
     results: dict[int, BranchCurrent] = {}
+    stamped = _unfused_view(grid, fusion)
 
     for stamp in _BRANCH_STAMPS:
         for group, block, rows, _cols in stamp.builder(
-            grid, f, index, cdt, rdt, device, param_overrides, branch_states
+            stamped, f, index, cdt, rdt, device, param_overrides, branch_states
         ):
             block = _masked_block(
                 block, _group_states(group, branch_states, rdt, device)
@@ -1479,9 +1879,107 @@ def branch_currents(
                     i_to=i_to[..., k, :],
                 )
 
+    if fusion is not None and fusion.fused_branch_ids:
+        results.update(
+            _fused_branch_results(
+                grid,
+                v,
+                f,
+                index,
+                fusion,
+                i_inj,
+                cdt,
+                rdt,
+                device,
+                dtype,
+                param_overrides,
+                branch_states,
+            )
+        )
+
     # Emit in grid.branches order over the stamped BranchBase branches (every
     # in-service branch, plus any branch listed in ``branch_states``).
     return [results[b.id] for b in grid.branches if b.id in results]
+
+
+def _fused_branch_results(
+    grid,
+    v,
+    f,
+    index,
+    fusion,
+    i_inj,
+    cdt,
+    rdt,
+    device,
+    dtype,
+    param_overrides,
+    branch_states,
+) -> dict[int, BranchCurrent]:
+    """The :class:`BranchCurrent` of every FUSED branch, from KCL at the fused rows.
+
+    The defect the fused branches have to carry is what the rest of the network leaves
+    at each fused row::
+
+        defect = i_inj - Y_network_without_fused_branches @ V
+
+    built in the FULL row layout (hence one assembly of the unfused network — the fused
+    rows' individual balances are exactly the information the reduced system sums away),
+    then inverted per fused group by the structural maps of the fusion map. Sign
+    convention as everywhere: positive current flows INTO the branch terminal, so the
+    TO terminal of an ideal conductor carries ``-i_from``.
+    """
+    y_nf = assemble_network_ybus(
+        _unfused_view(grid, fusion),
+        f,
+        dtype=dtype,
+        device=device,
+        param_overrides=param_overrides,
+        branch_states=branch_states,
+        fusion=False,
+    ).Y  # [H, N, N] (or [*batch, H, N, N] with batched states), FULL layout
+    if y_nf.ndim == 2:
+        y_nf = y_nf.unsqueeze(0)
+    defect = -torch.matmul(y_nf, v.unsqueeze(-1)).squeeze(-1)  # [*batch, H, N]
+    if i_inj is not None:
+        defect = defect + i_inj.to(dtype=cdt, device=device)
+    elif _fused_rows_carry_injection(grid, fusion):
+        _log.warning(
+            "branch_currents: the fused node(s) %s carry an injecting appliance or a "
+            "source, whose current is part of their current balance, but no i_inj was "
+            "given; the current reported for the fused branch(es) omits it. Pass the "
+            "solve's nodal injection as i_inj.",
+            [nid for grp in fusion.node_groups() for nid, _ph in grp][:8],
+        )
+    recovered = fused_branch_currents(fusion, defect)
+    out: dict[int, BranchCurrent] = {}
+    by_id = {int(b.id): b for b in grid.branches}
+    for bid, per_phase in recovered.items():
+        b = by_id[bid]
+        i_from = torch.stack(
+            [per_phase[p] for p in range(len(b.from_phases))], dim=-1
+        )  # [*batch, H, P]
+        out[bid] = BranchCurrent(
+            branch_id=bid,
+            from_node=b.from_node,
+            to_node=b.to_node,
+            from_phases=tuple(b.from_phases),
+            to_phases=tuple(b.to_phases),
+            i_from=i_from,
+            i_to=-i_from,
+        )
+    return out
+
+
+def _fused_rows_carry_injection(grid, fusion) -> bool:
+    """Does any fused node-phase row host an in-service injecting appliance / source?"""
+    fused_nodes = {nid for grp in fusion.node_groups() for nid, _ph in grp}
+    for a in grid.appliances:
+        if not getattr(a, "in_service", True):
+            continue
+        if isinstance(a, (InjectionAppliance, Source)) and int(a.node) in fused_nodes:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1588,6 +2086,35 @@ def branch_stamp_blocks(
     sub = grid.model_copy(
         update={"branches": [b for b in grid.branches if b.id in wanted_set]}
     )
+    # A zero-impedance branch has no primitive block, so it cannot be the rank-k term of
+    # a low-rank update either; name it instead of returning an infinite stamp. The
+    # static flags are forced on for the check, because every requested branch is
+    # stamped whatever they say.
+    forced = sub.model_copy(
+        update={
+            "branches": [
+                b.model_copy(
+                    update=(
+                        {"in_service": True, "closed": True}
+                        if hasattr(b, "closed")
+                        else {"in_service": True}
+                    )
+                )
+                for b in sub.branches
+            ]
+        }
+    )
+    ideal = [
+        z
+        for z in zero_impedance_branches(forced, param_overrides=param_overrides)
+        if z.branch_id in wanted_set
+    ]
+    if ideal:
+        raise InputError(
+            "branch_stamp_blocks: "
+            + describe_unfusable(ideal)
+            + " A swept or low-rank-updated branch has to stay a stamped branch."
+        )
     # Every requested branch is stamped, whatever its static flags say.
     active = {bid: 1.0 for bid in wanted}
 
@@ -1642,10 +2169,11 @@ def build_injections(
 ) -> Tensor:
     """Norton current-source vector ``I(f)`` aligned to ``index``.
 
-    M1 content: the source Norton current ``i_s = Y_s @ V_th`` stamped at the
-    source rows, where ``V_th`` is the per-phase Thevenin phasor
-    ``u_ref * exp(j*u_angle)`` and ``Y_s = Z_s(f)^-1``. Harmonic current sources
-    from load/generator spectra are a later milestone (return 0 contribution).
+    Stamps only the source Norton current ``i_s = Y_s @ V_th`` at the source rows,
+    where ``V_th`` is the per-phase Thevenin phasor ``u_ref * exp(j*u_angle)`` and
+    ``Y_s = Z_s(f)^-1``. Harmonic current injections from load/generator spectra
+    are computed separately by :mod:`pgml.solver.harmonic_flow`, not here — a grid
+    with no in-service source contributes 0.
 
     Returns
     -------
@@ -1986,6 +2514,69 @@ def flatten_plan_batch(
             sign=c.sign,
             v0=c.v0,
             p_avail=_flat(c.p_avail, 1),
+            m_c=c.m_c,
+            arow=c.arow,
+            n_used=c.n_used,
+        )
+        for c in plan.controlled
+    )
+    return InjectionPlan(
+        h=plan.h,
+        n=plan.n,
+        cdt=plan.cdt,
+        device=plan.device,
+        uncontrolled=uncontrolled,
+        controlled=controlled,
+    )
+
+
+def select_plan_batch(
+    plan: InjectionPlan, rows: Tensor, *, batch_size: int
+) -> InjectionPlan:
+    """A copy of ``plan`` holding only the scenarios ``rows`` of a FLAT batch axis.
+
+    The counterpart of :func:`flatten_plan_batch` for the other direction: where that
+    collapses a multi-dimensional operating-point batch onto one axis, this picks a
+    subset out of that one axis. A group whose power carries the full flat batch
+    (``batch_size`` entries) is indexed; a group carrying a broadcast (size-1) or scalar
+    batch is left alone, since it already applies to every scenario. ``rows`` is an
+    int64 index tensor (a contiguous chunk, or a single scenario).
+
+    Two consumers need it: the implicit-function backward, which builds the
+    block-diagonal state Jacobian in batch chunks whose size a memory budget decides,
+    and the criticality diagnostic, which analyses the single hardest scenario of a
+    batched solve. Index-select keeps autograd history, so a differentiable plan stays
+    differentiable.
+    """
+    bs = int(batch_size)
+    rows = rows.to(dtype=torch.int64)
+
+    def _sel(power: Tensor, tail_ndim: int) -> Tensor:
+        lead = tuple(power.shape[:-tail_ndim])
+        if len(lead) == 1 and int(lead[0]) == bs and bs > 1:
+            return power.index_select(0, rows.to(power.device))
+        return power
+
+    uncontrolled = tuple(
+        _UncontrolledGroupPlan(
+            m_c=g.m_c,
+            rows=g.rows,
+            flat_rows=g.flat_rows,
+            n_used=g.n_used,
+            p_pp=_sel(g.p_pp, 3),
+            q_pp=_sel(g.q_pp, 3),
+            v0=g.v0,
+            zip_p=g.zip_p,
+            zip_q=g.zip_q,
+        )
+        for g in plan.uncontrolled
+    )
+    controlled = tuple(
+        _ControlledAppliancePlan(
+            control=c.control,
+            sign=c.sign,
+            v0=c.v0,
+            p_avail=_sel(c.p_avail, 1),
             m_c=c.m_c,
             arow=c.arow,
             n_used=c.n_used,

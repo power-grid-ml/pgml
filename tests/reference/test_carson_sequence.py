@@ -14,6 +14,7 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pytest
 import torch
 
 from pgml.geometry.carson import kron_reduce, series_impedance
@@ -147,9 +148,13 @@ _DSS_ORDERS = [1, 5, 7, 11, 13]
 
 def _dss_series_z(line_cmd: str, nph: int, orders):
     """Series Z(h) [len(orders), nph, nph] (Ω/km) of an OpenDSS R/X line at harmonics."""
-    import opendssdirect as dss
+    dss = pytest.importorskip("opendssdirect", exc_type=ImportError)
 
     dss.Text.Command("Clear")
+    # OpenDSS scales a sequence-defined line's X by f/basefreq, where basefreq comes
+    # from this global setting: set it explicitly (the default is 60 Hz, and another
+    # circuit may have changed it).
+    dss.Text.Command(f"Set DefaultBaseFrequency={_DSS_F0}")
     dss.Text.Command(
         f"New Circuit.t basekv=12.47 phases={nph} bus1=s frequency={_DSS_F0} "
         "r1=1e-6 x1=1e-6"
@@ -171,6 +176,7 @@ def _dss_series_z(line_cmd: str, nph: int, orders):
     return np.array(out)
 
 
+@pytest.mark.opendss
 def test_opendss_native_3phase_rx_positive_sequence_is_naive():
     """Native OpenDSS 3-phase R/X line: Z1(h)=R1+jX1·(f/f0) (earth only in Z0).
 
@@ -325,7 +331,7 @@ def test_sequence_aware_assembly_recovers_damped_zero_sequence():
         ],
     )
     apply_sequence_aware_harmonic_model(grid)
-    assert grid.branches[0].tags["harmonic_line_model"] == "sequence_aware"
+    assert grid.branches[0].harmonic_line_model == "sequence_aware"
 
     a = np.exp(2j * np.pi / 3)
     amat = np.array([[1, 1, 1], [1, a * a, a], [1, a, a * a]])
@@ -349,6 +355,7 @@ def test_sequence_aware_assembly_recovers_damped_zero_sequence():
     assert (z0_13.real / z1_13.real) > 2.0 * (z0_1.real / z1_1.real)
 
 
+@pytest.mark.opendss
 def test_opendss_native_1phase_rx_carries_earth_floor():
     """Native OpenDSS 1-phase R/X line: the earth term enters the single self-Z (floor).
 

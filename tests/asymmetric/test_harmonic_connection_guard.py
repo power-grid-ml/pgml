@@ -3,7 +3,7 @@
 DELTA and WYE-on-a-Phase.N-node harmonic injection used to raise
 ``NotImplementedError`` (the deferred-boundary guard) because the fundamental
 current was formed from phase-row voltages, not the device terminal voltage. The
-per-phase / connection-aware increment now models the terminal voltage via the
+per-phase / connection-aware harmonic injection now derives the terminal voltage via the
 same incidence ``M`` the load flow uses, so these topologies solve instead of
 raising. This file pins that the guard is GONE and the solve is finite. The
 numerical correctness vs an independent oracle lives in

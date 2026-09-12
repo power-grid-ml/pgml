@@ -35,7 +35,7 @@ most relevant to typical usage are listed below.  Read a key at runtime with
     import pgml.defaults as defaults
 
     z_ohm = defaults.get("source.series_impedance_ohm")   # 5.0 (default)
-    rx    = defaults.get("source.rx_ratio")                # 10.0 (default)
+    xr    = defaults.get("source.xr_ratio")                # 10.0 (default)
 
 Upstream-grid (slack Source) modelling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -49,9 +49,9 @@ Upstream-grid (slack Source) modelling
     cross-feeder harmonic coupling; the user/grid value always wins via
     :func:`~pgml.defaults.resolve`.
 
-``source.rx_ratio`` (default 10.0)
+``source.xr_ratio`` (default 10.0)
     X/R ratio of the source series impedance
-    (R = ``|Z|`` / sqrt(1 + rx\ :sup:`2`), X = rx · R).  A value of 10 is typical for a
+    (R = ``|Z|`` / sqrt(1 + xr\ :sup:`2`), X = xr · R).  A value of 10 is typical for a
     stiff MV grid.
 
 .. automodule:: pgml.defaults

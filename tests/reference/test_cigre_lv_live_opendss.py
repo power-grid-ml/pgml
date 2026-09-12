@@ -10,9 +10,9 @@ Single-phase geometry path
     :func:`pgml.geometry.synthesis.synthesize_grid_geometry` attaches single-conductor
     Carson ``conductor_geometry`` to all 37 lines.  OpenDSS builds a circuit from the
     same ``WireData`` / ``LineGeometry`` data and applies its own Carson/Deri earth-
-    return correction.  pgml's ``geometry`` path replicates this correction
-    bit-exactly, so the parity is near machine precision (~1e-11 V absolute at
-    harmonics 5 and 11).
+    return correction.  pgml's ``geometry`` path implements the same correction, so the
+    parity is limited only by the physical constants (pgml uses the SI ``mu0``, OpenDSS a
+    truncated one): ~2.3e-8 V absolute at harmonics 5 and 11.
 
 Three-phase sequence-aware path
     :func:`pgml.geometry.synthesis.apply_default_harmonic_model` tags all lines with
@@ -33,8 +33,10 @@ Stub-subtract technique
 
 Tolerances
 ----------
-- Single-phase geometry: ``atol = 1e-9 V`` (empirically ~2e-12 V; tight enough to
-  catch any alignment or formula error).
+- Single-phase geometry: ``atol = 1e-7 V`` (empirically ~2.3e-8 V). The floor is the
+  SI-vs-OpenDSS ``mu0`` constant difference (4.9e-8 relative on every line impedance),
+  not the model: pgml uses the SI value of ``mu0``, OpenDSS truncates it. Still tight
+  enough to catch any alignment or formula error, which would be ~1e-3 or larger.
 - Three-phase sequence-aware: ``atol = 1e-6 V`` (empirically ~1.6e-8 V; tighter than
   5-15 % physics gap from a naive OpenDSS comparison).
 - Fundamental (order 1): returned verbatim from ``v1`` — bit-for-bit equal.
@@ -82,7 +84,7 @@ SPECTRUM = {o: (mag, 0.0) for o, mag in [(1, 1.0), (5, 0.20), (11, 0.09)]}
 INJECTION_NODES = [3, 25]
 
 # Tolerance for live oracle vs pgml (geometry path — near machine precision).
-ATOL_V_GEOMETRY = 1e-9  # empirically ~2e-12 V
+ATOL_V_GEOMETRY = 1e-7  # empirically ~2.3e-8 V (the mu0 constant difference)
 
 # Tolerance for live oracle vs pgml (sequence-aware path — near machine precision).
 ATOL_V_SEQ_AWARE = 1e-6  # empirically ~1.6e-8 V
@@ -104,8 +106,9 @@ def _build_injection(grid, nodes: list[int]) -> dict:
 class TestCigreLvLiveOracleSinglePhaseGeometry:
     """Live OpenDSS parity: SINGLE_PHASE_EQUIV + synthesized Carson geometry.
 
-    pgml's geometry path uses Carson/Deri line constants bit-exactly equal to
-    OpenDSS, so the live oracle matches pgml to near machine precision.
+    pgml's geometry path uses the same Carson/Deri line constants as OpenDSS, up to the
+    SI-vs-truncated ``mu0`` constant (4.9e-8 relative), so the live oracle matches pgml to
+    ~2.3e-8 V.
     """
 
     PHASE_MODE = PhaseMode.SINGLE_PHASE_EQUIV
@@ -236,7 +239,16 @@ class TestCigreLvLiveOracleThreePhaseSeqAware:
     PHASE_MODE = PhaseMode.THREE_PHASE
 
     def _solve_and_compare(self, orders=None):
-        """Build 3-phase seq-aware grid, solve pgml, run live oracle."""
+        """Build 3-phase seq-aware grid, solve pgml, run live oracle.
+
+        Both engines solve with NO device shunt: the quantity under test is the line
+        model, and pgml's earth-return resistance differs from OpenDSS's Carson
+        correction by the documented Carson-model gap. Without a device shunt the
+        harmonic current flows only on the injecting paths, where the two models agree
+        to ~1e-8 V; with every load shunted the same gap reaches ~2e-2 V on the branches
+        that then carry current (measured), which is the line model, not the shunt —
+        ``tests/reference/test_opendss_load_shunt.py`` validates the device model.
+        """
         if orders is None:
             orders = ORDERS
         grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
@@ -250,6 +262,7 @@ class TestCigreLvLiveOracleThreePhaseSeqAware:
             slack="norton",
             harmonic_injection=harmonic_injection,
             dtype=torch.complex128,
+            load_shunt="none",
         )
         assert hres.pf.converged, (
             f"THREE_PHASE solve_harmonic_flow did not converge "
@@ -263,6 +276,7 @@ class TestCigreLvLiveOracleThreePhaseSeqAware:
             orders,
             slack="norton",
             v1=v1_np,
+            load_shunt="none",
         )
         v_pgml = hres.v.detach().cpu().numpy()
         return v_pgml, v_oracle, orders
@@ -346,9 +360,15 @@ class TestCigreLvLiveOracleThreePhaseSeqAware:
             opendss_harmonic_voltages(grid, None, ORDERS, slack="thevenin")
 
     def test_plain_grid_raises(self) -> None:
-        """Plain R/X grid (no geometry, no seq-aware tags) raises ValueError."""
-        grid, _ = cigre_lv_full_grid(phase_mode=self.PHASE_MODE)
-        # No synthesize_grid_geometry or apply_default_harmonic_model called
+        """A grid with no geometry and no resolved line model raises ValueError.
+
+        The converter resolves the model for its own lines, so the unresolved state has
+        to be asked for explicitly (``harmonic_line_model="none"``); this oracle path
+        needs either a conductor geometry or the sequence-aware model.
+        """
+        grid, _ = cigre_lv_full_grid(
+            phase_mode=self.PHASE_MODE, harmonic_line_model="none"
+        )
         with pytest.raises(ValueError, match="conductor_geometry|sequence_aware"):
             opendss_harmonic_voltages(grid, None, ORDERS)
 
@@ -591,7 +611,7 @@ class TestCigreLvDynTransformerOracle:
 # conductor_geometry) and OpenDSS (via WireData / LineGeometry commands), so both
 # engines run Carson/Deri on the same positions — the only residual comes from
 # floating-point rounding in the respective implementations.
-ATOL_V_3PH_GEOMETRY = 1e-9  # V — empirically ~1e-12; exact Carson parity
+ATOL_V_3PH_GEOMETRY = 1e-7  # V — empirically ~9.3e-9 (the mu0 constant difference)
 
 # Triplen/zero-sequence orders included to verify the h3/h9 gap collapses to
 # numerical noise once both engines share the same 3-conductor geometry.
@@ -607,10 +627,10 @@ class TestCigreLvThreePhaseCarsonGeometryOracle:
     Both pgml and the live OpenDSS oracle use the SAME synthesized equilateral
     3-conductor ``conductor_geometry`` (via ``synthesize_grid_geometry``).  OpenDSS
     receives the conductor positions as ``WireData`` / ``LineGeometry`` elements and
-    runs its own Carson/Deri calculation; pgml uses the same positions in
-    ``_stamp_geometry_lines``.  Because the Carson implementations are bit-exact
-    (validated in ``tests/reference/test_carson_opendss.py``), the resulting
-    harmonic voltages must agree to floating-point noise across ALL orders including
+    runs its own Carson/Deri calculation; pgml uses the same positions in its geometry
+    stamp.  Because the two Carson implementations agree to the physical constants
+    (4.8e-8 relative on Z, validated in ``tests/reference/test_carson_opendss.py``), the
+    resulting harmonic voltages agree to ~1e-8 V across ALL orders including
     the triplen / zero-sequence orders (h=3, h=9) which previously showed a
     ~60–180 % gap with the ``sequence_aware`` R1/X1 model.
 

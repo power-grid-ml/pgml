@@ -1,10 +1,11 @@
 """Filesystem conventions for experiment inputs and outputs.
 
-pgml/pgl/pgg never write experiment data into the library tree. A run's datasets,
-checkpoints, run configs and tracking go under the EXPERIMENTS ROOT — a single directory
-the user owns and keeps out of version control. This keeps reproducible-but-bulky
-experiment artifacts separate from the source, and lets a run be relocated (e.g. to fast
-cluster scratch) by pointing one environment variable elsewhere.
+Packages in the ecosystem this engine is built for never write experiment data into the
+library tree. A run's datasets, checkpoints, run configs and tracking go under the
+EXPERIMENTS ROOT — a single directory the user owns and keeps out of version control.
+This keeps reproducible-but-bulky experiment artifacts separate from the source, and
+lets a run be relocated (e.g. to fast cluster scratch) by pointing one environment
+variable elsewhere.
 
 The root is the ``PGML_EXPERIMENTS`` environment variable when set, else ``./data``
 relative to the current working directory.

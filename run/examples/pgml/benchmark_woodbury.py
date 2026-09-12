@@ -33,32 +33,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import time
 
 import torch
 
 from pgml.grids import synthetic_feeder
 from pgml.solver import solve_power_flow
 
+from _common import _time
+
 logging.getLogger("pgml").setLevel(logging.WARNING)
 
 TIE0 = 30000  # first tie-switch id of synthetic_feeder
 BYTES_PER_ENTRY = 16  # complex128
-
-
-def _time(fn, *, repeat: int = 2, sync: bool = False) -> float:
-    """Best-of-``repeat`` wall time of ``fn()`` in seconds (1 warmup call)."""
-    fn()
-    best = float("inf")
-    for _ in range(repeat):
-        if sync and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        fn()
-        if sync and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        best = min(best, time.perf_counter() - t0)
-    return best
 
 
 def switch_states(grid, n_switched: int, states: int, seed: int = 0) -> dict:
@@ -108,12 +94,12 @@ def bench_case(nodes: int, n_switched: int, states: int, device) -> dict:
         "device": device.type,
         "assemble_gib": dense_gib,
     }
-    t_wb = _time(lambda: run("woodbury"), sync=sync)
+    t_wb = _time(lambda: run("woodbury"), repeat=2, sync=sync)
     out["woodbury_s"] = t_wb
     if dense_gib > 4.0:
         out["assemble_s"] = None  # the [S, N, N] stack would not fit
         return out
-    t_as = _time(lambda: run("assemble"), sync=sync)
+    t_as = _time(lambda: run("assemble"), repeat=2, sync=sync)
     v_as, v_wb = run("assemble").v, run("woodbury").v
     out["assemble_s"] = t_as
     out["speedup"] = t_as / t_wb

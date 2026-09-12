@@ -45,8 +45,11 @@ def series_admittance_matrix(
     cdtype: torch.dtype,
     *,
     r_mult: Tensor | None = None,
+    r_unscaled: Tensor | None = None,
 ) -> Tensor:
     """Series admittance ``Ys(f) = (R(f) + jX(f))^-1`` per branch per frequency.
+
+    ``R(f) = r * r_mult(f) + r_unscaled`` and ``X(f) = 2*pi*f*ind``.
 
     Parameters
     ----------
@@ -58,7 +61,11 @@ def series_admittance_matrix(
         Target complex dtype.
     r_mult:
         Optional real tensor broadcastable to ``[H, K, 1, 1]`` (or ``[H,K,P,P]``)
-        skin-effect multiplier applied to ``R``. Defaults to 1.
+        skin-effect multiplier applied to ``r``. Defaults to 1.
+    r_unscaled:
+        Optional real ``[K, P, P]`` resistance ADDED after the multiplier — the part of
+        the resistance matrix the skin effect does not scale (the earth-return mutual
+        terms of a multi-phase line). Defaults to 0.
 
     Returns
     -------
@@ -72,6 +79,8 @@ def series_admittance_matrix(
     r_b = r[None]  # [1,K,P,P]
     if r_mult is not None:
         r_b = r_b * r_mult
+    if r_unscaled is not None:
+        r_b = r_b + r_unscaled[None]
     z = torch.complex(r_b.expand_as(x).to(_rdtype(cdtype)), x.to(_rdtype(cdtype))).to(
         cdtype
     )  # [H,K,P,P]
@@ -79,17 +88,29 @@ def series_admittance_matrix(
 
 
 def shunt_admittance_matrix(
-    g: Tensor, c: Tensor, f: Tensor, cdtype: torch.dtype
+    g: Tensor, c: Tensor, f: Tensor, cdtype: torch.dtype, *, ind: Tensor | None = None
 ) -> Tensor:
-    """Shunt admittance ``Y_sh(f) = G + jB`` with ``B = 2*pi*f*C`` per frequency.
+    """Shunt admittance ``Y_sh(f) = G + j*2*pi*f*C + (j*2*pi*f*L)^-1`` per frequency.
 
-    ``g, c`` are real ``[K, P, P]``; returns complex ``[H, K, P, P]``.
+    ``g, c`` are real ``[K, P, P]``; ``ind`` (optional) is the real inductance matrix
+    ``[K, P, P]`` of a parallel INDUCTIVE path and must be invertible (a diagonal of
+    positive inductances for an uncoupled reactor bank). The inductive susceptance
+    magnitude falls as ``1/h`` while the capacitive one rises as ``h``, so an inductive
+    shunt entered as an equivalent negative capacitance has the wrong sign of frequency
+    slope above the fundamental. Returns complex ``[H, K, P, P]``.
     """
     two_pi_f = (2.0 * torch.pi) * f  # [H]
     b = two_pi_f[:, None, None, None] * c[None]  # [H,K,P,P]
     g_b = g[None].expand_as(b)  # [H,K,P,P]
     rdt = _rdtype(cdtype)
-    return torch.complex(g_b.to(rdt), b.to(rdt)).to(cdtype)
+    y = torch.complex(g_b.to(rdt), b.to(rdt)).to(cdtype)
+    if ind is not None:
+        z_l = torch.complex(
+            torch.zeros_like(b).to(rdt),
+            (two_pi_f[:, None, None, None] * ind[None]).to(rdt),
+        ).to(cdtype)  # j*2*pi*f*L  [H,K,P,P]
+        y = y + torch.linalg.inv(z_l)
+    return y
 
 
 def pi_series_blocks(ys: Tensor) -> Tensor:

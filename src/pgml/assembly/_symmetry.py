@@ -14,8 +14,11 @@ so a user can see exactly what was built:
    default (single-phase vs multi-phase).
 
 ``log_modeling_summary`` emits an INFO summary: the resolved calculation symmetry,
-whether a NEUTRAL is being modeled (a node carries ``Phase.N``), and the WYE/DELTA
-load mix. Citations + rationale: ``docs/pgml/modeling/asymmetric.md``.
+whether a NEUTRAL is being modeled (a node carries ``Phase.N``), the WYE/DELTA load mix
+and the frequency-dependent line models in use. It WARNS on the two silent modeling
+traps: a line with no harmonic model, and a radius-based conductor internal-inductance
+model applied to a synthesized geometry whose radius is a placeholder. Citations +
+rationale: ``docs/pgml/modeling/asymmetric.md``.
 
 Runs once per assemble/solve call on the python schema objects — no tensors, no
 autograd, no per-node loops on the tape.
@@ -31,8 +34,10 @@ from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
+    Line,
     Phase,
     WindingConnection,
+    _has_resistance_law,
 )
 
 logger = logging.getLogger("pgml")
@@ -155,9 +160,85 @@ def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:
             "ASYMMETRIC (per-phase)" if asymmetric else "SYMMETRIC (balanced split)",
         )
 
+    log_line_models(grid)
+
+
+def log_line_models(grid: Grid) -> None:
+    """INFO-log which frequency-dependent line model each line uses.
+
+    A line whose ``harmonic_line_model`` is still unresolved is assembled from its
+    stored parameters (constant ``R``, ``X`` proportional to ``h``), which is the naive
+    model the modeling defaults deliberately do not choose — so an unresolved line is
+    logged as a WARNING naming the entry point that resolves it. Converted grids are
+    resolved at conversion time; a hand-built grid is resolved by
+    ``pgml.geometry.apply_default_harmonic_model``.
+    """
+    lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
+    if not lines:
+        return
+    counts: dict[str, int] = {}
+    for ln in lines:
+        name = ln.harmonic_line_model or (
+            "explicit resistance_frequency"
+            if _has_resistance_law(ln.resistance_frequency)
+            else "unresolved"
+        )
+        counts[name] = counts.get(name, 0) + 1
+    logger.info(
+        "pgml: %d line harmonic model(s): %s.",
+        len(lines),
+        ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
+    )
+    n_unresolved = counts.get("unresolved", 0)
+    if n_unresolved:
+        logger.warning(
+            "pgml: %d of %d lines have no harmonic line model and are assembled from "
+            "their stored parameters (R constant, X proportional to h). Above the "
+            "fundamental this is the naive model; apply the documented default with "
+            "pgml.geometry.apply_default_harmonic_model(grid) (the converters do it "
+            "for you) or set Line.harmonic_line_model.",
+            n_unresolved,
+            len(lines),
+        )
+    log_synthesized_geometry_radius(lines)
+
+
+def log_synthesized_geometry_radius(lines) -> None:
+    """WARN when a radius-based internal-inductance model meets a synthesized geometry.
+
+    ``pgml.geometry.synthesize_line_geometry`` fits the GMR to the line's reactance and
+    keeps the modeling-default radius as a placeholder, so a low-reactance line ends up
+    with ``GMR >> radius`` (flagged ``synth_unphysical``). Every internal-inductance
+    model except ``"gmr"`` reads that placeholder radius, which then dominates the
+    self-impedance: measured on the CIGRE LV residential feeder, the series ``Z`` above
+    1 kHz moves by a factor of 20. The combination is a modeling error, not a refinement.
+    """
+    model = defaults.get("line.geometry.internal_inductance")
+    if model == "gmr":
+        return
+    n_synth = sum(
+        1
+        for ln in lines
+        if ln.conductor_geometry is not None
+        and ln.conductor_geometry.provenance is not None
+        and ln.conductor_geometry.provenance.extra.get("synth_unphysical") == "True"
+    )
+    if n_synth:
+        logger.warning(
+            "pgml: line.geometry.internal_inductance=%r uses the conductor RADIUS, but "
+            "%d line(s) carry a synthesized geometry whose radius is a placeholder "
+            "(GMR >= radius, tagged synth_unphysical). Their harmonic impedance will be "
+            "dominated by that placeholder. Use 'gmr' for synthesized geometries, or "
+            "give these lines measured conductor data.",
+            model,
+            n_synth,
+        )
+
 
 __all__ = [
     "resolve_asymmetric",
     "resolve_connection",
     "log_modeling_summary",
+    "log_line_models",
+    "log_synthesized_geometry_radius",
 ]

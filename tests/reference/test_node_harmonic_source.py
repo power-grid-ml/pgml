@@ -176,8 +176,10 @@ def test_current_source_independent_of_network():
         source_power_va=s_sc,
         kind="current",
     )
+    # No device shunt: the reconstruction below builds Y from the network and the
+    # source stamp alone, which is the law under test.
     res = solve_harmonic_flow(
-        grid, [1, 5], slack="norton", dtype=CDT, node_sources=[src]
+        grid, [1, 5], slack="norton", dtype=CDT, node_sources=[src], load_shunt="none"
     )
     row2 = res.index.row(2, Phase.A)
     v1_node2 = res.v[0, row2]
@@ -214,6 +216,8 @@ def test_voltage_divider_law():
     """``V_node(h) = E_h * Z_net / (Z_s + Z_net)`` (finite-strength Thevenin)."""
     grid = _grid()
     s_sc = 4.0e5
+    # No device shunt: the divider below is formed from the network Y and the
+    # source's own shunt, which is the law under test.
     res = solve_harmonic_flow(
         grid,
         [1, 5],
@@ -227,6 +231,7 @@ def test_voltage_divider_law():
                 kind="voltage",
             )
         ],
+        load_shunt="none",
     )
     from pgml.assembly import assemble_network_ybus, node_phase_index
     from pgml.assembly._stamps import _cdtype, _rdtype

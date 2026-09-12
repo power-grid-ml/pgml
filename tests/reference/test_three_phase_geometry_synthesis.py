@@ -3,8 +3,9 @@
 The synthesized equilateral 3-conductor geometry must reproduce the target
 positive-sequence impedance ``Z1`` and zero-sequence reactance ``X0`` at the
 fundamental, recomputed through pgml's own Carson forward (``line_constants`` +
-Fortescue). This is the pgml-side correctness check; the OpenDSS bit-exact harmonic
-parity (the same geometry fed to OpenDSS) lives in the live-OpenDSS oracle tests.
+Fortescue). This is the pgml-side correctness check; the OpenDSS harmonic parity (the
+same geometry fed to OpenDSS, agreeing to ~5e-8 relative) lives in the live-OpenDSS
+oracle tests.
 """
 
 from __future__ import annotations

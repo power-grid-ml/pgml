@@ -12,10 +12,11 @@ exporter's PRIMARY path exercised tightly):
   :func:`pgml.scenarios.read_dataset` with the OpenDSS provenance stamped;
 - ``mode="matched"`` agrees with pgml's own solver to near machine precision (measured
   ~1e-8 to 1e-10 relative — see the docstrings below for the exact figures pinned);
-- ``mode="default"`` merely produces a valid report; NOT pinned tight (documented
-  divergence: OpenDSS's imperial-calibrated earth-return zero-sequence term dominates the
-  TRIPLEN order on this 3-wire, no-explicit-neutral feeder, and its load Norton shunk
-  — absent from pgml's harmonic model entirely — perturbs the non-triplen order);
+- ``mode="default"`` is pinned on the NON-TRIPLEN orders only: OpenDSS's own device model
+  (``NeglectLoadY=No`` with ``%SeriesRL=50``) is pgml's default, so those orders now agree
+  to ~8e-9 relative, while OpenDSS's imperial-calibrated earth-return zero-sequence term
+  still dominates the TRIPLEN order on this 3-wire, no-explicit-neutral feeder (documented
+  divergence, a few hundred percent);
 - the exporter raises a clear :class:`~pgml.errors.ConversionError` for the documented
   refusals (conductor-geometry lines, zigzag transformer windings, an off-diagonal/coupled
   Source Thevenin impedance) rather than silently exporting a wrong circuit.
@@ -28,27 +29,39 @@ import json
 import pytest
 import torch
 
-import opendssdirect as dss  # noqa: E402
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss  # noqa: E402
 
-from pgml.errors import ConversionError
-from pgml.evaluation.oracles.opendss_scenario_oracle import (
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = pytest.mark.opendss
+
+from pgml.errors import ConversionError  # noqa: E402
+from pgml.evaluation.oracles.opendss_scenario_oracle import (  # noqa: E402
     compare_to_pgml,
     export_grid_to_opendss,
     run_opendss_scenarios,
     write_opendss_dataset,
 )
-from pgml.grids import synthetic_feeder
-from pgml.scenarios import (
-    CoherentSpectrumConfig,
+from pgml.grids import synthetic_feeder  # noqa: E402
+from pgml.scenarios import (  # noqa: E402
     ParameterSpec,
     ScenarioConfig,
     Selector,
     Uniform,
+    batch_from_values,
     read_dataset,
     sample,
-    sample_coherent_spectra,
 )
-from pgml.schemas.grid_schema import (
+from pgml.schemas.grid_schema import (  # noqa: E402
     ComplexTap,
     Generator,
     Grid,
@@ -64,8 +77,6 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
     ZipCoefficients,
 )
-
-pytestmark = pytest.mark.opendss
 
 _ORDERS = [1, 3, 5]
 
@@ -117,16 +128,41 @@ def _snapshot_config() -> ScenarioConfig:
     )
 
 
-def _coherent_config() -> CoherentSpectrumConfig:
-    """A small node-coherent batch: B=2 scenarios, T=3 steps."""
-    return CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5],
-        n_steps=3,
-        n_scenarios=2,
-        n_modes=2,
-        seed=0,
-        harmonic_reference=None,  # absolute pu (clamped to 1.0); no IEC/EN reference needed
+#: Batch shape of the sequence cases: 2 scenarios of 3 steps each.
+_SEQ_B, _SEQ_T = 2, 3
+
+
+def _sequence_batch(grid, *, profiled: bool = False):
+    """A per-step sequence batch: ``[B, T]`` injections, optionally a ``[B, T]`` fundamental.
+
+    The magnitudes and the per-step fundamental vary over BOTH axes, so a consumer that
+    indexed the step axis by scenario (or dropped it) disagrees with the reference tool
+    instead of quietly averaging. Built from explicit values, which is what the engine
+    offers for a step axis it does not generate itself.
+    """
+    b, t = _SEQ_B, _SEQ_T
+    load_ids = [a.id for a in grid.appliances if isinstance(a, Load) and a.in_service]
+    # a distinct ramp per (scenario, step), and a distinct phase per device
+    ramp = torch.linspace(0.4, 1.0, b * t, dtype=torch.float64).reshape(b, t)
+    injection = {
+        cid: {
+            order: (
+                ramp * (0.02 + 0.01 * k),
+                torch.full((b, t), 15.0 * k, dtype=torch.float64),
+            )
+            for order in (3, 5)
+        }
+        for k, cid in enumerate(load_ids)
+    }
+    nameplate = {a.id: float(a.p_nom_w) for a in grid.appliances if a.id in load_ids}
+    p_w = {cid: ramp * nameplate[cid] for cid in load_ids} if profiled else None
+    return batch_from_values(
+        grid,
+        n_samples=b,
+        n_steps=t,
+        p_w=p_w,
+        harmonic_injection=injection,
+        shared_samples={"time_s": torch.arange(t, dtype=torch.float64) * 3600.0},
     )
 
 
@@ -292,16 +328,16 @@ def test_dataset_roundtrip_and_provenance_snapshot(tmp_path):
     assert torch.allclose(loaded.v, result.v)
 
 
-def test_dataset_roundtrip_and_provenance_coherent(tmp_path):
+def test_dataset_roundtrip_and_provenance_sequence(tmp_path):
     grid = _grid()
-    sampled = sample_coherent_spectra(grid, _coherent_config())
+    sampled = _sequence_batch(grid)
     result = run_opendss_scenarios(
         grid, sampled, harmonic_orders=_ORDERS, mode="matched"
     )
-    assert result.v.shape == (2, 3, len(_ORDERS), result.index.size)
+    assert result.v.shape == (_SEQ_B, _SEQ_T, len(_ORDERS), result.index.size)
 
     out = write_opendss_dataset(
-        grid, sampled, tmp_path / "ds_coherent", harmonic_orders=_ORDERS, mode="matched"
+        grid, sampled, tmp_path / "ds_sequence", harmonic_orders=_ORDERS, mode="matched"
     )
     meta = json.loads((out / "meta.json").read_text())
     assert meta["engine"] == "opendss"
@@ -334,14 +370,15 @@ def test_matched_mode_snapshot_agrees_with_pgml(tmp_path):
 
 
 @pytest.mark.slow
-def test_matched_mode_coherent_agrees_with_pgml():
+def test_matched_mode_sequence_agrees_with_pgml():
+    """A ``[B, T]`` harmonic injection against a ``[B]`` fundamental agrees with OpenDSS."""
     grid = _grid()
-    sampled = sample_coherent_spectra(grid, _coherent_config())
+    sampled = _sequence_batch(grid)
     report = compare_to_pgml(grid, sampled, harmonic_orders=_ORDERS, mode="matched")
     assert report["opendss_converged"] and report["pgml_converged"]
     for h, stats in report["per_order"].items():
         assert stats["rel_max"] < _MATCHED_REL_TOL, (
-            f"order {h}: matched-mode (coherent) relative error {stats['rel_max']:.3e} "
+            f"order {h}: matched-mode (sequence) relative error {stats['rel_max']:.3e} "
             f"exceeds {_MATCHED_REL_TOL:.0e}."
         )
 
@@ -351,20 +388,21 @@ def test_matched_mode_coherent_agrees_with_pgml():
 # ---------------------------------------------------------------------------
 @pytest.mark.slow
 def test_default_mode_report_generated_and_diverges_as_documented():
-    """``mode="default"`` is NOT pinned tight -- it characterizes, not validates, drift.
+    """``mode="default"`` leaves OpenDSS's own settings: ONE divergence source is left.
 
-    Two independent divergence sources are expected and are NOT bugs:
-    1. The TRIPLEN order (h=3, zero-sequence-dominated) is driven by OpenDSS's own
-       imperial-unit-calibrated earth-return ``Rg``/``Xg`` line correction (left at its
-       defaults in this mode) on a 3-wire, no-explicit-neutral feeder -- pgml's non-geometry
-       harmonic line models carry no such term at all (``docs/pgml/modeling/conventions.md``
-       §8, "the earth-return calibration gotcha"). Measured on this feeder: tens to a few
-       hundred percent relative error at h=3.
-    2. The non-triplen order (h=5) is driven by OpenDSS's default load Norton shunt
-       (``NeglectLoadY=No``), which pgml's harmonic solver does not implement at all
-       (``include_load_shunt`` is hard-`False`, see ``pgml.solver.harmonic_flow``). Measured
-       on this feeder: ~0.4-0.5% relative error at h=5.
-    The fundamental (h=1) is UNCHANGED vs matched mode -- ``NeglectLoadY``/``Rg``/``Xg`` only
+    The TRIPLEN order (h=3, zero-sequence-dominated) is driven by OpenDSS's own
+    imperial-unit-calibrated earth-return ``Rg``/``Xg`` line correction (left at its
+    defaults in this mode) on a 3-wire, no-explicit-neutral feeder -- pgml's non-geometry
+    harmonic line models carry no such term at all (``docs/pgml/modeling/conventions.md``
+    §8, "the earth-return calibration gotcha"). Measured on this feeder: 2.4 relative
+    (a few hundred percent) at h=3. That is expected and is NOT a bug.
+
+    The NON-TRIPLEN order is now pinned: OpenDSS's default device model
+    (``NeglectLoadY=No``, ``%SeriesRL=50``) is pgml's own default, so h=5 agrees to
+    8.3e-09 relative -- against 5.0e-03 with the pure current-source model, which is what
+    this test used to characterise as the second divergence source.
+
+    The fundamental (h=1) is mode-independent -- ``NeglectLoadY``/``Rg``/``Xg`` only
     affect the ``Solve mode=harmonics`` path, never the nonlinear snapshot solve.
     """
     grid = _grid()
@@ -376,6 +414,11 @@ def test_default_mode_report_generated_and_diverges_as_documented():
         assert stats["ref_rms_v"] > 0.0  # the report is populated, not vacuous
     # the fundamental is mode-independent (NeglectLoadY/Rg/Xg only affect harmonics mode)
     assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
+    # the non-triplen order: same device model on both sides, only Rg/Xg differ and they
+    # barely touch the positive-sequence path.
+    assert report["per_order"][5]["rel_max"] < _MATCHED_REL_TOL
+    # the triplen order: the earth-return term dominates, as documented.
+    assert report["per_order"][3]["rel_max"] > 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +487,37 @@ def _devices_grid() -> Grid:
 
 
 @pytest.mark.slow
-def test_devices_switch_generator_storage_shunt_matched_tight():
-    """Switch/Generator/Storage/ShuntAppliance all agree with pgml near machine precision."""
+def test_devices_switch_generator_storage_shunt_matched_tight(tmp_path, monkeypatch):
+    """Switch/Generator/Storage/ShuntAppliance all agree with pgml near machine precision.
+
+    Run with ``appliance.harmonic_shunt.generation_model: load_style``, the policy under
+    which a Generator / Storage carries the same operating-point shunt a Load does. That
+    is the only policy a matched-mode export can reproduce for a generation device: it
+    writes one as a negative-kW DSS ``Load``, whose shunt OpenDSS always derives from that
+    (negative) power, and ``NeglectLoadY`` is a global option. Under the shipped
+    ``none`` policy the export refuses the combination by name, which
+    ``tests/reference/test_opendss_load_shunt.py`` covers together with the size of the
+    difference.
+    """
+    import yaml
+
+    from pgml import defaults
+
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["appliance"]["harmonic_shunt"]["generation_model"]["value"] = "load_style"
+    path = tmp_path / "generation_load_style.yaml"
+    path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
+    defaults.reload(str(path))
+    try:
+        _devices_matched_comparison()
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
+
+
+def _devices_matched_comparison() -> None:
+    """The matched-mode comparison of the multi-device grid (see the test above)."""
     grid = _devices_grid()
     orders = [3, 5]
     cfg = ScenarioConfig(
@@ -502,7 +574,16 @@ def test_const_current_zip_harmonic_matched_tight():
     """ZIP-model loads with harmonic content agree at the tight matched-mode floor:
     the solver anchors each device's spectrum to its MODEL-CONSISTENT fundamental
     current (S_eff at the converged voltage), matching OpenDSS's per-model
-    fundamental current."""
+    fundamental current.
+
+    Solved with ``load_shunt="none"`` on both sides. The harmonic device shunt is the
+    one quantity where a voltage-dependent load model does NOT agree: pgml derives the
+    shunt from the power the device REALLY draws at the converged voltage, OpenDSS from
+    the SPECIFIED kW/kvar whatever the load model
+    (``Load.pas``'s ``Yeq`` comes from ``SetNominalLoad``). The resulting deviation is
+    measured and bounded by
+    ``tests/reference/test_opendss_load_shunt.py::test_zip_load_shunt_divergence_is_bounded``.
+    """
     grid = _devices_grid()
     grid = grid.model_copy(deep=True)
     for i, a in enumerate(grid.appliances):
@@ -548,7 +629,7 @@ def test_const_current_zip_harmonic_matched_tight():
     )
     sampled = sample(grid, cfg)
     report = compare_to_pgml(
-        grid, sampled, harmonic_orders=[1, *orders], mode="matched"
+        grid, sampled, harmonic_orders=[1, *orders], mode="matched", load_shunt="none"
     )
     assert report["per_order"][1]["rel_max"] < _MATCHED_REL_TOL
     for h in orders:
@@ -658,35 +739,23 @@ def test_delta_shunt_export_emits_delta_capacitor():
 
 
 # ---------------------------------------------------------------------------
-# Coherent batch with a LoadProfileConfig (per-step [B, T] operating point)
+# Sequence batch with a per-step [B, T] operating point
 # ---------------------------------------------------------------------------
 @pytest.mark.slow
-def test_coherent_with_load_profile_matched_tight():
-    """A per-STEP ``[B, T]`` operating point (LoadProfileConfig) agrees with pgml."""
-    from pgml.scenarios import LoadProfileConfig
-
+def test_sequence_with_per_step_fundamental_matched_tight():
+    """A per-STEP ``[B, T]`` operating point agrees with pgml order by order."""
     grid = _grid()
-    cfg = CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5],
-        n_steps=3,
-        n_scenarios=2,
-        seed=7,
-        step_size_s=3600.0,
-        profile=LoadProfileConfig(),
-        start_time="2026-06-01T00:00:00",
-    )
-    sampled = sample_coherent_spectra(grid, cfg)
+    sampled = _sequence_batch(grid, profiled=True)
     op = sampled.operating_point
     assert any(
         hasattr(v.get("p_w"), "ndim") and v["p_w"].ndim == 2 for v in op.values()
-    ), "the profile should lift the operating point to a per-step [B, T] shape"
+    ), "the batch should carry a per-step [B, T] fundamental"
 
     report = compare_to_pgml(grid, sampled, harmonic_orders=[1, 3, 5], mode="matched")
     assert report["opendss_converged"] and report["pgml_converged"]
     for h, stats in report["per_order"].items():
         assert stats["rel_max"] < _MATCHED_REL_TOL, (
-            f"order {h}: coherent-with-profile matched-mode error {stats['rel_max']:.3e} "
+            f"order {h}: per-step fundamental matched-mode error {stats['rel_max']:.3e} "
             f"exceeds {_MATCHED_REL_TOL:.0e} -- the per-step [B, T] operating point "
             "slicing must index by step, not just by scenario."
         )

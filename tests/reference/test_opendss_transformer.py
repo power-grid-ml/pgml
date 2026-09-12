@@ -53,7 +53,20 @@ import math
 import pytest
 import torch
 
-import opendssdirect as dss  # noqa: E402
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss  # noqa: E402
+
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = pytest.mark.opendss
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index  # noqa: E402
 from pgml.convert.opendss import PhaseMode, to_grid  # noqa: E402
@@ -583,6 +596,14 @@ class TestMagnetizingBranchConversion:
     IMAG_PCT = 0.5
 
     def test_magnetizing_fields_match_closed_form(self) -> None:
+        """``%noloadloss``/``%imag`` are OpenDSS's core G and B, each in percent.
+
+        OpenDSS does NOT define ``%imag`` as a TOTAL no-load current (pandapower's
+        ``i0_percent`` convention, where ``B = sqrt(I0^2 - G^2)``): it is the core
+        admittance's imaginary part directly, on the winding base admittance. Verified
+        on a live ``Yprim`` difference in
+        ``tests/reference/test_opendss_magnetizing_placement.py``.
+        """
         _build_transformer_circuit(
             conn_hv="delta",
             conn_lv="wye",
@@ -598,10 +619,7 @@ class TestMagnetizingBranchConversion:
         pfe_w = self.NOLOADLOSS_PCT / 100.0 * s_rated_va
         expected_g_m = pfe_w / (u_hv_v**2)
 
-        i0_amp = self.IMAG_PCT / 100.0 * s_rated_va / u_hv_v
-        s_nl = u_hv_v * i0_amp
-        q_nl = math.sqrt(s_nl**2 - pfe_w**2)
-        b_m = q_nl / (u_hv_v**2)
+        b_m = self.IMAG_PCT / 100.0 * s_rated_va / (u_hv_v**2)
         two_pi_f0 = 2.0 * math.pi * _F0
         expected_l_m = 1.0 / (two_pi_f0 * b_m)
 

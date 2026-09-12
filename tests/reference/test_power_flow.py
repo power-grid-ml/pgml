@@ -92,10 +92,18 @@ def _linear_ideal_v(grid: Grid):
     return v, idx
 
 
+#: Per-unit voltage-update tolerance the const-Z consistency checks below need: they
+#: assert agreement with the linear solve in VOLTS at the 1e-10 / 1e-9 level, which on a
+#: 400 V feeder is ~1e-12 pu — three orders tighter than the per-unit power-mismatch
+#: default (pandapower's 1e-8 pu). Driving the secondary (voltage) criterion instead of
+#: the primary one keeps the requested tolerance inside what complex128 resolves.
+_TOL_V_PU = 1.0e-13
+
+
 def test_const_z_consistency_norton_single_phase():
     grid = _set_load_model(single_phase_chain(), LoadModel.CONST_IMPEDANCE)
     v_lin, _ = _linear_norton_v(grid)
-    res = solve_power_flow(grid, slack="norton", dtype=CDT)
+    res = solve_power_flow(grid, slack="norton", dtype=CDT, tol_update_pu=_TOL_V_PU)
     torch.testing.assert_close(res.v.reshape(-1), v_lin, rtol=0, atol=1e-10)
     assert res.converged
 
@@ -103,7 +111,7 @@ def test_const_z_consistency_norton_single_phase():
 def test_const_z_consistency_ideal_single_phase():
     grid = _set_load_model(single_phase_chain(), LoadModel.CONST_IMPEDANCE)
     v_lin, _ = _linear_ideal_v(grid)
-    res = solve_power_flow(grid, slack="ideal", dtype=CDT)
+    res = solve_power_flow(grid, slack="ideal", dtype=CDT, tol_update_pu=_TOL_V_PU)
     torch.testing.assert_close(res.v.reshape(-1), v_lin, rtol=0, atol=1e-9)
     assert res.converged
 
@@ -111,14 +119,14 @@ def test_const_z_consistency_ideal_single_phase():
 def test_const_z_consistency_norton_three_phase():
     grid = _set_load_model(three_phase_two_bus(), LoadModel.CONST_IMPEDANCE)
     v_lin, _ = _linear_norton_v(grid)
-    res = solve_power_flow(grid, slack="norton", dtype=CDT)
+    res = solve_power_flow(grid, slack="norton", dtype=CDT, tol_update_pu=_TOL_V_PU)
     torch.testing.assert_close(res.v.reshape(-1), v_lin, rtol=0, atol=1e-9)
 
 
 def test_const_z_consistency_ideal_three_phase():
     grid = _set_load_model(three_phase_two_bus(), LoadModel.CONST_IMPEDANCE)
     v_lin, _ = _linear_ideal_v(grid)
-    res = solve_power_flow(grid, slack="ideal", dtype=CDT)
+    res = solve_power_flow(grid, slack="ideal", dtype=CDT, tol_update_pu=_TOL_V_PU)
     torch.testing.assert_close(res.v.reshape(-1), v_lin, rtol=0, atol=1e-9)
 
 

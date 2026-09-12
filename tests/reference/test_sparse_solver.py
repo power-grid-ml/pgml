@@ -115,14 +115,16 @@ def test_sparse_backend_rejects_cuda():
 def test_sparse_complex64_batch_converges_at_backend_floor():
     """A large complex64 scenario batch terminates under the sparse backend.
 
-    SuperLU's single-precision back-substitution leaves ~2e-6 relative rounding
-    noise per iterate — above the dense-calibrated 1e-6 float32 floor — so
-    marginal scenarios of a large batch used to oscillate to ``max_iter`` and
-    come back flagged unconverged although their voltages sit at the
-    single-precision floor. The backend-aware floor
-    (:func:`pgml.solver.power_flow._rel_convergence_floor`) must let the batch
-    terminate like the dense backend does, with the full mask converged and
-    floor-level accuracy against the double-precision dense reference.
+    SuperLU's single-precision back-substitution leaves more rounding noise per
+    iterate than the dense torch LU (measured on this batch: the per-row voltage
+    update plateaus FLAT at 5.7e-6 per unit, where the dense backend is still
+    contracting at 8.8e-7), so marginal scenarios of a large batch oscillate above a
+    dense-calibrated floor and come back flagged unconverged although their voltages
+    sit at the single-precision floor. The backend-aware floor
+    (:func:`pgml.solver.power_flow._rel_convergence_floor`, 1.2e-5 per unit for the
+    sparse float32 path) must let the batch terminate like the dense backend does,
+    with the full mask converged and floor-level accuracy against the
+    double-precision dense reference.
     """
     pp = pytest.importorskip("pandapower")
     import numpy as np

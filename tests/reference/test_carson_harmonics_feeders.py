@@ -4,9 +4,15 @@ Each feeder is given a SYNTHESIZED single-conductor Carson geometry that reprodu
 its R/X at fundamental (R/X feeders ship no conductor geometry). The SAME geometry is
 fed to pgml and OpenDSS, so the harmonic comparison isolates the line model:
 
-- the line series admittance (off-diagonal Y(h)) matches OpenDSS to floating point;
+- the line series admittance (off-diagonal Y(h)) matches OpenDSS to ~3e-8 relative, which
+  is the SI-vs-OpenDSS `mu0` constant difference (pgml uses the SI value);
 - the harmonic bus voltages match (OpenDSS line model solved with pgml's converged
-  injection) to a tight tolerance at every harmonic order.
+  injection) to ~1.4e-7 relative at every harmonic order, the same constant difference
+  carried through the solve.
+
+The orders stay below 1 kHz (20 * 50 Hz), where the two geometry models are the same; at
+and above 1 kHz OpenDSS changes its conductor spacing term (GMR -> radius) and pgml does
+not.
 
 This is the end-to-end payoff of the Carson/Deri geometry path — it closes the
 documented harmonic line-impedance gap on real feeders.
@@ -22,6 +28,7 @@ from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly.ybus import _stamp_sources
 from pgml.evaluation import oracles as ref
+from pgml.geometry.synthesis import strip_grid_geometry
 from pgml.schemas.grid_schema import Phase
 from pgml.solver import solve_harmonic_flow
 
@@ -40,11 +47,13 @@ def _pgml_harmonic_y(grid, index, h):
     return yb[0].numpy()
 
 
+@pytest.mark.opendss
 @pytest.mark.parametrize(
     "builder", [ref.ieee33_geometry_grid, ref.cigre_lv_geometry_grid]
 )
 def test_offdiagonal_Yh_matches_opendss(builder):
     """Line series admittance Y(h) (off-diagonal) is bit-close to OpenDSS at harmonics."""
+    pytest.importorskip("opendssdirect", exc_type=ImportError)
     grid, _ = builder()
     index = node_phase_index(grid)
     dssY = ref.opendss_geometry_systemy(grid, index, [1, 5, 7])
@@ -55,15 +64,19 @@ def test_offdiagonal_Yh_matches_opendss(builder):
         yd = dssY[h]
         denom = np.abs(yd[mask]).max()
         err = np.abs(yp[mask] - yd[mask]).max() / denom
-        # Measured ~1.5e-11 rel; tolerance set with safe headroom.
-        assert err < 1e-9, f"h={h}: off-diagonal Y(h) rel error {err:.2e}"
+        # Measured 3.1e-8 (IEEE-33) / 1.9e-8 (CIGRE LV) relative, which is the SI-vs-
+        # OpenDSS mu0 constant difference (4.9e-8) carried through Y = 1/Z; the MODEL
+        # agrees to floating point. Tolerance set with headroom.
+        assert err < 2e-7, f"h={h}: off-diagonal Y(h) rel error {err:.2e}"
 
 
+@pytest.mark.opendss
 @pytest.mark.parametrize(
     "builder", [ref.ieee33_geometry_grid, ref.cigre_lv_geometry_grid]
 )
 def test_harmonic_voltages_match_opendss(builder):
     """Harmonic bus voltages agree with OpenDSS's line model (same injection)."""
+    pytest.importorskip("opendssdirect", exc_type=ImportError)
     grid, _ = builder()
     index = node_phase_index(grid)
     res = solve_harmonic_flow(grid, ORDERS, slack="norton", dtype=CDT)
@@ -79,8 +92,9 @@ def test_harmonic_voltages_match_opendss(builder):
         i_inj = _pgml_harmonic_y(grid, index, h) @ vp
         vd = np.linalg.solve(dssY[h], i_inj)
         rel = np.abs(vd - vp).max() / (np.abs(vp).max() + 1e-15)
-        # Measured ~3.4e-9 rel (cigre); tolerance set with safe headroom.
-        assert rel < 1e-7, f"h={h}: |V_dss - V_pgml| rel {rel:.2e}"
+        # Measured 1.4e-7 rel (IEEE-33); the bound is the SI-vs-OpenDSS mu0 constant
+        # difference (4.9e-8) amplified by the voltage solve, not a model difference.
+        assert rel < 1e-6, f"h={h}: |V_dss - V_pgml| rel {rel:.2e}"
 
 
 def test_synthesized_geometry_is_tracked():
@@ -105,9 +119,7 @@ def test_carson_differs_from_naive_on_feeder():
     res_geom = solve_harmonic_flow(grid, [1, 7], slack="norton", dtype=CDT)
 
     # Strip geometry -> falls back to the explicit R/L path (naive X∝h, R const).
-    for b in grid.branches:
-        if hasattr(b, "conductor_geometry"):
-            b.conductor_geometry = None
+    strip_grid_geometry(grid)
     res_naive = solve_harmonic_flow(grid, [1, 7], slack="norton", dtype=CDT)
 
     row = index.row(int(grid.nodes[-1].id), Phase.A)

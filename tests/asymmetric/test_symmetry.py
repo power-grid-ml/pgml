@@ -143,3 +143,80 @@ def test_resolve_asymmetric_is_pure_no_logging(caplog):
         result = resolve_asymmetric(_balanced_grid(), mode="auto")
     assert result is False
     assert caplog.text == ""
+
+
+# --- log_synthesized_geometry_radius -----------------------------------------
+def _synth_geometry_line(unphysical: bool):
+    """A line carrying a synthesized geometry, flagged as (non-)physical."""
+    from pgml.schemas.grid_schema import (
+        ConductorPlacement,
+        Line,
+        LineGeometry,
+        Provenance,
+        SourceConvention,
+    )
+
+    return Line(
+        id=1,
+        from_node=1,
+        to_node=2,
+        from_phases=(Phase.A,),
+        to_phases=(Phase.A,),
+        length_m=100.0,
+        conductor_geometry=LineGeometry(
+            conductors=[
+                ConductorPlacement(
+                    phase=Phase.A,
+                    x_m=0.0,
+                    y_m=10.0,
+                    gmr_m=250.0 if unphysical else 0.0078,
+                    radius_m=0.0102,
+                    r_dc_ohm_per_m=2.0e-4,
+                )
+            ],
+            provenance=Provenance(
+                source_convention=SourceConvention.GEOMETRY,
+                notes="synthesized",
+                extra={"synth_unphysical": str(unphysical)},
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("model", ["gmr_skin", "gmr_power_frequency", "bessel"])
+def test_warns_when_a_radius_model_meets_a_synthesized_geometry(
+    caplog, model, tmp_path
+):
+    """A placeholder radius plus a radius-based model is a modeling error, not a refinement."""
+    from pgml import defaults as config
+    from pgml.assembly._symmetry import log_synthesized_geometry_radius
+
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        "line:\n  geometry:\n    internal_inductance:\n"
+        f"      value: {model}\n      units: enum\n      description: override\n"
+    )
+    try:
+        config.reload(str(custom))
+        with caplog.at_level(logging.WARNING, logger="pgml"):
+            log_synthesized_geometry_radius([_synth_geometry_line(True)])
+        assert "synth_unphysical" in caplog.text and model in caplog.text
+        caplog.clear()
+        # A physical geometry (GMR < radius) is fine with any model.
+        with caplog.at_level(logging.WARNING, logger="pgml"):
+            log_synthesized_geometry_radius([_synth_geometry_line(False)])
+        assert caplog.text == ""
+    finally:
+        import os
+
+        os.environ.pop("PGML_DEFAULTS", None)
+        config.reload()
+
+
+def test_no_warning_for_the_default_internal_inductance_model(caplog):
+    """The default ``"gmr"`` never reads the placeholder radius, so it never warns."""
+    from pgml.assembly._symmetry import log_synthesized_geometry_radius
+
+    with caplog.at_level(logging.WARNING, logger="pgml"):
+        log_synthesized_geometry_radius([_synth_geometry_line(True)])
+    assert caplog.text == ""

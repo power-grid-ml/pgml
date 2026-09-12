@@ -13,11 +13,13 @@ import cmath
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from pgml.schemas.grid_schema import (
     Grid,
     HarmonicComponent,
+    HarmonicShuntModel,
     Line,
     Load,
     LoadModel,
@@ -85,12 +87,16 @@ def _grid(spec=SPEC) -> Grid:
     )
 
 
-def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex]:
+def _numpy_harmonic_v_ld(
+    v_ld_fundamental: complex, orders, *, series_rl: float = 0.5
+) -> dict[int, complex]:
     """Independent numpy harmonic solve (simple R-const, X∝h model) at the load bus.
 
     Uses the fundamental load-bus voltage to form ``I1 = conj(S0)/conj(V1)`` then,
-    per harmonic, builds the 2x2 Y (line series + source Norton shunt), injects the
-    nodal harmonic current ``-I_h`` at the load bus, and solves.
+    per harmonic, builds the 2x2 Y (line series + source Norton shunt + the load's own
+    harmonic shunt), injects the nodal harmonic current ``-I_h`` at the load bus, and
+    solves. ``series_rl`` is the shunt's series fraction ``s``; ``None`` leaves the load
+    a pure current source.
     """
     s0 = complex(P_LOAD, Q_LOAD)
     i1 = np.conj(s0) / np.conj(v_ld_fundamental)
@@ -105,7 +111,19 @@ def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex
         z_src = R_SRC + 1j * h * X_SRC
         y_line = 1.0 / z_line
         y_src = 1.0 / z_src
-        Y = np.array([[y_src + y_line, -y_line], [-y_line, y_line]], dtype=complex)
+        y_load = 0.0 + 0.0j
+        if series_rl is not None:
+            # The load's harmonic Norton shunt at its RATED voltage: a parallel R-L
+            # branch plus a series R-L branch, both derived from conj(S0)/V_rated**2.
+            y_eq = np.conj(s0) / 230.0**2
+            s = series_rl
+            y_load = complex((1.0 - s) * y_eq.real, (1.0 - s) * y_eq.imag / h)
+            if s > 0.0:
+                z_ser = 1.0 / (s * y_eq)
+                y_load += 1.0 / complex(z_ser.real, h * z_ser.imag)
+        Y = np.array(
+            [[y_src + y_line, -y_line], [-y_line, y_line + y_load]], dtype=complex
+        )
         mag_h, ang_h = spec.get(h, (0.0, 0.0))
         i_drawn = (
             (mag_h / mag1)
@@ -121,6 +139,7 @@ def _numpy_harmonic_v_ld(v_ld_fundamental: complex, orders) -> dict[int, complex
 
 
 def test_matches_numpy_oracle():
+    """The shipped default: the load is a current source in parallel with its shunt."""
     grid = _grid()
     orders = [1, 5, 7]
     res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
@@ -139,6 +158,52 @@ def test_matches_numpy_oracle():
         )
 
 
+def test_matches_numpy_oracle_without_the_device_shunt():
+    """``load_shunt="none"``: the pure current-source model, same hand-written oracle."""
+    grid = _grid()
+    orders = [1, 5, 7]
+    res = solve_harmonic_flow(
+        grid, orders, slack="norton", dtype=CDT, load_shunt="none"
+    )
+    ld = res.index.row(2, Phase.A)
+    ref = _numpy_harmonic_v_ld(
+        complex(res.v[orders.index(1), ld]), orders, series_rl=None
+    )
+    for k, h in enumerate(orders):
+        got = complex(res.v[k, ld])
+        np.testing.assert_allclose(
+            [got.real, got.imag],
+            [ref[h].real, ref[h].imag],
+            rtol=1e-7,
+            atol=1e-9,
+            err_msg=f"order {h} mismatch vs numpy oracle (no device shunt)",
+        )
+
+
+@pytest.mark.parametrize("series_rl", [0.0, 1.0])
+def test_matches_numpy_oracle_for_every_split(series_rl):
+    """The two limits of the split, against the same hand-written oracle."""
+    grid = _grid()
+    for a in grid.appliances:
+        if isinstance(a, Load):
+            a.harmonic_model = HarmonicShuntModel(series_rl_fraction=series_rl)
+    orders = [1, 5, 7]
+    res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
+    ld = res.index.row(2, Phase.A)
+    ref = _numpy_harmonic_v_ld(
+        complex(res.v[orders.index(1), ld]), orders, series_rl=series_rl
+    )
+    for k, h in enumerate(orders):
+        got = complex(res.v[k, ld])
+        np.testing.assert_allclose(
+            [got.real, got.imag],
+            [ref[h].real, ref[h].imag],
+            rtol=1e-7,
+            atol=1e-9,
+            err_msg=f"order {h} mismatch vs numpy oracle (s={series_rl})",
+        )
+
+
 def test_fundamental_matches_power_flow():
     grid = _grid()
     res = solve_harmonic_flow(grid, [1, 5, 7], slack="norton", dtype=CDT)
@@ -150,20 +215,22 @@ def test_fundamental_matches_power_flow():
 
 
 def test_opendss_ballpark():
-    """vs OpenDSS oracle (harmonics.md). Fundamental exact; harmonics within ~4%
-    (the residual is OpenDSS Carson earth-return + load-Y, both deferred)."""
+    """Regression guard against OpenDSS values recorded once (harmonics.md), not a live
+    oracle call. Fundamental exact; harmonics within ~4% (the residual is OpenDSS Carson
+    earth-return + load-Y, both deferred). The live OpenDSS harmonic comparison is
+    `test_cigre_lv_live_opendss.py` / `test_carson_harmonics_feeders.py`."""
     grid = _grid()
     orders = [1, 5, 7]
     res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
     ld = res.index.row(2, Phase.A)
-    # OpenDSS AllBusVolts (NeglectLoadY=yes), |V_ld| per order:
-    oracle_mag = {1: 223.24690, 5: 5.51315, 7: 5.30916}
+    # OpenDSS AllBusVolts (NeglectLoadY=yes), |V_ld| per order, recorded once:
+    recorded_mag = {1: 223.24690, 5: 5.51315, 7: 5.30916}
     for k, h in enumerate(orders):
         mag = abs(complex(res.v[k, ld]))
-        rel = abs(mag - oracle_mag[h]) / oracle_mag[h]
+        rel = abs(mag - recorded_mag[h]) / recorded_mag[h]
         tol = 1e-4 if h == 1 else 0.04
         assert rel < tol, (
-            f"order {h}: |V|={mag:.5f} vs OpenDSS {oracle_mag[h]} (rel {rel:.4f})"
+            f"order {h}: |V|={mag:.5f} vs recorded OpenDSS {recorded_mag[h]} (rel {rel:.4f})"
         )
 
 
@@ -186,3 +253,117 @@ def test_harmonic_only_orders_without_fundamental():
     full = solve_harmonic_flow(grid, [1, 5, 7], slack="norton", dtype=CDT)
     torch.testing.assert_close(res.v[0], full.v[1], rtol=1e-7, atol=1e-9)
     torch.testing.assert_close(res.v[1], full.v[2], rtol=1e-7, atol=1e-9)
+
+
+class TestSolverOptions:
+    """The harmonic entry point exposes the solver options, and runs the safety gates.
+
+    A harmonic study's expensive part is the fundamental solve plus one direct solve per
+    order, all of which are factorizations of systems with the same sparsity — so the
+    caller has to be able to pick the backend, the equilibration and the criticality
+    policy for the whole study, and the pre-solve connectivity check must not be
+    silently skipped by any of it.
+    """
+
+    @staticmethod
+    def _orders():
+        return [1, 5, 13]
+
+    def test_every_backend_gives_the_same_voltages(self):
+        grid = _grid()
+        orders = self._orders()
+        ref = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, linear_solver="dense"
+        )
+        got = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, linear_solver="sparse"
+        )
+        torch.testing.assert_close(got.v, ref.v, rtol=1e-10, atol=1e-12)
+
+    def test_backend_reaches_the_per_order_solve(self):
+        """A forced backend is used by the HARMONIC orders, not only the fundamental.
+
+        Without this the option would be inert for the part of the study it is meant to
+        control, which is invisible in the result and shows up only as identical timings.
+        """
+        import pgml.solver.harmonic_flow as hf
+
+        seen = []
+        original = hf.lu_factor_system
+
+        def spy(y, **kw):
+            seen.append(kw.get("backend"))
+            return original(y, **kw)
+
+        hf.lu_factor_system = spy
+        try:
+            solve_harmonic_flow(
+                _grid(),
+                self._orders(),
+                slack="norton",
+                dtype=CDT,
+                linear_solver="sparse",
+            )
+        finally:
+            hf.lu_factor_system = original
+        assert seen and all(b == "sparse" for b in seen)
+
+    def test_equilibration_option_reaches_the_orders(self):
+        grid = _grid()
+        orders = self._orders()
+        ref = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, equilibrate="off"
+        )
+        got = solve_harmonic_flow(
+            grid, orders, slack="norton", dtype=CDT, equilibrate="symmetric"
+        )
+        torch.testing.assert_close(got.v, ref.v, rtol=1e-10, atol=1e-10)
+
+    def test_block_backend_solves_the_ensemble_at_every_order(self):
+        """`block_rows` reaches the per-order solves too (the CUDA ensemble path).
+
+        A disjoint union of two feeders has a block-diagonal admittance at EVERY order, so
+        the member-by-member factorization must answer the same voltages as the dense union
+        at the fundamental and at each harmonic.
+        """
+        from pgml.grids import synthetic_feeder
+        from pgml.multigrid import merge_grids
+
+        merged = merge_grids([synthetic_feeder(6), synthetic_feeder(6)])
+        orders = self._orders()
+        ref = solve_harmonic_flow(merged.grid, orders, dtype=CDT, linear_solver="dense")
+        blk = solve_harmonic_flow(
+            merged.grid,
+            orders,
+            dtype=CDT,
+            linear_solver="block",
+            block_rows=merged.block_rows(),
+        )
+        # Volts on a 20 kV feeder; the dense union and the per-member factorization differ
+        # only in their rounding.
+        assert float((blk.v - ref.v).abs().max()) < 1e-8
+
+    def test_criticality_option_is_accepted(self):
+        res = solve_harmonic_flow(
+            _grid(), self._orders(), slack="norton", dtype=CDT, criticality="always"
+        )
+        assert res.pf.diagnostics.criticality is not None
+
+    def test_connectivity_is_checked_by_default(self):
+        """The default run raises on a de-energized row; only "ignore" skips the check."""
+        import pytest
+
+        from pgml.errors import ConnectivityError
+
+        grid = _grid()
+        grid.branches[0].in_service = False  # cuts the load bus off the source
+        with pytest.raises(ConnectivityError):
+            solve_harmonic_flow(grid, [1, 5], slack="norton", dtype=CDT)
+        with pytest.raises(ConnectivityError):
+            solve_harmonic_flow(
+                grid, [1, 5], slack="norton", dtype=CDT, on_disconnected="raise"
+            )
+        zeroed = solve_harmonic_flow(
+            grid, [1, 5], slack="norton", dtype=CDT, on_disconnected="zero"
+        )
+        assert zeroed.v.shape[-1] == len(grid.nodes)

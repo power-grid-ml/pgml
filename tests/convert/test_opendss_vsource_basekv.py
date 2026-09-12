@@ -37,11 +37,24 @@ import math
 
 import pytest
 
-import opendssdirect as dss
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss
 
-from pgml.convert._common import PhaseMode
-from pgml.convert.opendss import to_grid
-from pgml.schemas.grid_schema import Phase, Source
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = pytest.mark.opendss
+
+from pgml.convert._common import PhaseMode  # noqa: E402
+from pgml.convert.opendss import to_grid  # noqa: E402
+from pgml.schemas.grid_schema import Phase, Source  # noqa: E402
 
 _F0 = 60.0
 

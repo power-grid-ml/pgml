@@ -374,7 +374,12 @@ def test_wye_neutral_harmonic_returns_into_n_row():
 # 4. Regression: device-level spectrum on WYE-to-ground == the historical stamp.
 # ---------------------------------------------------------------------------
 def test_wye_ground_device_spectrum_matches_numpy_oracle():
-    """Single-phase WYE-to-ground load reproduces the legacy numpy oracle exactly."""
+    """Single-phase WYE-to-ground load reproduces the legacy numpy oracle exactly.
+
+    The INJECTION convention is what is under test here, so the device shunt is off
+    (``load_shunt="none"``); the shunt's own connection awareness is covered by
+    ``tests/reference/test_harmonic_load_shunt.py``.
+    """
     r_line, x_line = 0.5, 0.5
     r_src, x_src = 0.1, 0.1
     p_load, q_load = 2000.0, 500.0
@@ -420,7 +425,9 @@ def test_wye_ground_device_spectrum_matches_numpy_oracle():
         ],
     )
     orders = [1, 5, 7]
-    res = solve_harmonic_flow(grid, orders, slack="norton", dtype=CDT)
+    res = solve_harmonic_flow(
+        grid, orders, slack="norton", dtype=CDT, load_shunt="none"
+    )
     ld = res.index.row(2, Phase.A)
     v_fund = complex(res.v[orders.index(1), ld])
     s0 = complex(p_load, q_load)

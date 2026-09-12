@@ -1,7 +1,7 @@
 """High-level simulation entry point — the blessed external API.
 
-``simulate(grid, config)`` is the front door for external consumers (dashboards, the
-future REST API, analysis scripts). It dispatches to the differentiable solvers and
+``simulate(grid, config)`` is the front door for external consumers (dashboards, a
+REST API, analysis scripts). It dispatches to the differentiable solvers and
 returns a :class:`SolvedState` — a complete, lazily-derived snapshot of the solved grid
 from which any quantity can be extracted:
 
@@ -46,6 +46,7 @@ from .solver import solve_harmonic_flow, solve_power_flow
 
 Calculation = Literal["power_flow", "harmonic"]
 Slack = Literal["ideal", "norton"]
+LoadShunt = Literal["none", "opendss", "motor"]
 Symmetry = Literal["auto", "symmetric", "asymmetric"]
 _DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
 
@@ -53,8 +54,13 @@ _DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
 class SimulationConfig(BaseModel):
     """Serializable definition of WHAT to simulate (the REST-friendly run spec).
 
-    Device / dtype are execution concerns and live on the :func:`simulate` call, not
-    here. ``harmonic_orders`` is used only when ``calculation == "harmonic"``.
+    Device / dtype / working precision are execution concerns and live on the
+    :func:`simulate` call, not here. ``harmonic_orders`` is used only when
+    ``calculation == "harmonic"``. The convergence tolerances are PER UNIT, so one
+    config means the same thing on any voltage level; ``None`` resolves the documented
+    defaults in ``pgml/data/defaults.yaml``. ``enforce_q_limits`` is a MODELING choice
+    (what a regulating generator is allowed to do), so it belongs in the config even
+    though it reaches the solver as a keyword.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -73,8 +79,44 @@ class SimulationConfig(BaseModel):
     operating_point: Optional[dict] = Field(
         default=None, description="Per-appliance P/Q override; None = nameplate."
     )
-    include_load_shunt: bool = False
-    tol: float = Field(default=1e-10, gt=0.0)
+    load_shunt: Optional[LoadShunt] = Field(
+        default=None,
+        description="Harmonic Norton shunt of every Load/Generator/Storage: 'opendss' "
+        "(the operating-point admittance split into a series and a parallel R-L "
+        "branch, OpenDSS's own default), 'motor' (fixed blocked-rotor series "
+        "reactance), or 'none' (pure current source, OpenDSS NeglectLoadY=Yes). None = "
+        "the documented default appliance.harmonic_shunt.model. A device's own "
+        "harmonic_model overrides the choice per device.",
+    )
+    tol: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="PRIMARY convergence tolerance of the nonlinear fundamental: the "
+        "largest nodal apparent-power mismatch in PER UNIT of s_base_va (what "
+        "pandapower and power-grid-model converge on). None = the documented default "
+        "solver.convergence.mismatch_pu (1e-8 pu).",
+    )
+    tol_update_pu: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="SECONDARY convergence tolerance: the largest per-row voltage "
+        "update in PER UNIT of the node's line-to-neutral rated voltage; both criteria "
+        "must hold. None = the documented default solver.convergence.update_pu "
+        "(1e-8 pu).",
+    )
+    s_base_va: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="Apparent-power base of the per-unit power mismatch. None = the "
+        "documented default solver.convergence.s_base_va (1e6 VA).",
+    )
+    enforce_q_limits: Optional[bool] = Field(
+        default=None,
+        description="Whether a voltage-regulating generator's reactive limits bound "
+        "its output (PV-to-PQ switching at the fundamental). None = the documented "
+        "default appliance.generator.enforce_q_limits. False reproduces pandapower "
+        "runpp's own default. Inert on a grid with no regulating generator.",
+    )
     max_iter: int = Field(default=100, gt=0)
 
     @model_validator(mode="after")
@@ -138,6 +180,9 @@ class SolvedState:
         dtype: torch.dtype,
         device: Optional[torch.device],
         param_overrides: Optional[dict] = None,
+        fusion=None,
+        harmonic_injection: Optional[dict] = None,
+        node_sources: Optional[Sequence] = None,
     ) -> None:
         self.grid = grid
         self.config = config
@@ -150,6 +195,11 @@ class SolvedState:
         self.dtype = dtype
         self.device = device
         self.param_overrides = param_overrides
+        # Zero-impedance branches collapsed by the solve (``None`` = none); the lazy
+        # branch quantities need it to report the current through a fused branch.
+        self.fusion = fusion
+        self.harmonic_injection = harmonic_injection
+        self.node_sources = node_sources
 
     # -- node quantities ---------------------------------------------------- #
     def node_voltages(self) -> Tensor:
@@ -166,6 +216,15 @@ class SolvedState:
 
     def thd(self, node_id: int, phase: Phase) -> Tensor:
         """Voltage THD at a ``(node, phase)``: ``sqrt(sum_{h>1}|V_h|^2)/|V_1|``.
+
+        Computed over the REQUESTED orders only — the orders in
+        ``config.harmonic_orders``, which is what ``v`` holds. This is the IEC
+        definition restricted to the solved spectrum, so the value depends on which
+        orders the caller asked for: a solve of ``[1, 5, 7]`` reports the THD of those
+        two harmonics, not of the full spectrum up to order 40 that a standard
+        measurement would cover. Ask for every order that carries energy (the default
+        ``[1, 3, 5, 7, 9, 11, 13]`` covers the dominant ones of a converter spectrum)
+        when the number is to be compared with a measurement or a limit.
 
         Requires the fundamental (order 1) to be among the solved orders.
         """
@@ -188,7 +247,11 @@ class SolvedState:
         """Per-branch terminal currents (list of ``BranchCurrent``); differentiable.
 
         Lazily reuses the assembly's primitive blocks (``Y_prim @ V_terminal``),
-        applying the same ``param_overrides`` the voltage solve used.
+        applying the same ``param_overrides`` the voltage solve used. A branch the solve
+        FUSED has no primitive block; its current comes from Kirchhoff's law at the
+        fused node, which needs the solve's nodal injection — rebuilt here from the
+        grid, the solved voltages and this state's own operating point / harmonic
+        injection, so the recovered current is the one the solved network carries.
         """
         from .assembly import branch_currents as _branch_currents
 
@@ -200,7 +263,84 @@ class SolvedState:
             dtype=self.dtype,
             device=self.device,
             param_overrides=self.param_overrides,
+            fusion=self.fusion,
+            i_inj=self._nodal_injection() if self.fusion is not None else None,
         )
+
+    def _nodal_injection(self) -> Tensor:
+        """The solve's nodal current injection ``[*batch, H, N]`` (device side only).
+
+        The injection the nodal equations balance, per solved order: the devices'
+        fundamental current at order 1 (``-I_device(V1)``, the sign of
+        ``Y V = I_slack - I_device``) and, above it, their harmonic current sources minus
+        what their harmonic Norton shunt draws (that shunt sits inside ``Y(h)``, so the
+        device's nodal current is the source minus the shunt current), plus any node
+        harmonic source. The SOURCE rows are deliberately left out — under an ideal slack
+        the source's own current is an output of the solve, not an input, so the
+        fused-branch recovery drops those rows' balances either way.
+        """
+        from .assembly import device_current_injections
+        from .solver.harmonic_flow import _harmonic_shunt_currents, harmonic_injections
+
+        f0 = float(self.grid.base_frequency_hz)
+        orders = [float(f) / f0 for f in self.frequencies_hz]
+        fundamental = next(
+            (k for k, h in enumerate(orders) if abs(h - 1.0) < 1e-12), None
+        )
+        if fundamental is None:
+            raise InputError(
+                "the current through a fused branch is derived from the nodal current "
+                "balance, whose harmonic part scales with each device's FUNDAMENTAL "
+                "current; solve order 1 together with the harmonic orders."
+            )
+        v1 = self.v[..., fundamental, :]
+        cols: list[Tensor] = []
+        for k, h in enumerate(orders):
+            if abs(h - 1.0) < 1e-12:
+                cols.append(
+                    -device_current_injections(
+                        self.grid,
+                        self.v[..., k, :],
+                        self.index,
+                        [f0],
+                        dtype=self.dtype,
+                        device=self.device,
+                        operating_point=self.config.operating_point,
+                        param_overrides=self.param_overrides,
+                        symmetry=self.config.symmetry,
+                    ).squeeze(-2)
+                )
+            else:
+                order = int(round(h))
+                i_src = harmonic_injections(
+                    self.grid,
+                    v1,
+                    [order],
+                    operating_point=self.config.operating_point,
+                    harmonic_injection=self.harmonic_injection,
+                    node_sources=self.node_sources,
+                    symmetry=self.config.symmetry,
+                    dtype=self.dtype,
+                    device=self.device,
+                    param_overrides=self.param_overrides,
+                )
+                i_shunt = _harmonic_shunt_currents(
+                    self.grid,
+                    v1,
+                    self.v[..., k : k + 1, :],
+                    [order],
+                    operating_point=self.config.operating_point,
+                    load_shunt=self.config.load_shunt,
+                    symmetry=self.config.symmetry,
+                    dtype=self.dtype,
+                    device=self.device,
+                    param_overrides=self.param_overrides,
+                    index=self.index,
+                )
+                cols.append((i_src - i_shunt).squeeze(-2))
+        lead = torch.broadcast_shapes(*[c.shape[:-1] for c in cols])
+        n = cols[0].shape[-1]
+        return torch.stack([c.broadcast_to(*lead, n) for c in cols], dim=-2)
 
     def branch_flows(self):
         """Per-branch complex power flows ``S = V ⊙ conj(I)`` at each terminal.
@@ -353,6 +493,7 @@ def simulate(
     *,
     device: Optional[str | torch.device] = None,
     dtype: str | torch.dtype = "complex128",
+    precision: str = "full",
     param_overrides: Optional[dict] = None,
     harmonic_injection: Optional[dict] = None,
     node_sources: Optional[Sequence] = None,
@@ -360,17 +501,24 @@ def simulate(
     on_disconnected: str = "raise",
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
+    equilibrate: Optional[str] = None,
 ) -> SolvedState:
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
     ``config`` (a :class:`SimulationConfig`, default = harmonic with standard orders)
-    is the serializable definition of WHAT to compute; ``device`` / ``dtype`` are the
-    execution concerns. Gradients flow from ``grid`` parameters through the result's
-    tensor accessors. ``param_overrides`` (per-parameter tensor substitution, see
-    :func:`pgml.assembly.assemble_ybus`) applies to ``calculation="power_flow"``
-    only — the state threads it into its lazy branch quantities so voltage and
-    currents describe the same overridden network; the harmonic calculation
-    rejects it.
+    is the serializable definition of WHAT to compute; ``device`` / ``dtype`` /
+    ``precision`` are the execution concerns. Gradients flow from ``grid`` parameters
+    through the result's tensor accessors. ``param_overrides`` (per-parameter tensor
+    substitution, see :func:`pgml.assembly.assemble_ybus`) applies to BOTH calculations:
+    the state threads it into its lazy branch quantities so voltage and currents
+    describe the same overridden network, and the harmonic calculation applies it to
+    every order's admittance and device power.
+
+    ``precision`` selects the working precision of the linear algebra: ``"full"``
+    (default) factors at ``dtype``, ``"mixed"`` factors at complex64 and refines
+    against complex128 residuals (see :func:`pgml.solver.solve_power_flow`) — the
+    recommended recipe for throughput on an ill-conditioned SI-unit feeder, since a
+    plain complex64 run of such a network keeps only a handful of digits.
 
     ``on_disconnected`` decides what the pre-solve connectivity check does with
     (node, phase) rows that have no galvanic path to an in-service source — an open
@@ -397,8 +545,14 @@ def simulate(
     :func:`pgml.solver.solve_power_flow`) — execution concerns like device and dtype,
     not part of the serializable config. ``linear_solver="block"`` with the row
     partition of an independent-grid ensemble
-    (``pgml.multigrid.MergedGrid.block_rows()``) factors each member on its own; both
-    apply to ``calculation="power_flow"`` only.
+    (``pgml.multigrid.MergedGrid.block_rows()``) factors each member on its own. Both
+    apply to the harmonic calculation as well, where they select the backend of the
+    fundamental solve AND of every per-order solve.
+
+    ``equilibrate`` is the diagonal equilibration of every factored system (``None`` =
+    the documented default ``solver.equilibration.mode``, ``"off"`` to factor each
+    matrix as assembled). It changes the conditioning of the factorizations, not the
+    result: see :func:`pgml.solver.solve_power_flow`.
 
     Raises :class:`~pgml.errors.ConvergenceError` if the nonlinear power flow does not
     converge (``strict=True``, the default); pass ``strict=False`` to return the
@@ -413,8 +567,12 @@ def simulate(
             grid,
             slack=config.slack,
             tol=config.tol,
+            tol_update_pu=config.tol_update_pu,
+            s_base_va=config.s_base_va,
+            enforce_q_limits=config.enforce_q_limits,
             max_iter=config.max_iter,
             dtype=cdt,
+            precision=precision,
             device=dev,
             operating_point=config.operating_point,
             param_overrides=param_overrides,
@@ -422,6 +580,7 @@ def simulate(
             linear_solver=linear_solver,
             block_rows=block_rows,
             on_disconnected=on_disconnected,
+            equilibrate=equilibrate,
         )
         v = pf.v.unsqueeze(-2)  # [*batch, 1, N]
         freqs = torch.tensor(
@@ -433,22 +592,9 @@ def simulate(
             pf.iterations,
             float(pf.residual),
         )
+        fusion = pf.fusion
         pf_diag = pf.diagnostics
     else:
-        if param_overrides is not None:
-            raise InputError(
-                "param_overrides is not supported for calculation='harmonic': the "
-                "harmonic solve reads parameters from the grid only. Apply the "
-                "values to the grid (float/tensor duality) or use "
-                "calculation='power_flow'."
-            )
-        if linear_solver != "auto" or block_rows is not None:
-            raise InputError(
-                "linear_solver / block_rows apply to calculation='power_flow' only: "
-                "the harmonic calculation factors each per-order system itself. Use "
-                "calculation='power_flow', or pgml.solver.solve_harmonic_flow for "
-                "the harmonic path."
-            )
         hf = solve_harmonic_flow(
             grid,
             config.harmonic_orders,
@@ -456,15 +602,24 @@ def simulate(
             operating_point=config.operating_point,
             harmonic_injection=harmonic_injection,
             node_sources=node_sources,
-            include_load_shunt=config.include_load_shunt,
+            load_shunt=config.load_shunt,
             tol=config.tol,
+            tol_update_pu=config.tol_update_pu,
+            s_base_va=config.s_base_va,
+            enforce_q_limits=config.enforce_q_limits,
             max_iter=config.max_iter,
             dtype=cdt,
+            precision=precision,
             device=dev,
             symmetry=config.symmetry,
             on_disconnected=on_disconnected,
+            param_overrides=param_overrides,
+            linear_solver=linear_solver,
+            block_rows=block_rows,
+            equilibrate=equilibrate,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
+        fusion = hf.fusion
         converged, iterations, residual = (
             hf.pf.converged,
             hf.pf.iterations,
@@ -498,6 +653,9 @@ def simulate(
         dtype=cdt,
         device=dev,
         param_overrides=param_overrides,
+        fusion=fusion,
+        harmonic_injection=harmonic_injection,
+        node_sources=node_sources,
     )
 
 

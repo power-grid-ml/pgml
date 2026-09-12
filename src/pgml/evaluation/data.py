@@ -172,8 +172,8 @@ def harmonic_profile_from_array(
     """Build a :class:`HarmonicProfile` from a plain complex ``[H, N]`` array.
 
     The row-building primitive every harmonic-profile adapter shares — the
-    solver-result path (:func:`harmonic_profile`) and the ML estimator/dataset
-    path (``pgl.evaluation``) both delegate here, so the per-unit base and the
+    solver-result path (:func:`harmonic_profile`) and a downstream ML
+    estimator/dataset path both delegate here, so the per-unit base and the
     node/phase/order alignment cannot drift between the two. ``frequencies_hz``
     (one entry per ``H``-row) is REQUIRED: a bare array cannot reveal its own
     row-to-order layout. ``index`` is the :class:`NodePhaseIndex` of the rows
