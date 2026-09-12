@@ -169,14 +169,18 @@ def log_line_models(grid: Grid) -> None:
     A line whose ``harmonic_line_model`` is still unresolved is assembled from its
     stored parameters (constant ``R``, ``X`` proportional to ``h``), which is the naive
     model the modeling defaults deliberately do not choose — so an unresolved line is
-    logged as a WARNING naming the entry point that resolves it. Converted grids are
-    resolved at conversion time; a hand-built grid is resolved by
+    logged as a WARNING naming the count, the first few line ids and the entry point that
+    resolves it. This matters above the fundamental only, and it is not cosmetic: the
+    model a three-phase lumped line resolves to is the sequence-aware one, which carries
+    a zero-sequence earth-return term the naive model has no equivalent for. Converted
+    grids are resolved at conversion time; a grid built without a converter is resolved by
     ``pgml.geometry.apply_default_harmonic_model``.
     """
     lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
     if not lines:
         return
     counts: dict[str, int] = {}
+    unresolved_ids: list[int] = []
     for ln in lines:
         name = ln.harmonic_line_model or (
             "explicit resistance_frequency"
@@ -184,21 +188,26 @@ def log_line_models(grid: Grid) -> None:
             else "unresolved"
         )
         counts[name] = counts.get(name, 0) + 1
+        if name == "unresolved":
+            unresolved_ids.append(int(ln.id))
     logger.info(
         "pgml: %d line harmonic model(s): %s.",
         len(lines),
         ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
     )
-    n_unresolved = counts.get("unresolved", 0)
-    if n_unresolved:
+    if unresolved_ids:
         logger.warning(
             "pgml: %d of %d lines have no harmonic line model and are assembled from "
             "their stored parameters (R constant, X proportional to h). Above the "
-            "fundamental this is the naive model; apply the documented default with "
+            "fundamental this is the naive model, which differs from the resolved one "
+            "(a three-phase lumped line resolves to the sequence-aware model, whose "
+            "zero-sequence earth-return term the naive model omits). First id(s): %s. "
+            "Apply the documented default with "
             "pgml.geometry.apply_default_harmonic_model(grid) (the converters do it "
             "for you) or set Line.harmonic_line_model.",
-            n_unresolved,
+            len(unresolved_ids),
             len(lines),
+            unresolved_ids[:10],
         )
     log_synthesized_geometry_radius(lines)
 

@@ -306,9 +306,13 @@ that sets the operating point is available.
   modeled iff a node carries `Phase.N`; WYE/DELTA mix; symmetry; the line harmonic models
   in use). Emitted ONCE per user entry point (`assemble_ybus` / `solve_power_flow` /
   `solve_harmonic_flow`).
-- `log_line_models(grid)` — the line-model part of that summary, plus a WARNING naming
-  `apply_default_harmonic_model` when a line's `harmonic_line_model` is still unresolved
-  (such a line is assembled from its stored parameters, i.e. the naive model above f0).
+- `log_line_models(grid)` — the line-model part of that summary, plus a WARNING naming the
+  count, the first ten line ids and `apply_default_harmonic_model` when a line's
+  `harmonic_line_model` is still unresolved (such a line is assembled from its stored
+  parameters, i.e. the naive model above f0, where a three-phase lumped line would resolve
+  to the sequence-aware model and its zero-sequence earth-return term). Reached once per
+  solve: `assemble_ybus` and `solve_power_flow` each log the summary, and a harmonic study
+  delegates to the fundamental solve's.
 - `log_synthesized_geometry_radius(lines)` — WARNS when `line.geometry.internal_inductance`
   is anything but `gmr` while some line carries a synthesized geometry tagged
   `synth_unphysical`: those geometries keep the modeling-default radius as a placeholder,

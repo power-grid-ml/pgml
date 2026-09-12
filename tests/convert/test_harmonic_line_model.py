@@ -249,17 +249,54 @@ def test_opendss_converter_applies_the_default():
 # ---------------------------------------------------------------------------
 # hand-built grids stay the caller's responsibility, but loudly
 # ---------------------------------------------------------------------------
+def _unresolved_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "no harmonic line model" in r.getMessage()
+    ]
+
+
 def test_unresolved_lines_warn_at_assembly(caplog):
-    """A hand-built grid with no model logs a WARNING naming the entry point."""
+    """A grid built without a converter logs a WARNING naming the entry point."""
     from pgml.grids import synthetic_feeder
 
     grid = synthetic_feeder(4)
     with caplog.at_level(logging.INFO, logger="pgml"):
         assemble_ybus(grid, [2.0 * math.pi], dtype=CDT)
-    warns = [
-        r.getMessage()
-        for r in caplog.records
-        if r.levelno == logging.WARNING and "no harmonic line model" in r.getMessage()
-    ]
+    warns = _unresolved_warnings(caplog)
     assert len(warns) == 1, warns
     assert "apply_default_harmonic_model" in warns[0]
+
+
+def test_unresolved_lines_warn_once_per_harmonic_solve(caplog):
+    """The harmonic study names the count and the first line ids, exactly once.
+
+    A grid assembled without a converter keeps the naive model at every order while a
+    converted one resolves to the sequence-aware model, so the solve that is actually
+    affected has to say so — and a study over several orders may say it only once.
+    """
+    from pgml.grids import synthetic_feeder
+    from pgml.solver import solve_harmonic_flow
+
+    grid = synthetic_feeder(4)
+    ids = [int(b.id) for b in grid.branches if isinstance(b, Line)]
+    with caplog.at_level(logging.INFO, logger="pgml"):
+        solve_harmonic_flow(grid, [1, 5, 7], dtype=CDT)
+    warns = _unresolved_warnings(caplog)
+    assert len(warns) == 1, warns
+    assert f"{len(ids)} of {len(ids)} lines" in warns[0]
+    assert str(ids[0]) in warns[0]
+    assert "apply_default_harmonic_model" in warns[0]
+
+
+def test_a_resolved_grid_is_silent(caplog):
+    """Applying the documented default removes the warning."""
+    from pgml.geometry import apply_default_harmonic_model
+    from pgml.grids import synthetic_feeder
+    from pgml.solver import solve_harmonic_flow
+
+    grid = apply_default_harmonic_model(synthetic_feeder(4))
+    with caplog.at_level(logging.INFO, logger="pgml"):
+        solve_harmonic_flow(grid, [1, 5], dtype=CDT)
+    assert _unresolved_warnings(caplog) == []
