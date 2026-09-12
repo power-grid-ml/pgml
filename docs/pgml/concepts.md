@@ -14,10 +14,12 @@ $$
 
 for the node voltages. Branch currents, terminal powers and spectra follow from `V(h)`.
 
-Harmonic sources are current injections in the Norton sense. A distorting device is a
-current source per order, optionally in parallel with a frequency-dependent shunt
-admittance. At harmonic orders the voltage source behind the slack is a short circuit and
-contributes only its own shunt.
+Harmonic sources are current injections in the Norton sense. A distorting device is a current
+source per order in parallel with a frequency-dependent shunt admittance derived from its
+fundamental operating point, which is the main damping of a feeder-end parallel resonance.
+`load_shunt` selects the shunt model, and a generation-sign device carries none by default.
+At harmonic orders the voltage source behind the slack is a short circuit and contributes only
+its own shunt. {doc}`modeling/references/opendss/harmonics` gives the admittance in full.
 
 At the fundamental the load flow is nonlinear, because a constant-power load is not a fixed
 admittance. `solve_power_flow` runs a current-injection fixed point or a Newton iteration,
@@ -67,10 +69,10 @@ Every branch contributes a pi-form primitive admittance.
 
 A line can instead carry `conductor_geometry`. Assembly then computes the impedance from
 conductor coordinates with the Carson/Deri earth-return and skin-effect model, per order.
-Lines defined by lumped R/L/C use one of the analytic harmonic line models instead.
-<!-- verify after fix-harmonic-line-model -->
-A converted grid arrives with the configured default harmonic line model already applied, so
-a three-phase R/X line uses the sequence-aware model rather than plain proportional scaling.
+Lines defined by lumped R/L/C use one of the analytic harmonic line models instead, selected
+by the typed field `Line.harmonic_line_model`. A converted grid arrives with the configured
+default already resolved into that field, so a three-phase R/X line uses the sequence-aware
+model rather than plain proportional scaling.
 {doc}`modeling/harmonic-line-model` explains the difference and when it matters.
 
 ## Floats or tensors, same grid
@@ -121,7 +123,10 @@ Each injection appliance may override the node-level neutral-or-ground choice th
 ## Harmonic injection per phase
 
 The same incidence matrix drives harmonic injection, so the normalisation always uses the
-correct terminal voltage. A device carries either one `spectrum`, broadcast to every
+correct terminal voltage. The device Norton shunt is connection-aware in the same way: its
+element admittance is mapped through the same incidence `M`, so a four-wire WYE device returns
+its shunt current through the neutral row and a DELTA device puts each leg admittance on both
+of its phase diagonals. A device carries either one `spectrum`, broadcast to every
 connected phase or delta branch, or a `spectrum_per_phase` mapping. The two fields are
 mutually exclusive. A phase absent from `spectrum_per_phase` injects nothing.
 

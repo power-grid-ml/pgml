@@ -124,12 +124,49 @@ because a delta coil's own base is `3·u_LL²/S`.
 - Every winding pairing of wye, grounded wye, delta, zigzag and grounded zigzag except
   zigzag to zigzag, at every clock of the pairing's parity.
 - Solid neutral grounding only. A grounding impedance is rejected rather than ignored.
-- The zero-sequence path follows the winding topology, while its value equals the
-  positive-sequence leakage. A separate zero-sequence value override is not consumed yet,
-  which matters mainly for a grounded zigzag, whose true `Z0` is smaller, and for
-  three-limb-core YNyn units.
+- The zero-sequence path follows the winding topology, so a delta or zigzag winding blocks
+  it. Its value is `Transformer.zero_sequence` when set, otherwise the documented
+  `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` ratios, which ship at 1.0 so that
+  `Z0 = Z1`. That is also what OpenDSS and power-grid-model imply for a two-winding unit,
+  since neither has a zero-sequence leakage input, while pandapower's `vk0_percent` and
+  `vkr0_percent` are read into the field by the converter. Set it for a three-limb-core YNyn
+  unit, where `X0/X1` is typically 0.3 to 1.0, and for a grounding zigzag, where `X0/X1` is
+  well below 1. Validated against pandapower's own unbalanced power flow on YNyn and Dyn
+  units at `vk0/vk` of 0.3, 0.5 and 2.0: the per-phase voltages agree to 2.0e-4 V, against
+  0.93 to 1.88 V when the value is dropped.
+- Not modelled, and named in a converter warning rather than dropped silently: a
+  zero-sequence magnetizing branch (pandapower `mag0_percent`/`mag0_rx`, power-grid-model
+  `i0_zero_sequence`/`p0_zero_sequence`, the path a three-limb core's zero-sequence flux
+  takes through tank and air), the HV/LV split of the zero-sequence leakage inside a T
+  (pandapower `si0_hv_partial`), and a neutral earthing impedance `3·Z_N` (pandapower
+  `xn_ohm`/`rn_ohm`, OpenDSS `Rneut`/`Xneut`, which the OpenDSS converter refuses).
 - Two-winding units only. No three-winding units and no regulators.
-- The magnetizing branch is a shunt on the HV terminal, referred to the HV line voltage.
+- The magnetizing branch is a shunt on one terminal, outside the leakage transform. Which
+  terminal is the documented choice `transformer.magnetizing_placement`: `from_terminal`,
+  the shipped default, puts it on the HV/from diagonal, so core loss does not see the leakage
+  drop and is independent of loading; `to_terminal` is OpenDSS's own placement, which
+  attaches the whole branch to its last winding's terminal; `split` is power-grid-model's,
+  half on each terminal. On a 500 kVA 20/0.4 kV unit loaded from 0 to 500 kW, `to_terminal`
+  reproduces a live OpenDSS solve to between 3e-10 and 2e-9 pu, while the default deviates
+  by 9.2e-5 pu at a 0.1 % magnetizing current, 2.2e-4 pu at 0.5 % and 8.2e-4 pu at 2 %, and
+  `split` by half of that. `split` reproduces power-grid-model to its magnetizing-free
+  tolerance of 1e-8 pu.
+- The winding resistance follows `R(f) = R · m(f) · (f/f₀ if the unit holds X/R constant
+  else 1)`. Here `m(f)` is the `resistance_frequency` multiplier, a constant, the Carson skin
+  law or a sampled curve, and the second factor is OpenDSS's `XRConst`, carried per
+  transformer in `harmonic_xr_constant` and selectable globally through
+  `transformer.harmonic_resistance.law`. The shipped default is R constant with X
+  proportional to h, which matches OpenDSS's `XRConst=No` default and pandapower's and
+  power-grid-model's frequency-independent resistance. It understates transformer damping at
+  high orders, because no eddy-current or stray-loss rise is modelled. Both settings were
+  validated against OpenDSS's own `Yprim` at orders 1, 5 and 13 to 1.25e-6 S, which is
+  OpenDSS's anti-float shunt, against 2e-2 S when the flag is ignored.
+- The zigzag winding model is experimental. It reproduces the three properties a zigzag must
+  have, a ±30° clock contribution, no zero-sequence transfer, and a low-impedance
+  zero-sequence path to ground on its own side, and it agrees with power-grid-model on an
+  unbalanced solve once the zero-sequence value is carried. Neither OpenDSS nor pandapower
+  can express the same unit as a single two-winding element, so it has one independent
+  reference only. Constructing one logs a warning.
 - With no winding metadata in the source data the default vector group is Dyn11, the European
   LV default.
 
@@ -154,6 +191,14 @@ so `R_lv = (%R_wdg1+%R_wdg2)/100 · Z_base_LV` and `X_lv = XHL%/100 · Z_base_LV
 `Z_base_LV = kV_lv²·1000/kVA` recover the LV-referred leakage directly, provided both windings
 share one kVA rating. Grounding follows OpenDSS's shorthand-bus rule, and only solidly
 grounded wye or delta windings convert.
+
+`%imag` and `%noloadloss` are the imaginary and real parts of the core admittance
+separately, each in percent of the winding base admittance, rather than a total no-load
+current with the loss component inside it, which is pandapower's `i0_percent` convention.
+The converter therefore reads `B_m = %imag/100 · S/u_hv²` directly, with no Pythagorean
+subtraction, and accepts a `%imag` below `%noloadloss`. Measured on a live `Yprim`
+difference, the magnetizing contribution is exactly
+`(%noloadloss + j·(−%imag))/100 · S/u_wdg2²` at the last winding's terminal.
 
 The three transformers of the CIGRE LV benchmark are Dyn1 units, 20 kV to 0.4 kV, rated 0.5,
 0.15 and 0.3 MVA with `shift_degree = 30`. The pandapower reader converts them to a delta

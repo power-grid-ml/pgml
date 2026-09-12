@@ -104,6 +104,21 @@ appliances by connection, phase count and effective return. The OpenDSS reader r
 element's own resolved return conductor rather than applying one rule per bus. The field is
 meaningless for DELTA, where a non-default value raises.
 
+### Where a four-wire neutral is grounded
+
+A bus that carries `Phase.N` gets its own matrix row, and nothing ties that row to the ground
+reference implicitly. A WYE appliance's return current flows into it, a four-conductor line
+carries it as a series conductor, and the transformer stamp only touches the phases it is wired
+to. The ground tie has to come from an explicit element. On an OpenDSS import that is a
+`Reactor` on the neutral conductor (`bus1=bus.4`), which converts to a phase-to-ground shunt on
+`Phase.N`. With that tie the neutral voltages of a three-bus four-wire feeder reproduce a live
+OpenDSS solve to 5e-10 V. Without any tie the neutral rows have no reference, the admittance
+matrix is rank-deficient, and the solve reports non-convergence rather than an answer, because
+pgml has no anti-float stabiliser where OpenDSS adds a `ppm_antifloat` shunt. A transformer
+winding wired to an explicit fourth conductor is refused by the converter rather than silently
+re-grounded. The pandapower converter never emits `Phase.N`, so four-wire grids come from
+OpenDSS or from hand-built input.
+
 ## Per-phase harmonic injection
 
 An OpenDSS load carries exactly one spectrum, and one complex multiplier per order applies to

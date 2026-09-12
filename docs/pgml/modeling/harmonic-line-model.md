@@ -59,8 +59,8 @@ OpenDSS has three line-impedance paths. A `LineGeometry` (real conductor coordin
 recomputed at every frequency with the full Carson/Deri model, earth return and skin effect
 included, and a specified geometry overrides every other impedance definition
 ([Line docs](https://opendss.epri.com/Line.html)); the earth model is selectable
-(`earthmodel = Carson | Deri | FullCarson`). This is the path pgml's geometry model matches
-bit-exact, described in [Carson line constants](references/opendss/carson.md). An
+(`earthmodel = Carson | Deri | FullCarson`). This is the path pgml's geometry model
+reproduces, described in [Carson line constants](references/opendss/carson.md). An
 impedance-defined line (`LineCode` with `R1 X1 R0 X0`, or `Rmatrix`/`Xmatrix`) instead
 carries explicit Carson earth-return terms `Rg` and `Xg`, by default
 `0.01805 + j·0.155081` Ω per 1000 ft at 60 Hz for 100 Ω·m earth and user-overridable
@@ -106,8 +106,14 @@ fixed at `0.7788·radius`, and finds a finite spacing `D = GMR·exp(X1/(2·f0·�
 which is what makes the direct model physically grounded rather than an ad-hoc scaling.
 
 The full Carson/Deri model with earth return is reserved for genuinely geometry-defined
-lines and for zero-sequence and ground-return paths, where it is correct and stays
-bit-exact against OpenDSS.
+lines and for zero-sequence and ground-return paths. On the same conductor geometry it
+agrees with OpenDSS to 4.8e-8 relative on `Z` and 2.1e-5 on `C`. Those two residuals are
+the physical constants rather than the model, because pgml uses the SI values of `μ0` and
+`e0` where OpenDSS truncates them. With the default conductor internal-inductance model
+the agreement holds below 1 kHz, where both tools take the spacing term from the published
+conductor GMR. OpenDSS moves that term to the physical radius outside 40 Hz to 1 kHz;
+`line.geometry.internal_inductance: gmr_power_frequency` reproduces that rule and holds the
+same agreement at every frequency.
 
 ## Unbalanced and 4-wire studies
 
@@ -149,17 +155,61 @@ neutral coordinates. The earth-resistance coefficient is exposed (default Carson
 `π²·10⁻⁷`) so the damping can be tuned or matched against a reference tool, mirroring the
 user-settable `Rg`/`Xg` of OpenDSS.
 
+The sub-linearity is available as an option, `line.earth_return.x0_frequency =
+carson_sublinear`, which subtracts the Carson/Deri decay `1.5·μ0·f0·h·ln h` from `X0(h)`.
+The soil resistivity cancels in that term, so it needs no extra data. It is not the
+default because it can drive `X0(h)` negative at very high orders on a cable whose stored
+`X0` is small, a property OpenDSS's own `Xg` correction shares. With the earth parameters
+matched on both sides, the lumped `sequence_aware` impedance and OpenDSS's R/X-line
+impedance agree to 1e-11 relative at every order up to 25, on all 32 lines of IEEE-33.
+
+## The conductor's internal inductance above power frequency
+
+A published GMR is measured at power frequency. It folds the conductor's internal inductance
+into one equivalent radius: for a solid round conductor `GMR = e^(-1/4)·radius`, and the
+reactance that adds, `(f·μ0)·ln(radius/GMR) = f·μ0/4`, is exactly `ω·μ0/(8π)`, the internal
+reactance at uniform current density. Skin effect confines the current to the surface, so
+the internal inductance decays and a fixed GMR over-states the reactance at harmonic
+frequencies. `pgml.geometry.internal_reactance_ratio` returns that decay,
+`g(f) = Im(Zint)/(f·μ0/4)`: for a 336 kcmil ACSR, `g = 0.97` at 250 Hz, `0.74` at 1 kHz and
+`0.49` at 2.5 kHz. For a 1/0 ACSR the same numbers are `1.00`, `0.97` and `0.84`, so the
+effect is a property of the conductor and not of the frequency alone.
+
+`line.geometry.internal_inductance` selects how the geometry path handles it.
+
+| value | model | use it for |
+|---|---|---|
+| `gmr` (default) | published GMR at every frequency | the default, and the only safe choice when a geometry was synthesized from R/X |
+| `gmr_skin` | published GMR with its internal reactance scaled by `g(f)` | measured conductor data, harmonics above about 1 kHz |
+| `gmr_power_frequency` | `gmr` while `40 Hz < f < 1 kHz`, `bessel` outside | reproducing OpenDSS at every frequency |
+| `bessel` | physical radius plus the full `Im(Zint)` | a conductor known to be solid and round |
+
+On a solid round conductor `gmr_skin` and `bessel` are the exact solution, and the default
+is 0.24 % (median) below 1 kHz and 1.0 % above. `gmr_power_frequency` reproduces OpenDSS to
+4.6e-8 relative from 20 Hz to 3 kHz, at the price of a discontinuity at each band edge. On
+the published ACSR 1/0 of the OpenDSS line-constants example that discontinuity is 8.9 % of
+`X`, because the rule replaces a measured `GMR/radius = 0.269` with the solid-round `0.7788`
+in one step while only 3 % of that conductor's internal inductance has actually decayed.
+
+Do not combine a radius-based model with a geometry produced by `synthesize_grid_geometry`.
+The synthesis fits the GMR and leaves the radius at its default, so the radius carries no
+information. Assembly warns when it sees that combination.
+
 ## Choosing the model
 
-<!-- verify after fix-harmonic-line-model -->
-A converted grid already carries the configured default model, because the readers apply it
-on import. A three-phase R/X line becomes sequence-aware and a one- or two-phase line
-positive-sequence. The choice is a field on the line, `harmonic_line_model`, so it can be
-read back and overridden per line.
+The model is the typed field `Line.harmonic_line_model`, one of `geometry`,
+`sequence_aware`, `positive_sequence`, `naive`, or unset, with `Line.harmonic_skin_effect`
+and `Line.earth_return` carrying its options. A converted grid already carries the
+configured default, because the readers resolve it at conversion time and log which model
+they applied. A three-phase R/X line becomes sequence-aware and a one- or two-phase line
+positive-sequence, so a converted grid never reaches a harmonic solve as the naive model by
+accident.
 
 `apply_default_harmonic_model(grid)` applies the same defaults to a grid you assembled
 yourself, and skips any line that already carries an explicit model or a conductor geometry.
-Nothing is applied silently at solve time. Every default value lives in one ordered,
+Assembly resolves nothing: an unset model means the line is assembled from its stored
+parameters as they are, and a line that is still unset when a harmonic assembly runs
+produces a warning naming the call that resolves it. Every default value lives in one ordered,
 self-describing defaults file inside the installed package, including the `0.7788` ratio of
 geometric mean radius to conductor radius, the earth-return coefficient, the default
 conductor radius and heights, and the soil resistivity.
@@ -174,7 +224,7 @@ OpenDSS itself.
 | R/X feeder, raw `X ∝ h`, no skin or earth | nothing to set | `Z1(h) = R1 + j·X1·(f/f0)` | native 3-phase `R1/X1` LineCode (`Z1`) |
 | R/X feeder plus physical skin on R | `apply_positive_sequence_harmonic_model(grid)` | `Z1(h) = R1·m_skin(h) + j·X1·(f/f0)` | 3-phase R/X plus a skin rise OpenDSS applies only to geometry lines |
 | unbalanced 4-wire R/X feeder (`Z1` and `Z0`) | `apply_sequence_aware_harmonic_model(grid)` | `Z_abc(h)` with earth-free `Z1` and earth-damped `Z0` | native 3-phase R/X with `Rg`/`Xg`; reactance sub-linearity only via geometry |
-| real 3-phase conductor coordinates | set `Line.conductor_geometry` | full Carson (earth in `Z0`, skin on R) | `LineGeometry`, bit-exact |
+| real 3-phase conductor coordinates | set `Line.conductor_geometry` | full Carson (earth in `Z0`, skin on R) | `LineGeometry`, 4.8e-8 relative on `Z` below 1 kHz |
 | single-conductor or SWER check | `synthesize_grid_geometry(grid)` | single conductor plus earth floor | 1-phase `LineGeometry` line |
 
 For an unbalanced 4-wire feeder, give the lines a full 3×3 `Z_abc(f0)` so that `Z0` is
@@ -201,7 +251,9 @@ the smaller skin-effect resistance rise.
 
 So does the simplified R/X approach differ significantly from OpenDSS? Only against OpenDSS
 modelling the lines as 1-phase single conductors with earth return, the comparison shown
-above, where the feeder-end voltage at `h = 13` is about 0.0081 pu against 0.0095 pu.
-Against native OpenDSS modelling the same R/X as a 3-phase line, the standard way to enter a
-balanced feeder, the pgml default agrees and reproduces `Z1(h) = R1 + j·X1·(f/f0)`. The
-divergence is a property of the reference setup rather than of the pgml model.
+above, where the feeder-end voltage at `h = 13` is 0.00759 pu against 0.00894 pu. The
+single-conductor profile and the live OpenDSS profile of the same geometry agree to the
+printed digits. Against native OpenDSS modelling the same R/X as a 3-phase line, the
+standard way to enter a balanced feeder, the pgml default agrees and reproduces
+`Z1(h) = R1 + j·X1·(f/f0)`. The divergence is a property of the reference setup rather than
+of the pgml model.

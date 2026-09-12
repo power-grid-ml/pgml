@@ -92,16 +92,22 @@ the converter raises `ConversionError` if they do not. Watch the OpenDSS input s
 here: the sequential `~ wdg=1 ... kVA=x` form silently re-syncs both windings to the last
 kVA given, so only the array form `kvas=[x, y]` creates a genuine per-winding mismatch.
 
-Magnetizing branch. pgml refers the magnetizing shunt `y_m=G_m+jB_m` to the HV terminal
-(`magnetizing_conductance_s`, `magnetizing_inductance_h`). The pandapower converter
-computes `G_m=pfe_w/u_hv²` and `B_m` from `i0%` and `sn` on the HV base; the pgm converter
-refers `i0` and `p0`, which pgm defines on the to-side `u2`, the same way by the square
-nameplate ratio. pandapower internally keeps the branch on the LV base split into the
-pi-shunt, physically equivalent after the turns ratio but numerically different, so do not
-compare raw numbers without re-referring. pgm's own stamp is a different topology, half the
-magnetizing admittance on the to-side and half, through the tap, on the from-side. The
-residual against pgml's HV-only shunt is small, around 1.5e-4 pu for a realistic `i0` of
-0.5%, and at machine precision when `i0=p0=0`.
+Magnetizing branch. pgml stores the magnetizing shunt `y_m=G_m+jB_m` referred to the
+HV/from terminal (`magnetizing_conductance_s`, `magnetizing_inductance_h`). Where it is
+stamped is the documented choice `transformer.magnetizing_placement`, because the three
+reference engines disagree. OpenDSS attaches the whole branch to its last winding's
+terminal, verified on a live `Yprim` difference; power-grid-model splits it half onto `Y_tt`
+and half through the tap onto `Y_ff`; pandapower keeps it on the LV base inside its pi
+shunt. These are different topologies rather than different referrals, since the magnetizing
+current either does or does not see a winding's leakage drop. Measured deviations from a
+live OpenDSS solve on a 500 kVA 20/0.4 kV unit: `to_terminal` 3e-10 to 2e-9 pu, `split` half
+of `from_terminal`, and `from_terminal` (the shipped default) 9.2e-5, 2.2e-4 and 8.2e-4 pu
+at magnetizing currents of 0.1, 0.5 and 2 %.
+
+The conversion of the percentages differs per tool as well. pandapower's `i0_percent` is the
+total no-load current, so `B=√(I0²−G²)`; OpenDSS's `%imag` is the susceptance itself, read
+as `B_m = %imag/100·S/u_hv²` with no Pythagorean subtraction, and `%imag` below
+`%noloadloss` is accepted.
 
 ## Transformer ratio, tap and vector group
 
@@ -151,8 +157,10 @@ a reversed winding construction that no bus wiring can express, so this converte
 produces them, and zigzag has no OpenDSS `Transformer` connection at all. Regulators,
 tap-changer control and frequency-correction curves (`XfmrCode`, `FreqMultCurve`) are not
 read. The magnetizing branch (`%noloadloss`, `%imag`) converts with the same closed form as
-the pandapower path, but pgml stamps it as a plain HV-terminal shunt while OpenDSS places
-it inside the leakage T, so the two agree in direction and order of magnitude only.
+the pandapower path. Where pgml stamps it is the documented choice
+`transformer.magnetizing_placement`, whose `to_terminal` setting reproduces OpenDSS's own
+placement to 3e-10 pu; the shipped `from_terminal` default deviates by up to 8.2e-4 pu at a
+2 % magnetizing current.
 
 ## Power sign convention
 
@@ -187,10 +195,10 @@ on the ppc base, so scale it by `Z_base=vn_kv²/sn_mva` before comparing against
 
 | | reference voltage | Thévenin impedance | zero-sequence source Z |
 |---|---|---|---|
-| pgml | `Source.u_ref_v`, L-N per phase for 3φ, with `u_angle_deg` | diagonal per-phase R/L | equal to the positive sequence |
-| pandapower | `ext_grid.vm_pu`·`vn_kv` (L-L), `va_degree` | from `s_sc_max_mva`, `rx_max` | `r0x0_max`, `x0x_max`, not read |
-| OpenDSS | `Vsource.basekv`·`pu`, `angle` | `R1/X1`, or `MVAsc3`/`MVAsc1` with `x1r1` | `R0`, `X0`, not read |
-| pgm | `source.u_ref`·`u_rated` (L-L), `u_ref_angle` | from `sk`, `rx_ratio` | `z01_ratio`, not read |
+| pgml | `Source.u_ref_v`, L-N per phase for 3φ, with `u_angle_deg` | per-phase self and mutual R/L | `Z_self=(Z0+2·Z1)/3`, `Z_mutual=(Z0−Z1)/3` |
+| pandapower | `ext_grid.vm_pu`·`vn_kv` (L-L), `va_degree` | from `s_sc_max_mva`, `rx_max` | `x0x_max`, `r0x0_max` |
+| OpenDSS | `Vsource.basekv`·`pu`, `angle` | `R1/X1`, or `MVAsc3`/`MVAsc1` with `x1r1` | `R0`, `X0` |
+| pgm | `source.u_ref`·`u_rated` (L-L), `u_ref_angle` | from `sk`, `rx_ratio` | `z01_ratio` |
 
 Every converter passes the magnitude OpenDSS itself would use as the solved per-conductor
 EMF. The source builder divides that by √3 under three-phase operation to get the
@@ -199,9 +207,31 @@ own treatment. `id_map["slack_v_complex"]` keeps the same raw phasor as a conven
 the single-phase ideal-slack `v_fixed`. At harmonics the source EMF is zero, a short, and
 the source contributes only its Norton shunt `Y_s(h)=1/(R+j·2πh·f₀·L)`.
 
-Known gap. The zero-sequence source impedance is taken equal to the positive-sequence
-value, since none of `r0x0_max`, `R0`/`X0` or `z01_ratio` are consumed. This matters only
-for three-phase asymmetric studies where the source zero-sequence path is significant.
+Source zero sequence. A `Source`'s per-phase Thévenin is sequence-aware: each converter
+reads its tool's native zero-sequence data into `Z_self=(Z0+2·Z1)/3` and
+`Z_mutual=(Z0−Z1)/3`, the same identity the line path uses. Without native data the
+documented `source.zero_sequence.{r0_over_r1, x0_over_x1}` ratios apply, shipping at 1.0 so
+that `Z0=Z1`, which is what power-grid-model and pandapower themselves default to, and a
+warning names the source. The negative sequence is always `Z2=Z1`, correct for a passive
+upstream network; a rotating-machine source with `Z2≠Z1` would need the third circulant
+entry.
+
+Two differences to pandapower's own unbalanced power flow are worth knowing. It multiplies
+its zero-sequence ext-grid shunt by the IEC voltage factor `c=1.1` even in power-flow mode,
+and it pins the positive sequence as an ideal slack while putting the short-circuit
+impedance in the negative-sequence network. Measured on a four-wire LV feeder fed directly
+by an OpenDSS Vsource with `Z0≠Z1`, the per-phase voltages agree with a live OpenDSS solve
+to 7.8e-8 V at the fundamental and 5.6e-9 V at harmonics 3 to 9, where assuming `Z0=Z1`
+misses the triplen voltage by more than 100 % of its magnitude.
+
+Upstream harmonic distortion is an operating-point quantity rather than grid data, because
+the upstream network's harmonic voltage changes minute by minute while the grid description
+does not. A `Source` has no spectrum field. Supply the background per solve as
+`solve_harmonic_flow(..., node_sources=[NodeHarmonicSource(node_id=..., kind="voltage",
+spectrum=...)])` at the source's node, or reproducibly through `pgml.scenarios`'
+`BackgroundHarmonicConfig`, which realizes one voltage-kind node source per in-service
+`Source` from a config plus a seed. At orders `h > 1` the source itself contributes its
+Norton shunt, plus that EMF when one is supplied.
 
 ## Line model
 
@@ -215,10 +245,53 @@ for three-phase asymmetric studies where the source zero-sequence path is signif
 Sequence inputs become 3×3 phase matrices through `self=(Z0+2·Z1)/3` and
 `mutual=(Z0−Z1)/3`, applied to R, X, C and G, followed by `L=X/2πf₀`. When a dataset has no
 native zero-sequence data, `r0`, `x0` and `c0` default to ratios from
-`config.line.zero_sequence.*`, and an explicit native value always wins. pgm total values
-use a `length_m=1` idiom so the per-metre times length product reproduces the total
-exactly. OpenDSS native `n×n` matrices are read as matrices with no sequence assumption,
-while pandapower and pgm route through the sequence path.
+`line.zero_sequence.*`, and an explicit native value always wins. The converter then logs a
+warning naming the ratios it used and the number of lines affected, because every unbalanced
+and triplen result on that grid rests on them. pgm total values use a `length_m=1` idiom so
+the per-metre times length product reproduces the total exactly. OpenDSS native `n×n`
+matrices are read as matrices with no sequence assumption, while pandapower and pgm route
+through the sequence path.
+
+Every line model is a lumped pi branch: `Z=z·length`, `Y=y·length` split half to each
+terminal, with no hyperbolic long-line correction and no distributed-parameter model. pgml
+is a frequency-domain steady-state engine, so standing-wave and travelling-wave phenomena
+are outside its scope. Split a long line into segments when its electrical length stops
+being small at the highest order of interest.
+
+A shunt reactor is modelled with an inductance (`inductance_h`), so its susceptance
+magnitude falls as `1/h`. An OpenDSS `Reactor` with `R=0` maps exactly at every order; one
+with a series resistance is converted as the equivalent parallel pair at the fundamental,
+which keeps its loss term flat where the series branch would decay as `1/h²`, and the
+converter warns. A pandapower `net.shunt` converts to a fixed WYE `ShuntAppliance`, `G` from
+`p_mw` and `C` from `−q_mvar/(2πf₀)`, both referred to the shunt's own rated voltage. An
+inductive shunt (`q_mvar > 0`) therefore becomes a negative capacitance: exact at the
+fundamental, but its susceptance magnitude rises with frequency where a real reactor's
+falls, so harmonic results at such a bus are not faithful. The converter warns and names the
+count.
+
+## Ideal branches: switches, couplers and jumpers
+
+A branch whose series impedance is exactly zero, such as a closed switch with no impedance
+data, a bus coupler or jumper modelled as a zero-impedance line, or a zero-length line, is
+an ideal conductor. The nodal formulation has no stamp for it, because it inverts every
+branch's series impedance, so the solve imposes what the element actually states: the two
+terminals have the same voltage. Their node-phase rows are collapsed into one row of the
+solved system, the reduced system is solved, and the result is reported on the original node
+ids, where every node of a fused group carries the group's voltage. The current through such
+a branch follows from Kirchhoff's law at the fused node. Two ideal branches in parallel
+leave a circulating current undetermined, and the reported split is then the minimum-norm
+one, named in a warning.
+
+This is exact, and it is what pandapower, which merges the buses of a closed bus-bus switch,
+and power-grid-model, whose `link` is a perfect connection, describe. The alternative is a
+small stand-in resistance, `branch.near_ideal_series_resistance_ohm`, which stays available
+for a branch that has to remain stamped, above all one whose state a `branch_states` sweep
+toggles. It is not free: it adds its own voltage drop, and it raises that row's admittance
+scale and with it the smallest power mismatch the solve can reach. On a 132 kV network with
+three coupler lines, 1e-4 Ω multiplies the condition number of the assembled system by 7600,
+from 6.5e2 to 4.9e6. Under
+`branch.zero_impedance: error` such a branch is refused by name instead of fused, and the
+message points at both ways out.
 
 ## Harmonics and earth return
 
@@ -234,10 +307,11 @@ default earth model is DERI.
 
 pgml offers three line models, chosen per study:
 
-- Geometry Carson/Deri (`conductor_geometry`) uses the full complex-penetration formula. It
-  matches OpenDSS bit-exactly, relative Z error around 1e-13, on every order including
-  triplen, because feeding the same geometry to both engines removes any earth-model
-  ambiguity. Use it for OpenDSS parity.
+- Geometry Carson/Deri (`conductor_geometry`) uses the full complex-penetration formula. On
+  the same geometry it agrees with OpenDSS to 4.8e-8 relative on `Z` on every order
+  including triplen, because feeding the same geometry to both engines removes any
+  earth-model ambiguity. The residual is the `μ0` constant OpenDSS truncates. Use it for
+  OpenDSS parity.
 - Positive-sequence (`apply_positive_sequence_harmonic_model`) applies `X1(h)=X1·h` plus
   skin effect on `R1`, with no earth term, which cancels in the positive sequence. This is
   physically representative for balanced R/X feeders.
@@ -246,22 +320,35 @@ pgml offers three line models, chosen per study:
   resistance `3·(Re(f)−Re(f₀))`. It is analytic and never non-physical, but `X0` stays
   linear in h, so it diverges from OpenDSS's Carson `Z0` on the triplen orders.
 
-The earth-return calibration trap is worth a factor of about 3.28. The classical Carson
-earth resistance is `Re(f)=ω·μ₀/8 = π²·f·10⁻⁷ Ω/m`, geometry-independent and proportional
-to frequency. pgml's configurable
-`line.earth_return.resistance_coeff_ohm_per_m_per_hz` defaults to that physical metric
-value, `π²·10⁻⁷`. OpenDSS exposes the same physics through per-LineCode `Rg` and `Xg`, but
-its defaults are calibrated for imperial length units, so on a `units=m` line they are
-about 3.28 times smaller, that being the number of metres per foot. Comparing pgml's
-sequence-aware `Z0` against an OpenDSS R/X line therefore shows a zero-sequence gap from
-two compounding causes, the units-calibrated earth resistance and the linear-versus-
-sub-linear `X0`. Both vanish on the geometry path, where the geometry and the Carson model
-are identical on both sides. The transformer vector group is independent of this, since a
-Dyn delta traps the zero sequence identically in both engines.
+The same physics is implemented on both sides. OpenDSS corrects a sequence-defined line as
+`R += Rg·(h−1)` and `X = h·(X − 0.5·KXg·ln h)` per matrix entry, which in sequence terms is
+pgml's `R0(h) = R0 + 3·(Re(f) − Re(f₀))` and, with
+`line.earth_return.x0_frequency = carson_sublinear`, `X0(h) = h·(X0 − 1.5·kx·f₀·ln h)`. What
+differs is the value of the earth parameters. OpenDSS's defaults `Rg = 0.01805` and
+`Xg = 0.155081` are the physical Carson values at 60 Hz in ohms per 1000 ft and are
+reinterpreted in the line's `units=`, so on a metric line they are 3.28 times too small per
+km, or 3280 times too large per metre. pgml's configurable
+`line.earth_return.resistance_coeff_ohm_per_m_per_hz` instead defaults to the physical
+metric value `π²·10⁻⁷`. Two further OpenDSS traps: those defaults are not rescaled for a
+50 Hz base frequency, and every element's base frequency comes from the global
+`DefaultBaseFrequency`, 60 Hz unless set, rather than from the circuit's `frequency=`.
 
-Transformer frequency scaling follows OpenDSS `XRConst=No`, its default. R is fixed and the
-leakage X scales with h, which pgml mirrors through `X(h)=2π·h·f₀·L` at constant R. A
-frequency-correction curve is not modelled.
+Comparing pgml's sequence-aware `Z0` against an OpenDSS R/X line therefore shows a
+zero-sequence gap whose causes are the units-calibrated earth resistance and, unless
+`carson_sublinear` is selected, the linear-versus-sub-linear `X0`. Both vanish on the
+geometry path, where the geometry and the Carson model are identical on both sides. The
+transformer vector group is independent of this, since a Dyn delta traps the zero sequence
+identically in both engines.
+
+Transformer winding resistance follows `R(f) = R · m(f) · (f/f₀ if the unit holds X/R
+constant else 1)`. Here `m(f)` is the `resistance_frequency` multiplier, a constant, the
+Carson skin law or a sampled curve, and the second factor is OpenDSS's `XRConst`, carried
+per transformer in `harmonic_xr_constant` and selectable globally through
+`transformer.harmonic_resistance.law`. The shipped default is R constant with X
+proportional to h, which matches OpenDSS's `XRConst=No` default and pandapower's and
+power-grid-model's frequency-independent resistance. It understates transformer damping at
+high orders, because no eddy-current or stray-loss rise is modelled. A frequency-correction
+curve read from a source file is not modelled.
 
 ## Converter coverage
 
@@ -270,9 +357,9 @@ read, a foreign network under-converts, and these are the current gaps.
 
 | | converted | not read |
 |---|---|---|
-| OpenDSS | `Transformer` (scope above), `Line`, `Load`, `Capacitor`, `Reactor`, `Generator`, `PVSystem`, `Storage` | three-winding transformers, regulators and tap-changer control, frequency-correction curves, a coupled `Rmatrix`/`Xmatrix` reactor, a non-grounded or two-bus terminal-2 shunt reference |
-| pandapower | `trafo`, `line`, `load`, `sgen`, `asymmetric_load`, `switch`, `ext_grid` | `shunt`, `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, `r0x0_max`/`x0x_max` |
-| pgm | `node`, `line`, `transformer`, `sym_load`, `asym_load`, `sym_gen`, `source` | `asym_gen`, `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `link`, `uk_min`/`uk_max`/`pk_min`/`pk_max`, `i0_zero_sequence`/`p0_zero_sequence`, `z01_ratio`, line `tan0` |
+| OpenDSS | `Transformer` (scope above), `Line`, `Load`, `Capacitor`, `Reactor`, `Generator` (including `model=3`), `PVSystem`, `Storage` | three-winding transformers, regulators and tap-changer control, frequency-correction curves, a coupled `Rmatrix`/`Xmatrix` reactor, a non-grounded or two-bus terminal-2 shunt reference, a neutral earthing impedance (`Rneut`/`Xneut`) |
+| pandapower | `trafo`, `line`, `load`, `sgen`, `gen`, `shunt`, `asymmetric_load`, `switch`, `ext_grid` (including `x0x_max`/`r0x0_max`) | `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, `mag0_percent`/`mag0_rx`, `si0_hv_partial`, `xn_ohm`/`rn_ohm` |
+| pgm | `node`, `line`, `transformer`, `link`, `sym_load`, `asym_load`, `sym_gen`, `source` (including `z01_ratio`) | `asym_gen`, `voltage_regulator`, `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `uk_min`/`uk_max`/`pk_min`/`pk_max`, `i0_zero_sequence`/`p0_zero_sequence` |
 
 Details worth knowing before a conversion:
 
@@ -293,10 +380,11 @@ Details worth knowing before a conversion:
   an approximation, since pandapower keeps the still-connected terminal energised through
   an internal auxiliary bus, so pgml drops that terminal's shunt too.
 - pandapower `gen`, a PV bus with fixed P, regulated `vm_pu` and free Q within its reactive
-  limits, is dropped by default. It converts only under
-  `gen_mode=GenMode.VOLT_VAR_APPROX`, which approximates the PV bus with a steep Volt-VAr
-  droop centred on `vm_pu` and saturating at the reactive limits, holding the voltage
-  magnitude near rather than at the setpoint. A `gen` row on the `ext_grid` bus, or one
-  flagged `slack`, is skipped. See the [DER decision record](der-pv-storage.md).
+  limits, converts exactly by default (`gen_mode=GenMode.VOLTAGE_REGULATING`): the row
+  becomes a `Generator` carrying a `VoltageRegulation` block that the solver holds at
+  `vm_pu`. `GenMode.VOLT_VAR_APPROX` keeps the earlier steep Volt-VAr droop for a study
+  that wants a real droop law, and `GenMode.DROP` skips the table. A `gen` row on the
+  `ext_grid` bus, or one flagged `slack`, is skipped in every mode. See the
+  [DER models](der-pv-storage.md) page.
 - pgm stores no base frequency, so the caller must pass the correct `base_frequency_hz`. A
   50 versus 60 Hz mismatch silently scales every L and C.
