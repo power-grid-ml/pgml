@@ -250,6 +250,39 @@ def _row_scale_bound(y_eff, v_abs: Tensor) -> Tensor:
     return rows * torch.linalg.vector_norm(v_abs)
 
 
+class _FloorRowScale:
+    """The mismatch floor's row scale, read from the admittance at most once per solve.
+
+    ``Σ_j |Y_ij| V_base,j`` is a property of the network and the rated voltages, while one
+    solve can build several convergence tests of the SAME system: a batched Newton solves
+    its scenarios one at a time, a Newton restart from a second warm start builds another
+    test, and a PV-to-PQ switching round repeats the whole solve at a new active set. They
+    share this holder, so the matrix is read once per solve at most — and not at all when
+    a prepared system already carries the scale
+    (:attr:`PowerFlowSystem.row_abs_scale`) or when the bound shows the floor is inert.
+
+    Shapes follow the two functions below: ``[*b, N]`` real, on the matrix's device.
+    """
+
+    def __init__(self, exact: Optional[Tensor] = None) -> None:
+        self._exact = exact
+        self._bound: Optional[Tensor] = None
+
+    def bound(self, y_eff, v_abs: Tensor) -> Tensor:
+        """An upper bound of the row scale — the exact scale itself where it is known."""
+        if self._exact is not None:
+            return self._exact
+        if self._bound is None:
+            self._bound = _row_scale_bound(y_eff, v_abs)
+        return self._bound
+
+    def exact(self, y_eff, v_abs: Tensor) -> Tensor:
+        """The row scale :func:`_abs_row_scale` returns, computed on first use."""
+        if self._exact is None:
+            self._exact = _abs_row_scale(y_eff, v_abs)
+        return self._exact
+
+
 #: Once-per-process guard for the plain-complex64 conditioning check (the estimate
 #: costs a few back-substitutions, so a scenario sweep must not pay it per solve).
 _COMPLEX64_COND_CHECKED = False
@@ -331,7 +364,7 @@ class _PuConvergence:
         device,
         rdt: torch.dtype,
         warn: bool = True,
-        row_abs: Optional[Tensor] = None,
+        scale: Optional[_FloorRowScale] = None,
     ) -> None:
         self.v_base = v_base.clamp_min(1e-12)  # [N] line-to-neutral base per row
         self.s_base = float(s_base)
@@ -353,19 +386,19 @@ class _PuConvergence:
             # wider, and varying per scenario, per grid and from run to run.
             band = _stall_tolerance_factor()
             self.ceil_update = max(self.thr_update, self.floor_update * band)
-            # ``row_abs`` is ``Σ_j |Y_ij| V_base,j``, a property of the network and the
-            # rated voltages: a prepared system computes it once
-            # (:class:`PowerFlowSystem.row_abs_scale`) instead of reading the whole
-            # matrix again on every solve.
-            if row_abs is None and self._floor_is_inert(y_eff, band):
+            # The row scale is ``Σ_j |Y_ij| V_base,j``, a property of the network and the
+            # rated voltages. It is held by :class:`_FloorRowScale`, which a prepared
+            # system seeds (:attr:`PowerFlowSystem.row_abs_scale`) and every convergence
+            # test of one solve shares, so no solve reads the matrix for it twice.
+            scale = _FloorRowScale() if scale is None else scale
+            if self._floor_is_inert(scale, y_eff, band):
                 # The floor cannot reach the requested tolerance anywhere, so both
                 # thresholds ARE that tolerance and the exact row scale is never formed.
                 thr = torch.as_tensor(self.tol_mismatch_pu, dtype=rdt, device=device)
                 self.thr_mismatch = thr
                 self.ceil_mismatch = thr
             else:
-                if row_abs is None:
-                    row_abs = _abs_row_scale(y_eff, self.v_base)
+                row_abs = scale.exact(y_eff, self.v_base)
                 s_scale_pu = (self.v_base * row_abs) / self.s_base  # [*b, N]
                 self.thr_mismatch = torch.clamp(
                     self.floor_mismatch * s_scale_pu, min=self.tol_mismatch_pu
@@ -376,7 +409,7 @@ class _PuConvergence:
             if warn:
                 self._warn_unreachable()
 
-    def _floor_is_inert(self, y_eff, band: float) -> bool:
+    def _floor_is_inert(self, scale: _FloorRowScale, y_eff, band: float) -> bool:
         """Is the precision floor below the requested tolerance on EVERY free row?
 
         Both mismatch thresholds are ``max(tol, floor · s_scale_row)``, so where the floor
@@ -391,7 +424,7 @@ class _PuConvergence:
         The answer is conservative in the safe direction: an upper bound that cannot
         prove inertness sends the floor through the exact pass.
         """
-        bound = self._free_scale_pu(_row_scale_bound(y_eff, self.v_base))
+        bound = self._free_scale_pu(scale.bound(y_eff, self.v_base))
         return float(self.floor_mismatch * band * bound.max()) <= self.tol_mismatch_pu
 
     def _free_scale_pu(self, row_scale: Tensor) -> Tensor:
@@ -2361,6 +2394,13 @@ def solve_power_flow(
     # operating point's u_ref_scale, whose leaves the grid + operating-point walk above
     # already collected — no second leaf walk is needed.
 
+    # The row scale behind the mismatch criterion's precision floor is a property of the
+    # network, and one solve can build several convergence tests of it (a Newton restart,
+    # each scenario of a batched Newton, each PV-to-PQ round). They share one holder, so
+    # the admittance is read for the floor at most once per solve — and not at all when a
+    # prepared system carries the scale already.
+    floor_scale = _FloorRowScale(None if system is None else system.row_abs_scale)
+
     # ----- closures over the CURRENT leaf values ----------------------------
     def build_system():
         return _y_eff_and_islack(
@@ -2584,6 +2624,7 @@ def solve_power_flow(
                     newton_solver,
                     precision,
                     eq_mode,
+                    floor_scale,
                 )
             return _newton_from_starts(
                 rr,
@@ -2600,6 +2641,7 @@ def solve_power_flow(
                 newton_solver,
                 precision,
                 fixed_rows,
+                floor_scale,
             )
         solve_system = system
         if use_woodbury and solve_system is None:
@@ -2658,6 +2700,7 @@ def solve_power_flow(
             block_rows,
             precision,
             eq_mode,
+            floor_scale,
         )
 
     # ----- the solve, plus PV-to-PQ switching rounds where a reactive limit binds ---
@@ -2870,6 +2913,7 @@ def _current_injection_forward(
     block_rows=None,
     precision="full",
     equilibrate="off",
+    scale=None,
 ):
     """Current-injection fixed point ``V_{k+1} = Y_eff^{-1}(I_slack − I_device(V_k))``.
 
@@ -3015,7 +3059,7 @@ def _current_injection_forward(
             n=n,
             device=device,
             rdt=rdt,
-            row_abs=None if system is None else system.row_abs_scale,
+            scale=scale,
         )
         state = _BatchIterationState(
             shape=tuple(lead), device=device, rdt=rdt, ctest=ctest
@@ -3266,6 +3310,7 @@ def _newton_from_starts(
     linear_solver,
     precision="full",
     fixed_rows=None,
+    scale=None,
 ):
     """Newton from each warm start in turn until one converges; best result wins.
 
@@ -3292,6 +3337,7 @@ def _newton_from_starts(
             linear_solver,
             precision,
             fixed_rows,
+            scale,
         )
         if out[3]:
             if attempt:
@@ -3385,6 +3431,7 @@ def _newton_forward(
     linear_solver="dense",
     precision="full",
     fixed_rows=None,
+    scale=None,
 ):
     """Newton on the real residual ``R(x) = 0`` from the warm start ``v_init``.
 
@@ -3431,6 +3478,7 @@ def _newton_forward(
             floor_update=_rel_convergence_floor(rdt),
             floor_mismatch=_mismatch_floor_rel(rdt),
             fixed_rows=fixed_rows,
+            scale=scale,
             y_eff=y_eff0,
             n=n,
             device=device,
@@ -3558,6 +3606,7 @@ def _newton_forward_sequential(
     linear_solver,
     precision="full",
     equilibrate="off",
+    scale=None,
 ):
     """Batched Newton by solving each scenario with the single-grid Newton forward.
 
@@ -3630,6 +3679,7 @@ def _newton_forward_sequential(
             linear_solver,
             precision,
             fixed_rows,
+            scale,
         )
         v_list.append(v_i)  # [N]
         conv_list.append(bool(cv_i))

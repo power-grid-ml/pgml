@@ -19,7 +19,7 @@ import pgml.geometry.sequence as seq_mod
 import pgml.solver.harmonic_flow as hf_mod
 import pgml.solver.power_flow as pf_mod
 from pgml.grids import synthetic_feeder
-from pgml.schemas.grid_schema import Switch
+from pgml.schemas.grid_schema import Load, Switch
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
 CDT = torch.complex128
@@ -59,6 +59,19 @@ def positive_sequence_grid():
         ln.harmonic_line_model = "positive_sequence"
         ln.harmonic_skin_effect = True
     return g
+
+
+def _batched_load_op(grid, factors):
+    """A scenario batch: every load's total P, Q scaled by each factor."""
+    scale = torch.tensor(factors, dtype=torch.float64)
+    return {
+        a.id: {
+            "p_w": scale * float(a.p_nom_w),
+            "q_var": scale * float(a.q_nom_var or 0.0),
+        }
+        for a in grid.appliances
+        if isinstance(a, Load)
+    }
 
 
 def _count(monkeypatch, name, *modules):
@@ -150,6 +163,25 @@ def test_the_row_scale_of_the_mismatch_floor_is_computed_once_per_solve(
     for _ in range(3):
         solve_power_flow(near_ideal_switch_grid, dtype=CDT, system=system)
     assert calls["n"] == 0, f"{calls['n']} |Y| passes on the prepared path"
+
+
+def test_a_batched_newton_solve_reads_the_admittance_once_for_the_floor(
+    monkeypatch, near_ideal_switch_grid
+):
+    """Newton solves a scenario batch one scenario at a time — the floor stays per GRID.
+
+    Each scenario builds its own convergence test, and the row scale is a property of
+    the network, so a batch of B scenarios must not read the admittance B times.
+    """
+    calls = _count(monkeypatch, "_abs_row_scale", pf_mod)
+    res = solve_power_flow(
+        near_ideal_switch_grid,
+        dtype=CDT,
+        method="newton",
+        operating_point=_batched_load_op(near_ideal_switch_grid, (0.8, 1.0, 1.2)),
+    )
+    assert res.converged and res.v.shape[0] == 3
+    assert calls["n"] == 1, f"{calls['n']} |Y| passes for 3 scenarios"
 
 
 def test_no_y_pass_where_the_precision_floor_cannot_reach_the_tolerance(
