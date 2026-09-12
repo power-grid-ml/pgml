@@ -288,6 +288,25 @@ per-device `R + jX` or a frequency curve) with its stamp. **Where.**
 
 ### D. Smaller follow-ups (no decision needed)
 
+- **Equilibrate the sparse backend without a dense pass**: the symmetric scaling writes one
+  full `[N, N]` copy, which on the SuperLU path costs as much as the factorization itself
+  (measured on a 1176-row feeder, complex128, CPU: 6.7 ms of scaling against a 7.0 ms
+  factorization; on the dense path 6.7 ms against 29.9 ms). Scaling the CSC data instead is
+  `O(nnz)`, i.e. free, but the factorization keeps the SCALED matrix as `y_mat` for the
+  mixed-precision residual, the sparse adjoint and `estimate_condition`, so it would have to
+  become lazy for the no-gradient case. WHERE: `src/pgml/solver/harmonic.py`
+  (`_SciPySparseLU`, `FactoredSystem.y_mat`), `src/pgml/solver/equilibration.py`.
+- **The anchored solve factors an unscaled SI matrix**: `AnchoredSystem` builds
+  `Z = Y_ff^-1` with a plain `torch.linalg.solve`, so it is the one factorization in the
+  package that does not go through the equilibration every other path uses. WHERE:
+  `src/pgml/solver/harmonic.py`.
+- **A low-rank harmonic shunt for a sparse device population**: with the shunt on the
+  `operating_point` basis, `Y(h)` is per scenario and a batch costs one factorization per
+  scenario and order. A Woodbury correction over the nameplate system would pay where the
+  distorting devices sit on few rows (`k/N < 1/3`, the measured crossover of the
+  switch-state path); on the benchmark grids `k/N` is 0.34 to 0.97 (every load node-phase),
+  so it does not. The DER case is the one to revisit. WHERE:
+  `src/pgml/solver/harmonic_flow.py`, `src/pgml/solver/lowrank.py`.
 - **Per-scenario time anchors in the batch contract**: a sequence batch records ONE `[T]`
   `time_unix_s` vector for the whole batch, so a generator that wanted to stagger its
   scenarios over the day has nowhere to put a per-scenario anchor. Allowing a `[B, T]`
