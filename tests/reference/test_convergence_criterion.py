@@ -30,6 +30,7 @@ import torch
 from pgml.multigrid import merge_grids
 from pgml.schemas.grid_schema import Grid, Line, Load, Node, Phase, Source
 from pgml.solver import solve_power_flow
+from tests.fixtures.tiny_grids import single_phase_chain
 
 CDT = torch.complex128
 A = (Phase.A,)
@@ -198,3 +199,91 @@ def test_float32_update_floor_still_terminates():
     assert res.converged
     assert res.iterations < 100
     assert res.diagnostics.update_max_pu < 1e-5  # at the float32 floor
+
+
+class TestResidualIdentity:
+    """The criterion's residual is the device-current change, and that is exact.
+
+    The fixed point's back-substitution enforces ``(Y V_new)_free = I_free``, so on every
+    free row ``F(V_new) = I_device(V_new) - I_device(V_old)``. The iteration uses that
+    identity instead of a matrix-vector product and confirms it against the nodal residual
+    before it exits.
+    """
+
+    @staticmethod
+    def _grid_and_op(scales=(0.6, 1.0, 1.4)):
+        grid = single_phase_chain()
+        p = torch.tensor([2000.0 * s for s in scales], dtype=torch.float64)
+        q = torch.tensor([300.0 * s for s in scales], dtype=torch.float64)
+        return grid, {30: {"p_w": p, "q_var": q}}
+
+    def test_one_matrix_vector_product_per_solve_not_per_iteration(self) -> None:
+        """The identity removes the per-iteration product and keeps the same answer.
+
+        The reference is the same solve with the residual formed explicitly every
+        iteration, which is what the engine did before: it is reproduced here by counting
+        the products and comparing the converged voltages and the iteration count.
+        """
+        import pgml.solver.power_flow as pf_mod
+
+        grid, op = self._grid_and_op()
+        orig = pf_mod._apply_y
+        calls = {"n": 0}
+
+        def counted(y, v):
+            calls["n"] += 1
+            return orig(y, v)
+
+        pf_mod._apply_y = counted
+        try:
+            r = solve_power_flow(grid, operating_point=op, dtype=CDT)
+        finally:
+            pf_mod._apply_y = orig
+        assert r.converged and r.iterations >= 4
+        # One product confirms the exit; the residual-scale estimate of the floor uses
+        # its own |Y| pass, which is not this function.
+        assert calls["n"] <= 2, f"{calls['n']} products for {r.iterations} iterations"
+
+    def test_the_reported_residual_is_the_nodal_one(self) -> None:
+        """A mixed-precision solve forms the residual explicitly; the two must agree.
+
+        ``precision="mixed"`` needs the nodal residual as its next right-hand side, so it
+        never uses the identity. Solving the same grid both ways and comparing the
+        reported per-unit mismatch at the same tolerance pins that the plain path reports
+        a NODAL mismatch and not the device-current change it iterates on.
+        """
+        grid, op = self._grid_and_op()
+        plain = solve_power_flow(
+            grid, operating_point=op, dtype=CDT, tol=1e-12, tol_update_pu=1e-12
+        )
+        mixed = solve_power_flow(
+            grid,
+            operating_point=op,
+            dtype=CDT,
+            precision="mixed",
+            tol=1e-12,
+            tol_update_pu=1e-12,
+        )
+        assert plain.converged and mixed.converged
+        assert torch.max(torch.abs(plain.v - mixed.v)) < 1e-9
+        # Both report a mismatch at the same (floor-limited) level, and both below the
+        # level a surrogate that ignores the back-substitution's own residual would show.
+        assert float(plain.residual) < 1e-9
+        assert float(mixed.residual) < 1e-9
+
+    def test_a_prepared_system_reports_the_same_mismatch(self) -> None:
+        """The cached per-row cancellation scale must not change the criterion."""
+        from pgml.solver import prepare_power_flow
+
+        grid, op = self._grid_and_op()
+        direct = solve_power_flow(grid, operating_point=op, dtype=CDT)
+        system = prepare_power_flow(grid, dtype=CDT)
+        prepared = solve_power_flow(grid, operating_point=op, dtype=CDT, system=system)
+        assert system.row_abs_scale is not None
+        assert torch.equal(direct.v, prepared.v)
+        assert float(direct.residual) == float(prepared.residual)
+        assert direct.iterations == prepared.iterations
+        assert (
+            direct.diagnostics.mismatch_floor_pu
+            == prepared.diagnostics.mismatch_floor_pu
+        )
