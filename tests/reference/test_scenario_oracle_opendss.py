@@ -487,8 +487,37 @@ def _devices_grid() -> Grid:
 
 
 @pytest.mark.slow
-def test_devices_switch_generator_storage_shunt_matched_tight():
-    """Switch/Generator/Storage/ShuntAppliance all agree with pgml near machine precision."""
+def test_devices_switch_generator_storage_shunt_matched_tight(tmp_path, monkeypatch):
+    """Switch/Generator/Storage/ShuntAppliance all agree with pgml near machine precision.
+
+    Run with ``appliance.harmonic_shunt.generation_model: load_style``, the policy under
+    which a Generator / Storage carries the same operating-point shunt a Load does. That
+    is the only policy a matched-mode export can reproduce for a generation device: it
+    writes one as a negative-kW DSS ``Load``, whose shunt OpenDSS always derives from that
+    (negative) power, and ``NeglectLoadY`` is a global option. Under the shipped
+    ``none`` policy the export refuses the combination by name, which
+    ``tests/reference/test_opendss_load_shunt.py`` covers together with the size of the
+    difference.
+    """
+    import yaml
+
+    from pgml import defaults
+
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["appliance"]["harmonic_shunt"]["generation_model"]["value"] = "load_style"
+    path = tmp_path / "generation_load_style.yaml"
+    path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
+    defaults.reload(str(path))
+    try:
+        _devices_matched_comparison()
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
+
+
+def _devices_matched_comparison() -> None:
+    """The matched-mode comparison of the multi-device grid (see the test above)."""
     grid = _devices_grid()
     orders = [3, 5]
     cfg = ScenarioConfig(

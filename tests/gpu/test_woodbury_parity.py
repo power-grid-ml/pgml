@@ -103,11 +103,22 @@ def test_complex64_honors_dtype(grid):
 
 
 def test_gradients_flow_on_cuda(grid):
-    """The IFT backward reaches the state leaf through the CUDA low-rank forward."""
+    """The IFT backward reaches the state leaf through the CUDA low-rank forward.
+
+    The VOLTAGES of the two devices agree to 2.2e-15 relative, and the STATE gradient to
+    about 1e-06: a switch state is reached by a rank-k downdate of the base
+    factorization, and that downdate spends digits in the derivative with respect to the
+    state (what ``LowRankUpdate.amplification`` measures) where it spends none in the
+    solution. The floor is a property of the path, not of the device or of the
+    equilibration: measured CPU against CUDA 1.6e-06 equilibrated and 1.3e-06 unscaled,
+    against 1.1e-07 on the assemble path, and the SAME 1.6e-06 between the woodbury and
+    assemble paths on one CPU. So this asserts 1e-05 on the gradient and keeps the sharp
+    bound on the solution.
+    """
     # Load ONE feeder heavily so the tie switch actually carries current (its state
     # is otherwise nearly irrelevant between two identically loaded feeder ends).
     op = {a.id: {"p_w": 3.0e6} for a in grid.appliances if (a.id - 20000) % 4 == 1}
-    grads = []
+    grads, volts = [], []
     for device in (torch.device("cpu"), CUDA):
         s = torch.tensor(
             [0.3, 0.9], dtype=torch.float64, device=device, requires_grad=True
@@ -122,4 +133,6 @@ def test_gradients_flow_on_cuda(grid):
         res.v.abs().sum().backward()
         assert s.grad is not None and torch.isfinite(s.grad).all()
         grads.append(s.grad.cpu())
-    assert torch.allclose(grads[0], grads[1], rtol=1e-6, atol=1e-9)
+        volts.append(res.v.detach().abs().cpu())
+    assert torch.allclose(volts[0], volts[1], rtol=1e-12, atol=0.0)
+    assert torch.allclose(grads[0], grads[1], rtol=1e-5, atol=1e-9)
