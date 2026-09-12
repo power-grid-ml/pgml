@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import logging
 import math
-import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Sequence
 
@@ -88,7 +87,11 @@ from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
 from ._pv_bus import PVTerminals, active_power_mismatch, collect_pv_terminals
-from .equilibration import equilibrated_lu_factor, resolve_equilibration
+from .equilibration import (
+    _nonzero_magnitudes,
+    equilibrated_lu_factor,
+    resolve_equilibration,
+)
 from .harmonic import (
     estimate_condition,
     lu_factor_system,
@@ -195,34 +198,23 @@ def _abs_row_scale(y_eff, v_abs: Tensor) -> Tensor:
 def _row_magnitude_sums(y: Tensor, v_abs: Tensor) -> Tensor:
     """``Σ_j |Y_ij| |V_j|`` of a dense ``[*b, N, N]`` admittance -> ``[*b, N]`` real.
 
-    The magnitude of a structural zero is zero and a nodal admittance matrix has O(N)
-    nonzeros, so the row sums need the magnitude of the NONZEROS only: one read of the
-    matrix into CSR, then O(nnz) work. That is three to six times cheaper than the dense
-    form — a full ``|Y|`` temporary (a square root per element) plus a matrix-vector
-    product — measured at complex128 on this engine's own feeders: 0.5 ms against 1.3 at
-    294 rows, 2.3 against 11.4 at 1176, 8.6 against 50 at 2469, 50 against 177 at 5505.
+    The row sums read the NONZEROS only (:func:`~pgml.solver.equilibration`'s sparse
+    magnitude form), which is three to six times cheaper than the dense form — a full
+    ``|Y|`` temporary, a square root per entry, plus a matrix-vector product — measured at
+    complex128 on this engine's own feeders: 0.5 ms against 1.3 at 294 rows, 2.3 against
+    11.4 at 1176, 8.6 against 50 at 2469, 50 against 177 at 5505.
 
-    The dense form is kept where the sparse one does not apply: the scatter that
-    accumulates the rows is order-deterministic on CPU only, and a per-scenario batched
-    admittance has no single sparsity pattern. Both are one elementwise pass plus one
-    reduction, which is also what an accelerator wants.
+    The dense form is kept where the sparse one does not apply (a batched admittance, an
+    accelerator, a per-row weight that is itself batched): one elementwise pass plus one
+    reduction, which is what an accelerator wants anyway.
     """
-    if (
-        y.device.type == "cpu"
-        and v_abs.dim() == 1
-        and y.reshape(-1, *y.shape[-2:]).shape[0] == 1
-    ):
-        n = y.shape[-1]
-        with warnings.catch_warnings():
-            # The backend's beta-status notice for CSR tensors is not a caller's concern.
-            warnings.simplefilter("ignore", UserWarning)
-            csr = y.reshape(n, n).to_sparse_csr()
-        cols = csr.col_indices()
-        vals = csr.values().abs() * v_abs.index_select(0, cols)  # [nnz]
-        rows = torch.repeat_interleave(csr.crow_indices().diff())  # [nnz]
-        out = torch.zeros(n, dtype=vals.dtype, device=y.device)
-        return out.index_add_(0, rows, vals).reshape(*y.shape[:-1])
-    return _apply_y(y.abs(), v_abs)
+    nz = _nonzero_magnitudes(y) if v_abs.dim() == 1 else None
+    if nz is None:
+        return _apply_y(y.abs(), v_abs)
+    rows, cols, mag = nz
+    vals = mag * v_abs.index_select(0, cols)  # [nnz]
+    out = torch.zeros(y.shape[-1], dtype=vals.dtype, device=y.device)
+    return out.index_add_(0, rows, vals).reshape(*y.shape[:-1])
 
 
 def _row_scale_bound(y_eff, v_abs: Tensor) -> Tensor:
