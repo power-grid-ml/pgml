@@ -86,8 +86,14 @@ so no stored value changes its physics. The RESULT of a harmonic solve DOES chan
 because the field was previously ignored: at orders `h > 1` each device now carries
 `Y_eq = conj(S)/V_rated²` split between a parallel and a series R-L branch
 (`docs/pgml/modeling/references/opendss/harmonics.md`). `load_shunt="none"` reproduces
-the former pure current-source model exactly. `HarmonicShuntModel` additionally rejects
-two ill-posed combinations (`neglect_shunt=True` together with a `motor_x_harm_pu`, and a
+the former pure current-source model exactly. A `Generator` / `Storage` is the exception:
+its stored block does NOT grant it a shunt, because every grid written before the field
+was consumed carries the former default block on every device and the load expression's
+conductance is negative for an injecting device (the documented default
+`appliance.harmonic_shunt.generation_model`, shipped `none`, leaves such a device a pure
+current source; `load_style` applies the expression anyway, and a block naming
+`motor_x_harm_pu` selects the motor model either way). `HarmonicShuntModel` additionally
+rejects two ill-posed combinations (`neglect_shunt=True` together with a `motor_x_harm_pu`, and a
 non-positive `motor_x_harm_pu`/`motor_xr_harm`) instead of silently picking a branch.
 
 `TransformerZeroSeq`'s documented reference side is corrected from "HV" to "the to-side

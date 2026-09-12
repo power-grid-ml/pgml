@@ -57,12 +57,20 @@ decisions. One entry per capability:
   OpenDSS-exact spectrum injection, vector-group transformers (Dyn traps triplen),
   connection-aware per-phase injection. Integer orders only — non-integer orders raise
   (see the time-domain note under open work).
-- **Harmonic device shunt** — every Load/Generator/Storage carries the OpenDSS load
-  Norton shunt in parallel with its current source (`load_shunt`, default
+- **Harmonic device shunt** — every Load carries the OpenDSS load Norton shunt in
+  parallel with its current source (`load_shunt`, default
   `appliance.harmonic_shunt.model = opendss` ≡ `NeglectLoadY=no`, `%SeriesRL=50`;
   `none` = the pure current-source model, `motor` = a blocked-rotor series reactance;
-  per-device override via `HarmonicShuntModel`). It is the dominant damping at a feeder
-  parallel resonance: the undamped model overstates a 370 kvar resonance peak by 40–75 %
+  per-device override via `HarmonicShuntModel`). A GENERATION device (Generator, Storage)
+  carries NO shunt by default (`appliance.harmonic_shunt.generation_model = none`, one
+  WARNING per solve naming the devices): the expression's conductance is negative for an
+  injecting device, i.e. it would feed harmonic energy into the network, and pgml's schema
+  carries no inverter filter or subtransient impedance to put there instead. `load_style`
+  applies it anyway, which is what OpenDSS computes for the negative-kW `Load` idiom an
+  export writes (measured difference on a feeder whose only distorting device is a 400 kW
+  inverter: 3.2e-7 pu of nominal at 20 kV, 4.9e-5 pu on a 400 V cable feeder, and 0.9 %
+  of the node's THD). The load shunt is the dominant damping at a feeder parallel
+  resonance: the undamped model overstates a 370 kvar resonance peak by 40–75 %
   and the three-phase CIGRE LV THD by 2.4 pp. Derived from the power the device draws at
   the converged fundamental, so it is on the autograd tape (gradcheck) and batched over
   devices, orders and scenarios. Validated against a live OpenDSS `YPrim` to 4.7e-16
@@ -247,20 +255,27 @@ pgml's public API from a downstream package.
 ### C. Frequency-dependent device models (shipped transformer loss curves)
 
 **What.** Both halves of the former device-model gap are CLOSED. The harmonic device
-shunt is implemented and carried by default (`load_shunt`, modeling default
-`appliance.harmonic_shunt.model = opendss`): per element
+shunt is implemented and carried by default on every LOAD (`load_shunt`, modeling default
+`appliance.harmonic_shunt.model = opendss`; a generation device carries none, see
+`appliance.harmonic_shunt.generation_model`): per element
 `Y_eq = conj(S_eff)/V_rated²` split into a parallel and a series R-L branch, with the
 `motor` blocked-rotor variant, validated against a live OpenDSS `YPrim` to 4.7e-16
 relative and end to end to 1.6e-12 pu of nominal (6.8e-12 on a capacitor resonance at
 order 6.9, 4.5e-9 on three-phase CIGRE LV). `resistance_frequency` and
 `harmonic_xr_constant` are consumed by the transformer stamp
 (`R(f) = R · m(f) · (f/f0 if harmonic_xr_constant else 1)`, validated against OpenDSS's
-`XRConst`). What REMAINS is that no eddy-current/stray-loss curve is SHIPPED, so a
-transformer's default winding resistance is still constant with frequency; a user must
-supply a measured `resistance_frequency` curve.
-**How.** Ship a documented default loss curve (IEC 60076-based or a published
-measurement) and a builder that attaches it. **Where.** `src/pgml/data/standards/`,
-`assembly/ybus.py` (`_resistance_multiplier`), `tests/reference`.
+`XRConst`). What REMAINS is (i) that no eddy-current/stray-loss curve is SHIPPED, so a
+transformer's default winding resistance is still constant with frequency (a user must
+supply a measured `resistance_frequency` curve), and (ii) that a DER has no harmonic
+output impedance at all: the load expression is anti-damping for an injecting device and
+is therefore off by default, while the physical quantity — an inverter's filter impedance
+or a machine's subtransient reactance (OpenDSS `%R`/`%X`, `Xdpp`) — has no schema field.
+**How.** Ship a documented default transformer loss curve (IEC 60076-based or a published
+measurement) with a builder that attaches it, and add a DER harmonic impedance field (a
+per-device `R + jX` or a frequency curve) with its stamp. **Where.**
+`src/pgml/data/standards/`, `assembly/ybus.py` (`_resistance_multiplier`),
+`schemas/grid_schema.py` + `assembly/_load_shunt.py` for the DER impedance,
+`tests/reference`.
 
 ### D. Smaller follow-ups (no decision needed)
 
@@ -408,11 +423,14 @@ results are never read as more physical than they are. Details live in `docs/pgm
   pgml has no per-device rated voltage: the shunt's `V_rated` comes from the host node,
   while OpenDSS takes each Load's own `kV` property, so an imported circuit whose load
   `kV` differs from its node's nominal carries a correspondingly different shunt.
-  A DER's shunt is the same load-style `conj(S)/V_rated²` with the generation sign (the
-  negative-load idiom the OpenDSS oracle exports), NOT the fixed `%R`/`%X` Thevenin an
-  OpenDSS `PVSystem`/`Storage`/`Generator` element uses — pgml carries no internal
-  inverter or machine impedance. Set `harmonic_model.neglect_shunt` on such a device for
-  a pure current source.
+  A DER carries NO harmonic shunt by default
+  (`appliance.harmonic_shunt.generation_model = none`). The load-style
+  `conj(S)/V_rated²` would have a NEGATIVE conductance for an injecting device — the
+  negative-load idiom an OpenDSS export writes, and anti-damping rather than damping —
+  while the quantity a real inverter or machine presents is its filter or subtransient
+  impedance (OpenDSS `%R`/`%X`, `Xdpp`), which this schema does not carry. `load_style`
+  reaches the idiom for a comparison; a measured DER harmonic impedance needs its own
+  schema field and is open work (§C).
 - **Sources.** The per-phase Thevenin is sequence-aware: converters read the native
   zero-sequence data (OpenDSS `Vsource.R0`/`X0`, power-grid-model `source.z01_ratio`,
   pandapower `ext_grid.x0x_max`/`r0x0_max` with `s_sc_max_mva`/`rx_max`) into the

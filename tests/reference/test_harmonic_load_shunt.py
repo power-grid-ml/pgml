@@ -10,8 +10,10 @@ pinned in ``pgml.assembly._load_shunt``, per element, with ``s = series_rl_fract
 
 Checked: the fundamental identity ``Y_par(1) + Y_ser(1) = Y_eq`` for every split, the
 two limits ``s = 0`` (``G + jB/h``) and ``s = 1`` (``1/(R + j h X)``), the motor branch,
-the zero-power degenerate case, the WYE / DELTA / four-wire nodal stamp, and the
-per-device override precedence.
+the zero-power degenerate case, the WYE / DELTA / four-wire nodal stamp, the per-device
+override precedence, and the generation policy (a Generator / Storage carries no shunt
+under the shipped ``appliance.harmonic_shunt.generation_model``, because the expression's
+conductance is negative for an injecting device).
 """
 
 from __future__ import annotations
@@ -23,12 +25,14 @@ import torch
 
 from pgml.assembly import node_phase_index
 from pgml.assembly._load_shunt import (
+    generation_shunt_is_neglected,
     harmonic_shunt_element_admittance,
     resolve_harmonic_shunt,
     resolve_shunt_model_name,
 )
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
+    Generator,
     Grid,
     HarmonicComponent,
     HarmonicShuntModel,
@@ -39,6 +43,7 @@ from pgml.schemas.grid_schema import (
     Source,
     SpectrumPoint,
     StaticSpectrum,
+    Storage,
     WindingConnection,
 )
 from pgml.solver.harmonic_flow import assemble_harmonic_ybus, solve_harmonic_flow
@@ -121,9 +126,88 @@ def test_zero_power_device_has_no_shunt():
 
 
 def test_generator_sign_gives_a_negative_conductance():
-    """The load convention carries the sign: a generator's shunt conductance is < 0."""
+    """The load convention carries the sign: a generator's shunt conductance is < 0.
+
+    Which is why a generation device carries NO shunt under the shipped
+    ``appliance.harmonic_shunt.generation_model`` — see
+    :func:`test_a_generation_device_carries_no_shunt_by_default`. This pins the
+    expression itself, which the ``load_style`` policy applies.
+    """
     (y,) = _element_admittance(-5_000.0, 0.0, 230.0, [5], 0.5)
     assert y.real < 0.0
+
+
+def test_a_generation_device_carries_no_shunt_by_default():
+    """Generator / Storage are pure current sources; an identical Load is not.
+
+    The shipped ``appliance.harmonic_shunt.generation_model: none`` refuses the load
+    expression for an injecting device because its conductance is negative. A stored
+    ``harmonic_model`` block does not override it (every grid written before the field
+    was consumed carries the former default block on every device); naming the motor
+    model does.
+    """
+    kwargs = dict(node=1, phases=[Phase.A], p_nom_w=1_000.0)
+    load = Load(id=1, **kwargs)
+    gen = Generator(id=2, **kwargs)
+    storage = Storage(id=3, **kwargs)
+    legacy = Generator(
+        id=4,
+        harmonic_model=HarmonicShuntModel(series_rl_fraction=0.5, neglect_shunt=False),
+        **kwargs,
+    )
+    motor = Generator(
+        id=5, harmonic_model=HarmonicShuntModel(motor_x_harm_pu=0.3), **kwargs
+    )
+    assert resolve_harmonic_shunt(load, "opendss").kind == "opendss"
+    assert resolve_harmonic_shunt(gen, "opendss").kind == "none"
+    assert resolve_harmonic_shunt(storage, "opendss").kind == "none"
+    assert resolve_harmonic_shunt(legacy, "opendss").kind == "none"
+    assert resolve_harmonic_shunt(motor, "opendss").kind == "motor"
+    assert generation_shunt_is_neglected(gen) is True
+    assert generation_shunt_is_neglected(load) is False
+
+
+def test_the_load_style_generation_policy_is_reachable(tmp_path, monkeypatch):
+    """``generation_model: load_style`` applies the load expression, sign included."""
+    import yaml
+
+    from pgml import defaults
+
+    gen = Generator(id=1, node=1, phases=[Phase.A], p_nom_w=1_000.0)
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["appliance"]["harmonic_shunt"]["generation_model"]["value"] = "load_style"
+    path = tmp_path / "load_style.yaml"
+    path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
+    try:
+        defaults.reload(str(path))
+        spec = resolve_harmonic_shunt(gen, "opendss")
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
+    assert (spec.kind, spec.series_rl_fraction) == ("opendss", 0.5)
+    assert resolve_harmonic_shunt(gen, "opendss").kind == "none"
+
+
+def test_an_unknown_generation_policy_raises(tmp_path, monkeypatch):
+    import yaml
+
+    from pgml import defaults
+
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["appliance"]["harmonic_shunt"]["generation_model"]["value"] = "filter"
+    path = tmp_path / "bad_generation.yaml"
+    path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
+    try:
+        defaults.reload(str(path))
+        with pytest.raises(InputError, match="generation-shunt model"):
+            resolve_harmonic_shunt(
+                Generator(id=1, node=1, phases=[Phase.A], p_nom_w=1.0), "opendss"
+            )
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
 
 
 # --------------------------------------------------------------------------- #

@@ -434,7 +434,10 @@ verified empirically). New orchestration:
      `Mᵗ diag(y_elem) M` through the SAME incidence the injection uses
      (`pgml.assembly._load_shunt`, `_stamp_harmonic_load_shunt`). A per-device
      `HarmonicShuntModel` overrides the model; a per-scenario operating point makes
-     `Y(h)` `[*batch, Hh, N, N]`.
+     `Y(h)` `[*batch, Hh, N, N]`. A GENERATION device carries no shunt under the shipped
+     `appliance.harmonic_shunt.generation_model = none` (the expression's conductance is
+     negative for an injecting device), with one WARNING per solve naming how many were
+     left as pure current sources.
    - `I(h)` = sum of per-device harmonic injections using the verified convention
      `|I_h|=(mag_h/mag_1)|I1|`, `arg(I_h)=ang_h + h·(arg(I1) − ang_1)` from each
      device's `Spectrum` (or the `harmonic_injection` override).

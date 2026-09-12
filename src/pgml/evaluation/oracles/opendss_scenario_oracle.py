@@ -155,7 +155,11 @@ import numpy as np
 import torch
 
 from pgml.assembly import node_phase_index
-from pgml.assembly._load_shunt import resolve_harmonic_shunt, resolve_shunt_model_name
+from pgml.assembly._load_shunt import (
+    generation_shunt_is_neglected,
+    resolve_harmonic_shunt,
+    resolve_shunt_model_name,
+)
 from pgml.errors import ConversionError, InputError
 from pgml.evaluation._util import to_float
 from pgml.evaluation.oracles.opendss_oracle import (
@@ -741,13 +745,29 @@ def _harmonic_shunt_properties(a, load_shunt: str) -> str:
     ``%SeriesRL`` carries the series/parallel split and ``puXharm``/``XRharm`` the motor
     series branch, so a matched-mode circuit solves the SAME harmonic device model pgml
     does (``pgml.assembly._load_shunt``). OpenDSS's ``NeglectLoadY`` is a global solution
-    option, so a device that switches its own shunt off while the run keeps one has no
-    OpenDSS representation and is refused rather than silently diverging.
+    option, so a device that carries no shunt while the run keeps one has no OpenDSS
+    representation and is refused rather than silently diverging. That is the case for
+    every GENERATION device under the shipped
+    ``appliance.harmonic_shunt.generation_model: none``, because OpenDSS's negative-kW
+    ``Load`` idiom always derives a shunt from the (negative) power; the error names both
+    ways to get a comparable circuit.
     """
     if load_shunt == "none":
         return ""  # the circuit carries Set NeglectLoadY=Yes instead.
     spec = resolve_harmonic_shunt(a, load_shunt)
     if spec.kind == "none":
+        if generation_shunt_is_neglected(a):
+            raise ConversionError(
+                f"appliance {a.id} is a GENERATION device, which carries no harmonic "
+                "shunt under the documented default "
+                "appliance.harmonic_shunt.generation_model='none', while this export "
+                "carries one. OpenDSS's negative-kW Load idiom always derives a shunt "
+                "from the device's power, and NeglectLoadY is a GLOBAL option, so the "
+                "two engines cannot be matched device by device here. Export with "
+                "load_shunt='none' to compare pure current sources on both sides, or "
+                "set that default to 'load_style' to give the generation devices the "
+                "load expression OpenDSS uses (negative conductance included)."
+            )
         raise ConversionError(
             f"appliance {a.id}: harmonic_model switches this device's harmonic shunt "
             "off while the run carries one; OpenDSS's NeglectLoadY is a GLOBAL "

@@ -41,6 +41,7 @@ import torch
 
 from pgml.assembly import base_voltage_per_row, node_phase_index
 from pgml.assembly._load_shunt import harmonic_shunt_element_admittance
+from pgml import defaults
 from pgml.convert.pandapower import PhaseMode
 from pgml.evaluation.oracles.opendss_scenario_oracle import (
     _extract_voltages,
@@ -331,8 +332,11 @@ def _attach_dss_spectra(dss, grid, circuit) -> None:
         f"%mag=[{mags}] angle=[{angs}]"
     )
     for ld in grid.appliances:
-        if isinstance(ld, Load) and ld.spectrum is not None:
-            for name in circuit.loads[int(ld.id)].elements.values():
+        # Every injection appliance exports as a DSS ``Load`` (a Generator / Storage as a
+        # negative-kW one), so the spectrum is attached by appliance id, not by kind.
+        if isinstance(ld, InjectionAppliance) and ld.spectrum is not None:
+            exp = circuit.loads.get(int(ld.id)) or circuit.generators[int(ld.id)]
+            for name in exp.elements.values():
                 dss.Text.Command(f"Edit Load.{name} spectrum=rect")
 
 
@@ -677,3 +681,192 @@ def test_fused_switch_next_to_shunted_loads_matches_opendss(load_shunt):
     stamped = _fused_shunt_deviation(switch_ohm=1.0e-6, load_shunt=load_shunt)
     assert stamped < 1e-11, f"{load_shunt} stamped: max |d|V_h|| = {stamped:.2e} pu"
     assert stamped < worst
+
+
+# --------------------------------------------------------------------------- #
+# 4. a GENERATION device carries no shunt by default
+# --------------------------------------------------------------------------- #
+#: ``(u_rated_v, p_nom_w, length_m, r_per_m, l_per_m, src_r, src_l)`` of the two PV
+#: feeders: a 20 kV MV one where the inverter is weak against the network, and a 400 V
+#: cable feeder where its admittance is a few per cent of the line's.
+PV_FEEDERS = {
+    "mv": (20_000.0, 4.0e5, 1_200.0, 3.0e-4, 1.0e-6, 0.2, 2.0e-3),
+    "lv": (400.0, 4.0e4, 200.0, 2.0e-4, 2.5e-7, 0.01, 3.0e-5),
+}
+
+
+def _pv_feeder(case: str = "mv"):
+    """3-phase feeder whose only injecting device is a distorting PV generator.
+
+    ``source -- line -- node 2``, with a rectifier-spectrum ``Generator`` at node 2 and
+    no load at all, so the only harmonic device model under comparison is the generation
+    one. ``case`` selects one of :data:`PV_FEEDERS`.
+    """
+    from pgml.schemas.grid_schema import (
+        Generator,
+        Grid,
+        HarmonicComponent,
+        Line,
+        Node,
+        Phase,
+        Source,
+        SpectrumPoint,
+        StaticSpectrum,
+    )
+
+    abc = [Phase.A, Phase.B, Phase.C]
+    u_v, p_w, length_m, r_pm, l_pm, src_r, src_l = PV_FEEDERS[case]
+    return Grid(
+        base_frequency_hz=50.0,
+        nodes=[Node(id=i, u_rated_v=u_v, phases=abc) for i in (1, 2)],
+        branches=[
+            Line(
+                id=10,
+                from_node=1,
+                to_node=2,
+                from_phases=abc,
+                to_phases=abc,
+                length_m=length_m,
+                series_resistance_ohm_per_m=[
+                    [r_pm if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                series_inductance_h_per_m=[
+                    [l_pm if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                shunt_capacitance_f_per_m=[[0.0] * 3 for _ in range(3)],
+                harmonic_line_model="naive",
+            )
+        ],
+        appliances=[
+            Source(
+                id=20,
+                node=1,
+                phases=abc,
+                u_ref_v=(u_v,) * 3,
+                u_angle_deg=(0.0, -120.0, 120.0),
+                resistance_ohm=[
+                    [src_r if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                inductance_h=[
+                    [src_l if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+            ),
+            Generator(
+                id=21,
+                node=2,
+                phases=abc,
+                p_nom_w=p_w,
+                q_nom_var=0.0,
+                spectrum=StaticSpectrum(
+                    spectrum=SpectrumPoint(
+                        components=[
+                            HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a)
+                            for o, m, a in RECTIFIER_SPECTRUM
+                        ]
+                    )
+                ),
+            ),
+        ],
+    )
+
+
+def _load_style_defaults(tmp_path, monkeypatch) -> None:
+    """Switch ``appliance.harmonic_shunt.generation_model`` to ``load_style``.
+
+    An override file REPLACES the packaged one, so it carries a full copy with one leaf
+    changed.
+    """
+    import yaml
+
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["appliance"]["harmonic_shunt"]["generation_model"]["value"] = "load_style"
+    path = tmp_path / "generation_load_style.yaml"
+    path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
+    defaults.reload(str(path))
+
+
+def _pv_deviation(grid, *, pgml_shunt: str, dss_shunt: str) -> float:
+    """Max ``|d|V(h)||`` in pu of nominal between pgml and a live OpenDSS solve."""
+    res = solve_harmonic_flow(
+        grid, ORDERS, slack="norton", dtype=CDT, load_shunt=pgml_shunt
+    )
+    assert res.pf.converged
+    v_pgml = res.v.numpy()
+    base_v = base_voltage_per_row(grid).numpy()
+    props = VARIANTS["series_rl_50"][2] if dss_shunt != "none" else ""
+    v_dss = _dss_harmonic_voltages(grid, dss_shunt, props, ORDERS, False)
+    worst = 0.0
+    for k, h in enumerate(ORDERS):
+        if h == 1:
+            continue
+        d = np.abs(np.abs(v_pgml[k]) - np.abs(v_dss[h])) / base_v
+        worst = max(worst, float(d.max()))
+    return worst
+
+
+@pytest.mark.parametrize("case", ["mv", "lv"])
+def test_a_generation_device_is_a_pure_current_source_like_neglect_load_y(case):
+    """pgml's default for a Generator is exactly OpenDSS ``Set NeglectLoadY=Yes``.
+
+    The load expression ``Y_eq = conj(S)/V_rated**2`` has a NEGATIVE conductance for a
+    device that injects power, so applying it to an inverter would make it FEED harmonic
+    energy into the network. The shipped
+    ``appliance.harmonic_shunt.generation_model: none`` therefore leaves every
+    Generator / Storage a pure harmonic current source, which is what OpenDSS computes
+    under ``NeglectLoadY=Yes``. Measured on this machine (complex128, CPU, orders 3 to 25,
+    in pu of nominal): 1.1e-13 on the MV feeder and 7.9e-13 on the LV one.
+    """
+    worst = _pv_deviation(_pv_feeder(case), pgml_shunt="opendss", dss_shunt="none")
+    assert worst < 1e-9, f"{case}: max |d|V_h|| = {worst:.2e} pu"
+
+
+@pytest.mark.parametrize("case", ["mv", "lv"])
+def test_the_negative_load_idiom_of_opendss_is_reachable_and_quantified(
+    case, tmp_path, monkeypatch
+):
+    """What OpenDSS's negative-kW ``Load`` idiom does, and how to reproduce it.
+
+    A matched-mode export writes a pgml ``Generator`` as a negative-kW DSS ``Load``, and
+    OpenDSS then derives that element's harmonic shunt from the negative power — the
+    anti-damping term pgml's default refuses.
+    ``appliance.harmonic_shunt.generation_model: load_style`` applies the same expression
+    and reproduces the circuit to 1.1e-13 (MV) and 8.2e-13 (LV) pu of nominal; the
+    packaged default differs from it by 3.2e-07 (MV) and 4.9e-05 (LV) pu, which is the
+    size of the modeling difference on a feeder whose only distorting device is the
+    inverter. Both measured on this machine, complex128, CPU, orders 3 to 25.
+    """
+    grid = _pv_feeder(case)
+    props = VARIANTS["series_rl_50"][2]
+    try:
+        _load_style_defaults(tmp_path, monkeypatch)
+        # The only way to make OpenDSS carry the shunt of a generation device is to
+        # export it with the same load-style policy (NeglectLoadY is global).
+        idiom = _dss_harmonic_voltages(grid, "opendss", props, ORDERS, False)
+        v_load_style = solve_harmonic_flow(
+            grid, ORDERS, slack="norton", dtype=CDT
+        ).v.numpy()
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
+    v_default = solve_harmonic_flow(grid, ORDERS, slack="norton", dtype=CDT).v.numpy()
+
+    base_v = base_voltage_per_row(grid).numpy()
+
+    def worst(v):
+        return max(
+            float((np.abs(np.abs(v[k]) - np.abs(idiom[h])) / base_v).max())
+            for k, h in enumerate(ORDERS)
+            if h != 1
+        )
+
+    assert worst(v_load_style) < 1e-9
+    assert 1e-7 < worst(v_default) < 1e-3
+
+
+def test_matched_mode_refuses_a_generation_device_while_the_run_carries_a_shunt():
+    """The export cannot match a device model OpenDSS has no per-element option for."""
+    from pgml.errors import ConversionError
+
+    with pytest.raises(ConversionError, match="GENERATION device"):
+        export_grid_to_opendss(_pv_feeder(), mode="matched", load_shunt="opendss")

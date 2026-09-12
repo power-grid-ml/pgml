@@ -32,6 +32,16 @@ by a fixed blocked-rotor reactance (OpenDSS ``puXharm`` / ``XRharm``)::
 per-element power for a WYE device (one single-phase element per phase) and the device
 total for a DELTA device (one multi-phase element).
 
+A GENERATION-sign device (Generator / Storage) carries NO shunt by default: ``S`` is
+negative for it, so ``Y_eq`` has a negative conductance and the expression would make an
+inverter feed harmonic energy into the network instead of damping it. The policy is the
+documented default ``appliance.harmonic_shunt.generation_model``
+(:func:`generation_shunt_is_neglected`), whose ``load_style`` value applies the load
+expression anyway — what OpenDSS computes for the negative-kW ``Load`` idiom, sign
+included. A real inverter's harmonic output impedance is its filter impedance and a
+machine's its subtransient reactance (OpenDSS ``%R``/``%X``, ``Xdpp``); neither is a
+field of this schema.
+
 All math is autograd-safe torch: gradients flow to the operating-point power (hence to
 the fundamental solution) and the degenerate cases (zero power, ``s = 0``) are handled
 by masking a safe denominator, never by Python control flow on a tensor value. The
@@ -53,6 +63,9 @@ from pgml.errors import InputError
 
 #: The selectable harmonic shunt models (``appliance.harmonic_shunt.model``).
 HARMONIC_SHUNT_MODELS = ("none", "opendss", "motor")
+
+#: What a generation-sign device carries (``appliance.harmonic_shunt.generation_model``).
+GENERATION_SHUNT_MODELS = ("none", "load_style")
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,37 @@ def resolve_shunt_model_name(model: Optional[str]) -> str:
     return str(name)
 
 
+def generation_shunt_is_neglected(appliance) -> bool:
+    """Does the documented generation policy leave ``appliance`` a pure current source?
+
+    ``True`` for an in-service GENERATION-sign device (Generator / Storage) while
+    ``appliance.harmonic_shunt.generation_model`` is ``"none"`` (the shipped value) and
+    the device's own ``harmonic_model`` does not name the ``motor`` model. The reason is
+    in that default's documentation: the load expression ``conj(S)/V_rated**2`` has a
+    negative conductance for a device that injects power, so applying it to an inverter
+    would make it feed harmonic energy into the network.
+    """
+    from pgml.schemas.grid_schema import Load
+
+    if isinstance(appliance, Load):
+        return False
+    override = getattr(appliance, "harmonic_model", None)
+    if override is not None and override.motor_x_harm_pu is not None:
+        return False
+    return _generation_model() == "none"
+
+
+def _generation_model() -> str:
+    """The validated ``appliance.harmonic_shunt.generation_model`` default."""
+    name = _cfg("appliance.harmonic_shunt.generation_model")
+    if name not in GENERATION_SHUNT_MODELS:
+        raise InputError(
+            f"unknown harmonic generation-shunt model {name!r}; use one of "
+            f"{', '.join(repr(m) for m in GENERATION_SHUNT_MODELS)}."
+        )
+    return str(name)
+
+
 def resolve_harmonic_shunt(appliance, model: str) -> ResolvedHarmonicShunt:
     """Resolve one appliance's harmonic shunt: device override > run model > defaults.
 
@@ -106,8 +150,20 @@ def resolve_harmonic_shunt(appliance, model: str) -> ResolvedHarmonicShunt:
     the documented ``appliance.harmonic_shunt.*`` values for anything it leaves open:
     ``neglect_shunt=True`` -> ``"none"``, a set ``motor_x_harm_pu`` -> ``"motor"``,
     else the run-level model.
+
+    A GENERATION-sign device (Generator / Storage) is additionally governed by
+    ``appliance.harmonic_shunt.generation_model``, whose shipped value leaves it a pure
+    current source (:func:`generation_shunt_is_neglected`): the load expression's
+    conductance is negative for an injecting device, which would damp nothing and feed
+    harmonic energy instead. A stored ``harmonic_model`` block does NOT override that —
+    every grid written before the shunt was consumed carries the former default block on
+    every device, so honouring it would silently re-introduce the negative conductance.
+    Naming the ``motor`` model (``motor_x_harm_pu``) does, and so does setting the
+    default to ``load_style``.
     """
     if model == "none":
+        return ResolvedHarmonicShunt("none", 0.0, 0.0, 1.0)
+    if generation_shunt_is_neglected(appliance):
         return ResolvedHarmonicShunt("none", 0.0, 0.0, 1.0)
     override = getattr(appliance, "harmonic_model", None)
     s = (
@@ -232,8 +288,10 @@ def _complex(re: Tensor, im: Tensor) -> Tensor:
 
 
 __all__ = [
+    "GENERATION_SHUNT_MODELS",
     "HARMONIC_SHUNT_MODELS",
     "ResolvedHarmonicShunt",
+    "generation_shunt_is_neglected",
     "resolve_shunt_model_name",
     "resolve_harmonic_shunt",
     "harmonic_shunt_element_admittance",

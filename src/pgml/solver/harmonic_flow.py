@@ -68,6 +68,7 @@ from pgml.assembly import (
 from pgml.assembly._fusion import resolve_fusion
 from pgml.assembly._incidence import build_incidence, group_appliances, used_rows
 from pgml.assembly._load_shunt import (
+    generation_shunt_is_neglected,
     harmonic_shunt_element_admittance,
     resolve_harmonic_shunt,
     resolve_shunt_model_name,
@@ -1424,6 +1425,7 @@ def _stamp_harmonic_load_shunt(
     node_map = {nd.id: nd for nd in grid.nodes}
     h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
     rated_only = []
+    generation_free = [a.id for a in loads if generation_shunt_is_neglected(a)]
     for grp in group_appliances(loads, node_map):
         specs = [resolve_harmonic_shunt(a, harmonic_shunt) for a in grp.appliances]
         keep = [ki for ki, sp in enumerate(specs) if sp.kind != "none"]
@@ -1506,6 +1508,17 @@ def _stamp_harmonic_load_shunt(
             "fundamental voltage for the exact operating point.",
             len(rated_only),
             rated_only[:10],
+        )
+    if generation_free:
+        _log.warning(
+            "harmonic device shunt: %d generation device(s) %s carry NO shunt and stay "
+            "pure harmonic current sources (appliance.harmonic_shunt.generation_model = "
+            "'none'): the load expression conj(S)/V_rated^2 has a negative conductance "
+            "for an injecting device. Set that default to 'load_style' to apply it "
+            "anyway (OpenDSS's negative-kW Load idiom), or give the device the motor "
+            "model.",
+            len(generation_free),
+            generation_free[:10],
         )
     return yh
 

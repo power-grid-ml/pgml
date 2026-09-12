@@ -33,6 +33,16 @@ requires an env var to be set.
   Load/Generator with no explicit `connection` (multi- vs single-phase; both WYE by
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
   `docs/pgml/modeling/asymmetric.md`.
+- `appliance.harmonic_shunt.{model, series_rl_fraction, motor_x_harm_pu, motor_xr_harm,
+  generation_model}` — the harmonic device Norton shunt every injection appliance carries
+  at orders `h > 1` (`none` / `opendss` / `motor`; `opendss` is the shipped value and
+  OpenDSS's own). `generation_model` (shipped `none`) is the separate policy for a
+  GENERATION-sign device: the load expression's conductance is negative for an injecting
+  device, so a Generator / Storage stays a pure current source unless this is set to
+  `load_style` or the device names the `motor` model. Resolved by
+  `pgml.assembly._load_shunt.{resolve_shunt_model_name, resolve_harmonic_shunt,
+  generation_shunt_is_neglected}`; per-device override `Load/Generator/Storage
+  .harmonic_model`; per-run override `solve_harmonic_flow(load_shunt=...)`.
 - `line.harmonic_model.{three_phase, single_phase, skin_effect}` — which
   frequency-dependent line model is written to `Line.harmonic_line_model` for an R/X line
   (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =

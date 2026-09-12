@@ -271,7 +271,18 @@ above, and the one the harmonic solver uses). Internal API:
 `appliance.harmonic_shunt.model`; an unknown name raises `InputError`),
 `resolve_harmonic_shunt(appliance, model) -> ResolvedHarmonicShunt` (device override >
 run-level model > defaults file; `"none"` at run level wins over every device, which is
-OpenDSS's global `NeglectLoadY`), and
+OpenDSS's global `NeglectLoadY`),
+`GENERATION_SHUNT_MODELS = ("none", "load_style")` +
+`generation_shunt_is_neglected(appliance) -> bool` (the documented default
+`appliance.harmonic_shunt.generation_model`, shipped `none`: a GENERATION-sign device
+carries NO shunt, because `Y_eq = conj(S)/V_rated²` has a negative conductance for an
+injecting device and would feed harmonic energy into the network. A stored
+`harmonic_model` block does not override that — every grid written before the field was
+consumed carries the former default block on every device — while naming the `motor`
+model does, and so does setting the default to `load_style`, which is the expression
+OpenDSS applies to the negative-kW `Load` idiom an export writes. The stamp logs one
+WARNING per assembly naming how many generation devices were left as pure current
+sources), and
 `harmonic_shunt_element_admittance(s_elem, v_rated, h, series_rl, *, motor_x_pu,
 motor_xr, motor_s_base, cdtype) -> [*batch, H, K, E]`, the per-element admittance
 `(1−s)Re(Y_eq) + j(1−s)Im(Y_eq)/h + 1/(Re(Z_s) + j·h·Im(Z_s))` with
