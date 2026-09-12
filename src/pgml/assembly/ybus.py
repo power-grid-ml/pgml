@@ -23,6 +23,7 @@ differentiable path (loops are only over the fixed set of component KINDS).
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
@@ -49,6 +50,14 @@ from pgml.schemas.grid_schema import (
 )
 
 from ._control import resolve_injection_power
+from ._fusion import (
+    FusionMap,
+    describe_unfusable,
+    fused_branch_currents,
+    log_fusion_summary,
+    resolve_fusion,
+    zero_impedance_branches,
+)
 from ._incidence import (
     build_incidence,
     cyclic_delta_incidence,
@@ -85,6 +94,8 @@ from ._stamps import (
 )
 from .index import NodePhaseIndex, node_phase_index
 
+_log = logging.getLogger("pgml")
+
 
 @dataclass(frozen=True)
 class YBus:
@@ -96,14 +107,21 @@ class YBus:
         Complex tensor ``[*batch, H, N, N]`` (or ``[N, N]`` if a single grid and a
         single frequency were requested and ``squeeze`` applies).
     index:
-        The :class:`NodePhaseIndex` describing the compact row layout.
+        The :class:`NodePhaseIndex` describing the compact row layout of ``Y`` — the
+        grid's full layout, or the REDUCED one when ``fusion`` is set.
     frequencies_hz:
         Real tensor ``[H]`` of the absolute frequencies the Y was built at.
+    fusion:
+        The :class:`~pgml.assembly._fusion.FusionMap` applied, or ``None`` when the
+        grid has no zero-impedance branch to collapse. When set, ``Y``'s rows are the
+        fused ones (``index is fusion.index``, ``N == fusion.size``) and
+        ``fusion.prolong`` maps a solution back to the grid's full row layout.
     """
 
     Y: Tensor
     index: NodePhaseIndex
     frequencies_hz: Tensor
+    fusion: Optional[FusionMap] = None
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +291,7 @@ def assemble_ybus(
     param_overrides: Optional[dict] = None,
     symmetry: Optional[str] = None,
     branch_states: Optional[dict] = None,
+    fusion: Optional[object] = None,
 ) -> YBus:
     """Assemble the LINEAR (const-Z) complex nodal admittance ``Y(f)``.
 
@@ -327,13 +346,21 @@ def assemble_ybus(
         intermediate values scale the admittance continuously and stay
         differentiable). A batched state promotes ``Y`` to ``[*batch, H, N, N]``,
         so one assembly covers a whole batch of switch configurations.
+    fusion:
+        Exact bus fusion of zero-impedance branches. ``None`` (default) resolves the
+        documented policy ``branch.zero_impedance``; ``False`` refuses a
+        zero-impedance branch by name instead of collapsing it; a
+        :class:`~pgml.assembly._fusion.FusionMap` uses that map (the way a solve shares
+        one map across its orders). When fusion applies, ``Y`` is the REDUCED system
+        ``P^T Y P`` and the returned ``index`` is the reduced layout.
 
     Returns
     -------
     YBus
         ``Y`` complex ``[H, N, N]`` (``[N, N]`` if ``H == 1`` and a scalar
         frequency was passed; ``[*batch, H, N, N]`` with batched
-        ``branch_states``), the :class:`NodePhaseIndex`, and the frequencies.
+        ``branch_states``), the :class:`NodePhaseIndex` of its rows, the frequencies,
+        and the :class:`~pgml.assembly._fusion.FusionMap` when one applied.
     """
     if device is None and isinstance(frequencies_hz, Tensor):
         device = frequencies_hz.device
@@ -343,7 +370,10 @@ def assemble_ybus(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    index = node_phase_index(grid)
+    fused = resolve_fusion(
+        grid, fusion, param_overrides=param_overrides, branch_states=branch_states
+    )
+    index = fused.index if fused is not None else node_phase_index(grid)
     n = index.size
 
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
@@ -351,12 +381,13 @@ def assemble_ybus(
     # call; solve_power_flow logs its own, and harmonic_flow delegates its log to
     # solve_power_flow — so no double logging across the public entry points).
     log_modeling_summary(grid, asymmetric=asymmetric)
+    log_fusion_summary(fused)
 
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
 
     # Passive network (shared with assemble_network_ybus).
     y = _stamp_network(
-        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states
+        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states, fused
     )
     # Linear-model device folding: source Norton + const-Z loads/gens.
     y = _stamp_sources(grid, f, y, index, cdt, rdt, device, param_overrides)
@@ -380,7 +411,7 @@ def assemble_ybus(
     )
     if scalar_freq and y.ndim == 3:
         y = y.reshape(n, n)
-    return YBus(Y=y, index=index, frequencies_hz=f)
+    return YBus(Y=y, index=index, frequencies_hz=f, fusion=fused)
 
 
 def assemble_network_ybus(
@@ -391,6 +422,7 @@ def assemble_network_ybus(
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    fusion: Optional[object] = None,
 ) -> YBus:
     """Assemble the PASSIVE-NETWORK nodal admittance ``Y_net(f)``.
 
@@ -407,16 +439,18 @@ def assemble_network_ybus(
 
     Parameters
     ----------
-    grid, frequencies_hz, dtype, device, param_overrides, branch_states:
+    grid, frequencies_hz, dtype, device, param_overrides, branch_states, fusion:
         Identical meaning to :func:`assemble_ybus` (no ``operating_point`` — there
-        is no device folding here). ``branch_states`` masks/batches branch stamps.
+        is no device folding here). ``branch_states`` masks/batches branch stamps;
+        ``fusion`` collapses zero-impedance branches into single rows.
 
     Returns
     -------
     YBus
         ``Y`` complex ``[H, N, N]`` (``[N, N]`` for a scalar frequency;
         ``[*batch, H, N, N]`` with batched ``branch_states``), the
-        :class:`NodePhaseIndex`, and the frequencies.
+        :class:`NodePhaseIndex` of its rows, the frequencies, and the
+        :class:`~pgml.assembly._fusion.FusionMap` when one applied.
     """
     if device is None and isinstance(frequencies_hz, Tensor):
         device = frequencies_hz.device
@@ -426,12 +460,15 @@ def assemble_network_ybus(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    index = node_phase_index(grid)
+    fused = resolve_fusion(
+        grid, fusion, param_overrides=param_overrides, branch_states=branch_states
+    )
+    index = fused.index if fused is not None else node_phase_index(grid)
     n = index.size
 
     y = torch.zeros((h, n, n), dtype=cdt, device=device)
     y = _stamp_network(
-        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states
+        grid, f, y, index, cdt, rdt, device, param_overrides, branch_states, fused
     )
 
     scalar_freq = (
@@ -441,11 +478,36 @@ def assemble_network_ybus(
     )
     if scalar_freq and y.ndim == 3:
         y = y.reshape(n, n)
-    return YBus(Y=y, index=index, frequencies_hz=f)
+    return YBus(Y=y, index=index, frequencies_hz=f, fusion=fused)
+
+
+def _unfused_view(grid: Grid, fusion) -> Grid:
+    """A shallow grid view without the fused branches (same nodes, same catalog).
+
+    A fused branch has no primitive admittance to stamp — its physics is the row
+    collapse itself — so the stamp builders never see it. Dropping it from a shallow
+    ``model_copy`` keeps every parameter tensor (and its autograd identity) shared with
+    the original grid.
+    """
+    if fusion is None or not fusion.fused_branch_ids:
+        return grid
+    drop = set(fusion.fused_branch_ids)
+    return grid.model_copy(
+        update={"branches": [b for b in grid.branches if int(b.id) not in drop]}
+    )
 
 
 def _stamp_network(
-    grid, f, y, index, cdt, rdt, device, param_overrides, branch_states=None
+    grid,
+    f,
+    y,
+    index,
+    cdt,
+    rdt,
+    device,
+    param_overrides,
+    branch_states=None,
+    fusion=None,
 ):
     """Accumulate every PASSIVE contribution into ``y`` (shared assembler core).
 
@@ -458,8 +520,12 @@ def _stamp_network(
 
     ``branch_states`` scales each listed branch's primitive block by its state
     (:func:`_group_states`) before scattering; a batched state promotes ``y`` to
-    ``[*batch, H, N, N]`` through the scatter's broadcast.
+    ``[*batch, H, N, N]`` through the scatter's broadcast. With a ``fusion`` map the
+    builders run on the grid WITHOUT its fused branches and index through the reduced
+    layout, which accumulates ``P^T Y P`` directly (the fused rows' scatter targets
+    coincide) without ever forming the full system.
     """
+    grid = _unfused_view(grid, fusion)
     for stamp in _BRANCH_STAMPS:
         for group, block, rows, cols in stamp.builder(
             grid, f, index, cdt, rdt, device, param_overrides, branch_states
@@ -1672,6 +1738,8 @@ def branch_currents(
     device: Optional[torch.device] = None,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    fusion: Optional[FusionMap] = None,
+    i_inj: Optional[Tensor] = None,
 ) -> list[BranchCurrent]:
     """Per-branch terminal currents from solved node voltages.
 
@@ -1719,6 +1787,20 @@ def branch_currents(
         listed branch's primitive block is scaled by its state, so an open
         (state 0) branch reports zero current and a batched state yields
         per-scenario currents.
+    fusion:
+        The :class:`~pgml.assembly._fusion.FusionMap` the solve used, if any. A FUSED
+        branch has no primitive block to multiply, so its current comes from
+        Kirchhoff's law at the fused node instead: the currents of the fused branches
+        meeting at a fused row carry exactly what the rest of the network leaves there.
+        ``v`` and ``index`` must then be the FULL (unreduced) layout — which is what a
+        result reports.
+    i_inj:
+        The nodal current injection ``[*batch, H, N]`` (or broadcastable) the solve
+        used, in the full row layout, needed ONLY to recover the current through a
+        fused branch: the devices and sources sitting on a fused node are part of that
+        node's current balance. ``None`` assumes zero injection at the fused rows,
+        which is exact for a fused node that carries no appliance and logs a warning
+        when one does.
 
     Returns
     -------
@@ -1726,7 +1808,8 @@ def branch_currents(
         One :class:`BranchCurrent` per in-service branch, in ``grid.branches``
         order. ``i_from`` / ``i_to`` are complex ``[*batch, H, P]`` (the leading
         ``*batch`` matching ``v``'s broadcast; a scalar/length-1 frequency keeps a
-        singleton H axis).
+        singleton H axis). For a fused branch ``i_to == -i_from`` exactly (an ideal
+        conductor has no shunt path).
     """
     if device is None:
         device = v.device
@@ -1746,15 +1829,23 @@ def branch_currents(
     if v.shape[-2] != h:
         v = v.expand(*v.shape[:-2], h, n)
 
+    if fusion is not None and n != fusion.full_index.size:
+        raise InputError(
+            f"branch_currents: with a fusion map, v / index must be the FULL row "
+            f"layout (N={fusion.full_index.size}); got N={n}. Prolong the reduced "
+            "solution first (fusion.prolong)."
+        )
+
     # Iterate the SAME branch-stamp registry the Y-bus assembly does: each builder
     # yields (group, block, rows, cols) — the exact primitive block the stamp
     # scatters — so the currents are consistent with Y to machine precision (KCL).
     # rows == cols here; the block is multiplied with the gathered terminal voltage.
     results: dict[int, BranchCurrent] = {}
+    stamped = _unfused_view(grid, fusion)
 
     for stamp in _BRANCH_STAMPS:
         for group, block, rows, _cols in stamp.builder(
-            grid, f, index, cdt, rdt, device, param_overrides, branch_states
+            stamped, f, index, cdt, rdt, device, param_overrides, branch_states
         ):
             block = _masked_block(
                 block, _group_states(group, branch_states, rdt, device)
@@ -1788,9 +1879,107 @@ def branch_currents(
                     i_to=i_to[..., k, :],
                 )
 
+    if fusion is not None and fusion.fused_branch_ids:
+        results.update(
+            _fused_branch_results(
+                grid,
+                v,
+                f,
+                index,
+                fusion,
+                i_inj,
+                cdt,
+                rdt,
+                device,
+                dtype,
+                param_overrides,
+                branch_states,
+            )
+        )
+
     # Emit in grid.branches order over the stamped BranchBase branches (every
     # in-service branch, plus any branch listed in ``branch_states``).
     return [results[b.id] for b in grid.branches if b.id in results]
+
+
+def _fused_branch_results(
+    grid,
+    v,
+    f,
+    index,
+    fusion,
+    i_inj,
+    cdt,
+    rdt,
+    device,
+    dtype,
+    param_overrides,
+    branch_states,
+) -> dict[int, BranchCurrent]:
+    """The :class:`BranchCurrent` of every FUSED branch, from KCL at the fused rows.
+
+    The defect the fused branches have to carry is what the rest of the network leaves
+    at each fused row::
+
+        defect = i_inj - Y_network_without_fused_branches @ V
+
+    built in the FULL row layout (hence one assembly of the unfused network — the fused
+    rows' individual balances are exactly the information the reduced system sums away),
+    then inverted per fused group by the structural maps of the fusion map. Sign
+    convention as everywhere: positive current flows INTO the branch terminal, so the
+    TO terminal of an ideal conductor carries ``-i_from``.
+    """
+    y_nf = assemble_network_ybus(
+        _unfused_view(grid, fusion),
+        f,
+        dtype=dtype,
+        device=device,
+        param_overrides=param_overrides,
+        branch_states=branch_states,
+        fusion=False,
+    ).Y  # [H, N, N] (or [*batch, H, N, N] with batched states), FULL layout
+    if y_nf.ndim == 2:
+        y_nf = y_nf.unsqueeze(0)
+    defect = -torch.matmul(y_nf, v.unsqueeze(-1)).squeeze(-1)  # [*batch, H, N]
+    if i_inj is not None:
+        defect = defect + i_inj.to(dtype=cdt, device=device)
+    elif _fused_rows_carry_injection(grid, fusion):
+        _log.warning(
+            "branch_currents: the fused node(s) %s carry an injecting appliance or a "
+            "source, whose current is part of their current balance, but no i_inj was "
+            "given; the current reported for the fused branch(es) omits it. Pass the "
+            "solve's nodal injection as i_inj.",
+            [nid for grp in fusion.node_groups() for nid, _ph in grp][:8],
+        )
+    recovered = fused_branch_currents(fusion, defect)
+    out: dict[int, BranchCurrent] = {}
+    by_id = {int(b.id): b for b in grid.branches}
+    for bid, per_phase in recovered.items():
+        b = by_id[bid]
+        i_from = torch.stack(
+            [per_phase[p] for p in range(len(b.from_phases))], dim=-1
+        )  # [*batch, H, P]
+        out[bid] = BranchCurrent(
+            branch_id=bid,
+            from_node=b.from_node,
+            to_node=b.to_node,
+            from_phases=tuple(b.from_phases),
+            to_phases=tuple(b.to_phases),
+            i_from=i_from,
+            i_to=-i_from,
+        )
+    return out
+
+
+def _fused_rows_carry_injection(grid, fusion) -> bool:
+    """Does any fused node-phase row host an in-service injecting appliance / source?"""
+    fused_nodes = {nid for grp in fusion.node_groups() for nid, _ph in grp}
+    for a in grid.appliances:
+        if not getattr(a, "in_service", True):
+            continue
+        if isinstance(a, (InjectionAppliance, Source)) and int(a.node) in fused_nodes:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1897,6 +2086,35 @@ def branch_stamp_blocks(
     sub = grid.model_copy(
         update={"branches": [b for b in grid.branches if b.id in wanted_set]}
     )
+    # A zero-impedance branch has no primitive block, so it cannot be the rank-k term of
+    # a low-rank update either; name it instead of returning an infinite stamp. The
+    # static flags are forced on for the check, because every requested branch is
+    # stamped whatever they say.
+    forced = sub.model_copy(
+        update={
+            "branches": [
+                b.model_copy(
+                    update=(
+                        {"in_service": True, "closed": True}
+                        if hasattr(b, "closed")
+                        else {"in_service": True}
+                    )
+                )
+                for b in sub.branches
+            ]
+        }
+    )
+    ideal = [
+        z
+        for z in zero_impedance_branches(forced, param_overrides=param_overrides)
+        if z.branch_id in wanted_set
+    ]
+    if ideal:
+        raise InputError(
+            "branch_stamp_blocks: "
+            + describe_unfusable(ideal)
+            + " A swept or low-rank-updated branch has to stay a stamped branch."
+        )
     # Every requested branch is stamped, whatever its static flags say.
     active = {bid: 1.0 for bid in wanted}
 

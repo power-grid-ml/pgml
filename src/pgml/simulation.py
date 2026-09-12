@@ -180,6 +180,9 @@ class SolvedState:
         dtype: torch.dtype,
         device: Optional[torch.device],
         param_overrides: Optional[dict] = None,
+        fusion=None,
+        harmonic_injection: Optional[dict] = None,
+        node_sources: Optional[Sequence] = None,
     ) -> None:
         self.grid = grid
         self.config = config
@@ -192,6 +195,11 @@ class SolvedState:
         self.dtype = dtype
         self.device = device
         self.param_overrides = param_overrides
+        # Zero-impedance branches collapsed by the solve (``None`` = none); the lazy
+        # branch quantities need it to report the current through a fused branch.
+        self.fusion = fusion
+        self.harmonic_injection = harmonic_injection
+        self.node_sources = node_sources
 
     # -- node quantities ---------------------------------------------------- #
     def node_voltages(self) -> Tensor:
@@ -239,7 +247,11 @@ class SolvedState:
         """Per-branch terminal currents (list of ``BranchCurrent``); differentiable.
 
         Lazily reuses the assembly's primitive blocks (``Y_prim @ V_terminal``),
-        applying the same ``param_overrides`` the voltage solve used.
+        applying the same ``param_overrides`` the voltage solve used. A branch the solve
+        FUSED has no primitive block; its current comes from Kirchhoff's law at the
+        fused node, which needs the solve's nodal injection — rebuilt here from the
+        grid, the solved voltages and this state's own operating point / harmonic
+        injection, so the recovered current is the one the solved network carries.
         """
         from .assembly import branch_currents as _branch_currents
 
@@ -251,7 +263,84 @@ class SolvedState:
             dtype=self.dtype,
             device=self.device,
             param_overrides=self.param_overrides,
+            fusion=self.fusion,
+            i_inj=self._nodal_injection() if self.fusion is not None else None,
         )
+
+    def _nodal_injection(self) -> Tensor:
+        """The solve's nodal current injection ``[*batch, H, N]`` (device side only).
+
+        The injection the nodal equations balance, per solved order: the devices'
+        fundamental current at order 1 (``-I_device(V1)``, the sign of
+        ``Y V = I_slack - I_device``) and, above it, their harmonic current sources minus
+        what their harmonic Norton shunt draws (that shunt sits inside ``Y(h)``, so the
+        device's nodal current is the source minus the shunt current), plus any node
+        harmonic source. The SOURCE rows are deliberately left out — under an ideal slack
+        the source's own current is an output of the solve, not an input, so the
+        fused-branch recovery drops those rows' balances either way.
+        """
+        from .assembly import device_current_injections
+        from .solver.harmonic_flow import _harmonic_shunt_currents, harmonic_injections
+
+        f0 = float(self.grid.base_frequency_hz)
+        orders = [float(f) / f0 for f in self.frequencies_hz]
+        fundamental = next(
+            (k for k, h in enumerate(orders) if abs(h - 1.0) < 1e-12), None
+        )
+        if fundamental is None:
+            raise InputError(
+                "the current through a fused branch is derived from the nodal current "
+                "balance, whose harmonic part scales with each device's FUNDAMENTAL "
+                "current; solve order 1 together with the harmonic orders."
+            )
+        v1 = self.v[..., fundamental, :]
+        cols: list[Tensor] = []
+        for k, h in enumerate(orders):
+            if abs(h - 1.0) < 1e-12:
+                cols.append(
+                    -device_current_injections(
+                        self.grid,
+                        self.v[..., k, :],
+                        self.index,
+                        [f0],
+                        dtype=self.dtype,
+                        device=self.device,
+                        operating_point=self.config.operating_point,
+                        param_overrides=self.param_overrides,
+                        symmetry=self.config.symmetry,
+                    ).squeeze(-2)
+                )
+            else:
+                order = int(round(h))
+                i_src = harmonic_injections(
+                    self.grid,
+                    v1,
+                    [order],
+                    operating_point=self.config.operating_point,
+                    harmonic_injection=self.harmonic_injection,
+                    node_sources=self.node_sources,
+                    symmetry=self.config.symmetry,
+                    dtype=self.dtype,
+                    device=self.device,
+                    param_overrides=self.param_overrides,
+                )
+                i_shunt = _harmonic_shunt_currents(
+                    self.grid,
+                    v1,
+                    self.v[..., k : k + 1, :],
+                    [order],
+                    operating_point=self.config.operating_point,
+                    load_shunt=self.config.load_shunt,
+                    symmetry=self.config.symmetry,
+                    dtype=self.dtype,
+                    device=self.device,
+                    param_overrides=self.param_overrides,
+                    index=self.index,
+                )
+                cols.append((i_src - i_shunt).squeeze(-2))
+        lead = torch.broadcast_shapes(*[c.shape[:-1] for c in cols])
+        n = cols[0].shape[-1]
+        return torch.stack([c.broadcast_to(*lead, n) for c in cols], dim=-2)
 
     def branch_flows(self):
         """Per-branch complex power flows ``S = V ⊙ conj(I)`` at each terminal.
@@ -495,6 +584,7 @@ def simulate(
             pf.iterations,
             float(pf.residual),
         )
+        fusion = pf.fusion
         pf_diag = pf.diagnostics
     else:
         if linear_solver != "auto" or block_rows is not None:
@@ -525,6 +615,7 @@ def simulate(
             param_overrides=param_overrides,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
+        fusion = hf.fusion
         converged, iterations, residual = (
             hf.pf.converged,
             hf.pf.iterations,
@@ -558,6 +649,9 @@ def simulate(
         dtype=cdt,
         device=dev,
         param_overrides=param_overrides,
+        fusion=fusion,
+        harmonic_injection=harmonic_injection,
+        node_sources=node_sources,
     )
 
 

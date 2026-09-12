@@ -55,6 +55,10 @@ class NodePhaseIndex:
         """Row indices of all phases of ``node_id`` (aligned to its ``phases`` order)."""
         return list(self._rows_of_node[node_id])
 
+    def has(self, node_id: int, phase: Phase) -> bool:
+        """Does the layout carry a row for ``(node_id, phase)``?"""
+        return (node_id, phase) in self._row_of
+
     def node_id_of(self, row: int) -> int:
         """Node id of ``row``."""
         return int(self.node_ids[row])

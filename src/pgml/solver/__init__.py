@@ -75,6 +75,11 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   branch_states=None) -> (Y, index)``
   ``Y(h)`` only, without the injection right-hand side — the self-consistency
   building block for a learned injection decoder.
+- ``harmonic_injections(grid, v1, harmonic_orders, *, operating_point,
+  harmonic_injection, node_sources, symmetry, dtype, device, param_overrides,
+  index=None) -> Tensor``
+  ``I(h)`` only, the injection right-hand side of the same system, on the grid's
+  full (or a given) row layout.
 """
 
 from __future__ import annotations
@@ -85,6 +90,7 @@ from .harmonic_flow import (
     NodeHarmonicSource,
     assemble_harmonic_system,
     assemble_harmonic_ybus,
+    harmonic_injections,
     solve_harmonic_flow,
 )
 from .power_flow import (
@@ -126,6 +132,7 @@ __all__ = [
     "solve_harmonic_flow",
     "assemble_harmonic_system",
     "assemble_harmonic_ybus",
+    "harmonic_injections",
     "HarmonicFlowResult",
     "NodeHarmonicSource",
 ]

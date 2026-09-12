@@ -175,6 +175,25 @@ tolerance family, and `test_cigre_mv_shift30_fallback`/
 `test_mv_oberrhein_ynd5_delta_referral_and_taps`, which now exercise this
 production path directly rather than a test-harness workaround).
 
+### Closed bus-bus switch (`et='b'`) — an IDEAL switch by default
+
+A closed bus-bus switch converts to a `Switch` branch. Its resistance comes from
+`switch.z_ohm` when the row carries one; with `z_ohm = 0` (the usual case, and what every
+pandapower built-in uses) the documented default `branch.switch_model` decides:
+
+- `ideal` (the default) writes `resistance_ohm = inductance_h = 0`. pandapower solves such
+  a switch by MERGING its two buses into one internal ppc bus, and pgml's solve collapses
+  the same two node-phase rows (`pgml.assembly.fusion_map`), so the converted grid
+  reproduces the source tool's own network exactly. Measured on CIGRE LV (three such
+  switches merging buses 0/1/20/23): max `|ΔV|` against `pp.runpp` falls from 1.09e-7 pu
+  (the stand-in below) to 1.6e-14 pu, and `κ(Y_ff)` from 1.44e4 back to 910.
+- `near_ideal` writes `branch.near_ideal_series_resistance_ohm` (1e-4 Ohm) instead, which
+  keeps the switch a STAMPED branch — the form a `branch_states` sweep needs — and logs a
+  WARNING naming the deviation from the source tool.
+
+A non-zero `z_ohm` is still read as the switch RESISTANCE only; pandapower splits it
+across R and X at its `switch_rx_ratio` (see the coverage gaps below).
+
 ### Delta-LV coil referral — PHASE-MODE INDEPENDENT (the important gotcha)
 
 `series_resistance_ohm`/`series_inductance_h` are ALWAYS the TO-side COIL value:

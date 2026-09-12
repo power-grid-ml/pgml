@@ -89,8 +89,12 @@ def test_geometry_internal_inductance_override_reaches_assembly(tmp_path, monkey
     drops the internal reactance the published GMR holds fixed, and the gap grows with
     frequency as the skin depth shrinks, so the admittance must move more at 1250 Hz than
     at 250 Hz.
+
+    An override file REPLACES the packaged one, so it carries every key assembly reads;
+    the override here is one leaf of a full copy.
     """
     import torch
+    import yaml
 
     from tests.differentiability.test_carson_gradcheck import _geom_grid
     from pgml.assembly import assemble_network_ybus
@@ -98,15 +102,10 @@ def test_geometry_internal_inductance_override_reaches_assembly(tmp_path, monkey
     grid = _geom_grid(1.2e-4)
     f = torch.tensor([250.0, 1250.0], dtype=torch.float64)
     y_gmr = assemble_network_ybus(grid, f, dtype=torch.complex128).Y
+    data = yaml.safe_load(yaml.safe_dump(config.defaults()))
+    data["line"]["geometry"]["internal_inductance"]["value"] = "bessel"
     custom = tmp_path / "custom.yaml"
-    custom.write_text(
-        "line:\n"
-        "  geometry:\n"
-        "    internal_inductance:\n"
-        "      value: bessel\n"
-        "      units: enum\n"
-        "      description: custom override\n"
-    )
+    custom.write_text(yaml.safe_dump(data))
     monkeypatch.setenv("PGML_DEFAULTS", str(custom))
     try:
         config.reload(str(custom))

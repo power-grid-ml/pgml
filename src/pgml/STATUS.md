@@ -114,6 +114,23 @@ decisions. One entry per capability:
   `docs/pgml/modeling/solver-performance.md`; benchmarks:
   `run/examples/pgml/benchmark_speed.py`, `run/examples/pgml/benchmark_sparse.py`,
   `run/examples/pgml/benchmark_woodbury.py`.
+- **Zero-impedance branches (ideal closed switches, bus couplers, jumpers)** — solved by
+  EXACT BUS FUSION: the branch's terminal node-phase rows are collapsed into one row of the
+  solved system (`pgml.assembly.fusion_map`; the reduced row index makes every stamp
+  accumulate `Pᵀ Y P` directly, so nothing is materialised and nothing is approximated),
+  the result is reported on the original node ids, and the current through a fused branch
+  follows from Kirchhoff's law at the fused node. The published idiom this unblocks: six
+  UKGDS HV/MV workbooks define a line type with R = X = B = 0 and used to crash; they now
+  solve and agree with pandapower (which merges the same buses) to ≤ 7e-14 pu. Against the
+  near-ideal stand-in resistance it is both more accurate and better conditioned —
+  CIGRE LV: 1.6e-14 pu vs 1.1e-7 pu against `pp.runpp`, `κ(Y_ff)` 910 vs 1.44e4; a 132 kV
+  coupler: `κ` 648 vs 4.9e6, and two of the UKGDS nets need 200 instead of 10 iterations
+  with the stand-in. Differentiable (a fused branch's own impedance is structurally not a
+  parameter of the solve: its gradient is a finite zero), batched, CPU/CUDA parity 4.7e-14
+  pu at 5370 rows. Policy: `branch.zero_impedance` (`fuse` default / `error`);
+  `branch.switch_model` decides what a converter writes for a switch with no impedance
+  data. A branch under a `branch_states` sweep is never fused (a swept branch needs a
+  stamped admittance to scale) and is refused by name.
 - **Convert** — pandapower / OpenDSS / power-grid-model → `Grid`, with per-terminal phase
   permutations, n_phases-aware neutrals, positive-sequence reduction (Z1 = Zself−Zmutual),
   pandapower `parallel` + line/trafo switches, ZIP load models, pandapower `gen`
@@ -412,15 +429,17 @@ results are never read as more physical than they are. Details live in `docs/pgm
   nominal voltage. Measured on an LV bench where each inverter mirrors its bus's load:
   3.9e-3 pu at the affected buses (both tools agree to 5e-8 with the generation stopped). Not a converter defect; take it into account when a pandapower
   reference is used as ground truth for a grid with co-located ZIP load and generation.
-- **Closed bus-bus switch impedance.** The pandapower converter reads `switch.z_ohm` as the
-  switch RESISTANCE (`Switch.resistance_ohm`, `inductance_h = 0`); pandapower itself splits
-  that value across R and X at its `switch_rx_ratio` (default 2, so X = z/√5). Physically a
-  closed contact is resistive, but the difference is not negligible on a low-reactance cable
-  network: on an LV cable feeder (line X ≈ 1.4 mΩ) a 1 mΩ switch contributed a 0.0125°
-  node-angle divergence from pandapower until the reference run was given a purely resistive
-  switch. Decide whether to reproduce pandapower's split when converting a net
-  whose switches carry a non-zero `z_ohm`. WHERE: `src/pgml/convert/pandapower/converter.py`
-  section 4 (bus-bus switches).
+- **Closed bus-bus switch with a NON-ZERO `z_ohm`.** The pandapower converter reads
+  `switch.z_ohm` as the switch RESISTANCE (`Switch.resistance_ohm`, `inductance_h = 0`);
+  pandapower itself splits that value across R and X at its `switch_rx_ratio` (default 2,
+  so X = z/√5). Physically a closed contact is resistive, but the difference is not
+  negligible on a low-reactance cable network: on an LV cable feeder (line X ≈ 1.4 mΩ) a
+  1 mΩ switch contributed a 0.0125° node-angle divergence from pandapower until the
+  reference run was given a purely resistive switch. Decide whether to reproduce
+  pandapower's split. This affects only a switch that CARRIES a `z_ohm`; with
+  `z_ohm = 0` (every pandapower built-in) the converted switch is ideal and the solve
+  collapses its two rows exactly, which is pandapower's own treatment (see the capability
+  list). WHERE: `src/pgml/convert/pandapower/converter.py` section 4 (bus-bus switches).
 - **Line geometry (Carson/Deri).** No conductor temperature dependence, no sub-conductor
   bundling; transposition per the documented Deri assumptions.
 - **Shunt reactor with a SERIES resistance.** The shunt primitive is the parallel form
@@ -473,10 +492,11 @@ results are never read as more physical than they are. Details live in `docs/pgm
   + line/trafo `switch` (+`parallel`)/`ext_grid`/`sgen`/`gen` (an exact PV terminal by
   default)/`shunt`; OpenDSS Lines/2W-Transformers/Vsources/Loads (ZIP models)/Capacitor/
   Reactor/Generator (incl. `model=3`)/PVSystem/Storage; pgm `node`/`line`/`sym_load`/
-  `asym_load`/`source`/`sym_gen`/`transformer`. NOT converted (a WARNING names any
-  non-empty dropped kind): pandapower `trafo3w`, `impedance`, `ward`/`xward`, `dcline`,
-  `storage`, `motor`, `asymmetric_sgen`; pgm `three_winding_transformer`, `shunt`,
-  `asym_gen`, `link`, `transformer_tap_regulator`; OpenDSS items under D above.
+  `asym_load`/`source`/`sym_gen`/`transformer`/`link` (an ideal closed switch, fused at
+  solve time). NOT converted (a WARNING names any non-empty dropped kind): pandapower
+  `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
+  `asymmetric_sgen`; pgm `three_winding_transformer`, `shunt`, `asym_gen`,
+  `transformer_tap_regulator`; OpenDSS items under D above.
   pandapower ideal phase-shifter taps raise, and a tap position whose
   `tap_changer_type` is unset is dropped with a WARNING (pandapower ignores it too).
   Neither the pandapower nor the pgm converter ever emits `Phase.N` (pandapower's

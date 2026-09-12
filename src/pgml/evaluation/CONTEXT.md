@@ -111,6 +111,15 @@ Pure-numpy harmonic oracle, no live OpenDSS required.
   `sequence_aware`/`positive_sequence` default (skin effect + a `resistance_frequency`
   law, which the oracle does not mirror) deviates by ~2e-2 V on CIGRE LV — convert with
   `harmonic_line_model="naive"` for a machine-precision comparison.
+- `fusion_prolongation(grid, index) -> np.ndarray | None` and
+  `solve_with_fusion(y, i, p_mat) -> np.ndarray` — the oracles' own DENSE form of exact bus
+  fusion: an ideal (zero-impedance) branch has no admittance to stamp, so the oracle skips
+  it and solves `(Pᵀ Y P) v = Pᵀ I` with the 0/1 prolongation `P` built by its own
+  union-find, then expands `V = P v`. pgml's solver reaches the same system through a
+  many-to-one row index instead of a matrix, so the oracle's machine-precision parity on
+  CIGRE LV (whose three bus-bus switches are ideal) is an INDEPENDENT check of the fusion
+  algebra. Used by every solve site of both the numpy and the live-OpenDSS oracle; an ideal
+  switch is also left out of the DSS circuit the live oracle builds.
 
 ### pandapower oracle (`oracles.pandapower_oracle`)
 - `pandapower_ybus(net, grid, id_map, index, *, label)` -> LabeledMatrix (pu->SI,

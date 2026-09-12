@@ -1,21 +1,31 @@
 """Pre-solve gate for a branch with ZERO series impedance.
 
 The nodal formulation turns every branch's series impedance into a primitive admittance
-by inverting it, so a branch with no series impedance has no stamp at all. Published
+by inverting it, so a branch with no series impedance has no STAMP at all. Published
 network data contains such branches routinely — a bus coupler or jumper modelled as a
 zero-impedance line, a zero-length line, a closed switch with no impedance data — and
 without a gate they surface as a linear-algebra failure naming an internal batch index,
 which names neither the branch nor a fix.
 
-:func:`pgml.solver.check_branch_impedances` raises
-:class:`~pgml.errors.ModelingError` naming every offending branch, and every solve entry
-point runs it.
+:func:`pgml.solver.check_branch_impedances` answers exactly the structural question
+"is every in-service branch stampable?" and raises
+:class:`~pgml.errors.ModelingError` naming every branch that is not.
+
+A solve asks a WIDER question, because an ideal conductor is representable without a
+stamp: it collapses the branch's terminal rows (exact bus fusion, the documented default
+``branch.zero_impedance: fuse``) and passes the resulting map to the same gate, which
+then reports only what neither a stamp nor a fused row can express. The policy
+``branch.zero_impedance: error`` restores the refusal.
 """
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 import torch
+
+from pgml import defaults
 
 from pgml.errors import ModelingError, PgmlError
 from pgml.schemas.grid_schema import (
@@ -102,12 +112,55 @@ def test_zero_impedance_line_raises_naming_the_branch():
         lambda g: solve_harmonic_flow(g, [1, 5], dtype=CDT),
     ],
 )
-def test_every_solve_entry_point_refuses_it(entry):
+def test_every_solve_entry_point_fuses_it(entry):
+    """A bus coupler is solved by collapsing its terminals, at every entry point."""
+    out = entry(_coupler_grid())
+    fusion = out.fusion if hasattr(out, "fusion") else out.fusion
+    assert fusion is not None
+    assert fusion.fused_branch_ids == (10,)
+    assert fusion.size == 2  # three rows, two of them one
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        lambda g: solve_power_flow(g, dtype=CDT),
+        lambda g: prepare_power_flow(g, dtype=CDT),
+        lambda g: solve_harmonic_flow(g, [1, 5], dtype=CDT),
+    ],
+)
+def test_every_solve_entry_point_refuses_it_under_the_error_policy(
+    entry, zero_impedance_error_policy
+):
     """A pgml error, not a raw torch linear-algebra error, from every entry point."""
     with pytest.raises(PgmlError) as err:
         entry(_coupler_grid())
     assert isinstance(err.value, ModelingError)
     assert "line 10" in str(err.value)
+
+
+@pytest.fixture
+def zero_impedance_error_policy(tmp_path, monkeypatch):
+    """Run the test under ``branch.zero_impedance: error`` (the refusal policy).
+
+    Points ``pgml.defaults`` at a copy of the shipped file with that one key changed and
+    restores the packaged defaults afterwards — both the environment pointer and the
+    loader's cache, so the policy cannot leak into another test.
+    """
+    import yaml
+
+    data = yaml.safe_load(
+        (pathlib.Path(defaults.__file__).parent / "data" / "defaults.yaml").read_text()
+    )
+    data["branch"]["zero_impedance"]["value"] = "error"
+    path = tmp_path / "defaults.yaml"
+    path.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(path))
+    defaults.reload(str(path))
+    yield
+    monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+    defaults.reload()
+    assert defaults.get("branch.zero_impedance") == "fuse"
 
 
 def test_zero_length_line_is_reported_as_such():
@@ -177,9 +230,7 @@ def test_zero_impedance_generic_branch_is_reported():
 
 
 def test_near_ideal_resistance_makes_it_solvable():
-    """The documented way out: the near-ideal series resistance the error names."""
-    from pgml import defaults
-
+    """The documented stand-in where the branch has to stay stamped."""
     r_ideal = float(defaults.get("branch.near_ideal_series_resistance_ohm"))
     grid = _grid([_line(10, 1, 2, r=r_ideal, ell=0.0, length=1.0), _line(11, 2, 3)])
     res = solve_power_flow(grid, dtype=CDT)

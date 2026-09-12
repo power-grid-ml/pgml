@@ -18,6 +18,11 @@ Two levels of comparison, both with the SAME device model on each side (pgml's
    fundamental floor is 3.3e-08 pu, set by the independent exporter). The bound asserted
    here is 1e-06 pu for every variant, which leaves at least three orders of magnitude of
    headroom.
+3. the shunt of a device whose node is FUSED with another device's node, where the shunt
+   admittances of two devices land on one reduced row. OpenDSS expresses the same circuit
+   with a closed ``Switch`` element, whose own near-ideal impedance is then the whole
+   residual (6.2e-11 pu against the 4.0e-13 pu floor reached when pgml keeps the same
+   near-ideal switch stamped).
 
 Both feeders are compared with R-const / ``X ~ h`` lines and ``Rg=Xg=0``, so the only
 model under test is the device shunt: pgml's default ``sequence_aware`` line model (skin
@@ -298,6 +303,9 @@ def _dss_harmonic_voltages(grid, load_shunt: str, props: str, orders, geometry: 
     else:
         circuit = export_grid_to_opendss(grid, mode="matched", load_shunt=load_shunt)
         index, rowmap = circuit.index, circuit.rowmap
+        # Harmonics mode writes the fundamental solution next to the circuit; keep that
+        # file out of the working directory.
+        dss.Text.Command(f"Set DataPath={tempfile.mkdtemp(prefix='pgml_shunt_')}")
         _attach_dss_spectra(dss, grid, circuit)
     dss.Text.Command("Set Mode=Snap")
     dss.Text.Command("Solve")
@@ -525,3 +533,147 @@ def test_voltage_dependent_load_shunt_divergence_is_bounded(
         f"shunt-on deviation {worst_shunt:.2e} pu is outside the disclosed band; the "
         "shunt is derived from the REALISED power, OpenDSS's from the specified one."
     )
+
+
+# --------------------------------------------------------------------------- #
+# 3. the shunt of a device whose node is FUSED with another device's node
+# --------------------------------------------------------------------------- #
+def _fused_shunt_feeder(*, switch_ohm: float = 0.0):
+    """20 kV 3-phase feeder whose ideal switch joins two SHUNTED, injecting loads.
+
+    ``source -- line -- node 2 =switch= node 3 -- line -- node 4``, with a rectifier
+    load on every one of the three load nodes. Nodes 2 and 3 are one electrical node, so
+    their two loads' harmonic shunts and harmonic current sources land on the SAME
+    reduced row; node 4 sits behind a real line. ``switch_ohm > 0`` keeps the switch
+    stamped instead, which is how a reference tool expresses a closed switch.
+    """
+    from pgml.schemas.grid_schema import (
+        Grid,
+        HarmonicComponent,
+        Line,
+        Node,
+        Phase,
+        Source,
+        SpectrumPoint,
+        StaticSpectrum,
+        Switch,
+    )
+
+    abc = [Phase.A, Phase.B, Phase.C]
+    spectrum = StaticSpectrum(
+        spectrum=SpectrumPoint(
+            components=[
+                HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a)
+                for o, m, a in RECTIFIER_SPECTRUM
+            ]
+        )
+    )
+
+    def line(bid, frm, to, length_m):
+        return Line(
+            id=bid,
+            from_node=frm,
+            to_node=to,
+            from_phases=abc,
+            to_phases=abc,
+            length_m=length_m,
+            series_resistance_ohm_per_m=[
+                [3.0e-4 if i == j else 0.0 for j in range(3)] for i in range(3)
+            ],
+            series_inductance_h_per_m=[
+                [1.0e-6 if i == j else 0.0 for j in range(3)] for i in range(3)
+            ],
+            shunt_capacitance_f_per_m=[[0.0] * 3 for _ in range(3)],
+            harmonic_line_model="naive",
+        )
+
+    def load(aid, node, kw, kvar):
+        return Load(
+            id=aid,
+            node=node,
+            phases=abc,
+            p_nom_w=kw * 1e3,
+            q_nom_var=kvar * 1e3,
+            spectrum=spectrum,
+        )
+
+    return Grid(
+        base_frequency_hz=50.0,
+        nodes=[Node(id=i, u_rated_v=20_000.0, phases=abc) for i in (1, 2, 3, 4)],
+        branches=[
+            line(10, 1, 2, 1_500.0),
+            Switch(
+                id=11,
+                from_node=2,
+                to_node=3,
+                from_phases=abc,
+                to_phases=abc,
+                closed=True,
+                resistance_ohm=switch_ohm,
+            ),
+            line(12, 3, 4, 900.0),
+        ],
+        appliances=[
+            Source(
+                id=20,
+                node=1,
+                phases=abc,
+                u_ref_v=(20_000.0,) * 3,
+                u_angle_deg=(0.0, -120.0, 120.0),
+                resistance_ohm=[
+                    [0.2 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+                inductance_h=[
+                    [2.0e-3 if i == j else 0.0 for j in range(3)] for i in range(3)
+                ],
+            ),
+            load(21, 2, 400.0, 150.0),
+            load(22, 3, 250.0, 80.0),
+            load(23, 4, 300.0, 100.0),
+        ],
+    )
+
+
+def _fused_shunt_deviation(*, switch_ohm: float, load_shunt: str):
+    """Max ``|d|V(h)||`` in pu of nominal against a live OpenDSS solve of the feeder."""
+    grid = _fused_shunt_feeder(switch_ohm=switch_ohm)
+    res = solve_harmonic_flow(
+        grid, ORDERS, slack="norton", dtype=CDT, load_shunt=load_shunt
+    )
+    assert res.pf.converged
+    fused = res.fusion is not None and res.fusion.fused_branch_ids == (11,)
+    assert fused == (switch_ohm == 0.0)
+    v_pgml = res.v.numpy()
+    base_v = base_voltage_per_row(grid).numpy()
+    props = VARIANTS["series_rl_50"][2] if load_shunt != "none" else ""
+    v_dss = _dss_harmonic_voltages(grid, load_shunt, props, ORDERS, False)
+    worst = 0.0
+    for k, h in enumerate(ORDERS):
+        if h == 1:
+            continue
+        d = np.abs(np.abs(v_pgml[k]) - np.abs(v_dss[h])) / base_v
+        worst = max(worst, float(d.max()))
+    return worst
+
+
+@pytest.mark.parametrize("load_shunt", ["opendss", "none"])
+def test_fused_switch_next_to_shunted_loads_matches_opendss(load_shunt):
+    """A fused switch between two shunted, injecting loads agrees with OpenDSS.
+
+    The harmonic device shunt is scattered through the node-phase index, which fusion
+    makes MANY-TO-ONE: the two loads on the fused pair of nodes add their element
+    admittances into one reduced row, which is what ``P^T Y P`` says. OpenDSS expresses
+    the same circuit with a closed ``Switch`` element (a ``Line`` with ``Switch=yes``,
+    which the exporter gives the near-ideal 1e-06 Ohm a reference tool needs), so the
+    residual here IS that stand-in's own voltage drop.
+
+    Measured on this machine (complex128, CPU, orders 3 to 25, in pu of nominal): 6.2e-11
+    with the default device shunt, 6.4e-11 with none and 6.2e-11 with the motor model,
+    against a 4.0e-13 floor when pgml is given the same 1e-06 Ohm switch — i.e. the fused
+    assembly and the stamped one differ by the reference's stand-in and by nothing else.
+    """
+    worst = _fused_shunt_deviation(switch_ohm=0.0, load_shunt=load_shunt)
+    assert worst < 1e-9, f"{load_shunt}: max |d|V_h|| = {worst:.2e} pu"
+    stamped = _fused_shunt_deviation(switch_ohm=1.0e-6, load_shunt=load_shunt)
+    assert stamped < 1e-11, f"{load_shunt} stamped: max |d|V_h|| = {stamped:.2e} pu"
+    assert stamped < worst

@@ -111,6 +111,7 @@ import re
 from enum import Enum
 from typing import Any, Optional
 
+from pgml import defaults
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
@@ -125,7 +126,7 @@ from pgml.convert._common import (
     resolve_converted_line_models,
     warn_dropped_elements,
 )
-from pgml.errors import ConversionError
+from pgml.errors import ConfigurationError, ConversionError
 from pgml.schemas.grid_schema import (
     Characteristic,
     ComplexTap,
@@ -147,7 +148,6 @@ _logger = logging.getLogger("pgml")
 
 _TINY_R = 1.0e-6  # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
 _TINY_L = 1.0e-12  # H   — near-ideal Thevenin for ext_grid in Norton stamp
-_SWITCH_R = 1.0e-4  # Ohm — near-ideal resistance for closed bus-bus switches
 
 #: Reactive envelope [var] used for a ``net.gen`` row that carries neither a
 #: reactive limit nor ``sn_mva`` nor active power — no size information at all.
@@ -516,6 +516,35 @@ def _gen_raw_reactive_bounds(row: Any) -> tuple[Optional[float], Optional[float]
         None if q_min is None else q_min * 1.0e6,
         None if q_max is None else q_max * 1.0e6,
     )
+
+
+def _closed_switch_resistance_ohm() -> float:
+    """Series resistance for a closed bus-bus switch that carries no ``z_ohm``.
+
+    pandapower solves such a switch by FUSING its two buses, so the faithful
+    conversion is an ideal switch (R = L = 0), whose terminal rows pgml collapses
+    exactly — the documented default ``branch.switch_model: ideal``. The alternative
+    ``near_ideal`` writes ``branch.near_ideal_series_resistance_ohm`` instead, keeping
+    the switch a stamped branch for a ``branch_states`` sweep, at the cost of a small
+    voltage drop and a worse-conditioned row; it is logged once so the deviation from
+    the source tool is never silent.
+    """
+    model = str(defaults.get("branch.switch_model"))
+    if model == "ideal":
+        return 0.0
+    if model != "near_ideal":
+        raise ConfigurationError(
+            f"branch.switch_model must be 'ideal' or 'near_ideal', got {model!r}."
+        )
+    r = float(defaults.get("branch.near_ideal_series_resistance_ohm"))
+    _logger.warning(
+        "pandapower: closed bus-bus switch(es) without z_ohm converted with the "
+        "near-ideal series resistance %g Ohm (branch.switch_model='near_ideal'). "
+        "pandapower fuses such a switch, so the converted grid carries a small voltage "
+        "drop the source tool does not have; use the default 'ideal' to reproduce it.",
+        r,
+    )
+    return r
 
 
 def _shunt_admittance(
@@ -1357,7 +1386,7 @@ def to_grid(
             sw_id = _id.next()
             id_map["switch"][pp_idx] = sw_id
             z_ohm = float(row.get("z_ohm", 0.0) or 0.0)
-            r_sw = z_ohm if z_ohm > 0.0 else _SWITCH_R
+            r_sw = z_ohm if z_ohm > 0.0 else _closed_switch_resistance_ohm()
             sw_phases = phases_for(phase_mode)
             branches.append(
                 Switch(
