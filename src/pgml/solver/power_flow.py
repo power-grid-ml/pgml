@@ -1634,6 +1634,14 @@ class PowerFlowSystem:
     #: rated voltages, so a prepared system carries it instead of paying one ``|Y|`` pass
     #: (a full matrix read: 7.6 ms on a 1176-row feeder, complex128, CPU) per solve.
     row_abs_scale: Optional[Tensor] = None
+    #: The grid's FULL node-phase layout (``index`` itself when nothing is fused). Results
+    #: are reported on it, so every consuming solve needs it; building it walks the node
+    #: list, which a reused system does not repeat.
+    full_index: Optional[NodePhaseIndex] = None
+    #: Line-to-neutral voltage base per row ``[N]`` (real), the per-unit base of both
+    #: convergence criteria and of the voltage-band diagnostics. A property of the rated
+    #: voltages, so it is built once with the system.
+    v_base: Optional[Tensor] = None
 
 
 def prepare_power_flow(
@@ -1774,6 +1782,8 @@ def prepare_power_flow(
         fusion=fusion,
         equilibration=eq_mode,
         row_abs_scale=row_abs,
+        full_index=fusion.full_index if fusion is not None else index,
+        v_base=v_base,
     )
 
 
@@ -2152,7 +2162,13 @@ def solve_power_flow(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    full_index = node_phase_index(grid)
+    # The full layout is structural: a prepared system carries it rather than walking
+    # the node list again on every solve that reuses the system.
+    full_index = (
+        node_phase_index(grid)
+        if system is None or system.full_index is None
+        else system.full_index
+    )
     index = fusion.index if fusion is not None else full_index
     n = index.size
     block_rows = _reduce_block_rows(block_rows, fusion)
@@ -2376,7 +2392,12 @@ def solve_power_flow(
 
     # Per-row per-unit bases of both convergence criteria (the voltage base is each
     # node's line-to-neutral rated voltage, as in the flat start and the diagnostics).
-    v_base = _node_voltage_bases(grid, index, rdt, device)
+    # Structural, so a prepared system carries it.
+    v_base = (
+        _node_voltage_bases(grid, index, rdt, device)
+        if system is None or system.v_base is None
+        else system.v_base
+    )
 
     # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
     def _newton_warm_starts(op, pv_state, vf=None):

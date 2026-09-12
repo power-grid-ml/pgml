@@ -126,3 +126,16 @@ def test_the_row_scale_of_the_mismatch_floor_is_computed_once_per_solve(
     for _ in range(3):
         solve_power_flow(grid, dtype=CDT, system=system)
     assert calls["n"] == 0, f"{calls['n']} |Y| passes on the prepared path"
+
+
+def test_a_prepared_system_carries_the_structural_quantities(monkeypatch, grid):
+    """The node layout and the per-row voltage bases come from the system, not the grid."""
+    system = prepare_power_flow(grid, dtype=CDT)
+    layout = _count(monkeypatch, "node_phase_index", pf_mod)
+    bases = _count(monkeypatch, "_node_voltage_bases", pf_mod)
+    ref = solve_power_flow(grid, dtype=CDT)
+    assert layout["n"] >= 1 and bases["n"] == 1  # the one-shot path builds both
+    layout["n"] = bases["n"] = 0
+    res = solve_power_flow(grid, dtype=CDT, system=system)
+    assert layout["n"] == 0 and bases["n"] == 0
+    assert torch.equal(res.v, ref.v)
