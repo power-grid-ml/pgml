@@ -23,6 +23,7 @@ from pgml.geometry.sequence import (
     sequence_aware_phase_z,
     sequence_impedances,
     sequence_to_phase_z,
+    skin_resistance_multiplier,
     two_conductor_geometry,
     two_conductor_loop_z,
     zero_sequence_harmonic_z,
@@ -139,6 +140,48 @@ def test_positive_sequence_batched_equals_per_line():
     z0 = positive_sequence_z(r1[0], x1[0], F0, freqs)
     z1 = positive_sequence_z(r1[1], x1[1], F0, freqs)
     assert torch.allclose(zb[0], z0) and torch.allclose(zb[1], z1)
+
+
+# --- the reference frequency is the exact constant 1 ------------------------
+def test_skin_multiplier_at_the_reference_frequency_is_exactly_one():
+    """m(f0) = 1 to the bit, whether f0 is requested alone or inside a harmonic list.
+
+    The fundamental-frequency assembly of a feeder asks for ``f0`` alone, and the
+    multiplier there is a known constant: the value and the gradient must be the same
+    as the order-1 entry of a multi-order request, which evaluates the full Bessel
+    expression.
+    """
+    r1 = torch.tensor([3.6e-4, 5.0e-4, 1.2e-3], dtype=RDT)
+    alone = skin_resistance_multiplier(r1, F0, _freqs([1]))  # [3, 1]
+    with_harmonics = skin_resistance_multiplier(r1, F0, _freqs([1, 5, 13]))  # [3, 3]
+
+    assert alone.shape == (3, 1)
+    assert torch.equal(alone[:, 0], torch.ones(3, dtype=RDT))
+    assert torch.equal(with_harmonics[:, 0], alone[:, 0])
+    assert torch.all(with_harmonics[:, 1:] > 1.0)  # skin growth above f0
+
+
+def test_skin_multiplier_at_the_reference_frequency_carries_no_gradient():
+    """``dm(f0)/dR1 = 0`` exactly: the full expression divides one value by itself."""
+    r1 = torch.tensor([3.6e-4, 5.0e-4], dtype=RDT, requires_grad=True)
+    m = skin_resistance_multiplier(r1, F0, _freqs([1, 5]))
+    (g,) = torch.autograd.grad(m[:, 0].sum(), r1)
+    assert torch.equal(g, torch.zeros_like(g))
+
+
+def test_fundamental_ybus_equals_the_order_one_slice_of_a_harmonic_assembly():
+    """A positive-sequence feeder's Y(f0) is the same matrix either way, bit for bit."""
+    from pgml.assembly import assemble_network_ybus
+    from pgml.grids import synthetic_feeder
+
+    grid = synthetic_feeder(12)
+    for ln in grid.branches:
+        ln.harmonic_line_model = "positive_sequence"
+        ln.harmonic_skin_effect = True
+    f0 = float(grid.base_frequency_hz)
+    y_fund = assemble_network_ybus(grid, [f0], dtype=torch.complex128).Y
+    y_harm = assemble_network_ybus(grid, [f0, 5 * f0], dtype=torch.complex128).Y
+    assert torch.equal(y_fund[0], y_harm[0])
 
 
 # --- native OpenDSS R/X lines (how OpenDSS frequency-adjusts an R/X LineCode) ----
