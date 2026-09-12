@@ -14,8 +14,11 @@ instead.
 - :class:`~pgml.simulation.SimulationConfig` is the **serializable** definition of WHAT to
   simulate (calculation type, harmonic orders, slack, symmetry, tolerances).  It is a
   pydantic model — a clean JSON body for a REST handler.
-- ``device`` and ``dtype`` are **execution** concerns (WHERE to run / precision), passed as
-  keyword arguments to :func:`~pgml.simulation.simulate`, not part of the config.
+- ``device``, ``dtype``, ``precision``, ``equilibrate``, ``linear_solver`` and
+  ``block_rows`` are **execution** concerns (where to run, at what working precision, with
+  which factorization), passed as keyword arguments to
+  :func:`~pgml.simulation.simulate` rather than stored in the config.  None of them changes
+  the model, so a stored config reproduces the same result through any of them.
 
 .. rubric:: Differentiability
 
@@ -78,6 +81,10 @@ Custom config (power flow only, 64-bit complex)::
 
     cfg = SimulationConfig(calculation="power_flow")
     state = simulate(grid, cfg, dtype="complex128", device="cpu")
+
+Factor at single precision and refine against the double-precision residual::
+
+    state = simulate(grid, dtype="complex128", precision="mixed")
 
 .. automodule:: pgml.simulation
    :members:
