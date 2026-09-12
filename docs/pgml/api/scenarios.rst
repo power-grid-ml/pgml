@@ -683,7 +683,7 @@ change the data without changing the config.
 package does not define. Reconstruction is explicit because reading a dataset must not import
 a module the file chose; the sidecar records ``config_module`` and ``config_class`` so the
 owner is identifiable either way, and without the mapping such a config reads back as a dict.
-:data:`~pgml.scenarios.SCENARIO_CONFIG_TYPES` is the set this package reconstructs on its own.
+``pgml.scenarios.SCENARIO_CONFIG_TYPES`` is the set this package reconstructs on its own.
 
 ``meta.json`` additionally carries the time axis as data — ``n_steps``, ``step_size_s``,
 ``t0_unix_s`` — so a consumer does not have to parse a generator-specific config to find it.

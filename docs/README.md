@@ -39,5 +39,15 @@ The API reference is generated from each subpackage's `__all__`, so the docstrin
 reference. Keep them valid reStructuredText. `pandapower` is mocked at autodoc time, while
 `pydantic` and `torch` are imported for real.
 
+The seven figures under `_static/figures/` are committed because a documentation build cannot
+run the studies that produce them. Each one comes from a script under `run/examples/pgml/`:
+`ybus_heatmaps`, `voltage_profile` and `harmonic_h5` from `evaluate_ieee33.py`,
+`seq_xr_vs_harmonic` and `feeder_h13` from `evaluate_line_sequence_harmonics.py`, `pv_nose`
+from `loadability_continuation.py`, and `spread_h11` from `scenario_node_injection_sweep.py`.
+Regenerate them, and re-run every code block whose output a page quotes, whenever a modelling
+default changes. Two filenames collide across scripts: `evaluate_harmonics_carson.py` also
+writes a `harmonic_h5.svg`, and `current_injection_convergence.py` also writes a `pv_nose.svg`,
+neither of which is the committed one.
+
 Read the Docs is configured by `.readthedocs.yaml` at the repository root. It builds with
 `fail_on_warning`, the same strictness as `docs-strict`.
