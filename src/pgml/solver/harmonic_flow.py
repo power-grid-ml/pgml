@@ -1244,7 +1244,7 @@ def _harmonic_injections(
     length ``n_elem`` is PER-ELEMENT, while a scalar or bare tensor is BROADCAST to all
     elements (see :func:`_element_coeff`). The NODAL injection (drawn) is
     ``I_used = -(M^T @ i_h_elem)`` scattered into the device's ``used_rows``.
-    WYE-to-ground reduces EXACTLY to the historical per-phase form (bit-exact
+    WYE-to-ground reduces EXACTLY to the historical per-phase form (a pinned
     regression). Fully broadcasting so per-element / per-order coefficients may carry
     leading SCENARIO batch dims (differentiable override).
     """

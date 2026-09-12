@@ -100,8 +100,8 @@ def _tensor_sum(per_phase: Sequence):
     """Autograd-safe sum of a per-phase sequence (mixed python floats / tensors).
 
     Mirrors :func:`pgml.assembly.ybus._tensor_sum` but does NOT coerce dtype/device:
-    a pure-float input stays a python float (so the const-Z reference path remains
-    bit-exact), while a tensor anywhere in the sequence makes the running total a
+    a pure-float input stays a python float (so the const-Z reference path is
+    numerically unchanged), while a tensor anywhere in the sequence makes the total a
     graph-preserving tensor (gradients flow back to each per-phase leaf). Uses plain
     ``+`` accumulation, which is autograd-safe and never an in-place op.
     """
