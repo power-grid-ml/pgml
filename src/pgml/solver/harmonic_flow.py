@@ -66,7 +66,7 @@ from pgml.assembly import (
     assemble_network_ybus,
     node_phase_index,
 )
-from pgml.assembly._fusion import resolve_fusion
+from pgml.assembly._fusion import NO_FUSION, resolve_fusion, zero_impedance_branches
 from pgml.assembly._incidence import build_incidence, group_appliances, used_rows
 from pgml.assembly._load_shunt import (
     generation_shunt_is_neglected,
@@ -386,10 +386,18 @@ def solve_harmonic_flow(
     harmonic_shunt = resolve_shunt_model_name(load_shunt)
     shunt_basis = resolve_shunt_basis(load_shunt_basis)
     orders = _integer_orders(harmonic_orders)
+    # One walk of the branch list feeds both the fusion map and the modeling gate.
+    zero = zero_impedance_branches(grid, param_overrides=param_overrides)
     fusion = resolve_fusion(
-        grid, None, param_overrides=param_overrides, branch_states=branch_states
+        grid,
+        None,
+        param_overrides=param_overrides,
+        branch_states=branch_states,
+        zero=zero,
     )
-    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
+    check_branch_impedances(
+        grid, fusion=fusion, param_overrides=param_overrides, zero_branches=zero
+    )
     if on_disconnected not in ("raise", "zero", "ignore"):
         raise InputError(
             f"Unsupported on_disconnected {on_disconnected!r} "
@@ -666,7 +674,7 @@ def _solve_harmonic_orders(
             device=device,
             branch_states=branch_states,
             param_overrides=param_overrides,
-            fusion=fusion,
+            fusion=NO_FUSION if fusion is None else fusion,
         )
 
     b_scen = int(v1.shape[0]) if v1.ndim == 2 else 1
@@ -889,7 +897,9 @@ def assemble_harmonic_system(
         device=device,
         branch_states=branch_states,
         param_overrides=param_overrides,
-        fusion=fused,
+        # The map is resolved above; ``NO_FUSION`` carries "resolved to nothing" so the
+        # assembler does not walk the branch list again.
+        fusion=NO_FUSION if fused is None else fused,
     ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
@@ -1126,7 +1136,9 @@ def assemble_harmonic_ybus(
         device=device,
         branch_states=branch_states,
         param_overrides=param_overrides,
-        fusion=fused,
+        # The map is resolved above; ``NO_FUSION`` carries "resolved to nothing" so the
+        # assembler does not walk the branch list again.
+        fusion=NO_FUSION if fused is None else fused,
     ).Y
     if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)

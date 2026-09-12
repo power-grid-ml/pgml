@@ -351,8 +351,10 @@ def assemble_ybus(
         documented policy ``branch.zero_impedance``; ``False`` refuses a
         zero-impedance branch by name instead of collapsing it; a
         :class:`~pgml.assembly._fusion.FusionMap` uses that map (the way a solve shares
-        one map across its orders). When fusion applies, ``Y`` is the REDUCED system
-        ``P^T Y P`` and the returned ``index`` is the reduced layout.
+        one map across its orders), and :data:`~pgml.assembly._fusion.NO_FUSION` says
+        that the resolution has already run and produced no map, which skips the branch
+        walk. When fusion applies, ``Y`` is the REDUCED system ``P^T Y P`` and the
+        returned ``index`` is the reduced layout.
 
     Returns
     -------
