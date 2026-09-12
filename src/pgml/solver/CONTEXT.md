@@ -139,6 +139,27 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     multiplied by a low-rank update's measured `amplification`. A tolerance below the
     floor logs a WARNING naming the floor, and the floor governs - the solve converges
     instead of running to `max_iter` at a converged voltage.
+  - PER-SCENARIO EXIT AND THE STALL WATCH (`_BatchIterationState`): a scenario batch is a
+    batch of INDEPENDENT problems, so each scenario exits on its own criteria and is then
+    HELD at the iterate that met them (`torch.where` on the `[*b]` mask, one `all()` per
+    iteration - the synchronisation the loop already had). A batched solve therefore
+    returns per scenario what the unbatched solve of that scenario returns, instead of
+    requiring every scenario to satisfy the criteria in the SAME iteration - which a
+    single-precision batch of thousands practically never does, because a float32 fixed
+    point does not settle: it reaches an exact fixed point of the ROUNDED map (update
+    exactly 0) or a limit cycle whose amplitude is one back-substitution's rounding
+    (measured 4e-7 to 6e-4 pu on distribution feeders, up to 50x the calibrated floor, and
+    varying from run to run with the reduction order of a multithreaded matvec).
+    A scenario that stops making progress - no improvement of `stall_decay` (0.9) in
+    EITHER criterion for `stall_patience` (4) consecutive iterations; either, because a
+    line-search Newton step can raise the voltage update while the mismatch falls by a
+    decade - is then resolved instead of iterated to `max_iter`: inside the floor's BAND
+    (`stall_tolerance_factor`, 100x the floor, on both criteria) it counts as CONVERGED AT
+    THE PRECISION FLOOR (`converged_mask` true, `diagnostics.floor_governed`, one WARNING
+    naming the level and the `precision="mixed"` recipe); above the band it is a FAILURE
+    reported by its own `likely_cause` naming both plateaus, and the solve stops as soon as
+    every scenario is converged or stalled. Side effect: an infeasible scenario now fails
+    in ~8 iterations instead of at the cap.
   - `precision`: `"full"` (default) factors at `dtype`; `"mixed"` factors at complex64
     and keeps the iteration, the residual and the convergence test at complex128 (which
     it requires). The fixed point then runs in RESIDUAL-CORRECTION form
@@ -156,8 +177,11 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     `s_base_va`, `residual_history` (the per-iteration per-unit update),
     `worst_nodes` (per-row `mismatch_pu`/`mismatch_va`/`mismatch_a`/`v_pu`),
     `out_of_band_nodes` (pu on each node's L-N base), `voltage_band_pu`, `likely_cause`
-    (heuristic: converged / diverged / oscillating / overload / near-singular), and
-    `criticality`. The cheap state diagnostics are ALWAYS populated and cost no extra
+    (heuristic: converged / converged at the precision floor / stalled / diverged /
+    oscillating / overload / near-singular), the PRECISION-FLOOR report
+    (`floor_governed`, `n_floor_governed`, `n_stalled`, `update_floor_pu`,
+    `mismatch_floor_pu`, `stall_update_pu`, `stall_mismatch_pu` - the thresholds that
+    actually governed and what the stalled scenarios reached), and `criticality`. The cheap state diagnostics are ALWAYS populated and cost no extra
     solve (the forward's own residual is reused); `simulate(strict=True)` passes
     `diagnostics.as_dict()` into the raised `ConvergenceError`.
   - `criticality` kwarg (`"auto"`/`"always"`/`"never"`): runs the IFT-Jacobian analysis

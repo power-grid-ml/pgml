@@ -516,9 +516,17 @@ results are never read as more physical than they are. Details live in `docs/pgm
   low-voltage-only harmonic system stays at 1e7 because its conditioning is not a scaling
   artefact, and equilibration does not make single precision accurate — LU with partial
   pivoting is backward stable, so the complex64 error barely moves. A plain complex64 solve
-  therefore still keeps only `7 − log10(cond)` digits (measured |ΔV| against complex128:
-  8e-6 pu on IEEE-33, 4e-5 pu at 2016 rows) and logs a one-time warning naming the
-  estimate. The
+  therefore still keeps only `7 − log10(cond)` digits (measured |ΔV| against complex128 at
+  the fundamental, CPU, batches of 1 to 256: 2.3e-6 pu dense / 4.9e-6 pu sparse on
+  IEEE-33, 2.7e-6 / 5.8e-6 on three-phase CIGRE LV, 3.3e-5 / 2.3e-5 on the 294-row Kerber
+  Vorstadtnetz, 2.0e-5 / 2.5e-5 at 1176 rows, against 1e-14 to 1.2e-12 for
+  `precision="mixed"` on the same runs), i.e. four to five digits of a per-unit voltage,
+  which no correctness guard at 1e-6 pu can pass. It logs a one-time warning naming the
+  estimate, and a solve that stops at that plateau reports it: the iteration reaches an
+  exact fixed point of the rounded map or a small limit cycle, and a scenario whose cycle
+  sits above the dtype's floor converges AT THE FLOOR with
+  `diagnostics.floor_governed` set and a warning naming the level, rather than running to
+  the iteration cap. The
   recipe: solve at complex128, or at complex128 with `precision="mixed"`
   (single-precision factorization refined against double-precision residuals — measured
   1.5–1.9x faster than complex128 on the DENSE path at 132–3600 rows, and no faster on the

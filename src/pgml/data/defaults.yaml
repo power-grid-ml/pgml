@@ -603,6 +603,48 @@ solver:
         Apparent-power base of the per-unit power mismatch. 1 MVA matches pandapower's
         default `sn_mva`, so the mismatch tolerance carries the same meaning there.
         A grid-specific base (e.g. the transformer rating) only rescales the criterion.
+    stall_patience:
+      value: 4
+      units: "iterations"
+      description: >
+        How many consecutive iterations a scenario may fail to reduce its voltage update
+        by the factor `stall_decay` before the solver calls it STALLED. A stalled
+        iteration has stopped making progress: at a single-precision working dtype the
+        fixed point reaches an exact fixed point of the rounded map or a small limit
+        cycle whose amplitude is set by the rounding of one back-substitution, and no
+        further iteration can improve it. Detecting that is what lets a solve stop at the
+        precision it can actually reach instead of running to `max_iter` at a converged
+        voltage. 4 iterations with a 10 % improvement requirement never fires on a
+        contracting fixed point (the current-injection map contracts by about a decade
+        per iteration on a distribution feeder, and even a contraction factor of 0.9 per
+        iteration improves by 34 % over four), while a plateau is detected within five
+        iterations of reaching it.
+    stall_decay:
+      value: 0.9
+      units: "factor"
+      description: >
+        The improvement of the per-row voltage update that counts as progress inside the
+        `stall_patience` window: an iteration is progress when the update drops below
+        `stall_decay` times the best update the scenario had reached when the window
+        opened. A value near 1 detects only a genuine plateau; a smaller value also calls
+        a slowly contracting iteration stalled.
+    stall_tolerance_factor:
+      value: 100.0
+      units: "multiples of the precision floor"
+      description: >
+        How far above the working precision's voltage-update floor
+        (1.2e-5 per unit for complex64 with the sparse backend, 1e-6 for complex64 dense,
+        16 eps for complex128) a STALLED scenario may sit and still count as converged at
+        its precision floor rather than as a failure. The floor is a calibrated estimate
+        of one back-substitution's rounding, while the plateau a scenario actually reaches
+        is a limit cycle whose amplitude varies per scenario, per grid and (through the
+        reduction order of a multithreaded matrix-vector product) from run to run, by up
+        to about two orders of magnitude on the grids measured. Accepting a stall inside
+        this band keeps a single-precision solve deterministic and honest — it converges
+        at the accuracy it reached and the diagnostics report that the floor governed —
+        while a stall above the band is reported as a failure, because at complex128 it
+        means the iteration is stuck on the physics (a scenario past the loadability
+        limit), not on the arithmetic.
   precision:
     complex64_cond_warn:
       value: 1.0e+3

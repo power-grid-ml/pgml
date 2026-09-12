@@ -147,11 +147,17 @@ class TestPartialFailure:
         assert any("did not converge" in rec.message for rec in caplog.records), (
             "expected an error log naming the failed states"
         )
+        # Each infeasible scenario is held at the iterate where its own iteration
+        # stopped making progress, so the solve reports the stall instead of spending
+        # every remaining iteration on a diverging scenario.
+        assert r.iterations < 60
+        assert r.diagnostics.n_stalled == 2
+        assert r.diagnostics.likely_cause.startswith("the iteration stopped making")
         # The criticality diagnostic RUNS on a batch and names the scenario it analysed
-        # (the one with the largest nodal mismatch, here the largest load).
+        # (the one with the largest nodal mismatch — one of the two infeasible ones).
         crit = r.diagnostics.criticality
         assert crit is not None and "skipped" not in crit
-        assert crit["batch"] == 3
+        assert crit["batch"] in (2, 3)
         assert crit["min_singular_value"] > 0.0
         assert len(crit["critical_nodes"]) > 0
 
@@ -167,13 +173,13 @@ class TestPartialFailure:
         batched = solve_power_flow(
             grid, operating_point=op, max_iter=60
         ).diagnostics.criticality
-        grid_one, op_one = _batched_chain_op([p_vals[3]])
+        worst = batched["batch"]
+        assert worst in (2, 3)  # one of the two infeasible scenarios
         single = solve_power_flow(
-            grid_one,
-            operating_point={30: {"p_w": p_vals[3], "q_var": 300.0}},
+            single_phase_chain(),
+            operating_point={30: {"p_w": p_vals[worst], "q_var": 300.0}},
             max_iter=60,
         ).diagnostics.criticality
-        assert batched["batch"] == 3
         for key in ("min_singular_value", "max_singular_value", "condition_number"):
             assert batched[key] == pytest.approx(single[key], rel=1e-9)
         assert [c["node_id"] for c in batched["critical_nodes"]] == [

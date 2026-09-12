@@ -290,6 +290,16 @@ class _PuConvergence:
                 self.floor_mismatch * s_scale_pu, min=self.tol_mismatch_pu
             )
             self.thr_update = max(self.tol_update_pu, self.floor_update)
+            # The band inside which a STALLED iterate counts as having reached the
+            # precision floor. The floor is a calibrated estimate of one
+            # back-substitution's rounding, while the plateau a scenario actually reaches
+            # is a limit cycle of the rounded map: measured up to two orders of magnitude
+            # wider, and varying per scenario, per grid and from run to run.
+            band = _stall_tolerance_factor()
+            self.ceil_mismatch = torch.clamp(
+                self.floor_mismatch * band * s_scale_pu, min=self.tol_mismatch_pu
+            )
+            self.ceil_update = max(self.thr_update, self.floor_update * band)
             if warn:
                 self._warn_unreachable()
 
@@ -326,8 +336,14 @@ class _PuConvergence:
 
     def check(
         self, mism_rows: Tensor, upd_rows: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """``(converged_mask, mismatch_max_pu, update_max_pu)``, all per scenario ``[*b]``.
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """``(ok, within_floor_band, mismatch_max_pu, update_max_pu)`` per scenario.
+
+        ``ok`` requires BOTH criteria at their thresholds. ``within_floor_band`` is the
+        same test against the wider band of ``ceil_mismatch`` / ``ceil_update``
+        (``solver.convergence.stall_tolerance_factor`` times the precision floor), which
+        is what decides whether a scenario that stopped making progress sits on a
+        solution at the precision floor or has failed (:class:`_BatchIterationState`).
 
         Each row meets its OWN mismatch threshold (the per-row precision floor), while
         the reported maxima are plain maxima — so a floor-limited row can leave
@@ -337,7 +353,172 @@ class _PuConvergence:
         ok = (mism_rows <= self.thr_mismatch).all(dim=-1) & (
             upd_rows <= self.thr_update
         ).all(dim=-1)
-        return ok, mism_rows.amax(dim=-1), upd_rows.amax(dim=-1)
+        in_band = (mism_rows <= self.ceil_mismatch).all(dim=-1) & (
+            upd_rows <= self.ceil_update
+        ).all(dim=-1)
+        return ok, in_band, mism_rows.amax(dim=-1), upd_rows.amax(dim=-1)
+
+    @property
+    def mismatch_floor_pu(self) -> float:
+        """Largest per-row power-mismatch threshold over the free rows [pu]."""
+        return float((self.thr_mismatch * self.free).max())
+
+
+def _stall_tolerance_factor() -> float:
+    """Band above the precision floor inside which a stall counts as convergence."""
+    return float(defaults.get("solver.convergence.stall_tolerance_factor"))
+
+
+def _stall_watch_settings() -> tuple[int, float]:
+    """``(patience, decay)`` of the stall detector (documented defaults)."""
+    return (
+        int(defaults.get("solver.convergence.stall_patience")),
+        float(defaults.get("solver.convergence.stall_decay")),
+    )
+
+
+@dataclass
+class _FloorReport:
+    """What the precision floor did to one solve (reported by the diagnostics)."""
+
+    floor_update_pu: float = 0.0  # governing voltage-update threshold [pu]
+    floor_mismatch_pu: float = 0.0  # largest per-row mismatch threshold [pu]
+    stall_ceiling_pu: float = 0.0  # largest accepted stall level [pu]
+    n_scenarios: int = 0
+    n_floor_governed: int = 0  # converged AT the floor, not at the tolerance
+    n_stalled: int = 0  # stopped making progress ABOVE the ceiling
+    stall_update_pu: float = 0.0  # worst per-row update of those scenarios [pu]
+    stall_mismatch_pu: float = 0.0  # worst power mismatch of those scenarios [pu]
+
+
+def _merge_floor_reports(parts: Sequence[_FloorReport]) -> _FloorReport:
+    """Sum per-scenario precision-floor reports into one (the sequential Newton path)."""
+    if not parts:
+        return _FloorReport()
+    return _FloorReport(
+        floor_update_pu=max(p.floor_update_pu for p in parts),
+        floor_mismatch_pu=max(p.floor_mismatch_pu for p in parts),
+        stall_ceiling_pu=max(p.stall_ceiling_pu for p in parts),
+        n_scenarios=sum(p.n_scenarios for p in parts),
+        n_floor_governed=sum(p.n_floor_governed for p in parts),
+        n_stalled=sum(p.n_stalled for p in parts),
+        stall_update_pu=max(p.stall_update_pu for p in parts),
+        stall_mismatch_pu=max(p.stall_mismatch_pu for p in parts),
+    )
+
+
+class _BatchIterationState:
+    """Per-scenario bookkeeping of a batched nonlinear iteration.
+
+    A scenario batch is a batch of INDEPENDENT problems, so each scenario's own criteria
+    decide when it is finished, and a finished scenario is HELD at the iterate that
+    finished it. Two properties follow, both of which a batched single-precision solve
+    needs:
+
+    - a batched solve returns per scenario what the unbatched solve of that scenario
+      returns. Without holding, the exit condition is that every scenario satisfies the
+      criteria in the SAME iteration, which a batch of thousands of scenarios at a
+      single-precision working dtype practically never does.
+    - a scenario that has stopped making progress is detected instead of iterated to
+      ``max_iter``. At float32 the fixed point does not settle: it either reaches an
+      exact fixed point of the rounded map (update exactly zero) or enters a small limit
+      cycle whose amplitude is one back-substitution's rounding, measured between 4e-7
+      and 6e-4 per unit on distribution feeders, i.e. up to fifty times the calibrated
+      floor of that dtype and backend. A scenario whose cycle sits above the floor can
+      never satisfy the voltage criterion, and before this bookkeeping it spun to the
+      iteration cap at a voltage that was as accurate as the precision allows.
+
+    Progress is improvement in EITHER criterion, because the two measure different
+    things along the way: a line-search Newton step can raise the voltage update from
+    one iteration to the next while the power mismatch falls by a decade (measured on a
+    57-bus network with a steep volt-var droop), and the single-precision fixed point
+    plateaus in both at once.
+
+    A stall inside the precision floor's band on BOTH criteria
+    (``solver.convergence.stall_tolerance_factor`` times the floor) counts as
+    convergence at the precision floor (recorded in
+    :class:`_FloorReport`, reported by the diagnostics and named by one warning); a
+    stall above it is a failure reported by its own likely cause. Everything here is
+    tensor work on ``[*b]`` masks under ``no_grad`` — one ``all()`` per iteration, the
+    same synchronisation the loop already had.
+    """
+
+    def __init__(
+        self,
+        *,
+        shape: tuple[int, ...],
+        device,
+        rdt: torch.dtype,
+        ctest: "_PuConvergence",
+    ) -> None:
+        self.ctest = ctest
+        self.patience, self.decay = _stall_watch_settings()
+        z = torch.zeros(shape, dtype=torch.bool, device=device)
+        self.done = z.clone()  # met the criteria (at the tolerance or at the floor)
+        self.stalled = z.clone()  # stopped making progress above the ceiling
+        self.floored = z.clone()  # converged because the floor governed
+        self.best_upd = torch.full(shape, float("inf"), dtype=rdt, device=device)
+        self.best_mism = torch.full(shape, float("inf"), dtype=rdt, device=device)
+        self.since = torch.zeros(shape, dtype=torch.int32, device=device)
+        self.upd_hold = torch.zeros(shape, dtype=rdt, device=device)
+        self.mism_hold = torch.zeros(shape, dtype=rdt, device=device)
+
+    def step(
+        self, ok: Tensor, in_band: Tensor, upd_vec: Tensor, mism_vec: Tensor
+    ) -> tuple[bool, Tensor, Tensor]:
+        """``(finished, converged_mask, reported_update)`` after one iteration.
+
+        ``finished`` is true once every scenario is either converged or stalled, which
+        is what ends the loop; ``reported_update`` holds each finished scenario's update
+        at the value that finished it, so the reported maximum is the worst scenario's
+        own exit level and not the zero update of a held scenario.
+        """
+        live = ~(self.done | self.stalled)
+        better_upd = upd_vec < self.best_upd * self.decay
+        better_mism = mism_vec < self.best_mism * self.decay
+        improved = better_upd | better_mism
+        self.best_upd = torch.where(better_upd & live, upd_vec, self.best_upd)
+        self.best_mism = torch.where(better_mism & live, mism_vec, self.best_mism)
+        self.since = torch.where(
+            improved | ~live, torch.zeros_like(self.since), self.since + 1
+        )
+        stalling = live & ~ok & (self.since >= self.patience)
+        at_floor = stalling & in_band
+        failed = stalling & ~in_band
+        newly = (live & ok) | at_floor
+        self.floored = self.floored | at_floor
+        self.stalled = self.stalled | failed
+        self.done = self.done | newly
+        self.upd_hold = torch.where(newly | failed, upd_vec, self.upd_hold)
+        self.mism_hold = torch.where(newly | failed, mism_vec, self.mism_hold)
+        finished = bool((self.done | self.stalled).all())
+        reported = torch.where(self.done | self.stalled, self.upd_hold, upd_vec)
+        return finished, self.done, reported
+
+    def hold(self, v_new: Tensor, v_old: Tensor) -> Tensor:
+        """``v_new`` where a scenario is still iterating, ``v_old`` where it finished."""
+        keep = self.done | self.stalled
+        if not bool(keep.any()):
+            return v_new
+        return torch.where(keep.unsqueeze(-1), v_old, v_new)
+
+    def report(self) -> _FloorReport:
+        """The precision-floor summary of this solve."""
+        n_floor = int(self.floored.sum())
+        n_stalled = int(self.stalled.sum())
+        mask = self.stalled.to(self.upd_hold.dtype)
+        return _FloorReport(
+            floor_update_pu=self.ctest.thr_update,
+            floor_mismatch_pu=self.ctest.mismatch_floor_pu,
+            stall_ceiling_pu=self.ctest.ceil_update,
+            n_scenarios=int(self.done.numel()),
+            n_floor_governed=n_floor,
+            n_stalled=n_stalled,
+            stall_update_pu=float((self.upd_hold * mask).max()) if n_stalled else 0.0,
+            stall_mismatch_pu=float((self.mism_hold * mask).max())
+            if n_stalled
+            else 0.0,
+        )
 
 
 def _validate_block_solver(
@@ -844,6 +1025,14 @@ class ConvergenceDiagnostics:
 
     Voltages (``v_pu``, ``voltage_band_pu``) are per unit on each node's line-to-neutral
     base.
+
+    The precision floor is reported explicitly, because a tolerance can be unreachable at
+    the working precision: ``update_floor_pu`` and ``mismatch_floor_pu`` are the
+    thresholds that actually governed, ``floor_governed`` / ``n_floor_governed`` say how
+    many scenarios converged because the floor governed rather than because the requested
+    tolerance was met, and ``n_stalled`` / ``stall_update_pu`` report the scenarios whose
+    iteration stopped making progress further above the floor than a rounding plateau
+    explains.
     """
 
     converged: bool
@@ -862,6 +1051,13 @@ class ConvergenceDiagnostics:
     out_of_band_nodes: list[dict] = field(default_factory=list)  # |V| outside the band
     likely_cause: str = ""
     criticality: Optional[dict] = None  # IFT-Jacobian analysis (non-convergence only)
+    floor_governed: bool = False  # a scenario converged at the precision floor
+    n_floor_governed: int = 0  # how many scenarios did
+    n_stalled: int = 0  # how many stopped making progress ABOVE the floor band
+    update_floor_pu: float = 0.0  # governing voltage-update threshold [pu]
+    mismatch_floor_pu: float = 0.0  # largest per-row mismatch threshold [pu]
+    stall_update_pu: float = 0.0  # worst update of a scenario stalled above it [pu]
+    stall_mismatch_pu: float = 0.0  # worst mismatch of a scenario stalled above it [pu]
 
     def as_dict(self) -> dict:
         """Plain-dict view (e.g. for :attr:`ConvergenceError.diagnostics`)."""
@@ -2323,6 +2519,7 @@ def solve_power_flow(
             update_max_pu,
             update_norm_v,
             fc_star,
+            floor_report,
         ) = run_forward(op_eff, real_res, fast_residual_complex, pv)
         if pv is None or not pv.enforce_q_limits:
             break
@@ -2389,7 +2586,27 @@ def solve_power_flow(
         criticality,
         pv,
         cdt,
+        floor_report,
     )
+
+    if floor_report.n_floor_governed:
+        # A solve that stops at what its arithmetic resolves says so: the voltage is as
+        # accurate as this working precision gets, and the number is the one to quote.
+        _log.warning(
+            "solve_power_flow: %d of %d scenario(s) converged AT THE PRECISION FLOOR, "
+            "not at the requested tolerance: their per-row voltage update stopped "
+            "improving at %.2e pu (the floor of this dtype and linear-solver backend is "
+            "%.2e pu, and a plateau up to %.2e pu counts as reaching it). The returned "
+            "voltages carry that accuracy. For a tighter answer solve at "
+            "dtype=torch.complex128, or at dtype=torch.complex128 with precision='mixed' "
+            "(single-precision factorization refined against double-precision "
+            "residuals), and store complex64.",
+            floor_report.n_floor_governed,
+            floor_report.n_scenarios,
+            float(update_max_pu),
+            floor_report.floor_update_pu,
+            floor_report.stall_ceiling_pu,
+        )
 
     if leaves:
         v_out = _IFTPowerFlow.apply(v_star, real_res, n, rdt, cdt, *leaves)
@@ -2519,9 +2736,10 @@ def _current_injection_forward(
     back-substitutions.
 
     Returns ``(v_star, iterations, mismatch_max_pu, converged, update_history, y_eff0,
-    i_slack0, converged_mask, mismatch_vec, update_max_pu, update_norm_v, fc)``; the
-    maxima are over the batch, while ``converged_mask`` / ``mismatch_vec`` are PER
-    scenario and ``fc`` is the final nodal residual (reused by the diagnostics).
+    i_slack0, converged_mask, mismatch_vec, update_max_pu, update_norm_v, fc,
+    floor_report)``; the maxima are over the batch, while ``converged_mask`` /
+    ``mismatch_vec`` are PER scenario, ``fc`` is the final nodal residual (reused by the
+    diagnostics) and ``floor_report`` is the :class:`_FloorReport` of the precision floor.
     """
     with torch.no_grad():
         if system is not None:
@@ -2637,6 +2855,9 @@ def _current_injection_forward(
             device=device,
             rdt=rdt,
         )
+        state = _BatchIterationState(
+            shape=tuple(lead), device=device, rdt=rdt, ctest=ctest
+        )
         i_dev = injections_from_plan(plan, v).squeeze(-2)  # [*b, N]
         fc = _apply_y(y_eff0, v) + i_dev - i_slack0 if mixed else None
         zero_slack = None if v_fixed is None else torch.zeros_like(v_fixed)
@@ -2650,6 +2871,10 @@ def _current_injection_forward(
                 # exactly the right-hand side's batch shape — a trailing singleton batch
                 # dim (an operating point batched [B, 1]) passes through untouched.
                 v_new = _factored_solve(fac, i_slack0 - i_dev, v_fixed)
+            # A scenario that already met its criteria is held at the iterate that met
+            # them, so its answer, its residual and its reported level are the ones an
+            # unbatched solve of that scenario would return.
+            v_new = state.hold(v_new, v)
             # One injection evaluation per iteration serves both the next right-hand
             # side and the residual the per-unit criteria are measured on.
             i_dev = injections_from_plan(plan, v_new).squeeze(-2)  # [*b, N]
@@ -2657,15 +2882,18 @@ def _current_injection_forward(
             dv = v_new - v
             mism_rows = ctest.mismatch_rows_pu(v_new, fc)
             upd_rows = ctest.update_rows_pu(dv)
-            converged_mask, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            ok, mism_ok, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            finished, converged_mask, update_vec = state.step(
+                ok, mism_ok, update_vec, mismatch_vec
+            )
             mismatch_max = mismatch_vec.max()
             update_max = update_vec.max()
             update_norm_v = torch.linalg.vector_norm(dv, dim=-1).max()
             update_history.append(float(update_max))
             v = v_new
             iterations += 1
-            if bool(converged_mask.all()):
-                converged = True
+            if finished:
+                converged = bool(converged_mask.all())
                 break
 
     return (
@@ -2681,6 +2909,7 @@ def _current_injection_forward(
         update_max,
         update_norm_v,
         fc,
+        state.report(),
     )
 
 
@@ -2852,7 +3081,7 @@ def _newton_from_starts(
     than one, a start that fails to converge is followed by the next one and the
     restart is logged; if none converges the attempt with the smallest final per-unit
     power mismatch is returned, so the diagnostics describe the best iterate reached.
-    Returns the 12-tuple of :func:`_newton_forward`.
+    Returns the result tuple of :func:`_newton_forward`.
     """
     best = None
     for attempt, make_init in enumerate(v_inits):
@@ -3049,6 +3278,7 @@ def _newton_forward(
         update_norm_v = torch.zeros((), dtype=rdt, device=device)
         converged_mask = torch.zeros(b, dtype=torch.bool, device=device)
         mismatch_vec = torch.zeros(b, dtype=rdt, device=device)
+        state = _BatchIterationState(shape=(b,), device=device, rdt=rdt, ctest=ctest)
         r = res_all(x)  # [b, 2N]
         fc = torch.complex(r[..., :n], r[..., n:])
         for _ in range(max_iter):
@@ -3072,20 +3302,25 @@ def _newton_forward(
                 if bool(ok.all()):
                     break
                 step = torch.where(ok.unsqueeze(-1), step, 0.5 * step)
-            dx_taken = step * dx
+            # A scenario that already met its criteria takes no further step, so its
+            # answer is the one the same scenario reaches on its own.
+            dx_taken = state.hold(step * dx, torch.zeros_like(dx))
             x = x + dx_taken
             # The residual at the NEW state feeds both the per-unit mismatch criterion
             # and the next step's Jacobian / line search (evaluated once).
             r = res_all(x)
             mism_rows, upd_rows, fc = pu_measures(x, r, dx_taken)
-            converged_mask, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            ok, mism_ok, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            finished, converged_mask, update_vec = state.step(
+                ok, mism_ok, update_vec, mismatch_vec
+            )
             mismatch_max = mismatch_vec.max()
             update_max = update_vec.max()
             update_norm_v = dx_taken.norm(dim=-1).max()
             update_history.append(float(update_max))
             iterations += 1
-            if bool(converged_mask.all()):
-                converged = True
+            if finished:
+                converged = bool(converged_mask.all())
                 break
         v_star = torch.complex(x[..., :n], x[..., n:]).reshape(*lead, n)
         cmask = converged_mask.reshape(lead) if lead else converged_mask.reshape(())
@@ -3104,6 +3339,7 @@ def _newton_forward(
         update_max,
         update_norm_v,
         fc,
+        state.report(),
     )
 
 
@@ -3142,9 +3378,11 @@ def _newton_forward_sequential(
     ``make_fast_residual_complex`` (one detached injection plan per slice — the
     detached forward needs only ``dR/dx``), and the voltage-regulating terminals are
     sliced the same way (per-scenario setpoints and active set). Returns the same
-    12-tuple as :func:`_newton_forward`.
+    result tuple as :func:`_newton_forward`, with the per-scenario precision-floor
+    reports summed into one.
     """
     v_list, conv_list, mis_list, upd_list, updv_list, fc_list = [], [], [], [], [], []
+    floors: list[_FloorReport] = []
     iterations = 0
     y_eff0 = i_slack0 = None
     for i in range(bsize):
@@ -3184,6 +3422,7 @@ def _newton_forward_sequential(
             upd_i,
             updv_i,
             fc_i,
+            floor_i,
         ) = _newton_from_starts(
             rr_i,
             warm_starts(op_i, pv_i, _vfixed_i()),
@@ -3206,6 +3445,7 @@ def _newton_forward_sequential(
         upd_list.append(upd_i.reshape(()))
         updv_list.append(updv_i.reshape(()))
         fc_list.append(fc_i.reshape(-1)[:n])
+        floors.append(floor_i)
         iterations = max(iterations, it_i)
     v_star = torch.stack(v_list, 0)  # [B, N]
     converged_mask = torch.tensor(conv_list, dtype=torch.bool, device=device)  # [B]
@@ -3226,6 +3466,7 @@ def _newton_forward_sequential(
         torch.stack(upd_list, 0).max(),
         torch.stack(updv_list, 0).max(),
         torch.stack(fc_list, 0),
+        _merge_floor_reports(floors),
     )
 
 
@@ -3760,6 +4001,7 @@ def _build_diagnostics(
     criticality: str = "auto",
     pv: Optional[PVTerminals] = None,
     cdt: torch.dtype = torch.complex128,
+    floor: Optional[_FloorReport] = None,
 ) -> "ConvergenceDiagnostics":
     """Cheap state diagnostics at ``V*`` (+ Jacobian criticality on non-convergence).
 
@@ -3864,6 +4106,13 @@ def _build_diagnostics(
         residual_history=residual_history,
         worst_nodes=worst_nodes,
         out_of_band_nodes=out_of_band,
+        floor_governed=bool(floor is not None and floor.n_floor_governed),
+        n_floor_governed=0 if floor is None else floor.n_floor_governed,
+        n_stalled=0 if floor is None else floor.n_stalled,
+        update_floor_pu=0.0 if floor is None else floor.floor_update_pu,
+        mismatch_floor_pu=0.0 if floor is None else floor.floor_mismatch_pu,
+        stall_update_pu=0.0 if floor is None else floor.stall_update_pu,
+        stall_mismatch_pu=0.0 if floor is None else floor.stall_mismatch_pu,
     )
     do_crit = criticality == "always" or (criticality == "auto" and not converged)
     if do_crit and finite:
@@ -3885,7 +4134,25 @@ def _likely_cause(
 ) -> str:
     """One-line heuristic explanation of the convergence outcome."""
     if diag.converged:
+        if diag.floor_governed:
+            return (
+                f"converged at the precision floor ({diag.n_floor_governed} scenario(s) "
+                f"stopped improving at a per-row update of {diag.update_max_pu:.2e} pu, "
+                f"against a floor of {diag.update_floor_pu:.2e} pu for this dtype and "
+                "linear-solver backend)"
+            )
         return "converged"
+    if diag.n_stalled:
+        return (
+            f"the iteration stopped making progress in {diag.iterations} iterations "
+            f"({diag.n_stalled} scenario(s) plateaued at a per-row update of "
+            f"{diag.stall_update_pu:.2e} pu and a power mismatch of "
+            f"{diag.stall_mismatch_pu:.2e} pu, too far above this dtype and backend's "
+            f"precision floor of {diag.update_floor_pu:.2e} pu / "
+            f"{diag.mismatch_floor_pu:.2e} pu for rounding to explain it) — the "
+            "iteration is not contracting there; try Newton, a better start, or a "
+            "homotopy continuation from a feasible base"
+        )
     if diverged:
         reached = (
             f"voltage reached {max_vpu:.1f} pu"
