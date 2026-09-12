@@ -96,6 +96,26 @@ Z1(h) = R1 · m_skin(h)  +  j · X1 · (f / f0)
   with the earth term dropped. This is the one physical effect a plain "R constant, X ∝ h"
   model misses.
 
+Two details of that multiplier matter on a three-phase line, because the Bessel curve is
+fitted through a DC resistance and the argument goes as `1/√Rdc`. The value it is fitted to is
+the positive-sequence resistance, recovered from the line's own phase matrix as the mean
+diagonal minus the mean off-diagonal, because a matrix expanded from sequence data carries
+`R_self = (R0 + 2·R1)/3` on its diagonal. And the multiplier scales the conductor part only:
+in Carson's equations the mutual resistance of a multi-phase line IS the earth-return term, so
+the stamp splits the matrix as `R(h) = m(h)·(R − R_earth) + R_earth`, with `R_earth` the
+off-diagonals and each diagonal entry set to that row's mean mutual. Skin effect is an
+internal-conductor phenomenon and has no business scaling the earth path. A single-phase line
+has no mutual, so its diagonal IS `R1` and neither detail applies.
+
+Both details move the impedance noticeably. On the first IEEE-33 line a fit to the mean
+diagonal returns twice `R1`, which understates `m(h)` by a third at order 25 (1.87 against
+2.51), while scaling the whole matrix overstates `R0(h)` by up to a fifth. The two errors act
+in opposite directions, which is why neither shows up as an outlier in an aggregate check. The
+effect on a harmonic VOLTAGE is small on a reactance-dominated feeder, about a tenth of a
+percent at order 13, so the correction matters for the impedance, and therefore for damping,
+resonance sharpness and any loss or parameter-recovery study, rather than for the voltage
+magnitude of such a case.
+
 Two equivalent constructions are available. `positive_sequence_z` evaluates the formula
 directly; it is linear in `h` to floating point, differentiable in `R1` and `X1`, and
 batched over lines and harmonics. `two_conductor_loop_z` instead builds a physical `+I` go
