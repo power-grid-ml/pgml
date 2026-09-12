@@ -19,6 +19,15 @@ its internal bus admittance. Sequence domain at heart, and not differentiable.
   loading_percent, pl_mw, ql_mvar.
 - res_trafo: loading_percent, p_hv_mw/p_lv_mw, etc.
 
+## What the reader takes
+- `gen` is pandapower's PV bus, and it converts to a voltage-regulating terminal by default.
+- `shunt` converts to a fixed WYE shunt appliance. An inductive row becomes a negative
+  capacitance, exact at the fundamental only.
+- `ext_grid`'s `x0x_max` and `r0x0_max` are read into the source's zero-sequence impedance.
+- `trafo`'s `vk0_percent` and `vkr0_percent` are read into the transformer's zero-sequence
+  leakage. `mag0_percent`, `mag0_rx` and `si0_hv_partial` are not modelled and are named in a
+  warning.
+
 ## Extracting ground truth
 ```python
 import pandapower as pp

@@ -22,7 +22,8 @@ per-unit leakage recovery to be well defined. There is no explicit clock paramet
 comes from `LeadLag` combined with a cyclic rotation of a winding bus's phase-conductor order,
 which reaches every clock of the pairing's parity except the polarity-flip clocks 2, 6 and 10,
 since no bus wiring expresses a reversed winding. `XRConst=No`, the default, keeps R fixed
-while X scales with the order. The reader converts two-winding units with solidly grounded wye
+while X scales with the order; the reader carries the flag per transformer and the harmonic
+assembly consumes it, so a unit declared `XRConst=Yes` gets R proportional to the order. The reader converts two-winding units with solidly grounded wye
 or delta windings. Three-winding units, regulators, tap-changer control and
 frequency-correction curves are not read, and an explicit non-zero neutral node raises. A wye
 winding's grounding follows OpenDSS's own shorthand-bus rule, where no extra conductor, or an
@@ -38,7 +39,10 @@ per element, so two elements on one four-wire bus can return differently, as the
 OpenDSS.
 
 Line. Symmetric components, explicit matrices, or a conductor geometry. Matrices and geometry
-take precedence over sequence data. The reader takes the native matrices directly in
+take precedence over sequence data. A geometry line's impedance is recomputed at every
+frequency, and outside the band 40 Hz to 1 kHz OpenDSS moves the spacing term from the
+published GMR to the physical radius, which pgml reproduces as an option rather than as its
+default; see {doc}`../../harmonic-line-model`. The reader takes the native matrices directly in
 three-phase mode and reduces a coupled multi-phase line to `Z1 = Z_self − Z_mutual` in
 single-phase-equivalent mode. A phase-permuted terminal carries its own phase tuple.
 
@@ -46,7 +50,10 @@ Other elements. `Capacitor` and `Reactor` become shunt appliances, grounded wye 
 per-leg values read from OpenDSS's own resolved numbers. A reactor's series R and X convert to
 the equivalent shunt admittance, which is exact at the fundamental only. `Generator`,
 `PVSystem` and `Storage` become injections, and the latter two are read at their present
-solved power, already derated. Every other element class is enumerated and raises one warning
+solved power, already derated. A `Generator` with `model=3` is a voltage-regulating bus, and
+it converts to a regulating terminal with its `Vpu` setpoint and its `Minkvar`/`Maxkvar`
+bounds. `Vpu` is per unit of the machine's own `kV` rating, so the reader re-refers it to the
+host node's base; a delta-connected `model=3` machine raises. Every other element class is enumerated and raises one warning
 per class naming the kind and the count, so nothing disappears quietly.
 
 ## Extracting ground truth

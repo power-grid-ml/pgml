@@ -54,6 +54,12 @@ its own, so the injected spectrum is shaped only by the network response `Z_net(
 the grid parameters. Several sources at once are a list. A per-node sweep that places one
 source at one node per scenario is the diagonal enumeration of that list.
 
+The same mechanism carries the upstream background. `pgml.scenarios`'
+`BackgroundHarmonicConfig` realizes one voltage-kind source per in-service `Source` node from
+a config plus a seed, which is how a reproducible study supplies the distortion the upstream
+network imposes. A voltage-kind source is an admittance as well as a current, so it cannot sit
+on a row that bus fusion collapsed; such a placement is refused by name.
+
 The OpenDSS equivalents for validation are an `ISource` carrying the spectrum for the Norton
 form, and a `VSource` with the EMF set to the node's fundamental voltage, `MVAsc1 = S_sc` and
 a resistive impedance for the Thévenin form.

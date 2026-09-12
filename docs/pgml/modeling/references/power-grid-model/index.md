@@ -16,6 +16,13 @@ not differentiable.
   clock (0-12 vector group), tap_side/pos/min/max/nom/size; zero-seq derived from
   winding connections + clock.
 
+## What the reader takes
+- `link`, power-grid-model's perfect connection, converts to an ideal closed switch that the
+  solve collapses exactly.
+- `source.z01_ratio` is read into the source's zero-sequence impedance.
+- `voltage_regulator`, added in 1.13, makes an existing generator or load a PV terminal. pgml
+  has the matching schema field but the reader does not map it yet.
+
 ## Output (per component)
 - node: u, u_pu, u_angle, p, q (+ per-phase in asym).
 - branch: loading, p_from/q_from/i_from/s_from, p_to/q_to/i_to/s_to.
