@@ -52,9 +52,9 @@ print(f"d|V5|/dP      {1e3 * p.grad:8.3f} V per kW of converter load")
 
 ```text
 fundamental    11562.2 V
-5th harmonic     149.7 V
-voltage THD      2.22%
-d|V5|/dP         1.044 V per kW of converter load
+5th harmonic     142.5 V
+voltage THD      2.10%
+d|V5|/dP         0.971 V per kW of converter load
 ```
 
 Any physical field of a grid accepts a tensor in place of a float, so `p` above is an
@@ -81,12 +81,14 @@ the assembled admittance to that one load parameter.
 - Phase domain throughout, per phase and per harmonic, with WYE, grounded WYE and DELTA
   connections and a neutral conductor where the grid has one.
 - Lines from explicit R/L/C or from conductor geometry (Carson/Deri), two-winding
-  transformers with real vector groups, loads, generators with inverter control laws,
-  storage, shunts and switches.
+  transformers with real vector groups, loads, generators as PQ injections or as
+  voltage-regulating terminals with reactive limits, inverter control laws, storage, shunts
+  and switches.
 - One implementation runs on CPU and CUDA, in complex64 or complex128, batched over
   harmonics and over scenarios.
 - Results are checked against OpenDSS for harmonics and against pandapower and
-  power-grid-model at the fundamental, on the IEEE 33-bus feeder and the CIGRE LV network.
+  power-grid-model at the fundamental, on the IEEE 33-bus feeder, the CIGRE LV network and
+  the MATPOWER transmission benchmarks.
 - Known gaps are listed where they belong, next to the model they affect, in
   {doc}`pgml/modeling/index`.
 

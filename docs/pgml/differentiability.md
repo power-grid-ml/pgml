@@ -34,8 +34,8 @@ in total and returns the whole gradient, which is what makes the last two exampl
 practical on a grid with hundreds of lines.
 
 The four examples run on the CIGRE LV benchmark network, 44 nodes across three feeders.
-They need the `convert` extra, they run on a laptop CPU, and each finishes in under half a
-minute.
+They need the `convert` extra, they run on a laptop CPU, and each finishes in a few
+seconds.
 
 ## 1. Line parameters from noisy voltage measurements
 
@@ -281,12 +281,15 @@ for label, k in (("top ranked", int(rank[0])), ("10th ranked", int(rank[9]))):
 
 ```text
 voltage stress 0.01581 over 37 lines
-  line 64 (26->27)  dJ/dscale +0.01292
   line 63 (25->26)  dJ/dscale +0.01292
+  line 64 (26->27)  dJ/dscale +0.01292
   line 71 (27->34)  dJ/dscale +0.00596
-  top ranked line 64 halved -> stress 0.01039
+  top ranked line 63 halved -> stress 0.01039
   10th ranked line 76 halved -> stress 0.01483
 ```
+
+The first two lines are in series and carry the same current, so their gradients are equal to
+the digits printed and the order between them is a tie-break.
 
 The two head sections of the loaded feeder come out on top, ahead of the lateral that feeds
 the worst node. Halving the impedance of the top-ranked line removes 34 % of the stress.
@@ -309,10 +312,14 @@ The same tape reaches further than the two parameter groups used above.
   decision has a gradient as well.
 
 Two implementation notes. The fundamental-frequency solve is nonlinear, and its backward
-pass uses the implicit function theorem rather than unrolling the iteration, so gradient
-cost does not grow with iteration count. The default dtype is complex128, which is also the
-dtype the gradient checks run in. complex64 halves memory and is meant for throughput once a
-study is calibrated, on grids whose admittance matrix is not too ill conditioned.
+pass uses the implicit function theorem rather than unrolling the iteration, so gradient cost
+does not grow with iteration count. Several products of one solve cost one back-substitution
+each after the first, because the adjoint factorization is cached on the autograd node. The
+default dtype is complex128, which is also the dtype the gradient checks run in. complex64
+halves memory and is meant for throughput once a study is calibrated; `precision="mixed"`
+usually serves better, because it factors at single precision while keeping the complex128
+residual, so the answer stays at double-precision accuracy. See
+{doc}`modeling/solver-performance`.
 
 For the API behind these examples see {doc}`public-api`. For what the model does and does
 not represent see {doc}`concepts` and {doc}`modeling/index`.

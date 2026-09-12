@@ -62,9 +62,9 @@ print(f"d|V5|/dP      {1e3 * p.grad:8.3f} V per kW of converter load")
 
 ```text
 fundamental    11562.2 V
-5th harmonic     149.7 V
-voltage THD      2.22%
-d|V5|/dP         1.044 V per kW of converter load
+5th harmonic     142.5 V
+voltage THD      2.10%
+d|V5|/dP         0.971 V per kW of converter load
 ```
 
 Any physical field of a grid accepts a tensor in place of a float, so `p` above is an ordinary
@@ -78,13 +78,16 @@ that removes an overvoltage, and ranking lines by the benefit of reinforcing the
   approximated.
 - Phase domain throughout, with WYE, grounded WYE and DELTA connections and a neutral
   conductor where the grid has one.
-- Lines from explicit R/L/C or from conductor geometry through a Carson/Deri model that is
-  bit-exact against OpenDSS on the same geometry.
+- Lines from explicit R/L/C or from conductor geometry through a Carson/Deri model that
+  agrees with OpenDSS to 4.8e-8 relative on the same geometry.
 - Two-winding transformers with real vector groups, so a Dyn delta traps triplen harmonics.
+- Generators as PQ injections or as voltage-regulating terminals with reactive limits, which
+  is what makes the MATPOWER transmission benchmarks importable.
 - Inverter control laws, storage, shunts and switches, with switch states as a differentiable
-  continuous parameter.
-- Two nonlinear power-flow solvers with actionable diagnostics, including a continuation that
-  reports the loadability margin, the critical bus and the limiting load.
+  continuous parameter and an ideal closed switch solved by exact bus fusion.
+- Two nonlinear power-flow solvers with actionable diagnostics, per-unit convergence criteria
+  and a mixed-precision factorization, including a continuation that reports the loadability
+  margin, the critical bus and the limiting load.
 - Reproducible batched scenarios for data generation, and one implementation that runs on CPU
   and CUDA in complex64 or complex128.
 

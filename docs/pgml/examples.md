@@ -46,8 +46,9 @@ The magnitude rises towards the three converter loads at the feeder end.
 `evaluate_harmonics_carson.py` does the stricter harmonic comparison. It synthesizes
 conductor geometry that reproduces each line's impedance at the fundamental, then feeds the
 same geometry to pgml and to OpenDSS. With the geometry identical on both sides there is no
-earth-model ambiguity left, and the two engines agree to floating-point precision at every
-order.
+earth-model ambiguity left, and the two engines agree to 4.8e-8 relative on the line
+impedance at every order below 1 kHz. The remaining residual is the `μ0` constant OpenDSS
+truncates, and {doc}`modeling/harmonic-line-model` explains what happens above 1 kHz.
 
 ## Harmonic line models
 
@@ -80,16 +81,25 @@ solvers along the way.
 :alt: Loadability nose curve
 :width: 80%
 
-Voltage against loading for the critical bus. The nose is where the solution disappears. The
-continuation reports the margin, the critical bus and the limiting load instead of returning
-a convergence failure.
+Voltage against loading for the critical bus. The walk stops at the largest λ the Newton
+corrector still solves, which is a lower bound on the true nose: the Jacobian becomes ill
+conditioned before the singularity. The study reports that margin, the critical bus and the
+limiting load instead of returning a convergence failure.
 ```
 
-## Performance studies
+On CIGRE LV the largest solvable λ is 3.41 under the default `ramp="load"`, a margin of 2.41
+times nameplate, with node 37 the collapse mode and the 20 kVA load at node 36 the element
+that costs the most margin.
 
-Three scripts measure rather than plot. `benchmark_speed.py` times the batched solve against
+## Performance and conditioning studies
+
+Five scripts measure rather than plot. `benchmark_speed.py` times the batched solve against
 batch size on whichever devices are present. `benchmark_sparse.py` sweeps system size and
 compares the dense and sparse factorization backends, which is how the automatic backend
 threshold was calibrated. `benchmark_woodbury.py` times a switch-state sweep with and without
 the low-rank update, and reports the voltage agreement between the two paths alongside the
-speedup. The measured numbers are in {doc}`modeling/solver-performance`.
+speedup. `benchmark_equilibration.py` reports the condition number of the matrix the solver
+factors, with and without the diagonal scaling, and the single-precision error that follows
+from it. `benchmark_ift_backward.py` times the backward pass against batch size and shows
+which Jacobian build the memory budget selected. The measured numbers are in
+{doc}`modeling/solver-performance`.
