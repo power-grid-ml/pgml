@@ -204,7 +204,19 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
   - `method="current_injection"` (default) forward = FIXED POINT: with
     `Y_net = assemble_network_ybus` (+ source Norton if `slack="norton"`), iterate
     `V_{k+1} = solve_harmonic(Y_eff, I_slack − device_current_injections(grid,V_k),
-    slack...)` until `||V_{k+1}-V_k|| < tol` or `max_iter`, under `torch.no_grad()`.
+    slack...)` until both per-unit criteria hold or `max_iter`, under `torch.no_grad()`.
+    The per-unit MISMATCH criterion needs the nodal residual `F(V) = Y V + I_dev − I_slack`
+    every iteration, and forming it with a matrix-vector product cost 0.2 to 0.8 times a
+    dense back-substitution and up to 14 times a SPARSE one (measured, 1176 rows,
+    complex128, CPU) — i.e. it was the dominant per-iteration cost on the sparse path.
+    It is not needed: the back-substitution has just enforced `(Y V_new)_free = I_free`,
+    so on every free row (the only rows the criteria measure)
+    `F(V_new) = I_dev(V_new) − I_dev(V_old)` EXACTLY, which the iteration already holds.
+    The identity is used for the per-iteration test and CONFIRMED against the true nodal
+    residual in the iteration that would exit (and once more if the loop hits `max_iter`),
+    so the reported mismatch and the convergence decision are still the nodal ones: one
+    matrix-vector product per SOLVE instead of one per iteration. `precision="mixed"`
+    keeps the explicit residual — there it IS the next right-hand side.
   - `method="newton"` forward = NEWTON on the real residual `R(x)=0` (`x=[Re V; Im V]`):
     per step solve `J·Δx = −R` with `J = dR/dx` (the SAME real `[2N,2N]` Jacobian the IFT
     backward builds, via `torch.autograd.functional.jacobian`), backtracking line search
@@ -686,7 +698,10 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   k=384). Voltages agree with the assemble path to ~1e-12 relative.
 - `prepare_power_flow(grid, *, slack, dtype, precision, device, param_overrides,
   branch_states, branch_states_method, linear_solver, block_rows, equilibrate)
-  -> PowerFlowSystem` +
+  -> PowerFlowSystem` (which also carries `row_abs_scale`, the `Σ_j |Y_ij| V_base,j` the
+  mismatch criterion's per-row floor is built from: a property of the network and the
+  rated voltages, so the prepared path no longer pays a full `|Y|` pass — 7.6 ms on a
+  1176-row feeder at complex128, CPU — on every solve) +
   `solve_power_flow(..., system=...)` — assembly + slack rows + factorization +
   grid-leaf walk once, reused across repeated solves (the `run_scenarios` chunk
   loop shares one system). Forward-only reuse: the IFT backward always rebuilds
@@ -766,7 +781,12 @@ nothing outside the factorization sees it. Default ON
   real scales in the real dtype paired with `a`'s (so a complex64 matrix stays complex64);
   `(None, None)` for `"off"`. `"symmetric"` returns one tensor twice.
 - `equilibrate_matrix(a, *, mode, power_of_two=None) -> (a_hat, d_row, d_col)`,
-  `scale_matrix(a, d_row, d_col) -> a_hat`.
+  `scale_matrix(a, d_row, d_col) -> a_hat`. A two-sided scaling writes ONE full matrix,
+  not two: with no gradient being recorded — every forward solve, which is where the cost
+  shows — the column scaling runs in place on the tensor the row scaling just produced
+  (measured on a 1176-row feeder, complex128, CPU: 6.7 ms against 13.9 ms, where that
+  matrix's SuperLU factorization is 7.0 ms and its dense LU 29.9 ms). With autograd active
+  both multiplications stay out-of-place and on the tape.
 - `equilibrated_lu_factor(a, *, mode, power_of_two=None, factor_dtype=None)
   -> EquilibratedLU` with `.solve(rhs, *, adjoint=False) -> x` — factor once, solve many
   for a REAL dense system that is not a network admittance: the Newton state Jacobian and

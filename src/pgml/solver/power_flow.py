@@ -270,6 +270,7 @@ class _PuConvergence:
         device,
         rdt: torch.dtype,
         warn: bool = True,
+        row_abs: Optional[Tensor] = None,
     ) -> None:
         self.v_base = v_base.clamp_min(1e-12)  # [N] line-to-neutral base per row
         self.s_base = float(s_base)
@@ -283,9 +284,13 @@ class _PuConvergence:
             free = free.index_fill(0, fixed_rows.to(device), 0.0)
         self.free = free
         with torch.no_grad():
-            s_scale_pu = (
-                self.v_base * _abs_row_scale(y_eff, self.v_base)
-            ) / self.s_base  # [*b, N]
+            # ``row_abs`` is ``Σ_j |Y_ij| V_base,j``, a property of the network and the
+            # rated voltages: a prepared system computes it once
+            # (:class:`PowerFlowSystem.row_abs_scale`) instead of reading the whole
+            # matrix again on every solve.
+            if row_abs is None:
+                row_abs = _abs_row_scale(y_eff, self.v_base)
+            s_scale_pu = (self.v_base * row_abs) / self.s_base  # [*b, N]
             self.thr_mismatch = torch.clamp(
                 self.floor_mismatch * s_scale_pu, min=self.tol_mismatch_pu
             )
@@ -463,15 +468,20 @@ class _BatchIterationState:
         self.upd_hold = torch.zeros(shape, dtype=rdt, device=device)
         self.mism_hold = torch.zeros(shape, dtype=rdt, device=device)
 
+    @property
+    def finished_mask(self) -> Tensor:
+        """Scenarios that will take no further step (converged or stalled)."""
+        return self.done | self.stalled
+
     def step(
         self, ok: Tensor, in_band: Tensor, upd_vec: Tensor, mism_vec: Tensor
-    ) -> tuple[bool, Tensor, Tensor]:
-        """``(finished, converged_mask, reported_update)`` after one iteration.
+    ) -> tuple[bool, Tensor, Tensor, Tensor]:
+        """``(finished, converged_mask, update, mismatch)`` after one iteration.
 
         ``finished`` is true once every scenario is either converged or stalled, which
-        is what ends the loop; ``reported_update`` holds each finished scenario's update
-        at the value that finished it, so the reported maximum is the worst scenario's
-        own exit level and not the zero update of a held scenario.
+        is what ends the loop; the reported update and mismatch hold each finished
+        scenario's values at the iterate that finished it, so the reported maxima are the
+        worst scenario's own exit levels and not the zero update of a held scenario.
         """
         live = ~(self.done | self.stalled)
         better_upd = upd_vec < self.best_upd * self.decay
@@ -491,13 +501,18 @@ class _BatchIterationState:
         self.done = self.done | newly
         self.upd_hold = torch.where(newly | failed, upd_vec, self.upd_hold)
         self.mism_hold = torch.where(newly | failed, mism_vec, self.mism_hold)
-        finished = bool((self.done | self.stalled).all())
-        reported = torch.where(self.done | self.stalled, self.upd_hold, upd_vec)
-        return finished, self.done, reported
+        fin = self.finished_mask
+        finished = bool(fin.all())
+        return (
+            finished,
+            self.done,
+            torch.where(fin, self.upd_hold, upd_vec),
+            torch.where(fin, self.mism_hold, mism_vec),
+        )
 
     def hold(self, v_new: Tensor, v_old: Tensor) -> Tensor:
         """``v_new`` where a scenario is still iterating, ``v_old`` where it finished."""
-        keep = self.done | self.stalled
+        keep = self.finished_mask
         if not bool(keep.any()):
             return v_new
         return torch.where(keep.unsqueeze(-1), v_old, v_new)
@@ -1602,6 +1617,11 @@ class PowerFlowSystem:
     precision: str = "full"  # working precision of the cached factorization
     fusion: Optional[FusionMap] = None  # the reduced row layout, when one applies
     equilibration: str = "off"  # equilibration of the cached factorization
+    #: ``Σ_j |Y_ij| V_base,j`` per row — the cancellation scale the per-unit mismatch
+    #: criterion's precision floor is built from. It depends only on the network and the
+    #: rated voltages, so a prepared system carries it instead of paying one ``|Y|`` pass
+    #: (a full matrix read: 7.6 ms on a 1176-row feeder, complex128, CPU) per solve.
+    row_abs_scale: Optional[Tensor] = None
 
 
 def prepare_power_flow(
@@ -1714,6 +1734,9 @@ def prepare_power_flow(
                 refine_steps=0,
                 equilibrate=eq_mode,
             )
+    with torch.no_grad():
+        v_base = _node_voltage_bases(grid, index, _rdtype(dtype), device)
+        row_abs = _abs_row_scale(y_eff, v_base.clamp_min(1e-12))
     return PowerFlowSystem(
         index=index,
         f0=f0,
@@ -1728,6 +1751,7 @@ def prepare_power_flow(
         precision=precision,
         fusion=fusion,
         equilibration=eq_mode,
+        row_abs_scale=row_abs,
     )
 
 
@@ -2854,6 +2878,7 @@ def _current_injection_forward(
             n=n,
             device=device,
             rdt=rdt,
+            row_abs=None if system is None else system.row_abs_scale,
         )
         state = _BatchIterationState(
             shape=tuple(lead), device=device, rdt=rdt, ctest=ctest
@@ -2877,13 +2902,37 @@ def _current_injection_forward(
             v_new = state.hold(v_new, v)
             # One injection evaluation per iteration serves both the next right-hand
             # side and the residual the per-unit criteria are measured on.
-            i_dev = injections_from_plan(plan, v_new).squeeze(-2)  # [*b, N]
-            fc = _apply_y(y_eff0, v_new) + i_dev - i_slack0  # [*b, N]
+            i_dev_new = injections_from_plan(plan, v_new).squeeze(-2)  # [*b, N]
             dv = v_new - v
-            mism_rows = ctest.mismatch_rows_pu(v_new, fc)
             upd_rows = ctest.update_rows_pu(dv)
+            if mixed:
+                # The residual IS the next right-hand side here, so it is formed anyway.
+                fc = _apply_y(y_eff0, v_new) + i_dev_new - i_slack0  # [*b, N]
+                fc_exact = True
+            else:
+                # The back-substitution just enforced (Y V_new)_free = I_free on every
+                # free row, so on those rows — the only ones the criteria measure —
+                # F(V_new) = I_device(V_new) - I_device(V_old) EXACTLY, up to the
+                # solve's own rounding. Using that identity removes one dense
+                # matrix-vector product per iteration, which costs 0.2 to 0.8 times a
+                # dense back-substitution and up to 14 times a sparse one (measured on a
+                # 1176-row feeder, complex128, CPU).
+                fc = i_dev_new - i_dev
+                fc_exact = False
+            i_dev = i_dev_new
+            mism_rows = ctest.mismatch_rows_pu(v_new, fc)
             ok, mism_ok, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
-            finished, converged_mask, update_vec = state.step(
+            if not fc_exact and bool((ok | state.finished_mask).all()):
+                # Every scenario would stop here: confirm it against the TRUE nodal
+                # residual before believing the identity above, so the reported mismatch
+                # and the convergence decision are the ones a nodal balance gives. The
+                # confirmation costs one matrix-vector product per SOLVE, not per
+                # iteration.
+                fc = _apply_y(y_eff0, v_new) + i_dev - i_slack0
+                fc_exact = True
+                mism_rows = ctest.mismatch_rows_pu(v_new, fc)
+                ok, mism_ok, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
+            finished, converged_mask, update_vec, mismatch_vec = state.step(
                 ok, mism_ok, update_vec, mismatch_vec
             )
             mismatch_max = mismatch_vec.max()
@@ -2895,6 +2944,12 @@ def _current_injection_forward(
             if finished:
                 converged = bool(converged_mask.all())
                 break
+        if not fc_exact:
+            # The loop ran out of iterations on the identity above; the residual the
+            # diagnostics report is the nodal one.
+            fc = _apply_y(y_eff0, v) + i_dev - i_slack0
+            mismatch_vec = ctest.mismatch_rows_pu(v, fc).amax(dim=-1)
+            mismatch_max = mismatch_vec.max()
 
     return (
         v,
@@ -3311,7 +3366,7 @@ def _newton_forward(
             r = res_all(x)
             mism_rows, upd_rows, fc = pu_measures(x, r, dx_taken)
             ok, mism_ok, mismatch_vec, update_vec = ctest.check(mism_rows, upd_rows)
-            finished, converged_mask, update_vec = state.step(
+            finished, converged_mask, update_vec, mismatch_vec = state.step(
                 ok, mism_ok, update_vec, mismatch_vec
             )
             mismatch_max = mismatch_vec.max()
