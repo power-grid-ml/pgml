@@ -194,17 +194,19 @@ per scenario (and per step, for a node-coherent batch). Two assumption modes
 control how closely the exported circuit matches pgml's own reduced harmonic
 model:
 
-- ``mode="matched"`` (default) sets ``NeglectLoadY=Yes`` (pgml's harmonic
-  solver has no load Norton shunt at all), ``Rg=Xg=0`` on every line-like
-  element (pgml's non-geometry line models carry no Carson earth-return
-  correction), a tight snap-solve tolerance, and an effectively unbounded
-  ``Vminpu``/``Vmaxpu`` band on every load (pgml's load laws apply at any
-  voltage, unlike OpenDSS's default clipping band). This isolates genuine
-  numeric agreement between the two harmonic engines — measured (2026-07
-  comparison campaign) at roughly 1e-8 to 1e-9 relative voltage error on
-  single-phase feeder cases and roughly 1e-6 on the three-phase CIGRE LV
-  benchmark, with one documented, bounded exception (the triplen orders under
-  ``mode="default"``, below).
+- ``mode="matched"`` (default) exports the harmonic DEVICE model the solve itself
+  uses, named by ``load_shunt``: each ``Load`` carries the resolved ``%SeriesRL``
+  (and ``puXharm`` / ``XRharm`` for the motor model), or the circuit is solved with
+  ``Set NeglectLoadY=Yes`` for the pure current-source model.  It also sets
+  ``Rg=Xg=0`` on every line-like element (pgml's non-geometry line models carry no
+  Carson earth-return correction), a tight snap-solve tolerance, and an effectively
+  unbounded ``Vminpu`` / ``Vmaxpu`` band on every load (pgml's load laws apply at any
+  voltage, unlike OpenDSS's default clipping band).  This isolates genuine numeric
+  agreement between the two harmonic engines, measured at roughly 1e-8 to 1e-9
+  relative voltage error on single-phase feeder cases and roughly 1e-6 on the
+  three-phase CIGRE LV benchmark.  ``NeglectLoadY`` is a GLOBAL OpenDSS option, so a
+  grid that mixes per-device shunt overrides cannot be matched device by device; the
+  exporter says so by name.
 - ``mode="default"`` leaves OpenDSS's own defaults (imperial-calibrated earth
   return, the default voltage-clip band) — a deliberate, documented divergence
   characterizing how far a naive "just point OpenDSS at the grid" study would

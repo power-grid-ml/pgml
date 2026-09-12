@@ -2,7 +2,7 @@ pgml.grids
 ==========
 
 Reference grid builders: pandapower → pgml :class:`~pgml.schemas.grid_schema.Grid`, with
-optional geometry, converter harmonic spectra, and a state-estimation benchmark recipe.
+optional conductor geometry and converter harmonic spectra.
 Also :func:`~pgml.grids.synthetic_feeder`, a schema-only synthetic feeder of arbitrary size
 for solver scaling and topology-batching studies.
 
@@ -66,8 +66,8 @@ Synthetic feeder (solver scaling benchmarks)
   ``branch_states`` switch-state batching (see the "Topology / switch-state
   batching" section of :doc:`solver`).
 
-State-estimation benchmark
----------------------------
+Distributed generation and harmonic emission
+----------------------------------------------
 
 - :func:`~pgml.grids.add_pv_systems` — attaches a unity-power-factor PV
   :class:`~pgml.schemas.grid_schema.Generator` (tagged ``consumer_type="pv"``) to a
