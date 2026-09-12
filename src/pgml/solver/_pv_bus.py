@@ -236,6 +236,17 @@ class PVTerminals:
         """The single-scenario terminals at batch index ``i`` (grad-preserving)."""
         return replace(self, groups=tuple(_slice_group(g, i) for g in self.groups))
 
+    def select(self, rows: Tensor) -> "PVTerminals":
+        """The terminals of the scenarios ``rows`` of a FLAT batch axis (grad-preserving).
+
+        The range counterpart of :meth:`slice`, mirroring
+        :func:`pgml.assembly.ybus.select_plan_batch`: a setpoint / limit carrying the
+        scenario batch is index-selected, a broadcast one is left alone. Used where the
+        residual is evaluated on a CHUNK of the batch (the implicit-function backward's
+        budgeted state-Jacobian build) or on one scenario (the criticality diagnostic).
+        """
+        return replace(self, groups=tuple(_select_group(g, rows) for g in self.groups))
+
     def flatten_batch(self, batch_shape: Sequence[int]) -> "PVTerminals":
         """Leading scenario dims collapsed to one, matching a flattened residual.
 
@@ -692,6 +703,21 @@ def _slice_group(g: PVGroup, i: int) -> PVGroup:
         q_min=slc(g.q_min),
         q_max=slc(g.q_max),
         state=slc(g.state),
+    )
+
+
+def _select_group(g: PVGroup, rows: Tensor) -> PVGroup:
+    def sel(t: Tensor) -> Tensor:
+        if t.ndim >= 2 and t.shape[0] > 1:
+            return t.index_select(0, rows.to(device=t.device, dtype=torch.int64))
+        return t
+
+    return replace(
+        g,
+        v_set_pu=sel(g.v_set_pu),
+        q_min=sel(g.q_min),
+        q_max=sel(g.q_max),
+        state=sel(g.state),
     )
 
 

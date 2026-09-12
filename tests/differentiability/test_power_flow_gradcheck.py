@@ -167,10 +167,14 @@ def test_gradcheck_source_uref_scale_operating_point():
     assert torch.autograd.gradcheck(fn, (scale,), eps=1e-4, atol=1e-4, rtol=1e-3)
 
 
-def test_backward_jvp_fallback_matches_dense(monkeypatch):
-    """The O(B) column-by-column JVP state Jacobian (used past the memory threshold)
-    yields the SAME gradient as the dense [B,2N,B,2N] path — incl. batched device
-    params, the batch source that off-diagonal-free per-element blocks get wrong."""
+def test_backward_jacobian_builds_agree(monkeypatch):
+    """All three state-Jacobian builds give the SAME gradient.
+
+    The build is chosen by a memory budget: the whole batch in one vectorized call, a
+    CHUNK of the batch per call, or column-by-column with 2N batched JVPs. The test
+    forces each one with the budget and compares, including batched device params — the
+    batch source that an off-diagonal-free per-element build gets wrong.
+    """
     import pgml.solver.power_flow as pf_mod
 
     p = torch.tensor([1500.0, 2500.0, 3500.0], dtype=torch.float64, requires_grad=True)
@@ -183,12 +187,34 @@ def test_backward_jvp_fallback_matches_dense(monkeypatch):
         ).v.abs().sum().backward()
         return p.grad.clone(), q.grad.clone()
 
-    monkeypatch.setattr(pf_mod, "_IFT_DENSE_JAC_MAX_ELEMS", 10**9)  # dense path
-    dp_dense, dq_dense = grad_pq()
-    monkeypatch.setattr(pf_mod, "_IFT_DENSE_JAC_MAX_ELEMS", 1)  # force JVP path
-    dp_jvp, dq_jvp = grad_pq()
-    assert torch.allclose(dp_dense, dp_jvp, rtol=1e-10, atol=1e-12)
-    assert torch.allclose(dq_dense, dq_jvp, rtol=1e-10, atol=1e-12)
+    def with_budget(nbytes):
+        monkeypatch.setattr(
+            pf_mod, "_ift_jacobian_budget_bytes", lambda *a, **k: nbytes
+        )
+        return grad_pq()
+
+    # N = 2 -> one scenario's vectorized build costs 2*2^3*16 = 256 bytes.
+    dp_whole, dq_whole = with_budget(10**9)  # whole batch vectorized
+    dp_chunk, dq_chunk = with_budget(1024)  # chunks of 2 of the 3 scenarios
+    dp_cols, dq_cols = with_budget(0)  # column-by-column JVPs
+    for dp, dq in ((dp_chunk, dq_chunk), (dp_cols, dq_cols)):
+        assert torch.allclose(dp_whole, dp, rtol=1e-10, atol=1e-12)
+        assert torch.allclose(dq_whole, dq, rtol=1e-10, atol=1e-12)
+
+
+def test_jacobian_chunk_follows_the_memory_budget():
+    """The chunk size is the largest whose ``chunk^2 * 2N^3 * itemsize`` peak fits."""
+    import pgml.solver.power_flow as pf_mod
+
+    n, cdt = 33, torch.complex128
+    coeff = 2 * n**3 * 16  # the c^2 coefficient of the peak
+    assert pf_mod._vectorized_jacobian_peak_bytes(4, n, cdt) == 16 * coeff
+    assert pf_mod._vectorized_jacobian_peak_bytes(1, n, cdt) == 0  # no broadcast at all
+    assert pf_mod._jacobian_chunk(64, n, cdt, 10 * coeff) == 3  # floor(sqrt(10))
+    assert pf_mod._jacobian_chunk(2, n, cdt, 10 * coeff) == 2  # capped by the batch
+    # A budget below one PAIR still allows the per-scenario build (nothing to broadcast).
+    assert pf_mod._jacobian_chunk(64, n, cdt, coeff // 2) == 1
+    assert pf_mod._jacobian_chunk(64, n, cdt, 0) == 0  # column-by-column
 
 
 def test_finite_difference_spot_check_load_p():

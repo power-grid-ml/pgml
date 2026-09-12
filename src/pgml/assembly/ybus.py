@@ -2530,6 +2530,69 @@ def flatten_plan_batch(
     )
 
 
+def select_plan_batch(
+    plan: InjectionPlan, rows: Tensor, *, batch_size: int
+) -> InjectionPlan:
+    """A copy of ``plan`` holding only the scenarios ``rows`` of a FLAT batch axis.
+
+    The counterpart of :func:`flatten_plan_batch` for the other direction: where that
+    collapses a multi-dimensional operating-point batch onto one axis, this picks a
+    subset out of that one axis. A group whose power carries the full flat batch
+    (``batch_size`` entries) is indexed; a group carrying a broadcast (size-1) or scalar
+    batch is left alone, since it already applies to every scenario. ``rows`` is an
+    int64 index tensor (a contiguous chunk, or a single scenario).
+
+    Two consumers need it: the implicit-function backward, which builds the
+    block-diagonal state Jacobian in batch chunks whose size a memory budget decides,
+    and the criticality diagnostic, which analyses the single hardest scenario of a
+    batched solve. Index-select keeps autograd history, so a differentiable plan stays
+    differentiable.
+    """
+    bs = int(batch_size)
+    rows = rows.to(dtype=torch.int64)
+
+    def _sel(power: Tensor, tail_ndim: int) -> Tensor:
+        lead = tuple(power.shape[:-tail_ndim])
+        if len(lead) == 1 and int(lead[0]) == bs and bs > 1:
+            return power.index_select(0, rows.to(power.device))
+        return power
+
+    uncontrolled = tuple(
+        _UncontrolledGroupPlan(
+            m_c=g.m_c,
+            rows=g.rows,
+            flat_rows=g.flat_rows,
+            n_used=g.n_used,
+            p_pp=_sel(g.p_pp, 3),
+            q_pp=_sel(g.q_pp, 3),
+            v0=g.v0,
+            zip_p=g.zip_p,
+            zip_q=g.zip_q,
+        )
+        for g in plan.uncontrolled
+    )
+    controlled = tuple(
+        _ControlledAppliancePlan(
+            control=c.control,
+            sign=c.sign,
+            v0=c.v0,
+            p_avail=_sel(c.p_avail, 1),
+            m_c=c.m_c,
+            arow=c.arow,
+            n_used=c.n_used,
+        )
+        for c in plan.controlled
+    )
+    return InjectionPlan(
+        h=plan.h,
+        n=plan.n,
+        cdt=plan.cdt,
+        device=plan.device,
+        uncontrolled=uncontrolled,
+        controlled=controlled,
+    )
+
+
 def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
     """Evaluate ``I_device(V)`` from a precomputed :class:`InjectionPlan`.
 

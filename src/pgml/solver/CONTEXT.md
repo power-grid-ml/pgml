@@ -5,7 +5,8 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
 
 ## Public API (IMPLEMENTED — final signature)
 Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
-- `solve_harmonic(y_bus, i_inj, *, fixed_rows=None, v_fixed=None, precision="full") -> v`
+- `solve_harmonic(y_bus, i_inj, *, fixed_rows=None, v_fixed=None, precision="full",
+  equilibrate=None) -> v`
   - `y_bus`: complex `[*batch, H, N, N]`  (or `[N, N]` unbatched)
   - `i_inj`: complex `[*batch, H, N]`     (or `[N]` unbatched)
   - returns `v`: complex `[*batch, H, N]` (or `[N]` when BOTH inputs were unbatched
@@ -19,6 +20,9 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   - `precision`: `"full"` (default, solve at `y_bus`'s dtype) or `"mixed"` (factor a
     complex64 copy, refine against complex128 residuals — needs a complex128 `y_bus`;
     routed through `lu_factor_system`/`solve_factored`, see MIXED PRECISION below).
+  - `equilibrate`: `None` (the documented default `solver.equilibration.mode`) /
+    `"symmetric"` / `"row_column"` / `"off"` / a bool — the diagonal equilibration applied
+    around the factorization (see EQUILIBRATION below). Invisible in the result.
 - `solve_anchored(y_bus, i_inj, *, row_weight=None, row_target=None, op=None,
   op_weight=None, op_target=None, fixed_rows=None, v_fixed=None) -> v` — MEASUREMENT-ANCHORED
   (over-determined) network solve: `min_V ‖Y·V−I‖² + Σ w_r|V_r−t_r|² + Σ w_k|(op·V)_k−t_k|²`
@@ -93,7 +97,7 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
      tol=None, tol_update_pu=None, s_base_va=None, max_iter=100,
      dtype=torch.complex128, precision="full", device=None,
      operating_point=None, param_overrides=None, symmetry=None,
-     criticality="auto") -> PowerFlowResult`
+     criticality="auto", equilibrate=None) -> PowerFlowResult`
   - `symmetry`: `None`/`"auto"`/`"symmetric"`/`"asymmetric"` (`None`
     -> config `calculation.symmetry`). Resolved ONCE here (`resolve_asymmetric`),
     logged ONCE (`log_modeling_summary`), and threaded as the resolved string into
@@ -163,11 +167,16 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     voltage-collapse MARGIN: σ_min shrinks toward the nose). Rigorous AT a solution; at a
     DIVERGED iterate it is only a local linearization (flagged `evaluated_at`, never
     claims `near_singular`) — a definitive loadability limit needs the (future)
-    homotopy/continuation. Dense; skipped above `2N=4000`. SINGLE-GRID only: SKIPPED for a
-    batched solve (`b>1`, logged) — re-run one scenario, or use `loadability_limit`. A
-    batch of ONE is still one grid: the singleton axis a batched residual closure leaves
-    on the Jacobian is folded away, and any other non-square Jacobian shape is reported
-    as a `{"skipped": ...}` dict (a diagnostic never raises).
+    homotopy/continuation. Dense; skipped above `2N=4000`. On a scenario BATCH it analyses
+    the HARDEST scenario (largest nodal mismatch) and names it as `criticality["batch"]`:
+    that scenario's own admittance, slack current, injection powers and setpoints are
+    index-selected, which is what makes the Jacobian single-grid at all (the residual
+    otherwise keeps the whole batch's powers). Its figures equal the ones that scenario
+    produces solved alone (pinned by a test). The build goes through the same budgeted path
+    as the gradient, so the diagnostic of a failed solve is not its most memory-hungry part.
+    A residual that still carries a batch, or any non-square Jacobian shape, is reported as
+    a `{"skipped": ...}` dict (a diagnostic never raises and never analyses a matrix that is
+    not the one it claims).
   - `method="current_injection"` (default) forward = FIXED POINT: with
     `Y_net = assemble_network_ybus` (+ source Norton if `slack="norton"`), iterate
     `V_{k+1} = solve_harmonic(Y_eff, I_slack − device_current_injections(grid,V_k),
@@ -182,6 +191,9 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     IFT gradients (gradcheck-verified). `linear_solver="dense"` (per-element `[2N,2N]`
     Jacobian + direct solve; no `[B,2N,B,2N]` blowup) or `"matrix_free"` (Jacobian-free
     Newton-Krylov: GMRES on finite-difference `J·v`, `O(N)` memory for large grids).
+    The dense Newton direction factors the Jacobian EQUILIBRATED (the real state Jacobian
+    of an SI-unit system mixes admittance rows with voltage rows, which matters most for
+    the single-precision direction of `precision="mixed"`).
     A BATCHED `operating_point` is solved SEQUENTIALLY per scenario (Newton's const-Z
     warm start + per-element Jacobian are single-grid, and the residual closes over the
     batched op) and the per-scenario `V*` are stacked; the SHARED IFT backward (full op,
@@ -235,7 +247,8 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     - HARMONICS: regulation is a fundamental-frequency concept; at orders h>1 the
       machine stays the Norton current source it is today (see `solve_harmonic_flow`).
   - `loadability_limit(grid, *, slack, lambda_max, lambda_step, bisect_tol, tol,
-    tol_update_pu, s_base_va, max_iter, top_k, ramp="all") -> LoadabilityResult`:
+    tol_update_pu, s_base_va, max_iter, top_k, ramp=None, equilibrate=None)
+    -> LoadabilityResult`:
     λ-RAMP loadability. Scales the injections by `λ`
     (`R(V,λ)=Y_eff·V+λ·I_dev(V)−I_slack`) from a feasible base, Newton-correcting at each
     step and bisecting onto the first λ the corrector cannot solve. `breaking_lambda` is
@@ -243,10 +256,11 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     P-V nose (a plain corrector fails before the singularity; measured ~4 % below the
     closed-form nose of a two-bus feeder) — a step-and-bisect on feasibility, NOT an
     arc-length predictor-corrector, and the Jacobian figures describe the last converged
-    point. `ramp="all"` (default) scales every injecting device (loads AND
-    generators/storage together); `ramp="load"` scales loads only and holds generation at
-    nameplate — the textbook continuation ramp (on a two-bus feeder with a load at
-    `0.8 P*` and generation at `0.3 P*` the two give 2.0 vs 1.625, both closed-form).
+    point. `ramp="load"` (the default, `solver.loadability.ramp`) scales loads only and
+    holds generation at nameplate — the textbook continuation ramp; `ramp="all"` scales
+    every injecting device, loads AND generators/storage together (on a two-bus feeder with
+    a load at `0.8 P*` and generation at `0.3 P*` the two give 1.625 vs 2.0, both
+    closed-form). `LoadabilityResult.ramp` records which was measured.
     `LoadabilityResult.ramp` records the choice. At the breaking λ the Jacobian's RIGHT
     singular vector = the voltage-collapse mode (`critical_nodes`, where it breaks) and
     the LEFT singular vector projected on each device's current = `limiting_loads` (which
@@ -295,7 +309,9 @@ verified empirically). New orchestration:
      load_shunt=None, tol=None, tol_update_pu=None, s_base_va=None,
      max_iter=100, dtype=torch.complex128, precision="full",
      device=None, symmetry=None, on_disconnected="raise", branch_states=None,
-     param_overrides=None, enforce_q_limits=None) -> HarmonicFlowResult`
+     branch_states_method="assemble", param_overrides=None, enforce_q_limits=None,
+     linear_solver="auto", block_rows=None, criticality="auto", equilibrate=None)
+     -> HarmonicFlowResult`
   - `tol` / `tol_update_pu` / `s_base_va` are the PER-UNIT convergence settings of the
     nonlinear fundamental (see `solve_power_flow`); the harmonic orders are direct linear
     solves with no iteration and therefore no convergence criterion of their own.
@@ -304,6 +320,15 @@ verified empirically). New orchestration:
     current source as any other.
   - `precision` applies to the fundamental AND to every per-order solve (where
     `"mixed"` is the classic iterative refinement of `lu_factor_system`).
+  - `linear_solver` / `block_rows` / `equilibrate` likewise select the backend and the
+    equilibration of the fundamental factorization AND of every order's own
+    (`"matrix_free"` is a Newton option of the fundamental solve and leaves the orders on
+    the automatic backend). `criticality` and `branch_states_method` are forwarded to the
+    fundamental solve; the harmonic orders always assemble their own per-state `Y(h)`,
+    because a Woodbury update is built from one frequency's stamps.
+  - `on_disconnected` is executed ONCE here for the whole study (the inner fundamental
+    solve is told to skip the repeat through an explicit resolved policy, not a hidden
+    `"ignore"`); with `branch_states` the per-scenario check runs inside that solve.
   - `param_overrides` is the SAME parameter-substitution hook `solve_power_flow` and the
     assemblers take, reaching the fundamental solve, every order's `Y(h)`, the source
     stamp and the device powers behind each harmonic injection, so a gradient w.r.t. a
@@ -603,15 +628,18 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   1.7-4.4x still at k=96. Crossover ≈ `k ≈ N/3` (600 rows: 1.1x at k=192, 0.2x at
   k=384). Voltages agree with the assemble path to ~1e-12 relative.
 - `prepare_power_flow(grid, *, slack, dtype, precision, device, param_overrides,
-  branch_states, branch_states_method, linear_solver, block_rows) -> PowerFlowSystem` +
+  branch_states, branch_states_method, linear_solver, block_rows, equilibrate)
+  -> PowerFlowSystem` +
   `solve_power_flow(..., system=...)` — assembly + slack rows + factorization +
   grid-leaf walk once, reused across repeated solves (the `run_scenarios` chunk
   loop shares one system). Forward-only reuse: the IFT backward always rebuilds
   differentiably, so gradients are unchanged. With
   `branch_states_method="woodbury"` the cached `y_eff` is a matrix-free
   `LowRankOperator` and `factorization` a `LowRankUpdate`. The system records its
-  `precision`; a consuming solve must request the same one (a mixed-precision system
-  caches single-precision factors, which only the residual-correction iteration reads).
+  `precision` and its `equilibration`; a consuming solve must request the same ones (a
+  mixed-precision system caches single-precision factors, which only the
+  residual-correction iteration reads; an equilibrated system caches the SCALED matrix plus
+  the scales that undo it).
 
 - `harmonic.back_substitute(fac, rhs)` / `ideal_slack_rhs(fac, i_inj, v_fixed)` /
   `scatter_slack_solution(fac, v_free, v_fixed)` — the three building blocks a
@@ -667,10 +695,74 @@ any "solve a MUTATED grid from the parent's factorization" consumer.
 
 
 # =====================================================================
+# EQUILIBRATION — `pgml.solver.equilibration` (module-level public surface)
+# =====================================================================
+Every factorization in this package is taken of the EQUILIBRATED matrix
+`Â = D_r A D_c`; the right-hand side is scaled by `D_r` and the solution by `D_c`, so
+nothing outside the factorization sees it. Default ON
+(`solver.equilibration.mode = "symmetric"`), disabled per call with `equilibrate="off"`.
+
+- `EQUILIBRATION_MODES = ("off", "symmetric", "row_column")`
+- `resolve_equilibration(equilibrate) -> str` — `None` -> the documented default, `True` /
+  `False` -> that default / `"off"`, a name validated against the modes.
+- `equilibration_scales(a, *, mode, power_of_two=None) -> (d_row, d_col)` — `[*batch, m]`
+  real scales in the real dtype paired with `a`'s (so a complex64 matrix stays complex64);
+  `(None, None)` for `"off"`. `"symmetric"` returns one tensor twice.
+- `equilibrate_matrix(a, *, mode, power_of_two=None) -> (a_hat, d_row, d_col)`,
+  `scale_matrix(a, d_row, d_col) -> a_hat`.
+- `equilibrated_lu_factor(a, *, mode, power_of_two=None, factor_dtype=None)
+  -> EquilibratedLU` with `.solve(rhs, *, adjoint=False) -> x` — factor once, solve many
+  for a REAL dense system that is not a network admittance: the Newton state Jacobian and
+  the implicit-function adjoint. The adjoint form swaps the two scales
+  (`x = D_r Â^-H D_c b`).
+
+Modes: `"symmetric"` is van der Sluis `d_i = |A_ii|^-1/2` applied as the congruence
+`D A D` (keeps symmetry and sparsity, reads only the diagonal, within `sqrt(n)` of the best
+condition number any diagonal scaling reaches); `"row_column"` is the two-sided LAPACK
+`xGEEQU` variant (row max-norms, then column max-norms), which needs one pass over the
+whole matrix and is REFUSED by `backend="block"`, whose free-row matrix is never
+materialised.
+
+Scale factors are rounded to POWERS OF TWO (`solver.equilibration.power_of_two`), so the
+scaled matrix is exact in binary floating point: the equilibration adds no rounding error
+of its own, and `round`'s zero derivative keeps the scale off the gradient while the
+scaling multiplications stay on the tape — gradients w.r.t. the matrix and the right-hand
+side are unchanged (measured identical to the last printed digit; float64 gradcheck passes
+on the dense and sparse backends in both modes).
+
+`FactoredSystem` carries `equilibration`, `scale_row`, `scale_col`, and its `y_mat` is the
+matrix AS FACTORED (scaled) — which is what the mixed-precision residual and
+`estimate_condition` must use. The Woodbury path needs no change: it reads `A^-1 U`
+through `back_substitute`, which answers the SI system.
+
+MEASURED (CPU, i7-12700, complex128, 1-norm estimate / exact 2-norm, 2026-09-11):
+
+| system | rows | off | symmetric | row_column |
+|---|---|---|---|---|
+| IEEE-33 fundamental `Y_ff` | 32 | 2.8e3 / 1.7e3 | 1.4e3 / 7.7e2 | 2.3e3 / 7.4e2 |
+| IEEE-33 `Y(13)` | 33 | 8.0e8 / 5.7e8 | 1.5e3 / 7.7e2 | 3.5e3 / 9.5e2 |
+| CIGRE LV 3-phase fundamental | 129 | 5.5e4 / 4.6e4 | 2.1e3 / 1.0e3 | 3.7e3 / 9.5e2 |
+| `mv_oberrhein` `Y(13)` | 179 | 7.2e9 / 6.2e9 | 1.7e5 / 7.2e4 | 2.4e5 / 6.2e4 |
+| Kerber `Y(13)` | 294 | 5.0e7 / 4.2e7 | 3.4e4 / 1.8e4 | 7.9e4 / 1.6e4 |
+| ladder rung fundamental | 2016 | 1.4e5 / 3.1e4 | 1.3e4 / 3.9e3 | 4.3e4 / 3.7e3 |
+| ladder rung `Y(13)` | 10044 | 7.5e6 / — | 4.0e5 / — | 3.8e6 / — |
+
+The exception is a LOW-VOLTAGE-only harmonic system (CIGRE LV at order 13: 1.9e7 ->
+2.4e7), where the conditioning is not a scaling artefact and the symmetric scaling is
+neutral to slightly worse. `row_column` is consistently worse than `symmetric` in the
+1-norm and costs a full matrix pass, which is why `symmetric` is the default.
+
+What it buys is ROBUSTNESS, not forward accuracy: LU with partial pivoting is
+backward-stable, so `cond·eps` is a pessimistic forward bound and the complex64 error is
+unchanged to within a factor 2 on small grids. On a 2016-row system it is the difference
+between converging and not — plain complex64 runs to the 100-iteration cap unscaled and
+converges in 9 iterations equilibrated (max |dV| 4.1e-5 -> 1.8e-5 pu).
+
+# =====================================================================
 # MIXED PRECISION (complex64 factors, complex128 accuracy)
 # =====================================================================
 `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
-precision="full", refine_steps=None) -> FactoredSystem`
+precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`
 
 - `precision="mixed"` factors a complex64 copy of the system and keeps the
   full-precision matrix (`FactoredSystem.y_mat`, or the per-bucket blocks of the block
@@ -696,7 +788,11 @@ precision="full", refine_steps=None) -> FactoredSystem`
 - `estimate_condition(fac, *, iters=5) -> float`: 1-norm condition estimate from the
   cached factorization (Hager's power method; a lower bound, `nan` for the block backend
   which holds no single matrix). Used for the one-time complex64 warning; measured
-  against `torch.linalg.cond` within a factor of 1.7 on real feeders.
+  against `torch.linalg.cond` within a factor of 1.7 on real feeders. It describes the
+  matrix AS FACTORED, i.e. the EQUILIBRATED one unless `equilibrate="off"` — that is the
+  conditioning the factorization actually sees, and it is what the precision decision
+  needs; factor with `equilibrate="off"` for the condition number of the matrix as
+  assembled.
 - MEASURED (CPU, i7-12700, 2026-09-11): factoring at complex64 is 1.9x faster dense and
   back-substitution 2.9-6x faster, so end-to-end `mixed` is 1.5-1.9x faster than
   complex128 on the DENSE path (132-3600 rows) at complex128 accuracy. On the CPU
@@ -765,16 +861,39 @@ the stamps will use. Values are read under `no_grad` (structural, never on the t
 `conductor_geometry` line is skipped (the geometry path always yields a finite impedance).
 
 # =====================================================================
-# IFT backward cost (open work, design note)
+# IFT backward: the Jacobian build, the adjoint solve, and what is still open
 # =====================================================================
-The backward builds the real state Jacobian `J = dR/dx` `[B, 2N, 2N]` by autograd
-(`_batched_state_jacobian`) and solves `J^T λ = grad_x` densely. Measured cost: ~8 forward
-solves at batch 12 on IEEE-33, and 200-730 s on a 1176-row grid at batch 16-64 on the CPU
-sparse path against an 85 ms forward. The forward already holds a factorization of the
-COMPLEX `Y_eff`, and `J` is the real embedding of `Y_eff + dI_device/dV` — the device term
-is BLOCK-DIAGONAL per node-phase row (each device current depends only on its own terminal
-voltage). So the adjoint can reuse the forward's factorization plus a low-rank / diagonal
-correction instead of a dense autograd Jacobian:
+The backward is a VECTOR-Jacobian product, so it needs one adjoint solution and never the
+Jacobian of the solve. It builds the real block-diagonal state Jacobian `J = dR/dx`
+`[B, 2N, 2N]` (`_batched_state_jacobian`), factors it ONCE equilibrated, solves
+`J^T λ = grad_x`, and forms `grad_θ = -(dR/dθ)^T λ` with one residual vjp.
+
+- BUILD, chosen by `solver.ift.jacobian_budget_mb` (default 1 GiB) against the measured
+  peak `chunk² · 2N³ · itemsize` (`_vectorized_jacobian_peak_bytes`): the whole batch in
+  one vectorized call, a CHUNK of the batch per call, or column-by-column with `2N` batched
+  JVPs. The quadratic term is the allocator's own request to the byte (a 294-row grid at
+  chunk 4 asks for 13 011 038 208 = 16·2·294³·16; a 1176-row grid at chunk 4 for
+  832 706 445 312), because what vmap replicates per output row is the BROADCAST admittance
+  a batch shares. A chunk of ONE has no broadcast and is always affordable, so the budget
+  never forces the slow column build on the gradient path; a zero budget selects it
+  explicitly. Chunking needs the residual of a batch SLICE, which is why
+  `assembly.ybus.select_plan_batch` and `PVTerminals.select` exist.
+- ADJOINT, cached: the factorization is kept on the autograd node while it stays under
+  `solver.ift.adjoint_factor_cache_mb` (default 256 MiB), so every FURTHER product of the
+  same solve — a full output Jacobian row by row, or any second backward under
+  `retain_graph` — is one back-substitution instead of another build.
+- MEASURED (CPU, i7-12700, complex128, one process per point, 2026-09-11), backward time
+  and the process' resident high-water mark, before -> after the budget:
+  IEEE-33 at batch 64, 1775 ms / 4856 MiB -> 773 ms / 1018 MiB; Kerber (294 rows) at batch
+  4 and 16, out of memory (13.0 GB and 208 GB requests) -> 146 ms and 453 ms; a 1176-row
+  Kerber ensemble at batch 4, out of memory (832.7 GB) -> 2.26 s. The repeated product is
+  6 to 120x cheaper than the first one wherever the factors fit the cache (at 1176 rows and
+  batch 16 they do not — 708 MiB — and it is rebuilt, by design).
+
+Still open: the adjoint of `Y_eff + dI_device/dV` could reuse the FORWARD's factorization
+of the complex `Y_eff` instead of building `J` by autograd at all (the device term is
+BLOCK-DIAGONAL per node-phase row, since each device current depends only on its own
+terminal voltage):
 
 1. Form the per-row device derivative analytically (it is the ZIP/control law's
    derivative, already differentiable) as a sparse diagonal-block operator `D`.

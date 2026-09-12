@@ -90,6 +90,30 @@ requires an env var to be set.
   that treatment exactly; `near_ideal` keeps the switch stamped and logs the deviation.
   Read by `pgml.convert.pandapower.converter._closed_switch_resistance_ohm`.
 
+- `solver.convergence.{mismatch_pu, update_pu, s_base_va}` — the two PER-UNIT convergence
+  criteria of the nonlinear power flow and the power base of the first one. Read by
+  `pgml.solver.power_flow._resolve_tolerances` (`solve_power_flow`, `solve_harmonic_flow`,
+  `loadability_limit`, `SimulationConfig`).
+- `solver.precision.{complex64_cond_warn, refine_steps}` — the condition estimate above
+  which a plain complex64 solve warns once, and the iterative-refinement step count of a
+  mixed-precision solve. Read by `pgml.solver.power_flow._warn_complex64_conditioning` and
+  `pgml.solver.harmonic.lu_factor_system`.
+- `solver.equilibration.{mode, power_of_two}` — the diagonal equilibration applied around
+  every factorization (`off | symmetric | row_column`, default `symmetric`) and whether its
+  scale factors are rounded to powers of two (default true, which makes the scaled matrix
+  exact in binary floating point). Read by
+  `pgml.solver.equilibration.{resolve_equilibration, equilibration_scales}`; every solve
+  entry point takes an `equilibrate=` override.
+- `solver.ift.{jacobian_budget_mb, adjoint_factor_cache_mb}` — the memory budget of the
+  state-Jacobian build of the gradient path and the dense Newton direction, and the largest
+  adjoint factorization kept for repeated vector-Jacobian products. Read by
+  `pgml.solver.power_flow._ift_jacobian_budget_bytes` / `_ift_adjoint_cache_bytes`.
+- `solver.loadability.ramp` — what the loadability analysis' λ multiplies (`load`, the
+  textbook continuation ramp, or `all`). Read by `pgml.solver.loadability_limit`.
+- `branch.near_ideal_series_resistance_ohm` — the stand-in an ideal (zero-impedance) branch
+  needs, named by the pre-solve modeling gate `check_branch_impedances` and substituted by
+  the pandapower converter for a bus-bus switch.
+
 ## Resolution precedence (highest first; `resolve(key, explicit, converted)`)
 1. **explicit** — a value the user set on the component / grid (ALWAYS wins).
 2. **defaults** — the value in `defaults.yaml`.

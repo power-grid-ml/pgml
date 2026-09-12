@@ -17,8 +17,9 @@ collapse:
 - the LEFT singular vector, projected on each load's current, is the margin sensitivity ->
   the **limiting load(s)** (which apparent-power injection most reduces the margin).
 
-By default ``λ`` scales loads AND generation together (``ramp="all"``); pass
-``ramp="load"`` for the textbook load-only continuation ramp.
+By default ``λ`` scales the LOADS and holds generation at nameplate (``ramp="load"``, the
+textbook continuation ramp); pass ``ramp="all"`` to ramp the whole operating point,
+generation included.
 
 On the FULL CIGRE LV benchmark this script:
 
@@ -93,11 +94,11 @@ def main(out_dir: str = str(_OUT / "loadability")) -> None:
 
     grid, _ = cigre_lv_full_grid(phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
 
-    # 1. The λ-ramp diagnostic: margin + critical bus + limiting load. ``ramp="all"``
-    # (the default) scales loads and generation together; this benchmark has no
-    # generation, so the load-only ramp would give the same limit.
+    # 1. The λ-ramp diagnostic: margin + critical bus + limiting load. ``ramp="load"``
+    # (the default) scales the loads only; this benchmark has no generation, so the joint
+    # ramp ``ramp="all"`` would give the same limit here.
     res = loadability_limit(
-        grid, slack="ideal", lambda_max=8.0, lambda_step=0.5, dtype=CDT, ramp="all"
+        grid, slack="ideal", lambda_max=8.0, lambda_step=0.5, dtype=CDT
     )
     crit = res.critical_nodes[0]
     lim = res.limiting_loads[0]

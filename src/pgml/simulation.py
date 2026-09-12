@@ -501,6 +501,7 @@ def simulate(
     on_disconnected: str = "raise",
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
+    equilibrate: Optional[str] = None,
 ) -> SolvedState:
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
@@ -544,8 +545,14 @@ def simulate(
     :func:`pgml.solver.solve_power_flow`) — execution concerns like device and dtype,
     not part of the serializable config. ``linear_solver="block"`` with the row
     partition of an independent-grid ensemble
-    (``pgml.multigrid.MergedGrid.block_rows()``) factors each member on its own; both
-    apply to ``calculation="power_flow"`` only.
+    (``pgml.multigrid.MergedGrid.block_rows()``) factors each member on its own. Both
+    apply to the harmonic calculation as well, where they select the backend of the
+    fundamental solve AND of every per-order solve.
+
+    ``equilibrate`` is the diagonal equilibration of every factored system (``None`` =
+    the documented default ``solver.equilibration.mode``, ``"off"`` to factor each
+    matrix as assembled). It changes the conditioning of the factorizations, not the
+    result: see :func:`pgml.solver.solve_power_flow`.
 
     Raises :class:`~pgml.errors.ConvergenceError` if the nonlinear power flow does not
     converge (``strict=True``, the default); pass ``strict=False`` to return the
@@ -573,6 +580,7 @@ def simulate(
             linear_solver=linear_solver,
             block_rows=block_rows,
             on_disconnected=on_disconnected,
+            equilibrate=equilibrate,
         )
         v = pf.v.unsqueeze(-2)  # [*batch, 1, N]
         freqs = torch.tensor(
@@ -587,13 +595,6 @@ def simulate(
         fusion = pf.fusion
         pf_diag = pf.diagnostics
     else:
-        if linear_solver != "auto" or block_rows is not None:
-            raise InputError(
-                "linear_solver / block_rows apply to calculation='power_flow' only: "
-                "the harmonic calculation factors each per-order system itself. Use "
-                "calculation='power_flow', or pgml.solver.solve_harmonic_flow for "
-                "the harmonic path."
-            )
         hf = solve_harmonic_flow(
             grid,
             config.harmonic_orders,
@@ -613,6 +614,9 @@ def simulate(
             symmetry=config.symmetry,
             on_disconnected=on_disconnected,
             param_overrides=param_overrides,
+            linear_solver=linear_solver,
+            block_rows=block_rows,
+            equilibrate=equilibrate,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
         fusion = hf.fusion

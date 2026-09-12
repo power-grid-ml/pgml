@@ -443,6 +443,14 @@ load P/Q passes; full suite green.
   on the tape stays differentiable. `v` with `H == 1`: only a bare `[1, N]` is
   read as carrying the H axis; any deeper `v` is `[*batch, N]`, so a trailing
   scenario dim of one (a `[B, 1]` operating point) is never mistaken for H.
+  Two plan-reshaping helpers live next to them for consumers that evaluate the residual
+  over a DIFFERENT scenario axis than the plan was built with (both in
+  `assembly/ybus.py`, both autograd-safe, both no-ops for a scalar / broadcast plan):
+  `flatten_plan_batch(plan, batch_shape)` collapses a multi-dimensional operating-point
+  batch onto one axis, and `select_plan_batch(plan, rows, *, batch_size)` picks a subset of
+  that one axis. The solver's gradient path uses the first to build a block-diagonal state
+  Jacobian over a flattened batch and the second to build it in memory-budgeted CHUNKS;
+  its criticality diagnostic uses the second to analyse one scenario of a batch.
 
 # =====================================================================
 # rev 3 additions (exact bus fusion of zero-impedance branches)

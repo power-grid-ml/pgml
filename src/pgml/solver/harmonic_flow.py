@@ -89,10 +89,12 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
 )
 
+from .equilibration import resolve_equilibration
 from .harmonic import lu_factor_system, solve_factored, solve_harmonic
 from .power_flow import (
     PowerFlowResult,
     _expand_zeroed_result,
+    _reduce_block_rows,
     check_branch_impedances,
     check_connectivity,
     solve_power_flow,
@@ -234,8 +236,13 @@ def solve_harmonic_flow(
     symmetry: Optional[str] = None,
     on_disconnected: str = "raise",
     branch_states: Optional[dict] = None,
+    branch_states_method: str = "assemble",
     param_overrides: Optional[dict] = None,
     enforce_q_limits: Optional[bool] = None,
+    linear_solver: str = "auto",
+    block_rows: Optional[Sequence[Tensor]] = None,
+    criticality: str = "auto",
+    equilibrate: Optional[str] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -313,12 +320,35 @@ def solve_harmonic_flow(
         ``"asymmetric"`` (``None`` -> config). Resolved ONCE here and threaded into
         the fundamental :func:`solve_power_flow` (single log) and the harmonic
         injection power resolution.
+    linear_solver, block_rows:
+        The inner factorization backend, as in :func:`solve_power_flow`, applied to the
+        nonlinear FUNDAMENTAL solve AND to every per-order harmonic solve (each order is
+        one direct solve of ``Y(h) V(h) = I(h)``, which has the same sparsity and the same
+        row partition as the fundamental system). ``"auto"`` (default) takes the sparse
+        SuperLU factorization on large CPU systems and the batched dense torch LU
+        otherwise; ``"dense"`` / ``"sparse"`` force the choice, and ``"block"`` with
+        ``block_rows`` factors a block-diagonal ensemble member by member.
+        ``"matrix_free"`` is a Newton-only option of the fundamental solve and leaves the
+        harmonic orders on the automatic choice.
+    criticality:
+        When the fundamental solve runs its Jacobian criticality analysis, as in
+        :func:`solve_power_flow` (``"auto"`` / ``"always"`` / ``"never"``).
+    equilibrate:
+        Diagonal equilibration of every factored system, as in
+        :func:`solve_power_flow`: the fundamental admittance, the Newton Jacobian, the
+        gradient path's adjoint, and each harmonic order's ``Y(h)``. ``None`` (default)
+        resolves ``solver.equilibration.mode``. The harmonic orders are where it matters
+        most: ``Y(h)``'s condition number grows with the order (measured on IEEE-33 at
+        order 13: 8.0e8 as assembled, 1.5e3 equilibrated), because the series reactances
+        scale with ``h`` while the diagonal collects shunt terms that do not.
     on_disconnected:
         Pre-solve connectivity handling, as in :func:`solve_power_flow`:
         ``"raise"`` (default) raises :class:`~pgml.errors.ConnectivityError` when a
         (node, phase) row has no path to an in-service source; ``"zero"`` solves the
         energized sub-grid and reports 0 V on the disconnected rows at every order
-        (full-grid row layout preserved); ``"ignore"`` skips the check.
+        (full-grid row layout preserved); ``"ignore"`` skips the check. The check runs
+        HERE, once, for the whole harmonic study (the inner fundamental solve is then
+        told not to repeat it); no policy silently disables it.
     branch_states:
         Optional topology / switch-state batching ``{branch_id: state}``, as in
         :func:`solve_power_flow`: the state (float / 0-d / ``[*batch]`` tensor,
@@ -326,6 +356,11 @@ def solve_harmonic_flow(
         fundamental AND every harmonic order, so one batched call solves every
         switch configuration end to end. ``on_disconnected="zero"`` is unsupported
         with states (the fundamental solve enforces this).
+    branch_states_method:
+        How the FUNDAMENTAL solve reaches each switch state (``"assemble"`` /
+        ``"woodbury"``, as in :func:`solve_power_flow`). The harmonic orders always
+        assemble their own per-state ``Y(h)``: a Woodbury update is built from one
+        frequency's stamps, so it does not carry to another order.
 
     Returns
     -------
@@ -343,11 +378,26 @@ def solve_harmonic_flow(
             f"Unsupported on_disconnected {on_disconnected!r} "
             "(use 'raise'/'zero'/'ignore')."
         )
+    eq_mode = resolve_equilibration(equilibrate)
+    # The harmonic orders are direct solves of a system with the same sparsity and row
+    # partition as the fundamental one, so they take the same backend. "matrix_free" is a
+    # Newton option of the fundamental solve only and leaves them on the automatic choice.
+    harmonic_backend = (
+        linear_solver if linear_solver in ("dense", "sparse", "block") else "auto"
+    )
+    # The connectivity policy is executed exactly ONCE, here, for the whole study; the
+    # inner fundamental solve is then told to skip the repeat. ``inner_on_disconnected``
+    # makes that explicit instead of leaving a silent "ignore" in the call below.
+    inner_on_disconnected = "ignore"
     if on_disconnected == "raise":
         if branch_states is None:
             check_connectivity(grid)
-        # With branch_states the (possibly per-scenario) check runs inside the
-        # fundamental solve_power_flow call below.
+        else:
+            # A per-scenario topology has no single connectivity verdict: the check is
+            # vectorized over the state batch inside the fundamental solve, so the policy
+            # is forwarded rather than run here.
+            inner_on_disconnected = "raise"
+
     elif on_disconnected == "zero":
         if branch_states is not None:
             raise InputError(
@@ -385,6 +435,11 @@ def solve_harmonic_flow(
                 symmetry=symmetry,
                 on_disconnected="ignore",
                 param_overrides=param_overrides,
+                enforce_q_limits=enforce_q_limits,
+                branch_states_method=branch_states_method,
+                linear_solver=linear_solver,
+                criticality=criticality,
+                equilibrate=eq_mode,
             )
             return _expand_zeroed_harmonic_result(grid, sub_res, fusion)
 
@@ -412,10 +467,15 @@ def solve_harmonic_flow(
         precision=precision,
         device=device,
         symmetry=sym_resolved,
-        on_disconnected=("ignore" if branch_states is None else on_disconnected),
+        on_disconnected=inner_on_disconnected,
         branch_states=branch_states,
+        branch_states_method=branch_states_method,
         param_overrides=param_overrides,
         enforce_q_limits=enforce_q_limits,
+        linear_solver=linear_solver,
+        block_rows=block_rows,
+        criticality=criticality,
+        equilibrate=eq_mode,
     )
     v1 = pf.v  # [*batch, N] complex
     if device is None:
@@ -452,9 +512,20 @@ def solve_harmonic_flow(
         # batched voltage node_source promotes Y(h) to [*batch, Hh, N, N]; that path keeps
         # the per-element solve.
         if yh.ndim == 3:
-            vh = solve_factored(lu_factor_system(yh, precision=precision), ih)
+            vh = solve_factored(
+                lu_factor_system(
+                    yh,
+                    backend=harmonic_backend,
+                    # Each order is factored on the FUSED rows, so a block-diagonal
+                    # ensemble's partition is mapped onto them as well.
+                    block_rows=_reduce_block_rows(block_rows, fusion),
+                    precision=precision,
+                    equilibrate=eq_mode,
+                ),
+                ih,
+            )
         else:
-            vh = solve_harmonic(yh, ih, precision=precision)
+            vh = solve_harmonic(yh, ih, precision=precision, equilibrate=eq_mode)
         for k, h in enumerate(harm):
             # Each order is solved on the fused rows; report it on the grid's own.
             v_by_order[h] = (
