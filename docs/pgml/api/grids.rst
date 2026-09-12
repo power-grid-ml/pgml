@@ -73,24 +73,14 @@ State-estimation benchmark
   :class:`~pgml.schemas.grid_schema.Generator` (tagged ``consumer_type="pv"``) to a
   fraction of a grid's load nodes, mirroring each host load's node/phases and rated at
   half its nameplate active power.
-- :func:`~pgml.grids.se_benchmark_scenario_config` — one call that builds a scenario
-  configuration for a state-estimation benchmark on the grids above. It draws correlated
-  load levels from a shared latent factor, a small per-phase unbalance, a slack-voltage
-  level, and a per-device harmonic spectrum referenced to IEC 61000-3-2 with per-order
-  phase diversity (orders :data:`~pgml.grids.LOAD_HARMONIC_ORDERS`). When the grid carries
-  PV it adds one shared irradiance scale and a per-inverter harmonic signature (orders
-  :data:`~pgml.grids.PV_HARMONIC_ORDERS`)::
+- :data:`~pgml.grids.LOAD_HARMONIC_ORDERS` and :data:`~pgml.grids.PV_HARMONIC_ORDERS` —
+  the order sets a converter load and a PV inverter emit on, and
+  :data:`~pgml.grids.CONVERTER_SPECTRUM` the six-pulse spectrum the builders attach.
 
-      from pgml.grids import (
-          add_pv_systems, se_benchmark_scenario_config, cigre_lv_full_grid,
-      )
-
-      grid, _ = cigre_lv_full_grid()
-      add_pv_systems(grid, fraction=0.5)
-      cfg = se_benchmark_scenario_config(grid, n_samples=512, seed=0)
-
-  One builder keeps every dataset drawn for this benchmark comparable, so what a model
-  trains on cannot silently diverge from what the benchmark documents.
+The builders here produce input GRIDS.  How a BATCH over such a grid is drawn — which
+quantities vary, over what ranges — is a study's decision rather than the engine's: build one
+from :class:`~pgml.scenarios.ScenarioConfig`, or hand explicit values to
+:func:`~pgml.scenarios.batch_from_values`.  See :doc:`scenarios`.
 
 .. automodule:: pgml.grids
    :members:

@@ -456,8 +456,8 @@ truth in two places:
   - ``"<name>_perturbed_<field>"`` — shape ``[B]``: the applied value (one entry
     per perturbed field; ``"pq"`` produces both ``_p`` and ``_q`` keys).
 
-For non-perturbation batches (random, cartesian, coherent),
-:attr:`~pgml.scenarios.SampledScenarios.perturbations` is always an empty list.
+For every other kind of batch
+:attr:`~pgml.scenarios.SampledScenarios.perturbations` is an empty list.
 
 Scope note
 ~~~~~~~~~~~
@@ -468,13 +468,62 @@ the inverse / parameter-recovery use case — is deferred to a later phase: it
 requires a branch-aware selector and matrix-valued ground truth that the schema's
 scalar ``nominal_value`` / ``perturbed_value`` fields cannot represent.
 
+Building a batch from values
+-----------------------------
+
+A batch does not have to come from a sampler. :func:`~pgml.scenarios.batch_from_values`
+takes the tensors you already have — a measured load curve, an optimiser's iterate, a
+sequence produced elsewhere — and returns the same
+:class:`~pgml.scenarios.SampledScenarios` the samplers do::
+
+    from pgml.scenarios import batch_from_values, run_scenarios
+
+    batch = batch_from_values(
+        grid,
+        n_samples=2,
+        p_w={load_id: torch.tensor([5.0e3, 2.0e4])},
+    )
+    result = run_scenarios(grid, batch)
+
+A component no mapping names, and a field a mapping leaves out, keep the grid's nominal
+value; there is no fill value to get wrong. Component ids are resolved against the grid, so
+a typo raises instead of being silently ignored. The values pass through untouched, so
+gradients flow from them into the solve and their device and dtype are the solver's.
+
+``n_steps`` declares a STEP axis. With ``n_steps=1`` (the default) the batch is a set of
+independent snapshots and the result is ``[B, N]`` or ``[B, H, N]``; with ``n_steps=T`` the
+per-step values are ``[B, T]`` and the result is ``[B, T, H, N]``. The step count is
+declared rather than inferred, because ``[B, T, N]`` and ``[B, H, N]`` have the same rank.
+
+Plugging in your own generator
+--------------------------------
+
+:func:`~pgml.scenarios.run_scenarios` accepts any :class:`~pgml.scenarios.ScenarioSpec`: an
+object with a ``sample(grid)`` method returning a
+:class:`~pgml.scenarios.SampledScenarios`, and optionally a ``harmonic_orders`` hint that
+declares the spec only makes sense as a harmonic calculation. The serializable configs
+satisfy the protocol themselves, so a generator that lives outside this package plugs into
+the same run and persistence path without the engine knowing its recipe.
+
+Records that are not per scenario
+-----------------------------------
+
+:attr:`~pgml.scenarios.SampledScenarios.samples` holds one row per scenario.
+:attr:`~pgml.scenarios.SampledScenarios.shared_samples` holds the records that have no
+leading scenario axis — a step-time vector, a device-id column, a per-device constant. The
+split is declared because a record whose length happens to equal the batch size cannot be
+told apart by shape, and a misfiled record reads back with the wrong shape.
+:attr:`~pgml.scenarios.SampledScenarios.all_samples` is the merged view, which is also what
+:func:`~pgml.scenarios.read_dataset` returns.
+
 Running scenarios
 -----------------
 
-:func:`~pgml.scenarios.run_scenarios` accepts a :class:`~pgml.scenarios.ScenarioConfig`,
-:class:`~pgml.scenarios.CartesianConfig`, :class:`~pgml.scenarios.CoherentSpectrumConfig`,
-:class:`~pgml.scenarios.SpectrumSweepConfig`, or a pre-built
-:class:`~pgml.scenarios.SampledScenarios` and solves the batch::
+:func:`~pgml.scenarios.run_scenarios` accepts any
+:class:`~pgml.scenarios.ScenarioSpec` — :class:`~pgml.scenarios.ScenarioConfig`,
+:class:`~pgml.scenarios.CartesianConfig`, :class:`~pgml.scenarios.SpectrumSweepConfig`,
+:class:`~pgml.scenarios.NodeInjectionSweepConfig` or a spec of your own — or a pre-built
+:class:`~pgml.scenarios.SampledScenarios`, and solves the batch::
 
     result = run_scenarios(
         grid,
@@ -495,16 +544,19 @@ The ``spec`` argument may also be a pre-built :class:`~pgml.scenarios.SampledSce
 so that sampling and solving can be separated (e.g. inspect the batch before
 solving it).
 
-When ``spec`` is a :class:`~pgml.scenarios.CoherentSpectrumConfig` or a
-:class:`~pgml.scenarios.SpectrumSweepConfig` the runner automatically forces
-``calculation="harmonic"`` and sets ``harmonic_orders`` to ``[1, *config.orders]``
-if not provided, so the minimal invocations are::
-
-    result = run_scenarios(grid, CoherentSpectrumConfig(...))
-    # result.v  shape [B, T, H, N]
+When a spec declares ``harmonic_orders``, as
+:class:`~pgml.scenarios.SpectrumSweepConfig` and
+:class:`~pgml.scenarios.NodeInjectionSweepConfig` do, the runner forces
+``calculation="harmonic"`` and sets ``harmonic_orders`` to ``[1, *spec.harmonic_orders]``
+if none was given, so the minimal invocation is::
 
     result = run_scenarios(grid, SpectrumSweepConfig(...))
     # result.v  shape [B, H, N] (B = number of matched targets)
+
+``load_shunt`` selects the harmonic device Norton shunt for the whole batch. A shunt derived
+from a PER-SCENARIO operating point makes ``Y(h)`` scenario-dependent, so every scenario
+factors its own matrix per order instead of sharing one factorization; ``"none"`` keeps the
+shared one.
 
 Convergence and failed scenarios
 -----------------------------------
@@ -515,11 +567,11 @@ failures, not a total loss.
 :attr:`~pgml.scenarios.ScenarioResult.converged` is ``True`` iff EVERY scenario
 converged; :attr:`~pgml.scenarios.ScenarioResult.failed_states` lists the SCENARIO
 indices (along the ``B`` axis of ``v``) that did not, and the solver logs the
-residual and likely cause for each. For node-coherent (``[B, T, H, N]``) data, a
-scenario counts as failed when ANY of its ``T`` steps failed — the per-step solver
-failure index maps to its scenario via integer division by ``T``, so
-``failed_states`` is always indexed the same way regardless of ``calculation`` or
-whether :func:`~pgml.scenarios.run_scenarios` chunked the batch with ``chunk_size``.
+residual and likely cause for each. For stepped (``[B, T, H, N]``) data a scenario counts as
+failed when ANY of its ``T`` steps failed — the per-step solver failure index maps to its
+scenario by integer division by ``T`` — so ``failed_states`` is always indexed the same way
+regardless of ``calculation`` or whether :func:`~pgml.scenarios.run_scenarios` chunked the
+batch with ``chunk_size``.
 
 Persistence (parquet training data)
 ------------------------------------
@@ -610,65 +662,31 @@ Beyond the config and seed, ``meta.json`` records what a reload alone cannot rec
   config (or its pre-serialized JSON string). Two configs producing the same hash describe
   the same batch — this is what a reuse gate (e.g. an ablation driver deciding whether to
   regenerate a dataset) compares instead of a field-by-field diff.
-- :func:`~pgml.scenarios.generation_provenance` — everything else a generated dataset should
-  record: ``provenance`` (:func:`~pgml.provenance.code_provenance` — the commit, dirty flag,
-  and library versions; see :doc:`provenance`), ``device_library_version``
-  (:data:`~pgml.scenarios.DEVICE_LIBRARY_VERSION`), and ``standards`` (the ACTIVE EN 50160 /
+- :func:`~pgml.scenarios.generation_provenance` — what pgml itself contributes:
+  ``provenance`` (:func:`~pgml.provenance.code_provenance` — the commit, dirty flag, and
+  library versions; see :doc:`provenance`) and ``standards`` (the ACTIVE EN 50160 /
   IEC 61000-3-2 tables, via :func:`~pgml.scenarios.en50160_provenance` /
   :func:`~pgml.scenarios.iec61000_3_2_provenance`).
 
 Two datasets written from a byte-identical config and seed can still differ numerically
-because the code changed, the shipped device library was recalibrated, or a ``PGML_*``
-environment variable silently swapped a standards table for the run — none of which the
-config or seed alone would show. :func:`~pgml.scenarios.read_dataset` needs none of these
-keys to reload a dataset; a dataset written before they existed simply lacks them.
+because the code changed or a ``PGML_*`` environment variable silently swapped a standards
+table for the run — neither of which the config or seed alone would show.
+:func:`~pgml.scenarios.read_dataset` needs none of these keys to reload a dataset; a dataset
+written before they existed simply lacks them.
 
-Storage dispatch and SoC integration
---------------------------------------
+``write_dataset(..., provenance={...})`` records the caller's own generation stamps under
+``extra_provenance`` in ``meta.json``. This is where a generator records what its config does
+not capture, such as the revision of a calibrated recipe or of a device library, since those
+change the data without changing the config.
 
-:class:`~pgml.schemas.grid_schema.Storage` elements appear in the power-flow
-snapshot as a signed ``(P, Q)`` injection (``p_nom_w > 0`` = discharging /
-injecting).  What couples timesteps is the state of charge (SoC) and the
-dispatch decision; these are resolved outside the per-snapshot solve into a
-realized per-step active-power sequence the solver consumes.
+``read_dataset(path, config_types={"MyConfig": MyConfig})`` reconstructs a config class this
+package does not define. Reconstruction is explicit because reading a dataset must not import
+a module the file chose; the sidecar records ``config_module`` and ``config_class`` so the
+owner is identifiable either way, and without the mapping such a config reads back as a dict.
+:data:`~pgml.scenarios.SCENARIO_CONFIG_TYPES` is the set this package reconstructs on its own.
 
-:func:`~pgml.scenarios.integrate_soc`
-    Realizes a requested power sequence ``[*batch, T]`` under SoC limits and
-    an optional power rating.  Returns a
-    :class:`~pgml.scenarios.StorageDispatchResult` with the realized power and
-    (when a capacity is given) the SoC and energy trajectories.  Uses torch
-    arithmetic so gradients flow through the realized setpoint value; no
-    gradient flows through the dispatch decision itself.
-
-:func:`~pgml.scenarios.dispatch_storage`
-    Convenience wrapper: reads ``energy_capacity_wh``, ``soc``, ``soc_min`` /
-    ``soc_max``, efficiencies, and ``p_rated_w`` from a
-    :class:`~pgml.schemas.grid_schema.Storage` element and delegates to
-    :func:`~pgml.scenarios.integrate_soc`.
-
-:func:`~pgml.scenarios.storage_operating_point`
-    Converts a ``{storage_id: realized_power_w}`` dict from a dispatch step
-    into the ``operating_point`` format consumed by
-    :func:`~pgml.solver.solve_power_flow` /
-    :func:`~pgml.solver.solve_harmonic_flow`.
-
-Example — one-day dispatch cycle::
-
-    from pgml.scenarios import dispatch_storage, storage_operating_point
-
-    # storage is a Storage element with a 10 kWh capacity, 50 % initial SoC
-    result = dispatch_storage(
-        storage,
-        requested_power_w=[5000.0] * 4 + [-3000.0] * 4,   # charge/discharge
-        dt_s=3600.0,
-    )
-    # result.realized_power_w  [8]  — clamped by SoC/rating
-    # result.soc               [9]  — SoC at each step boundary (soc[0] = initial)
-
-    # Build solver operating_point for step 2:
-    op = storage_operating_point(
-        {storage.id: float(result.realized_power_w[2])}
-    )
+``meta.json`` additionally carries the time axis as data — ``n_steps``, ``step_size_s``,
+``t0_unix_s`` — so a consumer does not have to parse a generator-specific config to find it.
 
 .. automodule:: pgml.scenarios
    :members:

@@ -142,6 +142,12 @@ per-scenario state in `[0, 1]`. pgml uses the scaling, `branch_states`, for thre
    turns reconfiguration into something gradient-based search can optimise. None of the
    reference tools expose that.
 
+`branch_states` and bus fusion are mutually exclusive on the same branch. A swept branch is
+reached by scaling its stamped admittance, and a fused branch has none, so a zero-impedance
+branch listed in `branch_states` is refused by name with both ways out: give the swept switch
+the documented near-ideal resistance, or drop it from the sweep. A grid may contain both kinds
+at once.
+
 The state overrides the branch's static in-service and closed flags, so one superset grid
 describes every configuration. Adding a branch that is absent from the superset still needs a
 new assembly. Because an open state can disconnect part of a grid, the per-scenario topologies
@@ -170,9 +176,9 @@ The base state matters. The correction reads values off the base solution and am
 `‖(I + CZ)⁻¹CZ‖`. Adding admittance to the base keeps that factor of order one. Removing a
 near-ideal closed switch from the base pushes it toward `|y · z_thevenin|`, because the quantity
 the downdate multiplies is that branch's own voltage drop, the difference of two nearly equal
-node voltages, which floating point resolves poorly. A 1e-4 Ω switch, the default contact
-resistance a converter assigns, already costs about four digits this way, which is enough to
-stall the fixed point. The sweep's base therefore omits every switched branch it can, opened one
+node voltages, which floating point resolves poorly. A 1e-4 Ω switch, the near-ideal stand-in
+a swept switch has to carry, already costs about four digits this way, which is enough to stall
+the fixed point. The sweep's base therefore omits every switched branch it can, opened one
 at a time while the grid stays connected without it, so an update only ever adds admittance.
 
 Measured with the shipped `benchmark_woodbury.py` example on an i7-12700 CPU with the automatic
@@ -267,21 +273,131 @@ per-scenario Jacobian evaluation. The division of labour stands. The current-inj
 point is the bulk-batch solver and Newton is the solver for hard grids near the loadability
 nose.
 
-## Precision policy
+## Convergence, in per unit
+
+Convergence is judged in per unit on two criteria, both of which must hold. The first is the
+largest nodal apparent-power mismatch over a power base, which is the quantity pandapower and
+power-grid-model report. The second is the largest per-row voltage update over the node's
+line-to-neutral rated voltage. Per-row normalisation makes a tolerance mean the same thing on a
+400 V node and on a 20 kV node, and makes it independent of the number of rows, so a
+multi-voltage grid or an ensemble of grids solved as one system is judged exactly like a single
+feeder.
+
+The defaults are `solver.convergence.mismatch_pu = 1e-8` on a `s_base_va = 1e6` power base and
+`solver.convergence.update_pu = 1e-8`. The first is pandapower's `tolerance_mva` default on a
+1 MVA base and the same order as power-grid-model's `error_tolerance`, so iteration counts are
+comparable across the three tools.
+
+Each criterion is capped by a precision floor, and a tighter request logs a warning naming the
+floor, which then governs. The voltage update is capped by the working dtype and the
+factorization backend, measured at 1e-6 per unit for complex64 dense and 1.2e-5 for complex64
+SuperLU. The power mismatch is capped by the cancellation scale of `Y·V` in that row: a 20 kV
+node behind a milliohm source impedance cannot resolve a mismatch below about 1e-9 per unit at
+complex128, whatever the iteration count.
+
+## Conditioning and equilibration
+
+An SI-unit power system is badly scaled. A stiff source row of the nodal matrix carries an
+admittance near $10^5\,\mathrm{S}$ while a low-voltage cable row carries
+$10^{-2}\,\mathrm{S}$, and at harmonic order `h` the series reactances grow with `h` while the
+shunt terms on the diagonal do not, so the rows drift a further decade apart per order. Every
+factorization in this engine is therefore taken of the equilibrated matrix `D_r·A·D_c`, and the
+scaling is undone on the solution. The right-hand side you pass and the voltages you read are
+SI, the residuals and tolerances are unchanged, and gradients are unchanged, while the matrix
+that is actually factored is far better conditioned.
+
+Measured 1-norm condition estimates of the factored free block, as assembled and with the
+default scaling:
+
+| system | rows | as assembled | equilibrated |
+|---|---|---|---|
+| IEEE-33, fundamental | 32 | 2.8e3 | 1.4e3 |
+| IEEE-33, order 13 | 33 | 7.3e8 | 1.4e3 |
+| CIGRE LV three-phase, fundamental | 120 | 4.8e3 | 2.1e3 |
+| CIGRE LV three-phase, order 13 | 123 | 2.2e4 | 3.1e3 |
+| `mv_oberrhein`, fundamental | 177 | 6.9e4 | 5.5e4 |
+| `mv_oberrhein`, order 13 | 179 | 4.2e9 | 1.3e5 |
+| Kerber Vorstadtnetz, order 13 | 294 | 4.7e7 | 3.2e4 |
+
+The default is the symmetric van der Sluis scaling `d_i = |A_ii|^(-1/2)`, whose factors are
+rounded to powers of two so that the scaled matrix is exact in binary floating point.
+`equilibrate="row_column"` selects the two-sided LAPACK variant, which is consistently worse in
+the 1-norm on these systems and twice failed to converge at single precision, and
+`equilibrate="off"` factors the matrix as assembled.
+
+Equilibration does not make single precision accurate. LU with partial pivoting is backward
+stable, so the measured complex64 error moves by less than a factor two. What it buys is
+robustness and a condition estimate that means something. It is also not a cure for intrinsic
+ill conditioning: where a system is badly conditioned for a physical reason rather than a
+scaling one, the scaling is neutral. The largest single source of artificial ill conditioning
+on these feeders was the near-ideal switch stand-in, which bus fusion removes outright; see
+{doc}`conventions`.
+
+## Working precision
 
 `complex128` is the accuracy and gradient-checking dtype. `complex64` is the throughput dtype
 for bulk data generation, and the reason a GPU is attractive there given workstation-class FP64
 rates.
 
-One caveat is policy. A physical feeder's admittance matrix in SI units mixes values across
-many decades, line shunts around $10^{-8}\,\mathrm{S}$ against source stamps around
-$10^{5}\,\mathrm{S}$, which produces condition numbers of $10^6$ to $10^9$. At single precision
-the error bound $\kappa\varepsilon$ can reach order one. This is observed rather than
-theoretical. On such a grid a `complex64` representation of the operator already perturbs the
-solved voltages at the percent level, and CPU and CUDA factorizations then disagree visibly
-with each other. Two rules follow.
+A plain complex64 solve keeps about `7 − log10(κ)` digits, measured at 2.5e-6 to 6.8e-5 per
+unit across the grids above, and it logs a one-time warning when the condition estimate exceeds
+`solver.precision.complex64_cond_warn`. The estimate the engine reports, and the one that
+warning quotes, is that of the matrix as factored, i.e. after equilibration; for the matrix as
+assembled, factor with `equilibrate="off"`.
 
-- Solve in `complex128` wherever the result feeds anything precision-sensitive and cast the
-  outputs down, so storage in `complex64` costs only the final rounding.
+`precision="mixed"` is the recommended middle. The system is factored at complex64 while the
+iteration, the residual and the convergence test stay at complex128, which reaches the
+complex128 solution to between 1.6e-14 and 1.3e-12 per unit on every grid measured. On CPU it
+is 1.5 to 1.9 times faster than complex128 on the dense path and no faster on the SuperLU
+sparse path, where single precision does not accelerate the factorization; the larger win is
+expected on a GPU, where double precision runs at a fraction of the single-precision rate. It
+requires `dtype="complex128"`.
+
+Two rules follow for data generation.
+
+- Solve in `complex128`, or in `complex128` with `precision="mixed"`, wherever the result feeds
+  anything precision-sensitive, and cast the outputs down, so storage in `complex64` costs only
+  the final rounding.
 - Generate datasets at `complex128` and store them as `complex64`, rather than generating at
   `complex64`, whenever the grid's conditioning is unknown.
+
+## The cost of a gradient
+
+The backward pass of a solve is a vector-Jacobian product, so it needs one adjoint solution and
+never the Jacobian of the solve itself. It builds the real block-diagonal state Jacobian of the
+converged residual, factors it once, and solves the adjoint system. The factorization is cached
+on the autograd node, so a caller that needs several products of one solve, a full output
+Jacobian row by row or a second backward pass, pays one back-substitution per further output
+vector.
+
+The Jacobian build is the expensive part, and which build runs is chosen by a memory budget,
+`solver.ift.jacobian_budget_mb`. The vectorised build replicates the admittance a scenario batch
+shares once per output row, so it peaks at `B²·2N³` words. Under the budget the build runs over
+the whole batch, over as many scenarios at a time as fits, or one scenario at a time, which is
+always affordable because a single scenario has no shared admittance to replicate. Measured on
+IEEE-33 with a batch of 64, the backward costs 610 ms against an 18.8 ms forward and peaks at
+1.3 GiB; on a 294-row feeder with a batch of 16, 398 ms against 31.8 ms and 213 MiB, where the
+unbudgeted build asked the allocator for 208 GB. A second backward pass of the same solve costs
+6.7 ms and 40 ms respectively, which is the cached adjoint factorization answering one
+back-substitution.
+
+Rebuilding the adjoint from the forward's own factorization of the complex `Y_eff`, instead of
+letting autograd build the Jacobian, would remove most of that cost and is open work.
+
+## Loadability
+
+`loadability_limit` scales the injections by λ from a feasible base, Newton-corrects at each
+step and bisects onto the first λ the corrector cannot solve. The reported `breaking_lambda` is
+therefore the largest λ at which the Newton corrector still converges, which is a lower bound
+on the true P-V nose: a plain corrector fails before the singularity because the Jacobian
+becomes ill-conditioned first, measured about 4 % below the closed-form nose of a two-bus
+feeder. It is a step-and-bisect on feasibility rather than an arc-length predictor-corrector
+continuation, so it cannot turn the nose, and the Jacobian figures it reports describe the last
+converged point.
+
+`ramp` chooses what λ multiplies. The default is `"load"`: the loads scale and generation stays
+at its nameplate value, which is the textbook continuation-power-flow ramp and what a published
+loadability figure means. `"all"` scales every injecting device together, the joint ramp of a
+whole operating point. On a feeder with generation the two differ materially, 1.625 against 2.0
+on a two-bus example with generation at 0.3 of the nose power, so the result records which one
+it measured.

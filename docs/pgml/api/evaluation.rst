@@ -115,10 +115,9 @@ Reference builders and oracle functions
 regression testing, plus the reference-grid builders re-exported from :mod:`pgml.grids`
 (see :doc:`grids` for the canonical documentation of
 :func:`~pgml.grids.ieee33_geometry_grid`, :func:`~pgml.grids.cigre_lv_geometry_grid`,
-:func:`~pgml.grids.cigre_lv_full_grid`, :func:`~pgml.grids.add_pv_systems`, and
-:func:`~pgml.grids.se_benchmark_scenario_config`) — ``from pgml.evaluation.oracles import
-cigre_lv_full_grid`` and ``from pgml.grids import cigre_lv_full_grid`` import the identical
-function.
+:func:`~pgml.grids.cigre_lv_full_grid` and :func:`~pgml.grids.add_pv_systems`) —
+``from pgml.evaluation.oracles import cigre_lv_full_grid`` and ``from pgml.grids import
+cigre_lv_full_grid`` import the identical function.
 
 Harmonic oracle functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -206,11 +205,17 @@ model:
   single-phase feeder cases and roughly 1e-6 on the three-phase CIGRE LV
   benchmark, with one documented, bounded exception (the triplen orders under
   ``mode="default"``, below).
-- ``mode="default"`` leaves OpenDSS's own defaults (load Norton shunt
-  included, imperial-calibrated earth return, the default voltage-clip band)
-  — a deliberate, documented divergence characterizing how far a naive
-  "just point OpenDSS at the grid" study would drift from pgml's reduced
-  model, not a bug.
+- ``mode="default"`` leaves OpenDSS's own defaults (imperial-calibrated earth
+  return, the default voltage-clip band) — a deliberate, documented divergence
+  characterizing how far a naive "just point OpenDSS at the grid" study would
+  drift from a matched comparison.
+
+A grid carrying a generation device cannot be compared in ``mode="matched"``
+without setting ``appliance.harmonic_shunt.generation_model`` to ``"load_style"``:
+OpenDSS gives the exported negative-kW ``Load`` its own operating-point shunt,
+which pgml's shipped policy deliberately withholds from an injecting device.  The
+refusal names both ways out.  See the DER section of
+:doc:`/pgml/modeling/der-pv-storage`.
 
 ::
 
@@ -233,8 +238,10 @@ model:
 :func:`~pgml.evaluation.oracles.compare_to_pgml` runs
 :func:`~pgml.evaluation.oracles.run_opendss_scenarios` (the ground truth) and
 :func:`pgml.scenarios.run_scenarios` on the *identical*
-:class:`~pgml.scenarios.SampledScenarios` and reports, per harmonic order, the
-absolute and RMS-relative voltage error. Its ``slack`` argument defaults to
+:class:`~pgml.scenarios.SampledScenarios` — from a
+:class:`~pgml.scenarios.ScenarioConfig`, from
+:func:`~pgml.scenarios.batch_from_values`, or from any scenario spec — and reports,
+per harmonic order, the absolute and RMS-relative voltage error. Its ``slack`` argument defaults to
 ``"norton"`` rather than pgml's own library default (``"ideal"``): an OpenDSS
 ``Vsource`` always behaves as a finite-impedance Thévenin source, so comparing
 against pgml's ideal-slack solve on a grid with non-negligible source

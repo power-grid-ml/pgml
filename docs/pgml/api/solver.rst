@@ -30,16 +30,170 @@ The solver package provides the following entry points:
 - :func:`~pgml.solver.check_connectivity` — the pre-solve structural gate:
   raises :class:`~pgml.errors.ConnectivityError` when part of the grid has no
   galvanic path to an in-service source, before any factorization is attempted.
+- :func:`~pgml.solver.check_branch_impedances` — the second pre-solve gate: reports
+  an in-service branch whose series impedance is exactly zero.  Under the default
+  ``branch.zero_impedance: fuse`` those branches are collapsed instead
+  (:func:`pgml.assembly.fusion_map`); under ``error`` the solve is refused by name.
+- :func:`~pgml.solver.harmonic_injections` — the realized nodal injection vector
+  ``I(h)`` on its own, given a converged fundamental voltage.  The counterpart to
+  :func:`~pgml.solver.assemble_harmonic_ybus` for a caller that assembles the matrix
+  and the right-hand side separately.
+- :func:`~pgml.solver.loadability_limit` — walks the loading parameter λ from a
+  feasible base to the largest value the Newton corrector still solves, and reports
+  the margin, the critical bus and the limiting load.
 - :func:`~pgml.solver.prepare_power_flow` — assembles and factors the
   operating-point-independent part of a nonlinear solve once, returning a
   :class:`~pgml.solver.PowerFlowSystem` that repeated
   :func:`~pgml.solver.solve_power_flow` calls on the same grid can reuse.
+- :mod:`pgml.solver.equilibration` — the diagonal scaling every factorization in
+  this package is taken of, and the factored handle
+  :class:`~pgml.solver.equilibration.EquilibratedLU` for a caller that wants it
+  directly.
 
 .. rubric:: Differentiability
 
 ``solve_harmonic`` differentiates cleanly via the linear solve adjoint.
 ``solve_power_flow`` uses an explicit IFT adjoint (the only sanctioned
 ``.detach()`` in the codebase) so gradients flow through the converged solution.
+
+Convergence criteria and working precision
+-------------------------------------------
+
+Both nonlinear entry points judge convergence in PER UNIT on two criteria, and both must
+hold:
+
+- ``tol`` — the largest nodal apparent-power mismatch in per unit of ``s_base_va``
+  (defaults ``solver.convergence.mismatch_pu`` = 1e-8 pu on a 1e6 VA base).  This is the
+  quantity pandapower's ``tolerance_mva`` and power-grid-model's ``error_tolerance``
+  report, so iteration counts are comparable across the three tools.
+- ``tol_update_pu`` — the largest per-row voltage update in per unit of that node's
+  line-to-neutral rated voltage (default ``solver.convergence.update_pu`` = 1e-8 pu).
+  Per-row normalisation makes one tolerance mean the same thing on a 400 V node and a
+  20 kV node, and makes it independent of the row count, so a multi-voltage grid or a
+  merged ensemble is judged exactly like a single feeder.
+
+Each is capped by what the working precision can resolve.  A tighter request logs a warning
+naming the floor, and the floor governs.
+:class:`~pgml.solver.ConvergenceDiagnostics` reports both achieved values.
+
+``precision`` selects the working precision of the factorization independently of ``dtype``:
+
+- ``"full"`` (default) factors and iterates at ``dtype``.
+- ``"mixed"`` factors at ``complex64`` while the iteration, the residual and the
+  convergence test stay at ``complex128``, refining against the double-precision residual
+  (``solver.precision.refine_steps``).  It reaches the ``complex128`` solution to better
+  than 1e-12 pu on every grid measured, at single-precision factorization cost.  Requires
+  ``dtype=torch.complex128``.
+
+A plain ``complex64`` solve logs a one-time warning when the condition estimate of the
+matrix it factored exceeds ``solver.precision.complex64_cond_warn``.  A
+:class:`~pgml.solver.PowerFlowSystem` records its ``precision``, and a solve that reuses it
+must request the same one.  See :doc:`/pgml/modeling/solver-performance` for the measured
+accuracy and cost.
+
+Equilibration (``equilibrate``)
+---------------------------------
+
+An SI-unit nodal matrix is badly SCALED: a stiff source row carries an admittance near
+1e5 S where a low-voltage cable row carries 1e-2 S, and at harmonic order ``h`` the series
+reactances grow with ``h`` while the diagonal shunt terms do not.  Every factorization in
+this package is therefore taken of the equilibrated matrix ``D_r A D_c``, and the scaling is
+undone on the solution: the right-hand side you pass and the voltages you read are SI, the
+residuals and tolerances are unchanged, and the gradients are unchanged.
+
+``equilibrate`` is accepted by :func:`~pgml.solver.solve_harmonic`,
+:func:`~pgml.solver.solve_power_flow`, :func:`~pgml.solver.prepare_power_flow`,
+:func:`~pgml.solver.solve_harmonic_flow`, :func:`~pgml.solver.loadability_limit` and
+:func:`pgml.simulation.simulate`:
+
+- ``None`` — the documented default ``solver.equilibration.mode``.
+- ``"symmetric"`` (shipped) — the van der Sluis scaling ``d_i = |A_ii|**-0.5``, with the
+  factors rounded to powers of two (``solver.equilibration.power_of_two``) so the scaled
+  matrix is exact in binary floating point.
+- ``"row_column"`` — the two-sided LAPACK variant.
+- ``"off"`` — factor the matrix as assembled.
+
+:mod:`pgml.solver.equilibration`, documented at the bottom of this page, exposes the pieces
+for a caller that wants the scaling directly, including
+:class:`~pgml.solver.equilibration.EquilibratedLU`, which answers right-hand sides at the
+input matrix's own dtype and handles the adjoint solve.  Every factored handle records which
+mode it was factored under, and :class:`~pgml.solver.PowerFlowSystem` rejects a reuse under a
+different one.
+
+Bus fusion: ideal branches in a solved result
+-----------------------------------------------
+
+A branch whose series impedance is exactly zero has no primitive admittance, because the
+nodal formulation inverts it.  Under the default ``branch.zero_impedance: fuse`` the solve
+collapses such a branch's terminal node-phase rows into ONE row of the system it factors,
+solves the reduced system, and reports the result on the grid's OWN row layout — so
+``PowerFlowResult.v`` stays ``[*batch, N]`` and ``HarmonicFlowResult.v`` stays
+``[*batch, H, N]``, with every node of a fused group carrying the group's voltage.
+
+:class:`~pgml.solver.PowerFlowResult`, :class:`~pgml.solver.HarmonicFlowResult`,
+:class:`~pgml.solver.PowerFlowSystem` and :class:`pgml.simulation.SolvedState` carry the
+:class:`~pgml.assembly.FusionMap` in a ``fusion`` field (``None`` on a grid without such a
+branch).  :func:`~pgml.assembly.branch_currents` takes it and recovers the current through a
+fused branch from Kirchhoff's law at the fused node.  See the "Bus fusion" section of
+:doc:`assembly` for the map itself and its rules.
+
+``branch_states`` and fusion are mutually exclusive on the same branch: a swept branch is
+reached by scaling its stamped admittance, and a fused branch has none.  A zero-impedance
+branch listed in ``branch_states`` is refused by name, with both ways out.
+
+Voltage-regulating generators (PV terminals)
+----------------------------------------------
+
+A :class:`~pgml.schemas.grid_schema.Generator` carrying a
+:class:`~pgml.schemas.grid_schema.VoltageRegulation` block is a PV terminal: its active
+power is given, its terminal voltage magnitude is held at ``v_set_pu``, and its reactive
+power is whatever that takes within ``q_min_var`` / ``q_max_var``.  The solver substitutes
+the imaginary half of that row's residual with the setpoint condition and recovers the
+reactive power from the converged solution, so the state stays ``[Re V; Im V]`` and the
+``[2N, 2N]`` IFT Jacobian, the adjoint and the batching are unchanged.
+
+Such a grid is always solved by Newton — a current-injection update has no injection to
+form at a regulated row — and ``method="current_injection"`` logs the switch.
+``enforce_q_limits`` (default from ``appliance.generator.enforce_q_limits``) decides whether
+the reactive limits bound the output; when they do, a unit outside its band is re-solved as
+a PQ injection pinned at the limit and released when its voltage crosses the setpoint from
+the other side.  :class:`~pgml.solver.VoltageRegulationResult`, on
+``PowerFlowResult.regulation``, reports per unit the resolved reactive power, the active
+set and which terminals are pinned.  The model, its scope and the reference comparisons are
+in :doc:`/pgml/modeling/der-pv-storage`.
+
+Loadability (``loadability_limit``)
+-------------------------------------
+
+:func:`~pgml.solver.loadability_limit` scales the injections by λ from a feasible base,
+Newton-corrects at each step and bisects onto the first λ the corrector cannot solve.  The
+reported ``breaking_lambda`` is therefore the largest λ at which the corrector still
+converges, which is a LOWER BOUND on the true P-V nose: a plain corrector fails before the
+singularity because the Jacobian becomes ill-conditioned first (measured about 4 % below the
+closed-form nose of a two-bus feeder).  It is a step-and-bisect on feasibility, not an
+arc-length predictor-corrector continuation, so it cannot turn the nose, and the Jacobian
+figures it reports describe the last converged point.
+
+``ramp`` chooses what λ multiplies.  The default is ``solver.loadability.ramp`` = ``"load"``:
+the loads scale and generation stays at nameplate, which is the textbook
+continuation-power-flow ramp.  ``"all"`` scales every injecting device together.  On a feeder
+with generation the two differ materially (1.625 against 2.0 on a two-bus example with
+generation at 0.3 of the nose power), so :class:`~pgml.solver.LoadabilityResult` records
+which ramp it measured.
+
+Harmonic solver options
+-------------------------
+
+:func:`~pgml.solver.solve_harmonic_flow` takes the same factorization options as the
+fundamental solve.  ``linear_solver`` and ``block_rows`` select the backend of the
+fundamental system AND of every harmonic order, since each order is one direct solve of a
+system with the same sparsity and the same row partition.  ``equilibrate`` sets the
+equilibration of all of them, ``criticality`` the Jacobian diagnostic of the fundamental
+solve, and ``branch_states_method`` how a switch-state sweep reaches each state at the
+fundamental — the harmonic orders always assemble their own per-state admittance, because a
+low-rank update is built from one frequency's stamps.  ``load_shunt`` selects the harmonic
+device Norton shunt.  The pre-solve connectivity and zero-impedance checks run once for the
+whole study.
 
 Symmetry kwarg
 --------------
@@ -347,5 +501,12 @@ per scenario) use :func:`~pgml.scenarios.run_node_injection_sweep` from
 :mod:`pgml.scenarios` (see :doc:`scenarios`).
 
 .. automodule:: pgml.solver
+   :members:
+   :show-inheritance:
+
+pgml.solver.equilibration
+---------------------------
+
+.. automodule:: pgml.solver.equilibration
    :members:
    :show-inheritance:
