@@ -102,6 +102,25 @@ class ZeroImpedanceBranch:
     fusable: bool
 
 
+class _NoFusion:
+    """Type of :data:`NO_FUSION`."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_FUSION"
+
+
+#: A fusion resolution that produced no map: this grid carries nothing to collapse, and
+#: that answer is already known. Pass it as ``fusion=`` to an assembly entry point
+#: (:func:`~pgml.assembly.assemble_ybus`,
+#: :func:`~pgml.assembly.assemble_network_ybus`) instead of ``None``, which means "not
+#: resolved yet" and makes the assembler walk the branch list again to rediscover the
+#: same empty answer. A solve resolves the zero-impedance structure once and hands it
+#: down in this form, so the walk is paid once per solve rather than once per assembly.
+NO_FUSION = _NoFusion()
+
+
 def _is_zero(*values) -> bool:
     """Are all given parameter values exactly zero (``None`` counts as zero)?
 
@@ -652,6 +671,7 @@ def fusion_map(
     *,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    zero: Optional[Sequence[ZeroImpedanceBranch]] = None,
 ) -> Optional[FusionMap]:
     """Build the exact bus fusion of ``grid``'s zero-impedance branches.
 
@@ -675,6 +695,11 @@ def fusion_map(
         branch with zero impedance therefore has no representation at all and raises
         :class:`~pgml.errors.ModelingError` — the two mechanisms are mutually exclusive
         by construction, and the fix (a finite impedance for a swept switch) is named.
+    zero:
+        The result of :func:`zero_impedance_branches` for this grid and these
+        ``param_overrides``, when the caller already holds it. A solve walks the branch
+        list once and hands the list to every consumer of it (the map, the modeling
+        gate) instead of rediscovering the same empty answer per call.
 
     Raises
     ------
@@ -684,7 +709,8 @@ def fusion_map(
         ``branch_states`` sweep. Also when two fused nodes have different rated
         voltages (an ideal conductor between two voltage levels is a data error).
     """
-    zero = zero_impedance_branches(grid, param_overrides=param_overrides)
+    if zero is None:
+        zero = zero_impedance_branches(grid, param_overrides=param_overrides)
     if not zero:
         return None
     swept = {int(b) for b in (branch_states or {})}
@@ -785,10 +811,11 @@ def _scalar(v) -> float:
 
 def resolve_fusion(
     grid: Grid,
-    fusion: Union[FusionMap, bool, None],
+    fusion: Union[FusionMap, bool, None, _NoFusion],
     *,
     param_overrides: Optional[dict] = None,
     branch_states: Optional[dict] = None,
+    zero: Optional[Sequence[ZeroImpedanceBranch]] = None,
 ) -> Optional[FusionMap]:
     """Resolve a ``fusion`` argument to a :class:`FusionMap` or ``None``.
 
@@ -798,9 +825,15 @@ def resolve_fusion(
       identical either way, and the overwhelming majority carry none).
     - ``False``: never fuse; a zero-impedance branch raises.
     - a :class:`FusionMap`: use it as given (the prepared / shared map of a solve).
+    - :data:`NO_FUSION`: a resolution that produced no map, handed on as such.
+
+    ``zero`` passes an already-collected :func:`zero_impedance_branches` list through to
+    :func:`fusion_map`.
     """
     if isinstance(fusion, FusionMap):
         return fusion
+    if fusion is NO_FUSION:
+        return None
     policy = "error" if fusion is False else str(defaults.get("branch.zero_impedance"))
     if policy not in ("fuse", "error"):
         from pgml.errors import ConfigurationError
@@ -809,12 +842,16 @@ def resolve_fusion(
             f"branch.zero_impedance must be 'fuse' or 'error', got {policy!r}."
         )
     if policy == "error":
-        bad = zero_impedance_branches(grid, param_overrides=param_overrides)
+        bad = (
+            zero_impedance_branches(grid, param_overrides=param_overrides)
+            if zero is None
+            else zero
+        )
         if bad:
             raise ModelingError(describe_unfusable(bad))
         return None
     return fusion_map(
-        grid, param_overrides=param_overrides, branch_states=branch_states
+        grid, param_overrides=param_overrides, branch_states=branch_states, zero=zero
     )
 
 
@@ -875,6 +912,7 @@ def fused_branch_currents(
 
 __all__ = [
     "FUSABLE_COMPONENTS",
+    "NO_FUSION",
     "FusionMap",
     "ZeroImpedanceBranch",
     "describe_unfusable",

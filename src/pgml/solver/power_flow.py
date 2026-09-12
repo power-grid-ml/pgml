@@ -72,6 +72,8 @@ from pgml.assembly import (
     node_phase_index,
 )
 from pgml.assembly._fusion import (
+    NO_FUSION,
+    ZeroImpedanceBranch,
     describe_unfusable,
     log_fusion_summary,
     resolve_fusion,
@@ -620,6 +622,7 @@ def check_branch_impedances(
     *,
     fusion: Optional[FusionMap] = None,
     param_overrides: Optional[dict] = None,
+    zero_branches: Optional[Sequence[ZeroImpedanceBranch]] = None,
 ) -> None:
     """Raise :class:`~pgml.errors.ModelingError` for a branch with no primitive stamp.
 
@@ -642,8 +645,15 @@ def check_branch_impedances(
 
     ``param_overrides`` makes the check read the EFFECTIVE impedance the stamps will use,
     so a branch whose zero impedance is substituted by a finite leaf passes.
+    ``zero_branches`` passes in the :func:`pgml.assembly.zero_impedance_branches` list of
+    this grid when the caller already holds it (a solve resolves the fusion map from the
+    same list), so the branch list is walked once instead of once per consumer.
     """
-    bad = zero_impedance_branches(grid, param_overrides=param_overrides)
+    bad = (
+        zero_impedance_branches(grid, param_overrides=param_overrides)
+        if zero_branches is None
+        else list(zero_branches)
+    )
     if fusion is not None:
         fused = set(fusion.fused_branch_ids)
         bad = [z for z in bad if z.branch_id not in fused]
@@ -1416,7 +1426,9 @@ def _y_eff_and_islack(
         device=device,
         param_overrides=param_overrides,
         branch_states=branch_states,
-        fusion=fusion,
+        # Every caller hands in a RESOLVED map; ``NO_FUSION`` says "resolved to nothing",
+        # so the assembler does not re-walk the branch list to rediscover that.
+        fusion=NO_FUSION if fusion is None else fusion,
     )
     y = yb.Y  # [1, M, M] or [*batch, 1, M, M] (batched branch states)
     has_freq_axis = y.ndim == 3  # ndim > 3: batched states, frequency axis folded next
@@ -1622,6 +1634,14 @@ class PowerFlowSystem:
     #: rated voltages, so a prepared system carries it instead of paying one ``|Y|`` pass
     #: (a full matrix read: 7.6 ms on a 1176-row feeder, complex128, CPU) per solve.
     row_abs_scale: Optional[Tensor] = None
+    #: The grid's FULL node-phase layout (``index`` itself when nothing is fused). Results
+    #: are reported on it, so every consuming solve needs it; building it walks the node
+    #: list, which a reused system does not repeat.
+    full_index: Optional[NodePhaseIndex] = None
+    #: Line-to-neutral voltage base per row ``[N]`` (real), the per-unit base of both
+    #: convergence criteria and of the voltage-band diagnostics. A property of the rated
+    #: voltages, so it is built once with the system.
+    v_base: Optional[Tensor] = None
 
 
 def prepare_power_flow(
@@ -1664,10 +1684,20 @@ def prepare_power_flow(
     eq_mode = resolve_equilibration(equilibrate)
     _validate_block_solver(linear_solver, block_rows)
     use_woodbury = _validate_branch_states_method(branch_states_method, branch_states)
+    # One walk of the branch list answers both questions about the zero-impedance
+    # branches: which of them are collapsed, and whether any of them is representable
+    # neither way.
+    zero = zero_impedance_branches(grid, param_overrides=param_overrides)
     fusion = resolve_fusion(
-        grid, None, param_overrides=param_overrides, branch_states=branch_states
+        grid,
+        None,
+        param_overrides=param_overrides,
+        branch_states=branch_states,
+        zero=zero,
     )
-    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
+    check_branch_impedances(
+        grid, fusion=fusion, param_overrides=param_overrides, zero_branches=zero
+    )
     log_fusion_summary(fusion)
     if branch_states is not None:
         if _branch_states_batched(branch_states):
@@ -1752,6 +1782,8 @@ def prepare_power_flow(
         fusion=fusion,
         equilibration=eq_mode,
         row_abs_scale=row_abs,
+        full_index=fusion.full_index if fusion is not None else index,
+        v_base=v_base,
     )
 
 
@@ -2069,18 +2101,24 @@ def solve_power_flow(
     # Exact bus fusion of the zero-impedance branches (ideal closed switches, jumpers):
     # their terminal rows are collapsed into one row of the solved system and the
     # solution is prolonged back to the full layout before it is reported. A prepared
-    # system carries the map it was built with.
-    fusion = (
-        system.fusion
-        if system is not None
-        else resolve_fusion(
-            grid, None, param_overrides=param_overrides, branch_states=branch_states
+    # system carries the map it was built with; otherwise ONE walk of the branch list
+    # feeds both the map and the modeling gate below.
+    if system is not None:
+        fusion = system.fusion
+    else:
+        zero = zero_impedance_branches(grid, param_overrides=param_overrides)
+        fusion = resolve_fusion(
+            grid,
+            None,
+            param_overrides=param_overrides,
+            branch_states=branch_states,
+            zero=zero,
         )
-    )
-    if system is None:
         # A zero-impedance branch that can be neither stamped nor fused is refused by
         # name whatever the connectivity policy is (a prepared system already ran it).
-        check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
+        check_branch_impedances(
+            grid, fusion=fusion, param_overrides=param_overrides, zero_branches=zero
+        )
     if system is None and on_disconnected != "ignore":
         if branch_states is not None:
             if _branch_states_batched(branch_states):
@@ -2124,7 +2162,13 @@ def solve_power_flow(
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
 
-    full_index = node_phase_index(grid)
+    # The full layout is structural: a prepared system carries it rather than walking
+    # the node list again on every solve that reuses the system.
+    full_index = (
+        node_phase_index(grid)
+        if system is None or system.full_index is None
+        else system.full_index
+    )
     index = fusion.index if fusion is not None else full_index
     n = index.size
     block_rows = _reduce_block_rows(block_rows, fusion)
@@ -2348,7 +2392,12 @@ def solve_power_flow(
 
     # Per-row per-unit bases of both convergence criteria (the voltage base is each
     # node's line-to-neutral rated voltage, as in the flat start and the diagnostics).
-    v_base = _node_voltage_bases(grid, index, rdt, device)
+    # Structural, so a prepared system carries it.
+    v_base = (
+        _node_voltage_bases(grid, index, rdt, device)
+        if system is None or system.v_base is None
+        else system.v_base
+    )
 
     # ----- forward: solve for the detached V* (gradients attached by the IFT) -----
     def _newton_warm_starts(op, pv_state, vf=None):
@@ -3018,7 +3067,7 @@ def _linear_const_z_init(
             operating_point=operating_point,
             param_overrides=param_overrides,
             branch_states=branch_states,
-            fusion=fusion,
+            fusion=NO_FUSION if fusion is None else fusion,
         )
     finally:
         pgml_log.setLevel(prev)
@@ -4523,8 +4572,11 @@ def loadability_limit(
         )
     eq_mode = resolve_equilibration(equilibrate)
     tol, tol_update_pu, s_base_va = _resolve_tolerances(tol, tol_update_pu, s_base_va)
-    fusion = resolve_fusion(grid, None, param_overrides=param_overrides)
-    check_branch_impedances(grid, fusion=fusion, param_overrides=param_overrides)
+    zero = zero_impedance_branches(grid, param_overrides=param_overrides)
+    fusion = resolve_fusion(grid, None, param_overrides=param_overrides, zero=zero)
+    check_branch_impedances(
+        grid, fusion=fusion, param_overrides=param_overrides, zero_branches=zero
+    )
     check_connectivity(grid)
     log_fusion_summary(fusion)
     cdt, rdt = _cdtype(dtype), _rdtype(dtype)

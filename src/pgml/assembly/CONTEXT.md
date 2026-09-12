@@ -487,13 +487,15 @@ constraint is expressed EXACTLY by collapsing the branch's terminal node-phase r
 ONE row of the solved system (`V = P v`, `(Pᵀ Y P) v = Pᵀ I`), never by a small-impedance
 stand-in and never by editing the grid.
 
-- `fusion_map(grid, *, param_overrides=None, branch_states=None) -> FusionMap | None`
-  (`_fusion.py`) — union-find over the fused terminals PER PHASE (position k of
+- `fusion_map(grid, *, param_overrides=None, branch_states=None, zero=None) -> FusionMap
+  | None` (`_fusion.py`) — union-find over the fused terminals PER PHASE (position k of
   `from_phases` is shorted to position k of `to_phases`, so a phase-rotating jumper is
   handled), then one reduced row per connected group. `None` when nothing fuses, which is
   the signal to every caller to keep the unreduced path. Reads the EFFECTIVE impedance: a
   `param_overrides` entry wins, so a substituted finite leaf keeps the branch stamped and
-  a substituted zero fuses an ordinary branch.
+  a substituted zero fuses an ordinary branch. `zero` accepts an already-collected
+  `zero_impedance_branches` list (the solve collects it once and feeds both the map and
+  the `check_branch_impedances` gate, instead of walking the branch list per consumer).
 - `FusionMap` (frozen dataclass): `size` (M), `index` (the REDUCED `NodePhaseIndex`, whose
   `(node, phase) -> row` map is MANY-TO-ONE), `full_index` (the grid's own N-row layout),
   `row_to_reduced [N]`, `representative [M]`, `fused_branch_ids`, `groups` (the full rows
@@ -515,10 +517,14 @@ stand-in and never by editing the grid.
 - `assemble_ybus` / `assemble_network_ybus` gain `fusion: FusionMap | bool | None = None`
   — `None` resolves the documented policy `branch.zero_impedance` (`fuse` default,
   `error` refuses), `False` refuses, a map uses that map (how a solve shares ONE map
-  across the fundamental and every harmonic order). When fusion applies, the returned
-  `YBus.Y` is the reduced `[*batch, H, M, M]`, `YBus.index is fusion.index`, and the new
-  field `YBus.fusion` carries the map. The fused branches are dropped from a shallow grid
-  view before stamping (`_unfused_view`), so no builder sees a singular impedance.
+  across the fundamental and every harmonic order), and the singleton `NO_FUSION`
+  (`_fusion.py`) says the resolution has already run and produced no map, which is what a
+  solve passes down so the assembler does not walk the branch list again to rediscover
+  the empty answer (`resolve_fusion` takes the same value, plus `zero=`). When fusion
+  applies, the returned `YBus.Y` is the reduced `[*batch, H, M, M]`, `YBus.index is
+  fusion.index`, and the field `YBus.fusion` carries the map. The fused branches are
+  dropped from a shallow grid view before stamping (`_unfused_view`), so no builder sees a
+  singular impedance.
 - `branch_currents(..., fusion=None, i_inj=None)` — a fused branch has no primitive block,
   so its terminal current comes from Kirchhoff's law at the fused rows instead: the defect
   `d = i_inj − Y_network_without_fused_branches · V` (assembled once in the FULL layout)

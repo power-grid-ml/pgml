@@ -132,35 +132,55 @@ def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:
     Makes implicit modeling explicit, e.g. that a neutral is being modeled because a
     node carries ``Phase.N`` (so WYE loads there return into the neutral, not ground).
     Call once per assemble/solve after :func:`resolve_asymmetric`.
-    """
-    neutral_nodes = [nd.id for nd in grid.nodes if Phase.N in nd.phases]
-    if neutral_nodes:
-        logger.info(
-            "pgml: NEUTRAL modeled as a solved row at %d node(s): %s "
-            "(WYE appliances there return into Phase.N, not ground).",
-            len(neutral_nodes),
-            neutral_nodes,
-        )
-    else:
-        logger.info(
-            "pgml: no Phase.N present — WYE appliances return to ground "
-            "(3-wire / solidly-grounded model)."
-        )
 
-    appliances = [a for a in grid.appliances if isinstance(a, InjectionAppliance)]
-    if appliances:
-        counts: dict[str, int] = {}
-        for a in appliances:
-            c = resolve_connection(a).value
-            counts[c] = counts.get(c, 0) + 1
-        logger.info(
-            "pgml: %d load/gen connection(s): %s; calculation = %s.",
-            len(appliances),
-            ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
-            "ASYMMETRIC (per-phase)" if asymmetric else "SYMMETRIC (balanced split)",
-        )
+    The summary counts nodes and appliances, which on a large grid costs more than the
+    log call itself, so it is built only when the INFO level is enabled. The modeling
+    WARNINGS of :func:`log_line_models` are emitted either way.
+    """
+    if logger.isEnabledFor(logging.INFO):
+        neutral_nodes = [nd.id for nd in grid.nodes if Phase.N in nd.phases]
+        if neutral_nodes:
+            logger.info(
+                "pgml: NEUTRAL modeled as a solved row at %d node(s): %s "
+                "(WYE appliances there return into Phase.N, not ground).",
+                len(neutral_nodes),
+                neutral_nodes,
+            )
+        else:
+            logger.info(
+                "pgml: no Phase.N present — WYE appliances return to ground "
+                "(3-wire / solidly-grounded model)."
+            )
+
+        appliances = [a for a in grid.appliances if isinstance(a, InjectionAppliance)]
+        if appliances:
+            counts: dict[str, int] = {}
+            for a in appliances:
+                c = resolve_connection(a).value
+                counts[c] = counts.get(c, 0) + 1
+            logger.info(
+                "pgml: %d load/gen connection(s): %s; calculation = %s.",
+                len(appliances),
+                ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
+                "ASYMMETRIC (per-phase)"
+                if asymmetric
+                else "SYMMETRIC (balanced split)",
+            )
 
     log_line_models(grid)
+
+
+def _line_model_name(line: Line) -> str:
+    """Which frequency-dependent model one line is assembled with, as a name.
+
+    ``"unresolved"`` when neither a typed ``harmonic_line_model`` nor an explicit
+    ``resistance_frequency`` law says, which is what the modeling WARNING reports.
+    """
+    return line.harmonic_line_model or (
+        "explicit resistance_frequency"
+        if _has_resistance_law(line.resistance_frequency)
+        else "unresolved"
+    )
 
 
 def log_line_models(grid: Grid) -> None:
@@ -179,22 +199,19 @@ def log_line_models(grid: Grid) -> None:
     lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
     if not lines:
         return
-    counts: dict[str, int] = {}
-    unresolved_ids: list[int] = []
-    for ln in lines:
-        name = ln.harmonic_line_model or (
-            "explicit resistance_frequency"
-            if _has_resistance_law(ln.resistance_frequency)
-            else "unresolved"
+    unresolved_ids = [
+        int(ln.id) for ln in lines if _line_model_name(ln) == "unresolved"
+    ]
+    if logger.isEnabledFor(logging.INFO):
+        counts: dict[str, int] = {}
+        for ln in lines:
+            name = _line_model_name(ln)
+            counts[name] = counts.get(name, 0) + 1
+        logger.info(
+            "pgml: %d line harmonic model(s): %s.",
+            len(lines),
+            ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
         )
-        counts[name] = counts.get(name, 0) + 1
-        if name == "unresolved":
-            unresolved_ids.append(int(ln.id))
-    logger.info(
-        "pgml: %d line harmonic model(s): %s.",
-        len(lines),
-        ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
-    )
     if unresolved_ids:
         logger.warning(
             "pgml: %d of %d lines have no harmonic line model and are assembled from "

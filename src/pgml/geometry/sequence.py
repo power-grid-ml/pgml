@@ -84,6 +84,20 @@ def fit_equivalent_rdc(r1, f0, freqs_ref: Tensor, *, iters: int = 12) -> Tensor:
     return rdc
 
 
+def _reference_frequency_only(f: Tensor, f0t: Tensor) -> bool:
+    """Does ``f`` hold the reference frequency ``f0t`` and nothing else?
+
+    The study's frequency list is a structural input, never a fitted quantity, so the
+    comparison is read under ``no_grad`` (one host read per assembly) — and it is
+    skipped altogether while either side carries a gradient, which keeps the general
+    expression (and its derivative in the frequency) in charge for such a caller.
+    """
+    if f.requires_grad or f0t.requires_grad:
+        return False
+    with torch.no_grad():
+        return bool(torch.all(f == f0t))
+
+
 def skin_resistance_multiplier(r1, f0, freqs: Tensor) -> Tensor:
     """Skin-effect resistance multiplier ``m(h)`` ``[*B, H]`` (``m(f0) = 1`` exactly).
 
@@ -91,11 +105,21 @@ def skin_resistance_multiplier(r1, f0, freqs: Tensor) -> Tensor:
     ``f0`` (:func:`fit_equivalent_rdc`). This is the SAME Bessel ``I0/I1`` internal
     resistance the Carson geometry path uses, with the earth-return term DROPPED — the
     positive-sequence resistance growth without the earth floor. NO earth return.
+
+    At the reference frequency the multiplier is the exact constant 1 for every ``R1``
+    — numerator and denominator are the same expression — so a request for ``f0`` alone
+    returns ones directly instead of fitting ``Rdc`` and evaluating the Bessel ratio
+    twice. That is the FUNDAMENTAL-frequency assembly of every feeder whose lines carry
+    the positive-sequence or sequence-aware model, which would otherwise pay a few
+    hundred elementwise operations per solve for a known answer.
     """
     rdt = _rdtype(freqs)
     dev = freqs.device
     f = freqs.to(rdt).reshape(-1)  # [H]
     f0t = _to(f0, rdt, dev).reshape(1)
+    if _reference_frequency_only(f, f0t):
+        r1t = _to(r1, rdt, dev)
+        return torch.ones((*r1t.shape, f.shape[0]), dtype=rdt, device=dev)
     rdc = fit_equivalent_rdc(r1, f0, freqs)  # [*B]
     r_f = internal_impedance(rdc, f).real  # [*B, H]
     r_0 = internal_impedance(rdc, f0t).real  # [*B, 1]
