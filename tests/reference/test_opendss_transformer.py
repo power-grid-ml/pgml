@@ -66,7 +66,7 @@ except ImportError:
 if not _OPENDSS_AVAILABLE:
     pytest.skip("opendssdirect not installed", allow_module_level=True)
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 from pgml.assembly import assemble_ybus, build_injections, node_phase_index  # noqa: E402
 from pgml.convert.opendss import PhaseMode, to_grid  # noqa: E402

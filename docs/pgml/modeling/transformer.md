@@ -141,16 +141,17 @@ because a delta coil's own base is `3·u_LL²/S`.
   (pandapower `si0_hv_partial`), and a neutral earthing impedance `3·Z_N` (pandapower
   `xn_ohm`/`rn_ohm`, OpenDSS `Rneut`/`Xneut`, which the OpenDSS converter refuses).
 - Two-winding units only. No three-winding units and no regulators.
-- The magnetizing branch is a shunt on one terminal, outside the leakage transform. Which
-  terminal is the documented choice `transformer.magnetizing_placement`: `from_terminal`,
-  the shipped default, puts it on the HV/from diagonal, so core loss does not see the leakage
-  drop and is independent of loading; `to_terminal` is OpenDSS's own placement, which
-  attaches the whole branch to its last winding's terminal; `split` is power-grid-model's,
-  half on each terminal. On a 500 kVA 20/0.4 kV unit loaded from 0 to 500 kW, `to_terminal`
-  reproduces a live OpenDSS solve to between 3e-10 and 2e-9 pu, while the default deviates
-  by 9.2e-5 pu at a 0.1 % magnetizing current, 2.2e-4 pu at 0.5 % and 8.2e-4 pu at 2 %, and
-  `split` by half of that. `split` reproduces power-grid-model to its magnetizing-free
-  tolerance of 1e-8 pu.
+- The magnetizing branch defaults to `split`: half on each terminal, referred to
+  each terminal's voltage base. `from_terminal` places it entirely on the from/HV
+  terminal; `to_terminal` places it on the to/LV terminal, as OpenDSS does for the last
+  winding of a two-winding transformer. These are alternative equivalent-circuit
+  choices. Use `defaults.use_preset("opendss")` for OpenDSS conformance and
+  `defaults.use_preset("power-grid-model")` for power-grid-model conformance.
+  On the measured 500 kVA 20/0.4 kV unit, the OpenDSS placement agrees within
+  3e-10 to 2e-9 pu; the full from-terminal model differs by 9.2e-5 pu at 0.1 %
+  magnetizing current, 2.2e-4 pu at 0.5 %, and 8.2e-4 pu at 2 %. The split model's
+  difference is about half as large. Reference agreement tests select the reference's
+  model rather than treating a default mismatch as solver error.
 - The winding resistance follows `R(f) = R · m(f) · (f/f₀ if the unit holds X/R constant
   else 1)`. Here `m(f)` is the `resistance_frequency` multiplier, a constant, the Carson skin
   law or a sampled curve, and the second factor is OpenDSS's `XRConst`, carried per

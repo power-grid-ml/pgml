@@ -77,7 +77,7 @@ except ImportError:
 if not _OPENDSS_AVAILABLE:
     pytest.skip("opendssdirect or pandapower not installed", allow_module_level=True)
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 from pgml.assembly import assemble_ybus, node_phase_index  # noqa: E402
 from pgml.convert.pandapower import to_grid as pp_to_grid  # noqa: E402

@@ -240,24 +240,23 @@ def log_synthesized_geometry_radius(lines) -> None:
     1 kHz moves by a factor of 20. The combination is a modeling error, not a refinement.
     """
     model = defaults.get("line.geometry.internal_inductance")
-    if model == "gmr":
-        return
-    n_synth = sum(
-        1
+    affected_models = [
+        ln.conductor_geometry.internal_inductance or model
         for ln in lines
         if ln.conductor_geometry is not None
+        and (ln.conductor_geometry.internal_inductance or model) != "gmr"
         and ln.conductor_geometry.provenance is not None
         and ln.conductor_geometry.provenance.extra.get("synth_unphysical") == "True"
-    )
-    if n_synth:
+    ]
+    if affected_models:
         logger.warning(
-            "pgml: line.geometry.internal_inductance=%r uses the conductor RADIUS, but "
+            "pgml: resolved internal_inductance=%s uses the conductor RADIUS, but "
             "%d line(s) carry a synthesized geometry whose radius is a placeholder "
             "(GMR >= radius, tagged synth_unphysical). Their harmonic impedance will be "
             "dominated by that placeholder. Use 'gmr' for synthesized geometries, or "
             "give these lines measured conductor data.",
-            model,
-            n_synth,
+            ", ".join(sorted(set(affected_models))),
+            len(affected_models),
         )
 
 

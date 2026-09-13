@@ -14,7 +14,7 @@ import torch
 from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.grids import synthetic_feeder
 from pgml.solver import prepare_power_flow, solve_power_flow
-from pgml.solver.harmonic import lu_factor_system
+from pgml.solver.harmonic import lu_factor_system, solve_factored
 
 pytestmark = pytest.mark.gpu
 
@@ -37,6 +37,19 @@ def test_auto_backend_is_dense_on_cuda():
     n = 600  # above the CPU sparse threshold
     y = (torch.eye(n, dtype=torch.complex128) * 2.0).cuda()
     assert lu_factor_system(y, backend="auto").backend == "dense"
+
+
+def test_interleaved_shared_rhs_axis_parity():
+    """CUDA preserves ``Y=[B,1,H,N,N]`` / ``I=[B,T,H,N]`` batch alignment."""
+    b, steps, h, n = 2, 4, 3, 5
+    torch.manual_seed(19)
+    y = torch.randn(b, 1, h, n, n, dtype=torch.complex128)
+    y = y + (n + 2) * torch.eye(n, dtype=torch.complex128)
+    rhs = torch.randn(b, steps, h, n, dtype=torch.complex128)
+    cpu = solve_factored(lu_factor_system(y, equilibrate="off"), rhs)
+    gpu = solve_factored(lu_factor_system(y.to(CUDA), equilibrate="off"), rhs.to(CUDA))
+    assert gpu.shape == rhs.shape and gpu.device.type == "cuda"
+    torch.testing.assert_close(gpu.cpu(), cpu, rtol=1e-12, atol=1e-12)
 
 
 def test_power_flow_parity_large_grid_auto_backend():

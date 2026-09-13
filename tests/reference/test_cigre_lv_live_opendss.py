@@ -69,7 +69,7 @@ try:
 except ImportError:  # pragma: no cover - environment guard
     pytest.skip("opendssdirect not installed", allow_module_level=True)
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 # ---------------------------------------------------------------------------
 # Shared test parameters

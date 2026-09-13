@@ -42,7 +42,7 @@ except ImportError:
 if not _OPENDSS_AVAILABLE:
     pytest.skip("opendssdirect not installed", allow_module_level=True)
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 from pgml.errors import ConversionError  # noqa: E402
 from pgml.evaluation.oracles.opendss_scenario_oracle import (  # noqa: E402

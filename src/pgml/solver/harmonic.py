@@ -678,39 +678,29 @@ class _SciPySparseLU:
         return np.concatenate(parts, axis=1)
 
     def solve(self, rhs: Tensor, trans: str = "N") -> Tensor:
-        """Solve against every RHS in ``rhs`` ``[*scenario, *fb, m]`` -> same shape.
+        """Solve against every RHS in ``rhs`` broadcastable with ``[*fb, m]``.
 
-        Identical broadcasting contract to :func:`_lu_solve_shared`: the trailing
-        ``fb`` dims of the broadcast batch select the factorization, every leading
-        scenario dim becomes an extra RHS column of that factorization.
+        Identical broadcasting contract to :func:`_lu_solve_shared`: non-singleton
+        factor-batch axes select the factorization, while extra and singleton axes
+        become multiple right-hand sides of that factorization.
         """
         import numpy as np
 
         m = self.m
         fb = self.fb
-        nfb = len(fb)
         fb_numel = 1
         for sz in fb:
             fb_numel *= sz
         batch = torch.broadcast_shapes(fb, rhs.shape[:-1])
         rhs_b = rhs.detach().to(dtype=self.dtype).broadcast_to(*batch, m)
-
-        if fb_numel == 1:
-            k = 1
-            for sz in batch:
-                k *= sz
-            cols = rhs_b.reshape(k, m).transpose(0, 1).contiguous().numpy()  # [m, k]
-            sol = self._solve_cols(self.lus[0], np.ascontiguousarray(cols), trans)
-            out = torch.from_numpy(np.ascontiguousarray(sol))
-            return out.transpose(0, 1).reshape(*batch, m).to(self.dtype)
-
         nb = len(batch)
-        n_sb = nb - nfb
-        sb = batch[:n_sb]
+        factor_axes, shared_axes, factor_shape, shared_shape = _factor_batch_layout(
+            fb, batch
+        )
         k = 1
-        for sz in sb:
+        for sz in shared_shape:
             k *= sz
-        perm = list(range(n_sb, nb)) + [nb] + list(range(n_sb))  # [*fb, m, *sb]
+        perm = [*factor_axes, nb, *shared_axes]  # [*factor, m, *shared]
         cols = rhs_b.permute(*perm).reshape(fb_numel, m, k).contiguous().numpy()
         if (
             _SPARSE_SOLVE_MAX_THREADS > 1
@@ -733,9 +723,10 @@ class _SciPySparseLU:
                 for i in range(fb_numel)
             ]
         sol = torch.from_numpy(np.ascontiguousarray(np.stack(sols, 0)))
-        sol = sol.reshape(*fb, m, *sb).to(self.dtype)
-        inv = list(range(nfb + 1, nfb + 1 + n_sb)) + list(range(nfb)) + [nfb]
-        return sol.permute(*inv)  # [*scenario, *fb, m]
+        sol = sol.reshape(*factor_shape, m, *shared_shape).to(self.dtype)
+        current_axes = [*factor_axes, nb, *shared_axes]
+        inverse = [current_axes.index(axis) for axis in range(nb + 1)]
+        return sol.permute(*inverse)  # [*batch, m]
 
 
 def _sum_to_shape(t: Tensor, shape: tuple) -> Tensor:
@@ -1124,14 +1115,13 @@ def _linear_solve_grad_matrix(
     outer product is never materialised: the backward memory is the size of ``A``.
     """
     m = v.shape[-1]
-    nfb = len(fb)
     fb_numel = 1
     for sz in fb:
         fb_numel *= sz
     batch = torch.broadcast_shapes(fb, v.shape[:-1], lam.shape[:-1])
     nb = len(batch)
-    n_sb = nb - nfb
-    perm = list(range(n_sb, nb)) + list(range(n_sb)) + [nb]  # [*fb, *sb, m]
+    factor_axes, shared_axes, _, _ = _factor_batch_layout(fb, batch)
+    perm = [*factor_axes, *shared_axes, nb]  # [*factor, *shared, m]
     lam_g = lam.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
     v_g = v.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
     gy = -torch.einsum("fki,fkj->fij", lam_g, v_g.conj())  # [fb_numel, m, m]
@@ -1510,70 +1500,73 @@ def lu_factor_system(
     )
 
 
+def _factor_batch_layout(
+    factor_batch: tuple[int, ...], batch: tuple[int, ...]
+) -> tuple[list[int], list[int], tuple[int, ...], tuple[int, ...]]:
+    """Separate factor-selecting axes from axes that share a factorization.
+
+    PyTorch broadcasting right-aligns ``factor_batch`` with ``batch``. A
+    non-singleton factor axis selects a distinct matrix; an extra RHS axis or a
+    singleton factor axis selects another right-hand side for the same matrix. The
+    latter matters for layouts such as ``factor_batch=[B, 1, H]`` and
+    ``batch=[B, T, H]``, where the middle step axis shares each ``(B, H)`` factor.
+    """
+    aligned = (1,) * (len(batch) - len(factor_batch)) + factor_batch
+    factor_axes = [axis for axis, size in enumerate(aligned) if size != 1]
+    shared_axes = [axis for axis, size in enumerate(aligned) if size == 1]
+    factor_shape = tuple(batch[axis] for axis in factor_axes)
+    shared_shape = tuple(batch[axis] for axis in shared_axes)
+    return factor_axes, shared_axes, factor_shape, shared_shape
+
+
 def _lu_solve_shared(
     lu: Tensor, piv: Tensor, rhs: Tensor, *, adjoint: bool = False
 ) -> Tensor:
     """Solve ``LU x = rhs`` reusing ONE factorization across a whole scenario batch.
 
     ``lu`` / ``piv`` carry the factorization's own batch ``*fb`` (``lu`` is
-    ``[*fb, m, m]``, ``piv`` is ``[*fb, m]``); ``rhs`` is ``[*scenario, *fb, m]`` where
-    the leading ``*scenario`` dims index independent right-hand sides that SHARE the
-    factorization (the network is constant across the batch — only the injections vary).
-    Those scenario dims are folded into the trailing multiple-RHS axis of
+    ``[*fb, m, m]``, ``piv`` is ``[*fb, m]``); ``rhs`` is broadcastable with
+    ``[*fb, m]``. Every extra RHS axis and every axis where ``fb`` is singleton indexes
+    independent right-hand sides that SHARE the factorization. Those axes are folded
+    into the trailing multiple-RHS axis of
     :func:`torch.linalg.lu_solve`, so the factorization is solved against all
-    ``prod(scenario)`` columns at once and is NEVER broadcast/replicated across the batch.
+    shared columns at once and is NEVER broadcast/replicated across the batch.
     Memory is ``O(prod(fb)*m^2 + prod(batch)*m)`` instead of the ``O(prod(batch)*m^2)`` a
     per-scenario LU broadcast would cost — the difference between fitting and OOMing for a
     large batch (a ``[B, H, N, N]`` LU tile dwarfs the ``[B, H, N]`` solution). Fully
-    differentiable; returns ``[*scenario, *fb, m]`` (same shape ``solve`` would give).
+    differentiable; returns ``[*batch, m]`` (same shape ``solve`` would give).
     ``adjoint`` solves ``Aᴴ x = rhs`` with the same factors (no re-factorization) — the
     adjoint system of a linear solve.
     """
     m = lu.shape[-1]
     fb = tuple(lu.shape[:-2])
-    nfb = len(fb)
-    fb_numel = 1
-    for sz in fb:
-        fb_numel *= sz
     batch = torch.broadcast_shapes(fb, rhs.shape[:-1])  # full leading batch
     rhs_b = rhs.broadcast_to(*batch, m)  # [*batch, m]
-
-    if fb_numel == 1:
-        # Exactly one factorization (no per-harmonic axis, or a singleton one): EVERY
-        # leading dim is just another right-hand side. Collapse them into the columns.
-        k = 1
-        for sz in batch:
-            k *= sz
-        lu_k = lu.reshape(m, m)
-        piv_k = piv.reshape(m)
-        cols = rhs_b.reshape(k, m).transpose(0, 1).contiguous()  # [m, k]
-        sol = torch.linalg.lu_solve(lu_k, piv_k, cols, adjoint=adjoint)  # [m, k]
-        return sol.transpose(0, 1).reshape(*batch, m)
-
-    # Distinct factorizations along the trailing ``nfb`` dims of ``batch`` (== ``fb``);
-    # the leading dims are the scenario batch -> fold them into the column axis.
     nb = len(batch)
-    n_sb = nb - nfb
-    sb = batch[:n_sb]
+    factor_axes, shared_axes, factor_shape, shared_shape = _factor_batch_layout(
+        fb, batch
+    )
     k = 1
-    for sz in sb:
+    for sz in shared_shape:
         k *= sz
-    perm = list(range(n_sb, nb)) + [nb] + list(range(n_sb))  # [*fb, m, *sb]
-    cols = rhs_b.permute(*perm).reshape(
-        *fb, m, k
-    )  # [*fb, m, K] (contiguous after reshape)
-    sol = torch.linalg.lu_solve(lu, piv, cols, adjoint=adjoint)  # [*fb, m, K]
-    sol = sol.reshape(*fb, m, *sb)
-    inv = list(range(nfb + 1, nfb + 1 + n_sb)) + list(range(nfb)) + [nfb]
-    return sol.permute(*inv)  # [*scenario, *fb, m]
+    perm = [*factor_axes, nb, *shared_axes]  # [*factor, m, *shared]
+    cols = rhs_b.permute(*perm).reshape(*factor_shape, m, k)
+    lu_f = lu.reshape(*factor_shape, m, m)
+    piv_f = piv.reshape(*factor_shape, m)
+    sol = torch.linalg.lu_solve(lu_f, piv_f, cols, adjoint=adjoint)
+    sol = sol.reshape(*factor_shape, m, *shared_shape)
+    current_axes = [*factor_axes, nb, *shared_axes]
+    inverse = [current_axes.index(axis) for axis in range(nb + 1)]
+    return sol.permute(*inverse)  # [*batch, m]
 
 
 def back_substitute(fac: FactoredSystem, rhs: Tensor) -> Tensor:
     """Back-substitute ``rhs`` against the factors, whichever backend holds them.
 
     The RHS lives in the factored matrix's own space: the FULL ``N`` rows in Norton
-    mode, the FREE rows only in ideal-slack mode. ``rhs`` is ``[*scenario, *fb, m]``
-    and the result has the broadcast shape (see :func:`_lu_solve_shared`). This is
+    mode, the FREE rows only in ideal-slack mode. ``rhs`` is broadcastable against the
+    factor batch and the result has their broadcast shape (see
+    :func:`_lu_solve_shared`). This is
     the single dispatch point every factored solve — plain
     (:func:`solve_factored`) or low-rank-updated
     (:func:`pgml.solver.lowrank.solve_factored_updated`) — goes through.

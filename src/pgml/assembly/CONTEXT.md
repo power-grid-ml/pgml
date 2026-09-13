@@ -159,13 +159,14 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
 - LINE harmonic models (`_line_block_groups` dispatches on the typed
   `Line.harmonic_line_model`, grouping lines by model + skin flag + phase count):
   `conductor_geometry` -> the Carson/Deri `_geometry_block_groups`, which reads the
-  conductor internal-inductance model from `line.geometry.internal_inductance` at
+  conductor internal-inductance model from `LineGeometry.internal_inductance`, falling
+  back to `line.geometry.internal_inductance` at
   ASSEMBLY time (so a defaults override applies without reimporting) and passes it to
   `line_constants`; `sequence_aware` ->
   `_sequence_aware_block_groups` (`Z_abc(f0)` -> `Z1`/`Z0`, each frequency-corrected,
   recombined; the per-line `earth_return` coefficients are stacked into tensors so a
   tensor coefficient keeps its gradient, while the DISCRETE options — skin flag,
-  `x0_frequency`, `r0_includes_earth_return` — form the batching key); everything else ->
+  `x0_frequency`, `x0_nonnegative`, `r0_includes_earth_return` — form the batching key); everything else ->
   `_line_rx_block_groups`, whose resistance is
   `R(h) = m(h)·(R − R_earth) + R_earth` with `R_earth` the mutual entries (the
   earth-return path, which the skin multiplier must NOT scale) and `m(h)` either the
@@ -551,3 +552,8 @@ stand-in and never by editing the grid.
   `tests/reference/test_switch_fusion_pandapower.py`,
   `tests/reference/test_switch_fusion_pgm.py`,
   `tests/differentiability/test_fusion_gradcheck.py`, `tests/gpu/test_fusion_parity.py`.
+
+The default transformer magnetizing placement is `split`. Conformance uses
+`pgml.defaults.use_preset` around conversion/assembly/solve to select the reference
+placement and frequency law. Per-line geometry model selection also controls the
+synthesized-radius warning.

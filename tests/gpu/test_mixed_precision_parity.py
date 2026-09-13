@@ -146,15 +146,9 @@ def test_harmonic_flow_mixed_precision_parity():
 
 def test_condition_estimate_parity():
     grid, _ = cigre_lv_full_grid()
-    from pgml.assembly import node_phase_index
-    from pgml.solver.power_flow import _slack_rows_and_vref, _y_eff_and_islack
-
-    idx = node_phase_index(grid)
     est = []
     for device in (torch.device("cpu"), CUDA):
-        y, _ = _y_eff_and_islack(
-            grid, float(grid.base_frequency_hz), idx, CDT, device, "ideal", None
-        )
-        rows, _ = _slack_rows_and_vref(grid, idx, torch.float64, CDT, device)
-        est.append(estimate_condition(lu_factor_system(y, fixed_rows=rows)))
+        system = prepare_power_flow(grid, dtype=CDT, device=device, slack="ideal")
+        assert system.fusion is not None
+        est.append(estimate_condition(system.factorization))
     assert est[0] == pytest.approx(est[1], rel=1e-6)

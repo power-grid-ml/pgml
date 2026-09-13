@@ -195,6 +195,13 @@ low-rank update is built from one frequency's stamps.  ``load_shunt`` selects th
 device Norton shunt.  The pre-solve connectivity and zero-impedance checks run once for the
 whole study.
 
+A per-scenario operating point ``[B]`` may be combined with a deeper harmonic-injection
+sequence ``[B, T]``.  The result is ``[B, T, H, N]``: the fundamental voltage of each
+scenario is broadcast across its ``T`` injection steps.  When the device shunt makes the
+harmonic matrix scenario-dependent, its layout is ``[B, 1, H, N, N]``.  The singleton
+step axis records that each ``(B, H)`` factorization serves all ``T`` right-hand sides, so
+the dense, sparse and block backends do not tile or refactor the matrix per step.
+
 Symmetry kwarg
 --------------
 
@@ -379,9 +386,11 @@ loop)::
         result = solve_power_flow(grid, slack="ideal", operating_point=op,
                                    system=system)
 
-The reused system must come from the SAME grid, ``slack``, ``dtype``,
+The reused system must come from the SAME grid, modeling defaults, ``slack``, ``dtype``,
 ``device``, ``param_overrides``, and ``branch_states`` as the solve that
-consumes it. ``slack`` / ``dtype`` / ``device`` / size are validated cheaply on
+consumes it. Modeling defaults are captured during preparation and compared on reuse, so
+a system prepared under one :func:`pgml.defaults.use_preset` context is rejected under a
+different preset. ``slack`` / ``dtype`` / ``device`` / size are validated cheaply on
 every call; :func:`~pgml.solver.prepare_power_flow` additionally records the
 grid's :func:`~pgml.topology.network_fingerprint` (every node, branch, source,
 shunt and their parameter values) at prepare time, and
@@ -389,10 +398,11 @@ shunt and their parameter values) at prepare time, and
 a same-size grid whose topology or impedances have since changed is REJECTED
 with :class:`~pgml.errors.InputError` instead of silently solving with the
 stale factorization. ``param_overrides`` / ``branch_states`` equality remains
-the caller's own contract (not fingerprinted). Reuse is a FORWARD-only
-optimization: the IFT backward always rebuilds its differentiable system from
-the parameter leaves, so gradients are byte-identical to a solve without
-``system``.
+the caller's own contract (not fingerprinted). Reuse is a FORWARD-only optimization: the
+IFT backward always rebuilds its differentiable system from the parameter leaves. The
+autograd node retains an immutable snapshot of the resolved forward defaults, so a delayed
+backward keeps the same physical model after a preset context exits or
+:func:`pgml.defaults.reload` changes the process-wide defaults source.
 
 Per-phase / connection-aware harmonic injection
 -----------------------------------------------

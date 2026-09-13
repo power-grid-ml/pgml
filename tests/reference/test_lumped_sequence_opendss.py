@@ -33,6 +33,7 @@ import torch
 
 from pgml.assembly import assemble_network_ybus, node_phase_index
 from pgml.defaults import get as cfg
+from pgml.defaults import use_preset
 from pgml.evaluation.oracles.opendss_oracle import _build_seq_aware_circuit_stub
 from pgml.geometry.synthesis import apply_sequence_aware_harmonic_model
 from pgml.schemas.grid_schema import EarthReturnModel, Grid, Line, Node, Phase, Source
@@ -45,6 +46,14 @@ W0 = 2.0 * math.pi * F0
 ORDERS = (1, 3, 5, 7, 11, 13, 25)
 CDT = torch.complex128
 RTOL_MATCHED = 1e-8  # command-string precision (measured ~1e-10)
+
+
+@pytest.fixture(autouse=True)
+def reference_model_choices():
+    """Conformance evaluates OpenDSS's unguarded reactance law explicitly."""
+    with use_preset("opendss"):
+        yield
+
 
 # A representative LV cable: R0/R1 = 4, X0/X1 = 3 (the converter's invented ratios).
 LINE = dict(r1=0.162e-3, x1=0.0554e-3, r0=0.648e-3, x0=0.1662e-3, length=100.0)

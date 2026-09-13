@@ -270,8 +270,9 @@ def test_zero_sequence_carries_earth_damping_positive_does_not():
     # at f0 both reproduce their inputs.
     assert abs(float(z0[0].real) - p["r0"]) < 1e-12
     assert abs(float(z1[0].real) - p["r1"]) < 1e-12
-    # X scales ∝ h in BOTH sequences (geometric); R0 grows much faster than R1 (earth).
-    assert torch.allclose(z0.imag, p["x0"] * (freqs / F0), rtol=0, atol=1e-18)
+    # Earth-return reactance grows sub-linearly; Z1 stays geometrically linear.
+    assert torch.all(z0.imag[1:] < p["x0"] * (freqs[1:] / F0))
+    assert torch.all(z0.imag >= 0)
     r0_growth = float(z0.real[-1] - z0.real[0])
     r1_growth = float(z1.real[-1] - z1.real[0])
     assert (
@@ -284,7 +285,12 @@ def test_zero_sequence_reduces_to_positive_without_earth():
     freqs = _freqs()
     p = _seq_line()
     z0_no_earth = zero_sequence_harmonic_z(
-        p["r1"], p["x1"], F0, freqs, earth_resistance_coeff=0.0
+        p["r1"],
+        p["x1"],
+        F0,
+        freqs,
+        earth_resistance_coeff=0.0,
+        earth_reactance_coeff=0.0,
     )
     z1 = positive_sequence_z(p["r1"], p["x1"], F0, freqs)
     assert torch.allclose(z0_no_earth, z1, atol=1e-15)

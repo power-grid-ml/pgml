@@ -45,7 +45,7 @@ from pgml.convert.opendss import PhaseMode, to_grid  # noqa: E402
 from pgml.schemas.grid_schema import Phase, Transformer  # noqa: E402
 from pgml.solver import solve_power_flow  # noqa: E402
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 _F0 = 50.0
 _KV_HV, _KV_LV, _KVA = 20.0, 0.4, 400.0

@@ -719,7 +719,12 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   `scatter_slack_solution(fac, v_free, v_fixed)` — the three building blocks a
   factored solve is made of (backend dispatch, the ideal-slack RHS correction, the
   free+slack reassembly). `solve_factored` and the low-rank update-solve below share
-  them, so the two can never drift.
+  them, so the two can never drift. Factor and RHS batch shapes follow PyTorch's
+  right-aligned broadcasting. Extra RHS axes and axes where the factor batch is
+  singleton share the same factorization and are folded into its multiple-RHS columns;
+  for example `Y=[B,1,H,N,N]` and `I=[B,T,H,N]` use one factor per `(B,H)` across all
+  `T` steps without tiling the LU. Dense, sparse, block, mixed-precision, and adjoint
+  paths use the same axis split.
 
 ## Low-rank update-solve — `pgml.solver.lowrank` (module-level public surface)
 Sherman-Morrison-Woodbury solve of `(A + U C Vᴴ) x = b` on top of a
@@ -989,3 +994,18 @@ terminal voltage):
 Effort estimate: 3-5 days including gradcheck parity against the dense path on every
 device model (ZIP, inverter control, DELTA/WYE-N incidences) and a batched benchmark; the
 risk is the control-law derivative, which today comes free from autograd.
+
+## Modeling contexts and convergence-scale reuse
+
+`PowerFlowSystem.modeling_defaults` stores the preparation defaults; a consuming solve
+rejects different defaults instead of reusing a factorization from another physical
+model. The IFT autograd node deep-copies the complete resolved defaults mapping and
+restores that stable snapshot for backward reassembly. The gradient therefore retains the
+forward model after a preset exits and after `PGML_DEFAULTS` / `defaults.reload` changes
+the process-wide source.
+
+The precision-floor row scale is shared across Newton retries, batch members and PV/PQ
+rounds. A conservative Cauchy-Schwarz bound skips its exact computation when the floor
+cannot govern. CPU non-gradient singleton matrices read magnitudes from CSR nonzeros;
+batched, gradient-carrying and accelerator matrices retain the dense expression.
+`row_column` equilibration remains available; no default-mode decision changes here.

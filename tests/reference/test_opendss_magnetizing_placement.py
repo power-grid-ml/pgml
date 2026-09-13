@@ -15,8 +15,8 @@ current sees a winding's leakage drop), not a referral difference:
 - pandapower keeps it on the LV base inside its pi shunt.
 
 pgml makes the placement an explicit, documented modeling choice,
-``transformer.magnetizing_placement`` (``from_terminal`` default / ``to_terminal`` /
-``split``), and this test measures each against a live OpenDSS solve on a 500 kVA
+``transformer.magnetizing_placement`` (``split`` default / ``from_terminal`` /
+``to_terminal``), and this test measures each against a live OpenDSS solve on a 500 kVA
 20/0.4 kV unit (``XHL = 4 %``, ``%R = 0.5`` per winding, ``%noloadloss = 0.2``) at three
 magnetizing currents and three loadings.
 
@@ -34,7 +34,7 @@ terminal voltages barely move):
 =========  =============  ==============  ==============  ==============
 
 So ``to_terminal`` reproduces OpenDSS to the solver floor (below 1e-9 pu), and the
-shipped ``from_terminal`` default is the documented deviation (~2e-4 pu at a realistic
+explicit ``from_terminal`` model has the documented deviation (~2e-4 pu at a realistic
 0.5 % magnetizing current). The Vsource is made near-ideal so that pgml's
 ``slack="ideal"`` and the DSS source coincide (the stock 2000 MVA default would
 otherwise add its own 2.5e-4 pu drop at rated load).

@@ -16,7 +16,19 @@ Resolution precedence
     explicit (user) > defaults (this module) > converter (source library)
 
 A user-supplied value always wins; a modeling default overrides whatever a converter would
-infer.
+infer.  :func:`~pgml.defaults.use_preset` temporarily selects the supported choices of a
+reference library while preserving that precedence::
+
+    import pgml.defaults as defaults
+    from pgml.solver import solve_harmonic_flow
+
+    with defaults.use_preset("opendss"):
+        result = solve_harmonic_flow(grid, [1, 3, 5])
+
+The selection is local to the context, including concurrent threads and tasks, and the
+previous selection is restored on exit.  Keep conversion, direct geometry calculations,
+preparation and solving in the same context.  See :doc:`/pgml/modeling/presets` for the
+available presets and their scope.
 
 Overriding the defaults file
 -----------------------------
@@ -63,8 +75,8 @@ Upstream-grid (slack Source) modelling
 Where a model is chosen rather than a value
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Several keys select a MODEL, with a shipped choice that reproduces the previous behaviour and
-a documented alternative for a specific comparison:
+Several keys select a MODEL, with a shipped choice and documented alternatives for
+reference comparisons:
 
 ``line.harmonic_model.three_phase`` / ``.single_phase``
     Which frequency-dependent line model a converter writes into
@@ -77,8 +89,9 @@ a documented alternative for a specific comparison:
     ``bessel``.
 
 ``line.earth_return.x0_frequency``
-    ``linear`` (shipped) or ``carson_sublinear``, the zero-sequence reactance law of the
-    lumped sequence-aware model.
+    ``carson_sublinear`` (shipped) or ``linear``, the zero-sequence reactance law of the
+    lumped sequence-aware model. ``line.earth_return.x0_nonnegative`` guards its
+    extrapolation by default. See :doc:`/pgml/modeling/presets` for reference choices.
 
 ``branch.zero_impedance``
     ``fuse`` (shipped) collapses an ideal branch's terminal rows exactly; ``error`` refuses
@@ -87,8 +100,8 @@ a documented alternative for a specific comparison:
     with no impedance data.
 
 ``transformer.magnetizing_placement``
-    ``from_terminal`` (shipped), ``to_terminal`` (OpenDSS's placement) or ``split``
-    (power-grid-model's).  ``transformer.harmonic_resistance.law`` and
+    ``split`` (shipped, power-grid-model's placement), ``to_terminal`` (OpenDSS's placement)
+    or ``from_terminal``. ``transformer.harmonic_resistance.law`` and
     ``transformer.zero_sequence.*`` are the other two transformer model choices; see
     :doc:`/pgml/modeling/transformer`.
 

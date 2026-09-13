@@ -51,6 +51,8 @@ norm under ``no_grad``). Honors input device/dtype; runs unchanged on CPU/CUDA.
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import logging
 import math
 from dataclasses import asdict, dataclass, field
@@ -1715,12 +1717,14 @@ class PowerFlowSystem:
     iteration and diagnostics; when parameter gradients are requested, the IFT
     backward rebuilds its differentiable system from the leaves as always, so
     differentiability is unchanged. The system must come from the SAME grid,
-    slack, dtype, device, ``param_overrides`` and ``branch_states`` as the solve
-    that consumes it. Validated per solve: slack / dtype / device / size and the
-    grid's :func:`~pgml.topology.network_fingerprint` (nodes, branches, sources,
-    shunts and their parameter values) — a same-size grid with changed topology or
-    impedances is rejected instead of silently reusing the stale factorization.
-    ``param_overrides`` / ``branch_states`` equality remains the caller's contract.
+    modeling defaults, slack, dtype, device, ``param_overrides`` and
+    ``branch_states`` as the solve that consumes it. Validated per solve: the resolved
+    defaults, slack / dtype / device / size and the grid's
+    :func:`~pgml.topology.network_fingerprint` (nodes, branches, sources, shunts and
+    their parameter values) — a different preset or a same-size grid with changed
+    topology or impedances is rejected instead of silently reusing the stale
+    factorization. ``param_overrides`` / ``branch_states`` equality remains the
+    caller's contract.
 
     With ``branch_states_method="woodbury"`` the cached system describes the sweep's
     BASE network instead: ``y_eff`` is a matrix-free
@@ -1739,6 +1743,7 @@ class PowerFlowSystem:
     factorization: object  # FactoredSystem of y_eff (or its LowRankUpdate)
     static_leaves: tuple[Tensor, ...]  # grid + overrides + states leaves
     network_fp: str = ""  # network_fingerprint(grid) at prepare time
+    modeling_defaults: Optional[dict] = None  # modeling choices used during preparation
     precision: str = "full"  # working precision of the cached factorization
     fusion: Optional[FusionMap] = None  # the reduced row layout, when one applies
     equilibration: str = "off"  # equilibration of the cached factorization
@@ -1781,9 +1786,10 @@ def prepare_power_flow(
     ``block_rows`` and ``branch_states_method`` as in :func:`solve_power_flow`).
     Pass the result as ``solve_power_flow(..., system=...)`` to skip that work on
     every subsequent call — with the SAME ``branch_states_method``, ``precision`` and
-    ``equilibrate`` (``precision="mixed"`` caches single-precision factors, so the
-    consuming solve must run its residual-correction iteration; ``equilibrate`` decides
-    which matrix the cached factors belong to).
+    ``equilibrate`` and under the same resolved modeling defaults
+    (``precision="mixed"`` caches single-precision factors, so the consuming solve must
+    run its residual-correction iteration; ``equilibrate`` decides which matrix the
+    cached factors belong to).
 
     ``equilibrate`` is the diagonal equilibration of the factored system
     (:mod:`pgml.solver.equilibration`; ``None`` -> the documented default
@@ -1891,6 +1897,7 @@ def prepare_power_flow(
         factorization=fac,
         static_leaves=tuple(leaves),
         network_fp=network_fingerprint(grid),
+        modeling_defaults=deepcopy(defaults.defaults()),
         precision=precision,
         fusion=fusion,
         equilibration=eq_mode,
@@ -2109,8 +2116,9 @@ def solve_power_flow(
         Optional :class:`PowerFlowSystem` from :func:`prepare_power_flow` — the
         operating-point-independent solve state (index, ``Y_eff``, slack rows,
         factorization, grid leaves) computed ONCE and reused across repeated
-        solves of the SAME grid / slack / dtype / device / overrides / states
-        (e.g. the chunk loop of :func:`pgml.scenarios.run_scenarios`). Skips
+        solves of the SAME grid / modeling defaults / slack / dtype / device /
+        overrides / states (e.g. the chunk loop of
+        :func:`pgml.scenarios.run_scenarios`). Skips
         assembly, factorization, the connectivity check (prepare ran it), and
         the grid leaf walk; the IFT backward still rebuilds differentiably, so
         gradients are unchanged. The ``current_injection`` forward benefits;
@@ -2159,6 +2167,15 @@ def solve_power_flow(
             "fixed-point factorization backend of method='current_injection'."
         )
     _validate_block_solver(linear_solver, block_rows, have_system=system is not None)
+    if (
+        system is not None
+        and system.modeling_defaults is not None
+        and system.modeling_defaults != defaults.defaults()
+    ):
+        raise InputError(
+            "The provided PowerFlowSystem was prepared with different modeling defaults. "
+            "Re-prepare it within the same modeling preset as the solve."
+        )
     use_woodbury = _validate_branch_states_method(
         branch_states_method, branch_states, method
     )
@@ -4023,6 +4040,10 @@ class _IFTPowerFlow(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, v_star, real_res, n, rdt, cdt, *leaves):
+        # Backward reassembles the system. Freeze the complete resolved mapping rather
+        # than only the active preset name: PGML_DEFAULTS / reload() may change the base
+        # source before a delayed backward, and the adjoint must rebuild the forward model.
+        ctx.modeling_defaults = defaults._snapshot()
         ctx.real_res = real_res
         ctx.n = n
         ctx.rdt = rdt
@@ -4036,6 +4057,13 @@ class _IFTPowerFlow(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_v):
+        # Reassembly must use the exact forward model even after a preset context exits or
+        # the process-wide defaults source is reloaded.
+        with defaults._use_snapshot(ctx.modeling_defaults):
+            return _IFTPowerFlow._backward(ctx, grad_v)
+
+    @staticmethod
+    def _backward(ctx, grad_v):
         saved = ctx.saved_tensors
         v_star = saved[0]
         leaves = saved[1 : 1 + ctx.num_leaves]

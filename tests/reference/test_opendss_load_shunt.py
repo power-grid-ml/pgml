@@ -64,7 +64,7 @@ from pgml.schemas.grid_schema import (
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
 pytest.importorskip("opendssdirect")
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 CDT = torch.complex128
 RDT = torch.float64

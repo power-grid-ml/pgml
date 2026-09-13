@@ -2,7 +2,7 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
-`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.0.6"`) stamps the contract version
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.1.0"`) stamps the contract version
 into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
 minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
 while the library is < 1.0.0); bump the patch/minor on any contract change.
@@ -228,3 +228,14 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   differentiable in the quantities that matter — it is built from the device's P/Q and
   the fundamental solution — but `series_rl_fraction` / `motor_x_harm_pu` themselves are
   not gradient leaves.
+
+## Schema 0.1.0 / library 0.4.0
+
+- `LineGeometry.internal_inductance: Optional[Literal["gmr", "gmr_skin",
+  "gmr_power_frequency", "bessel"]] = None`; resolves at assembly time if absent.
+- `EarthReturnModel.x0_nonnegative: Optional[bool] = None`; per-line override of the
+  guarded sub-linear Carson law.
+- Both additions serialize/round-trip and accept old JSON with unset fields. A stored
+  grid with unresolved defaults is not a complete historical modeling snapshot.
+- `ConductorPlacement`, `LineGeometry`, `EarthReturnModel` are exported by
+  `pgml.schemas` as well as `grid_schema`, and appear in the generated API docs.

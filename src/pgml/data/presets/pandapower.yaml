@@ -1,0 +1,4 @@
+# The pandapower pi-equivalent transformer uses a split terminal shunt.
+# Conformance must additionally select pandapower's trafo_model="pi".
+# https://pandapower.readthedocs.io/en/latest/elements/trafo.html
+transformer.magnetizing_placement: split

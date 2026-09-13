@@ -14,7 +14,7 @@ gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
 
 ## carson.py (torch)
 - `series_impedance(x, y, gmr, rdc, rho, freqs, *, radius=None,
-  internal_inductance=INTERNAL_INDUCTANCE, power_frequency_band_hz=POWER_FREQUENCY_BAND_HZ)
+  internal_inductance=None, power_frequency_band_hz=None)
   -> Z[*B, H, N, N]` (Ω/m): Deri earth return (complex penetration depth) + geometric
   reactance + skin-effect internal impedance (Bessel `I0/I1` via continued fraction
   `i0_over_i1`). The internal RESISTANCE is always present; `internal_inductance`
@@ -45,7 +45,7 @@ gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
   `C = 2*pi*e0 * inv(P)`.
 - `kron_reduce(M, n_phase)` eliminates neutral/shield conductors (>= n_phase).
 - `line_constants(x, y, gmr, rdc, radius, rho, freqs, n_phase, *,
-  internal_inductance=..., power_frequency_band_hz=...) -> (Z[*B,H,P,P] Ω/m,
+  internal_inductance=None, power_frequency_band_hz=None) -> (Z[*B,H,P,P] Ω/m,
   C[*B,P,P] F/m)` phase-reduced. Conductor arrays are `[*B, N]`, phases first.
   NOTE: capacitance differs from OpenDSS's by 2.1212e-5 relative (the `e0` constant
   ratio), always uses the physical radius, and OpenDSS's `capradius` option is not read;
@@ -53,8 +53,10 @@ gradients flow conductor-geometry -> Z/Yc -> Y-bus -> solve -> outputs.
   constant ratio).
 - Module constants `INTERNAL_INDUCTANCE_MODELS`, `INTERNAL_INDUCTANCE` and
   `POWER_FREQUENCY_BAND_HZ` mirror `line.geometry.internal_inductance` and
-  `line.geometry.power_frequency_band_hz`. `assembly/ybus.py` reads the former at
-  ASSEMBLY time, so a defaults override applies without reimporting.
+  `line.geometry.power_frequency_band_hz` at import time for inspection. The public
+  helpers and `assembly/ybus.py` resolve omitted arguments at call/assembly time, so a
+  defaults override or modeling preset applies without reimporting; explicit arguments
+  and per-line fields still win.
 
 ## sequence.py (positive-sequence harmonic model — NO earth floor)
 The corrected R/X-line harmonic model. A balanced positive-sequence
@@ -87,7 +89,7 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
 - `carson_earth_resistance(freqs, *, coeff=π²·1e-7) -> Re[H]` (Ω/m): Carson earth-return
   resistance `Re(f)=coeff·f`, geometry-independent, ∝ f (the zero-seq damping).
 - `zero_sequence_harmonic_z(r0, x0, f0, freqs, *, skin=True,
-  earth_resistance_coeff=π²·1e-7, earth_reactance_coeff=μ0, x0_frequency="linear",
+  earth_resistance_coeff=π²·1e-7, earth_reactance_coeff=μ0, x0_frequency=None, x0_nonnegative=None,
   x0_exponent=1.0, r0_includes_earth_return=False) -> Z0[*B,H]`:
   `R0(h) = R0_cond·m_skin(h) + 3·(Re(f) − Re_offset)` and
   `X0(h) = X0·h^p [− 1.5·kx·f0·h·ln h if carson_sublinear]`, exact at f0 for every
@@ -95,8 +97,9 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   `3·Re(f0)` (real zero-sequence data; then the earth part is excluded from the skin
   multiplier) or is conductor-only (an `R0/R1`-ratio value; the earth return is added as
   an increment). `x0_frequency="carson_sublinear"` is the lumped Carson/Deri reactance
-  decay (ρ-independent, reproduces OpenDSS's `Xg` correction); `"linear"` (the default)
-  leaves the sub-linearity to the geometry path. Every coefficient may be a tensor
+  decay (ρ-independent, reproduces OpenDSS's `Xg` correction); `"carson_sublinear"` is the default, with non-negative clamping.
+  `x0_nonnegative=False` selects the unguarded reference law; `"linear"` omits the
+  correction. The guard has zero gradient below its boundary. Every coefficient may be a tensor
   (differentiable, batched over lines). Defaults come from `line.earth_return.*` /
   `line.zero_sequence.r0_includes_earth_return`; module constants
   `CARSON_EARTH_R_PER_HZ`, `CARSON_EARTH_X_PER_HZ`, `X0_FREQUENCY`, `X0_EXPONENT`,
@@ -161,10 +164,12 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
 ## Schema (grid_schema.py)
 - `ConductorPlacement(phase, x_m, y_m, gmr_m, radius_m, r_dc_ohm_per_m, is_neutral)` —
   physical fields tensor-capable (autograd through geometry).
-- `LineGeometry(conductors, earth_resistivity_ohm_m=100, provenance)`.
+- `LineGeometry(conductors, earth_resistivity_ohm_m=100, provenance,
+  internal_inductance=None)`; explicit `gmr`/`gmr_skin`/`gmr_power_frequency`/`bessel`
+  overrides the active default, and persists through grid JSON.
 - `Line.conductor_geometry: Optional[LineGeometry]` — when set, assembly
   (`_geometry_block_groups` in `assembly/ybus.py`) uses Carson for Z(h)/Yc(h) instead of
-  explicit R/L/C. Lines group by (n_phase, n_cond) and batch through `line_constants`.
+  explicit R/L/C. Lines group by (n_phase, n_cond, resolved internal_inductance) and batch through `line_constants`.
 - `Line.harmonic_line_model: Optional[Literal["geometry","sequence_aware",
   "positive_sequence","naive"]]`, `Line.harmonic_skin_effect: Optional[bool]` and
   `Line.earth_return: Optional[EarthReturnModel]` — the TYPED model selector (no free-text

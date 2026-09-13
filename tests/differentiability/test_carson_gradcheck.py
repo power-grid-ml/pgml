@@ -189,3 +189,14 @@ def test_gradient_through_assemble_and_solve():
         and torch.isfinite(rdc2.grad).all()
         and rdc2.grad.abs() > 0
     )
+
+
+@pytest.mark.parametrize("model", INTERNAL_INDUCTANCE_MODELS)
+def test_per_line_internal_inductance_assembly_gradcheck(model):
+    def fn(rdc):
+        grid = _geom_grid(rdc)
+        grid.branches[0].conductor_geometry.internal_inductance = model
+        return assemble_network_ybus(grid, [250.0, 1250.0], dtype=CDT).Y
+
+    rdc = torch.tensor(1.2e-4, dtype=RDT, requires_grad=True)
+    assert torch.autograd.gradcheck(fn, (rdc,), eps=1e-8, atol=1e-5)

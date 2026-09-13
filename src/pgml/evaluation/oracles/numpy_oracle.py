@@ -358,6 +358,11 @@ def _numpy_line_series_z(b: Line, h: int, f0: float) -> np.ndarray:
         x0_h = z0.imag * h**expo
         if law == "carson_sublinear":
             x0_h -= 1.5 * kx * f0 * h * math.log(h)
+            guard = getattr(er, "x0_nonnegative", None)
+            if guard is None:
+                guard = _d.get("line.earth_return.x0_nonnegative")
+            if guard:
+                x0_h = max(x0_h, 0.0)
         z0_h = complex(r0_cond * m0 + r_earth, x0_h)
         z_self, z_mut = (z0_h + 2.0 * z1_h) / 3.0, (z0_h - z1_h) / 3.0
         return np.where(np.eye(3, dtype=bool), z_self, z_mut)

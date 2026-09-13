@@ -36,6 +36,7 @@ Each page states its own limits. Nothing here is hidden behind a default.
 
 ## Reference tools
 
+- {doc}`presets` selects reference model choices for conformance comparisons.
 - {doc}`references/index` holds short briefs on the tools pgml reads and validates against,
   OpenDSS, pandapower and power-grid-model, including the OpenDSS harmonic and Carson
   conventions that pgml reproduces.
@@ -51,4 +52,5 @@ der-pv-storage
 error-injection
 solver-performance
 references/index
+presets
 ```

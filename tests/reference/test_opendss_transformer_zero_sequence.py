@@ -53,7 +53,7 @@ from pgml.schemas.grid_schema import (  # noqa: E402
 )
 from pgml.solver import solve_power_flow  # noqa: E402
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 _F0 = 50.0
 _ABC = (Phase.A, Phase.B, Phase.C)

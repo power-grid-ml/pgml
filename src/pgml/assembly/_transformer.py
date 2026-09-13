@@ -402,9 +402,9 @@ MAGNETIZING_PLACEMENTS = ("from_terminal", "to_terminal", "split")
 def magnetizing_placement() -> str:
     """Return the configured magnetizing-shunt placement (validated).
 
-    One of :data:`MAGNETIZING_PLACEMENTS`: ``from_terminal`` (default — the HV/from
+    One of :data:`MAGNETIZING_PLACEMENTS`: ``from_terminal`` (the HV/from
     phase diagonal), ``to_terminal`` (the LV/to diagonal, referred through the squared
-    rated-voltage ratio; OpenDSS's own placement) or ``split`` (half on each terminal;
+    rated-voltage ratio; OpenDSS's own placement) or ``split`` (default, half on each terminal;
     power-grid-model's placement). An unrecognised value raises rather than silently
     falling back.
     """

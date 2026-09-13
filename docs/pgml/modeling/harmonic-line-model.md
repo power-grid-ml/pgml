@@ -166,22 +166,21 @@ Modelling each phase as an independent single conductor with earth return, a dia
 `Z_abc` whose every diagonal carries the full earth floor, is wrong twice over. It ignores
 the inter-phase mutual coupling and it triple-counts the earth term.
 
-Scope of the model. The earth-return resistance, the dominant damping term, is universal and
-robust. The earth-return reactance sub-linearity depends on the return path. Deep earth
-(`De ≈ 658·√(ρ/f)` m, overhead) and a neutral or sheath a few centimetres away (an LV
-cable) behave differently, so pgml does not apply it generically and keeps `X0 ∝ h`. For a
-return-path-correct `Z0(h)` reactance, use the geometry path with the actual conductor and
-neutral coordinates. The earth-resistance coefficient is exposed (default Carson
-`π²·10⁻⁷`) so the damping can be tuned or matched against a reference tool, mirroring the
-user-settable `Rg`/`Xg` of OpenDSS.
+The default lumped reactance law is `carson_sublinear`:
+`X0(h) = X0·h^p − 1.5·kx·f0·h·ln(h)`, with `p=1` and `kx=μ0`.
+The earth-path term cancels from the positive sequence. Set
+`Line.earth_return.x0_frequency="linear"` to retain geometric scaling.
+Deep-earth, neutral and sheath return paths differ; measured conductor and neutral
+geometry is preferable when those details matter. The lumped law is an approximation,
+not a claim that every cable returns current through deep earth.
 
-The sub-linearity is available as an option, `line.earth_return.x0_frequency =
-carson_sublinear`, which subtracts the Carson/Deri decay `1.5·μ0·f0·h·ln h` from `X0(h)`.
-The soil resistivity cancels in that term, so it needs no extra data. It is not the
-default because it can drive `X0(h)` negative at very high orders on a cable whose stored
-`X0` is small, a property OpenDSS's own `Xg` correction shares. With the earth parameters
-matched on both sides, the lumped `sequence_aware` impedance and OpenDSS's R/X-line
-impedance agree to 1e-11 relative at every order up to 25, on all 32 lines of IEEE-33.
+`line.earth_return.x0_nonnegative` defaults to `true`: sub-linear extrapolation is
+clamped at zero if the stored X0 is too small for the requested frequency. The clamp is
+continuous, has zero derivative below the boundary, and is not differentiable at the
+boundary. It prevents negative series reactance but cannot recover missing geometry.
+Set the per-line `EarthReturnModel.x0_nonnegative=False`, or use the `opendss` preset,
+for OpenDSS's unguarded correction. Matched conformance tests disable the guard and
+match Rg/Xg and the skin-effect policy explicitly.
 
 ## The conductor's internal inductance above power frequency
 
@@ -195,7 +194,9 @@ frequencies. `pgml.geometry.internal_reactance_ratio` returns that decay,
 `0.49` at 2.5 kHz. For a 1/0 ACSR the same numbers are `1.00`, `0.97` and `0.84`, so the
 effect is a property of the conductor and not of the frequency alone.
 
-`line.geometry.internal_inductance` selects how the geometry path handles it.
+`LineGeometry.internal_inductance` selects the model per line. An unset field resolves
+from `line.geometry.internal_inductance` (including the active preset) at assembly time.
+Lines with different models share a grid and are assembled in separate vectorized groups.
 
 | value | model | use it for |
 |---|---|---|
@@ -243,7 +244,7 @@ OpenDSS itself.
 | the documented defaults | applied on import, or `apply_default_harmonic_model(grid)` | 3-phase sequence-aware, 1-phase positive-sequence | 3-phase R/X with `Rg`/`Xg` (earth in `Z0`) |
 | R/X feeder, raw `X ∝ h`, no skin or earth | nothing to set | `Z1(h) = R1 + j·X1·(f/f0)` | native 3-phase `R1/X1` LineCode (`Z1`) |
 | R/X feeder plus physical skin on R | `apply_positive_sequence_harmonic_model(grid)` | `Z1(h) = R1·m_skin(h) + j·X1·(f/f0)` | 3-phase R/X plus a skin rise OpenDSS applies only to geometry lines |
-| unbalanced 4-wire R/X feeder (`Z1` and `Z0`) | `apply_sequence_aware_harmonic_model(grid)` | `Z_abc(h)` with earth-free `Z1` and earth-damped `Z0` | native 3-phase R/X with `Rg`/`Xg`; reactance sub-linearity only via geometry |
+| unbalanced 4-wire R/X feeder (`Z1` and `Z0`) | `apply_sequence_aware_harmonic_model(grid)` | `Z_abc(h)` with earth-free `Z1` and earth-damped `Z0` | native 3-phase R/X with matched `Rg`/`Xg`, no skin correction, and the guard disabled |
 | real 3-phase conductor coordinates | set `Line.conductor_geometry` | full Carson (earth in `Z0`, skin on R) | `LineGeometry`, 4.8e-8 relative on `Z` below 1 kHz |
 | single-conductor or SWER check | `synthesize_grid_geometry(grid)` | single conductor plus earth floor | 1-phase `LineGeometry` line |
 

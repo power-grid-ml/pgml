@@ -304,7 +304,8 @@ def zero_sequence_harmonic_z(
     skin: bool = True,
     earth_resistance_coeff=CARSON_EARTH_R_PER_HZ,
     earth_reactance_coeff=CARSON_EARTH_X_PER_HZ,
-    x0_frequency: str = X0_FREQUENCY,
+    x0_frequency: str | None = None,
+    x0_nonnegative: bool | None = None,
     x0_exponent=X0_EXPONENT,
     r0_includes_earth_return: bool = R0_INCLUDES_EARTH_RETURN,
 ) -> Tensor:
@@ -336,6 +337,11 @@ def zero_sequence_harmonic_z(
     R/X line through its ``Xg``. ``x0_exponent`` is an empirical alternative
     (``X0 ∝ h**p``).
 
+    ``x0_frequency=None`` resolves the active default (``carson_sublinear``).
+    ``x0_nonnegative=None`` resolves the guard default (True). The guard clamps the
+    sub-linear reactance at zero, with zero gradient below the boundary and a kink
+    at zero; disable it to reproduce the unguarded reference approximation.
+
     Differentiable in ``R0``/``X0`` and in every coefficient (each may be a tensor,
     batched over the leading line axis); batched over lines and ``H``.
     """
@@ -361,9 +367,15 @@ def zero_sequence_harmonic_z(
         x = x0t.unsqueeze(-1) * h  # exact geometric scaling
     else:
         x = x0t.unsqueeze(-1) * torch.pow(h, _lead(x0_exponent, rdt, dev))
+    if x0_frequency is None:
+        x0_frequency = _cfg("line.earth_return.x0_frequency")
+    if x0_nonnegative is None:
+        x0_nonnegative = _cfg("line.earth_return.x0_nonnegative")
     if x0_frequency == "carson_sublinear":
         kx = _lead(earth_reactance_coeff, rdt, dev)  # [*B, 1]
         x = x - (1.5 * kx * f0t) * (h * torch.log(h))
+        if x0_nonnegative:
+            x = x.clamp_min(0.0)
     elif x0_frequency != "linear":
         raise InputError(
             f"Unknown zero-sequence reactance law x0_frequency={x0_frequency!r} "
@@ -399,7 +411,8 @@ def sequence_aware_phase_z(
     skin: bool = True,
     earth_resistance_coeff=CARSON_EARTH_R_PER_HZ,
     earth_reactance_coeff=CARSON_EARTH_X_PER_HZ,
-    x0_frequency: str = X0_FREQUENCY,
+    x0_frequency: str | None = None,
+    x0_nonnegative: bool | None = None,
     x0_exponent=X0_EXPONENT,
     r0_includes_earth_return: bool = R0_INCLUDES_EARTH_RETURN,
 ) -> Tensor:
@@ -425,6 +438,7 @@ def sequence_aware_phase_z(
         earth_resistance_coeff=earth_resistance_coeff,
         earth_reactance_coeff=earth_reactance_coeff,
         x0_frequency=x0_frequency,
+        x0_nonnegative=x0_nonnegative,
         x0_exponent=x0_exponent,
         r0_includes_earth_return=r0_includes_earth_return,
     )

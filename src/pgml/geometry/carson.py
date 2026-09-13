@@ -204,8 +204,8 @@ def series_impedance(
     freqs: Tensor,
     *,
     radius: Optional[Tensor] = None,
-    internal_inductance: str = INTERNAL_INDUCTANCE,
-    power_frequency_band_hz: tuple[float, float] = POWER_FREQUENCY_BAND_HZ,
+    internal_inductance: Optional[str] = None,
+    power_frequency_band_hz: Optional[tuple[float, float]] = None,
 ) -> Tensor:
     """Carson/Deri series impedance ``Z[*B, H, N, N]`` in Ω/m (unreduced).
 
@@ -224,7 +224,7 @@ def series_impedance(
     internal inductance decay (:func:`internal_reactance_ratio`), so the four options
     differ only in how the conductor interior is treated:
 
-    ``"gmr"`` (default)
+    ``"gmr"`` (shipped default)
         ``G_i = GMR_i`` at every frequency, ``X_int = 0``. The internal inductance stays
         at its power-frequency value, so the reactance is over-stated once the skin depth
         drops below the conductor radius. Reproduces published power-frequency data and
@@ -260,12 +260,16 @@ def series_impedance(
         Conductor outer radius ``[*B, N]`` (m). Required by every model except
         ``"gmr"``.
     internal_inductance:
-        One of :data:`INTERNAL_INDUCTANCE_MODELS`; defaults to the modeling default
-        ``line.geometry.internal_inductance``.
+        One of :data:`INTERNAL_INDUCTANCE_MODELS`; ``None`` resolves the active modeling
+        default ``line.geometry.internal_inductance`` at call time.
     power_frequency_band_hz:
-        Exclusive band used by ``"gmr_power_frequency"``; defaults to
-        :data:`POWER_FREQUENCY_BAND_HZ`.
+        Exclusive band used by ``"gmr_power_frequency"``; ``None`` resolves
+        ``line.geometry.power_frequency_band_hz`` at call time.
     """
+    if internal_inductance is None:
+        internal_inductance = _cfg("line.geometry.internal_inductance")
+    if power_frequency_band_hz is None:
+        power_frequency_band_hz = tuple(_cfg("line.geometry.power_frequency_band_hz"))
     model = _check_internal_inductance(internal_inductance)
     if model != "gmr" and radius is None:
         raise InputError(
@@ -346,8 +350,8 @@ def line_constants(
     freqs: Tensor,
     n_phase: int,
     *,
-    internal_inductance: str = INTERNAL_INDUCTANCE,
-    power_frequency_band_hz: tuple[float, float] = POWER_FREQUENCY_BAND_HZ,
+    internal_inductance: Optional[str] = None,
+    power_frequency_band_hz: Optional[tuple[float, float]] = None,
 ) -> tuple[Tensor, Tensor]:
     """Phase-reduced ``(Z[*B, H, P, P] Ω/m, C[*B, P, P] F/m)`` for line geometry.
 
@@ -355,12 +359,12 @@ def line_constants(
     (frequency-independent) potential-coefficient matrix then inverts. ``C`` always uses
     the physical ``radius`` (no GMR, no frequency dependence); ``internal_inductance``
     and ``power_frequency_band_hz`` select the conductor internal model of
-    :func:`series_impedance`.
+    :func:`series_impedance`; ``None`` resolves each active modeling default at call time.
 
     Agreement with OpenDSS on the same geometry, measured: ``Z`` to 4.8e-8 relative (the
-    ``mu0`` constant) below 1 kHz with the default ``internal_inductance="gmr"`` and at
-    every frequency with ``"gmr_power_frequency"``; ``C`` to 2.1212e-5 relative (the
-    ``e0`` constant).
+    ``mu0`` constant) below 1 kHz with the shipped
+    ``internal_inductance="gmr"`` default and at every frequency with
+    ``"gmr_power_frequency"``; ``C`` to 2.1212e-5 relative (the ``e0`` constant).
     """
     z = kron_reduce(
         series_impedance(

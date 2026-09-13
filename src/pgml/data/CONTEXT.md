@@ -15,8 +15,11 @@ run config follows the same convention.
   `pgml.scenarios.en50160`.
 
 ## Loaders + overrides
-- `pgml.defaults` — `get/resolve/describe/units/defaults/reload`. Active source is
-  `defaults.yaml`; `PGML_DEFAULTS=/path/to.yaml` (or `reload(path)`) overrides it.
+- `pgml.defaults` — `get/resolve/describe/units/defaults/reload/use_preset`. Active source is
+  `defaults.yaml`; `use_preset(name)` overlays a packaged YAML in `data/presets/`
+  within a thread/task-local context, restoring the previous selection on exit.
+  Supported names: `pgml`, `opendss`, `pandapower`, `power-grid-model`; explicit
+  component fields win, unlisted settings retain the active defaults. `PGML_DEFAULTS=/path/to.yaml` (or `reload(path)`) overrides it.
 - `pgml.scenarios.en50160` — `en50160_limits()/en50160_limit(order)`. Active file is the
   packaged `standards/en50160.yaml`; an explicit `path=` argument or `PGML_EN50160`
   overrides it.
@@ -59,7 +62,7 @@ requires an env var to be set.
   resolves a default. Per-line override: `Line.harmonic_line_model` /
   `Line.harmonic_skin_effect`.
 - `line.earth_return.{resistivity_ohm_m, resistance_coeff_ohm_per_m_per_hz,
-  reactance_coeff_ohm_per_m_per_hz, x0_frequency, x0_exponent}` — the lumped Carson earth
+  reactance_coeff_ohm_per_m_per_hz, x0_frequency, x0_nonnegative, x0_exponent}` — the lumped Carson earth
   path of the `sequence_aware` model (ρ; the `π²·1e-7` Ω/m/Hz resistance coefficient; the
   `μ0` reactance coefficient; whether `X0` scales linearly or with the Carson/Deri
   sub-linear decay; the `X0` exponent). Per-line override: `Line.earth_return`.
@@ -84,8 +87,7 @@ requires an env var to be set.
   `Transformer.harmonic_xr_constant`) / `constant` / `xr_constant`: how the winding
   RESISTANCE behaves with frequency (X always scales with the order). Resolved by
   `pgml.assembly._transformer.harmonic_resistance_law`; an unknown value raises.
-- `transformer.magnetizing_placement` — `from_terminal` (default) / `to_terminal` /
-  `split`: which terminal the magnetizing shunt is stamped on (OpenDSS uses its last
+- `transformer.magnetizing_placement` — `split` (default) / `from_terminal` / `to_terminal`: which terminal the magnetizing shunt is stamped on (OpenDSS uses its last
   winding's terminal, power-grid-model splits it half/half). Resolved by
   `pgml.assembly._transformer.magnetizing_placement`; an unknown value raises.
 - `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of
@@ -151,3 +153,7 @@ requires an env var to be set.
 - `assembly/_fusion.py`: `branch.zero_impedance`; `solver/power_flow.py` +
   `convert/pandapower/converter.py`: `branch.near_ideal_series_resistance_ohm` /
   `branch.switch_model`.
+
+The default X0 law is `carson_sublinear`, guarded by `x0_nonnegative=true`.
+OpenDSS conformance selects the unguarded law and its geometry band rule.
+`LineGeometry.internal_inductance` overrides the global geometry model per line.

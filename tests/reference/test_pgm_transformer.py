@@ -412,17 +412,17 @@ class TestSymOracle:
             i0=0.005,
             p0=1_000.0,
         )
-        vm_from, va_from = _run_sym_case(input_data)
-        assert vm_from > 1.0e-5, "the from_terminal residual must be present"
-
         data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
-        data["transformer"]["magnetizing_placement"]["value"] = "split"
+        data["transformer"]["magnetizing_placement"]["value"] = "from_terminal"
         path = tmp_path / "split.yaml"
         path.write_text(yaml.safe_dump(data))
         monkeypatch.setenv("PGML_DEFAULTS", str(path))
         try:
             defaults.reload(str(path))
-            vm_split, va_split = _run_sym_case(input_data)
+            vm_from, _ = _run_sym_case(input_data)
+            assert vm_from > 1.0e-5, "the from_terminal residual must be present"
+            with defaults.use_preset("power-grid-model"):
+                vm_split, va_split = _run_sym_case(input_data)
         finally:
             monkeypatch.delenv("PGML_DEFAULTS", raising=False)
             defaults.reload()

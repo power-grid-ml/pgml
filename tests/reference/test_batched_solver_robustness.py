@@ -237,6 +237,23 @@ class TestFactoredSolve:
         )[0]
         assert torch.max(torch.abs(g_ref - g_fac)).item() < 1e-10
 
+    @pytest.mark.parametrize("backend", ["dense", "sparse"])
+    def test_interleaved_shared_rhs_axis_matches_direct_solve(self, backend) -> None:
+        """A singleton factor axis may expand to a non-singleton RHS step axis.
+
+        This is the harmonic-flow layout when each scenario has its own device shunt
+        but several coherent-spectrum steps share that shunt: ``Y=[B, 1, H, N, N]``
+        and ``I=[B, T, H, N]``. Each ``(B, H)`` factor must serve all ``T`` columns.
+        """
+        b, steps, h, n = 2, 3, 2, 4
+        y = self._spd_like(b * h, n).reshape(b, 1, h, n, n)
+        i = torch.randn(b, steps, h, n, dtype=CDT)
+        y_full = y.broadcast_to(b, steps, h, n, n)
+        ref = torch.linalg.solve(y_full, i.unsqueeze(-1)).squeeze(-1)
+        got = solve_factored(lu_factor_system(y, backend=backend, equilibrate="off"), i)
+        assert got.shape == i.shape
+        torch.testing.assert_close(got, ref, rtol=1e-12, atol=1e-12)
+
 
 class TestMixedBatchedDevices:
     def test_varying_only_some_devices_assembles(self) -> None:
@@ -339,6 +356,64 @@ class TestTrailingSingletonBatch:
         ).v  # [B, 1, H, N]
         assert tuple(stepped.shape) == (3, 1, 3, 3)
         assert torch.equal(stepped.squeeze(1), flat)
+
+    def test_scenario_shunt_is_shared_across_deeper_injection_steps(self) -> None:
+        """A ``[B]`` operating point and ``[B, T]`` spectrum solve in one call."""
+        from pgml.solver import solve_harmonic_flow
+
+        grid = single_phase_chain()
+        p = torch.tensor([1200.0, 3200.0], dtype=torch.float64)
+        q = 0.2 * p
+        mag3 = torch.tensor(
+            [[0.02, 0.04, 0.06], [0.03, 0.05, 0.07]], dtype=torch.float64
+        )
+        phase3 = torch.tensor(
+            [[-10.0, 0.0, 10.0], [15.0, 25.0, 35.0]], dtype=torch.float64
+        )
+        batched = solve_harmonic_flow(
+            grid,
+            [1, 3],
+            operating_point={30: {"p_w": p, "q_var": q}},
+            harmonic_injection={30: {3: (mag3, phase3)}},
+            load_shunt="opendss",
+            load_shunt_basis="operating_point",
+            linear_solver="dense",
+            dtype=CDT,
+        ).v
+        assert batched.shape == (2, 3, 2, 3)
+
+        singles = []
+        for scenario in range(2):
+            steps = []
+            for step in range(3):
+                steps.append(
+                    solve_harmonic_flow(
+                        grid,
+                        [1, 3],
+                        operating_point={
+                            30: {
+                                "p_w": float(p[scenario]),
+                                "q_var": float(q[scenario]),
+                            }
+                        },
+                        harmonic_injection={
+                            30: {
+                                3: (
+                                    float(mag3[scenario, step]),
+                                    float(phase3[scenario, step]),
+                                )
+                            }
+                        },
+                        load_shunt="opendss",
+                        load_shunt_basis="operating_point",
+                        linear_solver="dense",
+                        dtype=CDT,
+                    ).v
+                )
+            singles.append(torch.stack(steps))
+        torch.testing.assert_close(
+            batched, torch.stack(singles), rtol=1e-12, atol=1e-12
+        )
 
     def test_gradients_flow_through_the_singleton_batch(self) -> None:
         """The IFT backward returns a gradient of the operating point's own shape."""

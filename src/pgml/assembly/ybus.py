@@ -624,17 +624,20 @@ def _sequence_aware_options(line) -> tuple:
     select code paths, so they group lines; the numeric coefficients do not (see
     :func:`_earth_field`).
     """
-    from pgml.geometry import sequence as _seq
-
     er = line.earth_return
     skin = line.harmonic_skin_effect
     if skin is None:
         skin = _cfg("line.harmonic_model.skin_effect")
-    x0_frequency = getattr(er, "x0_frequency", None) or _seq.X0_FREQUENCY
+    x0_frequency = getattr(er, "x0_frequency", None) or _cfg(
+        "line.earth_return.x0_frequency"
+    )
     r0_inc = getattr(er, "r0_includes_earth_return", None)
     if r0_inc is None:
-        r0_inc = _seq.R0_INCLUDES_EARTH_RETURN
-    return bool(skin), str(x0_frequency), bool(r0_inc)
+        r0_inc = _cfg("line.zero_sequence.r0_includes_earth_return")
+    nonnegative = getattr(er, "x0_nonnegative", None)
+    if nonnegative is None:
+        nonnegative = _cfg("line.earth_return.x0_nonnegative")
+    return bool(skin), str(x0_frequency), bool(r0_inc), bool(nonnegative)
 
 
 #: Modeling-default keys of the numeric earth-return coefficients, by field name.
@@ -690,7 +693,7 @@ def _sequence_aware_block_groups(
         by_opts.setdefault(_sequence_aware_options(ln), []).append(ln)
 
     for opts, group in by_opts.items():
-        skin, x0_frequency, r0_includes_earth = opts
+        skin, x0_frequency, r0_includes_earth, x0_nonnegative = opts
         coeff = _earth_field(group, "resistance_coeff_ohm_per_m_per_hz", rdt, device)
         coeff_x = _earth_field(group, "reactance_coeff_ohm_per_m_per_hz", rdt, device)
         x0_exponent = _earth_field(group, "x0_exponent", rdt, device)
@@ -739,6 +742,7 @@ def _sequence_aware_block_groups(
             earth_resistance_coeff=coeff,
             earth_reactance_coeff=coeff_x,
             x0_frequency=x0_frequency,
+            x0_nonnegative=x0_nonnegative,
             x0_exponent=x0_exponent,
             r0_includes_earth_return=r0_includes_earth,
         )  # [K,H,3,3]  Ω/m
@@ -809,13 +813,16 @@ def _geometry_block_groups(
         return
     from pgml.geometry.carson import line_constants
 
-    by_key: dict[tuple[int, int], list] = {}
+    by_key: dict[tuple[int, int, str], list] = {}
     for ln in glines:
-        key = (len(ln.from_phases), len(ln.conductor_geometry.conductors))
+        model = ln.conductor_geometry.internal_inductance
+        if model is None:
+            model = _cfg("line.geometry.internal_inductance")
+        key = (len(ln.from_phases), len(ln.conductor_geometry.conductors), model)
         by_key.setdefault(key, []).append(ln)
 
     two_pi_f = (2.0 * torch.pi) * f  # [H]
-    for (nph, _ncond), group in by_key.items():
+    for (nph, _ncond, model), group in by_key.items():
         xs, ys_, gmrs, rdcs, rads, lengths, rhos = [], [], [], [], [], [], []
         for ln in group:
             cx, cy, cg, cr, cra = _geom_conductor_arrays(ln, rdt, device)
@@ -841,7 +848,10 @@ def _geometry_block_groups(
             RHO,
             f,
             nph,
-            internal_inductance=_cfg("line.geometry.internal_inductance"),
+            internal_inductance=model,
+            power_frequency_band_hz=tuple(
+                _cfg("line.geometry.power_frequency_band_hz")
+            ),
         )  # Z[K,H,P,P] Ω/m, C[K,P,P] F/m
         z_len = (z * LEN[:, None, None, None]).to(cdt)
         ys_adm = torch.linalg.inv(z_len).transpose(0, 1)  # [H,K,P,P] series admittance
@@ -1490,7 +1500,7 @@ def _transformer_block_groups(
     - Magnetizing shunt ``y_m = G_m + jB_m`` added to a TERMINAL phase diagonal
       directly (outside the incidence transform), referred to the HV line voltage as
       stored. The terminal is the documented modeling choice
-      ``transformer.magnetizing_placement``: ``from_terminal`` (default, the HV
+      ``transformer.magnetizing_placement``: ``from_terminal`` (the HV
       diagonal), ``to_terminal`` (the LV diagonal through the squared rated-voltage
       ratio — OpenDSS's own placement) or ``split`` (half on each —
       power-grid-model's). The three are different topologies: they differ in whether

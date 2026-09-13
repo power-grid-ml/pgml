@@ -37,3 +37,8 @@ Oracle comparisons (load flow vs external reference tools):
   engineering units to SI; align by id_map; tol e.g. atol on pu voltage 1e-4).
 - power-grid-model as a second results oracle (asym power flow).
 Always align per-phase ordering between our (A,B,C,N) layout and the reference.
+
+Reference-model fixture: `tests/reference/conftest.py::opendss_model_defaults`, opted into
+by conformance modules. The default/preset restoration, schema round-trip, mixed-model
+assembly and CPU/CUDA checks are in `tests/defaults/test_reference_presets.py`.
+The IFT context-retention test is `tests/differentiability/test_modeling_presets.py`.

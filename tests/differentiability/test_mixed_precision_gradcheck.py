@@ -123,6 +123,23 @@ def test_mixed_gradient_matches_full_precision():
         assert torch.allclose(g_full, g_mixed, rtol=1e-7, atol=1e-10)
 
 
+def test_gradcheck_mixed_interleaved_shared_rhs_axis():
+    """The exact mixed-precision adjoint sums every shared step per factor."""
+    b, steps, h, n = 2, 2, 2, 2
+    torch.manual_seed(8)
+    y = (
+        torch.randn(b, 1, h, n, n, dtype=CDT) + n * torch.eye(n, dtype=CDT)
+    ).requires_grad_(True)
+    i = torch.randn(b, steps, h, n, dtype=CDT).requires_grad_(True)
+
+    def fn(y_, i_):
+        return solve_factored(
+            lu_factor_system(y_, precision="mixed", equilibrate="off"), i_
+        )
+
+    assert torch.autograd.gradcheck(fn, (y, i), eps=1e-6, atol=1e-7, rtol=1e-5)
+
+
 # --------------------------------------------------------------------------- #
 # the nonlinear solve (implicit-function-theorem backward)
 # --------------------------------------------------------------------------- #

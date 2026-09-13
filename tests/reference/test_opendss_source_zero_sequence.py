@@ -89,7 +89,7 @@ from pgml.schemas.grid_schema import (  # noqa: E402
 )
 from pgml.solver import solve_harmonic_flow, solve_power_flow  # noqa: E402
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 _F0 = 50.0
 _R1, _X1 = 0.010, 0.040  # Ohm, positive-sequence source Thevenin

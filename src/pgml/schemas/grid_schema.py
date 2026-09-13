@@ -549,6 +549,16 @@ class LineGeometry(GridModel):
     conductors: list[ConductorPlacement] = Field(
         description="Phase + neutral conductors."
     )
+    internal_inductance: Optional[
+        Literal["gmr", "gmr_skin", "gmr_power_frequency", "bessel"]
+    ] = Field(
+        default=None,
+        description="Conductor internal-inductance model for this line. None resolves "
+        "from ``line.geometry.internal_inductance`` at assembly time. ``gmr`` retains "
+        "published GMR; ``gmr_skin`` applies continuous skin decay; "
+        "``gmr_power_frequency`` follows OpenDSS's frequency band; ``bessel`` uses "
+        "the solid-round-conductor model. Explicit values override any preset.",
+    )
     earth_resistivity_ohm_m: PosNum = si_field(
         "Earth resistivity (Deri earth return).",
         short="Ohm*m",
@@ -677,6 +687,13 @@ class EarthReturnModel(GridModel):
         "reactance decay ``1.5*kx*f0*h*ln(h)``, which is geometry- and "
         "soil-resistivity-independent and reproduces OpenDSS's ``Xg`` frequency "
         "correction. None = modeling default.",
+    )
+    x0_nonnegative: Optional[bool] = Field(
+        default=None,
+        description="Clamp the sub-linear zero-sequence reactance to zero when its "
+        "lumped extrapolation becomes negative. None uses the modeling default. "
+        "Disable for the unguarded reference law. The clamp has zero gradient below "
+        "the boundary and is not a replacement for measured return-path geometry.",
     )
     x0_exponent: Optional[Num] = si_field(
         "Exponent of the zero-sequence reactance scaling ``X0(h) = X0*h**p``. "
@@ -2638,6 +2655,9 @@ __all__ = [
     "DistributionSpectrum",
     "Spectrum",
     "Provenance",
+    "ConductorPlacement",
+    "LineGeometry",
+    "EarthReturnModel",
     "Node",
     "BranchBase",
     "Line",

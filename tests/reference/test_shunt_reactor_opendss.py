@@ -31,7 +31,7 @@ from pgml.convert._common import PhaseMode
 from pgml.schemas.grid_schema import Phase, ShuntAppliance
 
 pytest.importorskip("opendssdirect")
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 F0 = 50.0
 ORDERS = (1, 5, 13)

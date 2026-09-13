@@ -263,3 +263,10 @@ existing importers.  New code should import from `pgml.evaluation.oracles` direc
   "most similar" Y-bus difference is OUR `assemble_network_ybus` vs `pandapower_ybus`.
 - Demo: `run/examples/evaluate_ieee33.py` regenerates the IEEE-33 figure set.
 - Matplotlib backend: tests/headless use `Agg` (set in `tests/evaluation/conftest.py`).
+
+## Reference modeling choices
+
+Conformance tests select `defaults.use_preset("opendss")` explicitly; model-sensitivity
+tests still exercise named alternatives. The independent NumPy sequence oracle applies
+the same resolved non-negative Carson guard as pgml. OpenDSS's unguarded law remains
+selectable even when its extrapolated zero-sequence reactance is negative.

@@ -50,7 +50,7 @@ from pgml.evaluation.oracles.opendss_scenario_oracle import (  # noqa: E402
 )
 from pgml.schemas.grid_schema import Grid, Phase, Transformer  # noqa: E402
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 _F0 = 50.0
 _ABC = (Phase.A, Phase.B, Phase.C)
