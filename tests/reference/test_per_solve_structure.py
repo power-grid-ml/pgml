@@ -19,6 +19,7 @@ import pgml.geometry.sequence as seq_mod
 import pgml.solver.harmonic_flow as hf_mod
 import pgml.solver.power_flow as pf_mod
 from pgml.grids import synthetic_feeder
+from pgml.schemas.grid_schema import Load, Switch
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
 CDT = torch.complex128
@@ -30,6 +31,27 @@ def grid():
 
 
 @pytest.fixture(scope="module")
+def near_ideal_switch_grid():
+    """A feeder whose closed micro-ohm tie switch lifts the mismatch floor above ``tol``.
+
+    ``Σ_j |Y_ij| V_base,j`` of the switch's terminal rows is then ~1e11 VA, so the
+    per-row precision floor (4 eps of that, in per unit) is 2e-7 pu — two decades above
+    the default tolerance, which is the case the exact row scale exists for.
+    """
+    g = synthetic_feeder(20, tie_switches=1)
+    return g.model_copy(
+        update={
+            "branches": [
+                b.model_copy(update={"closed": True, "resistance_ohm": 1.0e-6})
+                if isinstance(b, Switch)
+                else b
+                for b in g.branches
+            ]
+        }
+    )
+
+
+@pytest.fixture(scope="module")
 def positive_sequence_grid():
     """A feeder whose lines carry the skin-effect positive-sequence harmonic model."""
     g = synthetic_feeder(20)
@@ -37,6 +59,19 @@ def positive_sequence_grid():
         ln.harmonic_line_model = "positive_sequence"
         ln.harmonic_skin_effect = True
     return g
+
+
+def _batched_load_op(grid, factors):
+    """A scenario batch: every load's total P, Q scaled by each factor."""
+    scale = torch.tensor(factors, dtype=torch.float64)
+    return {
+        a.id: {
+            "p_w": scale * float(a.p_nom_w),
+            "q_var": scale * float(a.q_nom_var or 0.0),
+        }
+        for a in grid.appliances
+        if isinstance(a, Load)
+    }
 
 
 def _count(monkeypatch, name, *modules):
@@ -109,23 +144,69 @@ def test_the_fundamental_solve_runs_no_skin_effect_fit(
 
 
 def test_the_row_scale_of_the_mismatch_floor_is_computed_once_per_solve(
-    monkeypatch, grid
+    monkeypatch, near_ideal_switch_grid
 ):
     """The ``|Y|`` pass behind the per-row mismatch floor is not per iteration.
 
     It reads the whole matrix, so paying it per iteration would dominate a large
-    system's solve; a prepared system pays it once per grid instead.
+    system's solve; a prepared system pays it once per grid instead. This grid's
+    near-ideal switch raises its terminal rows' cancellation scale until the floor
+    really governs, which is the case that needs the exact scale.
     """
     calls = _count(monkeypatch, "_abs_row_scale", pf_mod)
-    res = solve_power_flow(grid, dtype=CDT)
-    assert res.converged and res.iterations >= 3
+    res = solve_power_flow(near_ideal_switch_grid, dtype=CDT)
+    assert res.converged and res.diagnostics.mismatch_floor_pu > 1.0e-8
     assert calls["n"] == 1, f"{calls['n']} |Y| passes for {res.iterations} iterations"
 
-    system = prepare_power_flow(grid, dtype=CDT)
+    system = prepare_power_flow(near_ideal_switch_grid, dtype=CDT)
     calls["n"] = 0
     for _ in range(3):
-        solve_power_flow(grid, dtype=CDT, system=system)
+        solve_power_flow(near_ideal_switch_grid, dtype=CDT, system=system)
     assert calls["n"] == 0, f"{calls['n']} |Y| passes on the prepared path"
+
+
+def test_a_batched_newton_solve_reads_the_admittance_once_for_the_floor(
+    monkeypatch, near_ideal_switch_grid
+):
+    """Newton solves a scenario batch one scenario at a time — the floor stays per GRID.
+
+    Each scenario builds its own convergence test, and the row scale is a property of
+    the network, so a batch of B scenarios must not read the admittance B times.
+    """
+    calls = _count(monkeypatch, "_abs_row_scale", pf_mod)
+    res = solve_power_flow(
+        near_ideal_switch_grid,
+        dtype=CDT,
+        method="newton",
+        operating_point=_batched_load_op(near_ideal_switch_grid, (0.8, 1.0, 1.2)),
+    )
+    assert res.converged and res.v.shape[0] == 3
+    assert calls["n"] == 1, f"{calls['n']} |Y| passes for 3 scenarios"
+
+
+def test_no_y_pass_where_the_precision_floor_cannot_reach_the_tolerance(
+    monkeypatch, grid
+):
+    """A floor far below the requested tolerance is decided by a bound, not by ``|Y|``.
+
+    Both mismatch thresholds are ``max(tol, floor · s_scale_row)``, so on a grid whose
+    cancellation scale cannot lift the floor to the tolerance they are exactly the
+    tolerance — and one fused reduction over the matrix proves that for every row at a
+    fraction of the exact pass. The thresholds must come out the same as the exact route's:
+    the prepared system carries the exact scale, so its voltages pin it.
+    """
+    exact = _count(monkeypatch, "_abs_row_scale", pf_mod)
+    bound = _count(monkeypatch, "_row_scale_bound", pf_mod)
+    res = solve_power_flow(grid, dtype=CDT)
+    assert res.converged and res.iterations >= 3
+    assert res.diagnostics.mismatch_floor_pu == pytest.approx(1.0e-8)
+    assert exact["n"] == 0, f"{exact['n']} |Y| passes for an inert floor"
+    assert bound["n"] == 1, f"{bound['n']} row-scale bounds per solve"
+
+    system = prepare_power_flow(grid, dtype=CDT)
+    prepared = solve_power_flow(grid, dtype=CDT, system=system)
+    assert torch.equal(prepared.v, res.v)
+    assert prepared.diagnostics.mismatch_floor_pu == res.diagnostics.mismatch_floor_pu
 
 
 def test_a_prepared_system_carries_the_structural_quantities(monkeypatch, grid):

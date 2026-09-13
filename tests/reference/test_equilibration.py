@@ -96,6 +96,41 @@ class TestScaleFactors:
             a_hat.abs().amax(dim=-2), torch.ones(a.shape[-1], dtype=torch.float64)
         )
 
+    @pytest.mark.parametrize("power_of_two", [True, False])
+    def test_row_column_scales_read_from_the_nonzeros_are_the_dense_ones(
+        self, power_of_two
+    ):
+        """The maxima over the nonzeros ARE the dense pass's, to the bit.
+
+        A structural zero is never a row or a column maximum and a maximum does not
+        depend on the order it is taken in, so reading the magnitudes from the sparse
+        structure is exact rather than an approximation. A BATCHED matrix has no single
+        sparsity pattern and therefore takes the dense pass: stacking the same matrix
+        twice compares the two implementations on identical input.
+        """
+        a, _ = _spread_system(n=40)
+        a = a * (torch.rand(40, 40) < 0.2)  # a sparsity pattern to read
+        sparse = equilibration_scales(a, mode="row_column", power_of_two=power_of_two)
+        dense = equilibration_scales(
+            a.unsqueeze(0).repeat(2, 1, 1), mode="row_column", power_of_two=power_of_two
+        )
+        for got, want in zip(sparse, dense):
+            assert torch.equal(got, want[0])
+            assert torch.equal(got, want[1])
+
+    def test_an_empty_row_and_column_keep_scale_one_on_both_paths(self):
+        """An all-zero row has no maximum; both magnitude paths must report scale 1."""
+        a, _ = _spread_system(n=8)
+        a = a.clone()
+        a[3, :] = 0.0
+        a[:, 5] = 0.0
+        d_row, d_col = equilibration_scales(a, mode="row_column")
+        batched = equilibration_scales(
+            a.unsqueeze(0).repeat(2, 1, 1), mode="row_column"
+        )
+        assert float(d_row[3]) == 1.0 and float(d_col[5]) == 1.0
+        assert torch.equal(d_row, batched[0][0]) and torch.equal(d_col, batched[1][0])
+
     def test_power_of_two_scaling_is_exact_in_floating_point(self):
         """``D A D`` with power-of-two factors introduces NO rounding error.
 

@@ -287,3 +287,77 @@ class TestResidualIdentity:
             direct.diagnostics.mismatch_floor_pu
             == prepared.diagnostics.mismatch_floor_pu
         )
+
+
+class TestTheFloorRowScale:
+    """The cancellation scale ``Σ_j |Y_ij| V_base,j`` and the bound that gates it.
+
+    The scale is read from the admittance's nonzeros on a single CPU matrix and from a
+    dense magnitude pass otherwise (a batched admittance, an accelerator). Both forms must
+    report the same scale, and the cheap Cauchy-Schwarz bound that decides whether the
+    floor can bind at all must never report LESS than the scale — an underestimate would
+    lower a threshold the solve then cannot meet.
+    """
+
+    @staticmethod
+    def _sparse_matrix(n: int = 40, seed: int = 0, density: float = 0.2):
+        torch.manual_seed(seed)
+        a = torch.randn(n, n, dtype=CDT) * (torch.rand(n, n) < density)
+        return a + torch.diag(10.0 * torch.randn(n, dtype=CDT))
+
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_the_nonzero_and_the_dense_row_sums_agree(self, seed: int) -> None:
+        """Reading the nonzeros is the same sum, to the working precision's rounding."""
+        import pgml.solver.power_flow as pf_mod
+
+        a = self._sparse_matrix(seed=seed)
+        v = 0.5 + torch.rand(a.shape[-1], dtype=torch.float64)
+        sparse = pf_mod._abs_row_scale(a, v)
+        dense = pf_mod._abs_row_scale(a.unsqueeze(0).repeat(2, 1, 1), v)
+        assert dense.shape == (2, a.shape[-1])
+        assert torch.allclose(sparse, dense[0], rtol=1e-14, atol=0.0)
+        assert torch.equal(dense[0], dense[1])
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+    def test_the_bound_never_underestimates_the_row_scale(self, seed: int) -> None:
+        """``‖Y_i‖₂ ‖V‖₂`` is an upper bound, and a useful one (within two decades)."""
+        import pgml.solver.power_flow as pf_mod
+
+        a = self._sparse_matrix(seed=seed)
+        v = 0.5 + torch.rand(a.shape[-1], dtype=torch.float64)
+        exact = pf_mod._abs_row_scale(a, v)
+        bound = pf_mod._row_scale_bound(a, v)
+        assert bool((bound >= exact).all())
+        assert float((bound / exact).max()) < 100.0
+
+    def test_the_bound_bounds_a_real_feeder_and_its_switch_state_operator(self) -> None:
+        """The same on an assembled admittance and on the Woodbury low-rank operator.
+
+        A switch-state sweep solves ``A + U C Vᴴ`` without materialising it, and a closed
+        near-ideal switch is exactly the case that lifts the floor, so the bound has to
+        cover the low-rank term too.
+        """
+        import pgml.solver.power_flow as pf_mod
+        from pgml.assembly import assemble_network_ybus, node_phase_index
+        from pgml.grids import synthetic_feeder
+        from pgml.solver.lowrank import LowRankOperator
+
+        grid = synthetic_feeder(30, tie_switches=2)
+        index = node_phase_index(grid)
+        y = assemble_network_ybus(grid, float(grid.base_frequency_hz)).Y.reshape(
+            index.size, index.size
+        )
+        v = torch.full((index.size,), 230.0, dtype=torch.float64)
+        exact = pf_mod._abs_row_scale(y, v)
+        assert bool((pf_mod._row_scale_bound(y, v) >= exact).all())
+
+        torch.manual_seed(0)
+        k = 6
+        u = torch.zeros(index.size, k, dtype=CDT)
+        u[torch.arange(k), torch.arange(k)] = 1.0
+        c = torch.diag(1.0e4 * torch.rand(k, dtype=CDT)).unsqueeze(0)  # [1, k, k]
+        op = LowRankOperator(base=y, u=u, c=c, v=u)
+        lr_exact = pf_mod._abs_row_scale(op, v)
+        assert bool((pf_mod._row_scale_bound(op, v) >= lr_exact).all())
+        # the low-rank term really moves the scale (otherwise the check is vacuous)
+        assert float((lr_exact - exact).abs().max()) > 0.0
