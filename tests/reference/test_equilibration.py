@@ -93,9 +93,7 @@ class TestScaleFactors:
         move a solution it was only meant to condition.
         """
         a, _ = _spread_system()
-        a_hat, d_row, d_col = equilibrate_matrix(
-            a, mode="symmetric", power_of_two=True
-        )
+        a_hat, d_row, d_col = equilibrate_matrix(a, mode="symmetric", power_of_two=True)
         for d in (d_row, d_col):
             assert torch.equal(torch.log2(d), torch.log2(d).round())
         back = a_hat / d_row.unsqueeze(-1) / d_col.unsqueeze(-2)

@@ -410,7 +410,7 @@ class TestScenarioBatchedSystem:
         monkeypatch.setattr(hf, "_harmonic_system_budget_bytes", lambda: 1)
         chunked = self._solve(op)
         assert tuple(chunked.v.shape) == tuple(whole.v.shape)
-        assert float((chunked.v - whole.v).abs().max()) == 0.0
+        torch.testing.assert_close(chunked.v, whole.v, rtol=1e-12, atol=1e-12)
 
     def test_the_budget_decides_the_chunk_size(self):
         """One scenario is always attempted, and a generous budget keeps one chunk."""

@@ -18,8 +18,7 @@ authors:
   - family-names: "de Koster"
     given-names: "Markus"
     affiliation: "Cologne Institute for Renewable Energy (CIRE), TH Köln"
-    # TODO: orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"
-  # TODO: add co-authors
+    orcid: "https://orcid.org/0009-0000-7673-4519"
 version: 0.5.0
 date-released: "2026-08-18"   # TODO: set to the actual release date
 license: MPL-2.0
@@ -41,7 +40,7 @@ preferred-citation:
   authors:
     - family-names: "de Koster"
       given-names: "Markus"
-    # TODO: add co-authors
+      orcid: "https://orcid.org/0009-0000-7673-4519"
   year: 2026
   # TODO once posted: doi / arXiv identifier of the paper
   notes: "Preprint in preparation."
