@@ -42,8 +42,10 @@ Two assumption modes (``mode=``)
   tolerance is loose enough to show up in a comparison, growing with system size/loading —
   measured up to ~2e-6 relative pre-fix on a 12-node feeder at heavy load), and — on EVERY
   exported ``Load`` (including a Generator/Storage represented as one, see below) —
-  ``Vminpu=0.0001 Vmaxpu=10000`` (OpenDSS's default ``0.95``/``1.05`` band CLIPS the
-  constant-power/current/ZIP law outside it, extrapolating toward constant impedance instead;
+  ``Vminpu=1e-8 Vlowpu=1e-8 Vmaxpu=1e8`` (finite guards outside the declared comparison
+  range). OpenDSS's default ``0.95``/``1.05`` band CLIPS the
+  constant-power/current/ZIP law outside it, and its independent ``Vlowpu=0.5`` changes
+  the device to constant impedance at very low voltage;
   pgml's ``LoadModel``/``ZipCoefficients`` laws have no such band — measured live on the CIGRE
   LV benchmark: a bus solved at 0.919 pu, an everyday voltage drop, made a default-banded
   Model=1 load deliver 6.8% less than its nameplate kW). ``DefaultBaseFrequency`` is always
@@ -54,8 +56,9 @@ Two assumption modes (``mode=``)
   irreducible model gap — see below).
 - ``"default"``: leaves OpenDSS's own defaults (``NeglectLoadY=No`` with ``%SeriesRL=50`` on
   every Load — pgml reaches the same device model with ``load_shunt="opendss"``, so what
-  remains in this mode is the earth-return ``Rg``/``Xg`` and the ``Vminpu``/``Vmaxpu``
-  band). Expect a DOCUMENTED divergence from those two sources, not a bug — this mode
+  remains in this mode is the earth-return ``Rg``/``Xg`` and native voltage bands,
+  including ``Vlowpu`` for Load elements). Expect a DOCUMENTED divergence from those
+  sources, not a bug — this mode
   characterizes how far a "just point OpenDSS at the grid and solve" study drifts from
   pgml's own modeling choices. Measured on a 3-wire feeder: the NON-TRIPLEN orders agree to
   8.3e-09 relative (the device model is the same on both sides now), while the earth-return
@@ -188,6 +191,16 @@ from pgml.schemas.grid_schema import (
 from pgml.scenarios import SampledScenarios, ScenarioResult
 
 _logger = logging.getLogger("pgml")
+
+
+class OpenDSSConvergenceError(ConversionError):
+    """The exported circuit failed its initial OpenDSS snapshot solve.
+
+    The subclass keeps compatibility with callers that catch
+    :class:`~pgml.errors.ConversionError`, while allowing validity studies to distinguish
+    numerical nonconvergence from an unsupported model.
+    """
+
 
 _SQRT3 = math.sqrt(3.0)
 _PHASE_SUFFIX = {Phase.A: 1, Phase.B: 2, Phase.C: 3, Phase.N: 4}
@@ -780,15 +793,16 @@ def _harmonic_shunt_properties(a, load_shunt: str) -> str:
 
 
 def _emit_pq_element(
-    dss, name, bus, n, kv, kw, kvar, conn, model, zipv, harmonic=""
+    dss, name, bus, n, kv, kw, kvar, conn, model, zipv, harmonic="", *, mode
 ) -> None:
     """Emit a native DSS ``Load`` element (see ``_ApplianceExport``'s docstring for why
     EVERY injection appliance -- including a pgml ``Generator``/``Storage`` -- exports as
     a ``Load``, with a negated P/Q for the generation-type ones).
 
-    ``Vminpu``/``Vmaxpu`` are set to an effectively unbounded range: OpenDSS's default
-    (``0.95``/``1.05``) CLIPS every load model's constant-power/current/ZIP law outside
-    that per-unit voltage band (extrapolating toward constant impedance instead) --
+    Matched mode uses finite guards far outside the declared comparison range for
+    ``Vminpu``/``Vlowpu``/``Vmaxpu``. OpenDSS's native ``0.95``/``0.5``/``1.05``
+    thresholds CLIP every load model's constant-power/current/ZIP law outside
+    that per-unit voltage band (changing to constant impedance below ``Vlowpu``) --
     pgml's ``LoadModel``/``ZipCoefficients`` laws have NO such band, they apply exactly
     at any voltage. On a real feeder under load this is not a corner case: verified live
     on the CIGRE LV benchmark, a downstream bus solved at 0.919 pu (a realistic, everyday
@@ -796,17 +810,18 @@ def _emit_pq_element(
     nameplate kW -- silently double-counting a voltage-support behaviour pgml's model
     does not have.
     """
+    voltage_band = " Vminpu=1e-8 Vlowpu=1e-8 Vmaxpu=1e8" if mode == "matched" else ""
     dss.Text.Command(
         f"New Load.{name} phases={n} bus1={bus} kV={kv:.10g} kW={kw:.10g} "
         f"kvar={kvar:.10g} conn={conn} model={model} spectrum={_FLAT_SPECTRUM_NAME} "
-        f"Vminpu=0.0001 Vmaxpu=10000{harmonic}"
+        f"{voltage_band}{harmonic}"
     )
     if zipv is not None:
         zstr = " ".join(f"{v:.10g}" for v in zipv)
         dss.Text.Command(f"Edit Load.{name} ZIPV=[{zstr}]")
 
 
-def _export_native_der(dss, a, node, busname, f0) -> _ApplianceExport:
+def _export_native_der(dss, a, node, busname, f0, *, mode) -> _ApplianceExport:
     """Export a native internal-voltage DER without substituting a negative Load.
 
     The OpenDSS native model is balanced, scalar impedance and constant P/Q. A
@@ -881,23 +896,24 @@ def _export_native_der(dss, a, node, busname, f0) -> _ApplianceExport:
         neutral = Phase.N in node.phases and return_path in ("auto", "neutral")
         bus += ".4" if neutral else ".0"
     common = f"phases={n} bus1={bus} kv={kv:.17g} kva={kva:.17g} conn={'delta' if delta else 'wye'} spectrum={_FLAT_SPECTRUM_NAME}"
+    voltage_band = " vminpu=1e-8 vmaxpu=1e8" if mode == "matched" else ""
     if native_class == "Generator":
         if r != 0:
             raise ConversionError(
                 f"appliance {a.id}: native Generator harmonic model has pure Xdpp, not resistance"
             )
-        props = f"kw={p / 1000:.17g} kvar={q / 1000:.17g} xdpp={x / zbase:.17g} model=1 vminpu=.0001 vmaxpu=10000"
+        props = f"kw={p / 1000:.17g} kvar={q / 1000:.17g} xdpp={x / zbase:.17g} model=1{voltage_band}"
     elif native_class == "PVSystem":
         if p < 0:
             raise ConversionError(
                 f"appliance {a.id}: native PVSystem cannot absorb active power"
             )
-        props = f"pmpp={p / 1000:.17g} irradiance=1 kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %cutin=0 %cutout=0 model=1 vminpu=.0001 vmaxpu=10000"
+        props = f"pmpp={p / 1000:.17g} irradiance=1 kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %cutin=0 %cutout=0 model=1{voltage_band}"
     else:
         # External dispatch exposes the requested signed setpoint, without an
         # unrequested state-of-charge controller curtailing the snapshot.
         rated = max(1.0, abs(p) / 1000) * 2
-        props = f"kwrated={rated:.17g} kwhrated=1e9 %stored=50 %reserve=0 dispmode=external state={'charging' if p < 0 else 'discharging'} kw={p / 1000:.17g} kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %idlingkw=0 model=1 vminpu=.0001 vmaxpu=10000"
+        props = f"kwrated={rated:.17g} kwhrated=1e9 %stored=50 %reserve=0 dispmode=external state={'charging' if p < 0 else 'discharging'} kw={p / 1000:.17g} kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %idlingkw=0 model=1{voltage_band}"
     dss.Text.Command(f"New {native_class}.{name} {common} {props}")
     if a.spectrum is not None:
         if not isinstance(a.spectrum, StaticSpectrum):
@@ -939,6 +955,7 @@ def _export_injection_appliance(
     name_prefix: str,
     sign: float = 1.0,
     harmonic: str = "",
+    mode: str,
 ) -> _ApplianceExport:
     """Export a Load/Generator/Storage appliance as native DSS ``Load`` element(s).
 
@@ -997,6 +1014,7 @@ def _export_injection_appliance(
             model,
             zipv,
             harmonic,
+            mode=mode,
         )
         return _ApplianceExport(
             kind="whole",
@@ -1043,6 +1061,7 @@ def _export_injection_appliance(
             model,
             zipv,
             harmonic,
+            mode=mode,
         )
         elements[ph] = name
     return _ApplianceExport(
@@ -1299,7 +1318,9 @@ def export_grid_to_opendss(
             continue
         node = node_by_id[int(a.node)]
         if isinstance(a, (Generator, Storage)) and a.harmonic_impedance is not None:
-            generators[int(a.id)] = _export_native_der(dss, a, node, busname, f0)
+            generators[int(a.id)] = _export_native_der(
+                dss, a, node, busname, f0, mode=mode
+            )
             continue
         if isinstance(a, (Load, Generator, Storage)):
             prefix = {Load: "lo", Generator: "ge", Storage: "st"}[type(a)]
@@ -1313,6 +1334,7 @@ def export_grid_to_opendss(
                 harmonic=(
                     _harmonic_shunt_properties(a, shunt) if mode == "matched" else ""
                 ),
+                mode=mode,
             )
             if isinstance(a, Load):
                 loads[int(a.id)] = exported
@@ -1355,7 +1377,7 @@ def export_grid_to_opendss(
     with _scratch_datapath():
         dss.Text.Command("Solve")
     if not dss.Solution.Converged():
-        raise ConversionError(
+        raise OpenDSSConvergenceError(
             "the exported OpenDSS circuit did not converge on its initial "
             "nominal-operating-point solve; check the exported topology/ratings."
         )
@@ -1851,6 +1873,7 @@ def compare_to_pgml(
 
 __all__ = [
     "ExportedCircuit",
+    "OpenDSSConvergenceError",
     "export_grid_to_opendss",
     "run_opendss_scenarios",
     "write_opendss_dataset",

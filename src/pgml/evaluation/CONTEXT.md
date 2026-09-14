@@ -194,10 +194,14 @@ this reproduces bit-for-bit).
   `r1/x1`-defined Line; verified live, a switch-only repro alone desynced a comparison by
   ~0.4%); a tight `Set Tolerance=1e-10`/`Set MaxIterations=100` snap solve (OpenDSS's
   default `1e-4` tolerance is loose enough to show up, growing with system size/loading);
-  and `Vminpu=0.0001 Vmaxpu=10000` on every `Load` (OpenDSS's default `0.95`/`1.05` band
+  and `Vminpu=1e-8 Vlowpu=1e-8 Vmaxpu=1e8` on every `Load` (finite guards outside the
+  comparison range; OpenDSS's default `0.95`/`0.5`/`1.05` thresholds
   CLIPS the constant-power/current/ZIP law outside it — pgml's laws have none — measured
   live: a bus at 0.919 pu, an everyday LV drop, made a default-banded load deliver 6.8%
   less than nameplate). `mode="default"` leaves OpenDSS's own defaults for all of these.
+  An initial snapshot failure raises public `OpenDSSConvergenceError`, a
+  `ConversionError` subclass, so callers can distinguish nonconvergence from unsupported
+  exports without breaking existing catches.
 - `run_opendss_scenarios(grid, sampled, *, harmonic_orders, mode="matched"|"default",
   load_shunt=None, dtype=complex128) -> pgml.scenarios.ScenarioResult` — exports once,
   attaches one native `Spectrum` per device carrying a harmonic injection, then per

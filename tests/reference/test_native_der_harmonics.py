@@ -53,6 +53,29 @@ def native_voltages():
 
 
 @pytest.mark.parametrize("kind", ["Generator", "PVSystem", "Storage"])
+@pytest.mark.parametrize(
+    "mode,expected", [("matched", (1.0e-8, 1.0e8)), ("default", (0.9, 1.1))]
+)
+def test_native_der_voltage_bands_follow_oracle_mode(kind, mode, expected):
+    from pgml.evaluation.oracles.opendss_scenario_oracle import export_grid_to_opendss
+
+    native_der_circuit(kind, "wye")
+    grid, _ = to_grid(
+        dss, phase_mode=PhaseMode.THREE_PHASE, harmonic_line_model="naive"
+    )
+    exported = export_grid_to_opendss(grid, mode=mode, load_shunt="none")
+    device = next(
+        a for a in grid.appliances if getattr(a, "harmonic_impedance", None) is not None
+    )
+    name = exported.generators[device.id].elements[None]
+    values = []
+    for property_name in ("vminpu", "vmaxpu"):
+        dss.Text.Command(f"? {kind}.{name}.{property_name}")
+        values.append(float(dss.Text.Result()))
+    assert values == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("kind", ["Generator", "PVSystem", "Storage"])
 @pytest.mark.parametrize("conn,phases", [("wye", 1), ("wye", 3), ("delta", 3)])
 def test_native_der_harmonic_voltage_and_norton_initialization(kind, conn, phases):
     native_der_circuit(kind, conn, phases)

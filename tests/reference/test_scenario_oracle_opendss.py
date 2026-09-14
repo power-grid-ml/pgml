@@ -46,6 +46,7 @@ pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaul
 
 from pgml.errors import ConversionError  # noqa: E402
 from pgml.evaluation.oracles.opendss_scenario_oracle import (  # noqa: E402
+    OpenDSSConvergenceError,
     compare_to_pgml,
     export_grid_to_opendss,
     run_opendss_scenarios,
@@ -197,6 +198,60 @@ def test_export_solves_and_load_model_maps_to_dss():
     name = circuit.loads[2].elements[Phase.A]
     dss.Loads.Name(name)
     assert dss.Loads.Model() == 2
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("matched", (1.0e-8, 1.0e-8, 1.0e8)),
+        ("default", (0.95, 0.5, 1.05)),
+    ],
+)
+def test_load_voltage_bands_follow_oracle_mode(mode, expected):
+    grid = _grid()
+    circuit = export_grid_to_opendss(grid, mode=mode)
+    load = next(iter(circuit.loads.values()))
+    dss.Loads.Name(next(iter(load.elements.values())))
+    dss.Text.Command(f"? Load.{dss.Loads.Name()}.Vlowpu")
+    actual = (dss.Loads.Vminpu(), float(dss.Text.Result()), dss.Loads.Vmaxpu())
+    assert actual == pytest.approx(expected)
+
+
+def test_matched_mode_does_not_hide_infeasible_constant_power_behind_voltage_band():
+    phase = (Phase.A,)
+    grid = Grid(
+        nodes=[Node(id=0, u_rated_v=230.0, phases=phase)],
+        branches=[],
+        appliances=[
+            Source(
+                id=1,
+                node=0,
+                phases=phase,
+                u_ref_v=[230.0],
+                u_angle_deg=[0.0],
+                resistance_ohm=[[2.0]],
+                inductance_h=[[0.0]],
+            ),
+            Load(
+                id=2,
+                node=0,
+                phases=phase,
+                p_nom_w=100_000.0,
+                q_nom_var=0.0,
+            ),
+        ],
+    )
+
+    circuit = export_grid_to_opendss(grid, mode="default")
+    dss.Loads.Name(circuit.loads[2].elements[Phase.A])
+    delivered_kw = sum(dss.CktElement.Powers()[0::2])
+    assert dss.Solution.Converged()
+    assert dss.Circuit.AllBusMagPu()[0] < 0.5
+    assert delivered_kw < 0.05 * 100_000.0 / 1000.0
+
+    with pytest.raises(OpenDSSConvergenceError, match="did not converge") as caught:
+        export_grid_to_opendss(grid, mode="matched")
+    assert isinstance(caught.value, ConversionError)
 
 
 def test_export_refuses_conductor_geometry_line():
@@ -431,7 +486,7 @@ _ABC = (Phase.A, Phase.B, Phase.C)
 def _devices_grid() -> Grid:
     """A 3-phase feeder with a closed Switch, a Capacitor+Reactor ShuntAppliance, a
     PV Generator, and a Storage unit -- everything the campaign found clean once
-    exported as a negative-kW Load with Vminpu/Vmaxpu unbounded (see the module
+    exported as a negative-kW Load with finite voltage-band guards (see the module
     docstring's "Exporter coverage")."""
     diag = lambda v: [[v if i == j else 0.0 for j in range(3)] for i in range(3)]  # noqa: E731
     nodes = [Node(id=i, u_rated_v=400.0, phases=_ABC) for i in range(3)]

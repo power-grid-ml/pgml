@@ -266,7 +266,11 @@ zigzag transformer windings, a phase-coupled or unbalanced ``Source``, an
 impedance-grounded transformer neutral, and a nonzero vector-group phase
 shift on a single-phase transformer (OpenDSS has no delta/``LeadLag``
 mechanism at ``phases=1``). See the module docstring for the complete
-coverage and refusal list.
+coverage and refusal list. A representable circuit that fails its initial
+snapshot raises
+:class:`~pgml.evaluation.oracles.opendss_scenario_oracle.OpenDSSConvergenceError`,
+a compatibility subclass of :class:`~pgml.errors.ConversionError`, so validation
+code can count nonconvergence separately from unsupported models.
 
 .. automodule:: pgml.evaluation
    :members:
