@@ -23,59 +23,61 @@ plt.rcParams.update(
 
 
 def save(fig, stem):
-    fig.savefig(ASSETS / f"{stem}.svg", bbox_inches="tight", metadata={"Date": None})
+    svg = ASSETS / f"{stem}.svg"
+    fig.savefig(svg, bbox_inches="tight", metadata={"Date": None})
+    svg.write_text(
+        "\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n"
+    )
     fig.savefig(Path("/tmp") / f"pgml-readme-{stem}.png", dpi=120, bbox_inches="tight")
     plt.close(fig)
 
 
 def throughput():
     data = json.loads((ASSETS / "batch_throughput.json").read_text())
-    grid = data["grids"]["ieee33"]
-    fig, ax = plt.subplots(figsize=(10.8, 3.5), layout="constrained")
-    for key, label, color in [
-        ("cpu_dense_c128", "pgml · CPU", "#2563eb"),
-        ("gpu_dense_c128", "pgml · GPU", "#d97706"),
-    ]:
-        records = grid["series"][key]
-        valid = [
-            r
-            for r in records
-            if r.get("verdict") == "ok"
-            and r.get("converged") is True
-            and np.isfinite(r.get("throughput", np.nan))
-            and np.isfinite(r.get("max_dV_pu", np.nan))
-            and r["max_dV_pu"] <= 1e-6
-        ]
-        if not valid:
-            raise ValueError(f"No valid throughput points for {key}")
-        ax.plot(
-            [r["batch"] for r in valid],
-            [r["throughput"] for r in valid],
-            "o-",
-            color=color,
-            label=label,
-            linewidth=2,
-            markersize=5,
-        )
-    ax.set(
-        xscale="log",
-        yscale="log",
-        xlabel="Scenarios per batch",
-        ylabel="Solved scenarios / second",
-        title="Batching one IEEE 33-bus feeder · double precision",
+    curves = [
+        ("series", "cpu_dense_c128", "pgml · CPU dense", "#2563eb", "o-"),
+        ("series", "cpu_sparse_c128", "pgml · CPU sparse", "#0891b2", "s-"),
+        ("series", "gpu_dense_c128", "pgml · GPU", "#d97706", "o-"),
+        ("baselines", "pandapower", "pandapower · CPU", "#7c3aed", "^--"),
+        ("baselines", "power_grid_model", "power-grid-model · CPU", "#15803d", "v--"),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.1), sharey=True)
+    for ax, (name, title) in zip(
+        axes, [("ieee33", "IEEE 33-bus feeder"), ("kerber", "Kerber · 294 buses")]
+    ):
+        grid = data["grids"][name]
+        for section, key, label, color, style in curves:
+            records = grid[section][key]
+            for row in records:
+                valid = np.isfinite(row.get("throughput", np.nan))
+                if section == "series":
+                    valid &= row.get("verdict") == "ok" and row.get("converged") is True
+                    error = row.get("max_dV_pu", np.nan)
+                else:
+                    valid &= row.get("status") == "ok"
+                    valid &= row.get("comparison_scenarios") == row["batch"]
+                    error = row.get("max_dV_vs_pgml_cpu_c128_pu", np.nan)
+                if not valid or not np.isfinite(error) or error > 1e-6:
+                    raise ValueError(f"Invalid comparison point: {name}/{key}/{row}")
+            ax.plot(
+                [r["batch"] for r in records],
+                [r["throughput"] for r in records],
+                style,
+                color=color,
+                label=label,
+                linewidth=1.8,
+                markersize=4,
+            )
+        ax.set(xscale="log", yscale="log", xlabel="Scenarios per batch", title=title)
+        ax.grid(alpha=0.2, which="both")
+    axes[0].set_ylabel("Solved scenarios / second")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False, fontsize=10)
+    fig.suptitle(
+        "Fundamental power flow · double precision · one GPU / eight allocated CPUs",
+        fontsize=12,
     )
-    ax.grid(alpha=0.2, which="both")
-    ax.legend(frameon=False)
-    date = data["environment"]["date"][:10]
-    provenance = json.loads((ASSETS / "provenance.json").read_text())
-    suffix = (
-        ""
-        if provenance.get("performance_current_review", False)
-        else " · refresh pending"
-    )
-    fig.supxlabel(
-        f"Recorded {date} · Core i7-12700 / RTX A2000 12 GB{suffix}", fontsize=10
-    )
+    fig.tight_layout(rect=(0, 0.15, 1, 0.96))
     save(fig, "batch_throughput")
 
 
