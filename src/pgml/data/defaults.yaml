@@ -714,7 +714,7 @@ solver:
   equilibration:
     mode:
       value: "symmetric"
-      units: "name: off | symmetric | row_column"
+      units: "name: off | symmetric"
       description: >
         Diagonal equilibration applied around every factorization of a linear system
         (the nodal admittance, the Newton state Jacobian, the implicit-function adjoint).
@@ -724,9 +724,7 @@ solver:
         number. "symmetric" is van der Sluis scaling d_i = |Y_ii|^-1/2 applied as the
         congruence D Y D: it keeps symmetry and sparsity, reads only the diagonal, and is
         within sqrt(n) of the best condition number any diagonal scaling can reach.
-        "row_column" is the two-sided LAPACK xGEEQU variant (row max-norms, then column
-        max-norms), which needs a pass over the whole matrix and is unavailable on the
-        block-diagonal backend. "off" factors the matrix as assembled. The scaling is
+        "off" factors the matrix as assembled. The scaling is
         undone on the solution, so results, reported quantities and gradients are
         unchanged; what changes is the conditioning of the factored system, the meaning of
         the condition estimate, and the robustness of a single-precision factorization.

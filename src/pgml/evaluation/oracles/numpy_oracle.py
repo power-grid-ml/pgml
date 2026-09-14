@@ -49,6 +49,25 @@ from pgml.evaluation.data import HarmonicProfile
 from pgml.evaluation.topology import distance_from_slack
 
 
+def _reject_explicit_der_impedance(grid: Grid, oracle_name: str) -> None:
+    """Refuse a hybrid oracle that does not stamp explicit DER impedance/source data."""
+    device_ids = [
+        a.id
+        for a in grid.appliances
+        if getattr(a, "in_service", True)
+        and getattr(a, "harmonic_impedance", None) is not None
+    ]
+    if device_ids:
+        raise ValueError(
+            f"{oracle_name} does not model explicit Generator/Storage "
+            f"harmonic_impedance (device ids {device_ids[:10]}). Use "
+            "solve_harmonic_flow for the pgml model; for native-compatible "
+            "opendss_voltage/opendss_admittance devices, use "
+            "pgml.evaluation.oracles.opendss_scenario_oracle."
+            "run_opendss_scenarios for an independent native comparison."
+        )
+
+
 # ---------------------------------------------------------------------------
 # ideal (zero-impedance) branches: the oracle's own dense bus fusion
 # ---------------------------------------------------------------------------
@@ -730,6 +749,8 @@ def numpy_harmonic_profiles(
     ``v1``. ``load_shunt`` selects the device shunt model (``None`` = the documented
     modeling default, as in :func:`pgml.solver.solve_harmonic_flow`).
     """
+    _reject_explicit_der_impedance(grid, "numpy_harmonic_profiles")
+
     from pgml.assembly._load_shunt import resolve_shunt_model_name
 
     shunt = resolve_shunt_model_name(load_shunt)
@@ -921,6 +942,7 @@ def numpy_harmonic_voltages(
     opendss_harmonic_voltages : Live OpenDSS oracle (Carson lines).
     numpy_harmonic_profiles : Single-phase numpy oracle (lines + source only).
     """
+    _reject_explicit_der_impedance(grid, "numpy_harmonic_voltages")
     if slack != "norton":
         raise ValueError(
             f"numpy_harmonic_voltages supports only slack='norton'; got {slack!r}"

@@ -45,6 +45,7 @@ from pgml.evaluation.topology import distance_from_slack
 from pgml.evaluation.oracles.numpy_oracle import (
     _apply_node_sources_numpy,
     _is_ideal_branch,
+    _reject_explicit_der_impedance,
     _stamp_device_shunts_numpy,
     _stamp_transformer_numpy,
     fusion_prolongation,
@@ -208,6 +209,7 @@ def opendss_geometry_harmonic_profiles(
     this isolates the Carson line model — paired with :func:`pgml.evaluation.data.harmonic_profiles`
     it is a true OpenDSS-vs-pgml harmonic comparison. Single-phase feeders only.
     """
+    _reject_explicit_der_impedance(grid, "opendss_geometry_harmonic_profiles")
     index = hres.index
     f0 = float(grid.base_frequency_hz)
     freqs = hres.frequencies_hz.detach().cpu().numpy()
@@ -900,6 +902,8 @@ def opendss_harmonic_voltages(
     opendss_geometry_harmonic_profiles : Carson-line profile oracle (passive feeder).
     numpy_harmonic_profiles : Single-phase numpy oracle (lines + source only).
     """
+    _reject_explicit_der_impedance(grid, "opendss_harmonic_voltages")
+
     import opendssdirect as dss
 
     from pgml.schemas.grid_schema import Generator as PgmlGen, Load as PgmlLoad
@@ -1509,6 +1513,8 @@ def opendss_dyn_transformer_harmonic_voltages(
     opendss_harmonic_voltages : Live oracle with pgml-stamped transformers.
     numpy_harmonic_voltages : Pure-numpy regression oracle (machine-precision parity).
     """
+    _reject_explicit_der_impedance(grid, "opendss_dyn_transformer_harmonic_voltages")
+
     import cmath as _cmath
 
     import opendssdirect as dss

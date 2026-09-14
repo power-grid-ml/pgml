@@ -36,18 +36,17 @@ def _spread_system(n=16, spread=1.0e6, seed=0):
     return a * d.unsqueeze(-1) * d.unsqueeze(-2), torch.randn(n, dtype=CDT)
 
 
-@pytest.mark.parametrize("mode", ["symmetric", "row_column"])
-def test_scale_factors_are_device_independent(mode):
+def test_scale_factors_are_device_independent():
     a, _ = _spread_system()
-    cpu = equilibration_scales(a, mode=mode)
-    cuda = equilibration_scales(a.to(CUDA), mode=mode)
+    cpu = equilibration_scales(a, mode="symmetric")
+    cuda = equilibration_scales(a.to(CUDA), mode="symmetric")
     for dc, dg in zip(cpu, cuda):
         assert dg.device.type == "cuda"
         # Powers of two on both devices: the scaling is exact, so it must be identical.
         assert torch.equal(dc, dg.cpu())
 
 
-@pytest.mark.parametrize("mode", ["off", "symmetric", "row_column"])
+@pytest.mark.parametrize("mode", ["off", "symmetric"])
 def test_factored_solve_matches_across_devices(mode):
     a, b = _spread_system()
     ref = solve_factored(lu_factor_system(a, equilibrate=mode), b)
@@ -87,8 +86,6 @@ def test_block_backend_is_equilibrated_on_cuda():
     sym = solve_power_flow(merged.grid, equilibrate="symmetric", **kw)
     assert off.converged and sym.converged
     assert float((sym.v - off.v).abs().max()) < 1e-6  # volts on a 20 kV feeder
-    with pytest.raises(Exception):  # row_column needs a matrix this backend never forms
-        solve_power_flow(merged.grid, equilibrate="row_column", **kw)
 
 
 def test_gradient_is_unchanged_on_cuda():

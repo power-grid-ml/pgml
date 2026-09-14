@@ -2093,8 +2093,8 @@ def solve_power_flow(
         state Jacobian of a Newton step, and the adjoint system of the gradient path.
         ``None`` (default) resolves the documented default
         ``solver.equilibration.mode`` (``"symmetric"``, van der Sluis scaling
-        ``d_i = |A_ii|^{-1/2}``), ``"row_column"`` selects the two-sided variant, and
-        ``"off"`` factors every matrix as assembled. The scaling is applied around each
+        ``d_i = |A_ii|^{-1/2}``) or ``"off"`` to factor every matrix as assembled.
+        The scaling is applied around each
         factorization and undone on its solution, so voltages, currents, residuals,
         tolerances and gradients are unchanged; what changes is the conditioning of the
         factored systems (measured: the condition number of the fundamental free block

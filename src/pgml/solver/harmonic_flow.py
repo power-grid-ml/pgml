@@ -33,15 +33,18 @@ Model (matches OpenDSS ``Solve mode=harmonics`` — see
    WYE-neutral ``[I|-1]`` (terminal = ``V_phase - V_N``), DELTA-3 circulant
    (terminal = L-L difference).
 3. For each harmonic order ``h > 1`` (batched over all orders): the network is
-   LINEAR. ``Y(h) = assemble_network_ybus(grid, [h*f0]) + source Norton shunt``.
+   LINEAR. ``Y(h)`` contains the network, source Norton shunt, load-derived shunt,
+   and every explicit Generator/Storage harmonic impedance.
    Each device injects (load-terminal convention) a per-element harmonic current
    ``|I_h^e| = (mag_h^e/mag_1^e) * |I1_elem|`` and
    ``arg(I_h^e) = ang_h^e + h*(arg(I1_elem) - ang_1^e)`` from its per-ELEMENT
    spectrum coefficients (device ``spectrum`` broadcast on all elements,
    ``spectrum_per_phase`` per phase/branch, or the ``harmonic_injection`` override).
-   The NODAL injection is ``-(M^T @ i_h_elem)`` (the device draws it, same sense as
-   the fundamental). The source is a Norton shunt held at zero harmonic voltage (no
-   ideal slack here), so ``V(h) = solve_harmonic(Y(h), I(h))`` in Norton mode.
+   The NODAL injection is ``-(M^T @ i_h_elem)`` for a terminal-current spectrum.
+   An internal-voltage spectrum instead initializes the voltage behind an explicit
+   impedance and injects its positive Norton current. The source is a Norton shunt
+   held at zero harmonic voltage (no ideal slack here), so
+   ``V(h) = solve_harmonic(Y(h), I(h))`` in Norton mode.
 
 Differentiability + GPU: the fundamental carries IFT gradients (via
 :func:`solve_power_flow`); the harmonics are linear and differentiable. Gradients
@@ -83,17 +86,20 @@ from pgml.assembly.ybus import _override, _stamp_sources
 from pgml.errors import InputError
 from pgml.assembly._control import resolve_injection_power
 from pgml.schemas.grid_schema import (
+    Generator,
     Grid,
     InjectionAppliance,
     Load,
     LoadModel,
     Phase,
     StaticSpectrum,
+    Storage,
     WindingConnection,
 )
 
 from .equilibration import resolve_equilibration
 from .harmonic import lu_factor_system, solve_factored
+from .lowrank import LowRankOperator, low_rank_update, solve_factored_updated
 from .power_flow import (
     PowerFlowResult,
     _expand_zeroed_result,
@@ -659,7 +665,14 @@ def _solve_harmonic_orders(
             ih,
         )
 
-    def assemble(v1_in, op_in, inj_in):
+    def assemble(
+        v1_in,
+        op_in,
+        inj_in,
+        *,
+        shunt_model=load_shunt,
+        shunt_basis=load_shunt_basis,
+    ):
         return assemble_harmonic_system(
             grid,
             harm,
@@ -667,8 +680,8 @@ def _solve_harmonic_orders(
             operating_point=op_in,
             harmonic_injection=inj_in,
             node_sources=node_sources,
-            load_shunt=load_shunt,
-            load_shunt_basis=load_shunt_basis,
+            load_shunt=shunt_model,
+            load_shunt_basis=shunt_basis,
             symmetry=symmetry,
             dtype=dtype,
             device=device,
@@ -685,6 +698,77 @@ def _solve_harmonic_orders(
         and b_scen > 1
         and not node_sources
     )
+    # A sparse population of scenario-dependent device shunts changes only a small
+    # principal block of each harmonic matrix. Factor the shunt-free network once and
+    # add that exact block with Woodbury. Dense device populations retain the direct
+    # path. The conservative ``3k < N`` selection rule avoids the high-rank regime;
+    # it is a heuristic, because the actual crossover depends on backend and hardware.
+    if (
+        scenario_matrix
+        and branch_states is None
+        and _injection_batch_rank(harmonic_injection) <= v1.ndim - 1
+    ):
+        y_base, ih, _ = assemble(
+            v1,
+            operating_point,
+            harmonic_injection,
+            shunt_model="none",
+            shunt_basis="nameplate",
+        )
+        if y_base.ndim == 3:
+            terms = _harmonic_shunt_lowrank_terms(
+                grid,
+                v1,
+                node_phase_index(grid) if fusion is None else fusion.index,
+                harm,
+                operating_point,
+                load_shunt,
+                param_overrides,
+                symmetry == "asymmetric",
+                _cdtype(dtype),
+                _rdtype(dtype),
+                device,
+            )
+            if terms is None:
+                return solve_chunk(y_base, ih)
+            u, c = terms
+            if 3 * u.shape[1] < n_rows:
+                fac = update = voltage = operator = None
+                try:
+                    fac = lu_factor_system(
+                        y_base,
+                        backend=backend,
+                        block_rows=block_rows,
+                        precision=precision,
+                        equilibrate=equilibrate,
+                    )
+                    update = low_rank_update(fac, u, c)
+                    voltage = solve_factored_updated(update, ih)
+                    operator = LowRankOperator(y_base, u, c, u)
+                    residual_ok, relative_residual = _lowrank_harmonic_residual_ok(
+                        operator, voltage, ih
+                    )
+                    if residual_ok:
+                        return voltage
+                    _log.warning(
+                        "solve_harmonic_flow: low-rank device-shunt solve has relative "
+                        "backward error %.3e; falling back to exact assembled "
+                        "factorization.",
+                        relative_residual,
+                    )
+                    del voltage, update, operator, fac
+                except torch.OutOfMemoryError:
+                    raise
+                except RuntimeError as exc:
+                    _log.warning(
+                        "solve_harmonic_flow: low-rank device-shunt factorization "
+                        "failed (%s); falling back to exact assembled factorization.",
+                        exc,
+                    )
+                    del fac, update, voltage, operator
+            del u, c, terms
+        del y_base, ih
+
     chunk = (
         _harmonic_chunk(b_scen, len(harm), n_rows, _cdtype(dtype))
         if scenario_matrix
@@ -783,8 +867,11 @@ def assemble_harmonic_system(
     device's harmonic shunt (``load_shunt``) — the source is held at zero harmonic
     voltage (no ideal slack at harmonics) unless a ``node_sources`` voltage source
     stamps a shunt. ``I(h)`` is the sum of each
-    device's harmonic current injection (:func:`_harmonic_injections`) plus any
-    ``node_sources`` Norton/Thevenin current. The fundamental voltage ``v1`` enters
+    device's harmonic current or voltage-behind-impedance Norton injection
+    (:func:`_harmonic_injections`) plus any ``node_sources`` Norton/Thevenin current.
+    Explicit Generator/Storage harmonic impedances are always stamped and supersede
+    their derived ``harmonic_model`` shunt; ``load_shunt="none"`` does not remove a
+    physical impedance. The fundamental voltage ``v1`` enters
     ``I(h)`` through each device's fundamental terminal current
     ``I1_elem = sign·conj(S0_elem)/conj(V_term)`` (and, for voltage ``node_sources``,
     through ``E_h``), so gradients flow to ``v1``, to grid parameters (via ``Y(h)``
@@ -906,6 +993,7 @@ def assemble_harmonic_system(
     yh = _stamp_sources(
         grid, fvec, yh, index, cdt, rdt, device, param_overrides
     )  # [Hh, N, N]
+    yh = _stamp_der_harmonic_impedance(grid, yh, index, orders, cdt, rdt, device)
     harmonic_shunt = resolve_shunt_model_name(load_shunt)
     if harmonic_shunt != "none":
         yh = _stamp_harmonic_load_shunt(
@@ -980,8 +1068,9 @@ def harmonic_injections(
     """The harmonic nodal current injection ``I(h)`` ``[*batch, Hh, N]`` alone.
 
     The RHS half of :func:`assemble_harmonic_system`, without assembling ``Y(h)``: each
-    injecting device's connection-aware harmonic current from its converged fundamental
-    terminal current and its spectrum, plus the Norton current of every
+    injecting device's connection-aware harmonic source from its converged fundamental
+    state and spectrum (terminal current or voltage behind an explicit DER impedance),
+    plus the Norton current of every
     CURRENT-kind :class:`NodeHarmonicSource`. Differentiable in ``v1``, the device
     powers and the spectra.
 
@@ -1082,7 +1171,8 @@ def assemble_harmonic_ybus(
         constant-power device, an approximation for a ZIP or inverter-controlled one, which is
         named in a WARNING. Pass the converged ``v1`` (or use
         :func:`assemble_harmonic_system`) to reproduce :func:`solve_harmonic_flow`'s matrix
-        exactly. ``load_shunt="none"`` returns the pure network + source matrix.
+        exactly. ``load_shunt="none"`` removes only the derived device shunt; explicit
+        Generator/Storage harmonic impedances remain in the matrix.
     dtype, device:
         Complex dtype and device for the assembled matrix (``device=None`` -> CPU). Honoured
         throughout; gradients flow w.r.t. the network parameters on the live tape.
@@ -1145,6 +1235,7 @@ def assemble_harmonic_ybus(
     yh = _stamp_sources(
         grid, fvec, yh, index, cdt, rdt, device, param_overrides
     )  # [Hh, N, N]
+    yh = _stamp_der_harmonic_impedance(grid, yh, index, orders, cdt, rdt, device)
     if harmonic_shunt != "none":
         yh = _stamp_harmonic_load_shunt(
             grid,
@@ -1410,6 +1501,106 @@ def _effective_element_power(
     return torch.complex(sign * p_t * scale_p, sign * q_t * scale_q).to(cdt)
 
 
+def _der_impedance_values(appliance, n_elem, rdt, device) -> tuple[Tensor, Tensor]:
+    """Validated per-element ``R, L`` tensors for a DER harmonic impedance.
+
+    The schema deliberately preserves tensor identity, so tensor value and shape
+    checks live at the numerical boundary. Only a scalar or one value per connection
+    element is meaningful; leading scenario axes are not part of this static device
+    parameter contract.
+    """
+    impedance = appliance.harmonic_impedance
+    values = []
+    for name in ("resistance_ohm", "inductance_h"):
+        value = _as_rt(getattr(impedance, name), rdt, device)
+        if value.ndim == 0:
+            value = value.expand(n_elem)
+        elif value.ndim != 1 or value.shape[0] != n_elem:
+            raise InputError(
+                f"{type(appliance).__name__} {appliance.id}: harmonic_impedance."
+                f"{name} must be scalar or have one value per connection element "
+                f"({n_elem}); got shape {tuple(value.shape)}."
+            )
+        with torch.no_grad():
+            valid = torch.isfinite(value).all() and (value >= 0).all()
+        if not bool(valid):
+            raise InputError(
+                f"{type(appliance).__name__} {appliance.id}: harmonic_impedance."
+                f"{name} must contain finite nonnegative values."
+            )
+        values.append(value)
+    resistance, inductance = values
+    with torch.no_grad():
+        nonzero = ((resistance != 0) | (inductance != 0)).all()
+    if not bool(nonzero):
+        raise InputError(
+            f"{type(appliance).__name__} {appliance.id}: harmonic impedance must "
+            "be nonzero on every connection element."
+        )
+    return resistance, inductance
+
+
+def _der_harmonic_admittance(
+    appliance, n_elem, harm_orders, f0, cdt, rdt, device
+) -> tuple[Tensor, Tensor]:
+    """Return ``(Y(h), Z1)`` per connection element for an explicit DER model."""
+    resistance, inductance = _der_impedance_values(appliance, n_elem, rdt, device)
+    z1 = torch.complex(resistance, 2.0 * math.pi * f0 * inductance).to(cdt)
+    safe_z1 = torch.where(z1.abs() == 0, torch.ones_like(z1), z1)
+    y1 = 1.0 / safe_z1
+    h = torch.as_tensor(harm_orders, dtype=rdt, device=device).unsqueeze(-1)
+    if appliance.harmonic_impedance.frequency_model == "series_rl":
+        impedance = torch.complex(
+            resistance.unsqueeze(0).expand(len(harm_orders), -1),
+            2.0 * math.pi * f0 * h * inductance.unsqueeze(0),
+        ).to(cdt)
+        admittance = 1.0 / impedance
+    else:
+        admittance = torch.complex(
+            y1.real.unsqueeze(0).expand(len(harm_orders), -1),
+            y1.imag.unsqueeze(0) / h,
+        ).to(cdt)
+    return admittance, z1
+
+
+def _stamp_der_harmonic_impedance(
+    grid, yh, index, harm_orders, cdt, rdt, device
+) -> Tensor:
+    """Stamp explicit Generator/Storage harmonic impedances into ``Y(h)``.
+
+    These are real device impedances and therefore remain present when the optional
+    load-derived shunt model is ``"none"``.
+    """
+    devices = [
+        a
+        for a in grid.appliances
+        if isinstance(a, (Generator, Storage))
+        and a.in_service
+        and a.harmonic_impedance is not None
+    ]
+    if not devices:
+        return yh
+    node_map = {node.id: node for node in grid.nodes}
+    for group in group_appliances(devices, node_map):
+        m_c = build_incidence(group, rdt, device).to(cdt)
+        rows_group = used_rows(group, index, device)
+        blocks = []
+        for appliance in group.appliances:
+            admittance, _ = _der_harmonic_admittance(
+                appliance,
+                group.n_elem,
+                harm_orders,
+                float(grid.base_frequency_hz),
+                cdt,
+                rdt,
+                device,
+            )
+            blocks.append(torch.einsum("ei,he,ej->hij", m_c, admittance, m_c))
+        block = torch.stack(blocks, dim=-3)
+        yh = scatter_blocks_into(yh, block, rows_group, rows_group)
+    return yh
+
+
 def _harmonic_injections(
     grid,
     v1,
@@ -1454,11 +1645,10 @@ def _harmonic_injections(
         a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
     ]
 
-    # Per device that injects: (group, rows[n_used], i1_mag[*b,n_elem],
-    # i1_ang[*b,n_elem], {order:(mag_elem,ang1_elem?)} via element spectra).
-    # We collect the per-element fundamental current and the element spectra, grouped
-    # so the incidence M (a topology constant) is shared.
-    entries = []  # (m_c, rows, i1_mag, i1_ang, elem_spectra, n_elem)
+    # Each entry retains the connection incidence and a reference phasor. Current
+    # spectra use the absorbed terminal current and carry a negative nodal sign;
+    # voltage-behind-impedance spectra use a Norton source and carry a positive sign.
+    entries = []
     for grp in group_appliances(loads, node_map):
         n_elem = grp.n_elem
         m = build_incidence(grp, rdt, device)  # [n_elem, n_used] real
@@ -1497,11 +1687,57 @@ def _harmonic_injections(
                 vtc.abs() < 1e-300, torch.zeros_like(s0), torch.conj(s0) / safe_vtc
             )  # [*batch, n_elem]
 
+            mode = "current"
+            reference = i1
+            admittance = None
+            impedance = getattr(a, "harmonic_impedance", None)
+            if impedance is not None and impedance.spectrum_reference != "current":
+                admittance, z1 = _der_harmonic_admittance(
+                    a,
+                    n_elem,
+                    harm_orders,
+                    float(grid.base_frequency_hz),
+                    cdt,
+                    rdt,
+                    device,
+                )
+                mode = impedance.spectrum_reference
+                if mode == "internal_voltage":
+                    reference = vt - z1 * i1
+                else:
+                    if n_elem not in (1, 3):
+                        raise InputError(
+                            f"{type(a).__name__} {a.id}: spectrum_reference="
+                            "'opendss_voltage' supports one- or three-phase devices."
+                        )
+                    # OpenDSS initializes one phase-to-ground internal voltage from
+                    # terminal-1 LINE current, then synthesizes the balanced phase
+                    # vector at each harmonic. Its delta initialization uses the
+                    # star equivalent of the per-coil impedance retained by schema.
+                    v_used = v1.index_select(-1, rows).to(cdt)
+                    line_current = torch.einsum("eu,...e->...u", m_c, i1)[..., 0]
+                    z_star = z1[0] / (
+                        3.0 if grp.connection == WindingConnection.DELTA else 1.0
+                    )
+                    phase_one_voltage = (
+                        v_used[..., 0]
+                        if grp.connection == WindingConnection.DELTA
+                        else vt[..., 0]
+                    )
+                    reference = (phase_one_voltage - z_star * line_current).unsqueeze(
+                        -1
+                    )
+                    elem_spectra = {
+                        order: (magnitude[..., :1], phase[..., :1])
+                        for order, (magnitude, phase) in elem_spectra.items()
+                    }
+
+            ref_elem = reference.shape[-1]
             mag1_e, ang1_e = elem_spectra.get(
                 1,
                 (
-                    torch.ones(n_elem, dtype=rdt, device=device),
-                    torch.zeros(n_elem, dtype=rdt, device=device),
+                    torch.ones(ref_elem, dtype=rdt, device=device),
+                    torch.zeros(ref_elem, dtype=rdt, device=device),
                 ),
             )
             ang1_e = ang1_e * (math.pi / 180.0)
@@ -1509,11 +1745,13 @@ def _harmonic_injections(
                 (
                     m_c,
                     rows,
-                    torch.abs(i1),
-                    torch.angle(i1),
+                    torch.abs(reference),
+                    torch.angle(reference),
                     mag1_e,
                     ang1_e,
                     elem_spectra,
+                    mode,
+                    admittance,
                 )
             )
 
@@ -1528,11 +1766,21 @@ def _harmonic_injections(
     # per (device × order), which dominated multi-order assemblies.
     h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
     zero_e = None
-    parts = []  # (rows [n_used], i_used [*batch, Hh, n_used])
-    for m_c, rows, i1_mag, i1_ang, mag1_e, ang1_e, elem_spectra in entries:
-        n_elem = mag1_e.shape[-1]
-        if zero_e is None or zero_e.shape[-1] != n_elem:
-            zero_e = torch.zeros(n_elem, dtype=rdt, device=device)
+    parts = []  # (rows [n_used], sign, i_used [*batch, Hh, n_used])
+    for (
+        m_c,
+        rows,
+        ref_mag,
+        ref_ang,
+        mag1_e,
+        ang1_e,
+        elem_spectra,
+        mode,
+        admittance,
+    ) in entries:
+        n_reference = mag1_e.shape[-1]
+        if zero_e is None or zero_e.shape[-1] != n_reference:
+            zero_e = torch.zeros(n_reference, dtype=rdt, device=device)
         pairs = [elem_spectra.get(h, (zero_e, zero_e)) for h in harm_orders]
         cshape = torch.broadcast_shapes(*[t.shape for p in pairs for t in p])
         mag_h = torch.stack([p[0].broadcast_to(cshape) for p in pairs], dim=-2)
@@ -1552,26 +1800,45 @@ def _harmonic_injections(
         # missing singleton step axes just before the element axis so the per-scenario
         # fundamental current broadcasts across the extra step dims (a no-op when the
         # batches already match — the snapshot / nominal cases).
-        i1_mag_b = _pad_batch_before_elem(i1_mag, mag_h.ndim - 1)
-        i1_ang_b = _pad_batch_before_elem(i1_ang, mag_h.ndim - 1)
-        mag = ratio * i1_mag_b.unsqueeze(-2)
+        ref_mag_b = _pad_batch_before_elem(ref_mag, mag_h.ndim - 1)
+        ref_ang_b = _pad_batch_before_elem(ref_ang, mag_h.ndim - 1)
+        mag = ratio * ref_mag_b.unsqueeze(-2)
         phase = ph_h * (math.pi / 180.0) + h_vec[:, None] * (
-            i1_ang_b.unsqueeze(-2) - ang1_e.unsqueeze(-2)
+            ref_ang_b.unsqueeze(-2) - ang1_e.unsqueeze(-2)
         )
-        i_h_elem = torch.polar(mag, phase)  # [*batch, Hh, n_elem]
-        # Nodal current at the used rows: I_used = -(M^T @ i_elem) (drawn).
+        harmonic_reference = torch.polar(mag, phase)
+        sign = -1.0
+        if mode == "current":
+            i_h_elem = harmonic_reference
+        elif mode == "internal_voltage":
+            i_h_elem = harmonic_reference * admittance
+            sign = 1.0
+        else:
+            n_elem = m_c.shape[0]
+            phase_number = torch.arange(n_elem, dtype=rdt, device=device)
+            rotation = torch.polar(
+                torch.ones((len(harm_orders), n_elem), dtype=rdt, device=device),
+                -2.0 * math.pi * h_vec[:, None] * phase_number[None, :] / 3.0,
+            )
+            e_used = harmonic_reference * rotation
+            if m_c.shape[1] > n_elem:  # explicit WYE neutral is the zero reference.
+                e_used = torch.cat([e_used, torch.zeros_like(e_used[..., :1])], dim=-1)
+            e_elem = torch.einsum("eu,...u->...e", m_c, e_used)
+            i_h_elem = e_elem * admittance
+            sign = 1.0
+        # Map element current to the device's used nodal rows.
         i_used = torch.einsum("eu,...e->...u", m_c, i_h_elem)  # [*batch, Hh, n_used]
-        parts.append((rows, i_used))
+        parts.append((rows, sign, i_used))
 
-    bshape = torch.broadcast_shapes(*[p.shape[:-2] for _, p in parts])
+    bshape = torch.broadcast_shapes(*[p.shape[:-2] for _, _, p in parts])
     out = torch.zeros((*bshape, hh, n), dtype=cdt, device=device)
-    for rows, i_used in parts:
+    for rows, sign, i_used in parts:
         # `broadcast_to` returns a VIEW; a non-contiguous complex tensor can fail
         # the CUDA index_add backend, so materialise it (defensive, matches
         # ybus._scatter_injection). `.contiguous()` is autograd-safe.
         i_used = i_used.broadcast_to(*bshape, hh, rows.shape[0]).contiguous()
         # Out-of-place index_add (GPU-safe for COMPLEX, unlike scatter_add).
-        out = out.index_add(-1, rows, -i_used)
+        out = out.index_add(-1, rows, sign * i_used)
     return out  # [*batch, Hh, N]
 
 
@@ -1592,6 +1859,9 @@ def _stamp_harmonic_load_shunt(
     rdt,
     device,
     basis="operating_point",
+    *,
+    blocks_only=False,
+    warn=True,
 ):
     """Add every device's harmonic Norton shunt to ``Y(h)`` ``[*batch, Hh, N, N]``.
 
@@ -1624,10 +1894,16 @@ def _stamp_harmonic_load_shunt(
     that buys is the shunt of the nameplate load rather than of this scenario's load.
     """
     loads = [
-        a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
+        a
+        for a in grid.appliances
+        if isinstance(a, InjectionAppliance)
+        and a.in_service
+        # A measured/imported DER impedance is the device's physical shunt. It
+        # supersedes the load-derived approximation instead of being added to it.
+        and getattr(a, "harmonic_impedance", None) is None
     ]
     if not loads:
-        return yh
+        return [] if blocks_only else yh
     if basis == "nameplate":
         # The nameplate basis is exactly the no-fundamental evaluation, applied on
         # purpose: the device's stored power at its rated terminal voltage.
@@ -1636,6 +1912,7 @@ def _stamp_harmonic_load_shunt(
     node_map = {nd.id: nd for nd in grid.nodes}
     h_vec = torch.as_tensor([float(h) for h in harm_orders], dtype=rdt, device=device)
     rated_only = []
+    blocks = []
     generation_free = [a.id for a in loads if generation_shunt_is_neglected(a)]
     for grp in group_appliances(loads, node_map):
         specs = [resolve_harmonic_shunt(a, harmonic_shunt) for a in grp.appliances]
@@ -1711,8 +1988,8 @@ def _stamp_harmonic_load_shunt(
         )  # [*batch, Hh, K, n_elem]
         block = torch.einsum("ei,...ke,ej->...kij", m_c, y_elem, m_c)
         rows = rows_grp[torch.as_tensor(keep, dtype=torch.int64, device=device)]
-        yh = scatter_blocks_into(yh, block, rows, rows)
-    if rated_only:
+        blocks.append((block, rows))
+    if warn and rated_only:
         _log.warning(
             "harmonic load shunt: %d voltage-dependent device(s) %s evaluated at their "
             "RATED terminal voltage (%s); pass the fundamental voltage with "
@@ -1723,7 +2000,7 @@ def _stamp_harmonic_load_shunt(
             if basis == "nameplate"
             else "no fundamental solution given",
         )
-    if generation_free:
+    if warn and generation_free:
         _log.warning(
             "harmonic device shunt: %d generation device(s) %s carry NO shunt and stay "
             "pure harmonic current sources (appliance.harmonic_shunt.generation_model = "
@@ -1734,7 +2011,92 @@ def _stamp_harmonic_load_shunt(
             len(generation_free),
             generation_free[:10],
         )
+    if blocks_only:
+        return blocks
+    for block, rows in blocks:
+        yh = scatter_blocks_into(yh, block, rows, rows)
     return yh
+
+
+def _harmonic_shunt_lowrank_terms(
+    grid,
+    v1,
+    index,
+    harm_orders,
+    operating_point,
+    harmonic_shunt,
+    param_overrides,
+    asymmetric,
+    cdt,
+    rdt,
+    device,
+):
+    """Return ``U, C`` for the exact operating-point harmonic device shunt.
+
+    ``U`` selects the unique node-phase rows touched by any modeled device and
+    ``C`` is the shunt restricted to those rows. Connection incidence is inherited
+    directly from :func:`_stamp_harmonic_load_shunt`, so neutral-returning WYE and
+    DELTA blocks retain their off-diagonal terms.
+    """
+    blocks = _stamp_harmonic_load_shunt(
+        grid,
+        None,
+        v1,
+        index,
+        harm_orders,
+        operating_point,
+        harmonic_shunt,
+        param_overrides,
+        asymmetric,
+        cdt,
+        rdt,
+        device,
+        blocks_only=True,
+        warn=False,
+    )
+    if not blocks:
+        return None
+
+    flat_rows = torch.cat([rows.reshape(-1) for _, rows in blocks])
+    selected, inverse = torch.unique(flat_rows, sorted=True, return_inverse=True)
+    rank = selected.shape[0]
+    # Build the N-by-k selector directly. ``eye(N).index_select`` transiently allocates
+    # N² entries and defeats the memory purpose of a low-rank path on a large feeder.
+    u = torch.zeros((index.size, rank), dtype=cdt, device=device)
+    u[selected, torch.arange(rank, device=device)] = 1.0
+    core = torch.zeros((len(harm_orders), rank, rank), dtype=cdt, device=device)
+    offset = 0
+    for block, rows in blocks:
+        count = rows.numel()
+        local_rows = inverse[offset : offset + count].reshape_as(rows)
+        core = scatter_blocks_into(core, block, local_rows, local_rows)
+        offset += count
+    return u, core
+
+
+def _lowrank_harmonic_residual_ok(
+    operator: LowRankOperator, voltage: Tensor, current: Tensor
+) -> tuple[bool, float]:
+    """Check the dimensionless backward error of a harmonic Woodbury solve.
+
+    The check is a numerical guard only and does not alter the differentiable
+    successful result. Its denominator bounds ``||A'||∞ ||V||∞ + ||I||∞`` using
+    the base matrix and compact update core without materializing ``A'``.
+    """
+    with torch.no_grad():
+        base_v = torch.matmul(operator.base, voltage.unsqueeze(-1)).squeeze(-1)
+        residual = base_v + operator.correction(voltage) - current
+        base_norm = operator.base.abs().sum(-1).amax(-1)
+        update_norm = operator.c.abs().sum(-1).amax(-1)
+        voltage_norm = voltage.abs().amax(-1)
+        current_norm = current.abs().amax(-1)
+        denominator = (base_norm + update_norm) * voltage_norm + current_norm
+        safe = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+        relative = (residual.abs().amax(-1) / safe).amax()
+        eps = torch.finfo(voltage.real.dtype).eps
+        limit = max(1.0e-10, 100.0 * operator.shape[-1] * eps)
+        value = float(relative)
+        return bool(torch.isfinite(relative) and relative <= limit), value
 
 
 def _harmonic_shunt_currents(
@@ -1755,7 +2117,8 @@ def _harmonic_shunt_currents(
     """The current the devices' harmonic Norton shunts DRAW, ``[*batch, Hh, N]``.
 
     ``Y_shunt(h) V(h)`` for the shunt model ``load_shunt`` selects (``None`` = the
-    documented default; ``"none"`` returns zeros): the part of each device's harmonic
+    documented default; ``"none"`` retains explicit Generator/Storage impedances):
+    the part of each device's harmonic
     nodal current that :func:`assemble_harmonic_system` carries on the LEFT-hand side,
     inside ``Y(h)``. The DEVICE-side nodal current at order ``h`` is therefore
     :func:`harmonic_injections` MINUS this term, which is what a nodal current balance
@@ -1783,23 +2146,31 @@ def _harmonic_shunt_currents(
     if device is None:
         device = vh.device
     idx = index if index is not None else node_phase_index(grid)
-    if harmonic_shunt == "none":
-        return torch.zeros(vh.shape, dtype=cdt, device=device)
-    y_shunt = _stamp_harmonic_load_shunt(
+    y_shunt = _stamp_der_harmonic_impedance(
         grid,
         torch.zeros((len(orders), idx.size, idx.size), dtype=cdt, device=device),
-        v1,
         idx,
         orders,
-        operating_point,
-        harmonic_shunt,
-        param_overrides,
-        resolve_asymmetric(grid, operating_point, mode=symmetry),
         cdt,
         rdt,
         device,
-        resolve_shunt_basis(load_shunt_basis),
-    )  # [*batch, Hh, N, N]
+    )
+    if harmonic_shunt != "none":
+        y_shunt = _stamp_harmonic_load_shunt(
+            grid,
+            y_shunt,
+            v1,
+            idx,
+            orders,
+            operating_point,
+            harmonic_shunt,
+            param_overrides,
+            resolve_asymmetric(grid, operating_point, mode=symmetry),
+            cdt,
+            rdt,
+            device,
+            resolve_shunt_basis(load_shunt_basis),
+        )  # [*batch, Hh, N, N]
     return torch.einsum("...hij,...hj->...hi", y_shunt, vh.to(cdt))
 
 

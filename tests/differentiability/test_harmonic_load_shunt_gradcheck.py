@@ -229,6 +229,33 @@ def _solve_batched(p, *, budget_bytes=None, basis=None):
     ).v.reshape(-1)
 
 
+def _solve_sparse_shunt_batch(p):
+    """Five rows with one shunt row select the automatic low-rank path."""
+    grid = _two_bus()
+    nodes = list(grid.nodes) + [
+        Node(id=i, u_rated_v=230.0, phases=A) for i in range(3, 6)
+    ]
+    branches = list(grid.branches) + [
+        Line(
+            id=20 + i,
+            from_node=i - 1,
+            to_node=i,
+            from_phases=A,
+            to_phases=A,
+            length_m=100.0,
+            series_resistance_ohm_per_m=[[1.0e-3]],
+            series_inductance_h_per_m=[[1.0e-6]],
+            shunt_capacitance_f_per_m=[[1.0e-9]],
+        )
+        for i in range(3, 6)
+    ]
+    sparse_grid = grid.model_copy(update={"nodes": nodes, "branches": branches})
+    op = {30: {"p_w": p, "q_var": torch.full_like(p, 500.0)}}
+    return solve_harmonic_flow(
+        sparse_grid, [1, 5, 7], dtype=CDT, operating_point=op
+    ).v.reshape(-1)
+
+
 def test_gradcheck_through_the_chunked_scenario_batch():
     """A batch whose per-scenario ``Y(h)`` is assembled in chunks stays differentiable.
 
@@ -238,6 +265,18 @@ def test_gradcheck_through_the_chunked_scenario_batch():
     p = torch.tensor([1500.0, 2000.0, 2500.0], dtype=torch.float64, requires_grad=True)
     assert torch.autograd.gradcheck(
         lambda x: _solve_batched(x, budget_bytes=1),
+        (p,),
+        eps=1e-4,
+        atol=1e-6,
+        rtol=1e-4,
+    )
+
+
+def test_gradcheck_through_sparse_shunt_woodbury_update():
+    """The compact update retains every scenario's operating-point gradient."""
+    p = torch.tensor([1500.0, 2000.0, 2500.0], dtype=torch.float64, requires_grad=True)
+    assert torch.autograd.gradcheck(
+        _solve_sparse_shunt_batch,
         (p,),
         eps=1e-4,
         atol=1e-6,

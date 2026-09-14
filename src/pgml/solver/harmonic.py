@@ -84,8 +84,8 @@ def solve_harmonic(
         Diagonal equilibration of the system around the solve
         (:mod:`pgml.solver.equilibration`): ``None`` (default) resolves the documented
         default ``solver.equilibration.mode``, ``"symmetric"`` is van der Sluis scaling
-        ``d_i = |Y_ii|^{-1/2}`` applied as the congruence ``D Y D``, ``"row_column"``
-        the two-sided variant, ``"off"`` solves the matrix as handed in. The scaling is
+        ``d_i = |Y_ii|^{-1/2}`` applied as the congruence ``D Y D``, and ``"off"``
+        solves the matrix as handed in. The scaling is
         applied around the factorization and undone on the solution, so the returned
         voltages, their units and their gradients are unchanged; what changes is the
         conditioning of the factored system. An SI-unit admittance spans decades: at
@@ -1262,7 +1262,7 @@ class FactoredSystem:
     precision: str = "full"  # "full" | "mixed" (single-precision factors + refinement)
     refine_steps: int = 0  # mixed: residual corrections at the working dtype
     work_dtype: Optional[torch.dtype] = None  # mixed: the working complex dtype
-    equilibration: str = "off"  # "off" | "symmetric" | "row_column"
+    equilibration: str = "off"  # "off" | "symmetric"
     scale_row: Optional[Tensor] = None  # [*fb, m] real, applied to the RHS
     scale_col: Optional[Tensor] = None  # [*fb, m] real, applied to the solution
 
@@ -1312,9 +1312,7 @@ def _block_equilibration_scale(y_bus: Tensor, eq_mode: str) -> Optional[Tensor]:
 
     The block backend never materialises the matrix it factors (it gathers each
     diagonal block straight out of ``y_bus``), so the scale is built from the diagonal
-    and indexed per block. That is exactly van der Sluis scaling; the two-sided
-    ``"row_column"`` variant would need the row and column maxima of the free-row
-    matrix, which this backend does not form, so it is refused by name.
+    and indexed per block. That is exactly van der Sluis scaling.
     """
     if eq_mode == "off":
         return None
@@ -1386,9 +1384,7 @@ def lu_factor_system(
     answers the SI system exactly as before — including the Woodbury low-rank path, which
     reads ``A^{-1}U`` through the same entry point. The default ``"symmetric"`` mode
     (van der Sluis, ``d_i = |A_ii|^{-1/2}``) reads only the diagonal and costs one scaled
-    copy of the matrix; ``"row_column"`` additionally needs one pass over the whole
-    matrix and is rejected for ``backend="block"``, whose free-row matrix is never
-    materialised.
+    copy of the matrix.
     """
     n = y_bus.shape[-1]
     eq_mode = resolve_equilibration(equilibrate)

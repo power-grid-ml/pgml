@@ -17,8 +17,7 @@ What these tests pin:
   point and the equilibration introduces no rounding error of its own;
 - gradients are unchanged (bit-for-bit on a small system), and the equilibrated path
   passes a float64 gradcheck;
-- the mode is the documented default, overridable per call, and ``"row_column"`` is
-  refused by name on the block-diagonal backend.
+- the mode is the documented default and remains overridable per call.
 """
 
 from __future__ import annotations
@@ -86,51 +85,6 @@ class TestScaleFactors:
         want = a.diagonal().abs().rsqrt()
         assert torch.allclose(d_row, want, rtol=1e-12)
 
-    def test_row_column_scale_normalises_both_max_norms(self):
-        a, _ = _spread_system()
-        a_hat, _, _ = equilibrate_matrix(a, mode="row_column", power_of_two=False)
-        assert torch.allclose(
-            a_hat.abs().amax(dim=-1), torch.ones(a.shape[-1], dtype=torch.float64)
-        )
-        assert torch.allclose(
-            a_hat.abs().amax(dim=-2), torch.ones(a.shape[-1], dtype=torch.float64)
-        )
-
-    @pytest.mark.parametrize("power_of_two", [True, False])
-    def test_row_column_scales_read_from_the_nonzeros_are_the_dense_ones(
-        self, power_of_two
-    ):
-        """The maxima over the nonzeros ARE the dense pass's, to the bit.
-
-        A structural zero is never a row or a column maximum and a maximum does not
-        depend on the order it is taken in, so reading the magnitudes from the sparse
-        structure is exact rather than an approximation. A BATCHED matrix has no single
-        sparsity pattern and therefore takes the dense pass: stacking the same matrix
-        twice compares the two implementations on identical input.
-        """
-        a, _ = _spread_system(n=40)
-        a = a * (torch.rand(40, 40) < 0.2)  # a sparsity pattern to read
-        sparse = equilibration_scales(a, mode="row_column", power_of_two=power_of_two)
-        dense = equilibration_scales(
-            a.unsqueeze(0).repeat(2, 1, 1), mode="row_column", power_of_two=power_of_two
-        )
-        for got, want in zip(sparse, dense):
-            assert torch.equal(got, want[0])
-            assert torch.equal(got, want[1])
-
-    def test_an_empty_row_and_column_keep_scale_one_on_both_paths(self):
-        """An all-zero row has no maximum; both magnitude paths must report scale 1."""
-        a, _ = _spread_system(n=8)
-        a = a.clone()
-        a[3, :] = 0.0
-        a[:, 5] = 0.0
-        d_row, d_col = equilibration_scales(a, mode="row_column")
-        batched = equilibration_scales(
-            a.unsqueeze(0).repeat(2, 1, 1), mode="row_column"
-        )
-        assert float(d_row[3]) == 1.0 and float(d_col[5]) == 1.0
-        assert torch.equal(d_row, batched[0][0]) and torch.equal(d_col, batched[1][0])
-
     def test_power_of_two_scaling_is_exact_in_floating_point(self):
         """``D A D`` with power-of-two factors introduces NO rounding error.
 
@@ -139,12 +93,13 @@ class TestScaleFactors:
         move a solution it was only meant to condition.
         """
         a, _ = _spread_system()
-        for mode in ("symmetric", "row_column"):
-            a_hat, d_row, d_col = equilibrate_matrix(a, mode=mode, power_of_two=True)
-            for d in (d_row, d_col):
-                assert torch.equal(torch.log2(d), torch.log2(d).round())
-            back = a_hat / d_row.unsqueeze(-1) / d_col.unsqueeze(-2)
-            assert torch.equal(back, a)
+        a_hat, d_row, d_col = equilibrate_matrix(
+            a, mode="symmetric", power_of_two=True
+        )
+        for d in (d_row, d_col):
+            assert torch.equal(torch.log2(d), torch.log2(d).round())
+        back = a_hat / d_row.unsqueeze(-1) / d_col.unsqueeze(-2)
+        assert torch.equal(back, a)
 
     def test_unrounded_scaling_is_not_exact(self):
         """The contrast: the unrounded scaling does perturb the matrix (by ~eps)."""
@@ -174,6 +129,8 @@ class TestScaleFactors:
             assert resolve_equilibration(mode) == mode
         with pytest.raises(InputError, match="symmetric"):
             resolve_equilibration("van_der_sluis")
+        with pytest.raises(InputError, match="symmetric"):
+            resolve_equilibration("row_column")
 
     def test_the_documented_default_is_symmetric(self):
         assert defaults.get("solver.equilibration.mode") == "symmetric"
@@ -183,16 +140,16 @@ class TestScaleFactors:
 class TestLinearSolveIsUnchanged:
     """Every factored path answers the SI system, whatever the scaling."""
 
-    @pytest.mark.parametrize("mode", ["symmetric", "row_column"])
     @pytest.mark.parametrize("backend", ["dense", "sparse"])
-    def test_factored_solve_matches_the_unscaled_solve(self, mode, backend):
+    def test_factored_solve_matches_the_unscaled_solve(self, backend):
         a, b = _spread_system()
         ref = torch.linalg.solve(a, b.unsqueeze(-1)).squeeze(-1)
-        v = solve_factored(lu_factor_system(a, backend=backend, equilibrate=mode), b)
+        v = solve_factored(
+            lu_factor_system(a, backend=backend, equilibrate="symmetric"), b
+        )
         assert float((v - ref).abs().max() / ref.abs().max()) < 1e-13
 
-    @pytest.mark.parametrize("mode", ["symmetric", "row_column"])
-    def test_direct_solve_matches_in_both_slack_modes(self, mode):
+    def test_direct_solve_matches_in_both_slack_modes(self):
         a, b = _spread_system()
         fixed = torch.tensor([0, 1])
         vf = torch.tensor([1.0 + 0j, 0.5 + 0j], dtype=CDT)
@@ -200,7 +157,9 @@ class TestLinearSolveIsUnchanged:
             ref = solve_harmonic(
                 a.unsqueeze(0), b.unsqueeze(0), equilibrate="off", **kw
             )
-            got = solve_harmonic(a.unsqueeze(0), b.unsqueeze(0), equilibrate=mode, **kw)
+            got = solve_harmonic(
+                a.unsqueeze(0), b.unsqueeze(0), equilibrate="symmetric", **kw
+            )
             assert float((got - ref).abs().max() / ref.abs().max()) < 1e-13
 
     def test_mixed_precision_composes_with_equilibration(self):
@@ -225,7 +184,7 @@ class TestLinearSolveIsUnchanged:
             v = solve_factored_updated(upd, b)
             assert float((v - ref).abs().max() / ref.abs().max()) < 1e-12
 
-    def test_block_backend_matches_and_refuses_row_column(self):
+    def test_block_backend_matches(self):
         a1, b1 = _spread_system(5, seed=1)
         a2, b2 = _spread_system(7, seed=2)
         big = torch.zeros(12, 12, dtype=CDT)
@@ -241,10 +200,6 @@ class TestLinearSolveIsUnchanged:
             rhs,
         )
         assert float((v - ref).abs().max() / ref.abs().max()) < 1e-13
-        with pytest.raises(InputError, match="block"):
-            lu_factor_system(
-                big, backend="block", block_rows=blocks, equilibrate="row_column"
-            )
 
 
 class TestConditioning:
@@ -316,11 +271,10 @@ class TestPowerFlowIsUnchanged:
         index = node_phase_index(ieee33)
         bases = _bases(ieee33, index)
         ref = solve_power_flow(ieee33, equilibrate="off", tol_update_pu=1e-12)
-        for mode in ("symmetric", "row_column"):
-            got = solve_power_flow(ieee33, equilibrate=mode, tol_update_pu=1e-12)
-            assert got.converged
-            assert float(((got.v - ref.v).abs() / bases).max()) < 1e-11
-            assert got.iterations == ref.iterations
+        got = solve_power_flow(ieee33, equilibrate="symmetric", tol_update_pu=1e-12)
+        assert got.converged
+        assert float(((got.v - ref.v).abs() / bases).max()) < 1e-11
+        assert got.iterations == ref.iterations
 
     def test_newton_solution_is_unchanged(self, ieee33):
         index = node_phase_index(ieee33)
@@ -364,17 +318,16 @@ class TestGradientsAreUnchanged:
     def test_linear_solve_gradients_match_the_unscaled_path(self):
         a0, b0 = _spread_system(8, spread=1.0e3)
         grads = {}
-        for mode in ("off", "symmetric", "row_column"):
+        for mode in ("off", "symmetric"):
             a = a0.clone().requires_grad_(True)
             b = b0.clone().requires_grad_(True)
             v = solve_factored(lu_factor_system(a, equilibrate=mode), b)
             v.abs().square().sum().backward()
             grads[mode] = (a.grad.clone(), b.grad.clone())
-        for mode in ("symmetric", "row_column"):
-            for g, ref in zip(grads[mode], grads["off"]):
-                assert torch.allclose(
-                    g, ref, rtol=1e-11, atol=1e-11 * float(ref.abs().max())
-                )
+        for g, ref in zip(grads["symmetric"], grads["off"]):
+            assert torch.allclose(
+                g, ref, rtol=1e-11, atol=1e-11 * float(ref.abs().max())
+            )
 
     def test_gradcheck_through_an_equilibrated_factored_solve(self):
         a0, b0 = _spread_system(6, spread=1.0e3)

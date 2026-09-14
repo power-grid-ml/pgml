@@ -96,6 +96,33 @@ def _grid(connection: WindingConnection) -> Grid:
     )
 
 
+def _sparse_shunt_grid() -> Grid:
+    """Five three-phase nodes with one device select the low-rank shunt path."""
+    grid = _grid(WindingConnection.DELTA)
+
+    def diag(value: float):
+        return [[value if i == j else 0.0 for j in range(3)] for i in range(3)]
+
+    nodes = list(grid.nodes) + [
+        Node(id=i, u_rated_v=400.0, phases=ABC) for i in range(3, 6)
+    ]
+    branches = list(grid.branches) + [
+        Line(
+            id=i,
+            from_node=i - 1,
+            to_node=i,
+            from_phases=ABC,
+            to_phases=ABC,
+            length_m=1.0,
+            series_resistance_ohm_per_m=diag(0.05),
+            series_inductance_h_per_m=diag(0.05 / W0),
+            shunt_capacitance_f_per_m=diag(0.0),
+        )
+        for i in range(3, 6)
+    ]
+    return grid.model_copy(update={"nodes": nodes, "branches": branches})
+
+
 def _run(
     device, *, connection=WindingConnection.WYE, shunt="opendss", dtype=CDT, op=None
 ):
@@ -129,6 +156,24 @@ def test_cpu_cuda_parity_batched_operating_point():
     cpu = run(torch.device("cpu"))
     cuda = run(torch.device("cuda"))
     assert cpu.shape == (3, 3, 6)
+    assert torch.allclose(cpu, cuda.cpu(), rtol=1e-9, atol=1e-9)
+
+
+def test_cpu_cuda_parity_sparse_shunt_woodbury():
+    def run(device):
+        p = torch.tensor([6000.0, 9000.0, 12000.0], dtype=torch.float64, device=device)
+        return solve_harmonic_flow(
+            _sparse_shunt_grid(),
+            [1, 5, 7],
+            slack="norton",
+            dtype=CDT,
+            device=device,
+            operating_point={2: {"p_w": p}},
+        ).v
+
+    cpu = run(torch.device("cpu"))
+    cuda = run(torch.device("cuda"))
+    assert cuda.device.type == "cuda"
     assert torch.allclose(cpu, cuda.cpu(), rtol=1e-9, atol=1e-9)
 
 
