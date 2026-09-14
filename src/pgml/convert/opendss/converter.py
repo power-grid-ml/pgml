@@ -835,6 +835,7 @@ def to_grid(
     # ---------------------------------------------------------------------- #
     # 5. Loads                                                                #
     # ---------------------------------------------------------------------- #
+    load_voltage_ranges: dict[tuple[float, float, float], list[str]] = {}
     ret = dss.Loads.First()
     while ret:
         load_name = dss.Loads.Name().lower()
@@ -878,6 +879,12 @@ def to_grid(
             )
 
         load_model, zip_coefficients = _resolve_load_model(dss, load_name, kind="Load")
+        if int(dss.Loads.Model()) in (1, 5):
+            bounds = tuple(
+                float(_dss_query(dss, "Load", load_name, prop))
+                for prop in ("Vminpu", "Vmaxpu", "Vlowpu")
+            )
+            load_voltage_ranges.setdefault(bounds, []).append(load_name)
 
         load_id = _id.next()
         id_map["load"][load_name] = load_id
@@ -937,6 +944,21 @@ def to_grid(
             appliances.append(load_obj)
 
         ret = dss.Loads.Next()
+
+    for (vmin, vmax, vlow), names in load_voltage_ranges.items():
+        _logger.warning(
+            "OpenDSS voltage-dependent load limits are not imported: %d "
+            "constant-power/current load(s), including %s, have Vminpu=%g, "
+            "Vmaxpu=%g and Vlowpu=%g. pgml applies the selected power/current "
+            "law without these voltage limits; agreement outside the native "
+            "range is not expected, including low-voltage constant-impedance "
+            "fallback. Nominal P/Q values are preserved.",
+            len(names),
+            ", ".join(names[:5]),
+            vmin,
+            vmax,
+            vlow,
+        )
 
     # ---------------------------------------------------------------------- #
     # 6. Capacitors -> ShuntAppliance (WYE, solidly grounded only)             #

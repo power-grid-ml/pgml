@@ -16,11 +16,19 @@ grid_3ph, id_map_3ph = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
 
 ### Signature
 ```
-to_grid(dss_handle: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV) -> tuple[Grid, dict[str, Any]]
+to_grid(dss: Any, *, phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
+        harmonic_line_model: Optional[str] = None,
+        der_harmonics: bool = True) -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function (reads from the active OpenDSS engine state). The circuit must
 already be loaded and solved (or `Calcvoltagebases` called) before calling.
+
+Constant-power/current loads retain nominal P/Q and their selected load law.
+Native `Vminpu`, `Vmaxpu` and independent `Vlowpu` fallback are not represented
+by the pgml load schema. Conversion warns once per distinct voltage-range tuple,
+including affected load names/counts; low-voltage native convergence can therefore
+describe a different physical demand. Constant-impedance loads need no such warning.
 
 ### `phase_mode` parameter
 

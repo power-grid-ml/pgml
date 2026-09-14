@@ -366,7 +366,8 @@ per-device `R + jX` or a frequency curve) with its stamp. **Where.**
   `opendss_scenario_oracle`. WHERE: `src/pgml/evaluation/oracles/`.
 - **Convert (OpenDSS)**: not yet read: 3-winding units, `RegControl`, `XfmrCode`/
   frequency-correction curves, explicit non-solid neutral nodes, and load
-  `Vminpu`/`Vmaxpu`/CVR (currently silently ignored — at minimum warn). WHERE:
+  `Vminpu`/`Vmaxpu`/`Vlowpu`/CVR. Constant-power/current voltage limits now trigger
+  grouped conversion warnings; the schema still has no voltage-limit model. WHERE:
   `src/pgml/convert/opendss/`.
 - **Converter test gaps**: the OpenDSS SINGLE_PHASE_EQUIV positive-sequence reduction
   (`Z1 = Zself − Zmutual`, `_positive_sequence_scalar`) has no direct value-pinning test
