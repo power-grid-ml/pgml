@@ -17,10 +17,10 @@ Deliberate reductions, each flagged on the returned object:
   calculations, so a three-phase ``Grid`` exports its positive-sequence equivalent.
 * power-grid-model has no ZIP load. ZIP and other model-changing reductions
   raise unless ``allow_approximation=True``; enabled reductions are recorded.
-* A ``Source`` exports with a very large short-circuit power, because
-  power-grid-model's source is always a finite-impedance Thevenin equivalent
-  while the comparison runs against an ideal slack.  The residual source-drop
-  is ``~S_load/S_k`` and is reported with the run.
+* A ``Source`` with explicit series impedance preserves its positive-sequence
+  Thevenin equivalent. An ideal ``Source`` exports with a large finite
+  short-circuit power because power-grid-model has no ideal voltage boundary;
+  that approximation is recorded on the returned object.
 """
 
 from __future__ import annotations
