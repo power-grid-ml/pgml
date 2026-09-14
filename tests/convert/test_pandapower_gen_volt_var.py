@@ -1,10 +1,12 @@
-"""``net.gen`` conversion: the default drop and the opt-in Volt-VAr approximation.
+"""``net.gen`` conversion: the drop mode and the Volt-VAr droop approximation.
 
 ``net.gen`` is pandapower's PV bus (fixed P, regulated ``vm_pu``, free Q between
-``min_q_mvar`` and ``max_q_mvar``). The converter's default
-:data:`~pgml.convert.pandapower.GenMode.DROP` leaves it unread; the opt-in
+``min_q_mvar`` and ``max_q_mvar``).
+:data:`~pgml.convert.pandapower.GenMode.DROP` leaves it unread;
 :data:`~pgml.convert.pandapower.GenMode.VOLT_VAR_APPROX` maps each row onto a
-:class:`~pgml.schemas.grid_schema.Generator` carrying a steep Volt-VAr droop.
+:class:`~pgml.schemas.grid_schema.Generator` carrying a steep Volt-VAr droop (the
+exact PV terminal of the default mode is
+``tests/convert/test_pandapower_voltage_regulating_gen.py``).
 
 Covered here:
 
@@ -26,19 +28,31 @@ from __future__ import annotations
 
 import math
 
-import pandapower as pp
 import pytest
 import torch
 
-from pgml.convert.pandapower import (
+# ---------------------------------------------------------------------------
+# Optional pandapower guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import pandapower as pp
+
+    _PP_AVAILABLE = True
+except ImportError:
+    _PP_AVAILABLE = False
+
+if not _PP_AVAILABLE:
+    pytest.skip("pandapower not installed", allow_module_level=True)
+
+from pgml.convert.pandapower import (  # noqa: E402
     DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
     GenMode,
     PhaseMode,
     to_grid,
 )
-from pgml.errors import ConversionError
-from pgml.schemas.grid_schema import Generator, Phase, QReference, VoltVarControl
-from pgml.solver import solve_power_flow
+from pgml.errors import ConversionError  # noqa: E402
+from pgml.schemas.grid_schema import Generator, Phase, QReference, VoltVarControl  # noqa: E402
+from pgml.solver import solve_power_flow  # noqa: E402
 
 CDT = torch.complex128
 
@@ -90,12 +104,12 @@ def _vm_pu(net, grid, id_map, pp_bus: int, *, method: str = "newton") -> float:
 
 
 # ---------------------------------------------------------------------------
-# 1. The default is unchanged
+# 1. GenMode.DROP leaves the table unread
 # ---------------------------------------------------------------------------
-class TestDefaultDrops:
-    def test_default_drops_gen_and_warns(self, caplog):
+class TestDropMode:
+    def test_drop_mode_drops_gen_and_warns(self, caplog):
         with caplog.at_level("WARNING", logger="pgml"):
-            grid, id_map = to_grid(_net())
+            grid, id_map = to_grid(_net(), gen_mode=GenMode.DROP)
         assert _gens(grid) == []
         assert id_map["gen"] == {}
         assert any(
@@ -103,20 +117,22 @@ class TestDefaultDrops:
             for r in caplog.records
         ), f"expected a gen drop warning, got: {[r.message for r in caplog.records]}"
 
-    def test_default_matches_a_net_without_gen_rows(self):
-        """The default conversion of a net WITH ``gen`` rows is identical to the
-        conversion of the same net without them — the table changes nothing."""
-        with_gen, _ = to_grid(_net(with_gen=True))
-        without_gen, _ = to_grid(_net(with_gen=False))
+    def test_drop_mode_matches_a_net_without_gen_rows(self):
+        """Dropping a net's ``gen`` rows is identical to converting the same net
+        without them — the table changes nothing."""
+        with_gen, _ = to_grid(_net(with_gen=True), gen_mode=GenMode.DROP)
+        without_gen, _ = to_grid(_net(with_gen=False), gen_mode=GenMode.DROP)
         assert with_gen.model_dump() == without_gen.model_dump()
 
-    def test_volt_var_mode_no_longer_reports_gen_as_dropped(self, caplog):
-        with caplog.at_level("WARNING", logger="pgml"):
-            to_grid(_net(), gen_mode=GenMode.VOLT_VAR_APPROX)
-        assert not any(
-            "'gen'" in r.message and "NOT converted" in r.message
-            for r in caplog.records
-        )
+    def test_neither_converting_mode_reports_gen_as_dropped(self, caplog):
+        for mode in (GenMode.VOLT_VAR_APPROX, GenMode.VOLTAGE_REGULATING):
+            caplog.clear()
+            with caplog.at_level("WARNING", logger="pgml"):
+                to_grid(_net(), gen_mode=mode)
+            assert not any(
+                "'gen'" in r.message and "NOT converted" in r.message
+                for r in caplog.records
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +321,7 @@ class TestVoltVarPhysics:
         """Without the ``gen`` the loaded bus sags well below 1.02 pu; with it the
         droop injects vars and pulls the bus up to the setpoint."""
         net = _net()
-        sagged, id_map_drop = to_grid(net)
+        sagged, id_map_drop = to_grid(net, gen_mode=GenMode.DROP)
         held, id_map_gen = to_grid(net, gen_mode=GenMode.VOLT_VAR_APPROX)
         v_sag = _vm_pu(net, sagged, id_map_drop, 1)
         v_held = _vm_pu(net, held, id_map_gen, 1)

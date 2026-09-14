@@ -5,7 +5,13 @@ Differentiable conductor geometry → line constants (Carson/Deri).
 
 The geometry package implements the full Carson/Deri earth-return model for
 per-unit-length series impedance ``Z(h)`` and shunt admittance ``Yc(h)``
-(Maxwell capacitance), validated bit-exact against OpenDSS.
+(Maxwell capacitance).  On the same conductor geometry it agrees with a running
+OpenDSS to 4.8e-8 relative on ``Z`` and 2.1e-5 on ``C`` below 1 kHz — those two
+residuals are the ``mu0`` and ``e0`` constants OpenDSS truncates, not the model.
+``line.geometry.internal_inductance`` selects how the conductor's internal
+inductance enters above power frequency, and its ``"gmr_power_frequency"`` option
+reproduces OpenDSS's own 1 kHz rule at every frequency (4.6e-8 relative, 20 Hz to
+3 kHz).  See :doc:`/pgml/modeling/harmonic-line-model`.
 
 .. rubric:: Sub-modules
 

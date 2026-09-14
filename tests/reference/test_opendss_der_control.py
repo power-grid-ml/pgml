@@ -105,7 +105,7 @@ from pgml.solver import solve_power_flow
 # Module-level skip guard and marker
 # ---------------------------------------------------------------------------
 
-pytestmark = pytest.mark.opendss
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 if not _OPENDSS_AVAILABLE:
     pytest.skip("opendssdirect not installed", allow_module_level=True)

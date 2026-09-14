@@ -1,10 +1,10 @@
 """Reference grid builders: benchmark networks and synthetic feeders as pgml Grids.
 
 Most functions convert a well-known benchmark network (IEEE 33-bus, CIGRE LV) from
-pandapower into a pgml :class:`~pgml.schemas.grid_schema.Grid`.  These are the
-suite's canonical INPUT grids — training-data generation, examples, and the oracle
-comparison tests all build on them — so they live in the core package rather than
-the evaluation oracles.  :func:`synthetic_feeder` additionally builds a
+pandapower into a pgml :class:`~pgml.schemas.grid_schema.Grid`.  These are canonical
+input grids: training-data generation, examples, and the oracle comparison tests all
+build on them, so they live in the core package rather than the evaluation oracles.
+:func:`synthetic_feeder` additionally builds a
 parameterizable radial MV feeder of ANY size directly on the schema (no external
 dependency) — the scaling knob for solver benchmarks and topology studies.
 
@@ -65,7 +65,9 @@ def ieee33_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
-def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
+def cigre_lv_full_grid(
+    *, phase_mode=None, source_impedance_ohm=None, harmonic_line_model=None
+):
     """The FULL CIGRE LV benchmark grid (all 3 feeders + MV source + 3 transformers).
 
     Unlike :func:`cigre_lv_geometry_grid` (one residential feeder with synthesized
@@ -77,7 +79,7 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     The stock pandapower ext-grid converts to a near-ideal source (R~1e-6 Ohm) which
     short-circuits the bus at harmonics; a FINITE series impedance is applied so the
     source does not fully absorb injected harmonics (``source_impedance_ohm`` is ``|Z|``
-    at the source's rated voltage, ``source.rx_ratio`` for the X/R split — config
+    at the source's rated voltage, ``source.xr_ratio`` for the X/R split — config
     defaults under ``source.*``). Larger = weaker upstream grid = more cross-feeder
     coupling.
 
@@ -88,6 +90,9 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     source_impedance_ohm:
         Source series-impedance magnitude [Ohm]; ``None`` -> config
         ``source.series_impedance_ohm``. Pass ``0`` to keep the converted (stiff) source.
+    harmonic_line_model:
+        Forwarded to the converter: the harmonic line model every line gets
+        (``None`` -> the modeling default, ``"none"`` -> leave the lines unresolved).
 
     Returns
     -------
@@ -102,7 +107,11 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
     from pgml.schemas.grid_schema import Source
 
     mode = phase_mode if phase_mode is not None else PhaseMode.SINGLE_PHASE_EQUIV
-    grid, id_map = to_grid(pn.create_cigre_network_lv(), phase_mode=mode)
+    grid, id_map = to_grid(
+        pn.create_cigre_network_lv(),
+        phase_mode=mode,
+        harmonic_line_model=harmonic_line_model,
+    )
 
     z = (
         _defaults.get("source.series_impedance_ohm")
@@ -110,9 +119,9 @@ def cigre_lv_full_grid(*, phase_mode=None, source_impedance_ohm=None):
         else float(source_impedance_ohm)
     )
     if z > 0.0:
-        rx = float(_defaults.get("source.rx_ratio"))
-        r = z / math.sqrt(1.0 + rx * rx)
-        ll = (rx * r) / (2.0 * math.pi * float(grid.base_frequency_hz))  # X = 2*pi*f0*L
+        xr = float(_defaults.get("source.xr_ratio"))
+        r = z / math.sqrt(1.0 + xr * xr)
+        ll = (xr * r) / (2.0 * math.pi * float(grid.base_frequency_hz))  # X = 2*pi*f0*L
         for a in grid.appliances:
             if isinstance(a, Source):
                 p = len(a.phases)
@@ -153,12 +162,12 @@ def cigre_lv_geometry_grid(*, n_harmonic_loads: int = 3, spectrum=None):
     return grid, id_map
 
 
-#: Harmonic orders :func:`se_benchmark_scenario_config` injects by default (the odd
-#: orders up to 13, including the triplen 3/9); pass ``orders`` for a wider range.
+#: The load order set of these benchmark grids: the odd orders up to 13, including the
+#: triplen 3/9. A named set for a batch that injects into loads.
 LOAD_HARMONIC_ORDERS = [3, 5, 7, 9, 11, 13]
 #: The non-triplen orders 5/7/11/13 — a typical inverter switching signature. Kept as a
-#: named order set for spectrum sweeps; the benchmark recipe injects the same orders into
-#: loads and inverters and distinguishes them by their per-order MAGNITUDES instead.
+#: named order set for spectrum sweeps; a batch that excites loads and inverters at the
+#: same orders distinguishes them by their per-order MAGNITUDES instead.
 PV_HARMONIC_ORDERS = [5, 7, 11, 13]
 
 
@@ -307,40 +316,6 @@ def synthetic_feeder(
     )
 
 
-def se_benchmark_scenario_config(grid, *, n_samples: int, seed: int, orders=None):
-    """The canonical randomized state-estimation benchmark sampling recipe.
-
-    A thin front door onto :func:`pgml.scenarios.se_random_scenario_config`, which holds
-    the calibrated recipe (correlated load levels, per-phase unbalance, a slack-voltage
-    draw, IEC 61000-3-2-referenced emission with per-order phase diversity, and the PV
-    inverter signature on a grid built by :func:`add_pv_systems`). Sharing that one
-    builder is what keeps the benchmark, the workflow datasets and the multi-grid corpus
-    from drifting apart.
-
-    Parameters
-    ----------
-    grid:
-        The benchmark grid (read for its appliance mix).
-    n_samples, seed:
-        Batch size and sampling seed.
-    orders:
-        Injected harmonic orders; ``None`` uses :data:`LOAD_HARMONIC_ORDERS`.
-
-    Returns
-    -------
-    pgml.scenarios.ScenarioConfig
-        The sampling template.
-    """
-    from pgml.scenarios import se_random_scenario_config
-
-    return se_random_scenario_config(
-        grid,
-        orders=LOAD_HARMONIC_ORDERS if orders is None else orders,
-        n_samples=n_samples,
-        seed=seed,
-    )
-
-
 __all__ = [
     "CONVERTER_SPECTRUM",
     "LOAD_HARMONIC_ORDERS",
@@ -349,6 +324,5 @@ __all__ = [
     "cigre_lv_full_grid",
     "cigre_lv_geometry_grid",
     "add_pv_systems",
-    "se_benchmark_scenario_config",
     "synthetic_feeder",
 ]

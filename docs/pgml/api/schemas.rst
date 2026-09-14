@@ -15,14 +15,47 @@ Appliance types
 The grid input carries five appliance kinds (all subclasses of
 :class:`~pgml.schemas.grid_schema.ApplianceBase`):
 
-- :class:`~pgml.schemas.grid_schema.Source` — Thevenin slack / external network.
+- :class:`~pgml.schemas.grid_schema.Source` — Thevenin slack / external network.  Its
+  ``resistance_ohm`` / ``inductance_h`` are per-phase MATRICES, so a three-phase source
+  whose zero-sequence impedance differs from its positive-sequence one carries the
+  symmetric-component self / mutual split.  A ``Source`` has no spectrum field: upstream
+  background distortion is an operating point, supplied per solve as a
+  :class:`~pgml.solver.NodeHarmonicSource` or generated from
+  :class:`~pgml.scenarios.BackgroundHarmonicConfig`.
 - :class:`~pgml.schemas.grid_schema.Load` — passive demand (const-P / ZIP / harmonic).
-- :class:`~pgml.schemas.grid_schema.Generator` — active injection (PV, wind, CHP).
+- :class:`~pgml.schemas.grid_schema.Generator` — active injection (PV, wind, CHP).  With a
+  :class:`~pgml.schemas.grid_schema.VoltageRegulation` block it is a PV terminal instead of
+  a PQ injection: ``v_set_pu``, the reactive bounds ``q_min_var`` / ``q_max_var``, and
+  ``regulated`` (:class:`~pgml.schemas.grid_schema.RegulatedQuantity`, the positive-sequence
+  magnitude or every phase).  ``control`` and ``voltage_regulation`` are mutually exclusive.
 - :class:`~pgml.schemas.grid_schema.Storage` — bidirectional inverter (battery);
   ``p_nom_w > 0`` = discharging / injecting, ``< 0`` = charging.  At a power-flow
   snapshot a storage is treated identically to a generator; the state-of-charge
-  integration lives in :mod:`pgml.scenarios` (see :doc:`scenarios`).
+  integration lives in :mod:`pgml.dispatch` (see :doc:`dispatch`).
 - :class:`~pgml.schemas.grid_schema.ShuntAppliance` — passive shunt (G + jB).
+
+Every injection appliance also carries ``harmonic_model``
+(:class:`~pgml.schemas.grid_schema.HarmonicShuntModel`), the per-device override of the
+harmonic Norton shunt: the series / parallel split ``series_rl_fraction``, the motor branch
+``motor_x_harm_pu`` / ``motor_xr_harm``, and ``neglect_shunt`` to model the device as a pure
+current source.  The shipped defaults live under ``appliance.harmonic_shunt.*``.
+
+Branch types are :class:`~pgml.schemas.grid_schema.Line`,
+:class:`~pgml.schemas.grid_schema.Transformer`,
+:class:`~pgml.schemas.grid_schema.Switch`,
+:class:`~pgml.schemas.grid_schema.ShuntReactor` (a single-terminal ``G``, ``C`` and ``L``
+bank, where the inductance makes a reactor's susceptance fall as ``1/h``) and
+:class:`~pgml.schemas.grid_schema.GenericBranch`.
+
+Frequency dependence is typed on the element that owns it.  A
+:class:`~pgml.schemas.grid_schema.Line` carries ``harmonic_line_model``
+(``"geometry"`` / ``"sequence_aware"`` / ``"positive_sequence"`` / ``"naive"``, or unset),
+``harmonic_skin_effect`` and ``earth_return``; a
+:class:`~pgml.schemas.grid_schema.Transformer` carries ``zero_sequence``
+(:class:`~pgml.schemas.grid_schema.TransformerZeroSeq`), ``harmonic_xr_constant``
+(OpenDSS's ``XRConst``) and ``resistance_frequency``.  The validators reject a combination an
+element's model does not consume, rather than accepting a field nothing reads.  See
+:doc:`/pgml/modeling/harmonic-line-model` and :doc:`/pgml/modeling/transformer`.
 
 :class:`~pgml.schemas.grid_schema.Load`, :class:`~pgml.schemas.grid_schema.Generator`,
 and :class:`~pgml.schemas.grid_schema.Storage` all inherit
@@ -105,8 +138,8 @@ timing.
 
 ``accuracy_class`` (e.g. ``"0.2S"`` per IEC 62053, ``"A"`` / ``"S"`` per
 IEC 61000-4-30) is categorical — pgml attaches no numeric interpretation to it; it
-is the intended key for a future measurement-noise model in the ML layer
-(:mod:`pgl`). ``connection`` is free-form JSON describing how to reach the physical
+is the intended key for a measurement-noise model outside the engine.
+``connection`` is free-form JSON describing how to reach the physical
 instrument (e.g. a Modbus TCP host/port); it is interpreted by the external
 acquisition service, never by pgml.
 
@@ -128,9 +161,8 @@ leaving the grid half-updated::
     ])
 
 Slack designation is unrelated to instrumentation and stays ``Source``-based
-(:func:`pgml.topology.slack_node_ids`); ``pgl.data.MeasurementModel.from_grid``
-derives the ML sensor set — and whether the slack is fully metered — from the
-attached devices.
+(:func:`pgml.topology.slack_node_ids`). A consumer derives its sensor set, and whether
+the slack is metered, from the attached devices.
 
 .. automodule:: pgml.schemas
    :members:

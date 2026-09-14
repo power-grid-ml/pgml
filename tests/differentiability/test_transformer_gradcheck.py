@@ -5,6 +5,11 @@ off-nominal tap magnitude must pass ``gradcheck`` (float64), through BOTH the
 3-phase winding-incidence path (``Y = Nᵀ Y_winding N``) and the single-phase /
 positive-sequence scalar-tap path. Leaf tensors are injected via the
 ``param_overrides`` hook so the frozen schema is not mutated.
+
+The ZERO-SEQUENCE-aware path (a unit whose ``zero_sequence`` leakage differs from its
+positive-sequence leakage, so the winding primitive carries a per-phase MATRIX through a
+matrix inverse instead of a scalar reciprocal) is covered too: gradients must reach the
+zero-sequence R0 / L0 as well as R1 / L1 / tap.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from pgml.schemas.grid_schema import (
     Phase,
     Source,
     Transformer,
+    TransformerZeroSeq,
     WindingConnection,
 )
 from pgml.solver import solve_harmonic
@@ -34,6 +40,7 @@ def _dyn_grid(
     from_connection=WindingConnection.DELTA,
     to_connection=WindingConnection.WYE_GROUNDED,
     shift_deg=30.0,
+    zero_sequence=None,
 ) -> Grid:
     """HV source -> transformer (given vector group) -> LV node with a const-Z load."""
     n = len(phases)
@@ -60,6 +67,7 @@ def _dyn_grid(
         series_resistance_ohm=0.01,
         series_inductance_h=1.0e-4,
         tap=ComplexTap(ratio_magnitude=1.0, shift_deg=shift_deg),
+        zero_sequence=zero_sequence,
     )
     load = Load(id=30, node=2, phases=phases, p_nom_w=9.0e3, q_nom_var=2.0e3)
     nodes = [
@@ -121,3 +129,69 @@ def test_gradcheck_transformer_yzn5():
         to_connection=WindingConnection.ZIGZAG_GROUNDED,
         shift_deg=150.0,
     )
+
+
+def _run_zero_sequence(phases, **vector_group):
+    """Gradcheck the per-phase (matrix) leakage path, incl. the zero-sequence pair."""
+    grid = _dyn_grid(
+        phases,
+        zero_sequence=TransformerZeroSeq(r0_ohm=0.004, x0_ohm=0.0126),
+        **vector_group,
+    )
+    r = torch.tensor(0.01, dtype=torch.float64, requires_grad=True)
+    ell = torch.tensor(1.0e-4, dtype=torch.float64, requires_grad=True)
+    tap = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    r0 = torch.tensor(0.004, dtype=torch.float64, requires_grad=True)
+    l0 = torch.tensor(4.0e-5, dtype=torch.float64, requires_grad=True)
+
+    def fn(r, ell, tap, r0, l0):
+        overrides = {
+            ("transformer", 20, "series_resistance_ohm"): r,
+            ("transformer", 20, "series_inductance_h"): ell,
+            ("transformer", 20, "tap_magnitude"): tap,
+            ("transformer", 20, "zero_sequence_resistance_ohm"): r0,
+            ("transformer", 20, "zero_sequence_inductance_h"): l0,
+        }
+        return _voltages(grid, overrides)
+
+    assert torch.autograd.gradcheck(
+        fn, (r, ell, tap, r0, l0), eps=1e-6, atol=1e-5, rtol=1e-3
+    )
+
+
+def test_gradcheck_transformer_zero_sequence_ynyn():
+    """YNyn with Z0 != Z1: grads reach R1/L1/tap AND the zero-sequence R0/L0."""
+    _run_zero_sequence(
+        ABC,
+        from_connection=WindingConnection.WYE_GROUNDED,
+        to_connection=WindingConnection.WYE_GROUNDED,
+        shift_deg=0.0,
+    )
+
+
+def test_gradcheck_transformer_zero_sequence_dyn():
+    """Dyn with Z0 != Z1: the delta blocks the zero sequence, R0/L0 still reach the LV."""
+    _run_zero_sequence(ABC)
+
+
+def test_gradcheck_transformer_zero_sequence_from_schema_ratio():
+    """Without an override the zero-sequence pair is the ratio-scaled R1/L1, so the
+    gradient w.r.t. R1/L1 carries BOTH sequences (one leaf, two paths)."""
+    grid = _dyn_grid(
+        ABC,
+        from_connection=WindingConnection.WYE_GROUNDED,
+        to_connection=WindingConnection.WYE_GROUNDED,
+        shift_deg=0.0,
+        zero_sequence=TransformerZeroSeq(r0_ohm=0.004, x0_ohm=0.0126),
+    )
+    r = torch.tensor(0.01, dtype=torch.float64, requires_grad=True)
+    ell = torch.tensor(1.0e-4, dtype=torch.float64, requires_grad=True)
+
+    def fn(r, ell):
+        overrides = {
+            ("transformer", 20, "series_resistance_ohm"): r,
+            ("transformer", 20, "series_inductance_h"): ell,
+        }
+        return _voltages(grid, overrides)
+
+    assert torch.autograd.gradcheck(fn, (r, ell), eps=1e-6, atol=1e-5, rtol=1e-3)

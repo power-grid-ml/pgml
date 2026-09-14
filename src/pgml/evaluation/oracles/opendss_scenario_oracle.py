@@ -21,18 +21,19 @@ Two purposes
    :class:`~pgml.scenarios.SampledScenarios` with both engines and reports the per-order
    voltage error (absolute + relative to the per-order RMS voltage), the pgml-vs-OpenDSS
    ground-truth agreement check.
-2. **Independent test set for pgl**: :func:`write_opendss_dataset` persists an OpenDSS-
+2. **Independent evaluation set**: :func:`write_opendss_dataset` persists an OpenDSS-
    solved dataset in the exact same on-disk layout pgml's own generator writes, provenance-
    stamped (``engine="opendss"``), so a trained state estimator can be evaluated on data it
    never saw pgml solve.
 
 Two assumption modes (``mode=``)
 ---------------------------------
-- ``"matched"``: ``Set NeglectLoadY=Yes`` (pgml's harmonic model is a PURE per-device current
-  source at every order — no load Norton shunt is implemented, see
-  ``pgml.solver.harmonic_flow``'s ``include_load_shunt`` — so this is not merely a numerics
-  nicety, it is REQUIRED for the two engines to solve the same physical model), ``Rg=0 Xg=0``
-  on every line-like element (``Line``/``GenericBranch``/``Switch`` — ALL of them, including
+- ``"matched"``: the harmonic DEVICE model pgml solves, named by ``load_shunt`` — each
+  exported ``Load`` carries the resolved ``%SeriesRL`` (and ``puXharm``/``XRharm`` for the
+  motor model) of ``pgml.assembly._load_shunt``, or the circuit is solved with
+  ``Set NeglectLoadY=Yes`` for the pure current-source model; this is not merely a numerics
+  nicety, it is REQUIRED for the two engines to solve the same physical model. Also
+  ``Rg=0 Xg=0`` on every line-like element (``Line``/``GenericBranch``/``Switch`` — ALL of them, including
   the SEQUENCE-form ``Switch``, which picks up the same nonzero earth-return default; pgml's
   non-geometry harmonic line models carry no Carson earth-return correction at all; OpenDSS's
   default ``Rg``/``Xg`` are calibrated for IMPERIAL units and would otherwise add a spurious,
@@ -41,8 +42,10 @@ Two assumption modes (``mode=``)
   tolerance is loose enough to show up in a comparison, growing with system size/loading —
   measured up to ~2e-6 relative pre-fix on a 12-node feeder at heavy load), and — on EVERY
   exported ``Load`` (including a Generator/Storage represented as one, see below) —
-  ``Vminpu=0.0001 Vmaxpu=10000`` (OpenDSS's default ``0.95``/``1.05`` band CLIPS the
-  constant-power/current/ZIP law outside it, extrapolating toward constant impedance instead;
+  ``Vminpu=1e-8 Vlowpu=1e-8 Vmaxpu=1e8`` (finite guards outside the declared comparison
+  range). OpenDSS's default ``0.95``/``1.05`` band CLIPS the
+  constant-power/current/ZIP law outside it, and its independent ``Vlowpu=0.5`` changes
+  the device to constant impedance at very low voltage;
   pgml's ``LoadModel``/``ZipCoefficients`` laws have no such band — measured live on the CIGRE
   LV benchmark: a bus solved at 0.919 pu, an everyday voltage drop, made a default-banded
   Model=1 load deliver 6.8% less than its nameplate kW). ``DefaultBaseFrequency`` is always
@@ -51,20 +54,23 @@ Two assumption modes (``mode=``)
   between the two harmonic engines — see the module's oracle test file for MEASURED figures
   (matched mode reaches ~1e-6 to 1e-9 relative on every tested case except one documented,
   irreducible model gap — see below).
-- ``"default"``: leaves OpenDSS's own defaults (``NeglectLoadY=No`` — the load Norton shunt
-  IS included in OpenDSS's harmonics but never in pgml's; earth-return ``Rg``/``Xg`` and
-  ``Vminpu``/``Vmaxpu`` at their defaults). Expect a DOCUMENTED divergence from these sources,
-  not a bug — this mode exists to characterize how far a "just point OpenDSS at the grid and
-  solve" study would drift from pgml's own reduced model, not to be tight (measured: several
-  hundred percent relative on triplen harmonics of a Dyn feeder, driven almost entirely by the
-  earth-return term dominating the zero-sequence path — see ``opendss_scenario_oracle``'s test
-  module docstring for the exact figures).
+- ``"default"``: leaves OpenDSS's own defaults (``NeglectLoadY=No`` with ``%SeriesRL=50`` on
+  every Load — pgml reaches the same device model with ``load_shunt="opendss"``, so what
+  remains in this mode is the earth-return ``Rg``/``Xg`` and native voltage bands,
+  including ``Vlowpu`` for Load elements). Expect a DOCUMENTED divergence from those
+  sources, not a bug — this mode
+  characterizes how far a "just point OpenDSS at the grid and solve" study drifts from
+  pgml's own modeling choices. Measured on a 3-wire feeder: the NON-TRIPLEN orders agree to
+  8.3e-09 relative (the device model is the same on both sides now), while the earth-return
+  term dominates the zero-sequence path and leaves a few hundred percent on the triplen
+  order — see ``opendss_scenario_oracle``'s test module docstring for the exact figures.
 
 Exporter coverage
 ------------------
-Converted: ``Source`` (balanced, diagonal — i.e. uncoupled — Thevenin only; the FIRST
-in-service ``Source`` becomes the DSS ``Circuit``'s own slack, any further ones export as
-additional ``Vsource`` elements with a warning), ``Line``/``GenericBranch`` (explicit
+Converted: ``Source`` (balanced, symmetric-circulant Thevenin — the positive- and
+zero-sequence pair is recovered from the per-phase matrix and exported as the Vsource's
+``R1``/``X1``/``R0``/``X0``; the FIRST in-service ``Source`` becomes the DSS ``Circuit``'s
+own slack, any further ones export as additional ``Vsource`` elements with a warning), ``Line``/``GenericBranch`` (explicit
 Rmatrix/Xmatrix/Cmatrix, phase-permuted terminals via independent ``from_phases``/
 ``to_phases`` bus suffixes), ``Transformer`` (native two-winding element; the 3-phase
 vector-group clock is realised via ``LeadLag`` + a cyclic TO-side bus rotation, reusing the
@@ -74,8 +80,9 @@ SAME clock-realisation helpers already pinned against a live OpenDSS solve in
 cannot be reproduced), ``Switch`` (a near-ideal ``Line`` with ``Switch=yes`` FIRST on the
 command — see ``_export_switch``'s docstring for why the parameter order matters — disabled
 when open), ``Load``/``Generator``/``Storage`` (EVERY injection appliance, including a
-Generator/Storage, exports as a native DSS ``Load`` — see ``_ApplianceExport``'s docstring for
-why a genuine DSS ``Generator`` element cannot be used here; a WYE appliance is exported as
+Generator/Storage without explicit internal impedance, exports as a native DSS
+``Load`` (negative P/Q for generation); native internal-voltage DER instead retains
+its Generator/PVSystem/Storage class and passive harmonic impedance; a WYE appliance is exported as
 ONE single-phase ``Load`` PER PHASE, enabling per-phase P/Q scenario overrides a single
 balanced multi-phase element cannot express; a DELTA appliance exports as one multi-phase
 element and supports only a balanced total P/Q scenario override), ``ShuntAppliance``/
@@ -87,10 +94,12 @@ Capacitor/Reactor banks being balanced per leg).
 Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
 - ``Line.conductor_geometry`` — out of scope for this exporter; the EXISTING geometry
   parity oracle (``opendss_oracle.build_opendss_geometry_circuit`` /
-  ``opendss_geometry_systemy``) already gives bit-exact Carson-geometry parity for that case.
+  ``opendss_geometry_systemy``) already gives Carson-geometry parity (4.8e-8 relative) for
+  that case.
 - An unresolved ``type_ref`` on a ``Line``/``Transformer`` — materialise against
   ``Grid.types`` before exporting (this module never reads the catalog).
-- A ``Source`` with off-diagonal (phase-coupled) Thevenin impedance, or non-balanced
+- A ``Source`` whose Thevenin matrix is not symmetric-circulant (unequal diagonal or
+  unequal off-diagonal terms), or non-balanced
   per-phase magnitude/120°-spacing — an OpenDSS ``Vsource`` models a symmetric,
   uncoupled positive/zero-sequence source only.
 - ``Transformer`` ``ZIGZAG``/``ZIGZAG_GROUNDED`` windings — no OpenDSS ``Transformer``
@@ -150,6 +159,11 @@ import numpy as np
 import torch
 
 from pgml.assembly import node_phase_index
+from pgml.assembly._load_shunt import (
+    generation_shunt_is_neglected,
+    resolve_harmonic_shunt,
+    resolve_shunt_model_name,
+)
 from pgml.errors import ConversionError, InputError
 from pgml.evaluation._util import to_float
 from pgml.evaluation.oracles.opendss_oracle import (
@@ -157,6 +171,7 @@ from pgml.evaluation.oracles.opendss_oracle import (
     _dss_rotated_phase_suffix,
 )
 from pgml.schemas.grid_schema import (
+    ConsumerType,
     Generator,
     GenericBranch,
     Grid,
@@ -167,6 +182,7 @@ from pgml.schemas.grid_schema import (
     ShuntAppliance,
     ShuntReactor,
     Source,
+    StaticSpectrum,
     Storage,
     Switch,
     Transformer,
@@ -175,6 +191,16 @@ from pgml.schemas.grid_schema import (
 from pgml.scenarios import SampledScenarios, ScenarioResult
 
 _logger = logging.getLogger("pgml")
+
+
+class OpenDSSConvergenceError(ConversionError):
+    """The exported circuit failed its initial OpenDSS snapshot solve.
+
+    The subclass keeps compatibility with callers that catch
+    :class:`~pgml.errors.ConversionError`, while allowing validity studies to distinguish
+    numerical nonconvergence from an unsupported model.
+    """
+
 
 _SQRT3 = math.sqrt(3.0)
 _PHASE_SUFFIX = {Phase.A: 1, Phase.B: 2, Phase.C: 3, Phase.N: 4}
@@ -255,17 +281,11 @@ class _ApplianceExport:
     per-phase scenario override. ``kind="whole"``: one multi-phase DELTA DSS element
     (``elements={None: name}``) — balanced total only.
 
-    ``dss_class`` is ALWAYS ``"Load"`` (see the module docstring's "Generator/Storage
-    export as a negative-kW Load" note): a genuine DSS ``Generator`` element stamps its
-    own linearized PQ shunt admittance into the harmonics-mode linear system REGARDLESS
-    of ``NeglectLoadY``/``Model``/``Xdpp`` (verified empirically — no combination zeroes
-    it), so a pgml ``Generator``/``Storage`` (a pure current injection, no internal
-    admittance) is represented as a DSS ``Load`` with a NEGATED P/Q — the well-established
-    OpenDSS negative-load generation idiom — which DOES become a true pure current source
-    under ``NeglectLoadY=Yes`` (verified: post-solve ``YPrim`` ~1e-12, vs ~0.0375 S for a
-    genuine ``Generator`` element on the same nameplate). ``sign`` (``+1.0`` for a real
-    ``Load``, ``-1.0`` for a ``Generator``/``Storage``) is applied to every P/Q value
-    written to this element, both at export and at every per-scenario edit.
+    Pure terminal-current Generator/Storage models use a negative-P/Q native Load,
+    with ``sign=-1``. Explicit native internal-voltage DER impedance uses the real
+    Generator, PVSystem or Storage class with ``sign=1``. Whole native DER elements
+    have a balanced operating point; per-phase overrides are rejected. The native
+    harmonic impedance is never omitted or inferred from signed P/Q.
     """
 
     kind: str
@@ -291,6 +311,7 @@ class ExportedCircuit:
 
     grid: Grid
     mode: str
+    load_shunt: str
     busname: dict
     node_order: list
     rowmap: list
@@ -308,19 +329,35 @@ def _source_params(src: Source, f0: float) -> dict:
     n = len(src.phases)
     r_mat = src.resistance_ohm
     l_mat = src.inductance_h
+    w0 = 2.0 * math.pi * f0
+    # A 3-phase source Thevenin is a symmetric circulant matrix (self on the
+    # diagonal, one mutual term off it) whenever Z0 != Z1 — exactly the form an
+    # OpenDSS Vsource builds from its own R1/X1/R0/X0 (verified live: its Yprim
+    # inverts to Zs=(Z0+2*Z1)/3, Zm=(Z0-Z1)/3). Recover the sequence pair from
+    # the matrix instead of refusing it; only a matrix that is NOT of that form
+    # (an unbalanced or non-circulant source) is unrepresentable.
+    z_self = complex(to_float(r_mat[0][0]), w0 * to_float(l_mat[0][0]))
+    z_mutual = (
+        complex(0.0, 0.0)
+        if n < 2
+        else complex(to_float(r_mat[0][1]), w0 * to_float(l_mat[0][1]))
+    )
     for i in range(n):
         for j in range(n):
-            if i != j and (
-                abs(to_float(r_mat[i][j])) > 1e-9 or abs(to_float(l_mat[i][j])) > 1e-9
-            ):
+            z_ij = complex(to_float(r_mat[i][j]), w0 * to_float(l_mat[i][j]))
+            want = z_self if i == j else z_mutual
+            scale = max(abs(z_self), 1e-12)
+            if abs(z_ij - want) > 1e-9 * scale:
                 raise ConversionError(
-                    f"Source {src.id}: off-diagonal (phase-coupled) Thevenin "
-                    "impedance is not representable by an OpenDSS Vsource "
-                    "(R1/X1/R0/X0 sequence parameters model a symmetric, "
-                    "uncoupled source only)."
+                    f"Source {src.id}: the Thevenin impedance matrix is not "
+                    "symmetric-circulant (equal diagonal, one equal off-diagonal "
+                    "term), so it has no OpenDSS Vsource equivalent — a Vsource's "
+                    "R1/X1/R0/X0 always build a symmetric sequence source."
                 )
-    r1 = to_float(r_mat[0][0])
-    x1 = 2.0 * math.pi * f0 * to_float(l_mat[0][0])
+    z1 = z_self - z_mutual
+    z0 = z_self + 2.0 * z_mutual
+    r1 = z1.real
+    x1 = z1.imag
     u0 = to_float(src.u_ref_v[0])
     ang0 = to_float(src.u_angle_deg[0])
     if n >= 3:
@@ -351,14 +388,23 @@ def _source_params(src: Source, f0: float) -> dict:
         "angle": ang0,
         "r1": r1,
         "x1": x1,
+        "r0": z0.real,
+        "x0": z0.imag,
         "bus_suffix": _bus_conductor_str(src.phases),
     }
+
+
+def _vsource_seq0(p: dict) -> str:
+    """``r0=/x0=`` clause of a Vsource command (empty below 3 phases)."""
+    if p["phases"] < 3:
+        return ""
+    return f" r0={p['r0']:.10g} x0={p['x0']:.10g}"
 
 
 def _emit_vsource(
     dss, cmd_prefix: str, name: str, bus: str, p: dict, f0: float
 ) -> None:
-    seq0 = f" r0={p['r1']:.10g} x0={p['x1']:.10g}" if p["phases"] >= 3 else ""
+    seq0 = _vsource_seq0(p)
     dss.Text.Command(
         f"{cmd_prefix}.{name} basekv={p['basekv']:.10g} phases={p['phases']} "
         f"bus1={bus} pu={p['pu']:.10g} angle={p['angle']:.10g} frequency={f0:.10g} "
@@ -392,7 +438,7 @@ def _export_line(dss, ln: Line, busname: dict, f0: float, mode: str) -> None:
             f"Line {ln.id}: conductor_geometry lines are out of scope for this "
             "full-circuit scenario exporter -- use "
             "pgml.evaluation.oracles.opendss_oracle.build_opendss_geometry_circuit "
-            "/ opendss_geometry_systemy (bit-exact Carson-geometry parity) for a "
+            "/ opendss_geometry_systemy (Carson-geometry parity to ~5e-8 relative) for a "
             "geometry-based grid instead."
         )
     n = len(ln.from_phases)
@@ -535,7 +581,15 @@ def _transformer_pct_r_xhl(
 def _transformer_magnetizing_pct(
     t: Transformer, w0: float, u_from_kv: float, kva_ref: float
 ) -> Optional[tuple]:
-    """``(pct_noloadloss, pct_imag)`` or ``None`` when the unit has no magnetizing branch."""
+    """``(pct_noloadloss, pct_imag)`` or ``None`` when the unit has no magnetizing branch.
+
+    OpenDSS's ``%noloadloss`` and ``%imag`` are the REAL and IMAGINARY parts of the core
+    admittance separately, each in percent of the winding base admittance, so they map
+    one-to-one onto ``G_m`` and ``B_m`` with no Pythagorean step. Per-unit values are
+    base-invariant, so the percentages computed on the from-side base are the ones DSS
+    needs even though it attaches the branch to its last winding's terminal (a
+    PLACEMENT difference, see ``transformer.magnetizing_placement``).
+    """
     g_m = to_float(t.magnetizing_conductance_s)
     u_hv_v = u_from_kv * 1000.0
     pfe_w = g_m * u_hv_v**2
@@ -545,10 +599,9 @@ def _transformer_magnetizing_pct(
         else 0.0
     )
     q_nl = b_m * u_hv_v**2
-    s_nl = math.hypot(pfe_w, q_nl)
     s_rated = kva_ref * 1000.0
-    if s_rated > 0.0 and (pfe_w > 0.0 or s_nl > 0.0):
-        return pfe_w / s_rated * 100.0, s_nl / s_rated * 100.0
+    if s_rated > 0.0 and (pfe_w > 0.0 or q_nl > 0.0):
+        return pfe_w / s_rated * 100.0, q_nl / s_rated * 100.0
     return None
 
 
@@ -590,11 +643,11 @@ def _export_transformer(dss, t: Transformer, busname: dict, f0: float) -> None:
             )
     if t.zero_sequence is not None:
         raise ConversionError(
-            f"Transformer {t.id}: an explicit zero_sequence override is not "
-            "exported -- pgml.assembly does not yet consume it (the "
-            "zero-sequence path is always topology-derived), so exporting a "
-            "matching OpenDSS override is not possible without diverging from "
-            "what pgml actually solves."
+            f"Transformer {t.id}: an explicit zero_sequence leakage has no OpenDSS "
+            "equivalent -- a DSS two-winding Transformer has no zero-sequence "
+            "impedance input (its zero sequence IS the positive-sequence winding "
+            "impedance seen through the winding topology), so the exported circuit "
+            "would solve a different model than pgml, which consumes the override."
         )
 
     w0 = 2.0 * math.pi * f0
@@ -696,14 +749,60 @@ def _dss_load_model(a) -> tuple:
     )
 
 
-def _emit_pq_element(dss, name, bus, n, kv, kw, kvar, conn, model, zipv) -> None:
+def _harmonic_shunt_properties(a, load_shunt: str) -> str:
+    """DSS ``Load`` properties reproducing pgml's harmonic shunt for appliance ``a``.
+
+    ``%SeriesRL`` carries the series/parallel split and ``puXharm``/``XRharm`` the motor
+    series branch, so a matched-mode circuit solves the SAME harmonic device model pgml
+    does (``pgml.assembly._load_shunt``). OpenDSS's ``NeglectLoadY`` is a global solution
+    option, so a device that carries no shunt while the run keeps one has no OpenDSS
+    representation and is refused rather than silently diverging. That is the case for
+    every GENERATION device under the shipped
+    ``appliance.harmonic_shunt.generation_model: none``, because OpenDSS's negative-kW
+    ``Load`` idiom always derives a shunt from the (negative) power; the error names both
+    ways to get a comparable circuit.
+    """
+    if load_shunt == "none":
+        return ""  # the circuit carries Set NeglectLoadY=Yes instead.
+    spec = resolve_harmonic_shunt(a, load_shunt)
+    if spec.kind == "none":
+        if generation_shunt_is_neglected(a):
+            raise ConversionError(
+                f"appliance {a.id} is a GENERATION device, which carries no harmonic "
+                "shunt under the documented default "
+                "appliance.harmonic_shunt.generation_model='none', while this export "
+                "carries one. OpenDSS's negative-kW Load idiom always derives a shunt "
+                "from the device's power, and NeglectLoadY is a GLOBAL option, so the "
+                "two engines cannot be matched device by device here. Export with "
+                "load_shunt='none' to compare pure current sources on both sides, or "
+                "set that default to 'load_style' to give the generation devices the "
+                "load expression OpenDSS uses (negative conductance included)."
+            )
+        raise ConversionError(
+            f"appliance {a.id}: harmonic_model switches this device's harmonic shunt "
+            "off while the run carries one; OpenDSS's NeglectLoadY is a GLOBAL "
+            "solution option with no per-Load equivalent, so this combination has no "
+            "OpenDSS representation."
+        )
+    props = f" %SeriesRL={spec.series_rl_fraction * 100.0:.10g}"
+    if spec.kind == "motor":
+        props += (
+            f" puXharm={spec.motor_x_harm_pu:.10g} XRharm={spec.motor_xr_harm:.10g}"
+        )
+    return props
+
+
+def _emit_pq_element(
+    dss, name, bus, n, kv, kw, kvar, conn, model, zipv, harmonic="", *, mode
+) -> None:
     """Emit a native DSS ``Load`` element (see ``_ApplianceExport``'s docstring for why
     EVERY injection appliance -- including a pgml ``Generator``/``Storage`` -- exports as
     a ``Load``, with a negated P/Q for the generation-type ones).
 
-    ``Vminpu``/``Vmaxpu`` are set to an effectively unbounded range: OpenDSS's default
-    (``0.95``/``1.05``) CLIPS every load model's constant-power/current/ZIP law outside
-    that per-unit voltage band (extrapolating toward constant impedance instead) --
+    Matched mode uses finite guards far outside the declared comparison range for
+    ``Vminpu``/``Vlowpu``/``Vmaxpu``. OpenDSS's native ``0.95``/``0.5``/``1.05``
+    thresholds CLIP every load model's constant-power/current/ZIP law outside
+    that per-unit voltage band (changing to constant impedance below ``Vlowpu``) --
     pgml's ``LoadModel``/``ZipCoefficients`` laws have NO such band, they apply exactly
     at any voltage. On a real feeder under load this is not a corner case: verified live
     on the CIGRE LV benchmark, a downstream bus solved at 0.919 pu (a realistic, everyday
@@ -711,18 +810,152 @@ def _emit_pq_element(dss, name, bus, n, kv, kw, kvar, conn, model, zipv) -> None
     nameplate kW -- silently double-counting a voltage-support behaviour pgml's model
     does not have.
     """
+    voltage_band = " Vminpu=1e-8 Vlowpu=1e-8 Vmaxpu=1e8" if mode == "matched" else ""
     dss.Text.Command(
         f"New Load.{name} phases={n} bus1={bus} kV={kv:.10g} kW={kw:.10g} "
         f"kvar={kvar:.10g} conn={conn} model={model} spectrum={_FLAT_SPECTRUM_NAME} "
-        f"Vminpu=0.0001 Vmaxpu=10000"
+        f"{voltage_band}{harmonic}"
     )
     if zipv is not None:
         zstr = " ".join(f"{v:.10g}" for v in zipv)
         dss.Text.Command(f"Edit Load.{name} ZIPV=[{zstr}]")
 
 
+def _export_native_der(dss, a, node, busname, f0, *, mode) -> _ApplianceExport:
+    """Export a native internal-voltage DER without substituting a negative Load.
+
+    The OpenDSS native model is balanced, scalar impedance and constant P/Q. A
+    different physical source or frequency law is rejected, never silently changed.
+    """
+    from pgml.assembly._params import phase_voltage_magnitude
+
+    block = a.harmonic_impedance
+    if (
+        block.spectrum_reference != "opendss_voltage"
+        or block.frequency_model != "opendss_admittance"
+    ):
+        raise ConversionError(
+            f"appliance {a.id}: native OpenDSS DER export requires opendss_voltage "
+            "and opendss_admittance; the specified physical model is not silently approximated"
+        )
+    if (
+        a.load_model != LoadModel.CONST_POWER
+        or a.control is not None
+        or getattr(a, "voltage_regulation", None) is not None
+    ):
+        raise ConversionError(
+            f"appliance {a.id}: native DER export supports fixed P/Q without controls"
+        )
+    if (
+        a.p_nom_per_phase_w is not None
+        or a.q_nom_per_phase_var is not None
+        or a.spectrum_per_phase is not None
+    ):
+        raise ConversionError(
+            f"appliance {a.id}: native DER export requires balanced P/Q and spectrum"
+        )
+    n = len(a.phases)
+    delta = a.connection == WindingConnection.DELTA
+    if n not in (1, 3) or (delta and n != 3):
+        raise ConversionError(
+            f"appliance {a.id}: native DER harmonic export requires one-phase WYE or three phases"
+        )
+    try:
+        r = to_float(block.resistance_ohm)
+        x = 2 * math.pi * f0 * to_float(block.inductance_h)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ConversionError(
+            f"appliance {a.id}: native DER export requires scalar impedance"
+        ) from exc
+    if delta:
+        r, x = r / 3, x / 3
+    p, q = to_float(a.p_nom_w), to_float(a.q_nom_var)
+    kva = max(1.0, math.hypot(p, q) / 1000) * 2
+    kv = (
+        phase_voltage_magnitude(
+            to_float(node.u_rated_v), len(node.phases), line_to_line=n > 1
+        )
+        / 1000
+    )
+    zbase = kv * kv * 1000 / kva
+    native_class = (
+        "Storage"
+        if isinstance(a, Storage)
+        else "PVSystem"
+        if a.consumer_type == ConsumerType.PV
+        else "Generator"
+    )
+    name = f"der{a.id}"
+    bus = f"{busname[int(a.node)]}.{_bus_conductor_str(a.phases)}"
+    if not delta:
+        return_path = getattr(a, "return_path", "auto")
+        if return_path == "neutral" and Phase.N not in node.phases:
+            raise ConversionError(
+                f"appliance {a.id}: neutral return has no node neutral"
+            )
+        neutral = Phase.N in node.phases and return_path in ("auto", "neutral")
+        bus += ".4" if neutral else ".0"
+    common = f"phases={n} bus1={bus} kv={kv:.17g} kva={kva:.17g} conn={'delta' if delta else 'wye'} spectrum={_FLAT_SPECTRUM_NAME}"
+    voltage_band = " vminpu=1e-8 vmaxpu=1e8" if mode == "matched" else ""
+    if native_class == "Generator":
+        if r != 0:
+            raise ConversionError(
+                f"appliance {a.id}: native Generator harmonic model has pure Xdpp, not resistance"
+            )
+        props = f"kw={p / 1000:.17g} kvar={q / 1000:.17g} xdpp={x / zbase:.17g} model=1{voltage_band}"
+    elif native_class == "PVSystem":
+        if p < 0:
+            raise ConversionError(
+                f"appliance {a.id}: native PVSystem cannot absorb active power"
+            )
+        props = f"pmpp={p / 1000:.17g} irradiance=1 kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %cutin=0 %cutout=0 model=1{voltage_band}"
+    else:
+        # External dispatch exposes the requested signed setpoint, without an
+        # unrequested state-of-charge controller curtailing the snapshot.
+        rated = max(1.0, abs(p) / 1000) * 2
+        props = f"kwrated={rated:.17g} kwhrated=1e9 %stored=50 %reserve=0 dispmode=external state={'charging' if p < 0 else 'discharging'} kw={p / 1000:.17g} kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %idlingkw=0 model=1{voltage_band}"
+    dss.Text.Command(f"New {native_class}.{name} {common} {props}")
+    if a.spectrum is not None:
+        if not isinstance(a.spectrum, StaticSpectrum):
+            raise ConversionError(
+                f"appliance {a.id}: native DER export requires a static spectrum or scenario override"
+            )
+        specname = f"native_der_spec{a.id}"
+        components = a.spectrum.spectrum.components
+        anchor = next((c for c in components if c.order == 1), None)
+        mag1 = anchor.magnitude_pu if anchor is not None else 1.0
+        if mag1 <= 0:
+            raise ConversionError(
+                f"appliance {a.id}: spectrum fundamental normalization must be positive"
+            )
+        orderstr = " ".join(str(c.order) for c in components)
+        magstr = " ".join(f"{100 * c.magnitude_pu / mag1:.17g}" for c in components)
+        angles = " ".join(f"{c.phase_deg:.17g}" for c in components)
+        dss.Text.Command(
+            f"New Spectrum.{specname} numharm={len(components)} harmonic=[{orderstr}] %mag=[{magstr}] angle=[{angles}]"
+        )
+        dss.Text.Command(f"Edit {native_class}.{name} spectrum={specname}")
+    return _ApplianceExport(
+        kind="whole",
+        elements={None: name},
+        phases=a.phases,
+        p_nom_pp=[p / n] * n,
+        q_nom_pp=[q / n] * n,
+        dss_class=native_class,
+        sign=1.0,
+    )
+
+
 def _export_injection_appliance(
-    dss, a, node, busname: dict, *, name_prefix: str, sign: float = 1.0
+    dss,
+    a,
+    node,
+    busname: dict,
+    *,
+    name_prefix: str,
+    sign: float = 1.0,
+    harmonic: str = "",
+    mode: str,
 ) -> _ApplianceExport:
     """Export a Load/Generator/Storage appliance as native DSS ``Load`` element(s).
 
@@ -780,6 +1013,8 @@ def _export_injection_appliance(
             "delta",
             model,
             zipv,
+            harmonic,
+            mode=mode,
         )
         return _ApplianceExport(
             kind="whole",
@@ -825,6 +1060,8 @@ def _export_injection_appliance(
             "wye",
             model,
             zipv,
+            harmonic,
+            mode=mode,
         )
         elements[ph] = name
     return _ApplianceExport(
@@ -947,7 +1184,11 @@ def _extract_voltages(dss, rowmap: list, n: int) -> np.ndarray:
 # Full-circuit export (public)
 # ---------------------------------------------------------------------------
 def export_grid_to_opendss(
-    grid: Grid, *, mode: str = "matched", circuit_name: str = "pgml_scenario_oracle"
+    grid: Grid,
+    *,
+    mode: str = "matched",
+    load_shunt: Optional[str] = None,
+    circuit_name: str = "pgml_scenario_oracle",
 ) -> ExportedCircuit:
     """Export ``grid`` as a genuine, independent OpenDSS circuit (own opendssdirect engine).
 
@@ -962,10 +1203,19 @@ def export_grid_to_opendss(
     grid:
         A materialised (no unresolved ``type_ref``) :class:`~pgml.schemas.grid_schema.Grid`.
     mode:
-        ``"matched"`` (default) sets ``NeglectLoadY=Yes`` and ``Rg=Xg=0`` on every line —
-        the model pgml's own harmonic solver implements. ``"default"`` leaves OpenDSS's own
-        defaults (a load Norton shunt at harmonics, imperial-calibrated earth return) — see
-        the module docstring for what to expect from each.
+        ``"matched"`` (default) exports the harmonic device model ``load_shunt`` names and
+        sets ``Rg=Xg=0`` on every line — the model pgml's own harmonic solver solves.
+        ``"default"`` leaves OpenDSS's own defaults (``NeglectLoadY=No`` with
+        ``%SeriesRL=50`` on every Load, imperial-calibrated earth return) — see the module
+        docstring for what to expect from each.
+    load_shunt:
+        The harmonic device shunt the circuit should carry in ``"matched"`` mode, as in
+        :func:`pgml.solver.solve_harmonic_flow` (``None`` = the documented modeling
+        default). ``"none"`` issues ``Set NeglectLoadY=Yes`` (a pure current source);
+        ``"opendss"`` / ``"motor"`` issue ``Set NeglectLoadY=No`` and write each device's
+        resolved ``%SeriesRL`` (and ``puXharm``/``XRharm``) onto its exported ``Load``, so
+        both engines solve the same device admittance. Ignored in ``"default"`` mode, which
+        is OpenDSS's own choice by definition.
     circuit_name:
         The DSS ``Circuit`` name.
 
@@ -977,6 +1227,7 @@ def export_grid_to_opendss(
     """
     if mode not in ("matched", "default"):
         raise InputError(f"mode must be 'matched' or 'default', got {mode!r}.")
+    shunt = resolve_shunt_model_name(load_shunt)
     import opendssdirect as dss
 
     f0 = float(grid.base_frequency_hz)
@@ -1001,7 +1252,7 @@ def export_grid_to_opendss(
         )
     src0 = sources[0]
     p0 = _source_params(src0, f0)
-    seq0 = f" r0={p0['r1']:.10g} x0={p0['x1']:.10g}" if p0["phases"] >= 3 else ""
+    seq0 = _vsource_seq0(p0)
     dss.Text.Command(
         f"New Circuit.{circuit_name} basekv={p0['basekv']:.10g} phases={p0['phases']} "
         f"bus1={busname[int(src0.node)]}.{p0['bus_suffix']} pu={p0['pu']:.10g} "
@@ -1066,18 +1317,29 @@ def export_grid_to_opendss(
         if not a.in_service or isinstance(a, Source):
             continue
         node = node_by_id[int(a.node)]
-        if isinstance(a, Load):
-            loads[int(a.id)] = _export_injection_appliance(
-                dss, a, node, busname, name_prefix="lo", sign=1.0
+        if isinstance(a, (Generator, Storage)) and a.harmonic_impedance is not None:
+            generators[int(a.id)] = _export_native_der(
+                dss, a, node, busname, f0, mode=mode
             )
-        elif isinstance(a, Generator):
-            generators[int(a.id)] = _export_injection_appliance(
-                dss, a, node, busname, name_prefix="ge", sign=-1.0
+            continue
+        if isinstance(a, (Load, Generator, Storage)):
+            prefix = {Load: "lo", Generator: "ge", Storage: "st"}[type(a)]
+            exported = _export_injection_appliance(
+                dss,
+                a,
+                node,
+                busname,
+                name_prefix=prefix,
+                sign=1.0 if isinstance(a, Load) else -1.0,
+                harmonic=(
+                    _harmonic_shunt_properties(a, shunt) if mode == "matched" else ""
+                ),
+                mode=mode,
             )
-        elif isinstance(a, Storage):
-            generators[int(a.id)] = _export_injection_appliance(
-                dss, a, node, busname, name_prefix="st", sign=-1.0
-            )
+            if isinstance(a, Load):
+                loads[int(a.id)] = exported
+            else:
+                generators[int(a.id)] = exported
         elif isinstance(a, ShuntAppliance):
             _export_shunt(
                 dss,
@@ -1099,7 +1361,10 @@ def export_grid_to_opendss(
     kv_str = ", ".join(f"{k:.6g}" for k in sorted(kv_bases))
     dss.Text.Command(f"Set VoltageBases=[{kv_str}]")
     dss.Text.Command("Calcvoltagebases")
-    dss.Text.Command("Set NeglectLoadY=" + ("Yes" if mode == "matched" else "No"))
+    # In matched mode the device model is pgml's (NeglectLoadY=Yes only for the pure
+    # current-source model); in default mode it is OpenDSS's own (NeglectLoadY=No).
+    neglect = "Yes" if (mode == "matched" and shunt == "none") else "No"
+    dss.Text.Command(f"Set NeglectLoadY={neglect}")
     # OpenDSS's default snap-solve convergence tolerance (1e-4 relative on the mismatch)
     # is loose enough to be visible in a pgml-vs-OpenDSS comparison at fundamental (it
     # scales with system size/loading -- measured up to ~2e-6 relative on a 12-node
@@ -1112,7 +1377,7 @@ def export_grid_to_opendss(
     with _scratch_datapath():
         dss.Text.Command("Solve")
     if not dss.Solution.Converged():
-        raise ConversionError(
+        raise OpenDSSConvergenceError(
             "the exported OpenDSS circuit did not converge on its initial "
             "nominal-operating-point solve; check the exported topology/ratings."
         )
@@ -1123,6 +1388,7 @@ def export_grid_to_opendss(
     return ExportedCircuit(
         grid=grid,
         mode=mode,
+        load_shunt=shunt,
         busname=busname,
         node_order=node_order,
         rowmap=rowmap,
@@ -1143,12 +1409,11 @@ def _apply_pq(
     negates a Generator/Storage's generation-positive P/Q into DSS's consumption-positive
     ``Load`` convention -- see ``_ApplianceExport``'s docstring).
 
-    ``t`` selects the STEP for a node-coherent batch. An operating-point entry is
-    ``[B]`` (drawn once per scenario, constant across steps -- the plain/no-profile
-    case) or ``[B, T]`` (a :class:`~pgml.scenarios.LoadProfileConfig`-lifted, per-step
-    fundamental); :func:`_scalar_at` slices either shape correctly from the SAME ``t``
-    argument (a ``[B]`` entry ignores ``t``, so the constant-across-steps case is
-    unaffected).
+    ``t`` selects the STEP of a batch that declares one. An operating-point entry is
+    ``[B]`` (drawn once per scenario, constant across steps -- the snapshot case) or
+    ``[B, T]`` (a per-step fundamental); :func:`_scalar_at` slices either shape correctly
+    from the SAME ``t`` argument (a ``[B]`` entry ignores ``t``, so the
+    constant-across-steps case is unaffected).
     """
     n = len(exp.phases)
     sign = exp.sign
@@ -1157,7 +1422,7 @@ def _apply_pq(
     if p_pp_key is not None or q_pp_key is not None:
         if exp.kind != "split":
             raise ConversionError(
-                f"{exp.dss_class} exported as a single DELTA element received "
+                f"{exp.dss_class} exported as a single balanced element received "
                 "a per-phase operating-point override, which has no per-leg "
                 "edit point on that element."
             )
@@ -1183,8 +1448,32 @@ def _apply_pq(
     q_var = _scalar_at(entry.get("q_var", sum(exp.q_nom_pp)), b, t)
     if exp.kind == "whole":
         name = exp.elements[None]
+        active_key = "Pmpp" if exp.dss_class == "PVSystem" else "kW"
+        if exp.dss_class == "PVSystem" and p_w < 0:
+            raise ConversionError("native PVSystem scenario cannot absorb active power")
+        if exp.dss_class in ("PVSystem", "Storage"):
+            # Ratings here are synthetic export auxiliaries, not schema limits.
+            # Enlarge them when a scenario exceeds the initial nameplate while
+            # preserving the physical harmonic impedance in ohms.
+            target = f"{exp.dss_class}.{name}"
+            dss.Text.Command(f"? {target}.kva")
+            old_kva = float(dss.Text.Result())
+            new_kva = max(old_kva, 2 * math.hypot(p_w, q_var) / 1000)
+            if new_kva > old_kva:
+                values = []
+                for prop in ("%r", "%x"):
+                    dss.Text.Command(f"? {target}.{prop}")
+                    values.append(float(dss.Text.Result()) * new_kva / old_kva)
+                dss.Text.Command(
+                    f"Edit {target} kva={new_kva:.17g} "
+                    f"%r={values[0]:.17g} %x={values[1]:.17g}"
+                )
+            if exp.dss_class == "Storage":
+                dss.Text.Command(f"? {target}.kwrated")
+                rated = max(float(dss.Text.Result()), 2 * abs(p_w) / 1000)
+                dss.Text.Command(f"Edit {target} kwrated={rated:.17g}")
         dss.Text.Command(
-            f"Edit {exp.dss_class}.{name} kW={sign * p_w / 1000.0:.10g} "
+            f"Edit {exp.dss_class}.{name} {active_key}={sign * p_w / 1000.0:.10g} "
             f"kvar={sign * q_var / 1000.0:.10g}"
         )
     else:
@@ -1206,9 +1495,9 @@ def _apply_operating_point(
     """Edit every targeted element to scenario ``b`` (+ step ``t``)'s operating point.
 
     Called once per STEP (not once per scenario) so a ``[B, T]`` per-step operating
-    point (:class:`~pgml.scenarios.LoadProfileConfig`) is applied correctly; a plain
-    ``[B]`` entry is unaffected (``_scalar_at`` ignores ``t`` for a 1-D tensor), so this
-    is a strict superset of the old once-per-scenario behaviour, not a change to it.
+    point is applied correctly; a plain ``[B]`` entry is unaffected (``_scalar_at``
+    ignores ``t`` for a 1-D tensor), so this is a strict superset of the
+    once-per-scenario behaviour, not a change to it.
     """
     for aid, entry in sampled.operating_point.items():
         if aid in circuit.sources:
@@ -1281,6 +1570,7 @@ def run_opendss_scenarios(
     *,
     harmonic_orders: Sequence[int],
     mode: str = "matched",
+    load_shunt: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
 ) -> ScenarioResult:
     """Run a realized :class:`~pgml.scenarios.SampledScenarios` batch through a live OpenDSS
@@ -1301,12 +1591,14 @@ def run_opendss_scenarios(
     grid:
         The grid ``sampled`` was drawn against.
     sampled:
-        A realized batch from :func:`pgml.scenarios.sample` /
-        :func:`pgml.scenarios.sample_coherent_spectra` (accepted as-is; never re-sampled).
+        A realized batch from :func:`pgml.scenarios.sample`,
+        :func:`pgml.scenarios.batch_from_values` or any other scenario spec (accepted
+        as-is; never re-sampled).
     harmonic_orders:
         Orders to solve; order 1 is always included even if omitted.
-    mode:
-        ``"matched"`` or ``"default"`` — see :func:`export_grid_to_opendss`.
+    mode, load_shunt:
+        ``"matched"`` or ``"default"``, and the harmonic device shunt the matched circuit
+        carries — see :func:`export_grid_to_opendss`.
     dtype:
         Complex dtype of the returned ``ScenarioResult.v`` (this oracle itself is a plain
         double-precision numpy computation; ``dtype`` only controls the final cast, matching
@@ -1325,10 +1617,10 @@ def run_opendss_scenarios(
     index = node_phase_index(grid)
     n = index.size
     b = int(sampled.n_samples)
-    is_coherent = "time_s" in sampled.samples
-    t_steps = int(sampled.samples["time_s"].shape[-1]) if is_coherent else 1
+    t_steps = int(sampled.n_steps)
+    is_sequence = t_steps > 1
 
-    circuit = export_grid_to_opendss(grid, mode=mode)
+    circuit = export_grid_to_opendss(grid, mode=mode, load_shunt=load_shunt)
     _attach_spectra(dss, circuit, sampled, orders)
 
     v_out = np.zeros((b, t_steps, len(orders), n), dtype=complex)
@@ -1338,10 +1630,10 @@ def run_opendss_scenarios(
         for bi in range(b):
             for ti in range(t_steps):
                 _apply_operating_point(
-                    dss, circuit, sampled, bi, ti if is_coherent else None
+                    dss, circuit, sampled, bi, ti if is_sequence else None
                 )
                 _apply_harmonic_spectra(
-                    dss, circuit, sampled, bi, ti if is_coherent else None
+                    dss, circuit, sampled, bi, ti if is_sequence else None
                 )
                 dss.Text.Command("Set Mode=Snap")
                 dss.Text.Command("Solve")
@@ -1373,7 +1665,7 @@ def run_opendss_scenarios(
                         v_out[bi, ti, k] = _extract_voltages(dss, circuit.rowmap, n)
 
     v_tensor = torch.tensor(v_out, dtype=dtype)
-    if not is_coherent:
+    if not is_sequence:
         v_tensor = v_tensor[:, 0]  # [B, H, N]
     freqs = torch.tensor([h * f0 for h in orders], dtype=torch.float64)
     return ScenarioResult(
@@ -1396,6 +1688,7 @@ def write_opendss_dataset(
     *,
     harmonic_orders: Sequence[int],
     mode: str = "matched",
+    load_shunt: Optional[str] = None,
     layout: str = "wide",
     dtype: torch.dtype = torch.complex128,
 ) -> Path:
@@ -1404,28 +1697,35 @@ def write_opendss_dataset(
     engine provenance so it is never mistaken for a pgml-generated dataset.
 
     ``meta.json`` gains: ``engine="opendss"``, ``oracle_mode`` (``"matched"``/``"default"``),
+    ``oracle_load_shunt`` (the harmonic device model the circuit carried),
     ``opendssdirect_version``, ``opendss_engine_version`` (``Basic.Version()``'s full string —
     the DSS C-API library + underlying OpenDSS SVN revision). The dataset is otherwise
-    byte-for-byte the same layout :func:`pgml.scenarios.read_dataset` and every ``pgl`` data
-    source already consume, so it plugs into training/evaluation unchanged.
+    byte-for-byte the same layout :func:`pgml.scenarios.read_dataset` and every downstream
+    data consumer already expects, so it plugs into training/evaluation unchanged.
     """
     from pgml.scenarios import write_dataset
 
     result = run_opendss_scenarios(
-        grid, sampled, harmonic_orders=harmonic_orders, mode=mode, dtype=dtype
+        grid,
+        sampled,
+        harmonic_orders=harmonic_orders,
+        mode=mode,
+        load_shunt=load_shunt,
+        dtype=dtype,
     )
     out = write_dataset(result, path, layout=layout)
-    _stamp_provenance(out, mode=mode)
+    _stamp_provenance(out, mode=mode, load_shunt=resolve_shunt_model_name(load_shunt))
     return out
 
 
-def _stamp_provenance(path, *, mode: str) -> None:
+def _stamp_provenance(path, *, mode: str, load_shunt: str) -> None:
     import opendssdirect as dss
 
     meta_path = Path(path) / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["engine"] = "opendss"
     meta["oracle_mode"] = mode
+    meta["oracle_load_shunt"] = load_shunt
     meta["opendssdirect_version"] = getattr(dss, "__version__", None)
     meta["opendss_engine_version"] = dss.Basic.Version()
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
@@ -1499,6 +1799,7 @@ def compare_to_pgml(
     *,
     harmonic_orders: Sequence[int],
     mode: str = "matched",
+    load_shunt: Optional[str] = None,
     out_dir=None,
     slack: str = "norton",
     symmetry: Optional[str] = None,
@@ -1513,6 +1814,9 @@ def compare_to_pgml(
     (``sqrt(mean(|V_opendss|^2))`` over the batch), each as mean/p95/max — the numeric
     cross-validation deliverable. Optionally writes ``opendss_comparison.json``/``.csv`` to
     ``out_dir``.
+
+    ``load_shunt`` selects the harmonic device shunt BOTH engines carry (``None`` = the
+    documented modeling default), so the comparison stays a numeric one.
 
     ``slack`` defaults to ``"norton"``, NOT pgml's own library default (``"ideal"``): an
     OpenDSS ``Vsource`` always behaves as a finite-impedance Thevenin source (its ``R1``/
@@ -1535,7 +1839,12 @@ def compare_to_pgml(
 
     orders = sorted(set(int(h) for h in harmonic_orders) | {1})
     oracle = run_opendss_scenarios(
-        grid, sampled, harmonic_orders=orders, mode=mode, dtype=dtype
+        grid,
+        sampled,
+        harmonic_orders=orders,
+        mode=mode,
+        load_shunt=load_shunt,
+        dtype=dtype,
     )
     pgml_result = run_scenarios(
         grid,
@@ -1544,6 +1853,7 @@ def compare_to_pgml(
         harmonic_orders=orders,
         slack=slack,
         symmetry=symmetry,
+        load_shunt=load_shunt,
         dtype=dtype,
     )
     v_ref = oracle.v.detach().cpu().numpy()
@@ -1563,6 +1873,7 @@ def compare_to_pgml(
 
 __all__ = [
     "ExportedCircuit",
+    "OpenDSSConvergenceError",
     "export_grid_to_opendss",
     "run_opendss_scenarios",
     "write_opendss_dataset",

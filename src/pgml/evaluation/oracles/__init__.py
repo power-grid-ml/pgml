@@ -46,6 +46,7 @@ from .opendss_oracle import (
 )
 from .opendss_scenario_oracle import (
     ExportedCircuit,
+    OpenDSSConvergenceError,
     compare_to_pgml,
     export_grid_to_opendss,
     run_opendss_scenarios,
@@ -79,6 +80,7 @@ __all__ = [
     "opendss_dyn_transformer_harmonic_voltages",
     # opendss SCENARIO oracle (independent full-circuit export + batch scenario runs)
     "ExportedCircuit",
+    "OpenDSSConvergenceError",
     "export_grid_to_opendss",
     "run_opendss_scenarios",
     "write_opendss_dataset",

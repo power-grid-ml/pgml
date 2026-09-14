@@ -12,7 +12,7 @@ Two branches under :class:`PgmlError`:
   (e.g. the nonlinear power flow did not converge). Maps to a 5xx; ``http_status``
   is 500.
 
-**Schema validation is deliberately NOT wrapped.** Constructing a :class:`~pgml.schemas`
+Schema validation is deliberately NOT wrapped. Constructing a :class:`~pgml.schemas`
 model with invalid data raises pydantic's ``ValidationError``, whose structured,
 field-level detail is exactly what a REST 422 body wants — re-wrapping it would lose
 that. Treat ``pydantic.ValidationError`` as the schema-input error alongside

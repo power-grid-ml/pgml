@@ -68,6 +68,8 @@ from pgml.schemas.grid_schema import (
 )
 from pgml.solver import solve_harmonic_flow
 
+from _common import _strip_geometry
+
 RDT = torch.float64
 CDT = torch.complex128
 F0 = 50.0
@@ -185,13 +187,6 @@ def plot_gmr_floor(out: Path) -> None:
 
 
 # --- (3) feeder harmonic voltages: corrected vs naive vs single-conductor ---
-def _strip_geometry(grid):
-    for b in grid.branches:
-        if isinstance(b, Line):
-            b.conductor_geometry = None
-    return grid
-
-
 def _ieee33_models(orders):
     """Build every 1-phase IEEE-33 line model -> {label: (grid, harmonic result)}.
 

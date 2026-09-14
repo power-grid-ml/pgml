@@ -137,3 +137,47 @@ def test_gradcheck_newton_power_flow():
         ).v.reshape(-1)
 
     assert torch.autograd.gradcheck(fn, (r1, l1, rs), eps=1e-6, atol=1e-5, rtol=1e-3)
+
+
+def test_gradcheck_const_z_fold_over_frequency():
+    """The frequency-dependent const-Z fold is differentiable in P and Q.
+
+    ``assemble_ybus`` scales a folded load's susceptance as the reactive element it
+    represents (``B*h`` capacitive, ``B/h`` inductive). The sign split is built from
+    ``clamp``, so the path stays differentiable away from ``Q = 0``; the check uses a
+    lagging and a leading load together, and a harmonic order where the scaling is
+    active.
+    """
+    from pgml.schemas.grid_schema import Grid, Load, Node, Phase, Source
+
+    ph = (Phase.A,)
+    f0 = 50.0
+
+    def fn(p_lag, q_lag, p_lead, q_lead):
+        grid = Grid(
+            base_frequency_hz=f0,
+            nodes=[Node(id=1, u_rated_v=230.0, phases=ph)],
+            appliances=[
+                Source(
+                    id=1,
+                    node=1,
+                    phases=ph,
+                    u_ref_v=(230.0,),
+                    u_angle_deg=(0.0,),
+                    resistance_ohm=[[0.5]],
+                    inductance_h=[[1e-4]],
+                ),
+                Load(id=2, node=1, phases=ph, p_nom_w=p_lag, q_nom_var=q_lag),
+                Load(id=3, node=1, phases=ph, p_nom_w=p_lead, q_nom_var=q_lead),
+            ],
+        )
+        yb = assemble_ybus(grid, [f0, 5.0 * f0, 13.0 * f0], dtype=torch.complex128)
+        return yb.Y.reshape(-1)
+
+    args = (
+        torch.tensor(2300.0, dtype=torch.float64, requires_grad=True),
+        torch.tensor(800.0, dtype=torch.float64, requires_grad=True),
+        torch.tensor(1500.0, dtype=torch.float64, requires_grad=True),
+        torch.tensor(-600.0, dtype=torch.float64, requires_grad=True),
+    )
+    assert torch.autograd.gradcheck(fn, args, eps=1e-4, atol=1e-8, rtol=1e-4)

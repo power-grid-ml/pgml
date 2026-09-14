@@ -3,7 +3,8 @@
 Files here are PACKAGE DATA: physical/standards tables and documented modeling defaults
 that ship inside the wheel and are read via `importlib.resources` (never a filesystem
 walk-up, never a required env var). They are not user run configuration — the
-serializable run schemas are `pgml.scenarios.config` / `pgl.config` / `pgg.config`.
+serializable run schema is `pgml.scenarios.config`; a downstream package that adds its own
+run config follows the same convention.
 
 ## Files
 - `defaults.yaml` — modeling default VALUES and default MODEL choices, ordered by
@@ -14,8 +15,11 @@ serializable run schemas are `pgml.scenarios.config` / `pgl.config` / `pgg.confi
   `pgml.scenarios.en50160`.
 
 ## Loaders + overrides
-- `pgml.defaults` — `get/resolve/describe/units/defaults/reload`. Active source is
-  `defaults.yaml`; `PGML_DEFAULTS=/path/to.yaml` (or `reload(path)`) overrides it.
+- `pgml.defaults` — `get/resolve/describe/units/defaults/reload/use_preset`. Active source is
+  `defaults.yaml`; `use_preset(name)` overlays a packaged YAML in `data/presets/`
+  within a thread/task-local context, restoring the previous selection on exit.
+  Supported names: `pgml`, `opendss`, `pandapower`, `power-grid-model`; explicit
+  component fields win, unlisted settings retain the active defaults. `PGML_DEFAULTS=/path/to.yaml` (or `reload(path)`) overrides it.
 - `pgml.scenarios.en50160` — `en50160_limits()/en50160_limit(order)`. Active file is the
   packaged `standards/en50160.yaml`; an explicit `path=` argument or `PGML_EN50160`
   overrides it.
@@ -32,22 +36,109 @@ requires an env var to be set.
   Load/Generator with no explicit `connection` (multi- vs single-phase; both WYE by
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
   `docs/pgml/modeling/asymmetric.md`.
+- `appliance.harmonic_shunt.{model, series_rl_fraction, motor_x_harm_pu, motor_xr_harm,
+  basis, generation_model}` — the harmonic device Norton shunt every injection appliance carries
+  at orders `h > 1` (`none` / `opendss` / `motor`; `opendss` is the shipped value and
+  OpenDSS's own). `generation_model` (shipped `none`) is the separate policy for a
+  GENERATION-sign device: the load expression's conductance is negative for an injecting
+  device, so a Generator / Storage stays a pure current source unless this is set to
+  `load_style` or the device names the `motor` model. Resolved by
+  `pgml.assembly._load_shunt.{resolve_shunt_model_name, resolve_harmonic_shunt,
+  generation_shunt_is_neglected}`; per-device override `Load/Generator/Storage
+  .harmonic_model`; per-run override `solve_harmonic_flow(load_shunt=...)`.
+  `basis` (shipped `operating_point`) is which power and terminal voltage the shunt is
+  built from, and therefore whether `Y(h)` is shared across a scenario batch:
+  `operating_point` follows this scenario (as OpenDSS's `YPrim` follows its Load's kW),
+  `nameplate` uses the stored P, Q at the rated voltage and keeps one factorization per
+  order for the whole batch. Resolved by
+  `pgml.assembly._load_shunt.resolve_shunt_basis`; per-run override
+  `solve_harmonic_flow(load_shunt_basis=...)` / `SimulationConfig.load_shunt_basis` /
+  `run_scenarios(load_shunt_basis=...)`.
 - `line.harmonic_model.{three_phase, single_phase, skin_effect}` — which
-  frequency-dependent line model `apply_default_harmonic_model(grid)` applies to an R/X
-  line (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =
-  `positive_sequence`).
-- `line.earth_return.{resistivity_ohm_m, resistance_coeff_ohm_per_m_per_hz}` — Carson
-  earth path (ρ; the `π²·1e-7` Ω/m/Hz earth-return resistance coefficient).
+  frequency-dependent line model is written to `Line.harmonic_line_model` for an R/X line
+  (default 3-phase = `sequence_aware` for 4-wire unbalanced studies; 1-/2-phase =
+  `positive_sequence`). Resolved by the converters (`to_grid`, which logs it) and by
+  `apply_default_harmonic_model(grid)` for hand-built grids; assembly itself never
+  resolves a default. Per-line override: `Line.harmonic_line_model` /
+  `Line.harmonic_skin_effect`.
+- `line.earth_return.{resistivity_ohm_m, resistance_coeff_ohm_per_m_per_hz,
+  reactance_coeff_ohm_per_m_per_hz, x0_frequency, x0_nonnegative, x0_exponent}` — the lumped Carson earth
+  path of the `sequence_aware` model (ρ; the `π²·1e-7` Ω/m/Hz resistance coefficient; the
+  `μ0` reactance coefficient; whether `X0` scales linearly or with the Carson/Deri
+  sub-linear decay; the `X0` exponent). Per-line override: `Line.earth_return`.
 - `line.conductor.{gmr_over_radius, radius_m, height_overhead_m, height_cable_m,
   phase_spacing_m}` — R/X→geometry synthesis defaults (`gmr_over_radius = e^{-1/4} =
   0.7788`; `phase_spacing_m` seeds the equilateral 3-phase synthesis fit).
-- `line.zero_sequence.{r0_over_r1, x0_over_x1, c0_over_c1}` — zero/positive-sequence
-  ratios used by the converter when only a positive-sequence impedance is given.
-- `source.{series_impedance_ohm, rx_ratio}` — default slack series impedance synthesis.
+- `line.zero_sequence.{r0_over_r1, x0_over_x1, c0_over_c1, r0_includes_earth_return}` —
+  zero/positive-sequence ratios used by the converter when only a positive-sequence
+  impedance is given (the converter warns once per grid when it used them), plus whether
+  a stored `R0` already contains the earth-return resistance at f0 (which decides how
+  much of `R0` the skin multiplier scales).
+- `source.{series_impedance_ohm, xr_ratio}` — default slack series impedance synthesis.
+- `source.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of a
+  3-phase `Source` Thevenin when the dataset carries no native zero-sequence data (both
+  1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). Read by
+  `pgml.convert._common.source_zero_sequence_ratios`; a fallback logs a WARNING.
 - `transformer.vector_group.{from, to, clock}` — winding connections + IEC clock assumed
   for a Transformer with no explicit `from_/to_connection` (default Dyn11). Resolved by
   `pgml.assembly._transformer.resolve_vector_group`; an explicit connection wins. See
   `docs/pgml/modeling/transformer.md`.
+- `transformer.harmonic_resistance.law` — `element` (default, follow each
+  `Transformer.harmonic_xr_constant`) / `constant` / `xr_constant`: how the winding
+  RESISTANCE behaves with frequency (X always scales with the order). Resolved by
+  `pgml.assembly._transformer.harmonic_resistance_law`; an unknown value raises.
+- `transformer.magnetizing_placement` — `split` (default) / `from_terminal` / `to_terminal`: which terminal the magnetizing shunt is stamped on (OpenDSS uses its last
+  winding's terminal, power-grid-model splits it half/half). Resolved by
+  `pgml.assembly._transformer.magnetizing_placement`; an unknown value raises.
+- `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` — zero/positive-sequence ratios of
+  the leakage impedance when a Transformer carries no explicit `zero_sequence` override
+  (both 1.0 = Z0 = Z1). Read by `pgml.assembly._transformer.zero_sequence_leakage`; the
+  zero-sequence PATH always comes from the winding connections.
+- `branch.zero_impedance` — `fuse` (default) / `error`: how a solve treats an in-service
+  branch whose series impedance is exactly zero. `fuse` collapses its terminal node-phase
+  rows into one row of the solved system (exact bus fusion) and reports the result on the
+  original node ids; `error` refuses it by name. Resolved by
+  `pgml.assembly._fusion.resolve_fusion` (every assembler and solve entry point); a branch
+  under a `branch_states` sweep is never fused and raises under either policy.
+- `branch.near_ideal_series_resistance_ohm` — the stand-in resistance (1e-4 Ohm) for an
+  ideal branch that has to remain STAMPED: under `zero_impedance: error`, or for a switch
+  whose state a sweep toggles. Named by the gate's message; not exact (it adds a voltage
+  drop and raises that row's admittance scale, and with it the achievable mismatch floor).
+- `branch.switch_model` — `ideal` (default) / `near_ideal`: what a CONVERTER writes for a
+  closed switch whose source library gives no impedance (a pandapower bus-bus switch with
+  `z_ohm = 0`, which pandapower itself solves by fusing the two buses). `ideal` reproduces
+  that treatment exactly; `near_ideal` keeps the switch stamped and logs the deviation.
+  Read by `pgml.convert.pandapower.converter._closed_switch_resistance_ohm`.
+
+- `solver.convergence.{mismatch_pu, update_pu, s_base_va}` — the two PER-UNIT convergence
+  criteria of the nonlinear power flow and the power base of the first one. Read by
+  `pgml.solver.power_flow._resolve_tolerances` (`solve_power_flow`, `solve_harmonic_flow`,
+  `loadability_limit`, `SimulationConfig`).
+- `solver.precision.{complex64_cond_warn, refine_steps}` — the condition estimate above
+  which a plain complex64 solve warns once, and the iterative-refinement step count of a
+  mixed-precision solve. Read by `pgml.solver.power_flow._warn_complex64_conditioning` and
+  `pgml.solver.harmonic.lu_factor_system`.
+- `solver.equilibration.{mode, power_of_two}` — the diagonal equilibration applied around
+  power-flow and harmonic factorizations (`off | symmetric`, default `symmetric`) and whether its
+  scale factors are rounded to powers of two (default true, which makes the scaled matrix
+  exact in binary floating point). Read by
+  `pgml.solver.equilibration.{resolve_equilibration, equilibration_scales}`. The public
+  power-flow, harmonic, loadability and simulation entry points take an `equilibrate=`
+  override; `solve_anchored` / `AnchoredSystem` do not yet use this setting.
+- `solver.ift.{jacobian_budget_mb, adjoint_factor_cache_mb}` — the memory budget of the
+  state-Jacobian build of the gradient path and the dense Newton direction, and the largest
+  adjoint factorization kept for repeated vector-Jacobian products. Read by
+  `pgml.solver.power_flow._ift_jacobian_budget_bytes` / `_ift_adjoint_cache_bytes`.
+- `solver.harmonic.system_budget_mb` — the memory budget of one scenario chunk of the
+  assembled harmonic system. A device shunt on the `operating_point` basis makes `Y(h)`
+  per-scenario, so the system is `[B, H, N, N]`; the budget (charged the matrix plus its
+  factorization) decides how many scenarios are assembled and factored at a time. Read by
+  `pgml.solver.harmonic_flow._harmonic_system_budget_bytes` / `_harmonic_chunk`.
+- `solver.loadability.ramp` — what the loadability analysis' λ multiplies (`load`, the
+  textbook continuation ramp, or `all`). Read by `pgml.solver.loadability_limit`.
+- `branch.near_ideal_series_resistance_ohm` — the stand-in an ideal (zero-impedance) branch
+  needs, named by the pre-solve modeling gate `check_branch_impedances` and substituted by
+  the pandapower converter for a bus-bus switch.
 
 ## Resolution precedence (highest first; `resolve(key, explicit, converted)`)
 1. **explicit** — a value the user set on the component / grid (ALWAYS wins).
@@ -60,3 +151,10 @@ requires an env var to be set.
 - `geometry/synthesis.py`: `_DEFAULT_HEIGHT`, `_DEFAULT_RADIUS`, `_DEFAULT_EARTH_RHO`,
   and the `apply_*` model/skin/earth-coeff defaults.
 - `convert/_common.py`: zero-sequence ratios. `evaluation/oracles/grids.py`: source impedance.
+- `assembly/_fusion.py`: `branch.zero_impedance`; `solver/power_flow.py` +
+  `convert/pandapower/converter.py`: `branch.near_ideal_series_resistance_ohm` /
+  `branch.switch_model`.
+
+The default X0 law is `carson_sublinear`, guarded by `x0_nonnegative=true`.
+OpenDSS conformance selects the unguarded law and its geometry band rule.
+`LineGeometry.internal_inductance` overrides the global geometry model per line.

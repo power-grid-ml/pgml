@@ -9,7 +9,8 @@ Covers the solver behaviour that makes large scenario batches usable:
   scenario) and matches the current-injection fixed point;
 - a batch with infeasible scenarios does NOT raise — every scenario's best-effort
   voltage is returned, the failures are listed in ``failed_states`` + logged, and the
-  single-grid criticality SVD is skipped for a batch;
+  criticality SVD analyses the HARDEST scenario (naming it) instead of raising or
+  reporting nothing;
 - a sweep that varies only SOME devices (loads but not generators) still assembles.
 """
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 import torch
 
 from pgml.schemas.grid_schema import Generator, Load
@@ -142,11 +144,47 @@ class TestPartialFailure:
         assert r.failed_states == (2, 3)  # the two infeasible scenarios
         assert tuple(r.v.shape) == (4, 3)
         assert torch.isfinite(r.v[0]).all() and torch.isfinite(r.v[1]).all()
-        # criticality is a single-grid diagnostic -> skipped for a batch (no crash)
-        assert r.diagnostics is not None and r.diagnostics.criticality is None
         assert any("did not converge" in rec.message for rec in caplog.records), (
             "expected an error log naming the failed states"
         )
+        # Each infeasible scenario is held at the iterate where its own iteration
+        # stopped making progress, so the solve reports the stall instead of spending
+        # every remaining iteration on a diverging scenario.
+        assert r.iterations < 60
+        assert r.diagnostics.n_stalled == 2
+        assert r.diagnostics.likely_cause.startswith("the iteration stopped making")
+        # The criticality diagnostic RUNS on a batch and names the scenario it analysed
+        # (the one with the largest nodal mismatch — one of the two infeasible ones).
+        crit = r.diagnostics.criticality
+        assert crit is not None and "skipped" not in crit
+        assert crit["batch"] in (2, 3)
+        assert crit["min_singular_value"] > 0.0
+        assert len(crit["critical_nodes"]) > 0
+
+    def test_batched_criticality_equals_the_single_scenario_analysis(self) -> None:
+        """The batched diagnostic analyses THAT scenario's system, not the batch's.
+
+        The Jacobian of the worst scenario is built from its own admittance, slack
+        current, injection powers and setpoints, so the figures must equal the ones the
+        same scenario produces when it is solved alone.
+        """
+        p_vals = [2000.0, 3000.0, 8.0e5, 1.0e6]
+        grid, op = _batched_chain_op(p_vals)
+        batched = solve_power_flow(
+            grid, operating_point=op, max_iter=60
+        ).diagnostics.criticality
+        worst = batched["batch"]
+        assert worst in (2, 3)  # one of the two infeasible scenarios
+        single = solve_power_flow(
+            single_phase_chain(),
+            operating_point={30: {"p_w": p_vals[worst], "q_var": 300.0}},
+            max_iter=60,
+        ).diagnostics.criticality
+        for key in ("min_singular_value", "max_singular_value", "condition_number"):
+            assert batched[key] == pytest.approx(single[key], rel=1e-9)
+        assert [c["node_id"] for c in batched["critical_nodes"]] == [
+            c["node_id"] for c in single["critical_nodes"]
+        ]
 
     def test_all_converged_reports_clean(self) -> None:
         grid, op = _batched_chain_op([1500.0, 2500.0, 3500.0])
@@ -198,6 +236,23 @@ class TestFactoredSolve:
             solve_factored(lu_factor_system(y), i).abs().sum(), y
         )[0]
         assert torch.max(torch.abs(g_ref - g_fac)).item() < 1e-10
+
+    @pytest.mark.parametrize("backend", ["dense", "sparse"])
+    def test_interleaved_shared_rhs_axis_matches_direct_solve(self, backend) -> None:
+        """A singleton factor axis may expand to a non-singleton RHS step axis.
+
+        This is the harmonic-flow layout when each scenario has its own device shunt
+        but several coherent-spectrum steps share that shunt: ``Y=[B, 1, H, N, N]``
+        and ``I=[B, T, H, N]``. Each ``(B, H)`` factor must serve all ``T`` columns.
+        """
+        b, steps, h, n = 2, 3, 2, 4
+        y = self._spd_like(b * h, n).reshape(b, 1, h, n, n)
+        i = torch.randn(b, steps, h, n, dtype=CDT)
+        y_full = y.broadcast_to(b, steps, h, n, n)
+        ref = torch.linalg.solve(y_full, i.unsqueeze(-1)).squeeze(-1)
+        got = solve_factored(lu_factor_system(y, backend=backend, equilibrate="off"), i)
+        assert got.shape == i.shape
+        torch.testing.assert_close(got, ref, rtol=1e-12, atol=1e-12)
 
 
 class TestMixedBatchedDevices:
@@ -301,6 +356,64 @@ class TestTrailingSingletonBatch:
         ).v  # [B, 1, H, N]
         assert tuple(stepped.shape) == (3, 1, 3, 3)
         assert torch.equal(stepped.squeeze(1), flat)
+
+    def test_scenario_shunt_is_shared_across_deeper_injection_steps(self) -> None:
+        """A ``[B]`` operating point and ``[B, T]`` spectrum solve in one call."""
+        from pgml.solver import solve_harmonic_flow
+
+        grid = single_phase_chain()
+        p = torch.tensor([1200.0, 3200.0], dtype=torch.float64)
+        q = 0.2 * p
+        mag3 = torch.tensor(
+            [[0.02, 0.04, 0.06], [0.03, 0.05, 0.07]], dtype=torch.float64
+        )
+        phase3 = torch.tensor(
+            [[-10.0, 0.0, 10.0], [15.0, 25.0, 35.0]], dtype=torch.float64
+        )
+        batched = solve_harmonic_flow(
+            grid,
+            [1, 3],
+            operating_point={30: {"p_w": p, "q_var": q}},
+            harmonic_injection={30: {3: (mag3, phase3)}},
+            load_shunt="opendss",
+            load_shunt_basis="operating_point",
+            linear_solver="dense",
+            dtype=CDT,
+        ).v
+        assert batched.shape == (2, 3, 2, 3)
+
+        singles = []
+        for scenario in range(2):
+            steps = []
+            for step in range(3):
+                steps.append(
+                    solve_harmonic_flow(
+                        grid,
+                        [1, 3],
+                        operating_point={
+                            30: {
+                                "p_w": float(p[scenario]),
+                                "q_var": float(q[scenario]),
+                            }
+                        },
+                        harmonic_injection={
+                            30: {
+                                3: (
+                                    float(mag3[scenario, step]),
+                                    float(phase3[scenario, step]),
+                                )
+                            }
+                        },
+                        load_shunt="opendss",
+                        load_shunt_basis="operating_point",
+                        linear_solver="dense",
+                        dtype=CDT,
+                    ).v
+                )
+            singles.append(torch.stack(steps))
+        torch.testing.assert_close(
+            batched, torch.stack(singles), rtol=1e-12, atol=1e-12
+        )
 
     def test_gradients_flow_through_the_singleton_batch(self) -> None:
         """The IFT backward returns a gradient of the operating point's own shape."""

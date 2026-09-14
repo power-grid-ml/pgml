@@ -10,13 +10,19 @@ import pytest
 from pydantic import ValidationError
 
 from pgml.schemas import SCHEMA_VERSION
-from pgml.schemas.grid_schema import ComplexTap, GenericBranch, Phase, ShuntReactor
+from pgml.schemas.grid_schema import (
+    ComplexTap,
+    GenericBranch,
+    Phase,
+    ShuntReactor,
+    Source,
+)
 
 ABC = (Phase.A, Phase.B, Phase.C)
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == "0.0.5"
+    assert SCHEMA_VERSION == "0.2.0"
 
 
 def test_shunt_reactor_rejects_mis_sized_matrix():
@@ -195,3 +201,75 @@ def test_grid_attach_is_atomic_and_roundtrips():
     assert dev.accuracy_class == "0.5S"
     with pytest.raises(ValidationError, match="unique"):
         grid.attach_measurement_devices([ok])  # duplicate id 1
+
+
+# ---------------------------------------------------------------------------
+# Source: the legacy `spectrum` key
+# ---------------------------------------------------------------------------
+def _legacy_source_payload(**extra) -> dict:
+    return {
+        "component": "source",
+        "id": 7,
+        "node": 1,
+        "phases": ["a"],
+        "u_ref_v": [400.0],
+        "u_angle_deg": [0.0],
+        "resistance_ohm": [[1.0e-6]],
+        "inductance_h": [[1.0e-12]],
+        **extra,
+    }
+
+
+def test_source_has_no_spectrum_field():
+    """Upstream distortion is an operating point (`NodeHarmonicSource`), not grid data."""
+    assert "spectrum" not in Source.model_fields
+
+
+def test_source_accepts_and_drops_a_null_legacy_spectrum():
+    """Every grid persisted under an earlier revision still validates."""
+    src = Source.model_validate(_legacy_source_payload(spectrum=None))
+    assert "spectrum" not in src.model_dump()
+
+
+def test_source_warns_when_dropping_a_populated_legacy_spectrum(caplog):
+    payload = _legacy_source_payload(
+        spectrum={
+            "kind": "static",
+            "spectrum": {
+                "components": [{"order": 5, "magnitude_pu": 0.05, "phase_deg": 0.0}]
+            },
+        }
+    )
+    with caplog.at_level("WARNING"):
+        src = Source.model_validate(payload)
+    assert "spectrum" not in src.model_dump()
+    assert any(
+        "Source 7" in r.message and "NodeHarmonicSource" in r.message
+        for r in caplog.records
+    )
+
+
+def test_source_still_rejects_an_unknown_field():
+    """The migration is narrow: any OTHER unknown field is still a loud error."""
+    with pytest.raises(ValidationError):
+        Source.model_validate(_legacy_source_payload(not_a_field=1.0))
+
+
+def test_source_accepts_keyword_construction_with_the_legacy_argument():
+    """The migration also covers `Source(..., spectrum=None)` in code, not just JSON.
+
+    Downstream loaders that still pass the removed argument keep working (the
+    before-validator sees the keyword dict), so the removal needs no lockstep release.
+    """
+    src = Source(
+        component="source",
+        id=9,
+        node=1,
+        phases=("a",),
+        u_ref_v=(400.0,),
+        u_angle_deg=(0.0,),
+        resistance_ohm=[[1.0e-6]],
+        inductance_h=[[1.0e-12]],
+        spectrum=None,
+    )
+    assert "spectrum" not in src.model_dump()

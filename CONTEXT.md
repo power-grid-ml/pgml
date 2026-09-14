@@ -1,8 +1,8 @@
 # pgml navigation index (read this first)
 
-Differentiable, GPU-ready, vectorized **harmonic power flow for power grids** — the base
-package of the power-grid-ml suite. This is the top-level map for contributors and agents:
-what the package does, where the contracts live, and which file to open next.
+Differentiable, GPU-ready, vectorized **harmonic power flow for power grids**. This is the
+top-level map for contributors: what the package does, where the contracts live, and which
+file to open next.
 
 **Read order.** This file → `src/pgml/CONTEXT.md` (the subpackage map + interface ledgers)
 → the subpackage `CONTEXT.md` you are touching → the code. How to *work* here (the hard
@@ -22,22 +22,14 @@ decisions, API reference): `docs/pgml/` (Sphinx; standalone landing `docs/index.
 
 A change that breaks float64 `gradcheck` or the GPU device/dtype test is not done.
 
-## The suite (one repository per package, one-way dependencies)
+## Where pgml sits
 
-`pgml` is the **base** package; the others are one-way dependents that import only `pgml`'s
-public API and never its internals. `pgml` imports none of them and knows nothing about
-them beyond this table. Every dependent pins a `power-grid-ml` version range and reads
-`SCHEMA_VERSION` from persisted datasets — the schemas are the cross-package data contract.
-
-| package | distribution | role | repository |
-|---|---|---|---|
-| **pgml** | `power-grid-ml` | differentiable, GPU-ready harmonic power flow (the gradient engine) | this one |
-| **pgl** | `power-grid-learn` | harmonic state-estimation models + training | `pgl` |
-| **pgg** | `power-grid-gen` | QD synthesis of LV grids (CVT-MAP-Elites + differentiable repair) | `pgg` |
-| **pghub** | `power-grid-hub` | real grid datasets → `pgml.Grid`, structural metrics, embeddings | `pghub` |
-| **pgd** | `power-grid-dash` | FastAPI backend + web SPA over simulation, estimation, live measurements | `pgd` |
-| — | `power-grid-suite` | developer aggregation (submodules, one pixi env, cluster jobs) + meta-package | `power-grid-suite` |
-| — | — | the published documentation site, assembled from every package's `docs/<pkg>/` | `docs` |
+pgml is designed as the base layer of a larger power-grid ecosystem: this repository owns
+the physics engine and the data contracts (the `Grid` / result / scenario schemas).
+Downstream tools — state estimation, grid synthesis, dataset and dashboard applications —
+build on pgml's public API only, pin a `power-grid-ml` version range, and read
+`SCHEMA_VERSION` from persisted datasets; pgml imports none of them and knows nothing about
+their internals beyond that contract.
 
 ## Why all-PyTorch
 
@@ -57,10 +49,22 @@ start there.)
 3. **solver** solves `Y(f)·V(f)=I(f)` (linear) or the nonlinear const-P/ZIP problem
    (current-injection fixed point or Newton, IFT gradients) → phasor **result**.
 4. **convert** turns pandapower / OpenDSS / power-grid-model nets into a `Grid`; **scenarios**
-   batches the inputs (ML training data); **evaluation** compares results to those reference
-   libraries.
+   declares and solves a BATCH of input deltas on one grid and persists it (ML training
+   data); **evaluation** compares results to those reference libraries.
 
 The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTEXT.md`.
+
+## GitHub publication landing page
+
+README leads with capabilities, a seven-library comparison, then throughput,
+conformance and resistance-recovery
+figures before installation. Figure inputs and provenance are in `assets/readme/`;
+`run/readme/render.py` redraws the recorded throughput and wide resistance panel
+without running a solve. Each figure's measurement date, source hashes and validation
+scope accompany its data; the README caption identifies the measured hardware and
+precision. Throughput compares IEEE33 and Kerber on one L40S with eight allocated
+CPUs against pandapower and power-grid-model, validating all scenarios at every
+batch size. Installation instructions target the GitHub repository.
 
 ## Where things live
 
@@ -69,7 +73,7 @@ The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTE
 | How to *work* here (constraints, style, commands, the frozen-schema rule) | `CLAUDE.md` |
 | The package map (subpackages + interface ledgers) | `src/pgml/CONTEXT.md` |
 | Status + open work | `src/pgml/STATUS.md` |
-| Published human docs (concepts, modeling decisions, API reference) | `docs/pgml/` (`docs/pgml/index.md`) |
+| Published human docs (concepts, modeling decisions, API reference) | `docs/` (landing page `docs/index.md`, pages under `docs/pgml/`) |
 | Modeling decisions (conventions, transformer, line model, DER, asymmetric) | `docs/pgml/modeling/` |
 | Cross-tool conventions + reference-library briefs | `docs/pgml/modeling/conventions.md`, `docs/pgml/modeling/references/` |
 | Runnable studies + config templates | `run/examples/pgml/`, `run/configs/` |
@@ -87,18 +91,17 @@ Don't conflate "config". There are three kinds:
 2. **Run-config schemas** — serializable pydantic contracts; one config + `seed` reproduces a
    run: `pgml.scenarios.config` (data generation). Inspect with
    `python -m pgml.scenarios.config --json-schema|--example`; templates in `run/configs/`.
-   (Dependents follow the same convention: `pgl.config` for training, `pgg.config` for
-   generation.)
+   (A downstream package that adds its own run-config schema follows the same convention.)
 3. **Run-config instances + outputs** — the user's own YAML + datasets/checkpoints/tracking.
    Never tracked here; live under the **experiments root** (`PGML_EXPERIMENTS`, default
-   `./data`; `pgml.experiments_root()`), organised per package (`data/pgml/`, `data/pgl/`, …).
+   `./data`; `pgml.experiments_root()`), organised per package (`data/pgml/` for this one).
 
 ## Frozen-contract rule
 
-`src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Import it; do NOT
-edit it as a subagent (orchestrator-only, and only after asking the user). Everything else
-— here and in every dependent repository — conforms to it. The full behavioral rule is in
-`CLAUDE.md`.
+`src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Import it; a
+schema change needs the maintainer's sign-off (a breaking change to a published data
+contract). Everything else — here and in every downstream consumer — conforms to it. The
+full behavioral rule is in `CLAUDE.md`.
 
 ## Key conventions (defined in the schemas; do not reinvent)
 
@@ -123,12 +126,17 @@ edit it as a subagent (orchestrator-only, and only after asking the user). Every
 2. Geometry → impedance differentiable path (Carson/Deri, skin effect). **Done** — bit-exact
    vs OpenDSS.
 3. Full harmonic range; validate harmonic results vs OpenDSS (IEEE-33 + CIGRE LV). **Done.**
-4. Batching/scale (`pgml.scenarios`): reproducible QMC/cartesian + correlated + EN 50160 +
-   parquet. **Done** — including cross-grid batching (`pgml.multigrid.merge_grids`
-   disjoint-union solves) and switch-state batching (`branch_states`); the production
-   GPU data-generation scale decision remains open (`src/pgml/STATUS.md` §A).
-5. Harmonic state estimation + the inverse (parameter recovery) path — the `pgl`
-   repository builds on this package. **In development there.**
+4. Batching/scale (`pgml.scenarios`): a declared batch of input deltas — reproducible
+   QMC/cartesian sampling, explicit values (`batch_from_values`), the excitation sweeps, the
+   standards-referenced emission, parquet persistence. **Done** — including cross-grid
+   batching (`pgml.multigrid.merge_grids` disjoint-union solves) and switch-state batching
+   (`branch_states`); the production GPU data-generation scale decision remains open
+   (`src/pgml/STATUS.md` §A).
+5. Harmonic state estimation and the inverse (parameter recovery) path build on this
+   package's public API. **Out of scope for this repository** — including the scenario
+   RECIPES a learning task needs (device populations, calibrated emission ranges, load
+   profiles). A downstream generator plugs into `run_scenarios` through the `ScenarioSpec`
+   protocol (an object with `sample(grid)`), so the engine stays free of them.
 
 ## Commands
 

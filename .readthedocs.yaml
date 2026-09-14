@@ -1,0 +1,29 @@
+# Read the Docs build configuration.
+#
+# The docs import pgml for autodoc, so the build needs the runtime dependencies. torch comes
+# from the PyTorch CPU index first (the default PyPI wheel pulls the CUDA runtime and is far
+# larger than a docs build needs); the second step then installs the package itself plus its
+# `docs` extra, and finds torch already satisfied.
+#
+# `fail_on_warning` mirrors the strict local build, so a broken reference fails here too.
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.13"
+
+sphinx:
+  configuration: docs/conf.py
+  fail_on_warning: true
+
+python:
+  install:
+    - requirements: docs/requirements.txt
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
+
+formats:
+  - pdf

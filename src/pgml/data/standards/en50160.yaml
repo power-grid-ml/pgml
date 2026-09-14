@@ -27,7 +27,7 @@ max_harmonic_values:
   23: 0.015
   24: 0.005
   25: 0.015
-  26: 0.005 # from here on, values were added manually. TODO use some form of extrapolation and interpolation for interharmonics
+  26: 0.005 # from here on (orders 26-49), values are a manual extension beyond the standard's own table, not derived from a documented extrapolation or interpolation rule
   27: 0.015
   28: 0.005
   29: 0.015

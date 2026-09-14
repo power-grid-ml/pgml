@@ -1,51 +1,44 @@
-# API Reference
+# API reference
 
-The `pgml` public API is organised into the following subpackages.  Each
-subpackage exports its public surface via `__all__` in its `__init__.py`.
+Which module to open for what. Each page is generated from that subpackage's `__all__`, so
+what you see here is the public surface.
+
+| Module | Open it for |
+|---|---|
+| {mod}`pgml.simulation` | `simulate`, `SimulationConfig`, `SolvedState`, the facade most code uses |
+| {mod}`pgml.schemas` | `Grid`, `Node`, `Branch`, `Appliance`, results and scenarios, the data contracts |
+| {mod}`pgml.solver` | `solve_harmonic_flow`, `solve_power_flow`, loadability, diagnostics, equilibration, prepared systems, switch-state batching |
+| {mod}`pgml.assembly` | `assemble_ybus`, device injections, branch currents, the node-phase row layout, the bus-fusion map |
+| {mod}`pgml.geometry` | Carson/Deri line constants from conductor geometry, and the analytic harmonic line models |
+| {mod}`pgml.topology` | Slack anchors, branch edges, distance from the slack, connectivity reports, grid fingerprints |
+| {mod}`pgml.scenarios` | Batched sampling of operating points, sweeps, the batched solve, parquet datasets |
+| {mod}`pgml.convert` | Readers for pandapower, power-grid-model and OpenDSS networks |
+| {mod}`pgml.grids` | Benchmark builders and the synthetic feeder |
+| {mod}`pgml.multigrid` | Merge a grid ensemble into one solvable grid, then split the result per member |
+| {mod}`pgml.dispatch` | State-of-charge integration and the realized power sequence a `Storage` element describes |
+| {mod}`pgml.evaluation` | Comparison plots and the reference oracles |
+| {mod}`pgml.errors` | The exception hierarchy and its HTTP status hints |
+| {mod}`pgml.defaults` | The shipped modelling defaults and standards tables |
+| {mod}`pgml.paths` | Where run outputs go |
+| {mod}`pgml.provenance` | The commit and version stamp to write beside a generated artifact |
 
 ```{toctree}
 :maxdepth: 2
 
 simulation
-errors
 schemas
-assembly
 solver
+assembly
 geometry
 topology
 scenarios
-evaluation
 convert
 grids
 multigrid
+dispatch
+evaluation
+errors
 defaults
 paths
 provenance
 ```
-
----
-
-## High-level entry points
-
-| Symbol | Purpose |
-|--------|---------|
-| {mod}`pgml.simulation` | `simulate`, `simulate_serializable`, `SimulationConfig`, `SolvedState`, `ResultBundle` — the stable public facade |
-| {mod}`pgml.errors` | `PgmlError`, `InputError`, `ComputationError`, and leaf exception classes |
-
-## Subpackage overview
-
-| Package | Purpose |
-|---------|---------|
-| {mod}`pgml.schemas` | Frozen data contracts: `Grid`, `Node`, `Branch`, `ResultSet`, `Scenario`, plus inert installed-instrumentation metadata (`MeasurementDevice`) |
-| {mod}`pgml.assembly` | Differentiable, batched, per-frequency Y-bus assembly; `branch_currents` / `BranchCurrent`; `branch_states` topology masking |
-| {mod}`pgml.solver` | Complex batched linear solve and nonlinear power-flow; pre-solve connectivity checking, switch-state batching, sparse/dense factorization, and system reuse |
-| {mod}`pgml.geometry` | Differentiable Carson/Deri line constants (geometry → Z(h)/Yc(h)) |
-| {mod}`pgml.topology` | Dependency-free slack anchor(s) (multi-source), branch edges, nearest-slack electrical distance, and the pre-solve connectivity report |
-| {mod}`pgml.scenarios` | Reproducible config-driven batched scenario sampling |
-| {mod}`pgml.evaluation` | Comparison plots (references vs our solve) |
-| {mod}`pgml.convert` | Converters from pandapower / power-grid-model / OpenDSS |
-| {mod}`pgml.grids` | Reference grid builders (IEEE-33, CIGRE LV) + the state-estimation benchmark recipe + the schema-only `synthetic_feeder` |
-| {mod}`pgml.multigrid` | Disjoint-union merge of a grid ensemble into one solvable `Grid` (block-diagonal `Y` for free); per-member id maps, `operating_point`/`branch_states` translation, `split()` row views |
-| {mod}`pgml.defaults` | Documented modelling defaults (shipped in the package, importlib.resources) |
-| {mod}`pgml.paths` | Experiments-root convention (`PGML_EXPERIMENTS`) |
-| {mod}`pgml.provenance` | `code_provenance` / `git_state` — the commit, dirty flag, and library versions stamped into every persisted artifact |

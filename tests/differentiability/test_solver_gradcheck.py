@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from pgml.solver import solve_harmonic
+from pgml.solver.harmonic import lu_factor_system, solve_factored
 
 torch.manual_seed(1)
 
@@ -35,6 +36,21 @@ def test_gradcheck_batched_norton():
 
     def fn(y, i):
         return solve_harmonic(y, i)
+
+    assert torch.autograd.gradcheck(fn, (y, i), eps=1e-6, atol=1e-6)
+
+
+def test_gradcheck_factored_interleaved_shared_rhs_axis():
+    """A singleton factor axis shares the LU across an interior RHS step axis."""
+    b, steps, h, n = 2, 2, 2, 2
+    y = (
+        torch.randn(b, 1, h, n, n, dtype=torch.complex128)
+        + n * torch.eye(n, dtype=torch.complex128)
+    ).requires_grad_(True)
+    i = torch.randn(b, steps, h, n, dtype=torch.complex128).requires_grad_(True)
+
+    def fn(y_, i_):
+        return solve_factored(lu_factor_system(y_, equilibrate="off"), i_)
 
     assert torch.autograd.gradcheck(fn, (y, i), eps=1e-6, atol=1e-6)
 
