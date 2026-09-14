@@ -195,9 +195,10 @@ def to_grid(
         (or ``Calcvoltagebases`` called).
     phase_mode:
         :class:`~pgml.convert._common.PhaseMode`. ``SINGLE_PHASE_EQUIV`` (default)
-        keeps today's positive-sequence single-phase-equivalent: every node/branch
-        is ``phases=(Phase.A,)`` and lines carry 1x1 matrices (the leading diagonal
-        entry of the DSS matrix). ``THREE_PHASE`` emits the real DSS phases (incl.
+        selects the positive-sequence single-phase equivalent: every node/branch
+        is ``phases=(Phase.A,)`` and lines carry 1x1 matrices. A coupled multiphase
+        line uses the mean self term minus the mean mutual term; a native
+        one-phase line retains its scalar impedance. ``THREE_PHASE`` emits the real DSS phases (incl.
         ``Phase.N`` for neutral conductors), full n×n line matrices, balanced
         3-phase Thevenin sources, and load ``connection`` from ``IsDelta()``.
     harmonic_line_model:

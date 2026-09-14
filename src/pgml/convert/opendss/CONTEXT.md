@@ -34,11 +34,11 @@ describe a different physical demand. Constant-impedance loads need no such warn
 
 | Value                 | Node phases          | Line matrices      | Load `connection`           |
 |-----------------------|----------------------|--------------------|-----------------------------|
-| `SINGLE_PHASE_EQUIV`  | `(Phase.A,)` always  | 1×1 (diagonal [0][0]) | `None` (resolves from config) |
+| `SINGLE_PHASE_EQUIV`  | `(Phase.A,)` always  | 1×1 positive-sequence equivalent; scalar for a native one-phase line | `None` (resolves from config) |
 | `THREE_PHASE`         | Real DSS phases (incl. `Phase.N` for neutral buses) | Full n×n from `RMatrix()/XMatrix()/CMatrix()` | `WYE` or `DELTA` from `IsDelta()` |
 
-`SINGLE_PHASE_EQUIV` is byte-identical to the historical converter output, except
-for the `u_rated_v` fix below (which does not change the IEEE 33-bus numbers).
+`SINGLE_PHASE_EQUIV` preserves the balanced positive-sequence fundamental model;
+it does not retain the zero-sequence or general unbalanced harmonic system.
 
 ### id_map format
 ```python
