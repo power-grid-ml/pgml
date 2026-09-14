@@ -54,6 +54,16 @@ start there.)
 
 The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTEXT.md`.
 
+## GitHub publication landing page
+
+README leads with capabilities, a seven-library comparison, then throughput,
+conformance and resistance-recovery
+figures before installation. Figure inputs and provenance are in `assets/readme/`;
+`run/readme/render.py` redraws the recorded throughput and wide resistance panel
+without running a solve. Each figure's measurement date, source hashes and validation
+scope accompany its data; the README caption identifies the measured hardware and
+precision. Installation instructions target the GitHub repository.
+
 ## Where things live
 
 | Need… | Open |
