@@ -137,7 +137,9 @@ def test_bad_lowrank_residual_falls_back_to_exact_assembly(monkeypatch, caplog):
     import pgml.solver.harmonic_flow as harmonic_flow
 
     grid = _sparse_load_grid()
-    power = torch.tensor([1_500.0, 2_000.0, 2_500.0], dtype=torch.float64)
+    power = torch.tensor(
+        [1_500.0, 2_000.0, 2_500.0], dtype=torch.float64, requires_grad=True
+    )
     operating_point = _operating_point(power)
     original = harmonic_flow.solve_factored_updated
 
@@ -152,6 +154,10 @@ def test_bad_lowrank_residual_falls_back_to_exact_assembly(monkeypatch, caplog):
 
     assert torch.allclose(result.v[..., 1:, :], direct, rtol=2e-12, atol=2e-12)
     assert "falling back to exact assembled factorization" in caplog.text
+    result.v.abs().sum().backward()
+    assert power.grad is not None
+    assert torch.isfinite(power.grad).all()
+    assert torch.count_nonzero(power.grad) == power.numel()
 
 
 def test_high_rank_population_keeps_direct_factorization(monkeypatch):

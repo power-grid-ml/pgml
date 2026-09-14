@@ -140,17 +140,20 @@ appliance:
       units: "enum{none, load_style}"
       description: >
         What a GENERATION-sign device (Generator, Storage) carries at orders h > 1.
-        `none` (the default) leaves it a PURE harmonic current source. The reason is
-        physical: Yeq = conj(S)/V_rated^2 has a NEGATIVE conductance for a device that
-        injects power, i.e. the load expression would make every inverter FEED harmonic
-        energy into the network instead of damping it, and no inverter or machine does
-        that. OpenDSS derives a `PVSystem`'s or `Generator`'s harmonic shunt from a
-        separate subtransient / filter impedance (`Xdpp`, `%R`/`%X`), a quantity this
-        schema does not carry. `load_style` applies the same expression a Load carries,
-        which is what OpenDSS computes for the negative-kW `Load` idiom a matched-mode
-        export writes; use it to reproduce such a comparison, knowing the sign. A device
-        whose own `harmonic_model` names the `motor` model (`motor_x_harm_pu`) carries
-        that model either way, and `neglect_shunt: true` always wins.
+        `none` (the default) adds no shunt derived from the device's P/Q, so a device
+        without an explicit `harmonic_impedance` remains a PURE harmonic current source.
+        The reason is physical: Yeq = conj(S)/V_rated^2 has a NEGATIVE conductance for a
+        device that injects power, i.e. the load expression would make every inverter
+        FEED harmonic energy into the network instead of damping it. OpenDSS instead
+        derives a `PVSystem`'s or `Generator`'s harmonic shunt from its separate
+        subtransient / filter impedance (`Xdpp`, `%R`/`%X`), which the optional
+        `harmonic_impedance` schema block represents. That explicit physical impedance
+        remains present under `none`. `load_style` applies the same expression a Load
+        carries, which is what OpenDSS computes for the negative-kW `Load` idiom a
+        matched-mode export writes; use it to reproduce such a comparison, knowing the
+        sign. A device whose own `harmonic_model` names the `motor` model
+        (`motor_x_harm_pu`) carries that model either way, and `neglect_shunt: true`
+        always wins when no explicit impedance supersedes the derived model.
 
   # How a voltage-regulating Generator (a `voltage_regulation` block = a PV terminal)
   # has its reactive limits enforced by the nonlinear power flow. See

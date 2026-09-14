@@ -15,7 +15,7 @@ Usage::
 
     provenance = code_provenance()
     # {"git_sha": "d6185fb...", "git_dirty": False, "git_source": "git",
-    #  "pgml_version": "0.2.0", "torch_version": "2.4.0"}
+    #  "pgml_version": "0.5.0", "torch_version": "2.10.0"}
 
 Write this dict alongside anything a config + seed alone would otherwise be trusted to
 reproduce.

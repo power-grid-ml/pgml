@@ -321,18 +321,21 @@ def solve_harmonic_flow(
         documented modeling default ``appliance.harmonic_shunt.model``; an unknown
         name raises. A device's own ``harmonic_model``
         (:class:`~pgml.schemas.grid_schema.HarmonicShuntModel`) overrides the choice
-        per device, except under ``"none"``, which carries no shunt anywhere. The
-        shunt is the dominant DAMPING term at a feeder parallel resonance and is
+        per device, except under ``"none"``, which suppresses every derived shunt.
+        An explicit Generator/Storage ``harmonic_impedance`` is a physical device model
+        and remains present under ``"none"``. The derived shunt is the dominant DAMPING
+        term at a feeder parallel resonance and is
         derived from the CONVERGED fundamental operating point, so gradients flow
         from the harmonic voltages through it to P, Q and the network parameters.
     load_shunt_basis:
         Which power and terminal voltage the shunt admittance is built from.
         ``"operating_point"`` uses the power the device draws in THIS scenario at the
         solved fundamental terminal voltage, which is what OpenDSS's ``YPrim`` does with
-        its Load's specified kW/kvar; it makes ``Y(h)`` scenario-dependent, so a batch of
-        ``B`` scenarios needs ``B`` factorisations per order (and a ``[B, Hh, N, N]``
-        matrix, chunked against the documented memory budget
-        ``solver.harmonic.system_budget_mb``). ``"nameplate"`` uses the device's stored
+        its Load's specified kW/kvar; it makes ``Y(h)`` scenario-dependent. A sparse flat
+        scenario batch uses an exact low-rank update when its shunt rows pass the
+        documented selection rule. The direct path otherwise needs ``B`` factorisations
+        per order and a ``[B, Hh, N, N]`` matrix, chunked against
+        ``solver.harmonic.system_budget_mb``. ``"nameplate"`` uses the device's stored
         P, Q at its rated terminal voltage, so ``Y(h)`` is the same for every scenario:
         one factorisation per order for the whole batch, at the price of a shunt that
         does not follow the loading. ``None`` (default) resolves the documented modeling
