@@ -166,14 +166,15 @@ grid, id_map = to_grid(net)
 to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
         gen_mode=GenMode.VOLTAGE_REGULATING,
         gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
-        harmonic_line_model=None)
+        harmonic_line_model=None,
+        open_switch_model=None)
     -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function. Converts a (materialised) pandapower network to a schema `Grid`
 and an `id_map` dictionary.  Handles: `bus`, `line`, `load`, `asymmetric_load`,
 `ext_grid`, `trafo`, bus-bus `switch`, `sgen` (-> `Generator`,
-generation-positive), `shunt` (-> a WYE `ShuntAppliance`: `G` from `p_mw`, `C` from
+generation-positive), `storage`, `shunt` (-> a WYE `ShuntAppliance`: `G` from `p_mw`, `C` from
 `-q_mvar/(2*pi*f0)`, referred to the shunt's own `vn_kv`) and `gen` (a PV bus). `gen`
 converts by default as the EXACT PV terminal
 (`gen_mode=GenMode.VOLTAGE_REGULATING`: a `Generator` with a `VoltageRegulation`
@@ -181,7 +182,7 @@ block; rows on one bus merge; a row on the `ext_grid` bus is skipped);
 `GenMode.VOLT_VAR_APPROX` keeps the earlier steep-Volt-VAr-droop approximation
 (steepness `gen_volt_var_slope_pu`, default 500) and `GenMode.DROP` leaves the table
 unread. Every OTHER non-empty element table (`trafo3w`, `impedance`, `ward`,
-`xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, and `gen` under
+`xward`, `dcline`, `motor`, `asymmetric_sgen`, and `gen` under
 `GenMode.DROP`) triggers a WARNING naming the kind and count — nothing is dropped
 silently.
 
@@ -190,16 +191,25 @@ silently.
 {
     "bus":      {pp_bus_index: Node.id, ...},
     "line":     {pp_line_index: Line.id, ...},
+    "trafo":    {pp_trafo_index: Transformer.id, ...},
+    "switch":   {pp_switch_index: Switch.id, ...},       # closed et='b'
     "load":     {pp_load_index: Load.id, ...},
+    "asymmetric_load": {pp_asym_index: Load.id, ...},
     "sgen":     {pp_sgen_index: Generator.id, ...},
     "gen":      {pp_gen_index: Generator.id, ...},   # empty under gen_mode=DROP
     "shunt":    {pp_shunt_index: ShuntAppliance.id, ...},
+    "storage":  {pp_storage_index: Storage.id, ...},
     "ext_grid": {pp_extgrid_index: Source.id, ...},
+    "open_terminal": {pp_switch_index: Node.id, ...}, # singly-open et='l'/'t'
     "slack_v_complex": complex,   # phasor V (line-to-line, V) for ideal-slack solve
 }
 ```
 - Keys are pandas integer indices (int) into the respective net.* DataFrames.
 - Only in-service elements whose buses are also in-service are included.
+- `open_switch_model=None` resolves the documented `terminal` default. `terminal`
+  retains a singly-open line/transformer on an auxiliary node so its connected-end
+  shunt remains energized; `drop_element` omits the whole element. Both-open elements
+  are omitted in either mode.
 - `slack_v_complex`: complex slack phasor = `vm_pu * vn_kv*1000 * exp(j*va_deg)`
   ready to pass directly as `v_fixed` to `solve_harmonic(..., v_fixed=...)`.
 
@@ -264,10 +274,11 @@ scalar stamp too; a phase-mode-conditional version of this factor is WRONG, see
 count (identical parallel systems) divides the series impedance and multiplies
 the shunt admittance (line C/G, trafo magnetizing) and the rated power
 (`s_rated_va`); `parallel==1` is byte-identical to before. An OPEN bus-line/
-bus-transformer switch (`et='l'`/`'t'`) takes the whole line/trafo out of
-service (an accepted approximation — the still-connected terminal's shunt is
-dropped too, unlike pandapower's own auxiliary-bus model); bus-bus (`et='b'`)
-switches are unaffected. `load`/`sgen`/`asymmetric_load` P/Q are scaled by the
+bus-transformer switch (`et='l'`/`'t'`) retains a singly-open element on an
+auxiliary terminal node by default, preserving the connected-end shunt like
+pandapower. `open_switch_model="drop_element"` selects the legacy whole-element
+approximation; both-open elements are always omitted. Bus-bus (`et='b'`) switches
+are unaffected. `load`/`sgen`/`asymmetric_load` P/Q are scaled by the
 per-element `scaling` column (NaN-safe, default 1.0 — pandapower's own `runpp`
 convention); `load` additionally maps `const_z_p_percent`/`const_i_p_percent`/
 `const_z_q_percent`/`const_i_q_percent` onto `ZipCoefficients` (all-zero, the

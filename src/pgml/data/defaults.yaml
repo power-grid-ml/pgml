@@ -18,6 +18,18 @@
 
 # How a simulation distributes appliance power across phases. pgml is ALWAYS phase-
 # domain, so this is operating-point RESOLUTION, not a change to the network solve.
+converter:
+  pandapower:
+    open_switch_model:
+      value: terminal
+      units: "enum{terminal, drop_element}"
+      description: >
+        An open bus-line or bus-transformer switch disconnects only its terminal.
+        The connected end still draws line charging or transformer no-load current.
+        terminal retains that circuit with an auxiliary open-end node; drop_element
+        omits the complete element as a reduced approximation. Both-open and
+        out-of-service elements are omitted in either mode.
+
 calculation:
   symmetry:
     value: auto

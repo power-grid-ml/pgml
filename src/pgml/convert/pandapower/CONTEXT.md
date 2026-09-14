@@ -27,6 +27,8 @@ to_grid(net: Any, *,
         phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
         gen_mode: GenMode = GenMode.VOLTAGE_REGULATING,
         gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,  # 500.0
+        harmonic_line_model: Optional[str] = None,
+        open_switch_model: Optional[Literal["terminal", "drop_element"]] = None,
         ) -> tuple[Grid, dict[str, Any]]
 ```
 
@@ -46,7 +48,9 @@ explicit per-km parameters are present.
     "sgen":             {pp_sgen_idx: Generator.id, ...},
     "gen":              {pp_gen_idx: Generator.id, ...},  # EMPTY under gen_mode=DROP; rows on ONE bus share the merged id
     "shunt":            {pp_shunt_idx: ShuntAppliance.id, ...},
+    "storage":          {pp_storage_idx: Storage.id, ...},
     "ext_grid":         {pp_eg_idx: Source.id, ...},
+    "open_terminal":    {pp_switch_idx: Node.id, ...},   # singly-open et='l'/'t' switch auxiliary terminals
     "slack_v_complex":  complex,  # FIRST ext_grid's phasor (V, L-L); ideal-slack convenience
 }
 ```
@@ -153,27 +157,21 @@ at all (see "Coverage gaps" below). See
 parity), `test_parallel_scales_series_impedance_and_shunt_admittance` (closed-form
 value checks), and `test_parallel_default_is_byte_identical`.
 
-### Bus-line / bus-transformer switches (`et='l'`/`'t'`) — accepted approximation
+### Bus-line / bus-transformer switches (`et='l'`/`'t'`)
 
-An OPEN `et='l'`/`'t'` switch (`net.switch`) converts its line/transformer as
-out-of-service (`_open_switch_targets`, called once up front and consulted by
-both the line and the trafo loop): the WHOLE element drops, not just the switched
-terminal. This is an accepted approximation, not full fidelity: pandapower's own
-solver instead keeps the still-connected terminal energized via an internal
-auxiliary bus (dropping only the current path, not that terminal's shunt
-admittance), so the converter's simplification also loses the line-charging
-capacitance at that terminal. A closed switch, or no switch at all, changes
-nothing; bus-bus (`et='b'`) switches are unaffected (see the field mapping table
-below this section). Root-caused (not guessed) on `create_cigre_network_mv`/
-`mv_oberrhein`: comparing a live `runpp` on the untouched net against the SAME net
-with those lines forced `in_service=False` for pandapower itself shows a
-~2.9e-4 pu / ~6.9e-3 deg (CIGRE MV) / ~8.9e-4 pu / ~1.4e-2 deg (`mv_oberrhein`)
-difference — almost the entire residual the grid-matrix oracle tests see against
-pandapower's OWN untouched `runpp` (see
-`tests/reference/test_pandapower_grid_matrix.py`'s module docstring, third
-tolerance family, and `test_cigre_mv_shift30_fallback`/
-`test_mv_oberrhein_ynd5_delta_referral_and_taps`, which now exercise this
-production path directly rather than a test-harness workaround).
+`open_switch_model` selects how an open element terminal is represented:
+
+- `terminal` (the default) reproduces pandapower's full auxiliary-bus model. A
+  singly-open line or transformer remains connected at its other end and its open end
+  is rewired to a new auxiliary `Node`. The connected terminal therefore retains line
+  charging or transformer no-load current. `id_map["open_terminal"]` maps the source
+  switch index to that auxiliary node id.
+- `drop_element` retains the legacy reduced approximation: an open switch at either
+  end omits the whole line/transformer, including the connected terminal's shunt.
+
+An element open at both ends or marked out of service is omitted in both modes. A
+closed switch or absence of an element switch changes nothing. Bus-bus (`et='b'`)
+switches remain schema `Switch` branches and are unaffected by this option.
 
 ### Closed bus-bus switch (`et='b'`) — an IDEAL switch by default
 
@@ -431,10 +429,9 @@ degenerates to the same pure-PQ system pandapower's `enforce_q_lims` solves, and
 the agreement is exact (1.4e-10 pu) and slope-independent.
 
 Two calibrating measurements:
-- **The unconverted `shunt` table is NOT what dominates `case118`.** Re-running the
-  same comparison with its 14 shunts LEFT IN pandapower (so the converter's gap is
-  live) moves the numbers only from 8.1e-2 to 8.9e-2 pu (slope 2) and 4.4e-2 to
-  5.1e-2 pu (slope 5). The residual is the PV-bus approximation, not the shunts.
+- **Fixed shunts do not dominate `case118`.** Its 14 shunts move the steep-droop
+  approximation much less than the PV-bus approximation itself; the default exact
+  voltage-regulating mode avoids that approximation.
 - **The network conversion itself is exact.** Freeze every generator at
   pandapower's OWN converged `(P, Q)` as an `sgen` row and drop the `gen` table:
   the converted grid then reproduces `runpp` to 2.1e-13 pu on `case39` and 9.8e-11
@@ -459,6 +456,16 @@ the slack rule, `net.shunt`), `tests/reference/test_pandapower_pv_bus.py` (live
 `tests/convert/test_pandapower_gen_volt_var.py` and
 `tests/reference/test_pandapower_gen_volt_var.py` (the approximation's mapping,
 fallbacks and steepness sweep).
+
+### `storage` (snapshot P/Q and energy state)
+
+Each in-service `net.storage` row on a converted bus becomes a schema `Storage`.
+pandapower is consumption-positive while pgml is discharge-positive, so
+`p_nom_w = -p_mw·1e6·scaling` and `q_nom_var = -q_mvar·1e6·scaling`.
+`max_e_mwh > 0` maps to `energy_capacity_wh = max_e_mwh·1e6`;
+`soc_percent` maps to `soc = soc_percent/100`, and a supplied `min_e_mwh` maps to
+`soc_min = min_e_mwh/max_e_mwh`. These energy fields record state and bounds; they do
+not alter the snapshot P/Q solve. Missing inverter ratings or dynamics remain unset.
 
 ### `shunt` (fixed bus admittance)
 
@@ -496,12 +503,10 @@ Tests: `tests/convert/test_pandapower_pv_bus_shunt.py`.
   pandapower's DISTRIBUTED slack (`slack=True` with `slack_weight`) is not modelled —
   such a row converts with a FIXED active power.
 - Bus-LINE/bus-transformer (`et='l'`/`'t'`) switches (used by `mv_oberrhein` and
-  `create_cigre_network_mv` to operate a meshed ring radially) ARE converted, but
-  only via the accepted out-of-service approximation described in "Bus-line /
-  bus-transformer switches" above — the still-connected terminal's shunt
-  admittance is dropped along with the element, unlike pandapower's own
-  auxiliary-bus model. Not a silent gap (`_open_switch_targets` is unconditional,
-  applied to every network), but not full fidelity either.
+  `create_cigre_network_mv` to operate a meshed ring radially) retain a singly-open
+  element on an auxiliary terminal node by default, matching pandapower's connected-
+  end shunt. The legacy whole-element omission remains explicitly selectable through
+  `open_switch_model="drop_element"`; both-open elements are omitted in either mode.
 - trafo ZERO-SEQUENCE leakage IS read: `vk0_percent`/`vkr0_percent` become
   `Transformer.zero_sequence` (per-unit values are base-invariant, so the same
   `Z = vk0% · Z_base_LV` formula the positive sequence uses applies, including the
@@ -513,7 +518,7 @@ Tests: `tests/convert/test_pandapower_pv_bus_shunt.py`.
   (a finite zero-sequence MAGNETIZING impedance — the three-limb-core path through tank
   and air), `si0_hv_partial` (the HV/LV split of the zero-sequence leakage inside a T) and
   `xn_ohm`/`rn_ohm` (a neutral earthing impedance, `3·Z_N` in series).
-- `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
+- `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `motor`,
   `asymmetric_sgen`: not converted (`warn_dropped_elements`).
 - ext_grid NEGATIVE-sequence source impedance is not represented separately: the
   converted `Source` is one physical Thevenin with `Z2 = Z1` (a passive upstream

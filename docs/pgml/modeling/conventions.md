@@ -358,7 +358,7 @@ read, a foreign network under-converts, and these are the current gaps.
 | | converted | not read |
 |---|---|---|
 | OpenDSS | `Transformer` (scope above), `Line`, `Load`, `Capacitor`, `Reactor`, `Generator` (including `model=3`), `PVSystem`, `Storage` | three-winding transformers, regulators and tap-changer control, frequency-correction curves, a coupled `Rmatrix`/`Xmatrix` reactor, a non-grounded or two-bus terminal-2 shunt reference, a neutral earthing impedance (`Rneut`/`Xneut`) |
-| pandapower | `trafo`, `line`, `load`, `sgen`, `gen`, `shunt`, `asymmetric_load`, `switch`, `ext_grid` (including `x0x_max`/`r0x0_max`) | `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `storage`, `motor`, `asymmetric_sgen`, `mag0_percent`/`mag0_rx`, `si0_hv_partial`, `xn_ohm`/`rn_ohm` |
+| pandapower | `trafo`, `line`, `load`, `sgen`, `gen`, `storage`, `shunt`, `asymmetric_load`, `switch`, `ext_grid` (including `x0x_max`/`r0x0_max`) | `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `motor`, `asymmetric_sgen`, `mag0_percent`/`mag0_rx`, `si0_hv_partial`, `xn_ohm`/`rn_ohm` |
 | pgm | `node`, `line`, `transformer`, `link`, `sym_load`, `asym_load`, `sym_gen`, `source` (including `z01_ratio`) | `asym_gen`, `voltage_regulator`, `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `uk_min`/`uk_max`/`pk_min`/`pk_max`, `i0_zero_sequence`/`p0_zero_sequence` |
 
 Details worth knowing before a conversion:
@@ -376,9 +376,10 @@ Details worth knowing before a conversion:
   `slack="norton"`.
 - pandapower `line` and `trafo` honour the `parallel` column, dividing the series impedance
   and multiplying the shunt admittance and rated power; `parallel==1` stays byte-identical.
-  An open bus-line or bus-transformer switch takes the whole branch out of service. That is
-  an approximation, since pandapower keeps the still-connected terminal energised through
-  an internal auxiliary bus, so pgml drops that terminal's shunt too.
+  By default, an open bus-line or bus-transformer switch rewires only its open terminal to
+  an auxiliary node, retaining the connected-end shunt like pandapower. The explicit
+  `open_switch_model="drop_element"` option selects the legacy whole-branch approximation;
+  an element open at both ends is omitted in either mode.
 - pandapower `gen`, a PV bus with fixed P, regulated `vm_pu` and free Q within its reactive
   limits, converts exactly by default (`gen_mode=GenMode.VOLTAGE_REGULATING`): the row
   becomes a `Generator` carrying a `VoltageRegulation` block that the solver holds at

@@ -6,7 +6,8 @@ Public API
   Convert a materialised pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`
   and an ``id_map`` that maps source identifiers back to our schema ids.
 - :class:`~pgml.convert.pandapower.converter.GenMode` — how ``net.gen`` (the PV bus)
-  is treated: dropped (default) or approximated by a Volt-VAr droop.
+  is treated: exact voltage regulation by default, dropped, or approximated by a
+  Volt-VAr droop.
 - ``DEFAULT_GEN_VOLT_VAR_SLOPE_PU`` — the default droop steepness of that
   approximation.
 
@@ -21,12 +22,12 @@ Usage example::
 
     # A transmission benchmark carries its generators in `net.gen` (PV buses):
     net118 = pn.case118()
-    grid118, id_map118 = to_grid(net118, gen_mode=GenMode.VOLT_VAR_APPROX)
+    grid118, id_map118 = to_grid(net118)
 
 The converter handles the element types present in typical radial distribution
-feeders (bus, line, load, ext_grid) plus two-winding transformers, switches and
-static generators. ``gen`` is converted only in the opt-in approximation above;
-``shunt`` and the remaining tables are reported as dropped.
+feeders (bus, line, load, ext_grid) plus two-winding transformers, switches,
+static generators, voltage-regulating generators, fixed shunts and storage.
+Unsupported non-empty tables are reported rather than dropped silently.
 
 id_map format
 -------------
@@ -40,8 +41,11 @@ A dict with string keys for each element table that was converted::
         "load":            {pp_load_index: Load.id, ...},
         "asymmetric_load": {pp_asym_index: Load.id, ...},  # THREE_PHASE only
         "sgen":            {pp_sgen_index: Generator.id, ...},
-        "gen":             {pp_gen_index: Generator.id, ...},  # VOLT_VAR_APPROX only
+        "gen":             {pp_gen_index: Generator.id, ...},
+        "storage":         {pp_storage_index: Storage.id, ...},
+        "shunt":           {pp_shunt_index: ShuntAppliance.id, ...},
         "ext_grid":        {pp_extgrid_index: Source.id, ...},
+        "open_terminal":   {pp_switch_index: Node.id, ...},
         "slack_v_complex": complex,  # ideal-slack phasor (V, line-to-line)
     }
 

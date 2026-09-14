@@ -176,11 +176,12 @@ Element coverage
 ~~~~~~~~~~~~~~~~
 
 ``bus``, ``line``, ``trafo`` (two-winding, vector-group and tap-changer aware),
-bus-bus ``switch``, ``load`` (including the four-column ZIP percentages),
-``asymmetric_load``, ``sgen``, ``gen`` (see ``gen_mode`` below) and ``shunt`` convert.
+bus-bus and bus-element ``switch``, ``load`` (including the four-column ZIP percentages),
+``asymmetric_load``, ``sgen``, ``gen`` (see ``gen_mode`` below), ``storage`` and
+``shunt`` convert.
 ``ext_grid`` converts with its zero-sequence short-circuit data (``x0x_max``,
 ``r0x0_max``).  Every remaining non-empty table — ``trafo3w``, ``impedance``,
-``ward`` / ``xward``, ``dcline``, ``storage``, ``motor``, ``asymmetric_sgen`` —
+``ward`` / ``xward``, ``dcline``, ``motor``, ``asymmetric_sgen`` —
 raises a WARNING naming the kind and count; nothing is dropped silently.
 
 A ``shunt`` row becomes a fixed WYE :class:`~pgml.schemas.grid_schema.ShuntAppliance`,
@@ -189,6 +190,43 @@ A ``shunt`` row becomes a fixed WYE :class:`~pgml.schemas.grid_schema.ShuntAppli
 exact at the fundamental, but its susceptance magnitude rises with frequency where a real
 reactor's falls as ``1/h``, so harmonic results at such a bus are not faithful.  The
 converter warns and names the count.
+
+Open line and transformer terminals
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A pandapower bus-line (``et='l'``) or bus-transformer (``et='t'``) switch controls
+one element terminal. The ``open_switch_model`` keyword selects its representation:
+
+``"terminal"``
+    The default and the full pandapower-compatible model. A singly-open element remains
+    connected at its other end, while its open terminal is rewired to an auxiliary
+    :class:`~pgml.schemas.grid_schema.Node`. This retains the connected terminal's line
+    charging or transformer no-load current. ``id_map["open_terminal"]`` maps each open
+    source switch index to its auxiliary node id.
+
+``"drop_element"``
+    The legacy reduced model. An open switch at either terminal omits the complete line
+    or transformer, including the shunt at its connected end.
+
+An element open at both terminals, or marked out of service, is omitted in both modes.
+Closed bus-element switches leave their element unchanged. Bus-bus switches remain
+:class:`~pgml.schemas.grid_schema.Switch` branches and are unaffected by this keyword.
+
+For example, the legacy approximation is explicit::
+
+    grid, id_map = to_grid(net, open_switch_model="drop_element")
+
+Storage snapshot convention
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An in-service ``net.storage`` row becomes a
+:class:`~pgml.schemas.grid_schema.Storage` at its original bus. pandapower's P/Q
+sign is consumption-positive, so the converter negates ``p_mw`` and ``q_mvar``
+after applying ``scaling`` to produce pgml's discharge-positive nameplate values.
+Positive ``max_e_mwh`` maps to ``energy_capacity_wh``; ``soc_percent`` maps to a
+fractional ``soc``, and ``min_e_mwh / max_e_mwh`` maps to ``soc_min``. These energy
+fields record snapshot state and bounds. The converter does not invent missing
+inverter ratings or dynamics.
 
 .. _convert-pandapower-gen-mode:
 

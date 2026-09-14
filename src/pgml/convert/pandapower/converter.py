@@ -56,14 +56,13 @@ admittance unchanged. ``trafo3w`` is not converted at all (see below), so its ow
 
 Bus-line / bus-transformer switches (``et='l'``/``'t'``)
 ------------------------------------------------------------
-An OPEN ``et='l'``/``'t'`` switch (``net.switch``) converts its line/transformer
-as out-of-service (``_open_switch_targets``): the accepted approximation is that
-the WHOLE element drops, not just the switched terminal, so the still-connected
-terminal's shunt admittance is lost too (pandapower's own solver instead keeps
-that terminal energized via an internal auxiliary bus -- a finer-grained model
-this converter does not replicate). A closed switch, or no switch at all, changes
-nothing. Bus-bus (``et='b'``) switches are unaffected (still a near-ideal
-``Switch`` branch).
+An OPEN ``et='l'``/``'t'`` switch disconnects that element terminal. The default
+``open_switch_model='terminal'`` reproduces pandapower's auxiliary-bus treatment:
+the line/transformer remains connected at its other end, so line charging or
+transformer no-load admittance remains energized. ``'drop_element'`` retains the
+legacy reduced approximation that omits the whole element when either end is open.
+An element open at both ends is omitted in either mode. Closed switches and bus-bus
+(``et='b'``) switches are unaffected.
 
 Voltage-dependent (ZIP) loads
 -----------------------------
@@ -109,7 +108,7 @@ import logging
 import math
 import re
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pgml import defaults
 from pgml.convert._common import (
@@ -135,6 +134,7 @@ from pgml.schemas.grid_schema import (
     QReference,
     SourceConvention,
     ShuntAppliance,
+    Storage,
     Switch,
     Transformer,
     TransformerZeroSeq,
@@ -202,14 +202,8 @@ class GenMode(str, Enum):
     ``_gen_volt_var_control`` for the mapping, the fallbacks and the accuracy
     the approximation buys.
 
-    It suits a DISTRIBUTION network with voltage-regulating generation, where it is
-    accurate to well under 1e-3 pu and differentiable. It does NOT make a
-    transmission benchmark importable: the droop carries no feedback outside a band
-    of width ~1/slope, so a stiffly loaded case either fails to converge (loudly) or,
-    on some networks, settles on the collapsed low-voltage branch while reporting
-    convergence. Check the solved voltages against the source network before trusting
-    such an import; a faithful PV bus needs the mixed residual row the solver does not
-    have.
+    It suits a study that deliberately wants a droop law. For faithful import of a
+    pandapower PV bus, use the default ``VOLTAGE_REGULATING`` mode.
     """
 
     VOLTAGE_REGULATING = "voltage_regulating"
@@ -374,16 +368,10 @@ def _parallel_count(row: Any) -> float:
 def _open_switch_targets(net: Any) -> tuple[set[int], set[int]]:
     """Return ``(open_line_pp_indices, open_trafo_pp_indices)`` from ``net.switch``.
 
-    A bus-line (``et='l'``) or bus-transformer (``et='t'``) switch is a per-terminal
-    connectivity control: when OPEN it disconnects its element from that one bus.
-    The converter's accepted approximation treats ANY open line/trafo switch as
-    taking the WHOLE element out of service (equivalent to ``in_service=False`` on
-    that line/trafo) -- this also drops the shunt admittance (line charging,
-    transformer magnetizing) at the STILL-connected terminal, unlike pandapower's
-    own solver, which keeps that terminal energized via an internal auxiliary bus
-    (a finer-grained model this converter does not replicate). A closed switch (or
-    no switch at all) changes nothing; bus-bus (``et='b'``) switches are handled
-    separately (section 4, below).
+    This helper only collects element indices. :func:`to_grid` then applies
+    ``open_switch_model``: retain a singly-open element on an auxiliary terminal
+    node, or omit the whole element. Bus-bus (``et='b'``) switches are handled
+    separately.
     """
     open_lines: set[int] = set()
     open_trafos: set[int] = set()
@@ -997,6 +985,7 @@ def to_grid(
     gen_mode: GenMode = GenMode.VOLTAGE_REGULATING,
     gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
     harmonic_line_model: Optional[str] = None,
+    open_switch_model: Optional[Literal["terminal", "drop_element"]] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -1044,6 +1033,13 @@ def to_grid(
         current-injection fixed point (the default, and what
         :func:`pgml.simulate` uses) does not contract on a stiff droop. Read only
         under ``gen_mode=GenMode.VOLT_VAR_APPROX``.
+    open_switch_model:
+        ``terminal`` (default) retains a line or two-winding transformer energized
+        from its connected end, using an auxiliary node for each open terminal.
+        This preserves charging current and magnetizing admittance. ``drop_element``
+        omits the whole element when either terminal switch is open. Elements with
+        both ends open are omitted in both modes. Original bus mappings are retained;
+        ``id_map["open_terminal"]`` maps open switch indices to auxiliary node ids.
 
     Returns
     -------
@@ -1052,13 +1048,18 @@ def to_grid(
         (no ``type_ref``).  ``id_map`` maps source element tables to our ids:
         ``"bus"`` -> ``{pp_bus_idx: Node.id}``,
         ``"line"`` -> ``{pp_line_idx: Line.id}``,
+        ``"trafo"`` -> ``{pp_trafo_idx: Transformer.id}``,
+        ``"switch"`` -> ``{pp_switch_idx: Switch.id}`` for closed bus-bus switches,
         ``"load"`` -> ``{pp_load_idx: Load.id}``,
         ``"asymmetric_load"`` -> ``{pp_asym_idx: Load.id}`` (THREE_PHASE only),
         ``"sgen"`` -> ``{pp_sgen_idx: Generator.id}``,
         ``"gen"`` -> ``{pp_gen_idx: Generator.id}`` (empty under ``GenMode.DROP``;
         several rows on one bus share the merged generator's id),
         ``"shunt"`` -> ``{pp_shunt_idx: ShuntAppliance.id}``,
+        ``"storage"`` -> ``{pp_storage_idx: Storage.id}``,
         ``"ext_grid"`` -> ``{pp_eg_idx: Source.id}``,
+        ``"open_terminal"`` -> ``{pp_switch_idx: Node.id}`` for singly-open
+        line/transformer terminals,
         ``"slack_v_complex"`` -> complex slack voltage phasor (V, LL) for
         ideal-slack mode.
     """
@@ -1067,6 +1068,13 @@ def to_grid(
             f"gen_volt_var_slope_pu={gen_volt_var_slope_pu} must be positive "
             "(it is a droop steepness in reactive base per per-unit voltage)."
         )
+    open_switch_model = (
+        defaults.get("converter.pandapower.open_switch_model")
+        if open_switch_model is None
+        else open_switch_model
+    )
+    if open_switch_model not in ("terminal", "drop_element"):
+        raise ConversionError(f"Unknown open_switch_model: {open_switch_model!r}")
     f0_hz: float = float(getattr(net, "f_hz", 50.0))
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
@@ -1080,10 +1088,12 @@ def to_grid(
         "load": {},
         "asymmetric_load": {},
         "sgen": {},
+        "storage": {},
         "gen": {},
         "shunt": {},
         "ext_grid": {},
         "slack_v_complex": None,
+        "open_terminal": {},
     }
 
     # ------------------------------------------------------------------ #
@@ -1107,13 +1117,61 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # 2. Lines                                                             #
     # ------------------------------------------------------------------ #
-    # `open_line_switches`/`open_trafo_switches` (section 4's `_open_switch_targets`,
-    # computed once up front so both element loops can see it): a line/trafo with
-    # ANY open bus-element switch converts as out-of-service, same as
-    # `in_service=False` -- see `_open_switch_targets`'s docstring for the accepted
-    # approximation this implies (the still-connected terminal's shunt is dropped
-    # with it).
+    # Collect open bus-element switches once for both element loops. In terminal mode,
+    # a singly-open element is rewired to an auxiliary node at that terminal; entries
+    # left in these sets (both ends open, invalid endpoint, or explicit legacy mode)
+    # are omitted by the line/transformer loops below.
     open_line_switches, open_trafo_switches = _open_switch_targets(net)
+    terminal_nodes: dict[tuple[str, int, int], int] = {}
+    if open_switch_model == "terminal":
+        for et, table, endpoints, dropped in (
+            ("l", net.line, ("from_bus", "to_bus"), open_line_switches),
+            (
+                "t",
+                getattr(net, "trafo", None),
+                ("hv_bus", "lv_bus"),
+                open_trafo_switches,
+            ),
+        ):
+            if table is None:
+                continue
+            for element in sorted(dropped.copy()):
+                if element not in table.index:
+                    continue
+                row = table.loc[element]
+                buses = tuple(int(row[key]) for key in endpoints)
+                if not bool(row.get("in_service", True)) or any(
+                    b not in id_map["bus"] for b in buses
+                ):
+                    continue
+                switches = net.switch[
+                    (net.switch.et == et)
+                    & (net.switch.element == element)
+                    & (~net.switch.closed)
+                ]
+                open_buses = {int(b) for b in switches.bus}
+                if not open_buses.issubset(buses):
+                    raise ConversionError(
+                        f"Open switch for {et} {element} does not name an element terminal"
+                    )
+                if all(b in open_buses for b in buses):
+                    continue
+                dropped.remove(element)
+                for switch_index, switch in switches.iterrows():
+                    bus = int(switch.bus)
+                    key = (et, int(element), bus)
+                    if key not in terminal_nodes:
+                        node_id = _id.next()
+                        terminal_nodes[key] = node_id
+                        nodes.append(
+                            build_node(
+                                id=node_id,
+                                name=f"open_{et}_{element}_bus_{bus}",
+                                u_rated_v=float(net.bus.loc[bus, "vn_kv"]) * 1000.0,
+                                mode=phase_mode,
+                            )
+                        )
+                    id_map["open_terminal"][switch_index] = terminal_nodes[key]
 
     zero_seq_lines = ZeroSequenceDefaults()
     branches: list = []
@@ -1168,8 +1226,12 @@ def to_grid(
             build_line_from_sequence(
                 id=line_id,
                 name=str(row.get("name", f"line_{pp_idx}") or f"line_{pp_idx}"),
-                from_node=id_map["bus"][from_bus],
-                to_node=id_map["bus"][to_bus],
+                from_node=terminal_nodes.get(
+                    ("l", int(pp_idx), from_bus), id_map["bus"][from_bus]
+                ),
+                to_node=terminal_nodes.get(
+                    ("l", int(pp_idx), to_bus), id_map["bus"][to_bus]
+                ),
                 mode=phase_mode,
                 length_m=length_m,
                 r1=r1,
@@ -1343,8 +1405,12 @@ def to_grid(
                 Transformer(
                     id=trafo_id,
                     name=str(row.get("name", f"trafo_{pp_idx}") or f"trafo_{pp_idx}"),
-                    from_node=id_map["bus"][hv_bus],  # from = HV side
-                    to_node=id_map["bus"][lv_bus],  # to   = LV side
+                    from_node=terminal_nodes.get(
+                        ("t", int(pp_idx), hv_bus), id_map["bus"][hv_bus]
+                    ),
+                    to_node=terminal_nodes.get(
+                        ("t", int(pp_idx), lv_bus), id_map["bus"][lv_bus]
+                    ),
                     from_phases=tx_phases,
                     to_phases=tx_phases,
                     s_rated_va=sn_va * parallel,
@@ -1367,10 +1433,9 @@ def to_grid(
     _warn_defaulted_zero_sequence(zero_seq_defaulted)
 
     # ------------------------------------------------------------------ #
-    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).      #
-    #    Bus-line/bus-transformer switches (et='l'/'t') were already        #
-    #    resolved up front (`_open_switch_targets`, used by sections 2/3):  #
-    #    an OPEN one takes the whole line/trafo out of service.             #
+    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).       #
+    #    Bus-line/bus-transformer switches (et='l'/'t') were handled by     #
+    #    sections 2/3 through an auxiliary terminal or element omission.    #
     # ------------------------------------------------------------------ #
     if hasattr(net, "switch") and len(net.switch):
         for pp_idx, row in net.switch.iterrows():
@@ -1584,9 +1649,45 @@ def to_grid(
             )
 
     # ------------------------------------------------------------------ #
-    # 9. Voltage-controlled generators (net.gen) -> Volt-VAr approximation #
-    #    OPT-IN: only under `gen_mode=GenMode.VOLT_VAR_APPROX`; the default #
-    #    `GenMode.DROP` leaves the table unread (warned below).             #
+    # Storage uses pandapower's consumption-positive convention; pgml uses
+    # discharge-positive injections. Energy metadata does not alter the snapshot.
+    storage = getattr(net, "storage", None)
+    if storage is not None:
+        for pp_idx, row in storage.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            storage_id = _id.next()
+            id_map["storage"][pp_idx] = storage_id
+            scaling = _scaling_factor(row)
+            energy_mwh = _opt_float(row, "max_e_mwh")
+            min_energy_mwh = _opt_float(row, "min_e_mwh")
+            soc_percent = _opt_float(row, "soc_percent")
+            state = {}
+            if energy_mwh is not None and energy_mwh > 0.0:
+                state["energy_capacity_wh"] = energy_mwh * 1e6
+                if min_energy_mwh is not None:
+                    state["soc_min"] = min_energy_mwh / energy_mwh
+            if soc_percent is not None:
+                state["soc"] = soc_percent / 100.0
+            appliances.append(
+                Storage(
+                    id=storage_id,
+                    name=str(
+                        row.get("name", f"storage_{pp_idx}") or f"storage_{pp_idx}"
+                    ),
+                    node=id_map["bus"][bus_pp],
+                    phases=phases_for(phase_mode),
+                    p_nom_w=-float(row["p_mw"]) * 1e6 * scaling,
+                    q_nom_var=-float(row.get("q_mvar", 0.0) or 0.0) * 1e6 * scaling,
+                    **state,
+                )
+            )
+
+    # 9. Voltage-controlled generators (net.gen): exact PV by default,      #
+    #    explicit DROP or Volt-VAr approximation alternatives.              #
     # ------------------------------------------------------------------ #
     # pandapower `gen` is GENERATION-POSITIVE, like `sgen`, and carries the same
     # per-row `scaling` multiplier on `p_mw` (its reactive LIMITS are read raw --
@@ -1846,7 +1947,6 @@ def to_grid(
                 "ward",
                 "xward",
                 "dcline",
-                "storage",
                 "motor",
                 "asymmetric_sgen",
             )
