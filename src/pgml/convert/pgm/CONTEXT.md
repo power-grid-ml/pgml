@@ -21,10 +21,12 @@ node and of two regulating generators on one node.
 ## Public API
 
 ```python
-from pgml.convert.pgm import to_grid
+from pgml.convert.pgm import from_grid, to_grid
 
 grid, id_map = to_grid(input_data, base_frequency_hz=60.0,
                         load_model=LoadModel.CONST_IMPEDANCE)
+
+exported = from_grid(grid)  # exported.input_data plus Grid-id -> pgm-id maps
 ```
 
 ### Signature
@@ -49,6 +51,24 @@ connection field, so a converted ``asym_load`` is always ``WYE``. The converter
 has NO runtime dependency on the ``power_grid_model`` package itself (it reads
 ``input_data`` as a plain numpy-structured-array format, including the raw pgm
 ``WindingType``/``BranchSide`` int values, mapped by a local table).
+
+### Outbound signature
+```
+from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport
+```
+
+`PgmExport` carries `input_data`, `pgm_of_node`, `pgm_of_branch`,
+`pgm_of_appliance`, and `reductions`. The supported balanced fundamental scope is nodes,
+explicit R/L/C/G lines, switches, two-winding transformers, shunts, sources, loads,
+generators and storage. Every node must use the same `(A,)` or `(A, B, C)` phase layout,
+and branches and appliances must match it; partial-phase, mixed-layout and
+neutral-conductor grids raise. Geometry lines, unresolved type references, generic branches,
+PV terminals and source forms PGM cannot encode raise `UnsupportedGridError`. PGM has no
+ZIP element; ZIP therefore raises by default and converts to constant power only with
+`allow_approximation=True`. The same opt-in applies to unbalanced P/Q, inverter controls,
+and any electrical term that must be dropped. Ideal sources and switches use the finite
+stand-ins required by PGM and record them. Harmonic-only fields are outside this API and
+are named in `reductions`; the input `Grid` is not mutated.
 
 ### id_map format
 ```python

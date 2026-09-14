@@ -21,7 +21,7 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
     complex64 copy, refine against complex128 residuals — needs a complex128 `y_bus`;
     routed through `lu_factor_system`/`solve_factored`, see MIXED PRECISION below).
   - `equilibrate`: `None` (the documented default `solver.equilibration.mode`) /
-    `"symmetric"` / `"row_column"` / `"off"` / a bool — the diagonal equilibration applied
+    `"symmetric"` / `"off"` / a bool — the diagonal equilibration applied
     around the factorization (see EQUILIBRATION below). Invisible in the result.
 - `solve_anchored(y_bus, i_inj, *, row_weight=None, row_target=None, op=None,
   op_weight=None, op_target=None, fixed_rows=None, v_fixed=None) -> v` — MEASUREMENT-ANCHORED
@@ -360,8 +360,12 @@ verified empirically). New orchestration:
     equilibration of the fundamental factorization AND of every order's own
     (`"matrix_free"` is a Newton option of the fundamental solve and leaves the orders on
     the automatic backend). `criticality` and `branch_states_method` are forwarded to the
-    fundamental solve; the harmonic orders always assemble their own per-state `Y(h)`,
-    because a Woodbury update is built from one frequency's stamps.
+    fundamental solve. For a flat scenario batch whose operating-point load shunt touches
+    fewer than one third of the rows under a conservative automatic heuristic, the harmonic
+    orders factor the shunt-free network once per order and apply their exact
+    connection-aware shunt blocks through Woodbury. A
+    dimensionless backward-error guard falls back to the assembled per-state factorization;
+    high-rank, topology-batched, and deeper-injection cases use that direct path immediately.
   - `on_disconnected` is executed ONCE here for the whole study (the inner fundamental
     solve is told to skip the repeat through an explicit resolved policy, not a hidden
     `"ignore"`); with `branch_states` the per-scenario check runs inside that solve.
@@ -731,6 +735,13 @@ Sherman-Morrison-Woodbury solve of `(A + U C Vᴴ) x = b` on top of a
 `FactoredSystem`. Used by the switch-state sweep above; designed to be reused by
 any "solve a MUTATED grid from the parent's factorization" consumer.
 
+`harmonic_flow._harmonic_shunt_lowrank_terms` also uses this surface internally for
+scenario-dependent operating-point shunts. Its selector `U` contains the unique rows touched
+by the modeled devices and its compact `C` is assembled from the same WYE/DELTA/neutral
+blocks as the exact matrix. Explicit Generator/Storage harmonic impedances belong to the
+scenario-independent base. The automatic path uses the conservative selection rule
+`3k < N`; the actual performance crossover depends on the factorization backend and hardware.
+
 - `low_rank_update(fac, u, c, *, v=None) -> LowRankUpdate` — precompute
   `W = A⁻¹U` (`k` back-substitutions of the base factorization) and the LU of the
   capacitance matrix `I + C VᴴW` (batched over `c`'s leading state dims), reused by
@@ -781,7 +792,7 @@ Every factorization in this package is taken of the EQUILIBRATED matrix
 nothing outside the factorization sees it. Default ON
 (`solver.equilibration.mode = "symmetric"`), disabled per call with `equilibrate="off"`.
 
-- `EQUILIBRATION_MODES = ("off", "symmetric", "row_column")`
+- `EQUILIBRATION_MODES = ("off", "symmetric")`
 - `resolve_equilibration(equilibrate) -> str` — `None` -> the documented default, `True` /
   `False` -> that default / `"off"`, a name validated against the modes.
 - `equilibration_scales(a, *, mode, power_of_two=None) -> (d_row, d_col)` — `[*batch, m]`
@@ -800,19 +811,16 @@ nothing outside the factorization sees it. Default ON
   the implicit-function adjoint. The adjoint form swaps the two scales
   (`x = D_r Â^-H D_c b`).
 
-Modes: `"symmetric"` is van der Sluis `d_i = |A_ii|^-1/2` applied as the congruence
+Mode `"symmetric"` is van der Sluis `d_i = |A_ii|^-1/2` applied as the congruence
 `D A D` (keeps symmetry and sparsity, reads only the diagonal, within `sqrt(n)` of the best
-condition number any diagonal scaling reaches); `"row_column"` is the two-sided LAPACK
-`xGEEQU` variant (row max-norms, then column max-norms), which needs one pass over the
-whole matrix and is REFUSED by `backend="block"`, whose free-row matrix is never
-materialised.
+condition number any diagonal scaling reaches).
 
 Scale factors are rounded to POWERS OF TWO (`solver.equilibration.power_of_two`), so the
 scaled matrix is exact in binary floating point: the equilibration adds no rounding error
 of its own, and `round`'s zero derivative keeps the scale off the gradient while the
 scaling multiplications stay on the tape — gradients w.r.t. the matrix and the right-hand
 side are unchanged (measured identical to the last printed digit; float64 gradcheck passes
-on the dense and sparse backends in both modes).
+on the dense and sparse backends).
 
 `FactoredSystem` carries `equilibration`, `scale_row`, `scale_col`, and its `y_mat` is the
 matrix AS FACTORED (scaled) — which is what the mixed-precision residual and
@@ -821,20 +829,19 @@ through `back_substitute`, which answers the SI system.
 
 MEASURED (CPU, i7-12700, complex128, 1-norm estimate / exact 2-norm, 2026-09-11):
 
-| system | rows | off | symmetric | row_column |
-|---|---|---|---|---|
-| IEEE-33 fundamental `Y_ff` | 32 | 2.8e3 / 1.7e3 | 1.4e3 / 7.7e2 | 2.3e3 / 7.4e2 |
-| IEEE-33 `Y(13)` | 33 | 8.0e8 / 5.7e8 | 1.5e3 / 7.7e2 | 3.5e3 / 9.5e2 |
-| CIGRE LV 3-phase fundamental | 129 | 5.5e4 / 4.6e4 | 2.1e3 / 1.0e3 | 3.7e3 / 9.5e2 |
-| `mv_oberrhein` `Y(13)` | 179 | 7.2e9 / 6.2e9 | 1.7e5 / 7.2e4 | 2.4e5 / 6.2e4 |
-| Kerber `Y(13)` | 294 | 5.0e7 / 4.2e7 | 3.4e4 / 1.8e4 | 7.9e4 / 1.6e4 |
-| ladder rung fundamental | 2016 | 1.4e5 / 3.1e4 | 1.3e4 / 3.9e3 | 4.3e4 / 3.7e3 |
-| ladder rung `Y(13)` | 10044 | 7.5e6 / — | 4.0e5 / — | 3.8e6 / — |
+| system | rows | off | symmetric |
+|---|---|---|---|
+| IEEE-33 fundamental `Y_ff` | 32 | 2.8e3 / 1.7e3 | 1.4e3 / 7.7e2 |
+| IEEE-33 `Y(13)` | 33 | 8.0e8 / 5.7e8 | 1.5e3 / 7.7e2 |
+| CIGRE LV 3-phase fundamental | 129 | 5.5e4 / 4.6e4 | 2.1e3 / 1.0e3 |
+| `mv_oberrhein` `Y(13)` | 179 | 7.2e9 / 6.2e9 | 1.7e5 / 7.2e4 |
+| Kerber `Y(13)` | 294 | 5.0e7 / 4.2e7 | 3.4e4 / 1.8e4 |
+| ladder rung fundamental | 2016 | 1.4e5 / 3.1e4 | 1.3e4 / 3.9e3 |
+| ladder rung `Y(13)` | 10044 | 7.5e6 / — | 4.0e5 / — |
 
 The exception is a LOW-VOLTAGE-only harmonic system (CIGRE LV at order 13: 1.9e7 ->
 2.4e7), where the conditioning is not a scaling artefact and the symmetric scaling is
-neutral to slightly worse. `row_column` is consistently worse than `symmetric` in the
-1-norm and costs a full matrix pass, which is why `symmetric` is the default.
+neutral to slightly worse.
 
 What it buys is ROBUSTNESS, not forward accuracy: LU with partial pivoting is
 backward-stable, so `cond·eps` is a pessimistic forward bound and the complex64 error is
@@ -1008,4 +1015,3 @@ The precision-floor row scale is shared across Newton retries, batch members and
 rounds. A conservative Cauchy-Schwarz bound skips its exact computation when the floor
 cannot govern. CPU non-gradient singleton matrices read magnitudes from CSR nonzeros;
 batched, gradient-carrying and accelerator matrices retain the dense expression.
-`row_column` equilibration remains available; no default-mode decision changes here.

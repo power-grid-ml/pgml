@@ -110,7 +110,6 @@ residuals and tolerances are unchanged, and the gradients are unchanged.
 - ``"symmetric"`` (shipped) — the van der Sluis scaling ``d_i = |A_ii|**-0.5``, with the
   factors rounded to powers of two (``solver.equilibration.power_of_two``) so the scaled
   matrix is exact in binary floating point.
-- ``"row_column"`` — the two-sided LAPACK variant.
 - ``"off"`` — factor the matrix as assembled.
 
 :mod:`pgml.solver.equilibration`, documented at the bottom of this page, exposes the pieces

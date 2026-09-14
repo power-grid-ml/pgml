@@ -27,7 +27,7 @@ Run (CPU): ``pixi run -e cpu python run/examples/pgml/benchmark_equilibration.py
 Run (GPU): ``pixi run python run/examples/pgml/benchmark_equilibration.py --device cuda``
 Optional args: ``--grids ieee33 cigre_lv_3ph``, ``--grid-json path.json[:label]`` (a
 persisted :class:`~pgml.schemas.grid_schema.Grid`, repeatable), ``--orders 1 13``,
-``--modes off symmetric row_column``, ``--exact-max-rows 3200``, ``--skip-accuracy``,
+``--modes off symmetric``, ``--exact-max-rows 3200``, ``--skip-accuracy``,
 ``--json out.json``.
 """
 
@@ -210,7 +210,7 @@ def main() -> None:
         help="persisted Grid JSON, optionally 'path:label'",
     )
     ap.add_argument("--orders", nargs="*", type=int, default=[1, 13])
-    ap.add_argument("--modes", nargs="*", default=["off", "symmetric", "row_column"])
+    ap.add_argument("--modes", nargs="*", default=["off", "symmetric"])
     ap.add_argument("--exact-max-rows", type=int, default=3200)
     ap.add_argument("--skip-accuracy", action="store_true")
     ap.add_argument("--device", default=None)

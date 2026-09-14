@@ -152,6 +152,12 @@ leading scenario dim (verified `batched == loop-of-individual`).
   nameplate a `mode="scale"` operating point multiplies and the denominator the emission
   law's loading ratio reads. Tensor-valued nameplates pass through untouched, so a scaled
   operating point stays differentiable w.r.t. the rated power.
+- `ar1_noise(shape, rho, generator, *, dtype=torch.float64, device=None) -> Tensor` —
+  stationary standard-normal AR(1) noise along the last axis. The three positional
+  arguments are stable for downstream scenario recipes. `rho` may be a tensor
+  broadcastable against `shape[:-1]`; its gradients and device are preserved. The output
+  device defaults to `generator.device`, and an explicit mismatched device raises before
+  drawing.
 
 ### Excitation primitives
 - `perturbation_sweep(grid, selector, Perturbation(name, field="p"|"q"|"pq",

@@ -152,6 +152,42 @@ clocks/pairings are reachable from that source format) is documented in the
 corresponding ``to_grid`` docstring below and in
 :doc:`/pgml/modeling/conventions` §§2–3.
 
+Exporting a Grid
+----------------
+
+Pandapower and power-grid-model provide balanced, fundamental-frequency export through
+their respective ``from_grid`` functions. Both return the native object together with
+maps from pgml ids and a ``reductions`` list. Populated harmonic spectra, harmonic shunt
+or converter-impedance blocks, and frequency-dependent line options are outside this
+scope; the ledger names them so a caller cannot mistake a fundamental export for a
+harmonic-preserving conversion.
+
+The supported phase layout is a consistent single positive-sequence conductor
+``(A,)`` or balanced ``(A, B, C)`` throughout the grid. Partial-phase, mixed-layout and
+neutral-conductor grids raise ``UnsupportedGridError`` instead of being silently reduced.
+
+The default is strict. An element or mode with no native representation raises
+``UnsupportedGridError``. Reductions that change the fundamental model, such as folding
+unbalanced P/Q into a balanced total or replacing a ZIP load in power-grid-model, require
+``allow_approximation=True`` and are then recorded::
+
+    from pgml.convert.pandapower import from_grid as to_pandapower
+    from pgml.convert.pgm import from_grid as to_pgm
+    import pandapower as pp
+    from power_grid_model import PowerGridModel
+
+    pp_export = to_pandapower(grid)
+    pp.runpp(pp_export.net)
+
+    pgm_export = to_pgm(grid)
+    pgm_model = PowerGridModel(pgm_export.input_data)
+
+For pandapower, :class:`~pgml.convert.pandapower.PandapowerExport` carries node/bus,
+line, transformer, switch, shunt, load, generator/storage and source maps. For
+power-grid-model, :class:`~pgml.convert.pgm.PgmExport` carries unified node, branch and
+appliance maps. PGM's finite source for an ideal voltage boundary and 1 nOhm line for an
+ideal switch are unavoidable native representations and are always recorded.
+
 pgml.convert.pandapower
 ------------------------
 
@@ -161,7 +197,7 @@ Convert a `pandapower <https://www.pandapower.org/>`_ network to a
 .. note::
 
    ``pandapower`` is mocked in the docs build.
-   The public API (``to_grid``) is documented from the source directly.
+   The public API (``to_grid`` and ``from_grid``) is documented from the source directly.
 
 Usage::
 

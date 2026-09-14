@@ -1,8 +1,8 @@
 # Interface ledger: convert (external formats -> our schema)
 
-One subpackage per source: `pandapower/`, `pgm/`, `opendss/`. Each exposes a pure
-function producing a valid `grid_schema.Grid` (and, where relevant, the id map back
-to the source so tests can align components).
+One subpackage per external library: `pandapower/`, `pgm/`, `opendss/`. Each exposes a
+pure `to_grid` function producing a valid `grid_schema.Grid` and an id map. Pandapower and
+power-grid-model also expose `from_grid` for balanced fundamental-frequency interchange.
 
 Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.md):
 - [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
@@ -14,6 +14,22 @@ Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.
       harmonic_line_model=None) -> (Grid, id_map)` — see `pgm/CONTEXT.md`.
 - [x] `convert.opendss.to_grid(dss_handle, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
       harmonic_line_model=None) -> (Grid, id_map)` — see `opendss/CONTEXT.md`.
+- [x] `convert.pandapower.from_grid(grid, *, name="pgml_export",
+      allow_approximation=False) -> PandapowerExport` — balanced fundamental export with
+      element maps and an explicit reduction ledger; see `pandapower/CONTEXT.md`.
+- [x] `convert.pgm.from_grid(grid, *, allow_approximation=False) -> PgmExport` — balanced
+      fundamental export to structured `input_data`, with element maps and an explicit
+      reduction ledger; see `pgm/CONTEXT.md`.
+
+The outbound functions are intentionally fundamental-only. Populated spectrum, harmonic
+shunt/impedance and frequency-dependent line fields are named in `reductions`; no harmonic
+preservation is implied. They accept a consistent `(A,)` positive-sequence layout or a
+balanced `(A, B, C)` layout; partial-phase, mixed-layout and neutral-conductor grids raise
+`UnsupportedGridError`. Other unsupported elements raise the same error. A
+model-changing balanced reduction raises by default and is enabled only by
+`allow_approximation=True`, which also records it. Unavoidable reference representations
+(a finite PGM source for an ideal boundary and a 1 nOhm PGM line for an ideal switch) are
+always recorded.
 
 `harmonic_line_model` (all three): the frequency-dependent line model written to every
 converted R/X line — `None` resolves the modeling default

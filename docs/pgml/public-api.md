@@ -44,8 +44,8 @@ complex64 and refines against complex128 residuals, which keeps complex128 accur
 single-precision factorization cost and requires `dtype="complex128"`.
 
 `equilibrate` is the diagonal equilibration of every linear system the solve factors: `None`
-for the documented default `solver.equilibration.mode`, or `"symmetric"`, `"row_column"` or
-`"off"`. It is an execution keyword rather than a config field because it changes the
+for the documented default `solver.equilibration.mode`, or `"symmetric"` or `"off"`.
+It is an execution keyword rather than a config field because it changes the
 conditioning of the factorizations and not the model. The result, its units and its gradients
 are the same either way. See {doc}`modeling/solver-performance`.
 

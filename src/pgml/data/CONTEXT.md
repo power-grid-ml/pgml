@@ -119,7 +119,7 @@ requires an env var to be set.
   mixed-precision solve. Read by `pgml.solver.power_flow._warn_complex64_conditioning` and
   `pgml.solver.harmonic.lu_factor_system`.
 - `solver.equilibration.{mode, power_of_two}` — the diagonal equilibration applied around
-  every factorization (`off | symmetric | row_column`, default `symmetric`) and whether its
+  every factorization (`off | symmetric`, default `symmetric`) and whether its
   scale factors are rounded to powers of two (default true, which makes the scaled matrix
   exact in binary floating point). Read by
   `pgml.solver.equilibration.{resolve_equilibration, equilibration_scales}`; every solve

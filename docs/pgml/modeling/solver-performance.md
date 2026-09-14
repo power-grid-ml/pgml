@@ -208,7 +208,15 @@ The rank `k` against that crossover is the single criterion for whether an updat
   state must also pass its own connectivity check.
 - Different operating points on one grid need no update at all. Constant-power and ZIP loads
   live on the right-hand side, so the factor-once path already solves every scenario as one
-  back-substitution.
+  back-substitution when the harmonic load-shunt model is disabled or uses its nameplate
+  basis. With the operating-point harmonic shunt, `solve_harmonic_flow` automatically uses
+  Woodbury under a conservative `k < N/3` selection rule when the exact connection-aware
+  shunt blocks touch `k` unique rows. The actual crossover depends on backend and hardware.
+  It factors the shunt-free harmonic network once per order and retains direct per-state
+  factorization for a denser device population. A backward-error check also sends an
+  inaccurate update to that exact direct path. Every device whose operating-point shunt
+  reads the scenario's solved fundamental voltage contributes its rows, even when its stored
+  P/Q did not change. Dense load populations therefore usually select direct factorization.
 - The same node set with moved or resized edges is an update of rank at most `2P` per changed
   branch against the parent factorization. {func}`pgml.assembly.branch_stamp_blocks` is the
   seam for that.
@@ -321,8 +329,6 @@ default scaling:
 
 The default is the symmetric van der Sluis scaling `d_i = |A_ii|^(-1/2)`, whose factors are
 rounded to powers of two so that the scaled matrix is exact in binary floating point.
-`equilibrate="row_column"` selects the two-sided LAPACK variant, which is consistently worse in
-the 1-norm on these systems and twice failed to converge at single precision, and
 `equilibrate="off"` factors the matrix as assembled.
 
 Equilibration does not make single precision accurate. LU with partial pivoting is backward

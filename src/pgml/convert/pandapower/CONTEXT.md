@@ -5,7 +5,7 @@ Converts a pandapower network (`pandapowerNet`) to our schema `Grid`.
 ## Public API
 
 ```python
-from pgml.convert.pandapower import to_grid, GenMode, PhaseMode
+from pgml.convert.pandapower import from_grid, to_grid, GenMode, PhaseMode
 
 import pandapower as pp
 import pandapower.networks as pn
@@ -19,6 +19,8 @@ grid_3ph, id_map_3ph = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
 grid_pv, id_map_pv = to_grid(pn.case118())                     # VOLTAGE_REGULATING
 grid_approx, _ = to_grid(pn.case118(), gen_mode=GenMode.VOLT_VAR_APPROX)
 grid_nogen, _ = to_grid(pn.case118(), gen_mode=GenMode.DROP)
+
+exported = from_grid(grid)  # exported.net plus Grid-id -> pandapower-index maps
 ```
 
 ### Signature
@@ -35,6 +37,26 @@ to_grid(net: Any, *,
 Pure function; `net` must already carry basic DataFrames (`bus`, `line`, `load`,
 `ext_grid`); unmaterialised `std_type` line references are accepted as long as
 explicit per-km parameters are present.
+
+### Outbound signature
+```
+from_grid(grid: Grid, *, name: str = "pgml_export",
+          allow_approximation: bool = False) -> PandapowerExport
+```
+
+`PandapowerExport` carries `net`, `bus_of_node` / `node_of_bus`,
+`line_of_branch`, `trafo_of_branch`, `switch_of_branch`, `shunt_of_component`,
+`load_of_appliance`, `sgen_of_appliance`, `ext_grid_of_appliance`, and `reductions`.
+It supports nodes, explicit R/L/C/G lines, two-winding transformers, bus switches,
+shunts, sources, loads, generators and storage in pandapower's balanced fundamental
+model. Every node must use the same `(A,)` or `(A, B, C)` phase layout, and branches and
+appliances must match it; partial-phase, mixed-layout and neutral-conductor grids raise.
+Geometry lines, unresolved type references, generic branches, zigzag windings and
+impedance-grounded transformer neutrals raise `UnsupportedGridError`. Unbalanced P/Q,
+inverter controls, PV voltage regulation, nonideal source impedance, and switch terms a
+pandapower bus switch cannot store require `allow_approximation=True`; each enabled
+reduction is named. Harmonic-only schema fields are ignored and named in `reductions`.
+The input `Grid` is not mutated.
 
 ### `id_map` format
 ```python

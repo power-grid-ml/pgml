@@ -49,6 +49,24 @@ convention a :class:`~pgml.schemas.grid_schema.Generator` uses — so a ``[low, 
 distribution spanning zero sweeps both charge and discharge in one
 :class:`~pgml.scenarios.ParameterSpec`.
 
+Shared stationary noise
+-----------------------
+
+:func:`~pgml.scenarios.ar1_noise` draws a seeded stationary standard-normal AR(1)
+process along the last tensor axis. It is the common primitive for downstream
+time-series recipes that need the same recurrence without copying its implementation::
+
+    import torch
+    from pgml.scenarios import ar1_noise
+
+    generator = torch.Generator().manual_seed(17)
+    noise = ar1_noise((128, 24), 0.9, generator)  # scenarios × hourly steps
+
+The output defaults to ``torch.float64`` on ``generator.device``. ``rho`` may be a
+tensor broadcastable against the axes before the step axis, and gradients with respect
+to a tensor ``rho`` are retained. ``dtype`` and ``device`` are keyword-only; an explicit
+device must match the generator.
+
 Correlated sampling
 -------------------
 

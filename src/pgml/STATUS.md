@@ -43,7 +43,7 @@ decisions. One entry per capability:
   a 2016-row network's 1.4e5 → 1.3e4, IEEE-33 at harmonic order 13 8.0e8 → 1.5e3). Default
   `solver.equilibration.mode = "symmetric"` (van der Sluis `d_i = |A_ii|^-1/2`, scale
   factors rounded to powers of two so the scaled matrix is exact in binary floating point);
-  `"row_column"` is the two-sided variant, `equilibrate="off"` factors the matrix as
+  `equilibrate="off"` factors the matrix as
   assembled. It buys robustness rather than forward accuracy — on a 2016-row system a plain
   complex64 solve runs to the iteration cap unscaled and converges in 9 iterations
   equilibrated.
@@ -134,7 +134,10 @@ decisions. One entry per capability:
   backend with backend-aware convergence floors, switch-state batching (`branch_states`
   admittance scaling, differentiable) with the optional Woodbury LOW-RANK update-solve
   (`branch_states_method="woodbury"` — one base factorization for the whole sweep,
-  `pgml.solver.lowrank`), multi-grid disjoint-union batching
+  `pgml.solver.lowrank`), automatic Woodbury solves for sparse scenario-dependent
+  harmonic device-shunt populations (a conservative `k/N < 1/3` selection rule, with
+  exact assembled fallback outside it or when the backward-error guard fails),
+  multi-grid disjoint-union batching
   (`pgml.multigrid.merge_grids`) plus its BLOCK-DIAGONAL factorization backend
   (`linear_solver="block"` + `MergedGrid.block_rows()` — factors each member's diagonal
   block, equal sizes stacked into one batched LU, so an ensemble costs `O(Σ n³)` instead
@@ -338,13 +341,6 @@ per-device `R + jX` or a frequency curve) with its stamp. **Where.**
   `Z = Y_ff^-1` with a plain `torch.linalg.solve`, so it is the one factorization in the
   package that does not go through the equilibration every other path uses. WHERE:
   `src/pgml/solver/harmonic.py`.
-- **A low-rank harmonic shunt for a sparse device population**: with the shunt on the
-  `operating_point` basis, `Y(h)` is per scenario and a batch costs one factorization per
-  scenario and order. A Woodbury correction over the nameplate system would pay where the
-  distorting devices sit on few rows (`k/N < 1/3`, the measured crossover of the
-  switch-state path); on the benchmark grids `k/N` is 0.34 to 0.97 (every load node-phase),
-  so it does not. The DER case is the one to revisit. WHERE:
-  `src/pgml/solver/harmonic_flow.py`, `src/pgml/solver/lowrank.py`.
 - **Per-scenario time anchors in the batch contract**: a sequence batch records ONE `[T]`
   `time_unix_s` vector for the whole batch, so a generator that wanted to stagger its
   scenarios over the day has nowhere to put a per-scenario anchor. Allowing a `[B, T]`
