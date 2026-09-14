@@ -787,10 +787,10 @@ scenario-independent base. The automatic path uses the conservative selection ru
 # =====================================================================
 # EQUILIBRATION — `pgml.solver.equilibration` (module-level public surface)
 # =====================================================================
-Every factorization in this package is taken of the EQUILIBRATED matrix
-`Â = D_r A D_c`; the right-hand side is scaled by `D_r` and the solution by `D_c`, so
-nothing outside the factorization sees it. Default ON
-(`solver.equilibration.mode = "symmetric"`), disabled per call with `equilibrate="off"`.
+The power-flow and harmonic factorization paths use the EQUILIBRATED matrix
+`Â = D_r A D_c` by default; the right-hand side is scaled by `D_r` and the solution by
+`D_c`, so nothing outside the factorization sees it. Disable it per call with
+`equilibrate="off"`. `solve_anchored` and `AnchoredSystem` do not yet apply this setting.
 
 - `EQUILIBRATION_MODES = ("off", "symmetric")`
 - `resolve_equilibration(equilibrate) -> str` — `None` -> the documented default, `True` /

@@ -119,11 +119,12 @@ requires an env var to be set.
   mixed-precision solve. Read by `pgml.solver.power_flow._warn_complex64_conditioning` and
   `pgml.solver.harmonic.lu_factor_system`.
 - `solver.equilibration.{mode, power_of_two}` — the diagonal equilibration applied around
-  every factorization (`off | symmetric`, default `symmetric`) and whether its
+  power-flow and harmonic factorizations (`off | symmetric`, default `symmetric`) and whether its
   scale factors are rounded to powers of two (default true, which makes the scaled matrix
   exact in binary floating point). Read by
-  `pgml.solver.equilibration.{resolve_equilibration, equilibration_scales}`; every solve
-  entry point takes an `equilibrate=` override.
+  `pgml.solver.equilibration.{resolve_equilibration, equilibration_scales}`. The public
+  power-flow, harmonic, loadability and simulation entry points take an `equilibrate=`
+  override; `solve_anchored` / `AnchoredSystem` do not yet use this setting.
 - `solver.ift.{jacobian_budget_mb, adjoint_factor_cache_mb}` — the memory budget of the
   state-Jacobian build of the gradient path and the dense Newton direction, and the largest
   adjoint factorization kept for repeated vector-Jacobian products. Read by

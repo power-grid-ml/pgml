@@ -719,8 +719,9 @@ solver:
       value: "symmetric"
       units: "name: off | symmetric"
       description: >
-        Diagonal equilibration applied around every factorization of a linear system
-        (the nodal admittance, the Newton state Jacobian, the implicit-function adjoint).
+        Diagonal equilibration applied around the power-flow and harmonic factorization
+        paths (the nodal admittance, the Newton state Jacobian, the implicit-function
+        adjoint). `solve_anchored` and `AnchoredSystem` do not yet apply this setting.
         An SI-unit admittance matrix spans decades — a stiff source row near 1e5 S next to
         a low-voltage cable row near 1e-2 S — so it is badly SCALED rather than
         intrinsically ill-conditioned, and a rescaling removes most of the condition

@@ -307,12 +307,13 @@ complex128, whatever the iteration count.
 
 An SI-unit power system is badly scaled. A stiff source row of the nodal matrix carries an
 admittance near $10^5\,\mathrm{S}$ while a low-voltage cable row carries
-$10^{-2}\,\mathrm{S}$, and at harmonic order `h` the series reactances grow with `h` while the
-shunt terms on the diagonal do not, so the rows drift a further decade apart per order. Every
-factorization in this engine is therefore taken of the equilibrated matrix `D_r·A·D_c`, and the
-scaling is undone on the solution. The right-hand side you pass and the voltages you read are
-SI, the residuals and tolerances are unchanged, and gradients are unchanged, while the matrix
-that is actually factored is far better conditioned.
+$10^{-2}\,\mathrm{S}$, and the different frequency laws of series and shunt terms can widen
+the spread at harmonic orders. The power-flow and harmonic factorization paths use the
+equilibrated matrix `D_r·A·D_c` by default, and undo the scaling on the solution. The
+right-hand side you pass and the voltages you read are SI, while residuals, tolerances and
+gradients are unchanged. The matrix that is actually factored can be better conditioned, as
+the measurements below show. `equilibrate="off"` keeps these paths unscaled;
+`solve_anchored` and `AnchoredSystem` do not yet apply equilibration.
 
 Measured 1-norm condition estimates of the factored free block, as assembled and with the
 default scaling:

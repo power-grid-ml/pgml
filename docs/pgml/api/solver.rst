@@ -45,8 +45,8 @@ The solver package provides the following entry points:
   operating-point-independent part of a nonlinear solve once, returning a
   :class:`~pgml.solver.PowerFlowSystem` that repeated
   :func:`~pgml.solver.solve_power_flow` calls on the same grid can reuse.
-- :mod:`pgml.solver.equilibration` — the diagonal scaling every factorization in
-  this package is taken of, and the factored handle
+- :mod:`pgml.solver.equilibration` — the diagonal scaling used by the power-flow and
+  harmonic factorization paths, and the factored handle
   :class:`~pgml.solver.equilibration.EquilibratedLU` for a caller that wants it
   directly.
 
@@ -95,11 +95,13 @@ Equilibration (``equilibrate``)
 ---------------------------------
 
 An SI-unit nodal matrix is badly SCALED: a stiff source row carries an admittance near
-1e5 S where a low-voltage cable row carries 1e-2 S, and at harmonic order ``h`` the series
-reactances grow with ``h`` while the diagonal shunt terms do not.  Every factorization in
-this package is therefore taken of the equilibrated matrix ``D_r A D_c``, and the scaling is
-undone on the solution: the right-hand side you pass and the voltages you read are SI, the
-residuals and tolerances are unchanged, and the gradients are unchanged.
+1e5 S where a low-voltage cable row carries 1e-2 S, and harmonic-frequency series and
+shunt terms can widen that spread.  By default, the power-flow and harmonic factorization
+paths use the equilibrated matrix ``D_r A D_c``. The scaling is undone on the solution:
+the right-hand side you pass and the voltages you read are SI, the residuals and tolerances
+are unchanged, and the gradients are unchanged. ``equilibrate="off"`` keeps these paths
+unscaled. :func:`~pgml.solver.solve_anchored` and
+:class:`~pgml.solver.AnchoredSystem` do not yet apply this equilibration.
 
 ``equilibrate`` is accepted by :func:`~pgml.solver.solve_harmonic`,
 :func:`~pgml.solver.solve_power_flow`, :func:`~pgml.solver.prepare_power_flow`,

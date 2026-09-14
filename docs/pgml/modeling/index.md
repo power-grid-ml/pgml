@@ -31,8 +31,8 @@ Each page states its own limits. Nothing here is hidden behind a default.
 - {doc}`solver-performance` explains how the solve is organised, factor once and solve many,
   the measured dense and sparse crossover, switch states as differentiable admittance scaling,
   grid ensembles, the structural checks run before any numerics, the per-unit convergence
-  criteria, the diagonal equilibration of every factorization, the working precision and what
-  a gradient costs.
+  criteria, diagonal equilibration in the power-flow and harmonic factorization paths, the
+  working precision and what a gradient costs.
 
 ## Reference tools
 
