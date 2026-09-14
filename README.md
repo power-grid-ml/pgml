@@ -95,6 +95,12 @@ Results are checked against OpenDSS for harmonics and against pandapower and pow
 at the fundamental, on the IEEE 33-bus feeder and the CIGRE LV network. Known modelling gaps
 are documented next to the model they affect.
 
+Optional generator/storage harmonic impedances retain measured or specified passive
+R/L without deriving damping from signed power. Native OpenDSS impedance laws and
+voltage-source initialization are explicit reference choices; unknown impedance stays
+absent. Harmonic batches can use exact Woodbury updates for sparse changing shunts,
+with a checked direct-solve fallback when the update rank or conditioning is unsuitable.
+
 ## Entry points
 
 | You want | Use |

@@ -46,9 +46,14 @@ and [power-grid-model components](https://power-grid-model.readthedocs.io/en/sta
 
 ## Version and persisted grids
 
-Library version 0.4.0 uses schema version 0.1.0. The additions are optional
+Library version 0.5.0 uses schema version 0.2.0. The additions are optional
 `LineGeometry.internal_inductance` and `EarthReturnModel.x0_nonnegative` fields.
 Existing JSON loads with both fields unset. Unset choices resolve from current defaults,
 so reproducing an older run requires its recorded defaults as well as its grid.
 Use `PGML_DEFAULTS` or `defaults.reload(path)` for a complete historical defaults file.
 The ideal converter-switch default preserves explicitly supplied switch impedance.
+
+Schema0.2.0 adds optional `Generator.harmonic_impedance` and
+`Storage.harmonic_impedance`. Older grids retain absent impedance. The explicit
+OpenDSS import selects its admittance-frequency and source-reference conventions;
+these fields are never inferred from signed P/Q.

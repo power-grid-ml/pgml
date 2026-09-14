@@ -2,7 +2,7 @@
 
 These three files are the single source of truth. Import them; never edit them.
 
-`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.1.0"`) stamps the contract version
+`SCHEMA_VERSION` (in `schemas/__init__.py`, currently `"0.2.0"`) stamps the contract version
 into persisted datasets (`meta.json`); `read_dataset` validates it (MAJOR mismatch → raise,
 minor/patch drift → warn). Pre-1.0 the schema MAJOR tracks the library major (both stay `0.x`
 while the library is < 1.0.0); bump the patch/minor on any contract change.
@@ -239,3 +239,18 @@ needed. The schema imports NO compute framework; "array-like" is duck-typed
   grid with unresolved defaults is not a complete historical modeling snapshot.
 - `ConductorPlacement`, `LineGeometry`, `EarthReturnModel` are exported by
   `pgml.schemas` as well as `grid_schema`, and appear in the generated API docs.
+
+## Rev0.2.0: passive DER harmonic impedance
+
+`HarmonicImpedance` is public. Generator/Storage add optional `harmonic_impedance`:
+scalar or per-connection-element `resistance_ohm`/`inductance_h` retain tensors;
+finite nonnegative, nonzero per element. Absent fields in older grids remain
+absent; no universal machine/inverter impedance is guessed. New grids using the
+block need a0.2-aware reader. Library version0.5.0.
+
+`spectrum_reference`: current preserves terminal-current emissions;
+internal_voltage initializes per-element E1=Vt-Z1*I_absorbed; opendss_voltage
+reproduces the native first-phase balanced nodal-voltage convention.
+`frequency_model`: series_rl is the passive series R/L default;
+opendss_admittance explicitly retains Re(1/Z1) and scales Im(1/Z1)/h.
+The impedance is harmonic-only and independent of the load-shunt switch.

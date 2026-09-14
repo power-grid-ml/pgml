@@ -133,12 +133,16 @@ from pgml.schemas.grid_schema import (
     ComplexTap,
     ConsumerType,
     Grid,
+    HarmonicComponent,
+    HarmonicImpedance,
     LoadModel,
     Phase,
     Provenance,
     ShuntAppliance,
     SourceConvention,
     Storage,
+    StaticSpectrum,
+    SpectrumPoint,
     Transformer,
     VoltageRegulation,
     WindingConnection,
@@ -179,6 +183,7 @@ def to_grid(
     *,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     harmonic_line_model: Optional[str] = None,
+    der_harmonics: bool = True,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -205,6 +210,11 @@ def to_grid(
         frequency behaviour has to be chosen here. An OpenDSS matrix already contains
         the earth-return resistance in its mutual entries at ``f0``, so such a grid is
         the case for ``Line.earth_return.r0_includes_earth_return = True``.
+
+    der_harmonics:
+        Import native Generator/PVSystem/Storage harmonic impedance and voltage
+        spectra (default True). Supports one-phase WYE and three-phase WYE/DELTA.
+        False explicitly requests fundamental-only DER conversion and omits both.
 
     Returns
     -------
@@ -1182,6 +1192,10 @@ def to_grid(
             )
             if rp != "auto":
                 gen_obj.return_path = rp
+        if der_harmonics:
+            gen_obj.harmonic_impedance, gen_obj.spectrum = _der_harmonic_model(
+                dss, "Generator", gen_name, n_phases, conn, phase_mode, f0_hz
+            )
         appliances.append(gen_obj)
         ret = dss.Generators.Next()
 
@@ -1237,6 +1251,10 @@ def to_grid(
             )
             if rp != "auto":
                 pv_obj.return_path = rp
+        if der_harmonics:
+            pv_obj.harmonic_impedance, pv_obj.spectrum = _der_harmonic_model(
+                dss, "PVSystem", pv_name, n_phases, conn, phase_mode, f0_hz
+            )
         appliances.append(pv_obj)
         ret = dss.PVsystems.Next()
 
@@ -1317,6 +1335,11 @@ def to_grid(
                 if rp != "auto":
                     storage_kwargs["return_path"] = rp
 
+        if der_harmonics:
+            impedance, spectrum = _der_harmonic_model(
+                dss, "Storage", bat_name, n_phases, conn, phase_mode, f0_hz
+            )
+            storage_kwargs.update(harmonic_impedance=impedance, spectrum=spectrum)
         appliances.append(Storage(**storage_kwargs))
         ret = dss.Storages.Next()
 
@@ -1562,6 +1585,93 @@ def _dss_query(dss: Any, class_name: str, elem_name: str, prop: str) -> str:
     """
     dss.Text.Command(f"? {class_name}.{elem_name}.{prop}")
     return dss.Text.Result().strip()
+
+
+def _der_harmonic_model(
+    dss: Any,
+    class_name: str,
+    name: str,
+    n_phases: int,
+    connection: WindingConnection,
+    phase_mode: PhaseMode,
+    f0_hz: float,
+) -> tuple[HarmonicImpedance, Optional[StaticSpectrum]]:
+    """Read the native passive impedance and internal-voltage spectrum.
+
+    Machine harmonics use pure Xdpp; XRdp belongs to the dynamic model. PV and
+    storage use %R/%X on the device's own kV/kVA base. OpenDSS scales the imaginary
+    part of the resulting *admittance*, which differs from series R/L when R>0.
+    """
+    native_conn = _dss_query(dss, class_name, name, "conn").lower()
+    if n_phases not in (1, 3) or (n_phases == 1 and native_conn == "delta"):
+        raise ConversionError(
+            f"{class_name}.{name}: native harmonic import supports one-phase WYE "
+            "and three-phase WYE/DELTA; use der_harmonics=False for fundamental-only import"
+        )
+    kv = float(_dss_query(dss, class_name, name, "kV"))
+    kva = float(_dss_query(dss, class_name, name, "kVA"))
+    if kv <= 0 or kva <= 0:
+        raise ConversionError(f"{class_name}.{name} requires positive kV and kVA")
+    base_frequency = float(_dss_query(dss, class_name, name, "BaseFreq"))
+    if not math.isclose(base_frequency, f0_hz, rel_tol=1e-10):
+        raise ConversionError(
+            f"{class_name}.{name} BaseFreq differs from the fundamental solution; "
+            "convert from a solved fundamental snapshot at the device base frequency"
+        )
+    z_base = kv * kv * 1000.0 / kva
+    if class_name == "Generator":
+        r = 0.0
+        x = float(_dss_query(dss, class_name, name, "Xdpp")) * z_base
+    else:
+        r = float(_dss_query(dss, class_name, name, "%R")) * z_base / 100.0
+        x = float(_dss_query(dss, class_name, name, "%X")) * z_base / 100.0
+    # Native harmonic Yprim divides the star admittance by three for delta.
+    # The balanced positive-sequence reduction retains its star-equivalent value.
+    factor = (
+        3.0
+        if connection == WindingConnection.DELTA and phase_mode is PhaseMode.THREE_PHASE
+        else 1.0
+    )
+    impedance = HarmonicImpedance(
+        resistance_ohm=r * factor,
+        inductance_h=x * factor / (2.0 * math.pi * f0_hz),
+        frequency_model="opendss_admittance",
+        spectrum_reference="opendss_voltage",
+    )
+    spec_name = _dss_query(dss, class_name, name, "spectrum").strip("\"'")
+    spectrum = None
+    try:
+        if spec_name and spec_name.lower() != "none":
+            orders = _parse_dss_float_array(
+                _dss_query(dss, "Spectrum", spec_name, "harmonic")
+            )
+            magnitudes = _parse_dss_float_array(
+                _dss_query(dss, "Spectrum", spec_name, "%mag")
+            )
+            angles = _parse_dss_float_array(
+                _dss_query(dss, "Spectrum", spec_name, "angle")
+            )
+            if len(orders) != len(magnitudes) or len(orders) != len(angles):
+                raise ConversionError(f"Spectrum.{spec_name} has inconsistent arrays")
+            if any(h < 1 or not float(h).is_integer() for h in orders):
+                raise ConversionError(
+                    f"Spectrum.{spec_name} includes unsupported interharmonics"
+                )
+            # Spectrum.GetMult removes h times the fundamental phase angle and
+            # uses %mag/100 directly. pgml's stored order1 is a normalization anchor.
+            angle1 = next((a for h, a in zip(orders, angles) if h == 1), 0.0)
+            components = [HarmonicComponent(order=1, magnitude_pu=1.0, phase_deg=0.0)]
+            components.extend(
+                HarmonicComponent(
+                    order=int(h), magnitude_pu=m / 100.0, phase_deg=a - h * angle1
+                )
+                for h, m, a in zip(orders, magnitudes, angles)
+                if h != 1
+            )
+            spectrum = StaticSpectrum(spectrum=SpectrumPoint(components=components))
+    finally:
+        dss.Circuit.SetActiveElement(f"{class_name}.{name}")
+    return impedance, spectrum
 
 
 def _parse_appliance_bus_connection(

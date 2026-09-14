@@ -111,6 +111,9 @@ Pure-numpy harmonic oracle, no live OpenDSS required.
   `sequence_aware`/`positive_sequence` default (skin effect + a `resistance_frequency`
   law, which the oracle does not mirror) deviates by ~2e-2 V on CIGRE LV — convert with
   `harmonic_line_model="naive"` for a machine-precision comparison.
+  Explicit `Generator/Storage.harmonic_impedance` is outside this legacy oracle and is
+  rejected at entry rather than silently omitted; use the native scenario oracle for a
+  native-compatible DER block.
 - `fusion_prolongation(grid, index) -> np.ndarray | None` and
   `solve_with_fusion(y, i, p_mat) -> np.ndarray` — the oracles' own DENSE form of exact bus
   fusion: an ideal (zero-impedance) branch has no admittance to stamp, so the oracle skips
@@ -145,6 +148,9 @@ Requires `opendssdirect` (imported lazily inside functions).
   line-model difference reaches ~2e-2 V because every branch then carries harmonic
   current). `load_shunt` is stamped with the numpy oracle's own formula, so the
   comparison stays a LINE-model comparison.
+  The hybrid harmonic profile/voltage/real-transformer entry points reject explicit DER
+  harmonic impedance/source blocks. `opendss_scenario_oracle.run_opendss_scenarios` is the
+  independent native path for supported `opendss_voltage` / `opendss_admittance` devices.
 - `opendss_dyn_transformer_harmonic_voltages(grid, harmonic_injection, orders, *,
   load_shunt=None, ...) -> np.ndarray` — genuine vector-group validation using real
   OpenDSS Transformer elements.
@@ -270,3 +276,13 @@ Conformance tests select `defaults.use_preset("opendss")` explicitly; model-sens
 tests still exercise named alternatives. The independent NumPy sequence oracle applies
 the same resolved non-negative Carson guard as pgml. OpenDSS's unguarded law remains
 selectable even when its extrapolated zero-sequence reactance is negative.
+
+## Native DER scenario export
+
+`export_grid_to_opendss` retains Generator/PVSystem/Storage for explicit
+opendss_voltage + opendss_admittance blocks, with scalar balanced impedance/PQ.
+Static voltage spectra and per-scenario P/Q are retained; PV uses Pmpp, storage
+external dispatch. Pure current-source generation continues to use negative Loads.
+Other explicit impedance/source laws are rejected rather than silently discarded.
+Native controls, per-phase DER overrides and non-scalar impedance are outside
+this reference-export scope. The general pgml harmonic model supports more choices.

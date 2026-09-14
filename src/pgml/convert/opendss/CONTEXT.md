@@ -592,3 +592,15 @@ capacitor/reactor conversion (+ live voltage parity) and the coupled-reactor
 out-of-scope warning, the generic dropped-element warning
 (`Isource`/`Monitor`/`EnergyMeter`), and the Vsource-impedance warning:
 `tests/convert/test_opendss_shunt_and_der_elements.py`.
+
+## Native DER harmonics
+
+`to_grid(..., der_harmonics: bool = True)` imports optional passive
+`harmonic_impedance` and `StaticSpectrum` for Generator/PVSystem/Storage.
+Machine: pure Xdpp, no XRdp resistance. Inverter: %R/%X on device kV/kVA base;
+three-phase DELTA coil impedance is three times the star equivalent.
+The block selects `opendss_admittance` and `opendss_voltage`; spectra preserve
+native %mag/100 and angle_h-h*angle_1 normalization. Empty spectrum emits nothing
+but retains the physical shunt. Scope: one-phase WYE / three-phase WYE or DELTA;
+`der_harmonics=False` explicitly omits harmonic DER data for fundamental imports.
+Source phase initialization and shunt admittance are both conformance gates.

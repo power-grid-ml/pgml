@@ -20,7 +20,7 @@ authors:
     affiliation: "Cologne Institute for Renewable Energy (CIRE), TH Köln"
     # TODO: orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"
   # TODO: add co-authors
-version: 0.4.0
+version: 0.5.0
 date-released: "2026-08-18"   # TODO: set to the actual release date
 license: MPL-2.0
 repository-code: "https://github.com/power-grid-ml/pgml"

@@ -1294,6 +1294,95 @@ class Source(ApplianceBase):
         return self
 
 
+class HarmonicImpedance(GridModel):
+    """Passive harmonic internal impedance of a generator or storage converter.
+
+    Each connection element (WYE phase or DELTA leg) has
+    ``Z(f) = resistance_ohm + j*2*pi*f*inductance_h``. Scalars apply to every
+    element; vectors follow the device's connection-element order. Tensor inputs
+    retain their autograd history. This impedance contributes only at harmonic
+    orders above one and does not change the fundamental PQ/control model.
+
+    ``spectrum_reference='current'`` preserves the existing terminal-current
+    spectrum and adds a passive parallel impedance. ``'internal_voltage'`` uses
+    the device's spectrum for the voltage behind the impedance: at the solved
+    fundamental, ``E1 = V_terminal - Z1*I_absorbed``; its harmonic voltage is
+    converted to the Norton injection ``E(h)/Z(h)``. ``'opendss_voltage'``
+    instead uses OpenDSS's first-phase, balanced internal nodal-voltage source,
+    including its delta star-equivalent initialization. Its matching
+    ``frequency_model='opendss_admittance'`` holds the real part of ``1/Z1``
+    fixed and scales the imaginary part by inverse harmonic order. These named
+    reference conventions are distinct from a physical series R/L law.
+    Unknown impedance is represented by an
+    absent device block, never by guessed universal R/L values.
+
+    All physical values must be finite and nonnegative, with nonzero impedance
+    on every element. Numeric values are validated here; tensor values and
+    connection-element shapes are checked by harmonic assembly.
+    """
+
+    resistance_ohm: Annotated[Any, _SER] = si_field(
+        "Per-element passive series resistance (scalar or connection-element vector).",
+        short="ohm",
+        long="ohm",
+        default=0.0,
+    )
+    inductance_h: Annotated[Any, _SER] = si_field(
+        "Per-element passive series inductance (scalar or connection-element vector).",
+        short="H",
+        long="henry",
+        default=0.0,
+    )
+    spectrum_reference: Literal["current", "internal_voltage", "opendss_voltage"] = (
+        Field(
+            default="current",
+            description="Whether spectrum coefficients scale terminal current or internal voltage.",
+        )
+    )
+
+    frequency_model: Literal["series_rl", "opendss_admittance"] = Field(
+        default="series_rl",
+        description="series_rl uses 1/(R+j*2*pi*f*L). opendss_admittance holds the "
+        "fundamental conductance fixed and divides its susceptance by harmonic order.",
+    )
+
+    @field_validator("resistance_ohm", "inductance_h", mode="before")
+    @classmethod
+    def _element_values(cls, value: Any) -> Any:
+        if _is_arraylike(value):
+            return value
+        if isinstance(value, (list, tuple)):
+            return tuple(float(x) for x in value)
+        return float(value)
+
+    @model_validator(mode="after")
+    def _passive_impedance(self) -> "HarmonicImpedance":
+        import math
+
+        values = []
+        for name in ("resistance_ohm", "inductance_h"):
+            value = getattr(self, name)
+            if _is_arraylike(value):
+                values.append(None)
+                continue
+            entries = (value,) if isinstance(value, (int, float)) else tuple(value)
+            if not entries or any(not math.isfinite(x) or x < 0 for x in entries):
+                raise ValueError(f"{name} must contain finite nonnegative values")
+            values.append(entries)
+        resistance, inductance = values
+        if resistance is not None and inductance is not None:
+            n = max(len(resistance), len(inductance))
+            if len(resistance) not in (1, n) or len(inductance) not in (1, n):
+                raise ValueError("resistance and inductance element vectors must align")
+            if any(
+                resistance[i % len(resistance)] == 0
+                and inductance[i % len(inductance)] == 0
+                for i in range(n)
+            ):
+                raise ValueError("harmonic impedance must be nonzero on every element")
+        return self
+
+
 class HarmonicShuntModel(GridModel):
     """Per-device OVERRIDE of the harmonic Norton shunt (OpenDSS ``Load.pas``).
 
@@ -1880,6 +1969,11 @@ class Generator(InjectionAppliance):
         description="Asymmetric per-phase harmonic current sources (keys subset of "
         "phases; missing phase = no harmonics). Mutually exclusive with spectrum.",
     )
+    harmonic_impedance: Optional[HarmonicImpedance] = Field(
+        default=None,
+        description="Optional passive harmonic R/L and spectrum basis. None means unknown; "
+        "no impedance is invented. Independent of the load-shunt model.",
+    )
     harmonic_model: Optional[HarmonicShuntModel] = Field(
         default=None,
         description="Per-device OVERRIDE of the harmonic Norton shunt. None "
@@ -2025,6 +2119,11 @@ class Storage(InjectionAppliance):
         default=None,
         description="Asymmetric per-phase harmonic current sources. Mutually "
         "exclusive with spectrum.",
+    )
+    harmonic_impedance: Optional[HarmonicImpedance] = Field(
+        default=None,
+        description="Optional passive harmonic R/L and spectrum basis. None means unknown; "
+        "no impedance is invented. Independent of the load-shunt model.",
     )
     harmonic_model: Optional[HarmonicShuntModel] = Field(
         default=None,
@@ -2672,6 +2771,7 @@ __all__ = [
     "ApplianceBase",
     "Source",
     "HarmonicShuntModel",
+    "HarmonicImpedance",
     "ZipCoefficients",
     "Characteristic",
     "QReference",

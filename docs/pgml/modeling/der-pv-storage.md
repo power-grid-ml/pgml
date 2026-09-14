@@ -300,3 +300,61 @@ and CUDA.
   -2, and VDE-AR-N 4105.
 - The spectrum and phase convention is recorded in
   [OpenDSS harmonics](references/opendss/harmonics.md).
+
+## Harmonic internal impedance
+
+`Generator.harmonic_impedance` and `Storage.harmonic_impedance` describe a passive
+internal impedance independently of the load-shunt approximation. Leave the block
+absent when the impedance is unknown. Fundamental P/Q alone does not identify an
+inverter filter or a machine's subtransient impedance.
+
+```python
+from pgml.schemas import HarmonicImpedance
+
+impedance = HarmonicImpedance(
+    resistance_ohm=0.15,
+    inductance_h=0.0008,
+    spectrum_reference="current",
+)
+```
+
+The values describe each WYE phase or DELTA leg; scalars repeat across elements and
+vectors follow connection-element order. Tensor values remain differentiable.
+The default law is a series R–L branch,
+$Y(h) = [R + j\,2\pi h f_0 L]^{-1}$. The block contributes only above the
+fundamental and remains present when `load_shunt="none"`: that option disables
+the load-derived model, not an explicitly specified DER impedance.
+If a Generator or Storage also carries the older `harmonic_model` approximation, the
+explicit impedance takes precedence; the two shunts are not added together.
+
+With `spectrum_reference="current"`, the existing terminal-current spectrum is
+unchanged and the passive impedance is added in parallel. `"internal_voltage"`
+instead initializes the per-element voltage behind the impedance from the solved
+fundamental, $E_1=V_t-Z_1 I_\mathrm{absorbed}$, applies the spectrum to that voltage,
+and injects its Norton current. This preserves dependence on the operating point
+and the impedance for parameter sensitivities.
+
+Native OpenDSS uses two distinct conventions that must be selected explicitly:
+`frequency_model="opendss_admittance"` holds $\Re(1/Z_1)$ constant and scales
+$\Im(1/Z_1)$ by $1/h$; `spectrum_reference="opendss_voltage"` initializes from
+phase 1 and synthesizes the balanced internal nodal-voltage source. These conventions
+are not the same as independently scaling each DELTA leg's voltage spectrum.
+The OpenDSS converter sets both automatically. Machines use pure `Xdpp` reactance;
+`XRdp` belongs to the dynamic model and is not a harmonic resistance. PV and storage
+use `%R`/`%X` on their own kV/kVA base, with the DELTA coil conversion applied once.
+See the native [Generator](https://opendss.epri.com/Generator.html) and
+[PVSystem](https://dss-extensions.org/dss-format/PVSystem.html) definitions.
+
+Native harmonic import covers one-phase WYE and three-phase WYE/DELTA. Other native
+phase arrangements require `der_harmonics=False` for explicit fundamental-only
+conversion. The general pgml passive connection model and a native OpenDSS model
+are separate choices; matching a primitive alone does not establish source-emission
+conformance.
+
+Native harmonic conformance requires the three-phase converter mode for a
+multiphase circuit. `PhaseMode.SINGLE_PHASE_EQUIV` retains a balanced equivalent
+and cannot preserve all positive-, negative- and zero-sequence harmonic responses.
+The native scenario exporter accepts the matching OpenDSS source/frequency pair;
+other explicit impedance conventions are rejected rather than discarded. Its
+auxiliary inverter ratings expand with a scenario while preserving physical
+impedance, so the export does not introduce an unrequested power limit.

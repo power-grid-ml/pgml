@@ -77,8 +77,9 @@ SAME clock-realisation helpers already pinned against a live OpenDSS solve in
 cannot be reproduced), ``Switch`` (a near-ideal ``Line`` with ``Switch=yes`` FIRST on the
 command — see ``_export_switch``'s docstring for why the parameter order matters — disabled
 when open), ``Load``/``Generator``/``Storage`` (EVERY injection appliance, including a
-Generator/Storage, exports as a native DSS ``Load`` — see ``_ApplianceExport``'s docstring for
-why a genuine DSS ``Generator`` element cannot be used here; a WYE appliance is exported as
+Generator/Storage without explicit internal impedance, exports as a native DSS
+``Load`` (negative P/Q for generation); native internal-voltage DER instead retains
+its Generator/PVSystem/Storage class and passive harmonic impedance; a WYE appliance is exported as
 ONE single-phase ``Load`` PER PHASE, enabling per-phase P/Q scenario overrides a single
 balanced multi-phase element cannot express; a DELTA appliance exports as one multi-phase
 element and supports only a balanced total P/Q scenario override), ``ShuntAppliance``/
@@ -167,6 +168,7 @@ from pgml.evaluation.oracles.opendss_oracle import (
     _dss_rotated_phase_suffix,
 )
 from pgml.schemas.grid_schema import (
+    ConsumerType,
     Generator,
     GenericBranch,
     Grid,
@@ -177,6 +179,7 @@ from pgml.schemas.grid_schema import (
     ShuntAppliance,
     ShuntReactor,
     Source,
+    StaticSpectrum,
     Storage,
     Switch,
     Transformer,
@@ -265,17 +268,11 @@ class _ApplianceExport:
     per-phase scenario override. ``kind="whole"``: one multi-phase DELTA DSS element
     (``elements={None: name}``) — balanced total only.
 
-    ``dss_class`` is ALWAYS ``"Load"`` (see the module docstring's "Generator/Storage
-    export as a negative-kW Load" note): a genuine DSS ``Generator`` element stamps its
-    own linearized PQ shunt admittance into the harmonics-mode linear system REGARDLESS
-    of ``NeglectLoadY``/``Model``/``Xdpp`` (verified empirically — no combination zeroes
-    it), so a pgml ``Generator``/``Storage`` (a pure current injection, no internal
-    admittance) is represented as a DSS ``Load`` with a NEGATED P/Q — the well-established
-    OpenDSS negative-load generation idiom — which DOES become a true pure current source
-    under ``NeglectLoadY=Yes`` (verified: post-solve ``YPrim`` ~1e-12, vs ~0.0375 S for a
-    genuine ``Generator`` element on the same nameplate). ``sign`` (``+1.0`` for a real
-    ``Load``, ``-1.0`` for a ``Generator``/``Storage``) is applied to every P/Q value
-    written to this element, both at export and at every per-scenario edit.
+    Pure terminal-current Generator/Storage models use a negative-P/Q native Load,
+    with ``sign=-1``. Explicit native internal-voltage DER impedance uses the real
+    Generator, PVSystem or Storage class with ``sign=1``. Whole native DER elements
+    have a balanced operating point; per-phase overrides are rejected. The native
+    harmonic impedance is never omitted or inferred from signed P/Q.
     """
 
     kind: str
@@ -809,6 +806,130 @@ def _emit_pq_element(
         dss.Text.Command(f"Edit Load.{name} ZIPV=[{zstr}]")
 
 
+def _export_native_der(dss, a, node, busname, f0) -> _ApplianceExport:
+    """Export a native internal-voltage DER without substituting a negative Load.
+
+    The OpenDSS native model is balanced, scalar impedance and constant P/Q. A
+    different physical source or frequency law is rejected, never silently changed.
+    """
+    from pgml.assembly._params import phase_voltage_magnitude
+
+    block = a.harmonic_impedance
+    if (
+        block.spectrum_reference != "opendss_voltage"
+        or block.frequency_model != "opendss_admittance"
+    ):
+        raise ConversionError(
+            f"appliance {a.id}: native OpenDSS DER export requires opendss_voltage "
+            "and opendss_admittance; the specified physical model is not silently approximated"
+        )
+    if (
+        a.load_model != LoadModel.CONST_POWER
+        or a.control is not None
+        or getattr(a, "voltage_regulation", None) is not None
+    ):
+        raise ConversionError(
+            f"appliance {a.id}: native DER export supports fixed P/Q without controls"
+        )
+    if (
+        a.p_nom_per_phase_w is not None
+        or a.q_nom_per_phase_var is not None
+        or a.spectrum_per_phase is not None
+    ):
+        raise ConversionError(
+            f"appliance {a.id}: native DER export requires balanced P/Q and spectrum"
+        )
+    n = len(a.phases)
+    delta = a.connection == WindingConnection.DELTA
+    if n not in (1, 3) or (delta and n != 3):
+        raise ConversionError(
+            f"appliance {a.id}: native DER harmonic export requires one-phase WYE or three phases"
+        )
+    try:
+        r = to_float(block.resistance_ohm)
+        x = 2 * math.pi * f0 * to_float(block.inductance_h)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ConversionError(
+            f"appliance {a.id}: native DER export requires scalar impedance"
+        ) from exc
+    if delta:
+        r, x = r / 3, x / 3
+    p, q = to_float(a.p_nom_w), to_float(a.q_nom_var)
+    kva = max(1.0, math.hypot(p, q) / 1000) * 2
+    kv = (
+        phase_voltage_magnitude(
+            to_float(node.u_rated_v), len(node.phases), line_to_line=n > 1
+        )
+        / 1000
+    )
+    zbase = kv * kv * 1000 / kva
+    native_class = (
+        "Storage"
+        if isinstance(a, Storage)
+        else "PVSystem"
+        if a.consumer_type == ConsumerType.PV
+        else "Generator"
+    )
+    name = f"der{a.id}"
+    bus = f"{busname[int(a.node)]}.{_bus_conductor_str(a.phases)}"
+    if not delta:
+        return_path = getattr(a, "return_path", "auto")
+        if return_path == "neutral" and Phase.N not in node.phases:
+            raise ConversionError(
+                f"appliance {a.id}: neutral return has no node neutral"
+            )
+        neutral = Phase.N in node.phases and return_path in ("auto", "neutral")
+        bus += ".4" if neutral else ".0"
+    common = f"phases={n} bus1={bus} kv={kv:.17g} kva={kva:.17g} conn={'delta' if delta else 'wye'} spectrum={_FLAT_SPECTRUM_NAME}"
+    if native_class == "Generator":
+        if r != 0:
+            raise ConversionError(
+                f"appliance {a.id}: native Generator harmonic model has pure Xdpp, not resistance"
+            )
+        props = f"kw={p / 1000:.17g} kvar={q / 1000:.17g} xdpp={x / zbase:.17g} model=1 vminpu=.0001 vmaxpu=10000"
+    elif native_class == "PVSystem":
+        if p < 0:
+            raise ConversionError(
+                f"appliance {a.id}: native PVSystem cannot absorb active power"
+            )
+        props = f"pmpp={p / 1000:.17g} irradiance=1 kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %cutin=0 %cutout=0 model=1 vminpu=.0001 vmaxpu=10000"
+    else:
+        # External dispatch exposes the requested signed setpoint, without an
+        # unrequested state-of-charge controller curtailing the snapshot.
+        rated = max(1.0, abs(p) / 1000) * 2
+        props = f"kwrated={rated:.17g} kwhrated=1e9 %stored=50 %reserve=0 dispmode=external state={'charging' if p < 0 else 'discharging'} kw={p / 1000:.17g} kvar={q / 1000:.17g} %r={100 * r / zbase:.17g} %x={100 * x / zbase:.17g} %idlingkw=0 model=1 vminpu=.0001 vmaxpu=10000"
+    dss.Text.Command(f"New {native_class}.{name} {common} {props}")
+    if a.spectrum is not None:
+        if not isinstance(a.spectrum, StaticSpectrum):
+            raise ConversionError(
+                f"appliance {a.id}: native DER export requires a static spectrum or scenario override"
+            )
+        specname = f"native_der_spec{a.id}"
+        components = a.spectrum.spectrum.components
+        anchor = next((c for c in components if c.order == 1), None)
+        mag1 = anchor.magnitude_pu if anchor is not None else 1.0
+        if mag1 <= 0:
+            raise ConversionError(
+                f"appliance {a.id}: spectrum fundamental normalization must be positive"
+            )
+        orderstr = " ".join(str(c.order) for c in components)
+        magstr = " ".join(f"{100 * c.magnitude_pu / mag1:.17g}" for c in components)
+        angles = " ".join(f"{c.phase_deg:.17g}" for c in components)
+        dss.Text.Command(
+            f"New Spectrum.{specname} numharm={len(components)} harmonic=[{orderstr}] %mag=[{magstr}] angle=[{angles}]"
+        )
+        dss.Text.Command(f"Edit {native_class}.{name} spectrum={specname}")
+    return _ApplianceExport(
+        kind="whole",
+        elements={None: name},
+        phases=a.phases,
+        p_nom_pp=[p / n] * n,
+        q_nom_pp=[q / n] * n,
+        dss_class=native_class,
+        sign=1.0,
+    )
+
+
 def _export_injection_appliance(
     dss,
     a,
@@ -1177,6 +1298,9 @@ def export_grid_to_opendss(
         if not a.in_service or isinstance(a, Source):
             continue
         node = node_by_id[int(a.node)]
+        if isinstance(a, (Generator, Storage)) and a.harmonic_impedance is not None:
+            generators[int(a.id)] = _export_native_der(dss, a, node, busname, f0)
+            continue
         if isinstance(a, (Load, Generator, Storage)):
             prefix = {Load: "lo", Generator: "ge", Storage: "st"}[type(a)]
             exported = _export_injection_appliance(
@@ -1276,7 +1400,7 @@ def _apply_pq(
     if p_pp_key is not None or q_pp_key is not None:
         if exp.kind != "split":
             raise ConversionError(
-                f"{exp.dss_class} exported as a single DELTA element received "
+                f"{exp.dss_class} exported as a single balanced element received "
                 "a per-phase operating-point override, which has no per-leg "
                 "edit point on that element."
             )
@@ -1302,8 +1426,32 @@ def _apply_pq(
     q_var = _scalar_at(entry.get("q_var", sum(exp.q_nom_pp)), b, t)
     if exp.kind == "whole":
         name = exp.elements[None]
+        active_key = "Pmpp" if exp.dss_class == "PVSystem" else "kW"
+        if exp.dss_class == "PVSystem" and p_w < 0:
+            raise ConversionError("native PVSystem scenario cannot absorb active power")
+        if exp.dss_class in ("PVSystem", "Storage"):
+            # Ratings here are synthetic export auxiliaries, not schema limits.
+            # Enlarge them when a scenario exceeds the initial nameplate while
+            # preserving the physical harmonic impedance in ohms.
+            target = f"{exp.dss_class}.{name}"
+            dss.Text.Command(f"? {target}.kva")
+            old_kva = float(dss.Text.Result())
+            new_kva = max(old_kva, 2 * math.hypot(p_w, q_var) / 1000)
+            if new_kva > old_kva:
+                values = []
+                for prop in ("%r", "%x"):
+                    dss.Text.Command(f"? {target}.{prop}")
+                    values.append(float(dss.Text.Result()) * new_kva / old_kva)
+                dss.Text.Command(
+                    f"Edit {target} kva={new_kva:.17g} "
+                    f"%r={values[0]:.17g} %x={values[1]:.17g}"
+                )
+            if exp.dss_class == "Storage":
+                dss.Text.Command(f"? {target}.kwrated")
+                rated = max(float(dss.Text.Result()), 2 * abs(p_w) / 1000)
+                dss.Text.Command(f"Edit {target} kwrated={rated:.17g}")
         dss.Text.Command(
-            f"Edit {exp.dss_class}.{name} kW={sign * p_w / 1000.0:.10g} "
+            f"Edit {exp.dss_class}.{name} {active_key}={sign * p_w / 1000.0:.10g} "
             f"kvar={sign * q_var / 1000.0:.10g}"
         )
     else:
