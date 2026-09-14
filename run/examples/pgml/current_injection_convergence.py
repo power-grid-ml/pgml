@@ -15,7 +15,7 @@ convergence region is SMALLER than the feasible region. This is the well-known w
 Gauss / current-injection iterations versus Newton, and is exactly why the convergence
 diagnostics report "did not settle" and point to the Newton solver
 (``solve_power_flow(method="newton")``) and the ``loadability_limit`` continuation —
-see ``ConvergenceDiagnostics`` and ``run/examples/loadability_continuation.py``.
+see ``ConvergenceDiagnostics`` and ``run/examples/pgml/loadability_continuation.py``.
 
 The grid is a textbook 2-bus radial — a stiff source ``E`` behind a series line ``R+jX``
 feeding a const-P load — for which the P-V nose is known in CLOSED FORM, so the solver's
@@ -61,7 +61,7 @@ POWER_FACTOR = (
     1.0  # load displacement power factor (1.0 = unity; lagging -> Q = P*tan(phi))
 )
 MAX_ITER = 60
-TOL = 1.0e-8
+TOL = 1.0e-8  # per-unit power mismatch (the solver's primary criterion)
 # Load levels as a fraction of the analytical nose power P_max.
 LEVELS = [0.40, 0.70, 0.90, 0.97, 1.10]
 
@@ -182,8 +182,10 @@ def main(out_dir: str = str(_OUT / "current_injection")) -> None:
         v2_pu = abs(res.v.reshape(-1)[row].item()) / E_V
         traj = current_injection_trace(complex(p_w, q_var), MAX_ITER)
         v_pu = [abs(v) / E_V for v in traj]
-        # Faithfulness: the transparent map's |ΔV2| must equal the solver's ||ΔV||.
-        dv_trace = [abs(traj[k + 1] - traj[k]) for k in range(len(traj) - 1)]
+        # Faithfulness: the transparent map's per-row update |ΔV2| / V_base must equal the
+        # solver's own per-unit update history (the solver's criterion is per unit of each
+        # node's rated voltage, so the trace is normalised the same way).
+        dv_trace = [abs(traj[k + 1] - traj[k]) / E_V for k in range(len(traj) - 1)]
         hist = res.diagnostics.residual_history
         if hist and dv_trace:
             max_dv_mismatch = max(
@@ -205,7 +207,7 @@ def main(out_dir: str = str(_OUT / "current_injection")) -> None:
 
     _print_table(runs, p_max)
     print(
-        f"\nmap fidelity: max |solver ||ΔV|| − trace |ΔV2|| = {max_dv_mismatch:.1e} "
+        f"\nmap fidelity: max |solver update − trace |ΔV2|/E| = {max_dv_mismatch:.1e} pu "
         "(the trace IS the solver's iteration)"
     )
 
@@ -248,10 +250,10 @@ def _plot_residuals(runs, path: Path) -> None:
     for r, c in zip(runs, colors):
         h = r["history"]
         ax.semilogy(range(1, len(h) + 1), h, "-o", ms=3, color=c, label=_label(r))
-    ax.axhline(TOL, ls=":", color="k", lw=1, label=f"tol = {TOL:g}")
+    ax.axhline(TOL, ls=":", color="k", lw=1, label=f"tol = {TOL:g} pu")
     ax.set(
         xlabel="iteration k",
-        ylabel=r"$\|\Delta V\|$  [V]",
+        ylabel=r"per-row update  $\max |\Delta V| / V_{LN}$  [pu]",
         title="Current-injection convergence: update norm per iteration\n"
         "(decays when converging, never settles near / past the nose)",
     )

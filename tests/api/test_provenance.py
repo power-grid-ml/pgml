@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 import pgml
-from pgml.provenance import PROVENANCE_FILENAME, code_provenance, git_state
+from pgml.provenance import PROVENANCE_FILENAME, code_provenance, git_state, _repo_root
 
 
 def test_code_provenance_shape():
@@ -23,8 +26,19 @@ def test_code_provenance_shape():
     json.dumps(prov)
 
 
+def _is_checkout() -> bool:
+    """Is the package under test inside a live git repository?"""
+    root = _repo_root()
+    return root is not None and Path(root / ".git").exists()
+
+
+@pytest.mark.skipif(
+    not _is_checkout(),
+    reason="the package is a mirrored tree without .git; the sync-stamp path covers it",
+)
 def test_git_state_in_a_checkout_resolves_a_real_sha():
-    # The test suite runs from a source checkout, so the live-git path must resolve.
+    # From a source checkout the live-git path must resolve; a mirrored tree (a cluster
+    # sync, a wheel) reports from the sync stamp instead — test_sync_stamp_fallback.
     state = git_state()
     assert state["git_source"] == "git"
     assert len(state["git_sha"]) == 40

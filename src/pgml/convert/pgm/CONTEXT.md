@@ -3,13 +3,30 @@
 Converts a power-grid-model ``input_data`` dict (structured numpy arrays) to a
 schema ``Grid`` and an ``id_map``.  Pure function; no side effects.
 
+## Not mapped yet: `voltage_regulator` (a PV terminal)
+
+power-grid-model 1.13 added a `voltage_regulator` component that makes an existing
+`sym_gen`/`asym_gen`/`sym_load`/`asym_load` a PV terminal: `regulated_object` (the
+appliance id), `status`, `u_ref` (required; per unit of the regulated node's
+`u_rated`, the same base as `source.u_ref`) and the optional `q_min`/`q_max`
+(declared in the input schema, but pgm's own limit handling is still marked as
+future work in its validation source). pgml's schema side is ready — the mapping is
+`u_ref -> Generator.voltage_regulation.v_set_pu`, `q_min`/`q_max -> q_min_var`/
+`q_max_var`, regulating the positive-sequence magnitude — but it is NOT implemented
+here yet, because it cannot be validated without a working power-grid-model core in
+the environment. pgm validates that every regulator and source on ONE node carries
+the same `u_ref`, which matches pgml's refusal of a regulating generator on a Source
+node and of two regulating generators on one node.
+
 ## Public API
 
 ```python
-from pgml.convert.pgm import to_grid
+from pgml.convert.pgm import from_grid, to_grid
 
 grid, id_map = to_grid(input_data, base_frequency_hz=60.0,
                         load_model=LoadModel.CONST_IMPEDANCE)
+
+exported = from_grid(grid)  # exported.input_data plus Grid-id -> pgm-id maps
 ```
 
 ### Signature
@@ -35,11 +52,30 @@ has NO runtime dependency on the ``power_grid_model`` package itself (it reads
 ``input_data`` as a plain numpy-structured-array format, including the raw pgm
 ``WindingType``/``BranchSide`` int values, mapped by a local table).
 
+### Outbound signature
+```
+from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport
+```
+
+`PgmExport` carries `input_data`, `pgm_of_node`, `pgm_of_branch`,
+`pgm_of_appliance`, and `reductions`. The supported balanced fundamental scope is nodes,
+explicit R/L/C/G lines, switches, two-winding transformers, shunts, sources, loads,
+generators and storage. Every node must use the same `(A,)` or `(A, B, C)` phase layout,
+and branches and appliances must match it; partial-phase, mixed-layout and
+neutral-conductor grids raise. Geometry lines, unresolved type references, generic branches,
+PV terminals and source forms PGM cannot encode raise `UnsupportedGridError`. PGM has no
+ZIP element; ZIP therefore raises by default and converts to constant power only with
+`allow_approximation=True`. The same opt-in applies to unbalanced P/Q, inverter controls,
+and any electrical term that must be dropped. Ideal sources and switches use the finite
+stand-ins required by PGM and record them. Harmonic-only fields are outside this API and
+are named in `reductions`; the input `Grid` is not mutated.
+
 ### id_map format
 ```python
 {
     "node":           {pgm_node_id: Node.id, ...},
     "line":           {pgm_line_id: Line.id, ...},
+    "link":           {pgm_link_id: Switch.id, ...},   # a perfect connection
     "transformer":    {pgm_transformer_id: Transformer.id, ...},
     "sym_load":       {pgm_load_id: Load.id, ...},
     "asym_load":      {pgm_load_id: Load.id, ...},  # THREE_PHASE only
@@ -54,6 +90,20 @@ has NO runtime dependency on the ``power_grid_model`` package itself (it reads
   transformers, status for loads/sources).
 - ``slack_v_complex``: taken from the first in-service source; complex phasor in
   SI volts (line-to-line), ready to pass as ``v_fixed`` to ``solve_harmonic``.
+
+### `link` — a perfect connection, converted to an ideal closed `Switch`
+
+power-grid-model's `link` is a zero-impedance connection between two nodes, which its own
+solver realises with a very large stand-in admittance (1e6 per unit). It converts to a
+closed `Switch` with `resistance_ohm = inductance_h = 0`, whose terminal node-phase rows
+the solve collapses exactly (`pgml.assembly.fusion_map`), so pgml carries no stand-in at
+all. An out-of-service link (`from_status`/`to_status == 0`) is not converted. Measured
+against power-grid-model 1.13 on a source–link–line–load feeder: node voltages agree to
+3.5e-9 pu and the link's own current to 6.0e-9 relative, both residuals being the
+reference's stand-in drop (7.0e-5 V across the link, which fusion makes exactly zero).
+power-grid-model reports a symmetric calculation in three-phase quantities, so its link
+current is the pgml single-phase-equivalent conductor current divided by `sqrt(3)`
+(`tests/reference/test_switch_fusion_pgm.py`).
 
 ### Parameter conventions
 

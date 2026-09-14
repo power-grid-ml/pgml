@@ -1,37 +1,18 @@
-"""Sphinx configuration for the power-grid-ml suite documentation.
+"""Sphinx configuration for the pgml documentation.
 
-The suite publishes ONE documentation site, assembled from the ``docs/<pkg>/`` tree of
-every package repository (pgml, pgl, pgg, pghub, pgd). This configuration serves both
-build modes with the same settings:
-
-- a **package repository** builds only its own ``docs/<pkg>/`` tree (the CI gate; the
-  landing ``docs/index.md`` is that package's toctree), and
-- the org-level ``docs`` repository builds the assembled site (every ``docs/<pkg>/`` tree
-  next to the suite landing page and ``getting-started/``).
-
-``PACKAGES`` lists which package trees the current source tree contains; cross-package
-``{doc}`` references to a package that is NOT built here resolve to the published site.
+The pages live under ``docs/pgml/``, with ``docs/index.md`` as the landing page. The API
+reference is generated from each subpackage's ``__all__``, so the docstrings are the
+reference. ``pandapower`` is mocked at autodoc time; ``torch`` and ``pydantic`` are real.
 """
 
 from __future__ import annotations
 
-import posixpath
 import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Which packages this build documents (edit per repository)
-# ---------------------------------------------------------------------------
-#: This repository documents its own package only.
-PACKAGES = ('pgml',)
-
-#: All packages of the suite, in dependency order; the published site carries them all.
-SUITE_PACKAGES = ("pgml", "pgl", "pgg", "pghub", "pgd")
-SUITE_DOCS_URL = "https://power-grid-ml.readthedocs.io/en/latest/"
-
-# ---------------------------------------------------------------------------
-# Path setup — src-layout; add `src` so `import <pkg>` works without install (a package
-# repository). In the assembled build the packages are installed (editable) instead.
+# Path setup. src-layout: add `src` so `import pgml` works without an install step.
+# An installed (editable or wheel) package takes over when `src` is absent.
 # ---------------------------------------------------------------------------
 _SRC = Path(__file__).parent.parent / "src"
 if _SRC.is_dir():
@@ -39,14 +20,45 @@ if _SRC.is_dir():
 
 
 # ---------------------------------------------------------------------------
-# Fix __module__ for re-exported symbols so Sphinx registers them under the
-# public package path (e.g. pgml.assembly.NodePhaseIndex) rather than the
-# private sub-module path (pgml.assembly.index.NodePhaseIndex).  Without this
-# autodoc emits "duplicate object description" warnings for every re-exported
-# dataclass/class attribute.
+# Fix __module__ for re-exported symbols so Sphinx registers them under the public
+# package path (``pgml.assembly.YBus`` rather than ``pgml.assembly.index.YBus``).
+# Without this, autodoc emits a duplicate object description for every re-exported
+# class reachable from two automodule directives.
 # ---------------------------------------------------------------------------
+_REEXPORTS = {
+    "pgml.assembly": ["NodePhaseIndex", "YBus"],
+    "pgml.solver": ["PowerFlowResult", "HarmonicFlowResult"],
+    "pgml.scenarios": ["SampledScenarios", "ScenarioResult"],
+    "pgml.geometry": [
+        "series_impedance",
+        "internal_impedance",
+        "potential_coefficients",
+        "kron_reduce",
+        "line_constants",
+        "i0_over_i1",
+        "positive_sequence_z",
+        "skin_resistance_multiplier",
+        "fit_equivalent_rdc",
+        "two_conductor_geometry",
+        "two_conductor_loop_z",
+        "phase_to_sequence",
+        "sequence_impedances",
+        "carson_earth_resistance",
+        "zero_sequence_harmonic_z",
+        "sequence_to_phase_z",
+        "sequence_aware_phase_z",
+        "synthesize_line_geometry",
+        "synthesize_grid_geometry",
+        "positive_sequence_resistance_model",
+        "apply_positive_sequence_harmonic_model",
+        "apply_sequence_aware_harmonic_model",
+        "apply_default_harmonic_model",
+    ],
+}
+
+
 def _patch_module(pkg_path: str, names: list) -> None:
-    """Set __module__ = pkg_path for each name imported into that package."""
+    """Set ``__module__ = pkg_path`` for each name imported into that package."""
     import importlib
 
     pkg = importlib.import_module(pkg_path)
@@ -56,69 +68,8 @@ def _patch_module(pkg_path: str, names: list) -> None:
             obj.__module__ = pkg_path
 
 
-_REEXPORTS = {
-    "pgml": {
-        "pgml.assembly": ["NodePhaseIndex", "YBus"],
-        "pgml.solver": ["PowerFlowResult", "HarmonicFlowResult"],
-        "pgml.scenarios": ["SampledScenarios", "ScenarioResult"],
-        "pgml.geometry": [
-            "series_impedance",
-            "internal_impedance",
-            "potential_coefficients",
-            "kron_reduce",
-            "line_constants",
-            "i0_over_i1",
-            "positive_sequence_z",
-            "skin_resistance_multiplier",
-            "fit_equivalent_rdc",
-            "two_conductor_geometry",
-            "two_conductor_loop_z",
-            "phase_to_sequence",
-            "sequence_impedances",
-            "carson_earth_resistance",
-            "zero_sequence_harmonic_z",
-            "sequence_to_phase_z",
-            "sequence_aware_phase_z",
-            "synthesize_line_geometry",
-            "synthesize_grid_geometry",
-            "positive_sequence_resistance_model",
-            "apply_positive_sequence_harmonic_model",
-            "apply_sequence_aware_harmonic_model",
-            "apply_default_harmonic_model",
-        ],
-    },
-    # pgd (the dashboard/service layer) has the same aggregator-package shape: pgd.core and
-    # pgd.storage each re-export classes defined in several private submodules
-    # (core/{gridstore,jobs,errors}.py; storage/{duck,interface}.py) via __all__, and the
-    # rest of pgd's own docstrings cross-reference them under the aggregator's short name
-    # (e.g. ``pgd.core.GridStore``, ``pgd.storage.DuckDBStore``) — patch so autodoc registers
-    # them there instead of under the private submodule path.
-    "pgd": {
-        "pgd.core": [
-            "GridStore",
-            "GridRecord",
-            "GridRevision",
-            "BranchLimit",
-            "GridNotFoundError",
-            "GridEditError",
-            "GridEditValidationError",
-            "EstimationUnavailable",
-            "JobManager",
-            "JobRecord",
-            "JobCancelled",
-        ],
-        "pgd.storage": [
-            "DuckDBStore",
-            "TimeseriesStore",
-            "DatasetInfo",
-            "SeriesSpec",
-            "DiagramSpec",
-        ],
-    },
-}
-for _pkg in PACKAGES:
-    for _module, _names in _REEXPORTS.get(_pkg, {}).items():
-        _patch_module(_module, _names)
+for _module, _names in _REEXPORTS.items():
+    _patch_module(_module, _names)
 
 # ---------------------------------------------------------------------------
 # Project information
@@ -126,7 +77,7 @@ for _pkg in PACKAGES:
 project = "pgml"
 author = "power-grid-ml contributors"
 copyright = "2024-2026, power-grid-ml contributors"
-# Version from the package (the source tree, no install step).
+
 import pgml as _pkg
 
 release = _pkg.__version__
@@ -150,7 +101,7 @@ autosummary_generate = True
 autosummary_generate_overwrite = True
 autosummary_imported_members = False
 
-# Napoleon: Google and NumPy-style docstrings
+# Napoleon: NumPy-style docstrings (Google style also parsed)
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_use_param = True
@@ -168,10 +119,9 @@ autodoc_member_order = "bysource"
 add_module_names = False
 
 # ---------------------------------------------------------------------------
-# Mock heavy/optional dependencies so the docs build does NOT need the full
-# runtime stack. `pandapower` imports cleanly but is heavyweight and unneeded
-# for autodoc (only its converter's docstrings are published); all other heavy
-# deps install alongside Sphinx.
+# Mock the one heavyweight optional dependency. `pandapower` imports cleanly but is
+# slow and unnecessary for autodoc, since only its converter's docstrings are
+# published. Every other dependency is installed alongside Sphinx and imports for real.
 # ---------------------------------------------------------------------------
 autodoc_mock_imports = [
     "pandapower",
@@ -191,7 +141,7 @@ source_suffix = {
 }
 
 # ---------------------------------------------------------------------------
-# Intersphinx — link to upstream docs
+# Intersphinx
 # ---------------------------------------------------------------------------
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
@@ -201,7 +151,17 @@ intersphinx_mapping = {
 }
 
 # ---------------------------------------------------------------------------
-# HTML output — furo theme
+# Link checking. The PyTorch documentation numbers its anchors differently from the
+# objects inventory intersphinx resolves against, so an anchor check on those generated
+# links reports failures that are not broken links.
+# ---------------------------------------------------------------------------
+linkcheck_anchors_ignore_for_url = [
+    "https://docs.pytorch.org/.*",
+    "https://pytorch.org/docs/.*",
+]
+
+# ---------------------------------------------------------------------------
+# HTML output
 # ---------------------------------------------------------------------------
 html_theme = "furo"
 html_title = f"{project} {release}"
@@ -218,15 +178,12 @@ html_theme_options = {
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
 
-# nitpicky off — avoids noise from cross-refs into mocked/optional deps and into suite
-# packages that are documented in another repository's build.
+# nitpicky off: cross-references into the mocked dependency cannot resolve.
 nitpicky = False
 
-# Suppress specific recurring warning categories.
-# - toc.not_included: README.md is excluded, no need for it in a toctree.
-# - ref.python (duplicate cross-refs): pgml.schemas re-exports grid_schema symbols,
-#   so both pgml.schemas.Phase and pgml.schemas.grid_schema.Phase exist; this is
-#   intentional for user convenience.
+# - toc.not_included: README.md is excluded from the build, so it needs no toctree entry.
+# - ref.python: pgml.schemas re-exports the three schema modules, so both
+#   pgml.schemas.Phase and pgml.schemas.grid_schema.Phase exist. That is intentional.
 suppress_warnings = [
     "toc.not_included",
     "ref.python",
@@ -234,28 +191,16 @@ suppress_warnings = [
 
 
 # ---------------------------------------------------------------------------
-# Silence "duplicate object description" warnings for re-exported schema types.
+# Silence "duplicate object description" for re-exported schema types.
 #
-# The pydantic schema models are defined in pgml.schemas.{grid,result,scenario}
-# _schema and re-exported through pgml.schemas via ``__all__``. With autosummary
-# documenting both the submodule and the package, the same field/class gets
-# registered twice under the same fully-qualified name, producing "duplicate
-# object description" warnings that cannot be suppressed via suppress_warnings
-# (the warning carries no type= code). This is structural (re-export + pydantic
-# field descriptors), NOT a docstring issue, so it cannot be fixed by editing the
-# schema docstrings. We patch the Python domain's note_object to keep the first
-# registration and silently drop duplicates.
+# The pydantic schema models are defined in pgml.schemas.{grid,result,scenario}_schema and
+# re-exported through pgml.schemas via ``__all__``. With both the package and its submodules
+# documented, the same fully-qualified name is registered twice, which emits a warning that
+# carries no type code and therefore cannot be suppressed through ``suppress_warnings``.
+# Keep the first registration and drop the duplicate.
 # ---------------------------------------------------------------------------
 def _patch_py_domain_silent_overwrite(app) -> None:  # noqa: ANN001
-    """Silence duplicate-object warnings for re-exported schema types.
-
-    The frozen pydantic schema models are re-exported from :mod:`pgml.schemas`
-    via ``__all__``, so autosummary registers the same fully-qualified name twice
-    (once under the submodule, once under the package), emitting an unsuppressible
-    "duplicate object description" warning (no ``type=`` code, so
-    ``suppress_warnings`` cannot catch it). We patch ``PythonDomain.note_object``
-    to keep the first registration and silently drop the duplicate.
-    """
+    """Keep the first registration of a fully-qualified name, drop later duplicates."""
     from sphinx.domains.python import PythonDomain
 
     _orig_note = PythonDomain.note_object
@@ -268,7 +213,6 @@ def _patch_py_domain_silent_overwrite(app) -> None:  # noqa: ANN001
         aliased=False,
         location=None,
     ):
-        # If already registered, keep the first entry silently.
         if fullname in self.objects:
             return
         _orig_note(self, fullname, objtype, node_id, aliased=aliased, location=location)
@@ -276,37 +220,6 @@ def _patch_py_domain_silent_overwrite(app) -> None:  # noqa: ANN001
     PythonDomain.note_object = _note_object_silent
 
 
-# ---------------------------------------------------------------------------
-# Cross-package ``{doc}`` references.
-#
-# A package's pages may point at another package's pages (a pgl page at
-# ``/pgml/api/provenance``, a pghub page at ``../pgg/workflow``). In the assembled
-# site every target exists; in a per-repository build the target package is not
-# part of the source tree, so the reference would be "unknown document" — a
-# warning that fails the strict build. Resolve such references to the published
-# site instead of dropping them, keeping the strict gate meaningful for genuinely
-# broken intra-package links.
-# ---------------------------------------------------------------------------
-def _resolve_suite_doc_refs(app, env, node, contnode):  # noqa: ANN001
-    """Turn an unresolved ``{doc}`` ref into another suite package into a site link."""
-    if node.get("refdomain") != "std" or node.get("reftype") != "doc":
-        return None
-    target = node.get("reftarget", "")
-    if target.startswith("/"):
-        docname = target.lstrip("/")
-    else:
-        docname = posixpath.normpath(posixpath.join(posixpath.dirname(node.get("refdoc", "")), target))
-    head = docname.split("/", 1)[0]
-    if head not in SUITE_PACKAGES or head in PACKAGES:
-        return None
-    from docutils import nodes
-
-    ref = nodes.reference("", "", internal=False, refuri=f"{SUITE_DOCS_URL}{docname}.html")
-    ref.append(contnode)
-    return ref
-
-
 def setup(app) -> None:  # noqa: ANN001
-    """Sphinx setup hook — apply runtime patches."""
+    """Sphinx setup hook."""
     app.connect("builder-inited", _patch_py_domain_silent_overwrite)
-    app.connect("missing-reference", _resolve_suite_doc_refs)

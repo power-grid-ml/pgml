@@ -49,6 +49,24 @@ convention a :class:`~pgml.schemas.grid_schema.Generator` uses — so a ``[low, 
 distribution spanning zero sweeps both charge and discharge in one
 :class:`~pgml.scenarios.ParameterSpec`.
 
+Shared stationary noise
+-----------------------
+
+:func:`~pgml.scenarios.ar1_noise` draws a seeded stationary standard-normal AR(1)
+process along the last tensor axis. It is the common primitive for downstream
+time-series recipes that need the same recurrence without copying its implementation::
+
+    import torch
+    from pgml.scenarios import ar1_noise
+
+    generator = torch.Generator().manual_seed(17)
+    noise = ar1_noise((128, 24), 0.9, generator)  # scenarios × hourly steps
+
+The output defaults to ``torch.float64`` on ``generator.device``. ``rho`` may be a
+tensor broadcastable against the axes before the step axis, and gradients with respect
+to a tensor ``rho`` are retained. ``dtype`` and ``device`` are keyword-only; an explicit
+device must match the generator.
+
 Correlated sampling
 -------------------
 
@@ -205,18 +223,16 @@ an ``h_mag`` spec additionally records what it REALLY injected: ``"<spec.name>_m
 ``"<spec.name>_phase"`` (``[B, n_dev, n_ord]``, per unit of each device's own fundamental
 current / degrees, i.e. exactly the values ``solve_harmonic_flow`` receives) and
 ``"<spec.name>_device_ids"`` (``[n_dev]``). This is what a persisted dataset is audited
-against downstream (``pgl.data.validate``'s ``i_h_emission_pct``, preferred over
-reconstructing ``I(h) = Y(h)·V(h)`` from the state — see :doc:`/pgl/api/data`'s "Dataset
-validation gate" section).
+against later, which is cheaper and more direct than reconstructing
+``I(h) = Y(h)·V(h)`` from the solved state.
 
 IEC 61000-3-2 appliance current-emission limits
 ---------------------------------------------------
 
-:mod:`pgml.scenarios.iec61000_3_2` is the DEFAULT reference for a device harmonic
-current fingerprint (:class:`~pgml.scenarios.CoherentSpectrumConfig`'s
-``harmonic_reference`` default) — it bounds what a device is PERMITTED TO INJECT into
-the supply, unlike the DIN EN 50160 limits below, which bound the supply VOLTAGE
-distortion and are not an appliance-emission model.  The data ships inside the package
+:mod:`pgml.scenarios.iec61000_3_2` is the default reference for a device harmonic
+current draw. It bounds what a device is PERMITTED TO INJECT into the supply. The DIN EN
+50160 limits below bound the supply VOLTAGE distortion instead, so they are not an
+appliance-emission model.  The data ships inside the package
 at ``pgml/data/standards/iec61000_3_2.yaml`` and is read via :mod:`importlib.resources`;
 an explicit ``path`` argument or the ``PGML_IEC61000_3_2`` environment variable
 overrides it.
@@ -239,8 +255,7 @@ special wave shape, mA per watt of active power):
 - :func:`~pgml.scenarios.iec61000_3_2_device_caps` — builds the full
   ``{device_id: {order: fraction}}`` cap table for a set of grid appliances in one call
   (per-device fundamental current from nominal power and the node's line-to-neutral
-  voltage), the per-device clamp :func:`~pgml.scenarios.sample_coherent_spectra` applies
-  by default.
+  voltage), which is the per-device clamp a sampled harmonic draw is held to.
 - :func:`~pgml.scenarios.iec61000_3_2_provenance` — identifies the ACTIVE table
   (``{"source", "override", "sha256"}``); a ``PGML_IEC61000_3_2`` override silently changes
   every generated emission fraction, so an artifact that does not record which table it used
@@ -281,406 +296,6 @@ The active file is resolved in priority order: an explicit ``path`` argument, th
 
     limits = en50160_limits()        # {2: 0.02, 3: 0.05, 5: 0.06, 7: 0.05, ...}
     cap_h5 = en50160_limit(5)        # 0.06 (6 % of fundamental)
-
-Node-coherent harmonic fingerprints
--------------------------------------
-
-For training harmonic state estimators the key challenge is that each node must have
-a *recognisable, time-varying* injection signature — so the estimator can attribute
-a harmonic pattern to a node even under noise.
-:class:`~pgml.scenarios.CoherentSpectrumConfig` and
-:func:`~pgml.scenarios.sample_coherent_spectra` implement this model:
-
-**Concept.** Each matched device draws ``n_modes`` base spectra ("operating states",
-e.g. a washing machine in heating vs spin cycle).  Over ``n_steps`` time steps it
-**sticks** to a mode (Markov dwell probability ``dwell``) and **wanders** around it
-(AR(1) temporal jitter with stickiness ``ar1_rho``), with magnitudes clamped to the
-per-order ``harmonic_reference`` limit.  The result is a ``[B, T]`` batch of harmonic
-injections where each node keeps its characteristic fingerprint while varying
-realistically over time.
-
-**Reference and class.** ``harmonic_reference`` defaults to ``"iec61000-3-2"`` — each
-device's fingerprint is clamped to its OWN IEC 61000-3-2 emission cap
-(:func:`~pgml.scenarios.iec61000_3_2_device_caps`), keyed by ``emission_class``
-(``"auto"`` resolves one per device from its ``consumer_type`` and nominal power).
-Pass ``harmonic_reference="en50160"`` to instead shape the fingerprint by the DIN EN
-50160 supply-voltage compatibility levels (background-distortion shape, not a device
-emission model — kept for backward compatibility), or ``None`` for an unclamped
-absolute-pu magnitude.
-
-**Held-out fingerprint sets.** Reproducibility of a coherent dataset depends on both
-``seed`` (the temporal Markov + AR(1) stream) and ``mode_bank_seed`` (the per-device
-fingerprint bank). ``mode_bank_seed=None`` (default) draws the bank from the ``seed``
-stream, byte-identical to a config with no ``mode_bank_seed`` set; give a DISTINCT
-``mode_bank_seed`` to pin a different device-signature bank while every other setting
-stays shared — the recipe for an unseen-fingerprint test split.
-
-**Output shape.** Passing a :class:`~pgml.scenarios.CoherentSpectrumConfig` to
-:func:`~pgml.scenarios.run_scenarios` forces ``calculation="harmonic"`` and produces
-node voltages ``v`` of shape ``[B, T, H, N]`` (B scenarios, T steps, H harmonic
-orders, N nodes)::
-
-    from pgml.scenarios import (
-        CoherentSpectrumConfig, Selector, Uniform, run_scenarios
-    )
-
-    cfg = CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5, 7, 11, 13],
-        n_steps=24,          # one day at hourly resolution
-        n_scenarios=64,      # B independent sequences
-        n_modes=3,
-        seed=42,
-        dwell=0.9,           # P(stay in mode) per step
-        ar1_rho=0.8,         # temporal stickiness of AR(1) jitter
-        jitter_mag=0.05,     # fractional std of magnitude jitter
-        jitter_phase_deg=5.0,
-        step_size_s=3600.0,
-        # harmonic_reference="iec61000-3-2" (default) — per-device IEC current caps;
-        # pass emission_class="auto" (default) or a concrete "A"/"B"/"C"/"D".
-    )
-    result = run_scenarios(grid, cfg)
-    # result.v  shape [64, 24, 6, N]  (H=6: fundamental + 5 harmonics)
-    # result.sampled.samples["time_s"]  shape [24]  (timestamps in seconds)
-
-**Sample record keys** written to ``sampled.samples`` (``name`` defaults to
-``"harmonics"``):
-
-- ``"<name>_mode"`` — ``[B, n_dev, T]`` active mode index (int), the ML attribution
-  label (ground truth for which fingerprint is active).
-- ``"<name>_mag"`` / ``"<name>_phase"`` — ``[B, n_dev, n_ord, T]`` realized injection
-  magnitudes and phases.
-- ``"<name>_mode_base_mag"`` — the per-device fingerprint spectra (base magnitudes
-  per mode, before jitter).
-- ``"<name>_device_ids"`` — ``[n_dev]`` integer device IDs in selector order.
-- ``"time_s"`` — ``[T]`` timestamps in seconds (``step_size_s`` * step index).
-
-``harmonic_injection`` in the returned :class:`~pgml.scenarios.SampledScenarios` maps
-``{device_id: {order: (mag[B, T], phase[B, T])}}``; this is passed directly to
-``solve_harmonic_flow`` by :func:`~pgml.scenarios.run_scenarios`.
-
-Time-varying fundamental (``LoadProfileConfig``)
----------------------------------------------------
-
-By default the fundamental P/Q of a :class:`~pgml.scenarios.CoherentSpectrumConfig`
-sequence is **constant** across its ``T`` steps — only the harmonic fingerprint varies.
-Setting ``profile`` to a :class:`~pgml.scenarios.LoadProfileConfig` makes the fundamental
-itself **time-varying**: every matched device's per-scenario base P/Q is multiplied by a
-synthetic profile factor composed on four time scales (seasonal, weekly, daily,
-short-term AR(1)), class-aware by ``consumer_type`` — a household evening peak, an
-office business-hours plateau, an EV late-evening charging peak, a near-flat industrial
-plateau, and a dedicated solar bell for ``"pv"`` that is zero at night with a
-seasonally-widening daylight window. ``start_time`` (ISO 8601) is **required** with
-``profile`` — the daily / weekly / seasonal phases need an absolute anchor::
-
-    from pgml.scenarios import CoherentSpectrumConfig, LoadProfileConfig, run_scenarios
-
-    cfg = CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5, 7, 11, 13],
-        n_steps=48,               # two days at hourly resolution
-        n_scenarios=32,
-        step_size_s=3600.0,
-        seed=42,
-        profile=LoadProfileConfig(),          # defaults: daily_amplitude=1.0, ...
-        start_time="2024-06-21T16:00:00",     # ISO 8601, anchors the daily/seasonal phase
-                                               # (the high-activity band; see the presets
-                                               # section below for why)
-    )
-    result = run_scenarios(grid, cfg)
-    # result.v  shape [32, 48, 6, N]  — the fundamental now moves step to step
-    # result.sampled.samples["time_unix_s"]  shape [48]  (absolute epoch seconds)
-
-Because the harmonic injection magnitude is defined **relative to** each device's own
-fundamental current, a profile-scaled fundamental already scales the absolute harmonic
-current at solve time — no extra coupling is needed. The profile draws on an RNG stream
-distinct from the fingerprint bank, the Markov path, the AR(1) jitter, and the
-operating-point cube, so ``profile=None`` (the default) is byte-identical to the
-fingerprint-only behavior.
-
-**Correlation model.** Two per-scenario shared latents make devices co-vary within a
-scenario: a ``behavioral`` latent scales the daily-amplitude of every non-``pv`` device
-together (a busy day lifts everyone's swing), and a ``cloudiness`` latent scales every
-``pv`` device's output together (an overcast day dims all panels). Each device then draws
-idiosyncratic per-scenario values on top — an overall level, an amplitude jitter, and a
-daily phase offset — plus a per-step AR(1) short-term term.
-
-**Sample record keys** added when ``profile`` is set (``name`` defaults to
-``"harmonics"``, matching the fingerprint's own name):
-
-- ``"<name>_profile_factor"`` — ``[B, n_dev, T]`` the realized multiplicative profile
-  factor per profiled device per step (ML ground truth for profile attribution).
-- ``"<name>_profile_device_ids"`` — ``[n_dev]`` the profiled device IDs.
-- ``"time_unix_s"`` — ``[T]`` absolute epoch seconds (``start_time`` + ``k * step_size_s``);
-  distinct from the always-present relative ``"time_s"``.
-
-A per-scenario source ``u_ref_scale`` (from ``CoherentSpectrumConfig.parameters``, ``[B]``)
-is automatically promoted to ``[B, 1]`` so the slack reference broadcasts against the
-per-step ``[B, T]`` state — the scale itself stays constant over the sequence, only the
-broadcast shape changes.
-
-:func:`~pgml.scenarios.load_profile_factors` (draws the raw per-device, per-step factors
-as a ``ProfileDraw`` — ``factor[B, n_dev, T]`` / ``device_ids[n_dev]`` / ``time_unix_s[T]``)
-and :func:`~pgml.scenarios.apply_load_profiles` (lifts an operating point to the per-step
-``[B, T]`` form) are the two functions :func:`~pgml.scenarios.sample_coherent_spectra`
-calls internally when ``profile`` is set; call them directly to inspect the realized
-profile factors before solving.
-
-**Differentiability.** A profiled ``[B, T]`` operating-point batch solves and
-differentiates like any other batch: the implicit-function-theorem backward pass builds
-its state Jacobian over a single flattened scenario axis by collapsing the plan's
-``[B, T]`` power to ``[B*T]`` internally, so gradients w.r.t. grid parameters flow through
-a profiled sequence exactly as they do through a constant-fundamental one (verified
-against a per-step-loop gradient and finite differences). A cartesian *states × operating
-point* batch remains forward-only, as before.
-
-.. note::
-
-   The profile generator lives in ``pgml.scenarios.profiles``; only
-   :func:`~pgml.scenarios.load_profile_factors` and
-   :func:`~pgml.scenarios.apply_load_profiles` are re-exported at the
-   :mod:`pgml.scenarios` package level (documented here alongside
-   :class:`~pgml.scenarios.CoherentSpectrumConfig`, the surface that uses them).
-
-Statistical device-class composition
-----------------------------------------
-
-The profile and fingerprint machinery above move an aggregated load's fundamental and
-harmonic spectrum as two SEPARATE signals — a profile scales the fundamental, a
-fingerprint wanders around a base spectrum — coupled only through the harmonic
-convention (magnitude is a fraction of the fundamental current). Real aggregated
-loads (a household, an office) are a mix of many devices whose OWN activity moves
-both signals TOGETHER: a washing machine coming on draws more power AND changes the
-spectrum in the same instant, and a state estimator that could learn to attribute an
-observed spectrum to a device mix needs data where that joint structure is present.
-:class:`~pgml.scenarios.CompositionConfig` (set on
-:attr:`~pgml.scenarios.CoherentSpectrumConfig.composition`) builds exactly that: each
-covered aggregated load becomes a SUM of statistical member devices, and the summed
-current is what the solver injects.
-
-**What it deliberately is NOT.** The device-class library
-(:func:`~pgml.scenarios.default_device_classes`) is plausible statistical coverage,
-not an appliance catalog — per-order magnitude ranges are LOOSELY IEC 61000-3-2-shaped
-(odd-dominated, decreasing with order) rather than measured nameplate spectra, and a
-class stands in for a whole family of similar devices (an "SMPS-electronics" class
-covers laptop chargers, LED drivers, TVs alike), not a single named appliance. The goal
-is diverse, physically-plausible training data with a KNOWN, recoverable ground truth —
-not a faithful digital twin of any one device.
-
-**The generation model** (per covered load, off the autograd tape, ``float64``, CPU,
-seeded — see the module docstring of ``pgml.scenarios.composition`` for the full
-derivation):
-
-1. **Roster** (drawn once, persisted) — a set of member devices per
-   :class:`~pgml.scenarios.ClassCount` in the matching
-   :class:`~pgml.scenarios.ConsumerComposition` rule, each with a rated power, a sign,
-   per-order rated harmonic magnitude/phase, a load-dependence exponent/slope, a mean
-   loading, activity stickiness, and (multi-state classes) a small set of
-   :class:`~pgml.scenarios.DeviceState` power/spectrum states.  With
-   :attr:`~pgml.scenarios.CompositionConfig.scale_to_nominal` (default) the roster's
-   share-weighted installed capacity is rescaled to the load's own ``p_nom_w``, so the
-   composition's total nameplate stays meaningful across grids of different scale.
-2. **Activity** ``a_d(t)`` — a diurnal availability rate (one of the profile daily
-   shapes, keyed by :attr:`~pgml.scenarios.DeviceClassSpec.activity_preset`) scaled by
-   a per-scenario shared latent (``behavioral`` for consumption classes, ``cloud`` for
-   PV — the SAME correlation mechanism the profile generator uses).  A switching class
-   (:attr:`~pgml.scenarios.DeviceClassSpec.discrete_activity` ``True``, the default)
-   realizes this as an on/off Markov chain whose stationary occupancy tracks the rate;
-   a continuously-modulated class (PV, a background base load) uses the rate directly
-   as a fractional availability.
-3. **Loading** ``lam_d(t)`` — an AR(1)-smoothed fluctuation around the member's mean
-   loading (single-state classes) or the current :class:`~pgml.scenarios.DeviceState`'s
-   ``power_fraction`` (multi-state classes: e.g. a heat-pump / white-goods class that
-   jumps between a near-linear HEATING state and a harmonic-rich INVERTER state on its
-   own Markov dwell).
-4. **Contribution** — power ``P_d = a_d · lam_d · P_rated · sign`` and a harmonic
-   current phasor whose magnitude and phase follow the SAME load-dependence laws as the
-   composed spectrum sampling above: ``mag_h(lam) = mag_h_rated · lam ** gamma_h`` and
-   ``ang_h(lam) = ang_h0 + s_h · (lam - 1)``, with ``gamma_h`` / ``s_h`` drawn per
-   member per order from :attr:`~pgml.scenarios.DeviceClassSpec.gamma` /
-   :attr:`~pgml.scenarios.DeviceClassSpec.phase_slope_deg`.  Per load, the members'
-   powers and harmonic phasors are SUMMED; the aggregate magnitude is normalized to the
-   solver's injection convention (a fraction of the aggregate fundamental current,
-   capped at :attr:`~pgml.scenarios.CompositionConfig.max_injection_pu` — a physically
-   real residual-THD blow-up near a net-zero fundamental, e.g. PV nearly cancelling
-   load, not a numerical artifact) and the phase relative to the aggregate fundamental
-   direction.  The aggregate power ``P_agg`` may go net-negative under enough PV — the
-   Load then injects, exactly as a real net-metered feeder would.
-
-**Config surface** (:mod:`pgml.scenarios`, all serializable pydantic models):
-
-- :class:`~pgml.scenarios.DeviceClassSpec` — one statistical device class: ``name``,
-  ``sign`` (``+1`` consuming, ``-1`` injecting), ``rated_power_w`` range,
-  ``power_factor``, per-order ``harmonic_magnitude`` / ``harmonic_phase_deg`` ranges,
-  ``gamma`` / ``phase_slope_deg`` load-dependence ranges, ``activity_preset`` +
-  ``discrete_activity`` + ``on_off_dwell``, ``loading_min`` / ``loading_mean`` /
-  ``loading_jitter`` / ``loading_rho``, and optional ``states``
-  (:class:`~pgml.scenarios.DeviceState`: ``power_fraction``, ``spectrum_scale``,
-  ``weight``) + ``state_dwell`` for a multi-state class.
-- :class:`~pgml.scenarios.ClassCount` — how many instances of one class an aggregated
-  load contains (``class_name``, ``count`` range, ``power_share`` for capacity
-  rescaling).
-- :class:`~pgml.scenarios.ConsumerComposition` — a composition rule: matches a load by
-  ``load_ids`` (per-appliance override), else ``consumer_type``, else is the fallback
-  for any load no other rule claims; lists its ``classes``
-  (:class:`~pgml.scenarios.ClassCount` entries).
-- :class:`~pgml.scenarios.CompositionConfig` — ``selector`` (default: every in-service
-  load), ``classes`` (default :func:`~pgml.scenarios.default_device_classes`, seven
-  built-in classes — a harmonic-free linear base load, SMPS electronics, an EV charger,
-  a PV inverter, a multi-state inverter drive, a kW-scale inverter heat pump, and a
-  thermostatic resistive heater), ``compositions`` (default
-  :func:`~pgml.scenarios.default_compositions`, one rule per common ``consumer_type`` —
-  ``"household"``, ``"office"``, ``"restaurant"``, ``"heat_pump"``, ``"ev_charging"``,
-  ``"pv"``, plus a fallback), ``scale_to_nominal``, ``max_injection_pu``,
-  ``behavioral_coupling`` / ``cloud_coupling`` (cross-device correlation strength), and
-  ``roster_seed`` (optional, distinct from ``seed`` — a held-out device-composition bank,
-  the same recipe as :attr:`~pgml.scenarios.CoherentSpectrumConfig.mode_bank_seed` above).
-  :data:`~pgml.scenarios.DEVICE_LIBRARY_VERSION` (currently ``"2"``) stamps the roster
-  identity into a generated dataset's metadata, since the library's rates and shapes can be
-  recalibrated in place — the heat-pump class and the h13-h19 calibrated envelope arrived
-  at version ``"2"`` with no change to the config surface, so only the version records that
-  two datasets built from the same config draw from different populations.
-
-**Silent-order guard.** A device class that emits nothing at a requested harmonic order
-makes that order silent by construction — the true harmonic voltage there is zero, relative
-error metrics turn into NaN, and the corresponding model input is dead.
-:func:`~pgml.scenarios.composition_silent_orders` checks a roster against a requested order
-set and returns the orders no class in it emits at (fundamental excluded);
-:class:`~pgml.scenarios.CoherentSpectrumConfig` calls it automatically for a composed config
-and raises naming the silent orders. The same check applies, against the
-``harmonic_reference`` table instead of a roster, to the plain per-order fingerprint (no
-composition) — an order the reference does not list is equally silent. Set
-:attr:`~pgml.scenarios.CoherentSpectrumConfig.allow_silent_orders` (a tuple of orders,
-default empty) to declare a silence deliberate rather than accidental.
-
-**Enabling it.** Set ``composition`` on a
-:class:`~pgml.scenarios.CoherentSpectrumConfig` (``start_time`` is REQUIRED — the
-activity model is diurnal and needs an absolute anchor, same as ``profile``)::
-
-    from pgml.scenarios import (
-        CoherentSpectrumConfig, CompositionConfig, Selector, run_scenarios
-    )
-
-    cfg = CoherentSpectrumConfig(
-        selector=Selector(component="load"),
-        orders=[3, 5, 7, 9, 11, 13],
-        n_steps=96,                 # a day at 15-minute resolution
-        n_scenarios=64,
-        step_size_s=900.0,
-        seed=42,
-        composition=CompositionConfig(),         # defaults: the 7-class library
-        start_time="2024-06-21T16:00:00",        # ISO 8601, anchors the activity model
-                                                  # (the high-activity band, not midnight —
-                                                  # every class preset is dark at 00:00)
-    )
-    result = run_scenarios(grid, cfg)
-    # result.v  shape [64, 96, 7, N]
-
-A load covered by the composition (matched by ``composition.selector`` AND claimed by a
-:class:`~pgml.scenarios.ConsumerComposition` rule) draws its fundamental P/Q and its
-harmonic injection ENTIRELY from the composition — it SUPERSEDES the mode-bank
-fingerprint and any ``parameters`` / ``profile`` targeting that same load. A load
-outside ``composition.selector``, or with no matching rule, is untouched and keeps the
-ordinary fingerprint / profile behavior.  The mixed ``[B]`` (fingerprint-only devices)
-and ``[B, T]`` (composed devices) operating point is unified to ``[B, T]`` so the whole
-batch shares one leading step axis.
-
-**Sample record keys** written to ``sampled.samples`` (``name`` defaults to
-``"harmonics"``, matching :attr:`~pgml.scenarios.CoherentSpectrumConfig.name`) — the
-per-class attribution ground truth, ordered along ``n_class`` as
-``config.composition.class_names()``:
-
-- ``"<name>_class_p_w"`` — ``[B, n_agg, n_class, T]`` signed per-class active-power
-  contribution (the primary attribution label — which class drew how much power, when).
-- ``"<name>_class_active"`` — ``[B, n_agg, n_class, T]`` (int64) active member count per
-  class per step.
-- ``"<name>_cap_binding"`` — ``[B, n_agg, n_ord, T]`` where
-  ``max_injection_pu`` clipped the relative magnitude (a diagnostic on the residual-THD
-  floor, not an error).
-- ``"<name>_agg_ids"`` — ``[n_agg]`` the covered load ids, in aggregation order.
-- ``"<name>_roster_p_rated"`` — ``[n_agg, n_class, max_count]`` the per-member rated
-  powers (a zero-padded sidecar; ``max_count`` = the largest member count drawn for any
-  one (load, class) pair).
-- ``"<name>_composed_mag"`` / ``"<name>_composed_phase"`` — ``[B, n_agg, n_ord, T]`` the
-  REALIZED aggregate spectrum itself: the member-summed injection in per unit of the
-  aggregate's own fundamental current and in degrees (the same pair
-  ``harmonic_injection`` carries), on the ``"<name>_agg_ids"`` device axis — so a written
-  composed dataset records what was actually injected, not only the per-class power split
-  above. Audited downstream as ``pgl.data.validate``'s ``i_h_emission_pct`` (see
-  :doc:`/pgl/api/data`'s "Dataset validation gate" section).
-
-:func:`~pgml.scenarios.sample_device_composition` and
-:func:`~pgml.scenarios.resolve_composed_ids` are the underlying functions
-:func:`~pgml.scenarios.sample_coherent_spectra` calls when ``composition`` is set — call
-them directly to inspect the drawn roster and realized attribution before solving.  The
-composition draws on roster + temporal RNG streams distinct from the fingerprint,
-operating-point cube, and profile streams, so ``composition=None`` (the default)
-reproduces the fingerprint-only output byte-for-byte.  ``pgl.data.CompositionLabels`` /
-``pgl.data.DataSource.composition_labels()`` expose these same attribution samples on
-the ML side — see :doc:`/pgl/api/data`.
-
-Calibrated state-estimation presets
-------------------------------------
-
-:mod:`pgml.scenarios.presets` defines HOW a state-estimation dataset is excited, ONCE:
-:func:`~pgml.scenarios.se_random_scenario_config` (Task A — independent snapshots) and
-:func:`~pgml.scenarios.se_coherent_scenario_config` (Task B/C — coherent sequences) build a
-:class:`~pgml.scenarios.ScenarioConfig` / :class:`~pgml.scenarios.CoherentSpectrumConfig`
-from a single calibrated recipe, using every mechanism described above — correlated load
-sampling, per-order emission-phase diversity, PV inverter emission, node-coherent
-fingerprints, statistical device-class composition. Every generator in the suite builds
-from these two functions instead of assembling its own specs: the single-grid training
-workflow's default (no ``--scenario-config``) run, the multi-grid corpus builder
-(:mod:`pgl.data.multigrid`), and :func:`~pgml.grids.se_benchmark_scenario_config`. A recipe
-fix made here reaches all of them at once, and two datasets stamped with the same
-:data:`~pgml.scenarios.SE_PRESET_VERSION` were drawn the same way::
-
-    from pgml.scenarios import se_random_scenario_config, se_coherent_scenario_config
-
-    random_cfg = se_random_scenario_config(
-        grid, orders=[1, 3, 5, 7, 9, 11, 13], n_samples=512, seed=0,
-    )
-    coherent_cfg = se_coherent_scenario_config(
-        grid, orders=[1, 3, 5, 7, 9, 11, 13],
-        n_scenarios=64, n_steps=96, seed=0,
-    )  # start_time defaults to HIGH_ACTIVITY_START_TIME
-
-**The requested orders drive generation, not the other way round.** ``orders`` is the
-SOLVED harmonic set (order 1 = fundamental, never injected); every order above it
-automatically gets a load-emission draw, an emission-phase draw and, on a PV grid, an
-inverter emission and phase draw — so widening or narrowing the requested spectrum widens
-or narrows what is generated, with nothing configured a second time. An order the IEC
-61000-3-2 reference table does not cover raises, naming the order, rather than silently
-injecting nothing there.
-
-**The recipe, briefly** (full rationale in the module docstring of
-:mod:`pgml.scenarios.presets`):
-
-- Load level ``U(0, 1)`` of nameplate through a shared ``demand`` latent (rank correlation
-  0.5, so the feeder's aggregate actually moves instead of concentrating toward its mean),
-  a small per-phase unbalance, and a ``Normal(1.0, 0.0333)`` slack-voltage draw.
-- Harmonic emission as a fraction ``[0, 2]`` of the device's own IEC 61000-3-2
-  current-emission limit — the physically correct per-device reference, not the DIN EN
-  50160 supply-voltage compatibility levels (an order of magnitude too small read as a
-  per-device emission fraction).
-- Emission-phase diversity per (device, order), widening with order, so injections do not
-  all add coherently at a shared bus.
-- A PV inverter's own h5-dominant emission shape, calibrated against measured
-  certification and lab-rack populations (the ``PV_EMISSION_HIGH`` / ``PV_PHASE_SPAN_DEG``
-  tables in :mod:`pgml.scenarios.presets`, an internal calibration surface, not re-exported
-  at the package level).
-- Coherent sequences anchored at :data:`~pgml.scenarios.HIGH_ACTIVITY_START_TIME`
-  (``"2024-06-21T16:00:00"``) — the late-afternoon band where households ramp, EVs arrive,
-  and PV still produces — rather than midnight, which sits in the dead band of every
-  device-class activity preset and would generate a corpus that is dark almost everywhere.
-
-``se_coherent_scenario_config``'s ``mode="composed"`` (default) builds the statistical
-device-class composition described above, pointing its own per-device fingerprint at the
-grid's generators (a PV inverter, since the composition already covers the loads); pass
-``mode="fingerprint"`` for the per-device mode-bank baseline used to isolate the composed
-power/spectrum coupling. Every fundamental / correlation / spectrum knob the two functions
-accept can be overridden per call — the calibrated defaults are a starting point, not a
-locked config; see each function's own docstring for the full parameter list.
 
 Per-node harmonic "error"-source sweep (``run_node_injection_sweep``)
 -----------------------------------------------------------------------
@@ -859,8 +474,8 @@ truth in two places:
   - ``"<name>_perturbed_<field>"`` — shape ``[B]``: the applied value (one entry
     per perturbed field; ``"pq"`` produces both ``_p`` and ``_q`` keys).
 
-For non-perturbation batches (random, cartesian, coherent),
-:attr:`~pgml.scenarios.SampledScenarios.perturbations` is always an empty list.
+For every other kind of batch
+:attr:`~pgml.scenarios.SampledScenarios.perturbations` is an empty list.
 
 Scope note
 ~~~~~~~~~~~
@@ -871,13 +486,62 @@ the inverse / parameter-recovery use case — is deferred to a later phase: it
 requires a branch-aware selector and matrix-valued ground truth that the schema's
 scalar ``nominal_value`` / ``perturbed_value`` fields cannot represent.
 
+Building a batch from values
+-----------------------------
+
+A batch does not have to come from a sampler. :func:`~pgml.scenarios.batch_from_values`
+takes the tensors you already have — a measured load curve, an optimiser's iterate, a
+sequence produced elsewhere — and returns the same
+:class:`~pgml.scenarios.SampledScenarios` the samplers do::
+
+    from pgml.scenarios import batch_from_values, run_scenarios
+
+    batch = batch_from_values(
+        grid,
+        n_samples=2,
+        p_w={load_id: torch.tensor([5.0e3, 2.0e4])},
+    )
+    result = run_scenarios(grid, batch)
+
+A component no mapping names, and a field a mapping leaves out, keep the grid's nominal
+value; there is no fill value to get wrong. Component ids are resolved against the grid, so
+a typo raises instead of being silently ignored. The values pass through untouched, so
+gradients flow from them into the solve and their device and dtype are the solver's.
+
+``n_steps`` declares a STEP axis. With ``n_steps=1`` (the default) the batch is a set of
+independent snapshots and the result is ``[B, N]`` or ``[B, H, N]``; with ``n_steps=T`` the
+per-step values are ``[B, T]`` and the result is ``[B, T, H, N]``. The step count is
+declared rather than inferred, because ``[B, T, N]`` and ``[B, H, N]`` have the same rank.
+
+Plugging in your own generator
+--------------------------------
+
+:func:`~pgml.scenarios.run_scenarios` accepts any :class:`~pgml.scenarios.ScenarioSpec`: an
+object with a ``sample(grid)`` method returning a
+:class:`~pgml.scenarios.SampledScenarios`, and optionally a ``harmonic_orders`` hint that
+declares the spec only makes sense as a harmonic calculation. The serializable configs
+satisfy the protocol themselves, so a generator that lives outside this package plugs into
+the same run and persistence path without the engine knowing its recipe.
+
+Records that are not per scenario
+-----------------------------------
+
+:attr:`~pgml.scenarios.SampledScenarios.samples` holds one row per scenario.
+:attr:`~pgml.scenarios.SampledScenarios.shared_samples` holds the records that have no
+leading scenario axis — a step-time vector, a device-id column, a per-device constant. The
+split is declared because a record whose length happens to equal the batch size cannot be
+told apart by shape, and a misfiled record reads back with the wrong shape.
+:attr:`~pgml.scenarios.SampledScenarios.all_samples` is the merged view, which is also what
+:func:`~pgml.scenarios.read_dataset` returns.
+
 Running scenarios
 -----------------
 
-:func:`~pgml.scenarios.run_scenarios` accepts a :class:`~pgml.scenarios.ScenarioConfig`,
-:class:`~pgml.scenarios.CartesianConfig`, :class:`~pgml.scenarios.CoherentSpectrumConfig`,
-:class:`~pgml.scenarios.SpectrumSweepConfig`, or a pre-built
-:class:`~pgml.scenarios.SampledScenarios` and solves the batch::
+:func:`~pgml.scenarios.run_scenarios` accepts any
+:class:`~pgml.scenarios.ScenarioSpec` — :class:`~pgml.scenarios.ScenarioConfig`,
+:class:`~pgml.scenarios.CartesianConfig`, :class:`~pgml.scenarios.SpectrumSweepConfig`,
+:class:`~pgml.scenarios.NodeInjectionSweepConfig` or a spec of your own — or a pre-built
+:class:`~pgml.scenarios.SampledScenarios`, and solves the batch::
 
     result = run_scenarios(
         grid,
@@ -898,16 +562,19 @@ The ``spec`` argument may also be a pre-built :class:`~pgml.scenarios.SampledSce
 so that sampling and solving can be separated (e.g. inspect the batch before
 solving it).
 
-When ``spec`` is a :class:`~pgml.scenarios.CoherentSpectrumConfig` or a
-:class:`~pgml.scenarios.SpectrumSweepConfig` the runner automatically forces
-``calculation="harmonic"`` and sets ``harmonic_orders`` to ``[1, *config.orders]``
-if not provided, so the minimal invocations are::
-
-    result = run_scenarios(grid, CoherentSpectrumConfig(...))
-    # result.v  shape [B, T, H, N]
+When a spec declares ``harmonic_orders``, as
+:class:`~pgml.scenarios.SpectrumSweepConfig` and
+:class:`~pgml.scenarios.NodeInjectionSweepConfig` do, the runner forces
+``calculation="harmonic"`` and sets ``harmonic_orders`` to ``[1, *spec.harmonic_orders]``
+if none was given, so the minimal invocation is::
 
     result = run_scenarios(grid, SpectrumSweepConfig(...))
     # result.v  shape [B, H, N] (B = number of matched targets)
+
+``load_shunt`` selects the harmonic device Norton shunt for the whole batch. A shunt derived
+from a PER-SCENARIO operating point makes ``Y(h)`` scenario-dependent, so every scenario
+factors its own matrix per order instead of sharing one factorization; ``"none"`` keeps the
+shared one.
 
 Convergence and failed scenarios
 -----------------------------------
@@ -918,11 +585,11 @@ failures, not a total loss.
 :attr:`~pgml.scenarios.ScenarioResult.converged` is ``True`` iff EVERY scenario
 converged; :attr:`~pgml.scenarios.ScenarioResult.failed_states` lists the SCENARIO
 indices (along the ``B`` axis of ``v``) that did not, and the solver logs the
-residual and likely cause for each. For node-coherent (``[B, T, H, N]``) data, a
-scenario counts as failed when ANY of its ``T`` steps failed — the per-step solver
-failure index maps to its scenario via integer division by ``T``, so
-``failed_states`` is always indexed the same way regardless of ``calculation`` or
-whether :func:`~pgml.scenarios.run_scenarios` chunked the batch with ``chunk_size``.
+residual and likely cause for each. For stepped (``[B, T, H, N]``) data a scenario counts as
+failed when ANY of its ``T`` steps failed — the per-step solver failure index maps to its
+scenario by integer division by ``T`` — so ``failed_states`` is always indexed the same way
+regardless of ``calculation`` or whether :func:`~pgml.scenarios.run_scenarios` chunked the
+batch with ``chunk_size``.
 
 Persistence (parquet training data)
 ------------------------------------
@@ -1013,65 +680,31 @@ Beyond the config and seed, ``meta.json`` records what a reload alone cannot rec
   config (or its pre-serialized JSON string). Two configs producing the same hash describe
   the same batch — this is what a reuse gate (e.g. an ablation driver deciding whether to
   regenerate a dataset) compares instead of a field-by-field diff.
-- :func:`~pgml.scenarios.generation_provenance` — everything else a generated dataset should
-  record: ``provenance`` (:func:`~pgml.provenance.code_provenance` — the commit, dirty flag,
-  and library versions; see :doc:`provenance`), ``device_library_version``
-  (:data:`~pgml.scenarios.DEVICE_LIBRARY_VERSION`), and ``standards`` (the ACTIVE EN 50160 /
+- :func:`~pgml.scenarios.generation_provenance` — what pgml itself contributes:
+  ``provenance`` (:func:`~pgml.provenance.code_provenance` — the commit, dirty flag, and
+  library versions; see :doc:`provenance`) and ``standards`` (the ACTIVE EN 50160 /
   IEC 61000-3-2 tables, via :func:`~pgml.scenarios.en50160_provenance` /
   :func:`~pgml.scenarios.iec61000_3_2_provenance`).
 
 Two datasets written from a byte-identical config and seed can still differ numerically
-because the code changed, the shipped device library was recalibrated, or a ``PGML_*``
-environment variable silently swapped a standards table for the run — none of which the
-config or seed alone would show. :func:`~pgml.scenarios.read_dataset` needs none of these
-keys to reload a dataset; a dataset written before they existed simply lacks them.
+because the code changed or a ``PGML_*`` environment variable silently swapped a standards
+table for the run — neither of which the config or seed alone would show.
+:func:`~pgml.scenarios.read_dataset` needs none of these keys to reload a dataset; a dataset
+written before they existed simply lacks them.
 
-Storage dispatch and SoC integration
---------------------------------------
+``write_dataset(..., provenance={...})`` records the caller's own generation stamps under
+``extra_provenance`` in ``meta.json``. This is where a generator records what its config does
+not capture, such as the revision of a calibrated recipe or of a device library, since those
+change the data without changing the config.
 
-:class:`~pgml.schemas.grid_schema.Storage` elements appear in the power-flow
-snapshot as a signed ``(P, Q)`` injection (``p_nom_w > 0`` = discharging /
-injecting).  What couples timesteps is the state of charge (SoC) and the
-dispatch decision; these are resolved outside the per-snapshot solve into a
-realized per-step active-power sequence the solver consumes.
+``read_dataset(path, config_types={"MyConfig": MyConfig})`` reconstructs a config class this
+package does not define. Reconstruction is explicit because reading a dataset must not import
+a module the file chose; the sidecar records ``config_module`` and ``config_class`` so the
+owner is identifiable either way, and without the mapping such a config reads back as a dict.
+``pgml.scenarios.SCENARIO_CONFIG_TYPES`` is the set this package reconstructs on its own.
 
-:func:`~pgml.scenarios.integrate_soc`
-    Realizes a requested power sequence ``[*batch, T]`` under SoC limits and
-    an optional power rating.  Returns a
-    :class:`~pgml.scenarios.StorageDispatchResult` with the realized power and
-    (when a capacity is given) the SoC and energy trajectories.  Uses torch
-    arithmetic so gradients flow through the realized setpoint value; no
-    gradient flows through the dispatch decision itself.
-
-:func:`~pgml.scenarios.dispatch_storage`
-    Convenience wrapper: reads ``energy_capacity_wh``, ``soc``, ``soc_min`` /
-    ``soc_max``, efficiencies, and ``p_rated_w`` from a
-    :class:`~pgml.schemas.grid_schema.Storage` element and delegates to
-    :func:`~pgml.scenarios.integrate_soc`.
-
-:func:`~pgml.scenarios.storage_operating_point`
-    Converts a ``{storage_id: realized_power_w}`` dict from a dispatch step
-    into the ``operating_point`` format consumed by
-    :func:`~pgml.solver.solve_power_flow` /
-    :func:`~pgml.solver.solve_harmonic_flow`.
-
-Example — one-day dispatch cycle::
-
-    from pgml.scenarios import dispatch_storage, storage_operating_point
-
-    # storage is a Storage element with a 10 kWh capacity, 50 % initial SoC
-    result = dispatch_storage(
-        storage,
-        requested_power_w=[5000.0] * 4 + [-3000.0] * 4,   # charge/discharge
-        dt_s=3600.0,
-    )
-    # result.realized_power_w  [8]  — clamped by SoC/rating
-    # result.soc               [9]  — SoC at each step boundary (soc[0] = initial)
-
-    # Build solver operating_point for step 2:
-    op = storage_operating_point(
-        {storage.id: float(result.realized_power_w[2])}
-    )
+``meta.json`` additionally carries the time axis as data — ``n_steps``, ``step_size_s``,
+``t0_unix_s`` — so a consumer does not have to parse a generator-specific config to find it.
 
 .. automodule:: pgml.scenarios
    :members:

@@ -16,8 +16,7 @@ the plotting stack:
 - :func:`~pgml.topology.distance_from_slack` — shortest-path line distance to the
   NEAREST slack along the branch graph (multi-source Dijkstra over the standard
   library ``heapq`` — identical to the single-slack result on a one-source grid); the
-  x-axis of the profile plots and a node feature of the graph learning layer
-  (``pgl.data.build_graph``).
+  x-axis of the profile plots, and a natural node feature for a graph model.
 - :func:`~pgml.topology.connectivity_report` — which ``(node, phase)`` rows have a
   galvanic path to an in-service :class:`~pgml.schemas.grid_schema.Source`; the
   pre-solve structural check behind :func:`pgml.solver.check_connectivity`.
@@ -26,8 +25,8 @@ the plotting stack:
   ``solve_power_flow(..., on_disconnected="zero")``.
 - :func:`~pgml.topology.layout_fingerprint` / :func:`~pgml.topology.network_fingerprint`
   — stable hashes of a grid's row layout and network identity; the check a prepared
-  :class:`~pgml.solver.PowerFlowSystem` and a ``pgl`` checkpoint use to refuse a
-  silently-relabeled or structurally-changed grid.
+  :class:`~pgml.solver.PowerFlowSystem` uses to refuse a silently relabeled or
+  structurally changed grid.
 
 The networkx graph view (:func:`pgml.evaluation.topology.grid_graph`) stays in the
 evaluation package with the plotting stack; :mod:`pgml.evaluation.topology` re-exports
@@ -103,10 +102,9 @@ tensor or a trained model needs to detect that the grid underneath it has change
   node-phase row layout (:func:`pgml.assembly.node_phase_index`) of every solved or
   persisted ``[..., N]`` tensor: the base frequency, each node's id and ``phases``
   tuple in grid order, and the slack anchoring (:func:`~pgml.topology.slack_node_ids`).
-  Two grids with the same layout fingerprint index their voltage rows identically —
-  a ``pgl`` checkpoint embeds this hash and
-  :meth:`~pgl.train.SEModule.from_checkpoint` refuses a grid with a different one
-  (relabeled or reordered nodes, a changed slack, or a different base frequency).
+  Two grids with the same layout fingerprint index their voltage rows identically.
+  A trained model can embed this hash and refuse a grid carrying a different one, after
+  relabeled or reordered nodes, a changed slack, or a different base frequency.
 - :func:`~pgml.topology.network_fingerprint` extends the layout fingerprint with
   everything a prepared power-flow system bakes into the effective admittance: every
   branch and its physical parameters, every :class:`~pgml.schemas.grid_schema.Source`

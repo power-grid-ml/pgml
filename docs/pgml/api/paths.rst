@@ -3,7 +3,7 @@ pgml.paths
 
 Filesystem conventions for experiment inputs and outputs.
 
-pgml, pgl, and pgg never write experiment data into the library tree.  A run's
+pgml never writes experiment data into the library tree.  A run's
 datasets, checkpoints, run configs, and tracking go under the **experiments root** — a
 single directory the user owns and keeps out of version control.  Keeping reproducible-but-bulky
 experiment artifacts separate from the source also lets a run be relocated (e.g. to fast

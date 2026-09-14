@@ -23,24 +23,24 @@ grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀�
 | **Modeling defaults** (documented values + model choices; explicit > defaults > converter) — internal, not user run-config | `defaults.py` (loader) + shipped `data/` | `data/CONTEXT.md` |
 | **Run-config schemas** (serializable; one config + seed reproduces a run) — user-facing | `scenarios/config.py` (data gen) | `scenarios/CONTEXT.md` |
 | **Experiments root** (where run outputs + config instances live; `PGML_EXPERIMENTS`, default `./data`) | `paths.py` | `data/README.md` |
-| **Y-bus assembly** (per-phase/per-harmonic/batched stamps; network + device injections; node-phase index; branch currents; vector-group transformer; control laws) | `assembly/` | `assembly/CONTEXT.md` |
+| **Y-bus assembly** (per-phase/per-harmonic/batched stamps; network + device injections; node-phase index; branch currents; vector-group transformer; control laws; exact bus fusion of zero-impedance branches) | `assembly/` | `assembly/CONTEXT.md` |
 | **Solve** (complex batched linear; nonlinear const-P/ZIP via IFT; Newton; harmonic flow; diagnostics + loadability) | `solver/` | `solver/CONTEXT.md` |
 | **Geometry → impedance** (differentiable Carson/Deri + skin; R/X → geometry synthesis; sequence-aware harmonic line models) | `geometry/` | `geometry/CONTEXT.md` |
 | **Converters** from pandapower / power-grid-model / OpenDSS → our `Grid` | `convert/` | `convert/CONTEXT.md` |
-| **Batched scenario sampling** (QMC/cartesian, reproducible; parquet I/O; ML training data) | `scenarios/` | `scenarios/CONTEXT.md` |
+| **The batch contract** (declare a batch of solver-input deltas — QMC/cartesian sampling, explicit values, the excitation sweeps, the upstream background, the standards tables; solve it batched; persist it as parquet) | `scenarios/` | `scenarios/CONTEXT.md` |
+| **Storage dispatch** (state-of-charge integration + the realized power sequence a `Storage` element's energy-state fields describe) | `dispatch.py` | `scenarios/CONTEXT.md` |
 | **Topology bookkeeping** (slack anchor, branch edges, distance-from-slack Dijkstra) — stdlib-only, safe for lean training imports | `topology.py` | — |
 | **Benchmark input grids** (IEEE-33 / CIGRE LV via pandapower; the canonical example/training feeders; `synthetic_feeder` for arbitrary-size scaling studies) | `grids.py` | — |
 | **Multi-grid batching** (disjoint-union merge of a grid ensemble into ONE solvable Grid — block-diagonal `Y` for free; per-member id maps, `operating_point`/`branch_states` translation, `split()` row views, `block_rows()` for the block-diagonal factorization backend) | `multigrid.py` | — |
 | **Evaluation plots** (Y-bus heatmaps, voltage/harmonic profiles, 3D, refs-vs-ours) + the optional reference oracles | `evaluation/` | `evaluation/CONTEXT.md` |
-| The **public API** — `simulate(grid, config, *, device, dtype, param_overrides, harmonic_injection, node_sources, strict, on_disconnected, linear_solver, block_rows) -> SolvedState`, `simulate_serializable(grid, config, **simulate_kwargs) -> ResultBundle`, `SolvedState`, `SimulationConfig` | `simulation.py` | `docs/pgml/public-api.md` |
+| The **public API** — `simulate(grid, config, *, device, dtype, precision, param_overrides, harmonic_injection, node_sources, strict, on_disconnected, linear_solver, block_rows, equilibrate) -> SolvedState`, `simulate_serializable(grid, config, **simulate_kwargs) -> ResultBundle`, `SolvedState`, `SimulationConfig` | `simulation.py` | `docs/pgml/public-api.md` |
 | The **error hierarchy** (`PgmlError` → `InputError` / `ComputationError`, http_status hints; `PgmError` = deprecated alias) | `errors.py` | — |
 | **Code provenance** (`code_provenance()` / `git_state()` — the commit/dirty/version stamp every persisted artifact records; reads git or the cluster sync's `.git-provenance.json`) | `provenance.py` | — |
-| **Calibrated SE recipes** (`se_random_scenario_config` / `se_coherent_scenario_config` — the ONE excitation recipe every state-estimation dataset generator builds from; `SE_PRESET_VERSION`, `DEVICE_LIBRARY_VERSION`) | `scenarios/presets.py` | `scenarios/CONTEXT.md` |
 
 ## Frozen-contract rule
 
-`schemas/` (grid/result/scenario) is the single source of truth — import and conform; never
-edit it as a subagent (orchestrator-only, ask the user first). `SCHEMA_VERSION` stamps the
+`schemas/` (grid/result/scenario) is the single source of truth — import and conform; a
+schema change needs the maintainer's sign-off first. `SCHEMA_VERSION` stamps the
 contract version into persisted datasets. Full rule: `CLAUDE.md`.
 
 ## Key conventions (do not reinvent)

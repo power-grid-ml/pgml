@@ -36,7 +36,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import time
 
 import torch
 
@@ -45,22 +44,9 @@ from pgml.solver import solve_power_flow
 from pgml.solver.harmonic import lu_factor_system, solve_factored
 from pgml.assembly import assemble_network_ybus
 
+from _common import _time
+
 logging.getLogger("pgml").setLevel(logging.WARNING)
-
-
-def _time(fn, *, repeat: int = 3, sync: bool = False) -> float:
-    """Best-of-``repeat`` wall time of ``fn()`` in seconds (1 warmup call)."""
-    fn()
-    best = float("inf")
-    for _ in range(repeat):
-        if sync and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        fn()
-        if sync and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        best = min(best, time.perf_counter() - t0)
-    return best
 
 
 def batched_operating_point(grid, b: int, seed: int = 0) -> dict:
@@ -84,10 +70,10 @@ def bench_backend(y, backend: str, b: int, device) -> dict:
     rhs1 = torch.randn(1, n, dtype=y.dtype, device=device)
     rhsb = torch.randn(b, 1, n, dtype=y.dtype, device=device)
     sync = device.type == "cuda"
-    t_factor = _time(lambda: lu_factor_system(y, backend=backend), sync=sync)
+    t_factor = _time(lambda: lu_factor_system(y, backend=backend), repeat=3, sync=sync)
     fac = lu_factor_system(y, backend=backend)
-    t_solve1 = _time(lambda: solve_factored(fac, rhs1), sync=sync)
-    t_solveb = _time(lambda: solve_factored(fac, rhsb), sync=sync)
+    t_solve1 = _time(lambda: solve_factored(fac, rhs1), repeat=3, sync=sync)
+    t_solveb = _time(lambda: solve_factored(fac, rhsb), repeat=3, sync=sync)
     return {
         "backend": backend,
         "device": device.type,

@@ -65,6 +65,24 @@ def test_gradcheck_sparse_multi_factorization_batch():
     assert torch.autograd.gradcheck(f, (y, i), eps=1e-6, atol=1e-8)
 
 
+def test_gradcheck_sparse_interleaved_shared_rhs_axis():
+    """A singleton factor axis shares each factor across coherent-sequence steps."""
+    b, steps, h, n = 2, 2, 2, 3
+    torch.manual_seed(7)
+    y = (
+        torch.randn(b, 1, h, n, n, dtype=torch.complex128)
+        + n * torch.eye(n, dtype=torch.complex128)
+    ).requires_grad_(True)
+    i = torch.randn(b, steps, h, n, dtype=torch.complex128).requires_grad_(True)
+
+    def f(y_, i_):
+        return solve_factored(
+            lu_factor_system(y_, backend="sparse", equilibrate="off"), i_
+        )
+
+    assert torch.autograd.gradcheck(f, (y, i), eps=1e-6, atol=1e-8)
+
+
 def test_power_flow_gradients_backend_independent():
     """IFT parameter gradients are identical for dense and sparse forwards."""
     grid = synthetic_feeder(8)

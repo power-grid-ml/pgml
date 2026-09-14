@@ -15,5 +15,5 @@ source of truth, so these never drift):
 python -m pgml.scenarios.config --json-schema   # or --example
 ```
 
-The dependent packages follow the same convention in their own repositories (`pgl.config`
-for training, `pgl.data.multigrid` for the multi-grid corpus, `pgg.config` for generation).
+Packages built on this engine follow the same "config" convention for their own
+serializable run schemas.

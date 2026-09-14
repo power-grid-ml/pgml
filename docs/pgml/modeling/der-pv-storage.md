@@ -1,499 +1,360 @@
-# DER modelling: PV systems, generators, and storage across tools
+# DER: PV inverters, generators and storage
 
-How pandapower, OpenDSS and power-grid-model model distributed-energy-resource (DER)
-behaviour — PV inverters, synchronous/asynchronous generators, and battery storage —
-contrasted with pgml's current model, followed by a differentiability-aware proposal for
-extending pgml. The motivating gap: pgml has a single generic `Generator` appliance (a
-fixed P/Q injection) and **no storage component**, so it cannot express the behaviour that
-actually distinguishes these devices — inverter Volt-VAr / Volt-Watt control, MPPT,
-reactive-power limits, and state-of-charge-driven dispatch.
+How pgml represents distributed energy resources, what rides the autograd tape and what does
+not, and how the model lines up with pandapower, OpenDSS and power-grid-model.
 
-This started as a design reference; the core of section 4 now ships.
+## The five questions a DER model has to answer
 
-**Implementation status.** Sections 4.1–4.4 and 4.6 (control→harmonic coupling) are
-implemented and validated. The schema carries the `InverterControl` union + `Characteristic`
-on `Generator`/`Storage`, the `Storage` appliance, and the `InjectionAppliance` base; the
-differentiable control law lives in `assembly/_control.py` (folded into
-`device_current_injections`, rides the IFT); storage SoC/dispatch is `scenarios/storage.py`.
-Validated vs pandapower `CharacteristicControl` Q(V) (same equilibrium to ~1e-10 pu) and
-OpenDSS `InvControl` VOLTVAR/VOLTWATT. Still open (optional): the voltage-regulating PV bus
-(§4.5) and the harmonic load Norton shunt (§4.6, tracked as open work in `src/pgml/STATUS.md`).
+1. Bus behaviour. Is the device a fixed P/Q injection, a voltage-regulating source with free
+   reactive power, or the slack. Most DER on a distribution feeder are the first. pgml models
+   all three: a PQ injection (`Load`, `Generator`, `Storage`), the slack (`Source`) and a PV
+   terminal (`Generator.voltage_regulation`).
+2. Inverter control law. A grid-following inverter does not hold P and Q constant. It follows
+   a characteristic, constant power factor, `cosφ(P)`, Volt-VAr `Q(V)`, Volt-Watt `P(V)`, or
+   a combination, subject to a capability limit.
+3. Active-power source. A PV array's available power comes from irradiance and temperature
+   through maximum-power-point tracking. A battery's comes from a dispatch decision.
+4. Output impedance. A grid-following inverter behaves as a current source at the
+   fundamental and injects harmonics as a current source. A synchronous machine sits behind
+   its sub-transient reactance. This matters mostly at harmonic orders.
+5. State and time coupling. A battery carries state of charge, and dispatch couples time
+   steps through `SoC[t+1] = SoC[t] + η·P·Δt`.
 
----
+Questions 1 to 4 are piecewise smooth functions of local quantities, so they belong on the
+differentiable path. Question 5 is stateful and rule-driven, and in every tool surveyed it is
+integrated outside the per-snapshot solve.
 
-## 1. The modelling questions
+## What pgml does
 
-A "PV system", a "generator" and a "battery" differ along axes that a power-flow /
-harmonic engine must represent explicitly. The libraries differ mainly in *how many* of
-these axes they expose:
+One injection appliance covers every kind of device. `Generator` and `Storage` carry an
+optional `control` block, and which control and harmonic model is set is what makes a device a
+PV inverter, a wind plant or a genset. `consumer_type` is a closed taxonomy used as a
+categorical feature and never drives the physics.
 
-1. **Fundamental bus behaviour.** Is the device a fixed P/Q injection (a PQ node), a
-   voltage-regulating source (a PV node, free Q to hold |V|), or the slack? Most DER on a
-   distribution feeder are PQ; only large synchronous machines / the grid equivalent
-   regulate voltage.
-2. **Inverter control law.** A modern grid-following inverter does not hold P/Q constant —
-   it follows an *autonomous* characteristic: constant power factor, power-factor-vs-power
-   `cosφ(P)`, Volt-VAr `Q(V)`, Volt-Watt `P(V)`, or a combination, subject to a kVA /
-   reactive-capability limit. These are **equation-defined** functions of the local voltage
-   and the available active power.
-3. **Active-power source.** A PV array's available power is set by irradiance and
-   temperature through MPP tracking (`P = irradiance·Pmpp·f(T)`); a battery's is set by a
-   dispatch decision; a synchronous genset's by a governor/schedule. The first is a smooth
-   exogenous curve; the last is a **rule / schedule**.
-4. **Internal / output impedance.** A grid-following PV inverter behaves as a near-ideal
-   current source (high output impedance) at the fundamental and injects harmonics as a
-   current source; a synchronous machine sits behind its sub-transient reactance `Xd"`.
-   This matters mostly at harmonic frequencies (the Norton shunt).
-5. **State and time-coupling.** A battery carries state of charge; dispatch couples
-   timesteps (`SoC[t+1] = SoC[t] + η·P·Δt`) and may be governed by rules, price signals,
-   profiles, or human behaviour — **not** by a closed-form equation of the present voltage.
+The control laws are a discriminated union over a common base that carries the capability
+circle `s_rated_va` and a `smoothing` half-width.
 
-Axes 1–4 are (piecewise) smooth functions and are candidates for the differentiable path.
-Axis 5 is stateful/rule-based and is, in every tool surveyed, integrated **outside** the
-per-snapshot solve.
+| Control | Law |
+|---|---|
+| `ConstantPowerFactorControl` | `Q = P·tanφ` |
+| `ConstantReactivePowerControl` | `Q` fixed |
+| `PowerFactorWattControl` | `cosφ(P)`, the VDE-AR-N 4105 shape |
+| `VoltVarControl` | `Q(|V|)` from a characteristic |
+| `VoltWattControl` | `P(|V|)` curtailment above a voltage threshold |
+| `VoltVarVoltWattControl` | Both together |
 
----
+Characteristics use the generic tensor-capable `Characteristic`, with `x_values`, `y_values`
+and linear or cubic interpolation, so curve points are differentiable parameters like any
+other.
 
-## 2. Cross-library comparison
+The capability limit applies with watt priority. Active power is clipped to the rating first,
+because an oversized array cannot exceed the inverter rating through `P` alone, then the
+reactive magnitude is bounded by the remaining headroom on the circle.
 
-### 2.1 pandapower
+## Why the control law is not an outer loop
 
-pandapower is a NumPy/pandas + Newton-Raphson balanced (and three-sequence) load-flow
-engine; **no harmonics**, **no autograd**.
+`device_current_injections` computes each element's effective power from a base power and a
+ZIP voltage factor. A control law makes that base power voltage dependent, so instead of a
+constant `S0` the device contributes
+`S0 = P_ctrl(|V_term|, P_avail) + j·Q_ctrl(|V_term|, P)`. Everything downstream is unchanged.
 
-- **`sgen` (static generator)** — the PV/wind/DER element. Modelled as a **constant-PQ
-  injection in generator convention** (positive `p_mw` = injection); the connected bus
-  stays a PQ bus. `scaling` multiplies P and Q; `sn_mva`, `k`, `rx`, `current_source`,
-  `generator_type` affect only short-circuit (IEC 60909), not load flow. The `type` column
-  accepts `'pv'` as a free label with no special treatment. [pp-create-sgen][pp-sgen-doc]
-- **`gen` (voltage-controlled generator)** — a **PV bus**: fixed P, regulated `vm_pu`, free
-  Q. `enforce_q_lims=True` adds the standard **PV→PQ switching loop**: a generator whose Q
-  exceeds `min/max_q_mvar` is clamped, its bus converted to PQ, and the system re-solved.
-  `ext_grid` is the slack (REF) bus. [pp-gen-doc][pp-qlims] pgml's pandapower converter
-  DROPS this table by default and can, on request, approximate it with a steep Volt-VAr
-  droop — see §4.5.
-- **`asymmetric_sgen`** — per-phase P/Q; summed to a balanced injection in `runpp`, handled
-  per phase in `runpp_3ph`. [pp-asym]
-- **`storage`** — a **constant-PQ element at each snapshot**, in *load* convention
-  (`p_mw > 0` = charging/consuming). `soc_percent`, `max_e_mwh`, `min_e_mwh` are stored but
-  **never read by `runpp`** — the docs state SoC is not updated by the power flow. SoC
-  integration is the caller's responsibility via the time-series module. [pp-storage]
-- **Control loop.** `run_control` is an **outer fixed-point loop around `runpp`**: each
-  controller's `control_step` writes setpoints, `runpp` solves, controllers re-check
-  convergence, repeat until all converge (≤ `max_iter`, default 30). `ConstControl` writes
-  profile values (1-step convergence); `CharacteristicControl` maps an input column (e.g.
-  `res_bus.vm_pu`) through a piecewise-linear `Characteristic` to an output column (e.g.
-  `sgen.q_mvar`), iterating until `|Δoutput| < tol`. This is exactly how a `Q(V)` / `cosφ(P)`
-  law is realised. [pp-runcontrol][pp-characteristic]
-- **Built-in DER curves.** Volt-VAr / Volt-Watt laws are assembled from the generic
-  `CharacteristicControl` + `Characteristic`; pandapower 3.x additionally ships a
-  dedicated `DERController` family (`QModelQV`, `QModelCosphiP`, PQV capability
-  areas) — verify behaviour against the installed version before relying on it.
-  [pp-characteristic]
+The nonlinear solve shares one residual with its backward pass,
+`F(V) = Y_eff·V + I_device(V) − I_slack`, and the implicit-function-theorem backward
+differentiates that residual once at the converged voltage. At a voltage-regulating terminal
+the residual instead carries a `|V|`-regulation row, with the reactive power eliminated
+analytically so the Jacobian keeps its size. The new `∂Q/∂|V|` and `∂P/∂|V|` terms therefore
+appear in the Jacobian automatically. No new adjoint code, and no unrolled
+iteration. Forward Newton uses the same Jacobian, so its behaviour near the loadability limit
+is preserved.
 
-### 2.2 OpenDSS
+pandapower and OpenDSS both realise a control law as an outer loop that re-solves the power
+flow until the setpoints stop moving. Folding the law into the residual instead makes it part
+of the implicit function `V*(θ)`, so the gradient of any output with respect to a curve slope,
+a rating or an irradiance value is available directly. That is what makes gradient-based
+tuning of inverter settings, or recovery of an unknown `Q(V)` slope from measurements,
+possible.
 
-OpenDSS is the harmonic ground truth (phase-domain, current-injection). DER are Power
-Conversion Elements with a fundamental dispatch model **and** a harmonic Norton model, and
-control is realised by separate Control Elements iterating with the power-flow solve.
+## Kinks on a differentiable path
 
-- **`PVSystem`** — combined PV array + inverter. Active power from MPP tracking:
-  `P_DC = irradiance · Pmpp · P-TCurve(Temperature)`, then `P_AC = EffCurve(P_DC/kVA)·P_DC`.
-  Inverter rating `kVA` bounds P and Q (capability curve). Reactive behaviour set by `pf`
-  (constant power factor) or `kvar` (constant kvar). `%Cutin`/`%Cutout` gate the inverter
-  on/off with **hysteresis**; `Vminpu`/`Vmaxpu` revert it to a constant-admittance model
-  outside the band. Time variation via `daily`/`yearly`/`duty` LoadShapes (irradiance) and
-  TShapes (temperature). [dss-pvsystem][dss-pvarray][dss-pvinv]
-- **`Generator`** — the `model` integer selects the fundamental behaviour:
-  `1` constant P,Q (default); `2` constant Z; `3` **constant P,|V| = PV bus** with
-  `min/maxkvar` limits; `4` constant P, fixed Q; `5` constant P, fixed reactance;
-  `6` user DLL; `7` **current-limited constant P,Q** (grid-following inverter / wind: limits
-  terminal current to ≈1 pu below `Vminpu`). [dss-generator][dss-model]
-- **`Storage`** — explicit `State` ∈ {IDLING, CHARGING, DISCHARGING}; nameplate `kWhrated`,
-  `kWrated`, `%stored`, `%reserve`; one-way `%EffCharge`/`%EffDischarge` (round-trip ≈81%
-  by default); `%IdlingkW`. SoC evolves over a QSTS solve
-  (`E[t+Δt] = E[t] + P_ch·η_ch·Δt` charging, `E[t+Δt] = E[t] − P_dch·Δt/η_dch`
-  discharging); a single snapshot is a **fixed P/Q injection** with no SoC update.
-  `dispmode` ∈ {DEFAULT, FOLLOW, EXTERNAL, LOADLEVEL, PRICE}, and the **`StorageController`**
-  element dispatches a fleet to a monitored quantity (PeakShave, Follow, Support, Time,
-  Price, …). [dss-storage][dss-operation][dss-storagecontroller]
-- **`InvControl` / `ExpControl`** — the inverter control elements. `InvControl` modes:
-  `VOLTVAR` (piecewise-linear `Q(V)` XYcurve), `VOLTWATT` (`P(V)` limit), `DYNAMICREACCURR`
-  (deadband reactive current), `WATTPF`, `WATTVAR`, and `CombiMode` `VV_VW` / `VV_DRC`.
-  `ExpControl` is a continuous **exponential Volt-VAr** with an adaptive voltage reference
-  (`VregTau`), modelling IEEE-1547 autonomous voltage regulation (no deadband). Both run in
-  OpenDSS's **control-iteration loop**: solve power flow → read voltages → evaluate curve →
-  push new P/Q setpoint → re-solve, up to `MaxControlIter`. Step damping (`deltaQ_Factor`,
-  `deltaP_Factor`), averaging windows, and rate-of-change limits (`LPF`, `RISEFALL`)
-  stabilise the loop. [dss-invcontrol][dss-vvfunc][dss-expcontrol][epri-smartinv]
-- **Harmonics.** Each PCElement injects a harmonic **current source** scaled from the
-  fundamental current and its `spectrum`: `|I_h| = (mag_h/mag_1)·|I₁|`,
-  `∠I_h = ang_h + h·(∠I₁ − ang_1)`. Generators/PVSystem/Storage convert to a Thévenin
-  behind an internal reactance (`Xd"` for machines; `%X` ≈ a few tens of % of kVA for the
-  inverter) → Norton equivalent for the nodal solve. A well-designed UL-1741 inverter emits
-  little at orders 3–13; significant content usually originates downstream. Loads add a
-  Norton shunt split between series and parallel R-L (`%SeriesRL`, default 50%) unless
-  `NeglectLoadY=yes` (pure current source). [dss-harmflow][dss-harmload][repo-harmonics]
+Volt-VAr and Volt-Watt curves, deadbands and capability clamps have corners. The forward pass
+evaluates the exact piecewise-linear curve and the hard clamp, which is what matches the
+reference tools at the operating point. For gradients each corner has a smooth variant, a
+blended breakpoint and a soft saturation, controlled by the `smoothing` half-width. A width of
+zero recovers the hard curve, and a positive width makes the map continuously differentiable
+so the Jacobian is well defined. This is the same approach the rest of the library takes when
+it guards a division by zero. Keep the forward correct and keep the gradient finite.
 
-### 2.3 power-grid-model (secondary data point)
+Genuinely discrete switches stay discrete. An inverter trip, or a cut-in and cut-out
+threshold with hysteresis, is resolved upstream into whether the device injects at all, rather
+than becoming a branch inside the solve.
 
-Fundamental-frequency only; **no harmonics, no storage, no voltage control.**
-`sym_gen`/`asym_gen` are injection components (a generator is a load with reversed sign)
-parameterised by `LoadGenType` ∈ {const_power, const_impedance, const_current} — the same
-ZIP-style voltage dependence pgml uses. `source` is the slack/Thévenin equivalent
-(`u_ref`, `sk`, `rx_ratio`, `z01_ratio`). The only voltage regulator is
-`transformer_tap_regulator` (discrete tap stepping); there is no PV bus, no Q-limit, no
-inverter control, and no battery component — storage must be faked as a signed `sym_gen`
-with no SoC. [pgm-components]
+## Storage, state of charge and dispatch
 
-### 2.4 pgml (current state)
+The snapshot solve sees a signed P/Q injection and nothing else, which is what pandapower and
+OpenDSS do as well. `Storage` carries `p_nom_w` signed so that a positive value discharges,
+plus the energy-state fields `energy_capacity_wh`, `soc`, `soc_min`, `soc_max`,
+`efficiency_charge`, `efficiency_discharge` and `p_rated_w`. Those fields are inert in the
+solve.
 
-- **Elements.** One `Generator` appliance = a P/Q injection with a `LoadModel`
-  (const_power / const_impedance / const_current / ZIP), connection (WYE/DELTA),
-  per-phase split, and an optional harmonic `spectrum` / `spectrum_per_phase` +
-  `HarmonicShuntModel` (Norton series/parallel R-L split, motor reactance). `consumer_type`
-  (`"pv"`, `"battery"`, …) is a **free string used only as an ML categorical** — it does not
-  change the physics. There is **no `Storage` component, no inverter control law, no
-  reactive-power limit, and no PV (voltage-regulating) bus** (the slack is the `Source`).
-  [grid_schema.py: `Generator`, `Load`, `HarmonicShuntModel`, `LoadModel`]
-- **Fundamental solve.** const-P / ZIP via a current-injection fixed point or Newton, with
-  **implicit-function-theorem (IFT) gradients** at the converged `V*`. The nodal balance is
-  `Y_eff·V = I_slack − I_device(V)`; the residual the solver and the IFT backward share is
-  `F_c(V) = Y_eff·V + I_device(V) − I_slack`. Devices enter only through `I_device(V)`:
-  per element `S_eff(V) = S0·(z·r² + i·r + p)` with `r = |V_term|/|V0|`,
-  `i_elem = conj(S_eff)/conj(V_term)`. [solver/power_flow.py:471–491; assembly/ybus.py:1461–1671]
-- **Harmonics.** `solve_harmonic_flow` derives each device's fundamental current `I₁` from
-  `V*` and injects per-order current sources using the OpenDSS-exact convention above;
-  differentiable and batched. The inverter "internal impedance" at harmonics is the
-  `HarmonicShuntModel` Norton shunt (matching OpenDSS), currently off by default
-  (`include_load_shunt=False`, pure current source). [solver/harmonic_flow.py]
-- **Differentiability.** Gradients flow grid params → Y → solve → outputs; the IFT backward
-  builds `J = dR/dV` by autograd-differentiating **one** residual evaluation at `V*`. This
-  is the lever for everything below: any extra smooth, V-dependent term added to
-  `I_device(V)` is picked up by both the forward Newton **and** the IFT backward with no new
-  adjoint code.
+Dispatch and state of charge live in {mod}`pgml.dispatch`.
+{func}`~pgml.dispatch.integrate_soc` realizes a requested power sequence under the state-of-
+charge reserve, the capacity and the power rating, advancing
+`SoC[t+1] = SoC[t] + η·P[t]·Δt` with separate charge and discharge efficiencies, following the
+OpenDSS equations. The dispatch rule itself is the caller's ordinary Python control flow and
+never touches the tape. The realized power is a tensor, so the solve differentiates with
+respect to the setpoint value rather than with respect to the rule that produced it, and the
+state-of-charge recurrence is itself differentiable if a gradient through time is wanted.
 
-### 2.5 Summary
+Maximum-power-point tracking has the same shape. Irradiance and temperature go through the
+array and efficiency curves to an active setpoint, resolved per scenario, differentiable with
+respect to irradiance when a sensitivity is wanted.
 
-| Capability | pandapower | OpenDSS | power-grid-model | pgml (today) |
+## The voltage-regulating (PV) bus
+
+A `Generator` carrying a `VoltageRegulation` block is a PV terminal. Its active power is the
+nameplate or operating-point value, its terminal voltage magnitude is held at `v_set_pu`, and
+its reactive power is whatever that takes, bounded by `q_min_var` and `q_max_var`. It is the
+model behind pandapower `net.gen`, power-grid-model's `voltage_regulator` and OpenDSS
+`Generator model=3`, and it is what makes the MATPOWER transmission benchmarks importable.
+
+### The residual row pair
+
+The solver's real residual carries the complex nodal current mismatch
+`F_c = Y_eff·V + I_device(V) − I_slack`. At a regulating terminal's row the two real equations
+become the power-form pair
+
+```
+g = conj(V) · F_c / v0                      (v0 = the node's line-to-neutral nominal)
+real half:  Re(g)                           active power balance   [A]
+imag half:  (|V_reg|² − V_set²) / (2·V_set) the voltage setpoint   [V]
+```
+
+The generator's reactive current is `−conj(jQ)/conj(V)`, and `conj(V)` times that is `+jQ`,
+purely imaginary. The active half is therefore independent of the reactive power, and the
+imaginary half is the only place it appears, so replacing the imaginary half frees the reactive
+power exactly. It is recovered from the converged solution as `Q = Q_pinned − Im(conj(V)·F_c)`,
+summed over the unit's phases, and reported in `PowerFlowResult.regulation`.
+
+Eliminating the reactive power analytically, rather than carrying it as an extra unknown, keeps
+the state at `[Re V; Im V]`. The `[2N, 2N]` implicit-function-theorem Jacobian, the adjoint and
+the batching are unchanged, and `dV/dv_set` flows through the same backward pass as every other
+parameter. The replacement row is quadratic in `V`, with no `abs` and no `sqrt`, so it is
+smooth and its Jacobian entries are O(1), the same scale as the ideal-slack pinning rows.
+
+### What is regulated
+
+`regulated="positive_sequence"`, the default, holds the positive-sequence magnitude `|V1|`.
+That is balanced regulation, the standard for a machine or a three-phase inverter. A
+three-phase unit then has one reactive power split equally over its phases, so the imaginary
+halves of its other two phases carry the equal-split conditions, which are reactive-power-free,
+while the first carries the setpoint. `regulated="per_phase"` instead holds every phase
+magnitude at the setpoint with its own free reactive power, while the reactive capability stays
+a machine total. On a balanced terminal the two agree exactly.
+
+### Reactive limits
+
+Limits are enforced the standard way, by switching the terminal's bus type between rounds of
+the solve. A unit whose required reactive power leaves its band is re-solved as a plain PQ
+injection pinned at the violated limit, and released when its terminal voltage crosses the
+setpoint from the other side. A hysteresis band
+(`appliance.generator.q_limit_hysteresis_*` in `pgml.defaults`) keeps solver noise from cycling
+the decision. `solve_power_flow(enforce_q_limits=False)` solves every terminal unbounded, which
+is what pandapower's `runpp` does by default.
+
+The switching decision is off-tape, being a comparison of converged values, while the residual
+at the resolved active set is on-tape, so the adjoint is exact for the solved configuration.
+The gradient flows through `v_set_pu` at a regulating terminal and through the binding limit at
+a pinned one. A smooth complementarity or saturation formulation would make the gradient
+continuous across the switching boundary, at the price of satisfying `Q = q_max` only to the
+smoothing width, and the reactive power at the limit is exactly the quantity a comparison
+against another tool checks.
+
+### Solver and scope
+
+A grid with a regulating terminal is always solved by Newton: the current-injection fixed point
+updates the voltage from a current injection, and a regulated row has no injection to form.
+`method="current_injection"` logs the switch. Such a grid also gets a second Newton warm start,
+the balanced nominal profile with every regulated row at its setpoint, which is tried first
+when the constant-impedance seed collapses below half nominal somewhere, and as a fallback
+otherwise.
+
+The row pair is formed for a WYE terminal returning to ground. A DELTA machine raises, because
+its reactive current is shared between two node rows, so only the circulating total is
+observable and not the split. A WYE machine returning through its node's neutral row raises as
+well, so set `return_path="ground"`. So do a positive-sequence setpoint on a two-phase
+terminal, a regulating generator on a `Source`'s node, and two regulating generators on one
+node. Regulation is a fundamental-frequency concept: at harmonic orders the machine stays the
+Norton current source described below.
+
+### Validation
+
+Against `pp.runpp` on the MATPOWER benchmarks as published, the converged voltages agree to
+4.4e-16 pu (case9), 6.2e-12 pu (case14), 8.9e-12 pu (case30), 1.8e-15 pu (case39) and
+3.1e-15 pu (case57), with case14 and case30 at pandapower's own mismatch tolerance, and the
+generator reactive powers to 7.9e-9 Mvar. With reactive limits enforced in both tools, the same
+generators switch to PQ at the same reactive power: case39 one of nine, to 1.3e-10 Mvar;
+case118 six of 53, to 7.3e-12 Mvar. case118 and case300 differ by 6.7e-3 and 1.0e-2 pu as
+published, entirely because of the magnetizing-branch placement described in
+{doc}`transformer`; with `i0_percent` zeroed in both tools they agree to 6.7e-16 and 3.0e-14 pu.
+Against OpenDSS `Generator model=3` on a two-bus feeder: 6.6e-10 pu in voltage and
+4.2e-4 kvar in reactive power while regulating, with 4 Newton iterations against OpenDSS's 108
+of its own, and 1.7e-13 pu and 1.3e-8 kvar with the machine pinned at a reactive limit.
+
+### The droop approximation
+
+The earlier Volt-VAr approximation remains available as
+`pgml.convert.pandapower.to_grid(net, gen_mode=GenMode.VOLT_VAR_APPROX)`. A Volt-VAr
+characteristic centred on the generator's own voltage setpoint and saturating at its reactive
+limits reproduces PV-bus behaviour in the limit of an infinite slope, and because it is an
+ordinary inverter control it rides the same backward pass. It holds the voltage only to
+`Q/(slope·Q_base)` per unit, and outside a `1/slope`-wide band it carries no voltage-control
+feedback at all: on `case39` it converges silently onto the collapsed low-voltage branch at
+every steepness. Use it to model a real droop-controlled DER, not to import a transmission
+benchmark.
+
+## Harmonics follow the control state
+
+Each device's harmonic injection is derived from its fundamental current, with
+`|I_h| = (mag_h/mag_1)·|I₁|` and `∠I_h = ang_h + h·(∠I₁ − ang_1)`. A control law changes the
+fundamental operating point, which changes `I₁`, which rescales the harmonic current sources.
+The spectrum therefore tracks the control state with no extra machinery, and it stays
+differentiable through `I₁`.
+
+A `Load` also carries the OpenDSS device Norton shunt in parallel with its current sources
+(`load_shunt`, default `appliance.harmonic_shunt.model`), which is the dominant damping term at
+a feeder parallel resonance. A generation-sign device does not: the load expression
+`conj(S_eff)/V_rated²` has a negative conductance when `S` is negative, so applying it to an
+inverter would feed harmonic energy into the network instead of damping it, and no physical
+inverter or machine does that. The policy is the documented default
+`appliance.harmonic_shunt.generation_model`, shipped as `none`, whose `load_style` setting
+applies the load expression anyway and reproduces the negative-kW `Load` idiom an OpenDSS
+export uses. Naming the `motor` model on a device grants it the blocked-rotor branch, and
+`harmonic_model.neglect_shunt = true` always wins. One warning per assembly names how many
+generation devices were left as pure current sources.
+
+Measured against a live OpenDSS on a feeder whose only injecting device is a distorting
+inverter, orders 3 to 25: the shipped default agrees with OpenDSS's `NeglectLoadY=Yes` to
+1.05e-13 pu of nominal at 20 kV and 7.90e-13 pu on a 400 V cable feeder, and `load_style`
+agrees with OpenDSS's negative-kW `Load` shunt to the same precision. The difference between
+the two models on those feeders is 3.2e-7 and 4.9e-5 pu of nominal, and 0.9 % relative on the
+node's THD. The choice is about the sign of the term rather than its present size.
+
+What a real grid-following inverter presents is a filter impedance, and a synchronous machine
+its subtransient reactance (OpenDSS `%R`/`%X`, `Xdpp`), neither of which is the
+operating-point admittance the device shunt models and neither of which is a field of this
+schema. A measured filter impedance is open work. Modern PWM inverters also emit little at low
+orders while producing content between and above the integer orders, which the schema can carry
+as data but the integer-order solve does not represent.
+
+## Cross-tool comparison
+
+| Capability | pandapower | OpenDSS | power-grid-model | pgml |
 |---|---|---|---|---|
-| PV/DER element | `sgen` (PQ) | `PVSystem` | `sym_gen` (PQ) | `Generator` (PQ) |
-| PV (voltage-regulating) bus | `gen` | `Generator model=3` | — | — (slack only; a `net.gen` import is approximated by a Volt-VAr droop, §4.5) |
-| Reactive-power limit | `enforce_q_lims` (PV→PQ) | `min/maxkvar` | — | — |
-| Constant power factor | via control | `pf` | — | — |
-| Volt-VAr `Q(V)` | `CharacteristicControl` | `InvControl VOLTVAR` / `ExpControl` | — | — |
-| Volt-Watt `P(V)` | `CharacteristicControl` | `InvControl VOLTWATT` | — | — |
-| MPPT (P from irradiance/T) | external profile | `PVSystem` P-T/Eff curves | external | external setpoint |
-| Storage element | `storage` (PQ, ext. SoC) | `Storage` + `StorageController` | — | — |
-| SoC in the solve | no (external) | QSTS only (external to snapshot) | — | — |
-| Harmonics | no | yes (current-source Norton) | no | yes (current-source Norton) |
-| Control ↔ solve coupling | outer loop around `runpp` | control-iteration loop | — | (would be inside the IFT residual) |
-| Differentiable | no | no | no | **yes (IFT)** |
+| DER element | `sgen`, a PQ injection | `PVSystem` | `sym_gen`, a PQ injection | `Generator` |
+| Voltage-regulating bus | `gen` | `Generator model=3` | `voltage_regulator` | `Generator.voltage_regulation`, an exact residual row pair |
+| Reactive limit | `enforce_q_lims`, switching PV to PQ | `min/maxkvar` | `q_min`/`q_max`, declared | PV to PQ switching, or the capability circle for a droop-controlled unit |
+| Constant power factor | through a controller | `pf` | none | `ConstantPowerFactorControl` |
+| Volt-VAr, Volt-Watt | `CharacteristicControl` | `InvControl`, `ExpControl` | none | control union |
+| Storage | `storage`, PQ with external SoC | `Storage` with `StorageController` | none | `Storage` with external dispatch |
+| Harmonics | no | yes, current source plus an operating-point shunt | no | yes, the same model, and no shunt on a generation device |
+| Control coupling | outer loop around the solve | control-iteration loop | none | inside the residual |
+| Differentiable | no | no | no | yes |
 
-**The pattern every tool follows:** the device's *operating point* (P, Q, on/off, SoC) is
-resolved by a control/dispatch layer that **iterates with** or sits **outside** the
-power-flow solve; the solve itself sees a P/Q (or admittance) injection. pgml's distinctive
-opportunity is that an *equation-defined* control law need not be an outer loop — it can be
-folded **into** the residual `I_device(V)`, where the existing IFT machinery differentiates
-it for free.
+The pattern the other tools share is that a control or dispatch layer resolves the operating
+point and the solve then sees a fixed injection. pgml keeps that split for stateful dispatch
+and moves the equation-defined part inside the residual.
 
----
+A few per-tool details are worth knowing when comparing results.
 
-## 3. Behaviour taxonomy by differentiability
+- pandapower's `sgen` is a constant-PQ injection in generator convention. Its short-circuit
+  fields do not affect the load flow, and its `type` column is a free label.
+- pandapower's `storage` is a constant-PQ element in load convention, and its state of charge
+  is documented as not updated by the power flow.
+- OpenDSS computes a `PVSystem`'s active power as `P_DC = irradiance·Pmpp·f(T)` followed by an
+  efficiency curve, bounds P and Q by the inverter rating, and gates the inverter with
+  hysteresis thresholds.
+- OpenDSS `Generator` selects its behaviour with a `model` integer, where 1 is constant P and
+  Q, 3 is a voltage-regulating bus and 7 is a current-limited inverter.
+- power-grid-model has no harmonics and no storage. Its `voltage_regulator` component makes an
+  existing generator or load a PV terminal, with optional reactive bounds. The pgml reader does
+  not map it yet. Its only other regulator is a discrete transformer tap.
 
-The user's framing is the right one: equation-defined behaviour is differentiable; rule- or
-state-defined behaviour is not. Concretely:
+## Validation
 
-### 3.1 Equation-defined → differentiable (fold into `I_device(V)`)
+Inverter control is checked against pandapower's `CharacteristicControl` for `Q(V)`, which
+reaches the same equilibrium to about 1e-10 pu, and against OpenDSS `InvControl` in its
+Volt-VAr and Volt-Watt modes. The differentiability gate runs a float64 gradient check of the
+solved voltage with respect to a curve slope, the capability limit and the active setpoint
+through the smoothed variants, and the device parity gate repeats every injection term on CPU
+and CUDA.
 
-These are (piecewise) smooth maps from the local terminal voltage `V_term` and exogenous
-setpoints to an injection `S(V)`. They enter the residual and are covered by the IFT with no
-new backward code; the only requirement for `gradcheck` is C¹ smoothness (see §4.3 for
-kinks).
+## Sources
 
-- **MPPT active power.** `P = irradiance·Pmpp·f_PT(T)·η(P/kVA)` — a product of curves in
-  *exogenous* inputs (irradiance, temperature). Differentiable w.r.t. those inputs and the
-  ratings; for the solve it is simply the active setpoint `S0.real`.
-- **Constant power factor / constant Q.** `Q = P·tanφ` or `Q = const`. Trivially smooth.
-- **`cosφ(P)`.** Power-factor-vs-active-power characteristic (VDE-AR-N 4105). Smooth in `P`.
-- **Volt-VAr `Q(V)`.** Reactive injection as a (piecewise-linear) function of `|V_term|`,
-  clamped to the reactive capability. Smooth except at curve breakpoints and the clamp.
-- **Volt-Watt `P(V)`.** Active curtailment above a voltage threshold — the user's "modern
-  p(V) control". Same smoothness profile.
-- **ZIP / constant-current limiting.** Already in pgml (`LoadModel`); OpenDSS `model=7`
-  current limiting is a smooth saturation of `|I|`.
-- **Synchronous PV bus + Q-limit.** Holding `|V|` with free Q, then saturating Q at a limit,
-  is the const-|V| constraint plus a smooth clamp; pgml has no PV bus today, but the IFT
-  residual can carry a `|V|`-regulation row (see §4.5).
+- pandapower documentation for `sgen`, `gen`, `storage`, the control loop and
+  `CharacteristicControl`.
+- OpenDSS documentation from EPRI for `PVSystem`, `Generator`, `Storage`,
+  `StorageController`, `InvControl`, `ExpControl`, and the harmonic flow and load pages, plus
+  the EPRI technical note on smart-inverter function modelling.
+- power-grid-model component reference.
+- Interconnection standards that define the characteristics, IEEE 1547-2018, EN 50549-1 and
+  -2, and VDE-AR-N 4105.
+- The spectrum and phase convention is recorded in
+  [OpenDSS harmonics](references/opendss/harmonics.md).
 
-### 3.2 State- or rule-defined → not differentiable as an equation (resolve off-tape)
+## Harmonic internal impedance
 
-These have memory, discrete switches, or exogenous logic; there is no closed-form `f(V)` to
-differentiate, and forcing one is wrong.
+`Generator.harmonic_impedance` and `Storage.harmonic_impedance` describe a passive
+internal impedance independently of the load-shunt approximation. Leave the block
+absent when the impedance is unknown. Fundamental P/Q alone does not identify an
+inverter filter or a machine's subtransient impedance.
 
-- **State of charge.** A *recurrence* `SoC[t+1] = SoC[t] + η·P[t]·Δt`, not a function of the
-  present voltage. The recurrence itself is differentiable (it is linear), but it is a
-  time-series coupling, not part of any single snapshot.
-- **Dispatch rules.** "Discharge when load > threshold", peak-shaving, price triggers,
-  EXTERNAL/LOADLEVEL modes — `if/else` on aggregate state. Discontinuous; no useful gradient.
-- **Deadbands, hysteresis, cut-in/cut-out, on/off.** `%Cutin`/`%Cutout`, Volt-VAr deadband,
-  inverter trip at `Vmin/maxpu` — piecewise-constant switches.
-- **Human behaviour / occupancy / stochastic profiles.** Sampled, not computed.
+```python
+from pgml.schemas import HarmonicImpedance
 
-The robust treatment (and what pandapower/OpenDSS/pgm all do in effect): a **dispatch /
-control resolution layer** produces a concrete operating-point `(P, Q)` per scenario/timestep,
-which becomes pgml's `operating_point` (or `harmonic_injection`) input. Gradients then flow
-w.r.t. the *resolved setpoint value* (a tensor — fully differentiable), **not** w.r.t. the
-rule that produced it. For ML use cases that need a differentiable policy, the rule is
-replaced by a *learned* differentiable surrogate (a small NN producing setpoints), which is
-an ML-layer choice, not a physics equation.
+impedance = HarmonicImpedance(
+    resistance_ohm=0.15,
+    inductance_h=0.0008,
+    spectrum_reference="current",
+)
+```
 
----
+The values describe each WYE phase or DELTA leg; scalars repeat across elements and
+vectors follow connection-element order. Tensor values remain differentiable.
+The default law is a series R–L branch,
+$Y(h) = [R + j\,2\pi h f_0 L]^{-1}$. The block contributes only above the
+fundamental and remains present when `load_shunt="none"`: that option disables
+the load-derived model, not an explicitly specified DER impedance.
+If a Generator or Storage also carries the older `harmonic_model` approximation, the
+explicit impedance takes precedence; the two shunts are not added together.
 
-## 4. Recommendations for pgml
+With `spectrum_reference="current"`, the existing terminal-current spectrum is
+unchanged and the passive impedance is added in parallel. `"internal_voltage"`
+instead initializes the per-element voltage behind the impedance from the solved
+fundamental, $E_1=V_t-Z_1 I_\mathrm{absorbed}$, applies the spectrum to that voltage,
+and injects its Norton current. This preserves dependence on the operating point
+and the impedance for parameter sensitivities.
 
-Guiding principle, consistent with every surveyed tool and with pgml's architecture:
+Native OpenDSS uses two distinct conventions that must be selected explicitly:
+`frequency_model="opendss_admittance"` holds $\Re(1/Z_1)$ constant and scales
+$\Im(1/Z_1)$ by $1/h$; `spectrum_reference="opendss_voltage"` initializes from
+phase 1 and synthesizes the balanced internal nodal-voltage source. These conventions
+are not the same as independently scaling each DELTA leg's voltage spectrum.
+The OpenDSS converter sets both automatically. Machines use pure `Xdpp` reactance;
+`XRdp` belongs to the dynamic model and is not a harmonic resistance. PV and storage
+use `%R`/`%X` on their own kV/kVA base, with the DELTA coil conversion applied once.
+See the native [Generator](https://opendss.epri.com/Generator.html) and
+[PVSystem](https://dss-extensions.org/dss-format/PVSystem.html) definitions.
 
-> **Separate operating-point *resolution* from the physics *solve*.** Smooth, voltage-local
-> control laws fold into `I_device(V)` and ride the existing IFT. Stateful/rule-based
-> dispatch is resolved upstream (in `scenarios` / an external service) into a setpoint that
-> the solver consumes as data. The solver core never branches on a rule.
+Native harmonic import covers one-phase WYE and three-phase WYE/DELTA. Other native
+phase arrangements require `der_harmonics=False` for explicit fundamental-only
+conversion. The general pgml passive connection model and a native OpenDSS model
+are separate choices; matching a primitive alone does not establish source-emission
+conformance.
 
-This keeps the two hard constraints intact: the differentiable path stays an
-autograd-friendly residual; the non-differentiable logic never touches the tape.
-
-### 4.1 Element taxonomy: extend `Generator`, add `Storage`
-
-The behavioural differences (PV vs synchronous vs induction vs battery) are not separate
-*topologies* — every one is a single-terminal P/Q injection with (a) an inverter/machine
-control law, (b) a harmonic source/impedance, and (c) optionally state. So:
-
-- **Keep one injection appliance (`Generator`)** and attach an optional **`control` block**
-  (the inverter/machine law) alongside the existing `harmonic_model`. The device *kind* (PV,
-  wind, CHP, synchronous, induction) is captured by which control + harmonic model is set,
-  not by a new class per device. Promote `consumer_type` from a free string to a closed
-  taxonomy used as an ML feature (it still must not drive physics implicitly).
-- **Add a dedicated `Storage` appliance** (recommended over overloading `Generator`): a
-  bidirectional injection with `p_setpoint` (signed: + discharge / − charge or the reverse,
-  pick one convention and document it), `s_rated_va`, `kwh_rated`, `soc`, `eff_charge`,
-  `eff_discharge`, and a `dispatch_ref` (external profile/rule id). At the snapshot it is a
-  signed P/Q injection identical to a `Generator`; the extra fields are **inert in the
-  solve** (exactly as pandapower `storage.soc_percent` is) and consumed only by the
-  time-series layer. A separate type is clearer for ML stratification and for the SoC/dispatch
-  service than a sign-flipped generator.
-
-These require **schema changes**. Reuse existing machinery: `CurveParam` for characteristics, `FrequencyParam`
-for any frequency dependence, the float/tensor duality so every new numeric field is
-gradient-capable.
-
-### 4.2 Inverter control block (the differentiable core)
-
-Model the control law as a discriminated union (mirroring `Spectrum` / `FrequencyParam`),
-each variant reusing `CurveParam` for its characteristic:
-
-- `ConstantPowerFactor(pf)` / `ConstantReactivePower(q)`
-- `CosPhiOfP(curve)` — `cosφ(P)`
-- `VoltVar(q_v_curve, q_base)` — `Q(|V|)`, `q_base` ∈ {available-VAr, kVA rating}
-- `VoltWatt(p_v_curve)` — `P(|V|)` curtailment
-- `CombinedVoltVarVoltWatt(...)`
-- an optional capability limit (kVA circle / PQ area) applied as a smooth clamp, with
-  watt priority: the active power itself is clipped to the rating first (an oversized
-  source cannot exceed the inverter VA rating through `P` alone), then `|Q|` is bounded
-  by the remaining circle headroom
-
-**Where it slots in.** `device_current_injections` already computes `S_eff(V_term)` from a
-fixed `S0` and a ZIP voltage factor (`assembly/ybus.py:1648–1667`). A control law makes the
-*base* power voltage-dependent: instead of a constant `S0`, compute
-`S0 = P_ctrl(|V_term|, P_avail) + j·Q_ctrl(|V_term|, P)`, where `P_ctrl`/`Q_ctrl` evaluate
-the curves. Everything downstream (`s_eff`, `i_elem = conj(s_eff)/conj(vt)`, the `Mᵀ`
-scatter) is unchanged. Because the IFT backward differentiates the residual
-`F_c(V) = Y_eff·V + I_device(V) − I_slack` **once at `V*`** via autograd
-(`solver/power_flow.py:478–491`), the new `∂Q/∂|V|`, `∂P/∂|V|` terms appear in `J = dR/dV`
-automatically — **no new adjoint, no iteration unrolling.** Forward Newton already uses that
-same `J`, so convergence near the nose is preserved.
-
-This is strictly better than the pandapower/OpenDSS outer control loop for the
-differentiable use case: the control law becomes part of the implicit function `V*(θ)`, so
-gradients of any output (voltages, currents, THD, loss) w.r.t. the curve parameters,
-ratings, and irradiance flow directly — enabling gradient-based tuning of inverter settings,
-parameter recovery of an unknown `Q(V)` slope, and physics-guided ML targets.
-
-### 4.3 Handling non-smooth pieces on the differentiable path
-
-Volt-VAr/Volt-Watt curves, deadbands, and capability clamps have kinks. Two-track approach:
-
-- **Forward (accuracy):** evaluate the exact piecewise-linear curve (`CurveParam` linear
-  interpolation) and hard clamps — matches OpenDSS/pandapower bit-for-bit at the operating
-  point.
-- **Backward (gradients):** for `gradcheck` (float64) and stable training, provide a
-  **smooth variant** of each kink: a soft deadband / smooth breakpoint
-  (`tanh`/`softplus`-blended segments or `CurveParam`'s cubic interpolation), and a smooth
-  saturation (`s·tanh(x/s)` or `softplus`-based) for kVA / Q-limit clamps. At a curve
-  breakpoint the exact map is C⁰ with a subgradient; the smoothing makes it C¹ so the IFT
-  Jacobian is well defined. Document the smoothing width as a model parameter (→ 0 recovers
-  the hard curve). This mirrors how pgml already guards `0/0` divides with `torch.where`:
-  keep the forward correct, keep the gradient finite.
-- **Discrete switches that must stay hard** (inverter trip, cut-in/cut-out): treat as
-  **scenario state**, not an in-solve branch — resolve on/off upstream into whether the
-  device injects at all (§4.4). A straight-through or sigmoid-gated relaxation is available
-  if a gradient through the gate is genuinely needed for ML, but it is opt-in, not the
-  default physics.
-
-### 4.4 Storage, SoC, and rule-based dispatch (off-tape, by design)
-
-Follow pandapower/OpenDSS exactly: **the snapshot solve sees a fixed signed P/Q injection;
-SoC and dispatch live in the time-series layer.**
-
-- **Snapshot.** `Storage` contributes `S0 = ±(P + jQ)` to `I_device(V)` like a generator —
-  fully differentiable w.r.t. the (possibly tensor) setpoint value.
-- **SoC / dispatch.** Implement in `scenarios` (the natural home for time-series and the
-  batching layer). A dispatch resolver maps `(profile | rule | price |
-  human-behaviour sample, SoC[t])` → `P[t]`, then advances `SoC[t+1] = SoC[t] + η·P[t]·Δt`
-  with the charge/discharge efficiency split (OpenDSS's equations). The **rule** is ordinary
-  Python control flow (no autograd); the **resulting `P[t]` tensor** is what the solver
-  differentiates. If a gradient *through time* is ever needed (e.g. learning a dispatch
-  policy end-to-end), the SoC recurrence is linear and can be kept on the tape while the
-  decision rule is replaced by a differentiable policy — but the default is rule-resolved,
-  off-tape dispatch, which matches every reference tool and keeps the core clean.
-- **MPPT** is the same shape: irradiance/temperature → `Pmpp` curve → active setpoint,
-  resolved per scenario; differentiable w.r.t. irradiance if a sensitivity is wanted, else a
-  plain data input.
-
-### 4.5 The PV (voltage-regulating) bus: an approximation today, the real fix later
-
-If voltage-regulating DER/machines are needed (OpenDSS `model=3`, pandapower `gen`), the
-real fix is a `|V|`-regulation mode: replace that terminal's power-balance row in the real
-residual with `|V_term| − V_set = 0` and let Q be the free variable, with a smooth
-Q-saturation for the `min/max_q` limit (the smooth analogue of pandapower's PV→PQ
-switching). This stays inside the same `[2N,2N]` IFT residual/Jacobian, so it remains
-differentiable and batched, but it needs both a solver change and a schema field to carry
-`V_set`. Lower priority than §4.2 for distribution-feeder DER, which are overwhelmingly
-PQ/inverter-curve controlled.
-
-**What exists today: a droop approximation, opt-in, in the pandapower converter.** A
-Volt-VAr characteristic centred on the generator's `vm_pu` and saturating at its reactive
-limits reproduces PV-bus behaviour in the limit of an infinite slope — the bus is held
-where the droop's reactive output balances the network, i.e. off the setpoint by
-`Q / (slope · Q_base)` per unit, and the reactive limit is enforced by the capability
-bound instead of by a discrete bus-type switch.
-`pgml.convert.pandapower.to_grid(net, gen_mode=GenMode.VOLT_VAR_APPROX)` builds exactly
-that (`gen_volt_var_slope_pu` is the steepness; default 500, i.e. one full reactive base
-per 0.002 pu of voltage). Because the law is an ordinary inverter control it enters
-`I_device(V)` and is differentiated by the same IFT backward — no new machinery.
-
-The approximation's limit is **conditioning, not steady-state fidelity**. Outside the
-`1/slope`-wide band `dQ/d|V|` is exactly zero, so an iterate that starts far from the
-setpoint sees no voltage-control feedback: on heavily loaded transmission benchmarks
-(`case39`, `case118`) the const-Z warm start is far enough out that Newton lands on the
-collapsed low-voltage branch — a genuine second solution of the *approximated* system that
-the exact `|V| − V_set = 0` row would exclude by construction. Measured against a live
-`pp.runpp(..., enforce_q_lims=True)`, the per-bus |V| deviation falls as `1/slope`
-(`case57`: 4.3e-2 pu at slope 5 → 2.3e-4 pu at slope 2000), but the usable steepness caps
-at ~5 on `case118`, and on `case39` every steepness converges *silently* onto the collapsed
-branch (0.49 pu off, all nine machines pinned at their reactive limit). The approximation
-is therefore good for small and moderately loaded networks and for differentiable
-sensitivity studies, and NOT a faithful way to import transmission benchmarks — those need
-the residual-row fix above (and `shunt` conversion). Always sanity-check the converged
-voltage profile against the source network's `res_bus`. Full record:
-`src/pgml/convert/pandapower/CONTEXT.md`.
-
-### 4.6 Harmonics coupling (already most of the way there)
-
-pgml's harmonic model derives each device's injection from its **fundamental** current `I₁`.
-A control law changes the fundamental operating point → changes `I₁` → automatically rescales
-the harmonic current sources (`|I_h| = (mag_h/mag_1)|I₁|`). So once §4.2 lands, the harmonic
-spectrum tracks the control state with no extra work — and it stays differentiable through
-`I₁`. Two refinements (both tracked as open work in `src/pgml/STATUS.md`):
-
-- The PV inverter "internal impedance" the user notes is the harmonic **Norton shunt**
-  (`HarmonicShuntModel`, OpenDSS `%X`); finishing `include_load_shunt=True` lets a
-  grid-following inverter present its high output impedance / damping at harmonics.
-- Modern PWM inverters emit little at low orders but can produce **inter/supraharmonics**;
-  the existing `Spectrum` (non-integer orders allowed) covers this as data.
-
-### 4.7 Validation targets
-
-- Fundamental control vs **pandapower** `CharacteristicControl` (`Q(V)`, `cosφ(P)`) and
-  `enforce_q_lims` (Q-limit), on IEEE-33 / CIGRE LV.
-- Inverter control + harmonics vs **OpenDSS** `InvControl` (VOLTVAR, VOLTWATT, VV_VW) and
-  `ExpControl`, and `Generator model=3/7`, `Storage` + `StorageController` for dispatch.
-- Differentiability gate: float64 `gradcheck` of `V*` (and THD) w.r.t. the `Q(V)`/`P(V)`
-  curve slope, the kVA limit, and irradiance through the IFT path (smoothed variants).
-- GPU device/dtype parity for every new injection term.
-
-### 4.8 Suggested phasing
-
-1. Inverter control block on `Generator` — constant-PF, `cosφ(P)`, `Q(V)`, `P(V)` folded
-   into `I_device(V)` with smooth-backward variants (§4.2–4.3). Highest value, smallest core
-   change, fully differentiable. *(shipped)*
-2. `Storage` appliance as a signed PQ injection (snapshot only) + SoC/dispatch resolver in
-   `scenarios` (§4.4). *(shipped)*
-3. PV-bus regulation mode (§4.5) and harmonic Norton-shunt completion (§4.6) as demand
-   arises. *(open — a Volt-VAr droop approximation of pandapower's `gen` ships in the
-   converter meanwhile)*
-
-Each step is gated by the differentiability + GPU tests and a reference comparison before it
-is considered done.
-
----
-
-## References
-
-pandapower
-- [pp-create-sgen] `pandapower.create.create_sgen`, source `pandapower/create.py`; bus
-  injection `pandapower/build_bus.py::_calc_pq_elements_and_add_on_ppc`.
-- [pp-sgen-doc] pandapower elements — static generator:
-  https://pandapower.readthedocs.io/en/latest/elements/sgen.html
-- [pp-gen-doc] pandapower elements — generator:
-  https://pandapower.readthedocs.io/en/latest/elements/gen.html
-- [pp-qlims] `pandapower/pf/run_newton_raphson_pf.py::_run_ac_pf_with_qlims_enforced`;
-  `runpp(enforce_q_lims=...)`.
-- [pp-asym] `pandapower.create.create_asymmetric_sgen`; `pandapower/pf/runpp_3ph.py`.
-- [pp-storage] pandapower elements — storage (SoC not updated by power flow):
-  https://pandapower.readthedocs.io/en/latest/elements/storage.html
-- [pp-runcontrol] pandapower control loop:
-  https://pandapower.readthedocs.io/en/latest/control/run.html
-- [pp-characteristic] `pandapower.control.controller.CharacteristicControl` +
-  `pandapower.control.util.characteristic.Characteristic`:
-  https://pandapower.readthedocs.io/en/latest/control/controller.html
-
-OpenDSS (EPRI manual, DSS-Extensions, source)
-- [dss-pvsystem] https://opendss.epri.com/PVSystem.html
-- [dss-pvarray] https://opendss.epri.com/PVarrayproperties.html
-- [dss-pvinv] https://opendss.epri.com/PVinverterproperties.html ;
-  capability curve https://opendss.epri.com/InverterCapabilityCurve.html ;
-  format ref https://dss-extensions.org/dss-format/PVSystem.html
-- [dss-generator] https://opendss.epri.com/Generator.html
-- [dss-model] https://opendss.epri.com/Model.html
-- [dss-storage] https://opendss.epri.com/Storage.html
-- [dss-operation] https://opendss.epri.com/Operation.html
-- [dss-storagecontroller] https://opendss.epri.com/StorageController.html ;
-  dispatch modes https://opendss.epri.com/DispatchModes1.html
-- [dss-invcontrol] https://opendss.epri.com/InvControl.html ;
-  batch/property ref https://dss-extensions.org/dss_capi/classdss_1_1obj_1_1InvControlBatch.html
-- [dss-vvfunc] https://opendss.epri.com/Propertiesofsmartinvertervolt-va.html ;
-  calculation https://opendss.epri.com/Calculationofthesmartinverterfun.html
-- [dss-expcontrol] https://opendss.epri.com/ExpControl.html
-- [epri-smartinv] EPRI TechNote 3002002271, "Smart Inverter Function Modeling in OpenDSS".
-- [dss-harmflow] https://opendss.epri.com/HarmonicFlowAnalysis.html
-- [dss-harmload] https://opendss.epri.com/HarmonicsLoadModeling.html
-- source: `Source/PCElements/{PVsystem,generator,Storage}.pas`,
-  https://github.com/tshort/OpenDSS
-
-power-grid-model
-- [pgm-components] LF Energy power-grid-model component reference:
-  https://power-grid-model.readthedocs.io/en/stable/user_manual/components.html
-
-Interconnection standards defining the control characteristics (Volt-VAr, Volt-Watt,
-`cosφ(P)`, reactive capability): IEEE 1547-2018; EN 50549-1/-2; VDE-AR-N 4105.
-
-This repository
-- [repo-harmonics] [OpenDSS harmonics](references/opendss/harmonics.md) (empirically verified
-  spectrum/phase convention and Norton shunt) and the [OpenDSS brief](references/opendss/index.md).
-- pgml model: `src/pgml/schemas/grid_schema.py` (`Generator`, `Storage`, `InverterControl`,
-  `Characteristic`, `Load`, `HarmonicShuntModel`, `LoadModel`);
-  `src/pgml/assembly/_control.py` (control laws); `src/pgml/assembly/ybus.py::device_current_injections`;
-  `src/pgml/solver/power_flow.py` (IFT residual); `src/pgml/solver/harmonic_flow.py`;
-  `src/pgml/scenarios/storage.py` (SoC / dispatch).
-- Open work: `src/pgml/STATUS.md` (frequency-dependent device models — incl. the harmonic
-  load Norton shunt — and the optional DER/storage extensions).
+Native harmonic conformance requires the three-phase converter mode for a
+multiphase circuit. `PhaseMode.SINGLE_PHASE_EQUIV` retains a balanced equivalent
+and cannot preserve all positive-, negative- and zero-sequence harmonic responses.
+The native scenario exporter accepts the matching OpenDSS source/frequency pair;
+other explicit impedance conventions are rejected rather than discarded. Its
+auxiliary inverter ratings expand with a scenario while preserving physical
+impedance, so the export does not introduce an unrequested power limit.

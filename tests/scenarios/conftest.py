@@ -1,4 +1,5 @@
-"""Shared fixtures: a single-phase 3-bus grid and a 3-phase 2-bus grid."""
+"""Shared fixtures: a single-phase 3-bus grid, a 3-phase 3-bus grid, and a
+single-phase 2-bus grid with a stored harmonic spectrum."""
 
 from __future__ import annotations
 

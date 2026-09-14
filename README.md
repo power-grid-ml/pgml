@@ -1,159 +1,160 @@
-# pgml — power-grid-ml
+# pgml
 
-**Differentiable, GPU-ready, vectorized harmonic power flow for power grids.**
+**Differentiable power flow and harmonics for electrical grids, on CPU and GPU.**
 
-`pgml` is a PyTorch library that (1) loads or builds power grids, (2) simulates **harmonic
-power quality in steady state** (harmonic power flow at integer harmonic orders, typically
-1–50), and (3) exposes every result as a differentiable tensor, so the same code is a
-forward simulator, a differentiable physics engine for machine learning, and an inverse /
-parameter-recovery tool. The defining requirement is **end-to-end differentiability**:
-gradients flow from grid parameters — down to line geometry — through Y-bus assembly and
-the complex solve to the outputs.
+`pgml` combines phase-domain grid modeling with PyTorch autograd. Simulate unbalanced
+networks, generate batches of operating scenarios, and differentiate voltages, currents
+and powers with respect to continuous grid parameters. Use those gradients to fit a
+**digital twin**, optimize an operating decision, or compute sensitivities.
 
-Harmonic power flow decouples per harmonic into a *linear* complex solve
-`Y(h)·V(h) = I(h)`, whose adjoint is cheap — so end-to-end gradients flow without
-differentiating Newton iterations. PyTorch provides complex tensors, batched solves, GPU,
-and native PyTorch-Geometric integration for the ML layer.
+## Capabilities at a glance
 
-`pgml` is the **base package of the power-grid-ml suite**; the learning framework
-(`pgl` / `power-grid-learn`), the grid generator (`pgg` / `power-grid-gen`), the dataset hub
-(`pghub` / `power-grid-hub`) and the dashboard (`pgd` / `power-grid-dash`) live in sibling
-repositories under the same organization and build on this package's public API. The
-combined documentation is published from the org `docs` repository; the `power-grid-suite` repository
-aggregates everything for development.
+- **Fast GPU simulations:** batch thousands of grid scenarios on CPU or GPU.
+- **PyTorch integration:** differentiate simulation outputs to fit grid parameters
+  or train models with a physics-based loss.
+- **Fundamental and harmonic power flow:** simulate unbalanced grids at harmonic orders.
 
-## Highlights
+| Library | Autodiff through power flow | GPU power flow | Harmonics | Unbalanced three-phase |
+|---|:---:|:---:|:---:|:---:|
+| [**pgml**](https://github.com/power-grid-ml/pgml) | Yes | Yes | Yes | Yes |
+| [DPF](https://github.com/Helmholtz-AI-Energy/differentiable-power-flow) | Yes | Yes | — | — |
+| [SABLE (paper)](https://arxiv.org/abs/2606.07099) | Yes | Yes | — | — |
+| [pandapower](https://github.com/e2nIEE/pandapower) | — | — | — | Yes |
+| [PyPSA](https://github.com/PyPSA/PyPSA) | — | — | — | — |
+| [power-grid-model](https://github.com/PowerGridModel/power-grid-model) | — | — | — | Yes |
+| OpenDSS | — | — | Yes | Yes |
 
-- **Phase-domain, fully asymmetric.** Per-phase, per-harmonic complex Y-bus; WYE / DELTA
-  / grounded-neutral loads; two-winding transformers with real **vector groups** (a Dyn
-  delta correctly traps zero-sequence / triplen harmonics).
-- **Differentiable + GPU.** Every core op runs on CPU and CUDA unchanged, honors input
-  device/dtype, and is vectorized/batched (no Python loops over nodes/branches/harmonics).
-  `float64` `gradcheck` and a CPU/CUDA parity suite are gates.
-- **Carson/Deri line model.** Conductor geometry → frequency-dependent `Z(h)`/`Yc(h)`,
-  **bit-exact vs OpenDSS**, with R/X → geometry synthesis for sequence-defined feeders.
-- **Validated against oracles.** Y-bus and voltages compared to pandapower /
-  power-grid-model (load flow) and OpenDSS (harmonics) on IEEE-33 and CIGRE LV.
-- **Two power-flow solvers + diagnostics.** Current-injection fixed point and Newton
-  (linear const-Z warm start; converges near the loadability nose), both with IFT
-  gradients. Non-convergence is actionable: `ConvergenceDiagnostics` and a
-  `loadability_limit` continuation that reports the margin, the critical bus, and the
-  limiting load.
-- **Reproducible batched scenarios.** QMC / cartesian sampling → operating points →
-  batched solves, for ML training-data generation.
+Autodiff means simulation outputs can participate in a general-purpose automatic
+differentiation graph. The table describes power-flow capabilities, rather than the
+backends available to a separate optimization problem. SABLE's row describes its paper.
+Each library has its own supported devices, assumptions and applications.
 
-## Installation
+## Performance: solve scenarios in batches
 
-> **Not on PyPI yet** (publication follows the engine paper). Until then install from git
-> in dependency order — `pip install "<distribution> @ git+ssh://git@github.com/power-grid-ml/<repo>.git"`,
-> the engine `power-grid-ml` first — or work from the
-> [power-grid-suite](https://github.com/power-grid-ml/power-grid-suite#installing--what-works-right-now)
-> checkout; the lines below are the released form.
+![Batch throughput of pgml, pandapower and power-grid-model on two distribution grids](assets/readme/batch_throughput.svg)
+
+Batching amortizes work across operating points of the same grid. This comparison
+uses **double precision**, one **NVIDIA L40S** and **eight allocated CPUs** on
+an **AMD EPYC 9334** node.
+All engines solve identical load scenarios, with independent load multipliers
+between 0.8 and 1.2. Every scenario converges and agrees in voltage magnitude
+within **1e-6 pu** across the compared engines.
+
+Pandapower uses numba, recycled network matrices and up to eight worker processes;
+power-grid-model uses its native iterative-current batch solver with eight threads.
+Pgml's dense CPU path uses one thread for the larger grid; its sparse path uses
+the eight-CPU allocation. Curves show median warm solve throughput over five
+repeats for pgml and power-grid-model, and three for pandapower. Grid conversion,
+GPU input staging, compilation and correctness checks are outside the timed region;
+GPU timings include synchronization. This measures forward fundamental power flow,
+without a backward pass. Performance depends on grid size and batch size.
+
+## Conformance: understand the differences
+
+![Twelve grids with the largest worst-node voltage-magnitude deviations from the reference engines](assets/readme/conformance_worst.svg)
+
+The evaluation covers **2,384 grids**. This plot shows the twelve largest
+worst-node voltage-magnitude differences among valid comparisons against
+pandapower, power-grid-model and OpenDSS. Failed or unsupported reference solves
+are excluded from accuracy statistics.
+
+The largest pandapower difference is **1.36e-4 pu**. Controlled comparisons trace
+these cases to transformer magnetizing equivalents: pgml and power-grid-model use
+a pi equivalent, while pandapower defaults to a T equivalent. On the worst case,
+selecting pandapower's pi model reduces the difference to **1.93e-11 pu**.
+The reference engines therefore also disagree with one another when their models
+differ. Matching the physical assumptions is part of a fair solver comparison.
+
+## Accurate digital twin building
+
+**Goal: recover line resistances from noisy measurements at 48% of buses using
+Levenberg–Marquardt optimization and pgml's automatically differentiated measurement
+Jacobian.**
+
+![Recovered resistance of ten trunk lines, showing true values and estimates from three measurement sets](assets/readme/resistance_recovery.svg)
+
+This simulated IEEE 33-bus example jointly estimates **20 unknown parameters**:
+resistance and reactance on ten trunk lines. It uses **12 operating snapshots**,
+voltage magnitudes at **16 of 33 buses**, and four current measurement locations.
+The initial catalogue differs from the installed values by up to **43% in resistance**
+and **25% in reactance** in this realization. Topology and load injections are known.
+
+Independent Gaussian measurement noise has standard deviations of **0.1% for
+fundamental voltage**, **1% for current**, and **5% for harmonic voltage**, relative
+to each measured magnitude. The last measurement set adds orders **5, 7, 11 and 13**.
+The fit uses a Gaussian catalogue prior with 50% standard deviation. Points show
+mean estimates and bars show one standard deviation across four noise draws.
+
+Adding harmonic measurements reduces the recorded median absolute resistance-scale
+error from **7.8% to 5.4% of catalogue resistance**, and reactance-scale error from
+**12.9% to 2.8%**. Some lines remain weakly identifiable: recovering both resistance
+and reactance from partial, magnitude-only measurements is an inverse problem,
+and additional measurements improve different parameters by different amounts.
+
+The plotted data and their source hashes are in [assets/readme](assets/readme).
+
+## Install from GitHub
+
+Requires **Python 3.13**. The distribution is `power-grid-ml`; the import is `pgml`.
 
 ```bash
-pip install power-grid-ml                 # core differentiable engine (import name: pgml)
-pip install "power-grid-ml[convert,viz]"  # + reference-library converters and plotting
-pip install "power-grid-ml[all]"          # everything except the docs/dev tooling
+pip install "power-grid-ml @ git+https://github.com/power-grid-ml/pgml.git"
 ```
 
-| Extra | Adds | For |
-|-------|------|-----|
-| `convert` | pandapower, power-grid-model | converting reference grids into a `Grid` |
-| `scenarios` | polars, pyarrow | batched scenario sampling + parquet datasets |
-| `viz` | matplotlib, plotly, networkx | the `pgml.evaluation` comparison plots |
-| `opendss` | opendssdirect | the OpenDSS harmonic path / oracle |
-| `oracles` | pandapower, power-grid-model, opendss | the reference oracles used in validation |
-| `docs` / `dev` | sphinx stack / pytest, ruff | building the docs, running the tests |
-
-The distribution is named `power-grid-ml` because `pgml` is taken on PyPI by an unrelated
-project; the import name stays `pgml`. Python 3.13.
-
-Development uses [pixi](https://pixi.sh) (conda-based, pinned environments; `PYTHONPATH=src`
-is set on activation, so nothing needs installing):
+For the included pandapower-based example and reference-grid conversion:
 
 ```bash
-pixi run -e cpu pytest -q          # run the test suite (CPU)
-pixi run -e cpu python run/examples/pgml/evaluate_ieee33.py
-pixi run -e docs docs-strict       # the strict Sphinx build (mirrors CI)
+pip install "power-grid-ml[convert] @ git+https://github.com/power-grid-ml/pgml.git"
 ```
 
-## Quickstart
+Optional extras: `convert` (pandapower/power-grid-model imports), `opendss` (OpenDSS),
+`scenarios` (Parquet datasets), and `viz` (plotting).
+
+## A first result, and its gradient
 
 ```python
+import torch
 import pgml
-from pgml.convert.pandapower import to_grid
+from pgml.grids import ieee33_geometry_grid
 from pgml.schemas import Phase
-from pgml.geometry import apply_default_harmonic_model
-import pandapower.networks as pn
 
-grid, _ = to_grid(pn.create_cigre_network_lv())   # reference net -> pgml Grid
-apply_default_harmonic_model(grid)                 # frequency-dependent line model
+grid, _ = ieee33_geometry_grid()               # IEEE 33-bus feeder with converter loads
+load = next(a for a in grid.appliances if a.id == 83)
+p = torch.tensor(float(load.p_nom_w), dtype=torch.float64, requires_grad=True)
+load.p_nom_w = p                               # a grid parameter that carries gradients
 
-config = pgml.SimulationConfig(calculation="harmonic", harmonic_orders=[1, 3, 5, 7])
-state = pgml.simulate(grid, config)                # -> a differentiable SolvedState
+state = pgml.simulate(grid)                    # harmonic power flow, orders 1, 3, ... 13
+v = state.voltage(node_id=18, phase=Phase.A)   # complex phasor per order [V]
+print(f"fundamental   {v.abs()[0]:8.1f} V")
+print(f"5th harmonic  {v.abs()[2]:8.1f} V")
+print(f"voltage THD   {state.thd(node_id=18, phase=Phase.A):8.2%}")
 
-v = state.node_voltages()              # complex [orders, nodes]; gradients flow to params
-currents = state.branch_currents()     # per-branch terminal currents (lazy, differentiable)
-thd = state.thd(node_id=1, phase=Phase.A)
-
-bundle = state.to_result_set()         # JSON-serializable ResultBundle (REST / dashboard)
-bundle.model_dump_json()
+v.abs()[2].backward()                          # one backward pass
+print(f"d|V5|/dP      {1e3 * p.grad:8.3f} V per kW of converter load")
 ```
 
-### Entry points (which one to use)
+The selected load power is an ordinary autograd leaf. The same approach can fit
+continuous physical parameters or propagate a task loss through the solved grid.
 
-| You want… | Use |
+## Entry points
+
+| Task | Entry point |
 |---|---|
-| One front door: full, differentiable **solved grid state** | `pgml.simulate(grid, config) -> SolvedState` |
-| The same, but **JSON** out (REST / dashboard / persist) | `pgml.simulate_serializable(...) -> ResultBundle` |
-| Raw differentiable **tensors** at minimal overhead (ML) | `pgml.solver.solve_power_flow` / `solve_harmonic_flow` |
-| **Batched** training-data generation → filesystem | `pgml.scenarios.run_scenarios(...)` + `write_dataset` |
+| Full differentiable state | `pgml.simulate(grid, config)` |
+| Serializable result | `pgml.simulate_serializable(...)` |
+| Direct solver tensors | `pgml.solver.solve_power_flow`, `solve_harmonic_flow` |
+| Reproducible scenario batches | `pgml.scenarios.run_scenarios`, `write_dataset` |
 
-`SimulationConfig` is the serializable *definition* of what to simulate; `device`/`dtype`
-are execution kwargs on `simulate`. Errors form a small hierarchy
-(`pgml.PgmError` → `InputError` / `ComputationError`, e.g. `ConvergenceError`), each with
-an `http_status` hint for a REST layer; schema-validation errors stay as pydantic
-`ValidationError`.
+`SimulationConfig` describes the study; `device` and `dtype` select execution.
+Non-integer harmonic orders are outside the solver's scope. Explicit modeling
+presets align supported reference conventions; they do not imply complete
+feature equivalence between engines.
 
-## Architecture
+## Development and license
 
-```
-grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀── evaluation (plots vs refs)
-      │              ▲   │         ▲                       ◀── scenarios (batched inputs)
-      │              │   └─ geometry (Carson Z(h)/Yc(h))   ◀── convert (pandapower/OpenDSS/pgm)
-      └─ config (documented modeling defaults) ────────────┘
-```
+Development environments use [pixi](https://pixi.sh). Run the CPU suite with
+`pixi run -e cpu pytest -q`. The figure renderer is
+`pixi run -e cpu python run/readme/render.py`; it uses recorded data and runs no solves.
 
-- **`schemas/`** — frozen, framework-free contracts (`Grid`, `Node`, `Branch`,
-  `Appliance`, `Result`, `Scenario`). Physical fields accept plain floats *or* tensors.
-- **`assembly/`** — per-phase, per-harmonic, batched, differentiable Y-bus + injections.
-- **`solver/`** — complex batched linear solve; nonlinear const-P/ZIP via the
-  implicit-function theorem; harmonic flow.
-- **`geometry/`** — differentiable Carson/Deri line constants + R/X → geometry synthesis.
-- **`convert/`** — pandapower / power-grid-model / OpenDSS → `Grid`.
-- **`scenarios/`** — reproducible config-driven batched sampling.
-- **`evaluation/`** — comparison plots and reference oracles.
-- **`data/` + `defaults.py`** — documented modeling defaults and standards tables (single
-  source of truth; `defaults.yaml`, shipped in the wheel).
-
-Each subpackage has a `CONTEXT.md` interface ledger; the package map is the root
-`CONTEXT.md`; status and open work live in `src/pgml/STATUS.md`.
-
-## Documentation
-
-The full, human-facing documentation — concepts, modeling decisions, examples, and the API
-reference — is published with Sphinx / Read-the-Docs as part of the suite site
-(<https://power-grid-ml.readthedocs.io>). This repository holds the pgml pages under
-`docs/pgml/` (start at `docs/pgml/index.md`); build them locally with
-
-```bash
-pixi run -e docs docs            # build HTML into docs/_build/html
-```
-
-Contributor orientation: `CONTEXT.md` (the package map), `src/pgml/STATUS.md` (status +
-open work), each subpackage's `CONTEXT.md` (interface ledger), `tests/CONTEXT.md` (the
-gates). If you use pgml in research, please cite it (`CITATION.cff`).
-
-## License
-
-See [LICENSE](LICENSE).
+If you use pgml in research, see [CITATION.cff](CITATION.cff).
+Licensed under the [Mozilla Public License 2.0](LICENSE).

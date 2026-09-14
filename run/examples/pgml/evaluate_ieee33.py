@@ -46,8 +46,12 @@ from pgml import evaluation as ev
 from pgml.evaluation import oracles as ref
 
 CDT = torch.complex128
-# Typical 6-pulse converter line-current spectrum (mag relative to fundamental).
-CONVERTER_SPECTRUM = [
+# Spectrum hand-attached to a few deep-bus loads for this figure set only (mag
+# relative to fundamental). Unlike the idealized 6-pulse spectrum in
+# pgml.grids.CONVERTER_SPECTRUM, this adds a small order-9 component so the
+# h=3,5,7,9 harmonic-profile figure (HARMONIC_ORDERS_3D below) has a nonzero
+# series to plot at h=9.
+EVALUATION_SPECTRUM = [
     (1, 1.0, 0.0),
     (5, 0.20, 0.0),
     (7, 0.14, 0.0),
@@ -138,7 +142,7 @@ def main(out_dir: str = str(_OUT)) -> None:
     # ---- 3. Harmonic profiles (attach converter spectra) ------------------
     comps = [
         HarmonicComponent(order=o, magnitude_pu=m, phase_deg=a)
-        for o, m, a in CONVERTER_SPECTRUM
+        for o, m, a in EVALUATION_SPECTRUM
     ]
     for app in grid.appliances:
         if isinstance(app, Load) and app.node in (17, 32, 24):  # a few deep buses

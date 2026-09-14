@@ -5,7 +5,7 @@ Converts a pandapower network (`pandapowerNet`) to our schema `Grid`.
 ## Public API
 
 ```python
-from pgml.convert.pandapower import to_grid, GenMode, PhaseMode
+from pgml.convert.pandapower import from_grid, to_grid, GenMode, PhaseMode
 
 import pandapower as pp
 import pandapower.networks as pn
@@ -15,22 +15,48 @@ pp.runpp(net)
 grid, id_map = to_grid(net)                                    # SINGLE_PHASE_EQUIV (default)
 grid_3ph, id_map_3ph = to_grid(net, phase_mode=PhaseMode.THREE_PHASE)
 
-# net.gen (PV buses) — opt-in Volt-VAr approximation, see the section below
-grid_pv, id_map_pv = to_grid(pn.case118(), gen_mode=GenMode.VOLT_VAR_APPROX)
+# net.gen (PV buses) is converted EXACTLY by default; the other two modes stay available
+grid_pv, id_map_pv = to_grid(pn.case118())                     # VOLTAGE_REGULATING
+grid_approx, _ = to_grid(pn.case118(), gen_mode=GenMode.VOLT_VAR_APPROX)
+grid_nogen, _ = to_grid(pn.case118(), gen_mode=GenMode.DROP)
+
+exported = from_grid(grid)  # exported.net plus Grid-id -> pandapower-index maps
 ```
 
 ### Signature
 ```
 to_grid(net: Any, *,
         phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
-        gen_mode: GenMode = GenMode.DROP,
+        gen_mode: GenMode = GenMode.VOLTAGE_REGULATING,
         gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,  # 500.0
+        harmonic_line_model: Optional[str] = None,
+        open_switch_model: Optional[Literal["terminal", "drop_element"]] = None,
         ) -> tuple[Grid, dict[str, Any]]
 ```
 
 Pure function; `net` must already carry basic DataFrames (`bus`, `line`, `load`,
 `ext_grid`); unmaterialised `std_type` line references are accepted as long as
 explicit per-km parameters are present.
+
+### Outbound signature
+```
+from_grid(grid: Grid, *, name: str = "pgml_export",
+          allow_approximation: bool = False) -> PandapowerExport
+```
+
+`PandapowerExport` carries `net`, `bus_of_node` / `node_of_bus`,
+`line_of_branch`, `trafo_of_branch`, `switch_of_branch`, `shunt_of_component`,
+`load_of_appliance`, `sgen_of_appliance`, `ext_grid_of_appliance`, and `reductions`.
+It supports nodes, explicit R/L/C/G lines, two-winding transformers, bus switches,
+shunts, sources, loads, generators and storage in pandapower's balanced fundamental
+model. Every node must use the same `(A,)` or `(A, B, C)` phase layout, and branches and
+appliances must match it; partial-phase, mixed-layout and neutral-conductor grids raise.
+Geometry lines, unresolved type references, generic branches, zigzag windings and
+impedance-grounded transformer neutrals raise `UnsupportedGridError`. Unbalanced P/Q,
+inverter controls, PV voltage regulation, nonideal source impedance, and switch terms a
+pandapower bus switch cannot store require `allow_approximation=True`; each enabled
+reduction is named. Harmonic-only schema fields are ignored and named in `reductions`.
+The input `Grid` is not mutated.
 
 ### `id_map` format
 ```python
@@ -42,8 +68,11 @@ explicit per-km parameters are present.
     "load":             {pp_load_idx: Load.id, ...},
     "asymmetric_load":  {pp_asym_idx: Load.id, ...},        # THREE_PHASE only
     "sgen":             {pp_sgen_idx: Generator.id, ...},
-    "gen":              {pp_gen_idx: Generator.id, ...},  # EMPTY unless gen_mode=VOLT_VAR_APPROX
+    "gen":              {pp_gen_idx: Generator.id, ...},  # EMPTY under gen_mode=DROP; rows on ONE bus share the merged id
+    "shunt":            {pp_shunt_idx: ShuntAppliance.id, ...},
+    "storage":          {pp_storage_idx: Storage.id, ...},
     "ext_grid":         {pp_eg_idx: Source.id, ...},
+    "open_terminal":    {pp_switch_idx: Node.id, ...},   # singly-open et='l'/'t' switch auxiliary terminals
     "slack_v_complex":  complex,  # FIRST ext_grid's phasor (V, L-L); ideal-slack convenience
 }
 ```
@@ -111,6 +140,21 @@ tap-changer configured -> `ratio_magnitude=1.0`. `tap_step_degree` nonzero, or
 `tap_phase_shifter=True` (an ideal phase-shifter tap) is not modelled and raises
 `ConversionError`.
 
+`tap_changer_type` decides WHETHER the tap acts, following pandapower 3's own rule
+(`build_branch._calc_nominal_ratio_from_dataframe`): `"Ratio"` and `"Symmetrical"`
+move the tapped side's nominal voltage by `delta` (they differ only through
+`tap_step_degree`, which raises here, so both reduce to the same real ratio);
+`"Ideal"` shifts the angle only and raises; a row whose type is UNSET (NaN / empty)
+gets NO tap, however far from neutral its `tap_pos` sits — pandapower ignores it, so
+this converter does too, and logs a WARNING naming the transformer whenever an
+off-neutral position is dropped that way (set the column on the source net if the tap
+is meant to act). A `trafo` table WITHOUT the column at all (pandapower < 3.0 data)
+keeps the legacy behaviour and applies the tap. An unrecognised non-empty value raises.
+Datasets written before the column exists (SimBench, for example) carry tap positions
+their own solver ignores: reading them as active moved `1-MV-urban--0-sw` by 1.65e-2 pu
+and a two-bus 110/20 kV unit at `tap_pos=-1` with a 1.5 % step by the full tap step.
+Tests: `tests/convert/test_pandapower_tap_changer_type.py`.
+
 ### `parallel` — identical parallel systems (lines AND two-winding transformers)
 
 pandapower's `parallel` column (default 1) is the count of electrically identical
@@ -135,27 +179,40 @@ at all (see "Coverage gaps" below). See
 parity), `test_parallel_scales_series_impedance_and_shunt_admittance` (closed-form
 value checks), and `test_parallel_default_is_byte_identical`.
 
-### Bus-line / bus-transformer switches (`et='l'`/`'t'`) — accepted approximation
+### Bus-line / bus-transformer switches (`et='l'`/`'t'`)
 
-An OPEN `et='l'`/`'t'` switch (`net.switch`) converts its line/transformer as
-out-of-service (`_open_switch_targets`, called once up front and consulted by
-both the line and the trafo loop): the WHOLE element drops, not just the switched
-terminal. This is an accepted approximation, not full fidelity: pandapower's own
-solver instead keeps the still-connected terminal energized via an internal
-auxiliary bus (dropping only the current path, not that terminal's shunt
-admittance), so the converter's simplification also loses the line-charging
-capacitance at that terminal. A closed switch, or no switch at all, changes
-nothing; bus-bus (`et='b'`) switches are unaffected (see the field mapping table
-below this section). Root-caused (not guessed) on `create_cigre_network_mv`/
-`mv_oberrhein`: comparing a live `runpp` on the untouched net against the SAME net
-with those lines forced `in_service=False` for pandapower itself shows a
-~2.9e-4 pu / ~6.9e-3 deg (CIGRE MV) / ~8.9e-4 pu / ~1.4e-2 deg (`mv_oberrhein`)
-difference — almost the entire residual the grid-matrix oracle tests see against
-pandapower's OWN untouched `runpp` (see
-`tests/reference/test_pandapower_grid_matrix.py`'s module docstring, third
-tolerance family, and `test_cigre_mv_shift30_fallback`/
-`test_mv_oberrhein_ynd5_delta_referral_and_taps`, which now exercise this
-production path directly rather than a test-harness workaround).
+`open_switch_model` selects how an open element terminal is represented:
+
+- `terminal` (the default) reproduces pandapower's full auxiliary-bus model. A
+  singly-open line or transformer remains connected at its other end and its open end
+  is rewired to a new auxiliary `Node`. The connected terminal therefore retains line
+  charging or transformer no-load current. `id_map["open_terminal"]` maps the source
+  switch index to that auxiliary node id.
+- `drop_element` retains the legacy reduced approximation: an open switch at either
+  end omits the whole line/transformer, including the connected terminal's shunt.
+
+An element open at both ends or marked out of service is omitted in both modes. A
+closed switch or absence of an element switch changes nothing. Bus-bus (`et='b'`)
+switches remain schema `Switch` branches and are unaffected by this option.
+
+### Closed bus-bus switch (`et='b'`) — an IDEAL switch by default
+
+A closed bus-bus switch converts to a `Switch` branch. Its resistance comes from
+`switch.z_ohm` when the row carries one; with `z_ohm = 0` (the usual case, and what every
+pandapower built-in uses) the documented default `branch.switch_model` decides:
+
+- `ideal` (the default) writes `resistance_ohm = inductance_h = 0`. pandapower solves such
+  a switch by MERGING its two buses into one internal ppc bus, and pgml's solve collapses
+  the same two node-phase rows (`pgml.assembly.fusion_map`), so the converted grid
+  reproduces the source tool's own network exactly. Measured on CIGRE LV (three such
+  switches merging buses 0/1/20/23): max `|ΔV|` against `pp.runpp` falls from 1.09e-7 pu
+  (the stand-in below) to 1.6e-14 pu, and `κ(Y_ff)` from 1.44e4 back to 910.
+- `near_ideal` writes `branch.near_ideal_series_resistance_ohm` (1e-4 Ohm) instead, which
+  keeps the switch a STAMPED branch — the form a `branch_states` sweep needs — and logs a
+  WARNING naming the deviation from the source tool.
+
+A non-zero `z_ohm` is still read as the switch RESISTANCE only; pandapower splits it
+across R and X at its `switch_rx_ratio` (see the coverage gaps below).
 
 ### Delta-LV coil referral — PHASE-MODE INDEPENDENT (the important gotcha)
 
@@ -175,9 +232,7 @@ comparison, not by inspection). Do NOT reintroduce a `phase_mode` condition on t
 factor — see `tests/reference/test_pandapower_grid_matrix.py`'s
 `test_mv_oberrhein_delta_lv_referral_factor_applied_in_both_phase_modes` and
 `test_mv_oberrhein_ybus_transformer_stamp_matches_pandapower` (the pinned regression
-guards) and `.claude/agent-memory/reference-integrator/pandapower-transformer-
-converter.md` (the full account of how the wrong, phase-mode-conditional version was
-first written and then caught).
+guards against exactly this mistake).
 
 ### Magnetizing branch — a real, expected T-vs-pi residual (not a bug)
 
@@ -227,21 +282,41 @@ pre-ZIP-aware output. `net.asymmetric_load` has no ZIP percentage columns at all
 `test_mixed_zip_load_coefficients_mapped_correctly`, and
 `test_zero_zip_percentages_stay_byte_identical`.
 
-### `gen` (PV buses) — the OPT-IN Volt-VAr approximation (`gen_mode`)
+### `gen` (PV buses) — `gen_mode`
 
 `net.gen` is pandapower's PV bus: fixed `p_mw`, regulated voltage MAGNITUDE
-`vm_pu`, reactive power free between `min_q_mvar` and `max_q_mvar`. pgml has no
-PV-bus appliance — a true PV bus needs a mixed residual row pair
-(`[P-balance; |V|² − V_set²]`) in `solver.power_flow` plus a schema field to carry
-the setpoint. `gen_mode` therefore selects between two behaviours:
+`vm_pu`, reactive power free between `min_q_mvar` and `max_q_mvar`. The solver
+implements exactly that (`solver/_pv_bus.py`: the terminal's reactive
+power-balance row becomes `|V|² − V_set²`), so `gen_mode` selects between the exact
+model and two legacy behaviours:
 
 | `gen_mode` | behaviour |
 |---|---|
-| `GenMode.DROP` (**default**) | `net.gen` is not read; `warn_dropped_elements` reports it. The converted `Grid` is byte-identical to the pre-`gen_mode` output, and to converting the same net with the `gen` table emptied. |
-| `GenMode.VOLT_VAR_APPROX` | Each in-service row becomes a `Generator` whose `VoltVarControl` is a steep `Q(|V|)` droop centred on `vm_pu` and saturating at the row's reactive limits. |
+| `GenMode.VOLTAGE_REGULATING` (**default**) | Each in-service row becomes a `Generator` carrying a `VoltageRegulation` block — the EXACT PV terminal. The solver holds `vm_pu` and solves the reactive power within the row's limits. |
+| `GenMode.VOLT_VAR_APPROX` | Each in-service row becomes a `Generator` whose `VoltVarControl` is a steep `Q(|V|)` droop centred on `vm_pu` and saturating at the row's reactive limits (the earlier approximation; kept for a DER study that wants a real droop law). |
+| `GenMode.DROP` | `net.gen` is not read; `warn_dropped_elements` reports it. The converted `Grid` is identical to converting the same net with the `gen` table emptied. |
 
-**The mapping** (`_gen_volt_var_control`), per in-service row not caught by the
-slack rule below:
+**The exact mapping** (`GenMode.VOLTAGE_REGULATING`), per in-service row not caught
+by the slack rule below:
+
+| pandapower field | Our schema field | Notes |
+|---|---|---|
+| `p_mw`, `scaling` | `Generator.p_nom_w` | `p_mw·1e6·scaling` (pandapower's own build scales `gen.p_mw` too) |
+| `vm_pu` | `VoltageRegulation.v_set_pu` | the SAME per-unit base: pgml's setpoint is per unit of the host node's rated voltage, and `phase_voltage_magnitude` reduces that to the L-N base the solver regulates, which equals pandapower's `vm_pu` in BOTH phase modes. A NaN `vm_pu` converts as 1.0 |
+| `min_q_mvar` / `max_q_mvar` | `VoltageRegulation.q_min_var` / `q_max_var` | `·1e6`, read RAW (pandapower's `add_q_constraints` does not scale them); a MISSING (NaN) limit stays `None` = UNBOUNDED, which is how pandapower reads it (`q_lim_default` 1e9 MVAr, and its `runpp` default `enforce_q_lims=False` ignores the limits entirely) |
+| — | `Generator.q_nom_var` | `0.0` — a regulating machine's reactive power is solved, not set |
+
+Several in-service rows on ONE bus MERGE into a single regulating generator (one
+bus carries one voltage setpoint, as in pandapower's own per-bus build): active
+powers and limits add, an unbounded side stays unbounded, the first row's `vm_pu`
+wins and a differing one logs a WARNING, and every merged row maps to the one
+`Generator.id` in `id_map["gen"]`. Reactive limits are enforced by the solver
+(`solve_power_flow(enforce_q_limits=...)`, default from `pgml.defaults`), NOT by the
+converter. Measured agreement against `pp.runpp` on the MATPOWER benchmarks: see
+"Accuracy" below and `tests/reference/test_pandapower_pv_bus.py`.
+
+**The Volt-VAr approximation's mapping** (`_gen_volt_var_control`, under
+`GenMode.VOLT_VAR_APPROX`), per in-service row not caught by the slack rule below:
 
 | pandapower field | Our schema field | Notes |
 |---|---|---|
@@ -283,12 +358,17 @@ Every conversion that used a fallback logs one aggregated WARNING with the count
 as a PLAIN PQ `Generator` with `q_nom_var` = that value and NO control.
 `min_q_mvar > max_q_mvar` raises `ConversionError`.
 
-**SLACK-BUS RULE.** A row on a bus that already carries an in-service `ext_grid`,
-or a row flagged `slack=True`, is SKIPPED and logged at WARNING (its `p_mw` really
-is dropped). The ideal slack fixes that bus's voltage phasor outright, so a droop
-there would regulate against an infinitely stiff reference; pandapower's own solve
-treats a generator at the reference bus the same way, absorbing its `p_mw` into the
-slack dispatch rather than injecting it.
+**SLACK-BUS RULE.** A row on a bus that already carries an in-service `ext_grid` is
+SKIPPED and logged at WARNING (its `p_mw` really is dropped). The ideal slack fixes
+that bus's voltage phasor outright, so a regulator there would work against an
+infinitely stiff reference; pandapower's own solve treats a generator at the
+reference bus the same way, absorbing its `p_mw` into the slack dispatch rather than
+injecting it. A row flagged `slack=True` away from the `ext_grid` bus (pandapower's
+distributed slack) is SKIPPED under `VOLT_VAR_APPROX` and CONVERTED under
+`VOLTAGE_REGULATING` with its `p_mw` fixed — pgml has one reference, so such a row
+does not share the slack's active-power imbalance; both paths log it. The solver
+additionally REFUSES a regulating generator on a Source's node
+(`ModelingError`).
 
 **What the approximation does and does NOT give.**
 - It holds `|V|` APPROXIMATELY, never exactly. Steeper trades conditioning for
@@ -317,8 +397,40 @@ slack dispatch rather than injecting it.
   profile 8.1e-1 pu off at its worst bus). It MOVES the basin, it does not ENLARGE
   it, so it is not baked in — the only dependable fix is the residual row.
 
-**Accuracy** (max / median per-bus |V| deviation in pu against a live
-`pp.runpp(net, enforce_q_lims=True)` — the apples-to-apples oracle, since the
+**Accuracy of the EXACT mode** (max per-bus |V| / angle deviation against a live
+`pp.runpp(net, calculate_voltage_angles=True, tolerance_mva=1e-10)` on the benchmark
+AS PUBLISHED — every element in service, nothing approximated; `method="newton"`,
+`SINGLE_PHASE_EQUIV`, complex128, pgml `tol=1e-6` V; i7-12700, CPU, float64):
+
+| case | buses | gen | shunt | max &#124;dV&#124; [pu] | max &#124;dθ&#124; [deg] | max &#124;dQ_gen&#124; [Mvar] | Newton its | pgml / runpp [ms] |
+|---|---|---|---|---|---|---|---|---|
+| case9 | 9 | 2 | 0 | 4.4e-16 | 7.1e-15 | 3.1e-13 | 4 | 30 / 50 |
+| case14 | 14 | 4 | 1 | 6.2e-12 | 3.9e-10 | 7.8e-9 | 5 | 27 / 41 |
+| case30 | 30 | 5 | 2 | 8.9e-12 | 6.4e-10 | 7.9e-9 | 5 | 100 / 42 |
+| case39 | 39 | 9 | 0 | 1.8e-15 | 3.7e-14 | 6.6e-12 | 10 | 277 / 58 |
+| case57 | 57 | 6 | 3 | 3.1e-15 | 2.2e-13 | 1.9e-12 | 5 | 291 / 154 |
+| case118 | 118 | 53 | 14 | 6.7e-3 | 3.7e-2 | 8.0e+1 | 6 | 173 / 37 |
+| case300 | 300 | 68 | 29 | 1.0e-2 | 3.8e-1 | 1.1e+2 | 8 | 2055 / 207 |
+
+`case14`/`case30` sit at pandapower's own `tolerance_mva=1e-10` floor, not at a
+modelling difference. `case118` and `case300` are the ONLY two benchmarks with a
+deviation above 1e-11, and it is entirely the transformer MAGNETIZING-BRANCH
+placement: 4 of case118's and 18 of case300's transformers carry a nonzero
+`i0_percent` (MATPOWER's branch charging susceptance on a ratio branch, which
+`from_ppc` stores as a negative magnetizing current), and pgml stamps the
+magnetizing admittance on the external HV terminal while pandapower splits it across
+the pi-model. Zeroing `i0_percent`/`pfe_kw` in BOTH tools removes the whole
+deviation: case118 6.7e-16 pu / 2.6e-13 deg, case300 3.0e-14 pu / 5.8e-12 deg, with
+the generator reactive powers agreeing to 1.2e-11 Mvar. With
+`enforce_q_lims=True` in both tools the same two benchmarks agree to 1.2e-15 pu and
+the SAME generators switch to PQ (case39: 1 of 9; case118: 6 of 53) at the same
+reactive power (7.3e-12 Mvar). `case300` with limits enforced is not comparable:
+pandapower's own solve does not converge there (50 iterations), and pgml does not
+either.
+
+**Accuracy of the Volt-VAr approximation** (max / median per-bus |V| deviation in pu
+against a live `pp.runpp(net, enforce_q_lims=True)` — the apples-to-apples oracle for
+that mode, since the
 converter enforces the reactive limits while pandapower's DEFAULT
 `enforce_q_lims=False` does not; shunt-carrying nets have `net.shunt` disabled in
 BOTH tools so the comparison isolates the `gen` mapping from the unconverted
@@ -339,10 +451,9 @@ degenerates to the same pure-PQ system pandapower's `enforce_q_lims` solves, and
 the agreement is exact (1.4e-10 pu) and slope-independent.
 
 Two calibrating measurements:
-- **The unconverted `shunt` table is NOT what dominates `case118`.** Re-running the
-  same comparison with its 14 shunts LEFT IN pandapower (so the converter's gap is
-  live) moves the numbers only from 8.1e-2 to 8.9e-2 pu (slope 2) and 4.4e-2 to
-  5.1e-2 pu (slope 5). The residual is the PV-bus approximation, not the shunts.
+- **Fixed shunts do not dominate `case118`.** Its 14 shunts move the steep-droop
+  approximation much less than the PV-bus approximation itself; the default exact
+  voltage-regulating mode avoids that approximation.
 - **The network conversion itself is exact.** Freeze every generator at
   pandapower's OWN converged `(P, Q)` as an `sgen` row and drop the `gen` table:
   the converted grid then reproduces `runpp` to 2.1e-13 pu on `case39` and 9.8e-11
@@ -353,55 +464,107 @@ Two calibrating measurements:
   Sanity-check the converged voltage profile against the source network's
   `res_bus` whenever this mode is used on a transmission grid.
 
-**Verdict.** Good enough for small and moderately loaded networks (a sub-1e-3 pu
-operating point at slope 500 on case9/case14/case57), and useful as a
-differentiable stand-in for voltage-regulating DER. NOT good enough to import
-transmission benchmarks with: on `case118` the branch problem caps the usable
-steepness at ~5 (a 2-5 % voltage error), and on `case39` there is no usable
-steepness at all — every setting converges silently onto the collapsed branch.
-Importing transmission cases faithfully needs the real fix — a PV residual row pair
-in `solver.power_flow` plus the schema field to carry `V_set` (see
-`docs/pgml/modeling/der-pv-storage.md` §4.5) — and `shunt` conversion.
+**Verdict on the approximation.** Good for small and moderately loaded networks (a
+sub-1e-3 pu operating point at slope 500 on case9/case14/case57) and as a
+differentiable stand-in for a real droop-controlled DER. NOT a way to import
+transmission benchmarks: on `case118` the branch problem caps the usable steepness at
+~5 (a 2-5 % voltage error), and on `case39` every steepness converges silently onto
+the collapsed branch. That is what `VOLTAGE_REGULATING` (the default) exists for —
+the same `case39` agrees with `runpp` to 1.8e-15 pu through the exact row pair.
 
-Tests: `tests/convert/test_pandapower_gen_volt_var.py` (mapping, fallbacks, slack
-rule, droop physics) and `tests/reference/test_pandapower_gen_volt_var.py` (live
-`runpp` oracle + the steepness sweep).
+Tests: `tests/convert/test_pandapower_pv_bus_shunt.py` (the exact mapping, the merge,
+the slack rule, `net.shunt`), `tests/reference/test_pandapower_pv_bus.py` (live
+`runpp` oracle on all seven benchmarks, with and without reactive limits),
+`tests/convert/test_pandapower_gen_volt_var.py` and
+`tests/reference/test_pandapower_gen_volt_var.py` (the approximation's mapping,
+fallbacks and steepness sweep).
+
+### `storage` (snapshot P/Q and energy state)
+
+Each in-service `net.storage` row on a converted bus becomes a schema `Storage`.
+pandapower is consumption-positive while pgml is discharge-positive, so
+`p_nom_w = -p_mw·1e6·scaling` and `q_nom_var = -q_mvar·1e6·scaling`.
+`max_e_mwh > 0` maps to `energy_capacity_wh = max_e_mwh·1e6`;
+`soc_percent` maps to `soc = soc_percent/100`, and a supplied `min_e_mwh` maps to
+`soc_min = min_e_mwh/max_e_mwh`. These energy fields record state and bounds; they do
+not alter the snapshot P/Q solve. Missing inverter ratings or dynamics remain unset.
+
+### `shunt` (fixed bus admittance)
+
+`net.shunt` is a fixed admittance at its bus. Each in-service row becomes a WYE
+`ShuntAppliance` on the host node:
+
+| pandapower field | Our schema field | Notes |
+|---|---|---|
+| `p_mw`, `step`, `vn_kv` | `ShuntAppliance.conductance_s` | `G = p_mw·1e6·step / (vn_kv·1e3)²`, referred to the SHUNT's own rated voltage (`vn_kv`, defaulting to the bus's) — algebraically identical to pandapower's `(G, B) = (p, −q)·step·(vn_bus/vn_shunt)²` per unit on the bus base (`build_bus._calc_shunts_and_add_on_ppc`) |
+| `q_mvar < 0`, `step`, `vn_kv` | `ShuntAppliance.capacitance_f` | a CAPACITIVE bank: `C = −q_mvar·1e6·step / (vn_kv·1e3)² / (2πf0)`, `inductance_h = None` |
+| `q_mvar > 0`, `step`, `vn_kv` | `ShuntAppliance.inductance_h` | a REACTOR: `L = (vn_kv·1e3)² / (2πf0·q_mvar·1e6·step)`, `capacitance_f = 0` |
+| `in_service` | — | an out-of-service row is skipped |
+
+Under `THREE_PHASE` the per-phase value is the same number repeated over A/B/C (a
+balanced bank's per-phase admittance equals its positive-sequence value). The reactive
+part becomes the reactive ELEMENT it is, so its susceptance carries the right frequency
+trend: `|B(h)| = h·B` for a capacitor bank, `B/h` for a reactor. Both forms reproduce the
+fundamental admittance exactly, so no load-flow result depends on the choice (verified on
+the MATPOWER benchmarks, whose shunts include 6 inductive rows in `case118` and several in
+`case300`); only the harmonic orders differ, and a negative capacitance would get them
+wrong by `h²`. The conversion log names how many converted rows are inductive.
+
+Tests: `tests/convert/test_pandapower_pv_bus_shunt.py`.
 
 ## Coverage gaps / known scope boundaries
 
-- `gen` (PV / voltage-controlled buses) is converted ONLY under the opt-in
-  `gen_mode=GenMode.VOLT_VAR_APPROX` (see the section above); the DEFAULT drops it
-  (`warn_dropped_elements`). `shunt` is never converted. `case118` (a
-  345/161/138 kV transmission benchmark) relies on 53 `gen` + 14 `shunt` for
-  voltage support; a full nonlinear constant-power comparison is therefore NOT a
-  valid oracle for that grid even after freezing pandapower's own converged
-  `res_gen`/`res_shunt` P/Q as fixed `sgen`/`load` (the nonlinear solver converges,
-  but to a badly wrong, inflated operating point at nearly every bus — a known
-  "wrong solution branch" phenomenon from removing voltage-control feedback on a
-  stressed network, not a transformer bug). The Volt-VAr approximation restores
-  the feedback but only up to a droop steepness of ~5 on that grid (a few percent
-  of voltage error) before the same branch problem returns. `case118`'s
-  transformer/tap conversion is instead validated via a LINEAR, exact Y-bus-stamp
-  comparison against pandapower's own internal `Ybus` — see
-  `tests/reference/test_pandapower_grid_matrix.py::TestCase118TransformerOnly`.
-  (A network whose generators are frozen at pandapower's OWN converged `(P, Q)` as
-  `sgen` rows reproduces pandapower to 2e-13 pu on `case9` and `case39` — the
-  network conversion itself, lines/transformers/taps included, is exact; the whole
-  residual on those grids is the PV-bus model.)
+- `case118`'s transformer/tap conversion is ALSO validated independently of the
+  power flow, via a LINEAR exact Y-bus-stamp comparison against pandapower's own
+  internal `Ybus` — see
+  `tests/reference/test_pandapower_grid_matrix.py::TestCase118TransformerOnly`. A
+  network whose generators are frozen at pandapower's OWN converged `(P, Q)` as
+  `sgen` rows reproduces pandapower to 2e-13 pu on `case9` and `case39`, so the
+  network conversion itself (lines, transformers, taps, the slack) is exact.
+- `gen` rows at the `ext_grid` bus are dropped by design (see the slack-bus rule);
+  pandapower's DISTRIBUTED slack (`slack=True` with `slack_weight`) is not modelled —
+  such a row converts with a FIXED active power.
 - Bus-LINE/bus-transformer (`et='l'`/`'t'`) switches (used by `mv_oberrhein` and
-  `create_cigre_network_mv` to operate a meshed ring radially) ARE converted, but
-  only via the accepted out-of-service approximation described in "Bus-line /
-  bus-transformer switches" above — the still-connected terminal's shunt
-  admittance is dropped along with the element, unlike pandapower's own
-  auxiliary-bus model. Not a silent gap (`_open_switch_targets` is unconditional,
-  applied to every network), but not full fidelity either.
-- `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `storage`, `motor`,
+  `create_cigre_network_mv` to operate a meshed ring radially) retain a singly-open
+  element on an auxiliary terminal node by default, matching pandapower's connected-
+  end shunt. The legacy whole-element omission remains explicitly selectable through
+  `open_switch_model="drop_element"`; both-open elements are omitted in either mode.
+- trafo ZERO-SEQUENCE leakage IS read: `vk0_percent`/`vkr0_percent` become
+  `Transformer.zero_sequence` (per-unit values are base-invariant, so the same
+  `Z = vk0% · Z_base_LV` formula the positive sequence uses applies, including the
+  TO-side delta coil factor and the `parallel` divide). A zero or absent `vk0_percent` is
+  pandapower's own "use the positive-sequence value", which is pgml's
+  `transformer.zero_sequence.*` default; the grounded-wye/zigzag units that fall back are
+  reported in ONE WARNING per conversion carrying the count and their indices
+  (`_warn_defaulted_zero_sequence`). NOT modelled, each named in a WARNING when set: `mag0_percent`/`mag0_rx`
+  (a finite zero-sequence MAGNETIZING impedance — the three-limb-core path through tank
+  and air), `si0_hv_partial` (the HV/LV split of the zero-sequence leakage inside a T) and
+  `xn_ohm`/`rn_ohm` (a neutral earthing impedance, `3·Z_N` in series).
+- `trafo3w`, `impedance`, `ward`/`xward`, `dcline`, `motor`,
   `asymmetric_sgen`: not converted (`warn_dropped_elements`).
-- ext_grid zero/negative-sequence source impedance (`r0x0_max`/`x0x_max`) is not
-  read; the `Source`'s zero-sequence impedance equals its positive-sequence value.
-  Irrelevant to `slack="ideal"` solves (the slack fixes the exact 3-phase phasor
-  set regardless of any Thevenin impedance) but relevant if a `norton`-mode slack
-  or a short-circuit study is ever added.
+- ext_grid NEGATIVE-sequence source impedance is not represented separately: the
+  converted `Source` is one physical Thevenin with `Z2 = Z1` (a passive upstream
+  network), whereas pandapower's own `runpp_3ph` pins the positive sequence as an
+  ideal slack and puts its short-circuit impedance in the NEGATIVE-sequence network
+  only. The converter follows pandapower's positive-sequence behaviour (near-ideal
+  `Z1 = 1e-6` Ohm), so the negative-sequence boundary differs by that
+  short-circuit impedance — negligible for a stiff feed, visible on a weak one
+  (measured 5e-6 pu on the 2-bus case of
+  `tests/reference/test_pandapower_source_zero_sequence.py` at `s_sc_max_mva = 1000`).
+- ext_grid ZERO-sequence source impedance IS read: `x0x_max`/`r0x0_max` together
+  with `s_sc_max_mva`/`rx_max` give `X0 = x0x_max * X1`, `R0 = r0x0_max * X0` with
+  `X1 = (U_LL^2/S_sc)/sqrt(1+rx_max^2)`, carried into the `Source`'s per-phase
+  matrix through `Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`
+  (`_ext_grid_zero_sequence`). pandapower multiplies its OWN zero-sequence shunt by
+  the IEC voltage factor `c = 1.1` even in power-flow mode
+  (`pd2ppc_zero._add_ext_grid_sc_impedance_zero`); pgml stores the physical
+  impedance (`c = 1`), so pandapower's internal value is exactly 1.1x pgml's
+  (asserted in the oracle test). Without the short-circuit columns (pandapower's
+  own default: NaN) the documented `source.zero_sequence.*` ratios apply and a
+  WARNING names the ext_grid. Irrelevant to `slack="ideal"` solves (the slack fixes
+  the exact 3-phase phasor set regardless of any Thevenin impedance); it shapes
+  `slack="norton"` solves and every harmonic order, where the source is a Norton
+  shunt.
 - An ideal phase-shifter tap (`tap_step_degree` nonzero, or `tap_phase_shifter`
   True) is not modelled and raises `ConversionError`.
 

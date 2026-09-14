@@ -28,7 +28,20 @@ import math
 import pytest
 import torch
 
-import opendssdirect as dss  # noqa: E402
+# ---------------------------------------------------------------------------
+# Optional opendssdirect guard (matches existing reference test conventions)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss  # noqa: E402
+
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect not installed", allow_module_level=True)
+
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
 
 from pgml.convert.opendss import PhaseMode, to_grid  # noqa: E402
 from pgml.schemas.grid_schema import Load, LoadModel, Phase, ZipCoefficients  # noqa: E402
@@ -112,6 +125,42 @@ class TestConstantImpedanceModel:
         load = next(a for a in grid.appliances if isinstance(a, Load))
         assert load.load_model == LoadModel.CONST_IMPEDANCE
         assert load.zip_coefficients is None
+
+
+@pytest.mark.parametrize("model", [1, 5])
+def test_unmapped_voltage_limits_warn_without_changing_native_model(caplog, model):
+    _build_circuit(
+        f"New Load.range1 phases=3 bus1=b1 kv={_BASEKV} kw=100 kvar=30 "
+        f"model={model} vminpu=.92 vmaxpu=1.08 vlowpu=.4"
+    )
+    dss.Text.Command(
+        f"New Load.range2 phases=3 bus1=b1 kv={_BASEKV} kw=50 kvar=15 "
+        f"model={model} vminpu=.92 vmaxpu=1.08 vlowpu=.4"
+    )
+    dss.Text.Command("Solve")
+    assert dss.Solution.Converged()
+    grid, _ = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
+    records = [
+        r for r in caplog.records if "voltage-dependent load limits" in r.message
+    ]
+    assert len(records) == 1
+    assert "2 constant-power/current load(s)" in records[0].message
+    for field in ("Vminpu=0.92", "Vmaxpu=1.08", "Vlowpu=0.4", "range1", "range2"):
+        assert field in records[0].message
+    assert (
+        sum(float(a.p_nom_w) for a in grid.appliances if isinstance(a, Load)) == 150_000
+    )
+    dss.Loads.Name("range1")
+    assert int(dss.Loads.Model()) == model
+    assert float(dss.Properties.Value("Vlowpu")) == pytest.approx(0.4)
+
+
+def test_constant_impedance_load_has_no_unmapped_voltage_range_warning(caplog):
+    _build_circuit(
+        f"New Load.zrange phases=3 bus1=b1 kv={_BASEKV} kw=100 kvar=30 model=2"
+    )
+    to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
+    assert not any("voltage-dependent load limits" in r.message for r in caplog.records)
 
 
 class TestConstantCurrentModel:

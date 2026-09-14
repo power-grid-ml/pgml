@@ -33,7 +33,7 @@ EE convention notes
   at rated voltage. Since we add NO loads to the DSS circuit, the DSS Y is
   the passive network (lines + Vsource shunt) only.
 - Our ``assemble_ybus`` stamps Load appliances as ``conj(S)/u_rated_v^2``
-  (constant-impedance M1 model). By subtracting these from our Y diagonal
+  (the linear constant-impedance model). By subtracting these from our Y diagonal
   before comparison, both sides represent the same passive network.
 - Vsource shunts: both OpenDSS and our assembly use ``Z_s = (1e-6 + j*X)``
   ohm (tiny Thevenin), so ``Y_s = Z_s^{-1} ≈ 1e6`` S on the source bus.
@@ -59,15 +59,30 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import opendssdirect as dss
-import pandapower.networks as pn
 import pytest
 import torch
 
-from pgml.assembly import assemble_ybus, node_phase_index
-from pgml.convert.pandapower import to_grid as pp_to_grid
-from pgml.convert.opendss import to_grid as dss_to_grid
-from pgml.schemas.grid_schema import (
+# ---------------------------------------------------------------------------
+# Optional opendssdirect + pandapower guard (matches existing reference test
+# conventions; this oracle needs both)
+# ---------------------------------------------------------------------------
+try:
+    import opendssdirect as dss
+    import pandapower.networks as pn
+
+    _OPENDSS_AVAILABLE = True
+except ImportError:
+    _OPENDSS_AVAILABLE = False
+
+if not _OPENDSS_AVAILABLE:
+    pytest.skip("opendssdirect or pandapower not installed", allow_module_level=True)
+
+pytestmark = [pytest.mark.opendss, pytest.mark.usefixtures("opendss_model_defaults")]
+
+from pgml.assembly import assemble_ybus, node_phase_index  # noqa: E402
+from pgml.convert.pandapower import to_grid as pp_to_grid  # noqa: E402
+from pgml.convert.opendss import to_grid as dss_to_grid  # noqa: E402
+from pgml.schemas.grid_schema import (  # noqa: E402
     Line as GridLine,
     Load as GridLoad,
     Phase,
@@ -106,6 +121,10 @@ def _build_dss_circuit_passive(net) -> None:
     x1_tiny = 2.0 * math.pi * f0 * 1.0e-12  # Ohm (X = 2*pi*f*L, L=1e-12 H)
 
     dss.Text.Command("Clear")
+    # Every OpenDSS element takes its BASE frequency from this global setting, and the
+    # converter reads it back as the grid's base frequency: set it explicitly so the
+    # circuit does not depend on whatever a previous circuit left behind.
+    dss.Text.Command(f"Set DefaultBaseFrequency={f0:.10g}")
     dss.Text.Command(
         f"New Circuit.ieee33_passive basekv={vn_kv} pu=1.0 phases=1 "
         f"bus1=bus0.1 r1={r1_tiny} x1={x1_tiny} frequency={f0}"
@@ -142,6 +161,10 @@ def _build_dss_circuit_with_loads(net) -> None:
     x1_tiny = 2.0 * math.pi * f0 * 1.0e-12
 
     dss.Text.Command("Clear")
+    # Every OpenDSS element takes its BASE frequency from this global setting, and the
+    # converter reads it back as the grid's base frequency: set it explicitly so the
+    # circuit does not depend on whatever a previous circuit left behind.
+    dss.Text.Command(f"Set DefaultBaseFrequency={f0:.10g}")
     dss.Text.Command(
         f"New Circuit.ieee33_full basekv={vn_kv} pu=1.0 phases=1 "
         f"bus1=bus0.1 r1={r1_tiny} x1={x1_tiny} frequency={f0}"

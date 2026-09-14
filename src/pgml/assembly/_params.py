@@ -20,19 +20,6 @@ import torch
 from torch import Tensor
 
 
-def matrix_to_tensor(
-    mat: Sequence[Sequence[float]], dtype: torch.dtype, device
-) -> Tensor:
-    """Convert a row-major PerPhaseMatrix to a real tensor ``[P, P]``."""
-    return torch.as_tensor(mat, dtype=dtype, device=device)
-
-
-def diag_from_tuple(values: Sequence[float], dtype: torch.dtype, device) -> Tensor:
-    """Build a diagonal ``[P, P]`` real tensor from a per-phase tuple."""
-    v = torch.as_tensor(values, dtype=dtype, device=device)
-    return torch.diag(v)
-
-
 def phase_voltage_magnitude(
     u_rated_v: float, n_phases: int, *, line_to_line: bool = False
 ) -> float:
@@ -113,8 +100,8 @@ def _tensor_sum(per_phase: Sequence):
     """Autograd-safe sum of a per-phase sequence (mixed python floats / tensors).
 
     Mirrors :func:`pgml.assembly.ybus._tensor_sum` but does NOT coerce dtype/device:
-    a pure-float input stays a python float (so the const-Z reference path remains
-    bit-exact), while a tensor anywhere in the sequence makes the running total a
+    a pure-float input stays a python float (so the const-Z reference path is
+    numerically unchanged), while a tensor anywhere in the sequence makes the total a
     graph-preserving tensor (gradients flow back to each per-phase leaf). Uses plain
     ``+`` accumulation, which is autograd-safe and never an in-place op.
     """
@@ -185,8 +172,6 @@ def resolve_operating_power(
 
 
 __all__ = [
-    "matrix_to_tensor",
-    "diag_from_tuple",
     "phase_voltage_magnitude",
     "const_z_shunt_admittance",
     "resolve_operating_power",

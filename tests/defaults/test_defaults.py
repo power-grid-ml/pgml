@@ -68,6 +68,57 @@ def test_module_constants_are_sourced_from_config():
     assert syn._DEFAULT_EARTH_RHO == config.get("line.earth_return.resistivity_ohm_m")
 
 
+def test_geometry_internal_inductance_default_is_the_published_gmr():
+    """The geometry path's internal-inductance model and OpenDSS's band are documented."""
+    from pgml.geometry import carson
+
+    assert config.get("line.geometry.internal_inductance") == "gmr"
+    assert carson.INTERNAL_INDUCTANCE == config.get("line.geometry.internal_inductance")
+    assert config.get("line.geometry.power_frequency_band_hz") == [40.0, 1000.0]
+    assert carson.POWER_FREQUENCY_BAND_HZ == (40.0, 1000.0)
+    assert config.get("line.geometry.internal_inductance") in (
+        carson.INTERNAL_INDUCTANCE_MODELS
+    )
+
+
+def test_geometry_internal_inductance_override_reaches_assembly(tmp_path, monkeypatch):
+    """Overriding the defaults file changes the Y-bus of a conductor-geometry line.
+
+    Assembly reads ``line.geometry.internal_inductance`` at assembly time, so a
+    project-level override applies to an already-imported package. The ``"bessel"`` model
+    drops the internal reactance the published GMR holds fixed, and the gap grows with
+    frequency as the skin depth shrinks, so the admittance must move more at 1250 Hz than
+    at 250 Hz.
+
+    An override file REPLACES the packaged one, so it carries every key assembly reads;
+    the override here is one leaf of a full copy.
+    """
+    import torch
+    import yaml
+
+    from tests.differentiability.test_carson_gradcheck import _geom_grid
+    from pgml.assembly import assemble_network_ybus
+
+    grid = _geom_grid(1.2e-4)
+    f = torch.tensor([250.0, 1250.0], dtype=torch.float64)
+    y_gmr = assemble_network_ybus(grid, f, dtype=torch.complex128).Y
+    data = yaml.safe_load(yaml.safe_dump(config.defaults()))
+    data["line"]["geometry"]["internal_inductance"]["value"] = "bessel"
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(custom))
+    try:
+        config.reload(str(custom))
+        y_bes = assemble_network_ybus(grid, f, dtype=torch.complex128).Y
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        config.reload()
+    rel = (y_bes - y_gmr).abs().amax(dim=(-2, -1)) / y_gmr.abs().amax(dim=(-2, -1))
+    assert float(rel[1]) > 3.0 * float(rel[0]) > 1e-3
+    # The packaged default is restored, so the Y-bus is back to the GMR model.
+    assert torch.equal(assemble_network_ybus(grid, f, dtype=torch.complex128).Y, y_gmr)
+
+
 def test_describe_and_units():
     assert "GMR" in config.describe("line.conductor.gmr_over_radius")
     assert config.units("line.earth_return.resistance_coeff_ohm_per_m_per_hz")
@@ -172,7 +223,11 @@ def test_default_model_three_phase_is_sequence_aware():
 
     grid = _three_phase_grid()
     apply_default_harmonic_model(grid)
-    assert grid.branches[0].tags["harmonic_line_model"] == "sequence_aware"
+    ln = grid.branches[0]
+    assert ln.harmonic_line_model == "sequence_aware"
+    assert ln.harmonic_skin_effect is True  # line.harmonic_model.skin_effect
+    # No per-line earth-return override: the line follows the defaults file.
+    assert ln.earth_return is None
 
 
 def test_default_model_single_phase_is_positive_sequence():
@@ -214,8 +269,8 @@ def test_default_model_single_phase_is_positive_sequence():
     )
     apply_default_harmonic_model(grid)
     ln = grid.branches[0]
-    assert "harmonic_line_model" not in (ln.tags or {})
-    assert ln.resistance_frequency.multiplier.law == "carson_skin_multiplier"
+    assert ln.harmonic_line_model == "positive_sequence"
+    assert ln.harmonic_skin_effect is True
 
 
 def test_default_model_respects_explicit_precedence():
@@ -223,6 +278,6 @@ def test_default_model_respects_explicit_precedence():
     from pgml.geometry import apply_default_harmonic_model
 
     grid = _three_phase_grid()
-    grid.branches[0].tags = {"harmonic_line_model": "positive_sequence"}
+    grid.branches[0].harmonic_line_model = "positive_sequence"
     apply_default_harmonic_model(grid)
-    assert grid.branches[0].tags["harmonic_line_model"] == "positive_sequence"
+    assert grid.branches[0].harmonic_line_model == "positive_sequence"

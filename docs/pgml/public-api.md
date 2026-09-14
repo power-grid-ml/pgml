@@ -1,120 +1,151 @@
 # Public API
 
-`pgml` exposes a single stable entry point for most users. The lower-level
-subpackages are available for advanced use (raw tensors, scenario batching,
-converter pipelines) but the facade below is the recommended starting point.
+One function covers most use. `pgml.simulate` takes a grid and a configuration and returns a
+differentiable `SolvedState`. The subpackages underneath are public too, for raw tensors,
+batched sampling and converters.
 
-## Entry points at a glance
+| Symbol | Module | Purpose |
+|---|---|---|
+| `pgml.simulate(grid, config)` | `pgml.simulation` | Solve, return a differentiable {class}`~pgml.simulation.SolvedState` |
+| `pgml.simulate_serializable(grid, config)` | `pgml.simulation` | Solve, return a JSON-ready {class}`~pgml.simulation.ResultBundle` |
+| `pgml.SimulationConfig` | `pgml.simulation` | Serializable definition of what to simulate |
+| `pgml.Grid` | `pgml.schemas` | The input grid, a frozen pydantic contract |
+| `pgml.PgmlError` and subclasses | `pgml.errors` | Exception hierarchy with HTTP status hints |
 
-| Symbol | Where | Purpose |
-|--------|-------|---------|
-| `pgml.simulate(grid, config)` | `pgml.simulation` | Run a simulation; return differentiable {class}`~pgml.simulation.SolvedState` |
-| `pgml.simulate_serializable(grid, config)` | `pgml.simulation` | As above but return JSON-ready {class}`~pgml.simulation.ResultBundle` |
-| `pgml.SimulationConfig` | `pgml.simulation` | Serializable definition of WHAT to simulate |
-| `pgml.Grid` | `pgml.schemas` | The input grid (frozen pydantic contract) |
-| `pgml.PgmlError` and subclasses | `pgml.errors` | Exception hierarchy with HTTP status hints (`PgmError` is a deprecated alias) |
+## What to simulate, and how to run it
 
-## `SimulationConfig` vs execution kwargs
+`SimulationConfig` is a pydantic model, so it serialises into a configuration file or a REST
+request body. It carries the physics of the study.
 
-`SimulationConfig` is a pydantic model — a clean, JSON-serialisable body for a
-REST handler or configuration file.  It carries:
+| Field | Meaning |
+|---|---|
+| `calculation` | `"harmonic"` by default, or `"power_flow"` |
+| `harmonic_orders` | Integer orders, default `[1, 3, 5, 7, 9, 11, 13]` |
+| `slack` | `"ideal"` or `"norton"` |
+| `symmetry` | `None`, `"auto"`, `"symmetric"` or `"asymmetric"`, see {doc}`concepts` |
+| `load_shunt` | The harmonic device Norton shunt, `"none"`, `"opendss"` or `"motor"`; `None` resolves the documented default |
+| `operating_point` | Per-appliance P and Q overrides |
+| `enforce_q_limits` | Whether a voltage-regulating generator's reactive limits bound its output |
+| `tol`, `tol_update_pu`, `s_base_va`, `max_iter` | Convergence control for the nonlinear solve |
 
-- `calculation` — `"harmonic"` (default) or `"power_flow"`
-- `harmonic_orders` — list of INTEGER harmonic orders (default `[1, 3, 5, 7, 9, 11, 13]`);
-  a non-integer order (an interharmonic) raises — spectra and the per-order assembly are
-  defined for integer multiples of the fundamental only
-- `slack` — `"ideal"` or `"norton"`
-- `symmetry` — `None` / `"auto"` / `"symmetric"` / `"asymmetric"` (see {doc}`concepts`)
-- `operating_point` — per-appliance P/Q overrides
-- `tol`, `max_iter` — convergence tolerances
+`tol` is the primary convergence tolerance: the largest nodal apparent-power mismatch in per
+unit of `s_base_va`, default 1e-8 pu on a 1e6 VA base. `tol_update_pu` is the secondary one,
+the largest per-row voltage update in per unit of the node's line-to-neutral rated voltage,
+also 1e-8 pu. Both criteria must hold. Each is capped by what the working precision can
+resolve, and a tighter request logs a warning naming the floor, which then governs.
+`load_shunt` lives in the config because it is a modelling choice.
 
-**Execution concerns** (`device`, `dtype`) are passed directly to {func}`~pgml.simulation.simulate`
-as keyword arguments, not stored in the config.  This keeps the config portable and
-lets the same spec run on CPU or GPU without modification.
+Execution concerns stay out of the config and are keyword arguments of
+{func}`~pgml.simulation.simulate`. `device` and `dtype` are the two common ones, so the same
+stored config runs on a CPU or a GPU unchanged.
 
-**`param_overrides`** is a further keyword of {func}`~pgml.simulation.simulate` (not part
-of the config, since it carries live tensor leaves rather than serializable values): a
-`{(component_kind, element_id, field_name): tensor}` mapping that substitutes individual
-grid parameters for a differentiable parameter-recovery loop. It applies to
-`calculation="power_flow"` only — the returned `SolvedState`'s lazy branch accessors reuse
-the same overrides, so voltages and currents describe one consistent network — and raises
-for `calculation="harmonic"` rather than silently ignoring it.
+`precision` is an execution keyword as well. `"full"` solves at `dtype`; `"mixed"` factors at
+complex64 and refines against complex128 residuals, which keeps complex128 accuracy at
+single-precision factorization cost and requires `dtype="complex128"`.
 
-**`on_disconnected`** is the keyword for grids that are not fully energized — a line taken
-out of service or an open switch leaving nodes without a galvanic path to a source. It
-applies to BOTH calculations:
+`equilibrate` is the diagonal equilibration of every linear system the solve factors: `None`
+for the documented default `solver.equilibration.mode`, or `"symmetric"` or `"off"`.
+It is an execution keyword rather than a config field because it changes the
+conditioning of the factorizations and not the model. The result, its units and its gradients
+are the same either way. See {doc}`modeling/solver-performance`.
 
-- `"raise"` (default) — {class}`~pgml.errors.ConnectivityError` naming the de-energized
-  nodes, the separating branches, and the concrete fixes.
-- `"zero"` — solve the energized sub-grid and report exactly 0 V on the de-energized rows at
-  every order, keeping the FULL grid's row layout, so voltages, branch currents and flows
-  stay addressable by the original ids and read 0 inside the island. This is the mode an
-  operational tool (dashboard, switching study) wants. {meth}`~pgml.simulation.SolvedState.thd`
-  is undefined on a de-energized row.
-- `"ignore"` — skip the check; a de-energized area then surfaces as a singular factorization
+`param_overrides` is another keyword rather than a config field, because it carries live
+tensors instead of serialisable values. It maps
+`(component_kind, element_id, field_name)` to a tensor and substitutes individual grid
+parameters for a parameter-recovery loop. It applies to `calculation="power_flow"` and
+raises for `"harmonic"` rather than being ignored. The returned state's lazy branch
+accessors reuse the same overrides, so voltages and currents always describe one network.
+
+`on_disconnected` decides what happens when part of the grid has no galvanic path to a
+source, after an open switch or an out-of-service line. It applies to both calculations.
+
+- `"raise"`, the default. {class}`~pgml.errors.ConnectivityError` names the de-energized
+  nodes, the separating branches and the available fixes.
+- `"zero"`. Solve the energized sub-grid and report exactly 0 V on the de-energized rows at
+  every order, keeping the full row layout so every id stays addressable. This is what an
+  operational tool wants. {meth}`~pgml.simulation.SolvedState.thd` is undefined on such a
+  row.
+- `"ignore"`. Skip the check. A de-energized area then shows up as a singular factorization
   or as non-convergence.
 
-## Quick examples
+## Reading a result
 
-### Harmonic flow (default)
+`SolvedState` holds the solved voltages eagerly and derives everything else on demand. All
+accessors return tensors on the autograd tape.
+
+| Accessor | Returns |
+|---|---|
+| `node_voltages()` | `[*batch, H, N]` complex node-phase voltages |
+| `voltage(node_id, phase)` | `[*batch, H]` phasor at one node and phase |
+| `spectrum_at(node_id, phase)` | The same values read as a spectrum |
+| `thd(node_id, phase)` | Voltage THD, needs order 1 among the solved orders |
+| `branch_currents()` | Per-branch terminal currents |
+| `branch_flows()` | Per-branch complex power at each terminal |
+| `to_result_set()` | A serializable `ResultBundle`, detached from the tape |
+| `fusion` | The bus-fusion map, when the grid had a zero-impedance branch |
+
+Voltages and the row index are always the grid's own layout, so nothing downstream changes when
+a grid contains an ideal switch or coupler. `SolvedState.fusion` records which node-phases were
+solved as one row, and it is what lets `branch_currents()` report the current through a fused
+branch. It is `None` on a grid without such a branch. See the ideal-branch section of
+{doc}`modeling/conventions`.
+
+## Four calls
 
 ```python
 import pgml
-from pgml.schemas import Grid, ...   # build your grid
 
-# Defaults: harmonic, orders [1,3,5,7,9,11,13], complex128, CPU
-state = pgml.simulate(grid)
-
-V = state.node_voltages()           # [H, N] complex — on the autograd tape
-thd = state.thd(node_id=1, phase=Phase.A)
+state = pgml.simulate(grid)                         # harmonic, orders 1..13, complex128, CPU
+v = state.node_voltages()                           # [H, N] complex, on the tape
 ```
-
-### Power flow only
 
 ```python
-from pgml import simulate, SimulationConfig
-
-cfg = SimulationConfig(calculation="power_flow")
-state = simulate(grid, cfg, dtype="complex128")
-v_fund = state.node_voltages()      # [1, N] complex (one harmonic = fundamental)
+cfg = pgml.SimulationConfig(calculation="power_flow")
+state = pgml.simulate(grid, cfg)                    # fundamental load flow only
 ```
-
-### Serialise for REST / persistence
 
 ```python
 bundle = pgml.simulate_serializable(grid)
-json_body = bundle.model_dump_json()   # standard pydantic JSON export
+body = bundle.model_dump_json()                     # REST response or file
 ```
-
-### Custom harmonic orders and GPU execution
 
 ```python
 cfg = pgml.SimulationConfig(harmonic_orders=[1, 3, 5, 7, 11, 13])
 state = pgml.simulate(grid, cfg, device="cuda", dtype="complex64")
 ```
 
-## Lower-level surfaces
+## Underneath the facade
 
-When the high-level facade is not enough:
+- {mod}`pgml.solver`. `solve_harmonic_flow` and `solve_power_flow` for direct tensor work.
+  Both run the connectivity and zero-impedance checks, accept `branch_states` for
+  differentiable switch states and switch-state batching, and take the same factorization
+  options: `linear_solver` for the sparse, dense and block backends, `block_rows`,
+  `equilibrate`, `criticality` and `branch_states_method`. `solve_power_flow` additionally
+  takes a prepared `system=` handle that reuses one factorization across solves, and
+  `enforce_q_limits` for a voltage-regulating generator's reactive bounds.
+  `loadability_limit` walks the loading parameter to the largest solvable value. See
+  {doc}`api/solver`.
+- {mod}`pgml.scenarios`. Reproducible batched sampling of operating points, parameter and
+  injection sweeps, a batched solve through `run_scenarios`, and parquet persistence with
+  `write_dataset` and `read_dataset`.
+- {mod}`pgml.assembly`. `assemble_ybus`, `device_current_injections`, `branch_currents` and
+  the node-phase index, for control over a single step.
+- {mod}`pgml.geometry`. Carson/Deri line constants from conductor geometry, and the analytic
+  harmonic line models for lines given as R and X.
+- {mod}`pgml.convert`. Readers for pandapower, power-grid-model and OpenDSS networks.
+- {mod}`pgml.grids`. The benchmark builders used throughout these pages, plus
+  `synthetic_feeder` for a radial feeder of any size with no external dependency.
+- {mod}`pgml.multigrid`. Merge an ensemble of grids into one solvable grid with a
+  block-diagonal admittance, then split the solved state back per member.
+- {mod}`pgml.dispatch`. State-of-charge integration and the realized power sequence a
+  `Storage` element's energy-state fields describe. The dispatch rule is the caller's ordinary
+  Python; `integrate_soc` realizes a requested power sequence under the reserve, the capacity
+  and the power rating, so a gradient with respect to the setpoint value is available.
+- {mod}`pgml.schemas`. The frozen data contracts.
 
-- {mod}`pgml.solver` — raw `solve_harmonic_flow` / `solve_power_flow` for
-  scenarios where you want to manage tensors directly (minimal overhead). Both
-  run a pre-solve connectivity check by default (`on_disconnected="raise"`
-  raises {class}`~pgml.errors.ConnectivityError`; `"zero"` solves the
-  energized sub-grid; `"ignore"` skips it), accept `branch_states` for
-  differentiable topology / switch-state batching (with an optional
-  `branch_states_method="woodbury"` fast path over a low-rank update instead of
-  assembling every state), and `solve_power_flow`
-  accepts `linear_solver="auto"` (sparse on large CPU systems, dense on GPU;
-  `"block"` factors a `pgml.multigrid`-merged grid ensemble one member at a
-  time) and a `system=` handle from `prepare_power_flow` to reuse one
-  factorization across repeated solves of the same grid. See {doc}`api/solver`.
-- {mod}`pgml.scenarios` — `run_scenarios` / `run_node_injection_sweep` for
-  reproducible batched training-data generation.
-- {mod}`pgml.assembly` — `assemble_ybus` / `device_current_injections` /
-  `branch_currents` for per-step Y-bus control.
-- {mod}`pgml.convert` — converters from pandapower / power-grid-model / OpenDSS.
-- {mod}`pgml.schemas` — frozen pydantic contracts (the single source of truth
-  for all data types).
+Errors form a small hierarchy. `PgmlError` splits into `InputError` and `ComputationError`,
+with leaves such as `ConvergenceError` and `ConnectivityError`, each carrying an
+`http_status` hint for a service layer. Schema validation keeps raising pydantic's own
+`ValidationError`.
 
-See the {doc}`api/index` for the full API reference.
+The full generated reference is {doc}`api/index`.

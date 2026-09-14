@@ -9,7 +9,7 @@ dim), so generating large ML datasets is one vectorized solve, not a python loop
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional, Protocol, Sequence, runtime_checkable
 
 import torch
 from torch import Tensor
@@ -19,14 +19,7 @@ from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
-from .config import (
-    CartesianConfig,
-    CoherentSpectrumConfig,
-    ScenarioConfig,
-    SpectrumSweepConfig,
-)
-from .harmonics import sample_coherent_spectra, spectrum_sweep
-from .sampler import SampledScenarios, cartesian_sample, sample
+from .sampler import SampledScenarios
 
 
 def _slice_range(x, start: int, end: int):
@@ -86,8 +79,8 @@ class ScenarioResult:
     ----------
     v:
         Node voltages — ``[B, N]`` for ``calculation="power_flow"``, ``[B, H, N]`` for
-        ``"harmonic"``, or ``[B, T, H, N]`` for a node-coherent
-        :class:`CoherentSpectrumConfig` (T = steps; timestamps in ``sampled.samples``).
+        ``"harmonic"``, or ``[B, T, H, N]`` for a sequence batch
+        (``sampled.n_steps > 1``; timestamps in ``sampled.samples["time_s"]``).
     index:
         The compact :class:`NodePhaseIndex` (row layout of ``v``).
     sampled:
@@ -100,7 +93,7 @@ class ScenarioResult:
         scenario — its best-effort voltages are still returned in ``v``.
     failed_states:
         SCENARIO indices (along the ``B`` axis of ``v``) that did not converge (empty
-        when all did). A node-coherent scenario counts as failed when ANY of its ``T``
+        when all did). A sequence scenario counts as failed when ANY of its ``T``
         steps failed. The solver also logs an error with the residual + likely cause.
     """
 
@@ -112,16 +105,39 @@ class ScenarioResult:
     failed_states: tuple[int, ...] = ()
 
 
-def _scenario_failures(
-    failed_flat, v_chunk: Tensor, is_coherent: bool
-) -> tuple[int, ...]:
+@runtime_checkable
+class ScenarioSpec(Protocol):
+    """What :func:`run_scenarios` needs from a batch specification.
+
+    Any object that can turn a grid into a :class:`SampledScenarios` is a spec, which is
+    how a downstream package plugs its own generator into this run path without pgml
+    knowing the recipe. The serializable configs of :mod:`pgml.scenarios.config` satisfy
+    it themselves.
+
+    Members
+    -------
+    sample(grid):
+        Draw / assemble the batch for ``grid``.
+    harmonic_orders:
+        Optional hint. A non-empty sequence declares that this spec only makes sense as a
+        harmonic calculation: :func:`run_scenarios` then switches ``calculation`` to
+        ``"harmonic"`` and uses the sequence as the solved order set unless the caller
+        named one. ``None`` leaves both to the caller.
+    """
+
+    harmonic_orders: Optional[Sequence[int]]
+
+    def sample(self, grid: Grid) -> SampledScenarios: ...
+
+
+def _scenario_failures(failed_flat, v_chunk: Tensor, n_steps: int) -> tuple[int, ...]:
     """Solver-flat failed indices -> unique scenario indices along ``B``.
 
-    The node-coherent path solves a ``[B, T]`` leading batch, so the solver's
+    A sequence batch (``n_steps > 1``) solves a ``[B, T]`` leading batch, so the solver's
     convergence mask flattens over ``B*T`` — a step index maps to its scenario via
-    ``// T``. Non-coherent runs have one solve per scenario (``T = 1``).
+    ``// T``. A snapshot batch has one solve per scenario.
     """
-    if is_coherent:
+    if n_steps > 1:
         if v_chunk.ndim >= 4:
             t = v_chunk.shape[-3]
             return tuple(sorted({i // t for i in failed_flat}))
@@ -132,12 +148,14 @@ def _scenario_failures(
 
 def run_scenarios(
     grid: Grid,
-    spec: "ScenarioConfig | CartesianConfig | SampledScenarios",
+    spec: "ScenarioSpec | SampledScenarios",
     *,
     calculation: str = "power_flow",
     harmonic_orders: Optional[Sequence[int]] = None,
     slack: str = "ideal",
     symmetry: Optional[str] = None,
+    load_shunt: Optional[str] = None,
+    load_shunt_basis: Optional[str] = None,
     dtype: torch.dtype = torch.complex128,
     device: Optional[torch.device] = None,
     chunk_size: Optional[int] = None,
@@ -160,14 +178,30 @@ def run_scenarios(
         Passed to the solver (``grid`` is the canonical single grid; scenarios vary
         its operating point via the sampled batched ``operating_point`` override).
     spec:
-        A :class:`ScenarioConfig` (random/QMC), a :class:`CartesianConfig` (grid
-        sweep), a :class:`CoherentSpectrumConfig` (node-coherent harmonic sequences —
-        forces ``calculation="harmonic"`` and defaults ``harmonic_orders`` to
-        ``[1, *config.orders]``), or a pre-built :class:`SampledScenarios`.
+        A :class:`ScenarioSpec` — anything with a ``sample(grid)`` method, which the
+        serializable configs (:class:`ScenarioConfig`, :class:`CartesianConfig`,
+        :class:`SpectrumSweepConfig`) satisfy — or a pre-built
+        :class:`SampledScenarios` (for example from
+        :func:`~pgml.scenarios.batch_from_values`). A spec whose
+        ``harmonic_orders`` hint is non-empty forces ``calculation="harmonic"`` and
+        supplies the default order set.
     calculation:
         ``"power_flow"`` (fundamental) or ``"harmonic"`` (requires ``harmonic_orders``).
     harmonic_orders:
         Orders for the harmonic calculation (e.g. ``[1, 5, 7]``).
+    load_shunt:
+        Harmonic device Norton shunt forwarded to
+        :func:`~pgml.solver.solve_harmonic_flow` (``"none"`` / ``"opendss"`` /
+        ``"motor"``; ``None`` = the documented modeling default). Harmonic calculation
+        only. A shunt derived from a PER-SCENARIO operating point makes ``Y(h)``
+        scenario-dependent, so each scenario is factored on its own — ``"none"`` keeps
+        the single shared factorization.
+    load_shunt_basis:
+        Which power and terminal voltage that shunt is built from
+        (:func:`~pgml.solver.solve_harmonic_flow`): ``"operating_point"`` follows each
+        scenario, ``"nameplate"`` uses the device's stored P, Q at its rated voltage and
+        so keeps ONE factorization per order for the whole batch. ``None`` = the
+        documented modeling default ``appliance.harmonic_shunt.basis``.
     symmetry:
         Calculation symmetry forwarded to the solver: ``None`` / ``"auto"`` (default;
         per-phase sampled operating points auto-promote to asymmetric), ``"symmetric"``
@@ -191,23 +225,22 @@ def run_scenarios(
         Intended for (non-differentiable) data generation — leave ``None`` to keep ``v`` on the
         solve device for a differentiable GPU pipeline.
     """
-    is_coherent = isinstance(spec, CoherentSpectrumConfig)
-    if is_coherent:
-        sampled = sample_coherent_spectra(grid, spec)
-        calculation = "harmonic"
-        if harmonic_orders is None:
-            harmonic_orders = [1, *spec.orders]
-    elif isinstance(spec, SpectrumSweepConfig):
-        sampled = spectrum_sweep(grid, spec)
-        calculation = "harmonic"
-        if harmonic_orders is None:
-            harmonic_orders = [1, *spec.orders]
-    elif isinstance(spec, SampledScenarios):
+    if isinstance(spec, SampledScenarios):
         sampled = spec
-    elif isinstance(spec, CartesianConfig):
-        sampled = cartesian_sample(grid, spec)
+    elif callable(getattr(spec, "sample", None)):
+        sampled = spec.sample(grid)
+        hint = getattr(spec, "harmonic_orders", None)
+        if hint:
+            calculation = "harmonic"
+            if harmonic_orders is None:
+                harmonic_orders = list(hint)
     else:
-        sampled = sample(grid, spec)
+        raise InputError(
+            f"run_scenarios spec {type(spec).__name__!r} is neither a SampledScenarios "
+            "nor a scenario spec (an object with a sample(grid) method)."
+        )
+    sampled.validate(grid)
+    n_steps = int(sampled.n_steps)
 
     if calculation == "harmonic" and not harmonic_orders:
         raise InputError("calculation='harmonic' requires harmonic_orders.")
@@ -242,6 +275,8 @@ def run_scenarios(
                 operating_point=op,
                 harmonic_injection=inj,
                 node_sources=list(sources) or None,
+                load_shunt=load_shunt,
+                load_shunt_basis=load_shunt_basis,
                 symmetry=symmetry,
                 dtype=dtype,
                 device=device,
@@ -266,7 +301,7 @@ def run_scenarios(
             sampled=sampled,
             frequencies_hz=freqs,
             converged=converged,
-            failed_states=_scenario_failures(failed, v, is_coherent),
+            failed_states=_scenario_failures(failed, v, n_steps),
         )
 
     # Stream the batch in chunks along the SCENARIO axis (a size-1 chunk loses its leading
@@ -274,10 +309,8 @@ def run_scenarios(
     # full [B, ...] tensor). The node-coherent path carries an extra step axis -> [B, T, H, N].
     if calculation == "power_flow":
         batched_ndim = 2
-    elif is_coherent:
-        batched_ndim = 4
     else:
-        batched_ndim = 3
+        batched_ndim = 4 if n_steps > 1 else 3
     v_parts: list[Tensor] = []
     failed: list[int] = []
     converged = True
@@ -297,7 +330,7 @@ def run_scenarios(
             v_c = v_c.to(output_device)
         v_parts.append(v_c)
         converged = converged and conv_c
-        failed.extend(start + i for i in _scenario_failures(failed_c, v_c, is_coherent))
+        failed.extend(start + i for i in _scenario_failures(failed_c, v_c, n_steps))
     return ScenarioResult(
         v=torch.cat(v_parts, dim=0),
         index=index,
@@ -308,4 +341,4 @@ def run_scenarios(
     )
 
 
-__all__ = ["ScenarioResult", "run_scenarios"]
+__all__ = ["ScenarioResult", "ScenarioSpec", "run_scenarios"]

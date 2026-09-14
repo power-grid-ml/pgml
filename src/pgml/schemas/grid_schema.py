@@ -1,9 +1,9 @@
-"""Phase-0 canonical data contract for the grid description (rev 3).
+"""Canonical data contract for the grid description.
 
-**SINGLE SOURCE OF TRUTH** for the grid description. Every other subsystem (Y-bus
-assembly, solver, parquet/SQL persistence, JSON export, the PyTorch-Geometric
-adapter) consumes these models and MUST NOT redefine them. Edits are
-orchestrator-only; subagents import, they do not modify.
+The single source of truth for the grid description. Every other subsystem (Y-bus
+assembly, solver, persistence, JSON export, downstream adapters) consumes these
+models and does not redefine them. Changes to these models are versioned through
+``pgml.schemas.SCHEMA_VERSION``.
 
 The data OUTPUT contract (per-harmonic, per-phase voltages/currents/powers and
 derived THD) lives in a separate artifact, :mod:`pgml.schemas.result_schema`, not
@@ -86,6 +86,7 @@ implicitly derived from geometry.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
@@ -109,6 +110,9 @@ from pydantic import (
 # framework: "array-like" is detected by duck typing (`.detach` / `__array__`).
 # Note: pydantic numeric constraints (gt/ge) are NOT applied to these Any-typed
 # fields, so positivity is enforced inside the validators below (floats only).
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _is_arraylike(v: Any) -> bool:
@@ -183,7 +187,7 @@ def si_field(
 
 
 class GridModel(BaseModel):
-    """Base: forbid unknown fields so a subagent inventing a field fails loudly."""
+    """Base model: unknown fields are rejected so a misspelled field fails loudly."""
 
     model_config = ConfigDict(
         extra="forbid", validate_assignment=True, arbitrary_types_allowed=True
@@ -382,7 +386,10 @@ class ResistanceFrequencyModel(GridModel):
     multiplier: FrequencyParam = Field(
         default_factory=lambda: ConstantParam(value=1.0),
         description="Per-unit resistance MULTIPLIER vs frequency, applied to the "
-        "reference-frequency resistance (1.0 = no skin effect).",
+        "reference-frequency resistance (1.0 = no skin effect). On a multi-phase "
+        "line the multiplier scales the CONDUCTOR part of the resistance matrix "
+        "only (diagonal minus the row's mean mutual); the mutual entries are the "
+        "geometry/earth-return path, where skin effect does not apply.",
     )
 
 
@@ -542,6 +549,16 @@ class LineGeometry(GridModel):
     conductors: list[ConductorPlacement] = Field(
         description="Phase + neutral conductors."
     )
+    internal_inductance: Optional[
+        Literal["gmr", "gmr_skin", "gmr_power_frequency", "bessel"]
+    ] = Field(
+        default=None,
+        description="Conductor internal-inductance model for this line. None resolves "
+        "from ``line.geometry.internal_inductance`` at assembly time. ``gmr`` retains "
+        "published GMR; ``gmr_skin`` applies continuous skin decay; "
+        "``gmr_power_frequency`` follows OpenDSS's frequency band; ``bessel`` uses "
+        "the solid-round-conductor model. Explicit values override any preset.",
+    )
     earth_resistivity_ohm_m: PosNum = si_field(
         "Earth resistivity (Deri earth return).",
         short="Ohm*m",
@@ -607,6 +624,96 @@ class BranchBase(GridModel):
     tags: dict[str, str] = Field(default_factory=dict)
 
 
+def _has_resistance_law(rfm: Optional["ResistanceFrequencyModel"]) -> bool:
+    """Whether a :class:`ResistanceFrequencyModel` carries a non-trivial law.
+
+    ``None`` or the default ``ConstantParam(value=1.0)`` is "no law"; anything else
+    (a constant other than 1, an analytic law, a sampled curve, an equation) is a
+    user-supplied resistance-vs-frequency multiplier.
+    """
+    if rfm is None:
+        return False
+    mult = rfm.multiplier
+    if isinstance(mult, ConstantParam):
+        return float(mult.value) != 1.0
+    return True
+
+
+class EarthReturnModel(GridModel):
+    """Carson earth-return parameters of the lumped ``sequence_aware`` line model.
+
+    Every field is ``None`` by default and then resolves from the packaged modeling
+    defaults (``pgml.defaults``, ``line.earth_return.*`` / ``line.zero_sequence.*``),
+    so this object is only needed to override the earth path of ONE line. The earth
+    return enters the zero sequence only (it cancels in the positive sequence), and
+    every form below reproduces the stored ``R0``/``X0`` exactly at ``f0``::
+
+        R0(h) = R0_conductor * m_skin(h) + 3 * (Re(h*f0) - Re_offset)
+        X0(h) = X0 * h**x0_exponent  [- 1.5 * kx * f0 * h * ln(h)  if carson_sublinear]
+
+    with ``Re(f) = resistance_coeff_ohm_per_m_per_hz * f`` (Carson's geometry-
+    independent earth-return resistance) and ``kx =
+    reactance_coeff_ohm_per_m_per_hz``. ``r0_includes_earth_return`` selects
+    ``R0_conductor = R0 - 3*Re(f0)``, ``Re_offset = 0`` (the stored ``R0`` is real
+    zero-sequence data that already contains the earth return) or, when false,
+    ``R0_conductor = R0``, ``Re_offset = Re(f0)`` (the stored ``R0`` is a
+    conductor-only value, e.g. one synthesised from an ``R0/R1`` ratio).
+
+    Consumed by the ``sequence_aware`` model only (``pgml.geometry.sequence``);
+    setting it on a line with another ``harmonic_line_model`` is rejected.
+    """
+
+    resistance_coeff_ohm_per_m_per_hz: Optional[Num] = si_field(
+        "Earth-return resistance per unit length per Hz (Carson: ``pi**2 * 1e-7``). "
+        "0 disables the earth-return damping. None = modeling default.",
+        short="Ohm/(m*Hz)",
+        long="ohm per metre per hertz",
+        default=None,
+    )
+    reactance_coeff_ohm_per_m_per_hz: Optional[Num] = si_field(
+        "Earth-return reactance per unit length per Hz per ln-unit (Carson/Deri: "
+        "``mu0``). Used by ``x0_frequency='carson_sublinear'`` only. None = modeling "
+        "default.",
+        short="Ohm/(m*Hz)",
+        long="ohm per metre per hertz",
+        default=None,
+    )
+    x0_frequency: Optional[Literal["linear", "carson_sublinear"]] = Field(
+        default=None,
+        description="Frequency law of the zero-sequence REACTANCE. ``linear``: "
+        "``X0(h) = X0*h`` (geometric scaling; the earth-return reactance "
+        "sub-linearity is left to the conductor-geometry path). "
+        "``carson_sublinear``: additionally subtract the Carson/Deri earth-return "
+        "reactance decay ``1.5*kx*f0*h*ln(h)``, which is geometry- and "
+        "soil-resistivity-independent and reproduces OpenDSS's ``Xg`` frequency "
+        "correction. None = modeling default.",
+    )
+    x0_nonnegative: Optional[bool] = Field(
+        default=None,
+        description="Clamp the sub-linear zero-sequence reactance to zero when its "
+        "lumped extrapolation becomes negative. None uses the modeling default. "
+        "Disable for the unguarded reference law. The clamp has zero gradient below "
+        "the boundary and is not a replacement for measured return-path geometry.",
+    )
+    x0_exponent: Optional[Num] = si_field(
+        "Exponent of the zero-sequence reactance scaling ``X0(h) = X0*h**p``. "
+        "1.0 = geometric. Values below 1 mimic a sub-linear earth-return reactance "
+        "empirically; prefer ``x0_frequency='carson_sublinear'`` for the physical "
+        "form. None = modeling default.",
+        short="1",
+        long="exponent",
+        default=None,
+    )
+    r0_includes_earth_return: Optional[bool] = Field(
+        default=None,
+        description="True when the stored ``R0`` already contains the earth-return "
+        "resistance at ``f0`` (real zero-sequence data): the earth part is then "
+        "excluded from the skin-effect multiplier. False for an ``R0`` synthesised "
+        "from an ``R0/R1`` ratio, which carries no earth content. Either way "
+        "``R0(f0)`` equals the stored ``R0``. None = modeling default.",
+    )
+
+
 class Line(BranchBase):
     """Multi-phase line/cable, canonical SI per-length phase-domain form.
 
@@ -615,8 +722,36 @@ class Line(BranchBase):
         Z_series(h) = (R0 .* r_mult(h) + j*2*pi*h*f0 * L) * length_m
         Y_shunt(h)  = (G + j*2*pi*h*f0 * C) * length_m   (split half to each end)
 
+    That explicit-matrix form is ONE of three line models; ``harmonic_line_model``
+    selects which physics builds ``Z_series(h)``:
+
+    - ``geometry`` — a ``conductor_geometry`` is given and the full differentiable
+      Carson/Deri model (earth return + skin effect, per harmonic) replaces the
+      stored R/L/C entirely (``pgml.geometry.carson``).
+    - ``sequence_aware`` — the stored 3x3 ``Z_abc(f0)`` is split into ``Z1``/``Z0``,
+      each sequence is frequency-corrected separately (``Z1`` earth-free, ``Z0``
+      carrying the Carson earth-return damping of :class:`EarthReturnModel`) and
+      recombined; the model an unbalanced 4-wire harmonic study needs.
+    - ``positive_sequence`` — the formula above with ``r_mult(h)`` the Bessel
+      skin-effect rise of the positive-sequence resistance and no earth return.
+    - ``naive`` — the formula above with ``r_mult(h) = 1`` (``R`` constant,
+      ``X`` proportional to ``h``).
+    - ``None`` — unresolved: assembly uses the stored parameters as they are
+      (equivalent to ``naive`` unless ``resistance_frequency`` carries a law). The
+      converters and ``pgml.geometry.apply_default_harmonic_model`` resolve it from
+      the modeling default ``line.harmonic_model.*``.
+
     Electrical matrices may come from ``type_ref`` (``Grid.types.lines``) instead
     of being given explicitly; a resolver materialises them before assembly.
+
+    Every model is a LUMPED pi branch: the series impedance is ``z * length_m``, the
+    shunt admittance ``y * length_m`` split half to each terminal, with no hyperbolic
+    (``sinh``/``tanh``) long-line correction and no distributed-parameter model. This is
+    the standard representation for distribution feeders over the harmonic range (a 1 km
+    LV cable at 2.5 kHz is a small fraction of a wavelength) and it is a frequency-domain
+    steady-state model: standing-wave and travelling-wave phenomena are outside it, and
+    the lumped form loses accuracy for long lines at high order. Split a long line into
+    several shorter ones when that matters.
     """
 
     component: Literal["line"] = "line"
@@ -661,12 +796,121 @@ class Line(BranchBase):
         description="Carson conductor geometry; when set, Z(h)/Yc(h) are computed via "
         "the Carson/Deri model (earth return + skin effect) instead of explicit R/L/C.",
     )
+    harmonic_line_model: Optional[
+        Literal["geometry", "sequence_aware", "positive_sequence", "naive"]
+    ] = Field(
+        default=None,
+        description="Frequency-dependent line model (see the class docstring). None = "
+        "unresolved: assembly uses the stored parameters, and the converters / "
+        "``pgml.geometry.apply_default_harmonic_model`` resolve it from the modeling "
+        "default ``line.harmonic_model.three_phase`` / ``.single_phase``.",
+    )
+    harmonic_skin_effect: Optional[bool] = Field(
+        default=None,
+        description="Apply the Bessel ``I0/I1`` skin-effect resistance rise in the "
+        "``sequence_aware`` / ``positive_sequence`` models (``m(f0) = 1`` exactly, so "
+        "the fundamental is unchanged). None = modeling default "
+        "``line.harmonic_model.skin_effect``. Rejected with ``naive`` (which is the "
+        "constant-R model) and with ``geometry`` (whose skin effect comes from Rdc).",
+    )
+    earth_return: Optional[EarthReturnModel] = Field(
+        default=None,
+        description="Per-line override of the Carson earth-return path of the "
+        "``sequence_aware`` model. None = the modeling defaults "
+        "(``line.earth_return.*``). Rejected with another ``harmonic_line_model``, "
+        "which does not consume it.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_tag_selectors(cls, data: Any) -> Any:
+        """Migrate the pre-typed ``tags`` harmonic-model selectors to typed fields.
+
+        Grids persisted before the typed fields existed carried the line model in
+        ``tags["harmonic_line_model"]`` plus ``tags["seq_skin"]`` and
+        ``tags["seq_earth_coeff"]``. Those keys are moved onto
+        :attr:`harmonic_line_model`, :attr:`harmonic_skin_effect` and
+        :attr:`earth_return` (warning once per line) and removed from ``tags``, so a
+        persisted grid keeps its physics. An unknown model name now raises instead of
+        silently selecting the naive model.
+        """
+        if not isinstance(data, dict):
+            return data
+        tags = data.get("tags")
+        if not isinstance(tags, dict) or "harmonic_line_model" not in tags:
+            return data
+        import warnings
+
+        tags = dict(tags)
+        model = tags.pop("harmonic_line_model")
+        skin = tags.pop("seq_skin", None)
+        coeff = tags.pop("seq_earth_coeff", None)
+        data = dict(data)
+        data["tags"] = tags
+        if data.get("harmonic_line_model") is None:
+            data["harmonic_line_model"] = model
+        if skin is not None and data.get("harmonic_skin_effect") is None:
+            data["harmonic_skin_effect"] = str(skin).lower() == "true"
+        if coeff is not None and data.get("earth_return") is None:
+            data["earth_return"] = {"resistance_coeff_ohm_per_m_per_hz": float(coeff)}
+        warnings.warn(
+            f"Line {data.get('id')!r}: the harmonic line model was read from the "
+            f"legacy tags['harmonic_line_model']={model!r} and migrated to the typed "
+            "fields harmonic_line_model / harmonic_skin_effect / earth_return. "
+            "Re-persist the grid to drop the legacy tags.",
+            stacklevel=2,
+        )
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "Line":
         n = len(self.from_phases)
         if len(self.to_phases) != n:
             raise ValueError("Line `from_phases`/`to_phases` must have equal length.")
+        model = self.harmonic_line_model
+        if model == "geometry" and self.conductor_geometry is None:
+            raise ValueError(
+                "`harmonic_line_model='geometry'` requires a `conductor_geometry`."
+            )
+        if (
+            model is not None
+            and model != "geometry"
+            and self.conductor_geometry is not None
+        ):
+            raise ValueError(
+                f"`harmonic_line_model={model!r}` contradicts the `conductor_geometry` "
+                "on this line (a geometry line always uses the Carson/Deri model); "
+                "drop one of the two."
+            )
+        if model == "sequence_aware" and n != 3:
+            raise ValueError(
+                "`harmonic_line_model='sequence_aware'` needs a 3-phase line (it is a "
+                f"Z1/Z0 model); this line has {n} phase(s)."
+            )
+        if self.harmonic_skin_effect is not None and model in ("naive", "geometry"):
+            raise ValueError(
+                f"`harmonic_skin_effect` is not consumed by "
+                f"`harmonic_line_model={model!r}` (naive is the constant-R model; a "
+                "geometry line takes its skin effect from the conductor Rdc)."
+            )
+        if self.earth_return is not None and model in (
+            "naive",
+            "positive_sequence",
+            "geometry",
+        ):
+            raise ValueError(
+                f"`earth_return` is not consumed by `harmonic_line_model={model!r}` "
+                "(only the sequence_aware model has a lumped earth-return path; a "
+                "geometry line derives it from the conductor coordinates)."
+            )
+        if model is not None and _has_resistance_law(self.resistance_frequency):
+            raise ValueError(
+                f"`resistance_frequency` carries a frequency law, which "
+                f"`harmonic_line_model={model!r}` does not consume (it derives its own "
+                "resistance vs frequency). Use `resistance_frequency` with "
+                "`harmonic_line_model=None` for a measured multiplier, or "
+                "`harmonic_skin_effect` with the typed model."
+            )
         core = (
             self.series_resistance_ohm_per_m,
             self.series_inductance_h_per_m,
@@ -727,21 +971,23 @@ class GroundingImpedance(GridModel):
 
 
 class TransformerZeroSeq(GridModel):
-    """Explicit zero-sequence leakage impedance VALUE override, referred to HV. The
-    zero-sequence PATH is always derived from winding connections + clock; this
-    overrides only the value. None => Z0 = Z1 connected per topology."""
+    """Explicit zero-sequence leakage impedance VALUE override, on the SAME reference
+    as the positive-sequence leakage (the to-side/LV winding coil). The zero-sequence
+    PATH is always derived from winding connections + clock; this overrides only the
+    value. None => the configured `transformer.zero_sequence.*` ratios (Z0 = Z1 by
+    default), connected per topology."""
 
     r0_ohm: Num = si_field(
         "Zero-sequence series resistance.",
         short="Ohm",
         long="ohm",
-        reference="referred to HV side",
+        reference="referred to the to-side (LV) winding coil",
     )
     x0_ohm: Num = si_field(
-        "Zero-sequence series reactance at f0.",
+        "Zero-sequence series reactance at f0. L0 = x0_ohm/(2*pi*f0); X0(h) = 2*pi*h*f0*L0.",
         short="Ohm",
         long="ohm",
-        reference="referred to HV side",
+        reference="referred to the to-side (LV) winding coil",
     )
 
 
@@ -854,6 +1100,19 @@ class Switch(BranchBase):
 
 
 class ShuntReactor(BranchBase):
+    """Single-terminal shunt branch: a parallel G / L / C admittance to ground.
+
+    Per-phase matrix admittance per harmonic ``h``::
+
+        Y(h) = G + 1/(j*2*pi*h*f0*L) + j*2*pi*h*f0*C
+
+    The inductive term is present only when ``inductance_h`` is given, and it is the
+    only term whose susceptance magnitude FALLS with frequency — an inductive shunt
+    (a reactor, a grounding reactor) must use it, because the same element entered as
+    an equivalent negative capacitance has the wrong sign of frequency slope above
+    the fundamental.
+    """
+
     component: Literal["shunt_reactor"] = "shunt_reactor"
     conductance_s: PerPhaseMatrix = si_field(
         "Shunt conductance matrix G.", short="S", long="siemens"
@@ -861,14 +1120,24 @@ class ShuntReactor(BranchBase):
     capacitance_f: PerPhaseMatrix = si_field(
         "Shunt capacitance matrix C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
     )
+    inductance_h: Optional[PerPhaseMatrix] = si_field(
+        "Shunt inductance matrix L (Y_L(h)=(j*2*pi*h*f0*L)^-1). None = no inductive "
+        "path. Must be invertible (a diagonal matrix of positive inductances for an "
+        "uncoupled reactor bank).",
+        short="H",
+        long="henry",
+        default=None,
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "ShuntReactor":
         # Single-terminal shunt: matrices align to `from_phases` (the stamp reads
         # only the from side; `to_node`/`to_phases` conventionally mirror it).
         n = len(self.from_phases)
-        for f in ("conductance_s", "capacitance_f"):
+        for f in ("conductance_s", "capacitance_f", "inductance_h"):
             m = getattr(self, f)
+            if m is None:
+                continue
             if len(m) != n or any(len(r) != n for r in m):
                 raise ValueError(f"`{f}` must be {n}x{n} to match phase count.")
         return self
@@ -955,7 +1224,24 @@ class InjectionAppliance(ApplianceBase):
 class Source(ApplianceBase):
     """Slack / external network equivalent: per-phase Thevenin voltage behind a
     per-phase impedance stored as R and L MATRICES (asymmetric, frequency-correct:
-    Z(h)=R + j*2*pi*h*f0*L). Sequence / short-circuit-power inputs convert in."""
+    Z(h)=R + j*2*pi*h*f0*L). Sequence / short-circuit-power inputs convert in.
+
+    The matrix is sequence-aware: a 3-phase source whose zero-sequence impedance
+    differs from its positive-sequence one carries the symmetric-component self /
+    mutual split (``Z_self=(Z0+2*Z1)/3``, ``Z_mutual=(Z0-Z1)/3``), which
+    ``pgml.convert._common.build_source`` builds from the native data of every
+    supported library.
+
+    UPSTREAM (background) HARMONIC DISTORTION IS AN OPERATING POINT, not grid data:
+    the upstream network's harmonic voltage varies minute by minute while the grid
+    description does not. It is supplied per solve through
+    ``solve_harmonic_flow(..., node_sources=[NodeHarmonicSource(...)])``, and
+    reproducibly generated by ``pgml.scenarios``'s ``BackgroundHarmonicConfig``
+    (``build_background_sources`` realizes one voltage-kind ``NodeHarmonicSource``
+    per in-service ``Source`` node). A ``Source`` therefore has no ``spectrum``
+    field; at orders ``h > 1`` it contributes its Norton shunt and, when a node
+    source is supplied, that source's harmonic EMF.
+    """
 
     component: Literal["source"] = "source"
     u_ref_v: Vec = si_field(
@@ -970,9 +1256,31 @@ class Source(ApplianceBase):
     inductance_h: PerPhaseMatrix = si_field(
         "Per-phase Thevenin inductance matrix.", short="H", long="henry"
     )
-    spectrum: Optional[Spectrum] = Field(
-        default=None, description="Optional source distortion."
-    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_spectrum(cls, data: Any) -> Any:
+        """Accept (and drop) a ``spectrum`` key written by an earlier schema revision.
+
+        The field was never consumed by assembly or the solver, so dropping it cannot
+        change a result. A non-null value is dropped with a WARNING naming the source,
+        because the intent behind it (upstream distortion) has to move to a
+        ``NodeHarmonicSource`` / ``BackgroundHarmonicConfig``; a null value carries no
+        information and is dropped silently so every persisted grid still loads.
+        """
+        if isinstance(data, dict) and "spectrum" in data:
+            legacy = data["spectrum"]
+            data = {k: v for k, v in data.items() if k != "spectrum"}
+            if legacy is not None:
+                _logger.warning(
+                    "Source %s carries a `spectrum`, a field this schema no longer "
+                    "defines; it is dropped. Upstream harmonic distortion is an "
+                    "operating-point quantity: pass it per solve as a "
+                    "`pgml.solver.NodeHarmonicSource` (or configure "
+                    "`BackgroundHarmonicConfig` in `pgml.scenarios`).",
+                    data.get("id", "<no id>"),
+                )
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "Source":
@@ -986,10 +1294,122 @@ class Source(ApplianceBase):
         return self
 
 
+class HarmonicImpedance(GridModel):
+    """Passive harmonic internal impedance of a generator or storage converter.
+
+    Each connection element (WYE phase or DELTA leg) has
+    ``Z(f) = resistance_ohm + j*2*pi*f*inductance_h``. Scalars apply to every
+    element; vectors follow the device's connection-element order. Tensor inputs
+    retain their autograd history. This impedance contributes only at harmonic
+    orders above one and does not change the fundamental PQ/control model.
+
+    ``spectrum_reference='current'`` preserves the existing terminal-current
+    spectrum and adds a passive parallel impedance. ``'internal_voltage'`` uses
+    the device's spectrum for the voltage behind the impedance: at the solved
+    fundamental, ``E1 = V_terminal - Z1*I_absorbed``; its harmonic voltage is
+    converted to the Norton injection ``E(h)/Z(h)``. ``'opendss_voltage'``
+    instead uses OpenDSS's first-phase, balanced internal nodal-voltage source,
+    including its delta star-equivalent initialization. Its matching
+    ``frequency_model='opendss_admittance'`` holds the real part of ``1/Z1``
+    fixed and scales the imaginary part by inverse harmonic order. These named
+    reference conventions are distinct from a physical series R/L law.
+    Unknown impedance is represented by an
+    absent device block, never by guessed universal R/L values.
+
+    All physical values must be finite and nonnegative, with nonzero impedance
+    on every element. Numeric values are validated here; tensor values and
+    connection-element shapes are checked by harmonic assembly.
+    """
+
+    resistance_ohm: Annotated[Any, _SER] = si_field(
+        "Per-element passive series resistance (scalar or connection-element vector).",
+        short="ohm",
+        long="ohm",
+        default=0.0,
+    )
+    inductance_h: Annotated[Any, _SER] = si_field(
+        "Per-element passive series inductance (scalar or connection-element vector).",
+        short="H",
+        long="henry",
+        default=0.0,
+    )
+    spectrum_reference: Literal["current", "internal_voltage", "opendss_voltage"] = (
+        Field(
+            default="current",
+            description="Whether spectrum coefficients scale terminal current or internal voltage.",
+        )
+    )
+
+    frequency_model: Literal["series_rl", "opendss_admittance"] = Field(
+        default="series_rl",
+        description="series_rl uses 1/(R+j*2*pi*f*L). opendss_admittance holds the "
+        "fundamental conductance fixed and divides its susceptance by harmonic order.",
+    )
+
+    @field_validator("resistance_ohm", "inductance_h", mode="before")
+    @classmethod
+    def _element_values(cls, value: Any) -> Any:
+        if _is_arraylike(value):
+            return value
+        if isinstance(value, (list, tuple)):
+            return tuple(float(x) for x in value)
+        return float(value)
+
+    @model_validator(mode="after")
+    def _passive_impedance(self) -> "HarmonicImpedance":
+        import math
+
+        values = []
+        for name in ("resistance_ohm", "inductance_h"):
+            value = getattr(self, name)
+            if _is_arraylike(value):
+                values.append(None)
+                continue
+            entries = (value,) if isinstance(value, (int, float)) else tuple(value)
+            if not entries or any(not math.isfinite(x) or x < 0 for x in entries):
+                raise ValueError(f"{name} must contain finite nonnegative values")
+            values.append(entries)
+        resistance, inductance = values
+        if resistance is not None and inductance is not None:
+            n = max(len(resistance), len(inductance))
+            if len(resistance) not in (1, n) or len(inductance) not in (1, n):
+                raise ValueError("resistance and inductance element vectors must align")
+            if any(
+                resistance[i % len(resistance)] == 0
+                and inductance[i % len(inductance)] == 0
+                for i in range(n)
+            ):
+                raise ValueError("harmonic impedance must be nonzero on every element")
+        return self
+
+
 class HarmonicShuntModel(GridModel):
-    """Norton-equivalent harmonic representation (OpenDSS): the attached Spectrum is
-    a current source in parallel with a shunt admittance that is a mix of a SERIES
-    R-L and a PARALLEL R-L branch, derived at assembly time from OPERATING-POINT P,Q."""
+    """Per-device OVERRIDE of the harmonic Norton shunt (OpenDSS ``Load.pas``).
+
+    At orders ``h > 1`` a device is a harmonic current source (its ``spectrum``) in
+    PARALLEL with this shunt. Per element (WYE phase / DELTA leg), with
+    ``s = series_rl_fraction``::
+
+        Y_eq     = conj(P + jQ) / V_rated**2         at the fundamental operating point
+        Y_par(h) = (1 - s)*Re(Y_eq) + j*(1 - s)*Im(Y_eq)/h
+        Z_ser    = 1/(s*Y_eq),  Y_ser(h) = 1/(Re(Z_ser) + j*h*Im(Z_ser))
+        Y(h)     = Y_par(h) + Y_ser(h)
+
+    Two conventions decide the value and are easy to get wrong. ``V_rated`` is the
+    element's RATED voltage (line-to-neutral for WYE, line-to-line for DELTA), never
+    the solved one. ``P, Q`` are the power the device actually draws at the converged
+    FUNDAMENTAL solution (the ZIP-scaled or control-resolved operating point, equal to
+    the nameplate for the constant-power default), so the shunt and the injected
+    current describe one consistent operating point. The split is exact at ``h = 1``
+    (``Y_par(1) + Y_ser(1) = Y_eq`` for any ``s``); it only sets how the shunt rolls
+    off with frequency.
+
+    Setting this block overrides the documented modeling default
+    ``appliance.harmonic_shunt.*`` for this device alone: ``neglect_shunt=True`` makes
+    it a pure current source, a ``motor_x_harm_pu`` selects the blocked-rotor series
+    branch below. A run solved with ``load_shunt="none"`` carries no shunt at all,
+    whatever the devices say (OpenDSS ``Set NeglectLoadY=Yes``).
+    """
 
     series_rl_fraction: float = si_field(
         "Fraction modelled as the SERIES R-L branch vs PARALLEL R-L (OpenDSS %SeriesRL/100). "
@@ -1001,18 +1421,34 @@ class HarmonicShuntModel(GridModel):
         le=1.0,
     )
     neglect_shunt: bool = Field(
-        default=False, description="True = pure current source, no shunt."
+        default=False,
+        description="True = this device is a pure current source (no shunt at any "
+        "order), whatever the run-level model says.",
     )
     motor_x_harm_pu: Optional[float] = si_field(
-        "Motor blocked-rotor / sub-transient reactance for the series branch. None = derive "
-        "from P,Q. Typical ~0.20.",
+        "Blocked-rotor (subtransient) reactance of the SERIES branch: "
+        "X = V_rated**2/(S*s)*x_pu, replacing the P,Q-derived Z_ser. Set = the motor "
+        "model; None = the derived split. Typical ~0.20.",
         short="pu",
         long="per unit of rated kVA",
         default=None,
     )
     motor_xr_harm: float = Field(
-        default=6.0, description="X/R ratio of motor_x_harm_pu at f0."
+        default=6.0,
+        gt=0.0,
+        description="X/R ratio of motor_x_harm_pu at f0 (OpenDSS XRharm).",
     )
+
+    @model_validator(mode="after")
+    def _check(self) -> "HarmonicShuntModel":
+        if self.neglect_shunt and self.motor_x_harm_pu is not None:
+            raise ValueError(
+                "neglect_shunt=True (no shunt) contradicts motor_x_harm_pu (a motor "
+                "series branch); set one or the other."
+            )
+        if self.motor_x_harm_pu is not None and self.motor_x_harm_pu <= 0.0:
+            raise ValueError("motor_x_harm_pu must be > 0 (it is a reactance).")
+        return self
 
 
 class ZipCoefficients(GridModel):
@@ -1188,6 +1624,100 @@ InverterControl = Annotated[
 ]
 
 
+class RegulatedQuantity(str, Enum):
+    """Which voltage magnitude a :class:`VoltageRegulation` holds at its setpoint."""
+
+    #: The positive-sequence magnitude ``|V1|`` of the terminal (balanced regulation,
+    #: the standard for a machine or a three-phase inverter). For a single-phase
+    #: terminal this is the phase magnitude itself.
+    POSITIVE_SEQUENCE = "positive_sequence"
+    #: Each connected phase holds its own magnitude at the setpoint (independent
+    #: single-phase regulators sharing one reactive capability).
+    PER_PHASE = "per_phase"
+
+
+class VoltageRegulation(GridModel):
+    """Voltage setpoint of a regulating generator: the PV-terminal model.
+
+    A generator carrying this block is a PV terminal: its ACTIVE power is the
+    nameplate / operating-point value, its terminal voltage MAGNITUDE is held at
+    ``v_set_pu``, and its REACTIVE power is whatever that takes, bounded by
+    ``q_min_var`` / ``q_max_var``. The nonlinear power flow replaces the terminal's
+    reactive power-balance row with ``|V|**2 - V_set**2`` and recovers the reactive
+    injection from the converged solution; see ``docs/pgml/modeling/der-pv-storage.md``
+    section 4.5. It is the model behind pandapower ``net.gen``, power-grid-model's
+    ``source``-like voltage control and OpenDSS ``Generator model=3``.
+
+    ``v_set_pu`` is per unit of the HOST NODE's rated voltage, i.e. the regulated
+    magnitude in volts is ``v_set_pu * phase_voltage_magnitude(node.u_rated_v,
+    len(node.phases))`` (line-to-neutral for a three-phase node, the rated value
+    itself below three phases) — the same per-unit base the Volt-VAr characteristic
+    and the convergence diagnostics use, and numerically equal to pandapower's
+    ``vm_pu``.
+
+    ``q_min_var`` / ``q_max_var`` are TOTAL over the connected phases and follow the
+    generator injection convention (positive = injected into the grid), exactly like
+    ``q_nom_var``. ``None`` means unbounded on that side. Limits are enforced by
+    PV-to-PQ switching in the solver (``solve_power_flow(enforce_q_limits=...)``).
+
+    Mutually exclusive with ``control``: an inverter control law states Q (or a P
+    curtailment) as an explicit function of the terminal voltage, while voltage
+    regulation states the voltage and leaves Q implicit.
+    """
+
+    v_set_pu: PosNum = si_field(
+        "Regulated voltage magnitude, per unit of the host node's rated voltage.",
+        short="pu",
+        long="per unit of the node rated voltage",
+        default=1.0,
+    )
+    q_min_var: Optional[Num] = si_field(
+        "Lower reactive limit (TOTAL, injection-positive). None = unbounded.",
+        short="var",
+        long="var",
+        default=None,
+    )
+    q_max_var: Optional[Num] = si_field(
+        "Upper reactive limit (TOTAL, injection-positive). None = unbounded.",
+        short="var",
+        long="var",
+        default=None,
+    )
+    regulated: RegulatedQuantity = Field(
+        default=RegulatedQuantity.POSITIVE_SEQUENCE,
+        description="Regulated quantity: the positive-sequence magnitude (balanced, "
+        "the standard) or each phase magnitude independently.",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> "VoltageRegulation":
+        lo, hi = self.q_min_var, self.q_max_var
+        if lo is None or hi is None:
+            return self
+        if _is_arraylike(lo) or _is_arraylike(hi):
+            return self  # tensor limits: caller owns the ordering
+        if lo > hi:
+            raise ValueError("`q_min_var` must not exceed `q_max_var`.")
+        return self
+
+
+def _check_voltage_regulation(obj) -> None:
+    """Validate an appliance's optional ``voltage_regulation`` block.
+
+    Voltage regulation and an inverter ``control`` law are two ways to state the same
+    reactive degree of freedom, so they are mutually exclusive.
+    """
+    reg = getattr(obj, "voltage_regulation", None)
+    if reg is None:
+        return
+    if getattr(obj, "control", None) is not None:
+        raise ValueError(
+            "Set either `voltage_regulation` (a PV terminal: the voltage magnitude is "
+            "held and Q is free) or `control` (an inverter law that states Q as a "
+            "function of the voltage), not both."
+        )
+
+
 def _check_control(obj) -> None:
     """Validate an appliance's optional inverter ``control`` block.
 
@@ -1349,7 +1879,12 @@ class Load(InjectionAppliance):
         "Phase to its Spectrum (keys subset of phases; missing phase = no harmonics). "
         "Mutually exclusive with spectrum. DELTA key = the delta branch at that phase.",
     )
-    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+    harmonic_model: Optional[HarmonicShuntModel] = Field(
+        default=None,
+        description="Per-device OVERRIDE of the harmonic Norton shunt. None "
+        "(default) = the documented modeling default appliance.harmonic_shunt.*, "
+        "as selected for the run by solve_harmonic_flow(load_shunt=...).",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "Load":
@@ -1409,6 +1944,15 @@ class Generator(InjectionAppliance):
         "injection. Honored by the nonlinear power flow (`solve_power_flow` / "
         "`solve_harmonic_flow`); the linear const-Z assembler uses the base P/Q.",
     )
+    voltage_regulation: Optional[VoltageRegulation] = Field(
+        default=None,
+        description="Optional voltage setpoint making this generator a PV terminal: "
+        "the terminal voltage magnitude is held at `v_set_pu` and the reactive power "
+        "is free within `q_min_var`/`q_max_var`. None = a plain PQ injection. "
+        "Mutually exclusive with `control`. Honored by the nonlinear power flow "
+        "(`solve_power_flow`, which solves a grid with a PV terminal by Newton); the "
+        "linear const-Z assembler uses the base P/Q.",
+    )
     consumer_type: Optional[ConsumerType] = Field(
         default=None,
         description="Closed device taxonomy (ML categorical; does not drive physics). "
@@ -1425,7 +1969,17 @@ class Generator(InjectionAppliance):
         description="Asymmetric per-phase harmonic current sources (keys subset of "
         "phases; missing phase = no harmonics). Mutually exclusive with spectrum.",
     )
-    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+    harmonic_impedance: Optional[HarmonicImpedance] = Field(
+        default=None,
+        description="Optional passive harmonic R/L and spectrum basis. None means unknown; "
+        "no impedance is invented. Independent of the load-shunt model.",
+    )
+    harmonic_model: Optional[HarmonicShuntModel] = Field(
+        default=None,
+        description="Per-device OVERRIDE of the harmonic Norton shunt. None "
+        "(default) = the documented modeling default appliance.harmonic_shunt.*, "
+        "as selected for the run by solve_harmonic_flow(load_shunt=...).",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "Generator":
@@ -1435,6 +1989,7 @@ class Generator(InjectionAppliance):
         _check_load_connection(self)
         _check_spectrum_per_phase(self)
         _check_control(self)
+        _check_voltage_regulation(self)
         return self
 
 
@@ -1452,10 +2007,9 @@ class Storage(InjectionAppliance):
     (``energy_capacity_wh``, ``soc``, ``soc_min``/``soc_max``, the charge/discharge
     efficiencies, ``p_rated_w``) are INERT in the solve — they are not read by the
     assembler or the solver, matching pandapower ``storage.soc_percent`` and the OpenDSS
-    ``Storage`` element. State-of-charge integration and the dispatch rule live in the
-    time-series / scenario layer (``pgml.scenarios``), which resolves them into the
-    per-step ``p_nom_w`` / operating point the solver consumes. See
-    ``docs/pgml/modeling/der-pv-storage.md`` section 4.4.
+    ``Storage`` element. State-of-charge integration and the dispatch rule live in
+    :mod:`pgml.dispatch`, which resolves them into the per-step ``p_nom_w`` / operating
+    point the solver consumes. See ``docs/pgml/modeling/der-pv-storage.md`` section 4.4.
     """
 
     component: Literal["storage"] = "storage"
@@ -1566,7 +2120,17 @@ class Storage(InjectionAppliance):
         description="Asymmetric per-phase harmonic current sources. Mutually "
         "exclusive with spectrum.",
     )
-    harmonic_model: HarmonicShuntModel = Field(default_factory=HarmonicShuntModel)
+    harmonic_impedance: Optional[HarmonicImpedance] = Field(
+        default=None,
+        description="Optional passive harmonic R/L and spectrum basis. None means unknown; "
+        "no impedance is invented. Independent of the load-shunt model.",
+    )
+    harmonic_model: Optional[HarmonicShuntModel] = Field(
+        default=None,
+        description="Per-device OVERRIDE of the harmonic Norton shunt. None "
+        "(default) = the documented modeling default appliance.harmonic_shunt.*, "
+        "as selected for the run by solve_harmonic_flow(load_shunt=...).",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "Storage":
@@ -1582,12 +2146,31 @@ class Storage(InjectionAppliance):
 
 
 class ShuntAppliance(ApplianceBase):
+    """Fixed linear shunt (capacitor bank, reactor, filter leg) at one node.
+
+    Per-phase element admittance per harmonic ``h``::
+
+        y(h) = G + 1/(j*2*pi*h*f0*L) + j*2*pi*h*f0*C
+
+    ``inductance_h`` is optional; when absent the element is the historical parallel
+    G/C shunt. A genuinely INDUCTIVE shunt must set it, because an equivalent
+    negative capacitance has the wrong sign of frequency slope above the
+    fundamental (``|B|`` must fall like ``1/h``, not rise like ``h``).
+    """
+
     component: Literal["shunt"] = "shunt"
     conductance_s: Vec = si_field(
         "Per-phase shunt conductance G.", short="S", long="siemens"
     )
     capacitance_f: Vec = si_field(
         "Per-phase shunt capacitance C (B(h)=2*pi*h*f0*C).", short="F", long="farad"
+    )
+    inductance_h: Optional[Vec] = si_field(
+        "Per-phase shunt inductance L (y_L(h)=1/(j*2*pi*h*f0*L)); every entry must be "
+        "> 0. None = no inductive path.",
+        short="H",
+        long="henry",
+        default=None,
     )
     connection: WindingConnection = Field(
         default=WindingConnection.WYE,
@@ -1609,6 +2192,17 @@ class ShuntAppliance(ApplianceBase):
                 "connection=DELTA requires at least 2 phases (a delta branch is a "
                 "phase-to-phase element)."
             )
+        n = len(self.phases)
+        for f in ("conductance_s", "capacitance_f", "inductance_h"):
+            v = getattr(self, f)
+            if v is not None and not _is_arraylike(v) and len(v) != n:
+                raise ValueError(f"`{f}` length must match the {n} connected phases.")
+        if self.inductance_h is not None and not _is_arraylike(self.inductance_h):
+            if any(float(x) <= 0.0 for x in self.inductance_h):
+                raise ValueError(
+                    "`inductance_h` entries must be > 0 (an inductive shunt branch is "
+                    "1/(j*2*pi*h*f0*L); use None for no inductive path)."
+                )
         return self
 
 
@@ -2160,6 +2754,9 @@ __all__ = [
     "DistributionSpectrum",
     "Spectrum",
     "Provenance",
+    "ConductorPlacement",
+    "LineGeometry",
+    "EarthReturnModel",
     "Node",
     "BranchBase",
     "Line",
@@ -2174,6 +2771,7 @@ __all__ = [
     "ApplianceBase",
     "Source",
     "HarmonicShuntModel",
+    "HarmonicImpedance",
     "ZipCoefficients",
     "Characteristic",
     "QReference",
@@ -2185,6 +2783,8 @@ __all__ = [
     "VoltWattControl",
     "VoltVarVoltWattControl",
     "InverterControl",
+    "RegulatedQuantity",
+    "VoltageRegulation",
     "InjectionAppliance",
     "Load",
     "Generator",

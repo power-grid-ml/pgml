@@ -1,16 +1,14 @@
 # pgml (power-grid-ml) — project memory
 
-Differentiable, GPU-ready, vectorized harmonic power flow for power grids — the **base
-package** of the power-grid-ml suite. The harmonic system `Y(h)·V(h)=I(h)` is the core; load
-flow is one differentiable output. The sibling packages (`pgl` learning, `pgg` generation,
-`pghub` dataset hub, `pgd` dashboard) live in their own repositories under the same GitHub
-organization and depend on this one; `pgml` imports none of them.
+Differentiable, GPU-ready, vectorized harmonic power flow for power grids. The harmonic
+system `Y(h)·V(h)=I(h)` is the core; load flow is one differentiable output. pgml is
+designed as the base layer of a larger power-grid ecosystem (state estimation, grid
+synthesis, dataset and dashboard tooling can build on its public API); pgml itself imports
+none of them.
 
-**Architecture, package map, and conventions: `CONTEXT.md` (read it first), then
-`src/pgml/CONTEXT.md` (subpackage ledgers).**
-**Orientation + open work: `src/pgml/STATUS.md`.**
-**Published human docs: `docs/pgml/` (Sphinx; the suite site is assembled by the org `docs`
-repository).**
+Architecture, package map, and conventions: `CONTEXT.md` (read it first), then
+`src/pgml/CONTEXT.md` (subpackage ledgers). Orientation and open work: `src/pgml/STATUS.md`.
+Published human docs: `docs/pgml/` (Sphinx, built as a standalone Read-the-Docs site).
 
 ## TWO HARD CONSTRAINTS (non-negotiable, every line of core code)
 1. DIFFERENTIABLE: gradients must flow grid parameters → Y-bus → solve → outputs. No
@@ -51,12 +49,11 @@ preferred over working around the schemas in `docs/conf.py`.)
   `pixi run -e docs docs-strict`.
 
 ## Documentation (Sphinx)
-This repository documents ITS package under `docs/pgml/` (concepts, `modeling/` decisions
-with the reference-library briefs, `api/` autodoc, `examples`); `docs/index.md` is only the
-standalone landing toctree. The org-level `docs` repository assembles every package's
-`docs/<pkg>/` tree plus the suite landing page and `getting-started/` into the single
-published Read-the-Docs site; the strict build here is the per-repo gate. The API reference
-is generated from each subpackage's `__init__.py` `__all__`, so **docstrings ARE the docs**.
+This repository documents its package under `docs/pgml/` (concepts, `modeling/` decisions
+with the reference-library briefs, `api/` autodoc, `examples`); `docs/index.md` is the
+landing toctree, built and published as a standalone Read-the-Docs site; the strict build
+here is the CI gate. The API reference is generated from each subpackage's `__init__.py`
+`__all__`, so docstrings ARE the docs.
 `pandapower` is mocked at autodoc time; `pydantic`/`torch` are real. Keep schema docstrings
 RST-safe IN SOURCE; `docs/conf.py` keeps only the Python-domain dedup hook and the
 suite-wide `{doc}` reference resolver. A docs build with import errors or broken
@@ -67,10 +64,8 @@ blocks; blank line before bullet lists; no explicit forward-ref quotes in annota
 
 ## Publishing
 Distribution `power-grid-ml` on PyPI, import name `pgml` (unchanged). Version lives in
-`src/pgml/__init__.py` (`pixi.toml`/`CITATION.cff` mirror it); dependents pin
-`power-grid-ml>=X.Y,<X.Y+1`. Release order across the suite: pgml → pghub → pgg / pgl →
-pgd → the `power-grid-suite` meta-package; the `docs` repository then bumps its submodule
-to the release tag.
+`src/pgml/__init__.py` (`pixi.toml`/`CITATION.cff` mirror it). A downstream package that
+depends on pgml pins a `power-grid-ml>=X.Y,<X.Y+1` range and updates after a release.
 
 ## Delegation policy
 - Delegate heavy, isolatable work to subagents (`.claude/agents/`); keep the orchestrator

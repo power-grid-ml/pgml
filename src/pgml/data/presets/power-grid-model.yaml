@@ -1,0 +1,3 @@
+# power-grid-model splits the magnetizing shunt between transformer terminals.
+# https://power-grid-model.readthedocs.io/en/stable/user_manual/components.html
+transformer.magnetizing_placement: split

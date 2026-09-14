@@ -1,49 +1,53 @@
-# Documentation (contributor notes)
+# Documentation sources
 
-This is the Sphinx source of the `pgml` documentation. It is **not** itself a built page
-(it is excluded from the build); it explains how to build and how the docs are laid out.
+Sphinx sources for the `pgml` documentation. This file is excluded from the build and only
+explains the layout.
 
-The power-grid-ml suite publishes ONE documentation site
-(<https://power-grid-ml.readthedocs.io>), assembled by the org-level `docs` repository
-from the `docs/<pkg>/` tree of every package repository plus the suite landing page and
-`getting-started/`. This repository owns the `pgml` tree; `index.md` here is only the
-standalone landing toctree used by the per-repository build (the CI gate).
+## Building
 
-## Building locally
-
-Use the `docs` pixi environment (Sphinx + furo + myst-parser + a CPU torch for autodoc):
+The `docs` pixi environment carries Sphinx, furo, myst-parser and a CPU torch, which autodoc
+needs because the build imports the package.
 
 ```bash
-pixi run -e docs docs            # standard build -> docs/_build/html
-pixi run -e docs docs-clean      # force full rebuild
-pixi run -e docs docs-strict     # warnings-as-errors (mirrors CI)
+pixi run -e docs docs            # build HTML into docs/_build/html
+pixi run -e docs docs-clean      # force a full rebuild
+pixi run -e docs docs-strict     # warnings as errors, what CI runs
 pixi run -e docs docs-linkcheck  # check external links
 ```
 
-Open `docs/_build/html/index.html` after building.
+Open `docs/_build/html/index.html` afterwards.
 
 ## Layout
 
 ```
 docs/
-  index.md                  standalone landing toctree (the suite landing lives in the docs repo)
-  conf.py                   Sphinx configuration (shared shape across the suite; PACKAGES = ("pgml",))
-  pgml/                     the simulation engine
-    index.md                pgml overview
-    concepts.md             modeling conventions (the short version)
-    public-api.md           the stable public facade
-    examples.md             example scripts + result figures
-    modeling/               modeling decisions (the long version)
-      *.md                  conventions, asymmetric, transformer, line model, DER, ...
-      references/           external-library briefs (opendss/, pandapower/, power-grid-model/)
-    api/                    autodoc API reference (one .rst per subpackage)
-  _static/figures/         committed figures embedded in the docs
+  index.md            landing page: what it is, install, first example, links
+  conf.py             Sphinx configuration
+  requirements.txt    extra build requirements for Read the Docs
+  pgml/
+    concepts.md          the model in brief
+    differentiability.md what the gradients are for, with runnable examples
+    public-api.md        the stable entry points
+    examples.md          the shipped example scripts and the validation figures
+    modeling/            modelling decisions, plus reference-tool briefs
+    api/                 generated API reference, one page per subpackage
+  _static/figures/    committed SVG figures embedded in the pages
+  _build/             output, not tracked
 ```
 
-The API reference is generated from each subpackage's `__init__.py` `__all__`, so the
-**docstrings are the docs**. Keep new docstrings valid reStructuredText. `pandapower` is
-mocked at autodoc time (`autodoc_mock_imports`); `pydantic`/`torch` are real.
+The API reference is generated from each subpackage's `__all__`, so the docstrings are the
+reference. Keep them valid reStructuredText. `pandapower` is mocked at autodoc time, while
+`pydantic` and `torch` are imported for real.
 
-Cross-package `{doc}` references (a page pointing at another suite package's page) resolve
-natively in the assembled site and to the published site's URL in this per-repository build
-(a `missing-reference` handler in `conf.py`).
+The seven figures under `_static/figures/` are committed because a documentation build cannot
+run the studies that produce them. Each one comes from a script under `run/examples/pgml/`:
+`ybus_heatmaps`, `voltage_profile` and `harmonic_h5` from `evaluate_ieee33.py`,
+`seq_xr_vs_harmonic` and `feeder_h13` from `evaluate_line_sequence_harmonics.py`, `pv_nose`
+from `loadability_continuation.py`, and `spread_h11` from `scenario_node_injection_sweep.py`.
+Regenerate them, and re-run every code block whose output a page quotes, whenever a modelling
+default changes. Two filenames collide across scripts: `evaluate_harmonics_carson.py` also
+writes a `harmonic_h5.svg`, and `current_injection_convergence.py` also writes a `pv_nose.svg`,
+neither of which is the committed one.
+
+Read the Docs is configured by `.readthedocs.yaml` at the repository root. It builds with
+`fail_on_warning`, the same strictness as `docs-strict`.

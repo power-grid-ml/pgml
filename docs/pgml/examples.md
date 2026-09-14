@@ -1,179 +1,105 @@
-# Examples
+# Examples and validation
 
-The `run/examples/` directory contains end-to-end scripts. Each is self-contained and produces
-paper-ready (SVG/PNG, ≥300 DPI) and interactive (Plotly HTML) figures under an output
-directory. Run any example with:
+The repository ships runnable studies under `run/examples/pgml/`. Each one is self-contained
+and writes its figures and tables into an output directory.
 
 ```bash
-pixi run -e cpu python run/examples/<script>.py [out_dir]
+python run/examples/pgml/evaluate_ieee33.py [output_dir]
 ```
 
-The figures below are produced by these scripts; they are the evidence behind the
-[validation claims](index.md) and the
-[modeling decisions](modeling/index.md).
+The figures below come from those scripts and are the evidence behind the modelling claims in
+{doc}`modeling/index`.
 
----
+## Against the reference tools
 
-## Comparing libraries: IEEE 33-bus
+`evaluate_ieee33.py` rebuilds the IEEE 33-bus feeder, assembles the admittance matrix, runs
+the load flow and the harmonic flow, and compares all three against pandapower and OpenDSS.
 
-**File:** `run/examples/evaluate_ieee33.py`
+```{figure} ../_static/figures/ybus_heatmaps.svg
+:alt: Assembled admittance matrix compared with pandapower and OpenDSS
+:width: 95%
 
-Regenerates the full IEEE 33-bus evaluation, comparing pgml's differentiable solver to
-**pandapower** and **OpenDSS**. The assembled Y-bus matches both reference tools to
-floating-point precision, and the load-flow voltage profile matches pandapower.
-
-```{figure} ../_static/figures/ybus_difference.svg
-:alt: Difference between pgml and the reference Y-bus
-:width: 80%
-
-\|ΔY\| between pgml's assembled admittance and the closest reference (near floating-point
-zero).
+The IEEE-33 nodal admittance magnitude assembled by pgml (left), pandapower's network
+admittance (centre) and OpenDSS's exported system admittance (right). Look for the same
+sparsity pattern and the same colour scale in all three panels. The residual between them is
+at floating-point level.
 ```
 
 ```{figure} ../_static/figures/voltage_profile.svg
-:alt: pgml vs pandapower voltage profile
+:alt: Load-flow voltage profile, pgml against pandapower
 :width: 85%
 
-Nonlinear power-flow voltage profile (per-unit vs distance), pgml versus pandapower.
+Nonlinear load-flow voltage in per unit against distance from the slack. The pgml curve and
+the pandapower markers lie on top of each other along the whole feeder, including the
+laterals that drop below 0.95 pu.
 ```
 
-Outputs (default `data/pgml/evaluation_output/`):
-
-| File | Description |
-|------|-------------|
-| `ybus_heatmaps.svg` | pgml full Y vs pandapower network Y vs OpenDSS SystemY |
-| `ybus_difference.svg` | \|ΔY\| of the two most-similar versions (near floating-point zero) |
-| `voltage_profile.svg` | Nonlinear power flow vs pandapower (pu vs distance) |
-| `voltage_error.svg` | Per-node \|Δpu\| bar chart |
-| `harmonic_h5.svg` | h=5 magnitude/angle profile, pgml vs numpy oracle |
-| `harmonic_3d.html` | Interactive 3D (h=3,5,7,9), pgml vs numpy oracle |
-| `harmonic_models_interactive.html` | Config-default vs naive line model, toggleable |
-| `harmonic_default_vs_naive_h5.svg` | Pairwise h=5 comparison |
-| `grid_voltage_map.svg` | Topology coloured by voltage pu |
-
-```{literalinclude} ../../run/examples/pgml/evaluate_ieee33.py
-:language: python
-:lines: 1-30
-:caption: run/examples/pgml/evaluate_ieee33.py (header)
-```
-
----
-
-## Comparing modeling approaches: harmonic line models
-
-Different ways of modeling a line's frequency dependence give materially different harmonic
-results. Two examples make the differences explicit.
-
-### Carson geometry vs OpenDSS
-
-**File:** `run/examples/pgml/evaluate_harmonics_carson.py`
-
-Synthesizes single-conductor Carson geometry that reproduces each line's R/X, runs the pgml
-harmonic flow, and compares to OpenDSS's line model on the *same* geometry — validating that
-the Carson/Deri path is **bit-exact** with OpenDSS.
-
-### Naive vs sequence-aware
-
-**File:** `run/examples/pgml/evaluate_line_sequence_harmonics.py`
-
-Contrasts the naive "X ∝ h" scaling, the corrected positive-sequence model, the
-single-conductor Carson model, and a live OpenDSS profile. See the
-[harmonic line model](modeling/harmonic-line-model.md) page for the physics.
-
-```{figure} ../_static/figures/harmonic_default_vs_naive_h5.svg
-:alt: Config-default vs naive harmonic line model at h=5
+```{figure} ../_static/figures/harmonic_h5.svg
+:alt: Fifth-harmonic voltage profile and angle
 :width: 85%
 
-IEEE-33 at the 5th harmonic: the config-default line model versus the naive "X ∝ h" model.
+Fifth-harmonic voltage magnitude and angle along the feeder, pgml against an independent
+NumPy solution of the same nodal system. Look for two curves that coincide in both panels.
+The magnitude rises towards the three converter loads at the feeder end.
 ```
 
-```{literalinclude} ../../run/examples/pgml/evaluate_harmonics_carson.py
-:language: python
-:lines: 1-25
-:caption: run/examples/pgml/evaluate_harmonics_carson.py (header)
-```
+`evaluate_harmonics_carson.py` does the stricter harmonic comparison. It synthesizes
+conductor geometry that reproduces each line's impedance at the fundamental, then feeds the
+same geometry to pgml and to OpenDSS. With the geometry identical on both sides there is no
+earth-model ambiguity left, and the two engines agree to 4.8e-8 relative on the line
+impedance at every order below 1 kHz. The remaining residual is the `μ0` constant OpenDSS
+truncates, and {doc}`modeling/harmonic-line-model` explains what happens above 1 kHz.
 
----
+## Harmonic line models
 
-## Scenarios: batched harmonic studies
+`evaluate_line_sequence_harmonics.py` overlays the analytic harmonic line models and a live
+OpenDSS profile on the same feeder. The resulting figures and the physics behind them are in
+{doc}`modeling/harmonic-line-model`.
 
-**Files:** `run/examples/pgml/scenario_randomized.py`, `run/examples/pgml/scenario_node_injection_sweep.py`
+## Batched scenarios
 
-Reproducible quasi-Monte-Carlo / cartesian sampling produces batches of operating points,
-solved together, for studying how harmonic disturbances spread across a feeder and for
-generating machine-learning training data.
+`scenario_randomized.py` and `scenario_node_injection_sweep.py` sample operating points,
+solve them in one batch, and summarise how a harmonic disturbance spreads across a feeder.
+Sampling is reproducible from a configuration and a seed.
 
 ```{figure} ../_static/figures/spread_h11.svg
 :alt: Spread of the 11th-harmonic voltage across a scenario batch
 :width: 85%
 
-Distribution of the 11th-harmonic node voltages across a sampled scenario batch on CIGRE
-LV.
+Distribution of the 11th-harmonic node voltage across a sampled batch on the CIGRE LV
+network. Look at how the spread widens with distance from the transformer, which is the
+quantity a harmonic study cares about rather than any single snapshot.
 ```
 
----
+## Solver behaviour near the limit
 
-## Solver behaviour and scale
-
-**Files:** `run/examples/pgml/loadability_continuation.py`,
-`run/examples/pgml/current_injection_convergence.py`, `run/examples/pgml/benchmark_speed.py`
-
-The power-flow solvers expose actionable diagnostics near the loadability limit, and the
-batched solve amortizes well on a GPU.
+`loadability_continuation.py` walks the loading parameter up to the point where the load flow
+stops having a solution, and `current_injection_convergence.py` compares the two nonlinear
+solvers along the way.
 
 ```{figure} ../_static/figures/pv_nose.svg
-:alt: PV-nose loadability curve
+:alt: Loadability nose curve
 :width: 80%
 
-The loadability "nose" curve: voltage versus loading, with the continuation locating the
-margin, the critical bus, and the limiting load.
+Voltage against loading for the critical bus. The walk stops at the largest λ the Newton
+corrector still solves, which is a lower bound on the true nose: the Jacobian becomes ill
+conditioned before the singularity. The study reports that margin, the critical bus and the
+limiting load instead of returning a convergence failure.
 ```
 
-```{figure} ../_static/figures/throughput_vs_batch.svg
-:alt: Throughput versus batch size
-:width: 80%
+On CIGRE LV the largest solvable λ is 3.41 under the default `ramp="load"`, a margin of 2.41
+times nameplate, with node 37 the collapse mode and the 20 kVA load at node 36 the element
+that costs the most margin.
 
-Scenario throughput versus batch size — the dense batched solve amortizes per-scenario cost
-as the batch grows.
-```
+## Performance and conditioning studies
 
-### Sparse vs dense factorization
-
-**File:** `run/examples/pgml/benchmark_sparse.py`
-
-Sweeps synthetic radial MV feeders (`pgml.grids.synthetic_feeder`) across system sizes and
-times both `solve_power_flow` factorization backends — the batched dense `torch` LU and the
-scipy SuperLU sparse factorization — for factorization time, back-substitution time (single
-RHS and a batched scenario), and end-to-end wall time. On a CUDA host the dense rows are also
-measured on the GPU, since the sparse-CPU advantage must be checked against the dense-GPU
-baseline rather than assumed. The observed CPU crossover calibrates the row-count threshold
-behind `linear_solver="auto"` (see the "Solve performance" section of
-{doc}`api/solver`).
-
-```{literalinclude} ../../run/examples/pgml/benchmark_sparse.py
-:language: python
-:lines: 1-30
-:caption: run/examples/pgml/benchmark_sparse.py (header)
-```
-
-### Switch-state sweeps: low-rank update (Woodbury)
-
-**File:** `run/examples/pgml/benchmark_woodbury.py`
-
-Sweeps switch-state configurations over `pgml.grids.synthetic_feeder` and times
-`solve_power_flow` under both `branch_states_method` strategies — assembling and
-factoring every state, versus factoring the base network once and reaching each state
-through the Sherman-Morrison-Woodbury low-rank update
-(`pgml.solver.lowrank`) — across system size, the number of switched branches (the
-update rank `k`), and the state count. Reports the speedup and the crossover in `k`
-alongside the maximum relative voltage difference between the two paths, so a reported
-speedup always comes with the accuracy it was measured at. See
-[Solver architecture: performance and structural checks](modeling/solver-performance.md)
-for the measured numbers and the conditioning argument behind the sweep's base-state
-choice.
-
-```{literalinclude} ../../run/examples/pgml/benchmark_woodbury.py
-:language: python
-:lines: 1-29
-:caption: run/examples/pgml/benchmark_woodbury.py (header)
-```
+Five scripts measure rather than plot. `benchmark_speed.py` times the batched solve against
+batch size on whichever devices are present. `benchmark_sparse.py` sweeps system size and
+compares the dense and sparse factorization backends, which is how the automatic backend
+threshold was calibrated. `benchmark_woodbury.py` times a switch-state sweep with and without
+the low-rank update, and reports the voltage agreement between the two paths alongside the
+speedup. `benchmark_equilibration.py` reports the condition number of the matrix the solver
+factors, with and without the diagonal scaling, and the single-precision error that follows
+from it. `benchmark_ift_backward.py` times the backward pass against batch size and shows
+which Jacobian build the memory budget selected. The measured numbers are in
+{doc}`modeling/solver-performance`.

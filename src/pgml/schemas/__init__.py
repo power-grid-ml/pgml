@@ -1,7 +1,8 @@
 """Public schema API for pgml.
 
-These three modules are the FROZEN data contracts (orchestrator-only). Consumers
-import the canonical types from here, e.g. ``from pgml.schemas import Grid, Node``.
+These three modules are the versioned data contracts of the package (see
+``SCHEMA_VERSION``). Consumers import the canonical types from here, e.g.
+``from pgml.schemas import Grid, Node``, and never redefine them.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from .scenario_schema import *  # noqa: F401,F403
 #: datasets (``meta.json``) so a reload can detect a schema change. During pre-1.0 development
 #: the schema MAJOR tracks the library major (both stay ``0.x`` while the library is < 1.0.0);
 #: bump the patch/minor on any contract change. A MAJOR mismatch on read is incompatible.
-SCHEMA_VERSION = "0.0.5"
+SCHEMA_VERSION = "0.2.0"
 
 __all__ = [
     "SCHEMA_VERSION",

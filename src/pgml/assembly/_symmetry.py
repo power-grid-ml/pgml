@@ -14,8 +14,11 @@ so a user can see exactly what was built:
    default (single-phase vs multi-phase).
 
 ``log_modeling_summary`` emits an INFO summary: the resolved calculation symmetry,
-whether a NEUTRAL is being modeled (a node carries ``Phase.N``), and the WYE/DELTA
-load mix. Citations + rationale: ``docs/pgml/modeling/asymmetric.md``.
+whether a NEUTRAL is being modeled (a node carries ``Phase.N``), the WYE/DELTA load mix
+and the frequency-dependent line models in use. It WARNS on the two silent modeling
+traps: a line with no harmonic model, and a radius-based conductor internal-inductance
+model applied to a synthesized geometry whose radius is a placeholder. Citations +
+rationale: ``docs/pgml/modeling/asymmetric.md``.
 
 Runs once per assemble/solve call on the python schema objects — no tensors, no
 autograd, no per-node loops on the tape.
@@ -31,8 +34,10 @@ from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
+    Line,
     Phase,
     WindingConnection,
+    _has_resistance_law,
 )
 
 logger = logging.getLogger("pgml")
@@ -127,32 +132,131 @@ def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:
     Makes implicit modeling explicit, e.g. that a neutral is being modeled because a
     node carries ``Phase.N`` (so WYE loads there return into the neutral, not ground).
     Call once per assemble/solve after :func:`resolve_asymmetric`.
-    """
-    neutral_nodes = [nd.id for nd in grid.nodes if Phase.N in nd.phases]
-    if neutral_nodes:
-        logger.info(
-            "pgml: NEUTRAL modeled as a solved row at %d node(s): %s "
-            "(WYE appliances there return into Phase.N, not ground).",
-            len(neutral_nodes),
-            neutral_nodes,
-        )
-    else:
-        logger.info(
-            "pgml: no Phase.N present — WYE appliances return to ground "
-            "(3-wire / solidly-grounded model)."
-        )
 
-    appliances = [a for a in grid.appliances if isinstance(a, InjectionAppliance)]
-    if appliances:
+    The summary counts nodes and appliances, which on a large grid costs more than the
+    log call itself, so it is built only when the INFO level is enabled. The modeling
+    WARNINGS of :func:`log_line_models` are emitted either way.
+    """
+    if logger.isEnabledFor(logging.INFO):
+        neutral_nodes = [nd.id for nd in grid.nodes if Phase.N in nd.phases]
+        if neutral_nodes:
+            logger.info(
+                "pgml: NEUTRAL modeled as a solved row at %d node(s): %s "
+                "(WYE appliances there return into Phase.N, not ground).",
+                len(neutral_nodes),
+                neutral_nodes,
+            )
+        else:
+            logger.info(
+                "pgml: no Phase.N present — WYE appliances return to ground "
+                "(3-wire / solidly-grounded model)."
+            )
+
+        appliances = [a for a in grid.appliances if isinstance(a, InjectionAppliance)]
+        if appliances:
+            counts: dict[str, int] = {}
+            for a in appliances:
+                c = resolve_connection(a).value
+                counts[c] = counts.get(c, 0) + 1
+            logger.info(
+                "pgml: %d load/gen connection(s): %s; calculation = %s.",
+                len(appliances),
+                ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
+                "ASYMMETRIC (per-phase)"
+                if asymmetric
+                else "SYMMETRIC (balanced split)",
+            )
+
+    log_line_models(grid)
+
+
+def _line_model_name(line: Line) -> str:
+    """Which frequency-dependent model one line is assembled with, as a name.
+
+    ``"unresolved"`` when neither a typed ``harmonic_line_model`` nor an explicit
+    ``resistance_frequency`` law says, which is what the modeling WARNING reports.
+    """
+    return line.harmonic_line_model or (
+        "explicit resistance_frequency"
+        if _has_resistance_law(line.resistance_frequency)
+        else "unresolved"
+    )
+
+
+def log_line_models(grid: Grid) -> None:
+    """INFO-log which frequency-dependent line model each line uses.
+
+    A line whose ``harmonic_line_model`` is still unresolved is assembled from its
+    stored parameters (constant ``R``, ``X`` proportional to ``h``), which is the naive
+    model the modeling defaults deliberately do not choose — so an unresolved line is
+    logged as a WARNING naming the count, the first few line ids and the entry point that
+    resolves it. This matters above the fundamental only, and it is not cosmetic: the
+    model a three-phase lumped line resolves to is the sequence-aware one, which carries
+    a zero-sequence earth-return term the naive model has no equivalent for. Converted
+    grids are resolved at conversion time; a grid built without a converter is resolved by
+    ``pgml.geometry.apply_default_harmonic_model``.
+    """
+    lines = [b for b in grid.branches if isinstance(b, Line) and b.in_service]
+    if not lines:
+        return
+    unresolved_ids = [
+        int(ln.id) for ln in lines if _line_model_name(ln) == "unresolved"
+    ]
+    if logger.isEnabledFor(logging.INFO):
         counts: dict[str, int] = {}
-        for a in appliances:
-            c = resolve_connection(a).value
-            counts[c] = counts.get(c, 0) + 1
+        for ln in lines:
+            name = _line_model_name(ln)
+            counts[name] = counts.get(name, 0) + 1
         logger.info(
-            "pgml: %d load/gen connection(s): %s; calculation = %s.",
-            len(appliances),
+            "pgml: %d line harmonic model(s): %s.",
+            len(lines),
             ", ".join(f"{k}x{v}" for k, v in sorted(counts.items())),
-            "ASYMMETRIC (per-phase)" if asymmetric else "SYMMETRIC (balanced split)",
+        )
+    if unresolved_ids:
+        logger.warning(
+            "pgml: %d of %d lines have no harmonic line model and are assembled from "
+            "their stored parameters (R constant, X proportional to h). Above the "
+            "fundamental this is the naive model, which differs from the resolved one "
+            "(a three-phase lumped line resolves to the sequence-aware model, whose "
+            "zero-sequence earth-return term the naive model omits). First id(s): %s. "
+            "Apply the documented default with "
+            "pgml.geometry.apply_default_harmonic_model(grid) (the converters do it "
+            "for you) or set Line.harmonic_line_model.",
+            len(unresolved_ids),
+            len(lines),
+            unresolved_ids[:10],
+        )
+    log_synthesized_geometry_radius(lines)
+
+
+def log_synthesized_geometry_radius(lines) -> None:
+    """WARN when a radius-based internal-inductance model meets a synthesized geometry.
+
+    ``pgml.geometry.synthesize_line_geometry`` fits the GMR to the line's reactance and
+    keeps the modeling-default radius as a placeholder, so a low-reactance line ends up
+    with ``GMR >> radius`` (flagged ``synth_unphysical``). Every internal-inductance
+    model except ``"gmr"`` reads that placeholder radius, which then dominates the
+    self-impedance: measured on the CIGRE LV residential feeder, the series ``Z`` above
+    1 kHz moves by a factor of 20. The combination is a modeling error, not a refinement.
+    """
+    model = defaults.get("line.geometry.internal_inductance")
+    affected_models = [
+        ln.conductor_geometry.internal_inductance or model
+        for ln in lines
+        if ln.conductor_geometry is not None
+        and (ln.conductor_geometry.internal_inductance or model) != "gmr"
+        and ln.conductor_geometry.provenance is not None
+        and ln.conductor_geometry.provenance.extra.get("synth_unphysical") == "True"
+    ]
+    if affected_models:
+        logger.warning(
+            "pgml: resolved internal_inductance=%s uses the conductor RADIUS, but "
+            "%d line(s) carry a synthesized geometry whose radius is a placeholder "
+            "(GMR >= radius, tagged synth_unphysical). Their harmonic impedance will be "
+            "dominated by that placeholder. Use 'gmr' for synthesized geometries, or "
+            "give these lines measured conductor data.",
+            ", ".join(sorted(set(affected_models))),
+            len(affected_models),
         )
 
 
@@ -160,4 +264,6 @@ __all__ = [
     "resolve_asymmetric",
     "resolve_connection",
     "log_modeling_summary",
+    "log_line_models",
+    "log_synthesized_geometry_radius",
 ]

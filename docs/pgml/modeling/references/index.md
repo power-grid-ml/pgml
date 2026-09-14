@@ -1,17 +1,16 @@
-# Reference-library notes
+# Reference tools
 
-pgml is validated against three established power-system tools, and converts grids from
-each. These briefs distil the modeling facts that matter for that conversion and
-validation — they are *not* full documentation of those tools, only the parts pgml depends
-on.
+pgml reads grids from three established power-system tools and validates its results against
+them. These briefs distil only the facts that matter for that reading and validation. They are
+not documentation of those tools.
 
-- **OpenDSS** is the **harmonic ground truth**: pgml's assembled Y-bus and per-order
+- OpenDSS is the harmonic reference. The assembled admittance matrix and the per-order
   voltages are compared against it.
-- **pandapower** and **power-grid-model** are **fundamental-frequency load-flow oracles**
-  (no harmonics): pgml's voltages and flows at 50/60 Hz are compared against them.
+- pandapower and power-grid-model are fundamental-frequency load-flow references. They model
+  no harmonics, so the comparison is at 50 or 60 Hz.
 
-See [cross-tool conventions](../conventions.md) for how each tool's conventions map onto
-pgml's canonical internal form at the converter boundary.
+How each tool's conventions map onto pgml's internal form is in
+{doc}`../conventions`.
 
 ```{toctree}
 :maxdepth: 1

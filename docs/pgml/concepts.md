@@ -1,161 +1,141 @@
 # Concepts
 
-This page explains the core modelling conventions used throughout `pgml`.
+The model behind every `pgml` result, in the order it matters to a user. The modelling
+decisions and their limits are recorded in {doc}`modeling/index`.
 
-## Phase-domain representation
+## One linear system per harmonic order
 
-`pgml` uses a **phase-domain, fully asymmetric** representation.  Every element
-is described by its per-phase primitive admittance — an *n_phase × n_phase*
-complex stamp per harmonic.  There is no implicit sequence-domain conversion
-inside the core; sequence data (Z1/Z0, short-circuit input conventions) are
-handled by converters that emit phase-domain objects.
+Steady-state harmonic power flow decouples by order. For each integer order `h` the engine
+assembles a complex nodal admittance matrix and solves
 
-Compact **node-phase indexing** (`pgml.assembly.node_phase_index`) assigns one
-matrix row to each existing *(node, phase)* pair rather than a padded A/B/C/N
-grid, so the assembled Y-bus has minimal size.
+$$
+Y(h)\,V(h) = I(h)
+$$
 
-## SI base units and stored quantities
+for the node voltages. Branch currents, terminal powers and spectra follow from `V(h)`.
 
-All physical fields are stored in SI units:
+Harmonic sources are current injections in the Norton sense. A distorting device is a current
+source per order in parallel with a frequency-dependent shunt admittance derived from its
+fundamental operating point, which is the main damping of a feeder-end parallel resonance.
+`load_shunt` selects the shunt model, and a generation-sign device carries none by default.
+At harmonic orders the voltage source behind the slack is a short circuit and contributes only
+its own shunt. {doc}`modeling/references/opendss/harmonics` gives the admittance in full.
 
-| Quantity | Unit | Storage convention |
-|----------|------|--------------------|
+At the fundamental the load flow is nonlinear, because a constant-power load is not a fixed
+admittance. `solve_power_flow` runs a current-injection fixed point or a Newton iteration,
+both warm-started from a constant-impedance solve. The backward pass uses the implicit
+function theorem in real coordinates, so the gradient does not unroll the iteration.
+
+## Phase domain, never sequence domain
+
+Every element is described by its own per-phase primitive admittance, an `n × n` complex
+stamp per order. The core has no sequence-domain step. Sequence data such as `Z1` and `Z0`
+is decomposed into phase quantities by the converters before assembly.
+
+Rows are indexed compactly. `pgml.assembly.node_phase_index` gives one matrix row per
+existing `(node, phase)` pair, not a padded A/B/C/N block, so a mixed one-phase and
+three-phase network assembles without empty rows.
+
+## SI units, and L and C rather than X and B
+
+| Quantity | Unit | Field |
+|---|---|---|
 | Resistance | Ω | `r_ohm` |
-| Inductance | H | `l_h` (not reactance X) |
-| Capacitance | F | `c_f` (not susceptance B) |
-| Voltage | V | phasors as `(v_re, v_im)` |
-| Current | A | phasors as `(i_re, i_im)` |
-| Power | W / VAr | `p_w`, `q_var` |
+| Inductance | H | `l_h` |
+| Capacitance | F | `c_f` |
+| Voltage | V | phasor as `(v_re, v_im)` |
+| Current | A | phasor as `(i_re, i_im)` |
+| Power | W, var | `p_w`, `q_var` |
 
-Reactive elements store **L and C**, never X or B.  At assembly time:
+Reactive elements store inductance and capacitance. Reactance and susceptance are derived at
+the frequency of each order, `X(h) = 2π h f₀ L` and `B(h) = 2π h f₀ C`. Frequency scaling
+stays physical that way, and a gradient lands on a physical parameter rather than on a
+frequency-specific one.
 
-$$
-X(h) = 2\pi h f_0 L, \quad B(h) = 2\pi h f_0 C
-$$
+`Node.u_rated_v` is the line-to-line nameplate for a node with three or more phases, and the
+line-to-neutral value for a one-phase node. Every per-phase voltage inside the solver is
+line-to-neutral. {doc}`modeling/conventions` pins the full convention set and compares it
+with the reference tools.
 
-This keeps frequency scaling physical and gradients attached to physical
-parameters.
+## Branches are pi stamps
 
-## Pi-form branch model
+Every branch contributes a pi-form primitive admittance.
 
-Every branch (line or transformer) contributes a **pi-form primitive admittance
-stamp** to the Y-bus:
+- Series admittance `y_s = 1 / (R + jωL)`, with an optional frequency-dependent resistance
+  law.
+- Shunt admittance `y_sh = G + jωC`, half at each end.
+- A transformer adds a complex tap `t` and a winding incidence that carries the vector
+  group, so a Dyn delta traps triplen harmonics the way the real unit does.
 
-- Series admittance: `y_s = 1 / (R + jωL)` with optional skin-effect resistance
-- Shunt admittance: `y_sh = G + jωC` (half at each end for the pi model)
-- Transformers add a **complex tap** `t = |t| e^{jφ}` so that the branch
-  admittance becomes `t* y_s t` on the from-side.
+A line can instead carry `conductor_geometry`. Assembly then computes the impedance from
+conductor coordinates with the Carson/Deri earth-return and skin-effect model, per order.
+Lines defined by lumped R/L/C use one of the analytic harmonic line models instead, selected
+by the typed field `Line.harmonic_line_model`. A converted grid arrives with the configured
+default already resolved into that field, so a three-phase R/X line uses the sequence-aware
+model rather than plain proportional scaling.
+{doc}`modeling/harmonic-line-model` explains the difference and when it matters.
 
-## Harmonic power flow
+## Floats or tensors, same grid
 
-Harmonic power flow **decouples per harmonic** into the linear solve:
+Physical schema fields accept a plain Python float, a nested list, or any array-like object
+such as a `torch.Tensor`. Array-likes pass through untouched, so the gradient chain
 
-$$
-Y(h) \, V(h) = I(h)
-$$
-
-A linear solve has a clean, cheap adjoint so end-to-end gradients flow without
-differentiating Newton iterations.  Sources inject complex harmonic currents
-(Norton representation); loads are a current source in parallel with a
-frequency-dependent shunt admittance.
-
-For the fundamental frequency, a nonlinear const-P / ZIP fixed-point iteration
-is available (`pgml.solver.solve_power_flow`), with backward pass via the
-implicit function theorem (IFT adjoint in real coordinates).
-
-## Float/tensor duality
-
-Physical schema fields accept **either** plain Python floats/lists or any
-array-like object (e.g. `torch.Tensor`).  Array-likes are passed through
-untouched so autograd gradients flow:
-
-```
-grid parameters (tensors) → assemble_ybus → solve → outputs
+```text
+grid parameters -> assemble_ybus -> solve -> outputs
 ```
 
-The schema imports no compute framework; "array-like" is detected by duck typing
-(`hasattr(v, "detach")` or `hasattr(v, "__array__")`).
+closes without a second parameter container. The schema imports no compute framework and
+detects an array-like by duck typing. {doc}`differentiability` shows what this is for.
 
-## Symmetric vs asymmetric calculation
+## Symmetric and asymmetric power
 
-`pgml` is always phase-domain, so "symmetric" and "asymmetric" refer to how
-**appliance power** is resolved across phases — not to the network solve itself.
-
-The `symmetry` argument accepted by `assemble_ybus`, `device_current_injections`,
-`solve_power_flow`, and `solve_harmonic_flow` controls this:
+The network solve is always per phase. Symmetry refers to how an appliance's power is
+resolved across its phases.
 
 | Mode | Behaviour |
-|------|-----------|
-| `"symmetric"` | Total P/Q split equally over the connected phases (balanced). |
-| `"asymmetric"` | Per-phase nameplate values or per-phase operating-point keys are honoured. |
-| `"auto"` | Asymmetric iff any appliance or operating point carries per-phase data; otherwise symmetric. |
-| `None` | Reads `calculation.symmetry` from the config (default `"auto"`). |
+|---|---|
+| `"symmetric"` | Total P and Q split equally over the connected phases |
+| `"asymmetric"` | Per-phase nameplate values and per-phase operating points are honoured |
+| `"auto"` | Asymmetric when any appliance or operating point carries per-phase data |
+| `None` | Take `calculation.symmetry` from the config, default `"auto"` |
 
-This mirrors power-grid-model's `symmetric=True/False` rule.  A single INFO
-modeling summary is logged per top-level call showing the resolved mode.
+The argument is accepted by `assemble_ybus`, `device_current_injections`,
+`solve_power_flow` and `solve_harmonic_flow`. The resolved mode is logged once per top-level
+call. power-grid-model's `symmetric=True/False` switch follows the same rule.
 
-## WYE/DELTA connection and neutral modeling
+## Connections and the neutral
 
-A `Load` or `Generator` can set `connection` explicitly
-(`WindingConnection.WYE`, `WYE_GROUNDED`, or `DELTA`).  When `connection` is
-`None`, the config defaults `appliance.load.default_connection` (multi-phase)
-and `appliance.load.single_phase_connection` (1-phase) are used (both `"wye"`
-by default).
+A `Load` or `Generator` can set `connection` to WYE, grounded WYE or DELTA. With
+`connection` left unset, the config defaults apply, separately for multi-phase and
+single-phase elements.
 
-`pgml` uses a **terminal incidence matrix** `M` to map node-phase voltages to
-element (terminal) voltages:
+Terminal voltages come from an incidence matrix `M` that maps node-phase voltages to element
+terminals.
 
-- **WYE, no neutral row** (`Phase.N` absent from the node): `M = I_n`.
-  Reduces exactly to the historical diagonal per-phase stamp.
-- **WYE, with neutral** (`Phase.N` present, 4-wire network): used rows are the
-  phase rows plus the neutral row; `M = [I_n | -1]`.  The neutral row receives
-  the return current automatically (Kirchhoff).
-- **DELTA-3**: used rows are the three phase rows; `M` is the circulant
-  difference matrix.  The base voltage is line-to-line.
+- WYE without a neutral row reduces to the diagonal per-phase stamp, `M = I`.
+- WYE on a four-wire node uses the phase rows plus the neutral row, `M = [I | -1]`. The
+  neutral row receives the return current by construction.
+- DELTA uses the circulant difference matrix, so the base voltage is line-to-line.
 
-DELTA and 4-wire WYE connections are fully modelled in the harmonic solver
-(connection-aware injection via the incidence matrix `M`); see the
-"Per-phase / connection-aware harmonic injection" section below.
-`NotImplementedError` is only raised for `include_load_shunt=True` (Norton
-shunt from `HarmonicShuntModel`) and for DELTA with fewer than two phases,
-neither of which is a topology restriction.
+Each injection appliance may override the node-level neutral-or-ground choice through
+`return_path`. {doc}`modeling/asymmetric` covers the per-phase model in full.
 
-The WYE neutral-vs-ground choice above is the node-level default; each
-`InjectionAppliance` (`Load`/`Generator`/`Storage`) may override it per element via
-`return_path` (`"auto"`/`"neutral"`/`"ground"`) — see
-[the asymmetric modeling brief](modeling/asymmetric.md) §4.
+## Harmonic injection per phase
 
-## Per-phase / connection-aware harmonic injection
-
-Harmonic current sources are modelled per *element* (terminal) using the same
-incidence matrix `M` that the fundamental power flow uses, so the correct
-terminal voltage appears in the normalisation:
-
-- **WYE, no neutral**: `M = I` — per-phase injection reduces exactly to the
-  historical diagonal form.
-- **WYE, 4-wire with neutral** (`Phase.N` present): `M = [I | -1]` — the
-  terminal voltage is `V_phase - V_N`; the neutral row receives the return
-  current automatically.
-- **DELTA-3**: `M` is the circulant difference matrix — the terminal voltage
-  is the relevant line-to-line voltage.
-
-### Symmetric vs per-phase spectra
-
-| Field | Behaviour |
-|-------|-----------|
-| `spectrum` on `Load` / `Generator` | One `Spectrum` broadcast to every connected phase / delta branch (OpenDSS multi-phase semantics). |
-| `spectrum_per_phase` on `Load` / `Generator` | `dict[Phase, Spectrum]` — each key maps a connected phase (for WYE) or the delta-branch starting phase (for DELTA) to its own `Spectrum`. Keys must be a subset of `phases`; a phase with no entry injects no harmonics. |
-
-The two fields are **mutually exclusive**.  Set one or the other, never both.
-
-Example — single-phase EV charger distorting only phase A on a three-phase load:
+The same incidence matrix drives harmonic injection, so the normalisation always uses the
+correct terminal voltage. The device Norton shunt is connection-aware in the same way: its
+element admittance is mapped through the same incidence `M`, so a four-wire WYE device returns
+its shunt current through the neutral row and a DELTA device puts each leg admittance on both
+of its phase diagonals. A device carries either one `spectrum`, broadcast to every
+connected phase or delta branch, or a `spectrum_per_phase` mapping. The two fields are
+mutually exclusive. A phase absent from `spectrum_per_phase` injects nothing.
 
 ```python
-from pgml.schemas.grid_schema import Load, Phase, StaticSpectrum, SpectrumPoint
+from pgml.schemas.grid_schema import Load, Phase, SpectrumPoint, StaticSpectrum
 
 load = Load(
-    id="ev_load",
-    node_id="bus_1",
+    id=7,
+    node=12,
     phases=(Phase.A, Phase.B, Phase.C),
     p_nom_w=7400.0,
     q_nom_var=0.0,
@@ -164,40 +144,39 @@ load = Load(
             components=[{"order": 5, "magnitude_pu": 0.08, "phase_deg": 0.0},
                         {"order": 7, "magnitude_pu": 0.05, "phase_deg": 0.0}]
         )),
-        # Phase.B and Phase.C are absent → no harmonic injection
     },
 )
 ```
 
-### Runtime override convention (`harmonic_injection`)
+`solve_harmonic_flow` also takes a `harmonic_injection` override of the form
+`{appliance_id: {order: (magnitude_pu, phase_deg)}}`, which wins over any stored spectrum.
+The shape rule removes the ambiguity that appears when a batch size happens to equal the
+element count. A list or tuple is always per element and its length must equal the number of
+connected phases or delta branches. A scalar, a 0-d tensor or a tensor with only batch
+dimensions is broadcast to every element. Entries may be tensors, and gradients flow through
+them.
 
-`solve_harmonic_flow` accepts a `harmonic_injection` dict that overrides
-stored spectra for scenario-level or differentiable variation:
+### Sequence structure across a device's phases
 
+A three-phase device's harmonic on phase B is its phase-A waveform delayed by a third of a
+cycle, so order `h` is rotated by `−h·120°`. Triplen orders therefore come out as zero
+sequence, which is what a Dyn transformer traps. Order 5 comes out as negative sequence,
+order 7 as positive sequence, and so on. None of this is drawn per phase. It follows from how
+the per-element angle is formed,
+
+```text
+|I_h^e|    = (mag_h / mag_1) * |I_1^e|
+arg I_h^e  = ang_h + h * (arg I_1^e - ang_1)
 ```
-{appliance_id: {order: (magnitude_pu, phase_deg)}}
-```
 
-Each `magnitude_pu` / `phase_deg` value follows an **unambiguous** convention
-that avoids silent misreads when the scenario batch size happens to equal the
-element count:
+per terminal element `e`, with `I_1^e` the fundamental current that element actually carries.
+A device-level spectrum broadcasts to every element of the device, and the `h·arg I_1^e` term
+supplies the rotation from the fundamental's own phase angles. An unbalanced fundamental
+therefore propagates into the per-phase harmonic magnitudes of one device.
 
-- A Python **`list` or `tuple`** is always **per-element** — its length *must*
-  equal `n_elem` (number of connected phases or delta branches).  Each entry
-  may be a Python float or a `[*batch]` tensor (gradients are preserved).
-- A **scalar, 0-d tensor, or `[*batch]` tensor** (no element axis) is
-  **broadcast** identically to every element.  This is the backward-compatible
-  path for symmetric overrides.
+## Integer orders only
 
-The override takes precedence over any stored `spectrum` or
-`spectrum_per_phase`.
-
-## Validation philosophy
-
-`pgml` validates against two reference implementations:
-
-- **OpenDSS** — harmonic ground truth.  We compare the assembled Y-bus (exported
-  system Y) and per-node voltage phasors at each harmonic.
-- **pandapower / power-grid-model** — fundamental-frequency load-flow oracles.
-
-Tests run on small IEEE feeders (IEEE 33-bus) and the CIGRE LV network.
+Orders are integer multiples of the fundamental. A non-integer order is rejected rather than
+approximated, because the spectra and the per-order assembly are defined for integer
+multiples. Interharmonics, flicker and transients need a time-domain model and are out of
+scope.

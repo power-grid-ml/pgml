@@ -23,10 +23,12 @@ from pgml.convert._common import (
     phases_for,
     sequence_to_phase_matrices,
     single_phase_matrix,
+    source_zero_sequence_ratios,
     thevenin_from_sk,
     thevenin_from_z,
     zero_sequence_ratios,
 )
+from pgml import defaults
 from pgml.schemas.grid_schema import Phase, WindingConnection
 
 ABC = (Phase.A, Phase.B, Phase.C)
@@ -311,14 +313,86 @@ def test_build_source_three_phase_balanced_angles():
         u_angle_deg=0.0,
         r_ohm=0.01,
         l_h=1e-5,
+        two_pi_f0=TWO_PI_F0,
     )
     u_ln = 400.0 / math.sqrt(3.0)
     assert s.phases == ABC
     assert s.u_ref_v == pytest.approx((u_ln, u_ln, u_ln))
     assert s.u_angle_deg == (0.0, -120.0, -240.0)
-    # diagonal Thevenin
+    # The default source zero-sequence ratios are 1.0 (Z0 = Z1), so the mutual term
+    # vanishes and the Thevenin stays the plain diagonal stamp, unrounded.
     assert s.resistance_ohm == [[0.01, 0, 0], [0, 0.01, 0], [0, 0, 0.01]]
     assert s.inductance_h == [[1e-5, 0, 0], [0, 1e-5, 0], [0, 0, 1e-5]]
+
+
+def test_build_source_three_phase_zero_sequence_split():
+    """Explicit R0/X0 become the symmetric-component self/mutual terms."""
+    r1, x1 = 0.01, 0.04
+    r0, x0 = 0.05, 0.30
+    s = build_source(
+        id=1,
+        node=2,
+        mode=PhaseMode.THREE_PHASE,
+        u_ref_v=400.0,
+        u_angle_deg=0.0,
+        r_ohm=r1,
+        l_h=x1 / TWO_PI_F0,
+        r0_ohm=r0,
+        x0_ohm=x0,
+        two_pi_f0=TWO_PI_F0,
+    )
+    r_self, r_mut = (r0 + 2.0 * r1) / 3.0, (r0 - r1) / 3.0
+    x_self, x_mut = (x0 + 2.0 * x1) / 3.0, (x0 - x1) / 3.0
+    for i in range(3):
+        for j in range(3):
+            assert s.resistance_ohm[i][j] == pytest.approx(r_self if i == j else r_mut)
+            assert s.inductance_h[i][j] * TWO_PI_F0 == pytest.approx(
+                x_self if i == j else x_mut
+            )
+
+
+def test_build_source_three_phase_defaults_warn(caplog):
+    """Falling back to the configured zero-sequence ratio names the element."""
+    with caplog.at_level("WARNING"):
+        build_source(
+            id=7,
+            node=2,
+            mode=PhaseMode.THREE_PHASE,
+            u_ref_v=400.0,
+            u_angle_deg=0.0,
+            r_ohm=0.01,
+            l_h=1e-5,
+            two_pi_f0=TWO_PI_F0,
+            element="test source",
+        )
+    assert any(
+        "test source" in r.message and "zero-sequence" in r.message
+        for r in caplog.records
+    )
+
+
+def test_build_source_single_phase_ignores_zero_sequence():
+    """A positive-sequence equivalent has no zero sequence: R0/X0 are not read."""
+    s = build_source(
+        id=1,
+        node=2,
+        mode=PhaseMode.SINGLE_PHASE_EQUIV,
+        u_ref_v=231.0,
+        u_angle_deg=0.0,
+        r_ohm=0.01,
+        l_h=1e-5,
+        r0_ohm=5.0,
+        x0_ohm=9.0,
+        two_pi_f0=TWO_PI_F0,
+    )
+    assert s.resistance_ohm == [[0.01]]
+    assert s.inductance_h == [[1e-5]]
+
+
+def test_source_zero_sequence_ratios_are_documented_defaults():
+    r0_over_r1, x0_over_x1 = source_zero_sequence_ratios()
+    assert r0_over_r1 > 0.0 and x0_over_x1 > 0.0
+    assert "zero-sequence" in defaults.describe("source.zero_sequence.r0_over_r1")
 
 
 # ----------------------------------------------------------------------- #

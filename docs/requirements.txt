@@ -1,0 +1,9 @@
+# Installed before the package itself on Read the Docs (see .readthedocs.yaml).
+#
+# The only reason this file exists is torch. The default PyPI wheel for Linux ships the CUDA
+# runtime, which a documentation build neither uses nor has room for, so torch is taken from
+# the PyTorch CPU index. The local version tag (+cpu) makes pip prefer it over the PyPI wheel
+# of the same version. Everything else the build needs is declared in pyproject.toml, in the
+# runtime dependencies and the `docs` extra.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.10,<3

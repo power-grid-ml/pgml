@@ -15,13 +15,16 @@ training data).
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal, Optional, Union
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 
 from pgml.schemas.grid_schema import Phase
+
+if TYPE_CHECKING:  # the sampler imports this module, so the batch type is a forward ref
+    from .sampler import SampledScenarios
 
 _U_EPS = 1e-7  # clamp unit samples off {0,1} so Gaussian-tail icdf stays finite.
 
@@ -393,6 +396,16 @@ class ScenarioConfig(_Base):
     #: (see :class:`BackgroundHarmonicConfig`). ``None`` (default) = no background.
     background: Optional["BackgroundHarmonicConfig"] = None
 
+    #: No implied calculation: the harmonic orders to solve are the caller's choice, since
+    #: a config may vary harmonic magnitudes, fundamental power, or both.
+    harmonic_orders: ClassVar[Optional[list[int]]] = None
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Draw this config's batch from ``grid`` (see :func:`~pgml.scenarios.sample`)."""
+        from .sampler import sample
+
+        return sample(grid, self)
+
 
 # =============================================================================
 # Cartesian-product (grid-sweep) batches
@@ -416,6 +429,15 @@ class CartesianConfig(_Base):
     """A reproducible (deterministic, no RNG) cartesian-product batch (pgm-style)."""
 
     axes: list[CartesianAxis] = Field(min_length=1)
+
+    #: A cartesian sweep varies operating points only; the calculation is the caller's.
+    harmonic_orders: ClassVar[Optional[list[int]]] = None
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Enumerate the product batch (see :func:`~pgml.scenarios.cartesian_sample`)."""
+        from .sampler import cartesian_sample
+
+        return cartesian_sample(grid, self)
 
 
 # =============================================================================
@@ -480,6 +502,17 @@ class SpectrumSweepConfig(_Base):
             magnitudes_pu=[float(spectrum[o][0]) for o in orders],
             phases_deg=[float(spectrum[o][1]) for o in orders],
         )
+
+    @property
+    def harmonic_orders(self) -> list[int]:
+        """The solved order set this sweep implies: the fundamental plus ``orders``."""
+        return [1, *self.orders]
+
+    def sample(self, grid) -> "SampledScenarios":
+        """Build the diagonal sweep (see :func:`~pgml.scenarios.spectrum_sweep`)."""
+        from .harmonics import spectrum_sweep
+
+        return spectrum_sweep(grid, self)
 
     @model_validator(mode="after")
     def _check(self) -> "SpectrumSweepConfig":
@@ -550,667 +583,19 @@ class NodeInjectionSweepConfig(_Base):
 
 
 # =============================================================================
-# Time-varying fundamental load profiles (multi-scale synthetic recurrence)
+# Upstream (supply-side) harmonic background
 # =============================================================================
-class LoadProfileConfig(_Base):
-    """Multi-scale synthetic load-profile generator for a coherent step sequence.
-
-    Turns the constant per-scenario fundamental of a
-    :class:`CoherentSpectrumConfig` into a per-STEP time series: every matched
-    device gets a multiplicative factor composed on four time scales,
-
-        ``factor(t) = f_seasonal(t) * f_weekly(t) * f_daily(t) * f_short(t)``,
-
-    applied to the device's per-scenario base ``P`` and ``Q`` TOGETHER (constant
-    power factor, the ``field="pq"`` semantics). The base is the device's sampled
-    per-scenario operating point (from ``CoherentSpectrumConfig.parameters``) if it
-    has one, else its nominal ``p_nom_w`` / ``q_nom_var``. Gradients still flow to a
-    tensor-valued base (the factor is a plain, off-tape multiplier).
-
-    The daily SHAPE is class-aware, keyed by each device's ``consumer_type``
-    (household evening peak, office/commercial business hours, EV evening charging,
-    a flat industrial plateau, and a neutral default). ``pv`` is special: a solar
-    bell that is ZERO at night, with a daylight window and amplitude that widen in
-    summer (the seasonal modulation folds into the daily bell, not ``f_seasonal``).
-    The concrete shapes live in :mod:`pgml.scenarios.profiles`; this config sets
-    their amplitudes and the stochastic ranges.
-
-    Correlation model (per-scenario co-variation)
-    ---------------------------------------------
-    Two per-scenario SHARED latents make devices co-vary within a scenario:
-
-    - a ``behavioral`` latent scales the DAILY AMPLITUDE of every non-``pv`` device
-      (a busy day lifts everyone's daily swing together), coupling strength
-      ``behavioral_coupling``;
-    - a ``cloudiness`` latent scales every ``pv`` device's output together
-      (an overcast day dims all panels), coupling strength ``cloud_coupling``.
-
-    On top of the shared latents each device draws IDIOSYNCRATIC per-scenario values:
-    an overall level (``level_min`` .. ``level_max``), an amplitude multiplier
-    (``amplitude_jitter_min`` .. ``amplitude_jitter_max``), a daily phase offset
-    (``+/- phase_offset_hours``, so devices do not all peak at the same instant), and
-    a per-step AR(1) short-term term (``short_rho`` stickiness, ``short_sigma``
-    std). The composed factor is clamped to be non-negative.
-
-    The generator draws on an RNG stream DERIVED from ``CoherentSpectrumConfig.seed``
-    with its own offset, DISTINCT from the fingerprint / Markov / AR(1) jitter and the
-    operating-point cube — so enabling a profile leaves the harmonic fingerprint and
-    the raw parameter draws byte-identical.
-    """
-
-    # Devices to profile: None = every in-service Load and Generator in the grid.
-    selector: Optional[Selector] = None
-
-    # Overall daily-shape depth (per-class base depths live in ``profiles``).
-    daily_amplitude: float = Field(default=1.0, ge=0.0)
-
-    # Per-scenario, per-device idiosyncratic draws.
-    level_min: float = Field(default=0.85, gt=0.0)
-    level_max: float = Field(default=1.15, gt=0.0)
-    amplitude_jitter_min: float = Field(default=0.8, ge=0.0)
-    amplitude_jitter_max: float = Field(default=1.2, ge=0.0)
-    phase_offset_hours: float = Field(default=1.0, ge=0.0)
-
-    # Per-scenario SHARED latents (co-variation across devices).
-    behavioral_coupling: float = Field(default=0.3, ge=0.0)  # non-pv daily amplitude
-    cloud_coupling: float = Field(default=0.5, ge=0.0)  # pv output
-
-    # Weekly weekday/weekend contrast (consumption; pv is unaffected).
-    weekend_contrast: float = Field(default=0.15)
-
-    # Seasonal modulation (annual sinusoid). ``*_peak_doy`` is a day-of-year phase.
-    seasonal_amplitude: float = Field(default=0.15, ge=0.0)  # consumption swing
-    seasonal_peak_doy: float = Field(default=15.0)  # consumption peaks in winter
-    pv_seasonal_amplitude: float = Field(default=0.4, ge=0.0)  # pv output swing
-    pv_seasonal_peak_doy: float = Field(default=172.0)  # summer solstice
-    pv_daylight_hours: float = Field(default=12.0, gt=0.0)  # mean day length
-    pv_daylight_swing: float = Field(default=4.0, ge=0.0)  # +/- seasonal day-length
-
-    # Short-term stochastic term (AR(1), per device per step).
-    short_rho: float = Field(default=0.9, ge=0.0, le=1.0)
-    short_sigma: float = Field(default=0.05, ge=0.0)
-
-    @model_validator(mode="after")
-    def _check(self) -> "LoadProfileConfig":
-        if self.level_max < self.level_min:
-            raise ValueError("level_max must be >= level_min.")
-        if self.amplitude_jitter_max < self.amplitude_jitter_min:
-            raise ValueError("amplitude_jitter_max must be >= amplitude_jitter_min.")
-        return self
-
-
-# =============================================================================
-# Statistical device-class composition of aggregated loads
-# =============================================================================
-#: Diurnal activity-rate presets a device class may follow. They REFERENCE the
-#: class-aware daily shapes in :mod:`pgml.scenarios.profiles` (household evening,
-#: office hours, EV evening, restaurant lunch/dinner, industrial plateau, the ``pv``
-#: solar bell) plus a ``"flat"`` constant availability.
-ActivityPreset = Literal[
-    "household", "office", "ev", "restaurant", "industrial", "pv", "flat"
-]
-
-
-class DeviceState(_Base):
-    """One operating state of a MULTI-STATE device class.
-
-    Captures the washing-machine / white-goods pattern where the SAME appliance draws
-    very different current AND injects a very different spectrum depending on its cycle
-    phase — e.g. a high-power, near-linear resistive HEATING state versus a low-power,
-    harmonic-rich INVERTER-driven spinning state. The device jumps between its states on
-    a Markov chain (dwell ``DeviceClassSpec.state_dwell``); the stationary probability of
-    a state is proportional to its ``weight``.
-
-    - ``power_fraction`` — the state's loading as a fraction of the device's rated power
-      (drives BOTH the drawn power and, through the ``gamma`` law, the harmonic
-      magnitude).
-    - ``spectrum_scale`` — an ADDITIONAL multiplier on the device's per-order harmonic
-      magnitudes in this state, capturing the qualitative spectral change that is NOT a
-      function of power magnitude alone (heating ≈ clean, inverter ≈ rich).
-    """
-
-    name: str = "state"
-    power_fraction: float = Field(gt=0.0, le=1.0)
-    spectrum_scale: float = Field(default=1.0, ge=0.0)
-    weight: float = Field(default=1.0, gt=0.0)
-
-
-class DeviceClassSpec(_Base):
-    """A STATISTICAL device class — a distribution over one appliance's behaviour.
-
-    The goal is NOT an accurate appliance model but plausible statistical coverage: an
-    aggregated load is composed of several members drawn from these classes (see
-    :class:`ConsumerComposition`), and a state estimator learns to attribute an observed
-    aggregate spectrum to a class mix. Every range below is drawn PER MEMBER (once, at
-    roster build); the temporal draws (activity, loading, state) then evolve per step.
-
-    The per-order harmonic magnitude ranges are FRACTIONS of the device's OWN fundamental
-    current at rated load and are only LOOSELY bounded by the IEC 61000-3-2 emission
-    shape (odd-dominated, decreasing with order) — they are a modelling convenience for
-    generating diverse training data, NOT the standard's per-appliance limits.
-
-    Load dependence (the measured reality that a device's harmonic signature depends on
-    how hard it is driven):
-
-    - magnitude ``mag_h(lam) = mag_h_rated * lam ** gamma_h`` with ``gamma_h`` drawn per
-      member per order from ``gamma`` (``gamma = 0`` → constant ratio; ``gamma < 0`` →
-      the THD FRACTION falls as load rises while the absolute harmonic current still
-      grows — the measured EV-charger / PV-inverter behaviour);
-    - phase ``ang_h(lam) = ang_h0 + s_h * (lam - 1)`` with ``s_h`` [deg] drawn per member
-      per order from ``phase_slope_deg``.
-
-    Activity: ``activity_preset`` is a diurnal availability shape (see
-    :data:`ActivityPreset`). ``discrete_activity`` selects how it is realised — a
-    switching appliance (``True``, the default) follows a two-state on/off Markov chain
-    whose target occupancy tracks the diurnal rate (stickiness drawn from
-    ``on_off_dwell``); a continuously-modulated device (``False``, e.g. a PV inverter
-    tracking irradiance, a background base load tracking occupancy) uses the diurnal rate
-    itself as a fractional availability in ``[0, 1]``.
-    """
-
-    name: str
-    #: ``+1`` consuming (Load-like), ``-1`` injecting (PV-like).
-    sign: Literal[1, -1] = 1
-    #: Rated active power per instance ``[low, high]`` in watts (magnitude).
-    rated_power_w: tuple[float, float]
-    #: Fundamental displacement power factor ``lambda`` (``Q = P * tan(acos(pf))``).
-    power_factor: float = Field(default=1.0, gt=0.0, le=1.0)
-
-    #: Per-order harmonic magnitude ranges at RATED load, as a FRACTION of the device's
-    #: own fundamental current: ``{order: [low, high]}`` (orders >= 2; absent = no
-    #: emission at that order). Every drawn member ratio is additionally CAPPED at the
-    #: member's IEC 61000-3-2 emission fraction (evaluated at the member's effective
-    #: rated power after ``scale_to_nominal``), so an aggregated roster can never emit
-    #: beyond what its individual appliances are permitted to inject — the same physical
-    #: envelope the randomized ``h_mag`` sampling references.
-    harmonic_magnitude: dict[int, tuple[float, float]] = Field(default_factory=dict)
-    #: IEC 61000-3-2 equipment class for the member emission cap: ``"A"``/``"B"``/
-    #: ``"C"``/``"D"``, or ``None`` (default) to resolve automatically from the member's
-    #: effective per-phase power (Class D inside its 75-600 W window, else Class A).
-    emission_class: Optional[Literal["A", "B", "C", "D"]] = None
-    #: Per-order harmonic phase ranges [deg] at rated load: ``{order: [low, high]}``.
-    harmonic_phase_deg: dict[int, tuple[float, float]] = Field(default_factory=dict)
-    #: Range for the per-order magnitude load-dependence exponent ``gamma_h``.
-    gamma: tuple[float, float] = (0.0, 0.0)
-    #: Range for the per-order phase load-dependence slope ``s_h`` [deg per unit load].
-    phase_slope_deg: tuple[float, float] = (0.0, 0.0)
-    #: Range for the per-order LOAD-INDEPENDENT share of the rated harmonic phasor.
-    #:
-    #: Measured devices do not emit a harmonic current proportional to their fundamental.
-    #: A part of the emission is present whenever the device is on and does not scale with
-    #: loading, so the emission is affine, ``I_h(lam) = A_h + B_h * lam``, and the RATIO to
-    #: the fundamental therefore grows as the device unloads. ``emission_floor`` is
-    #: ``|A_h|`` as a share of ``|A_h| + |B_h|``: ``0.0`` (default) restores the purely
-    #: proportional law ``I_h ~ lam`` exactly, ``0.61`` reproduces the ratio inflation
-    #: measured across certified inverters (``ratio(lam) = ratio_rated * (0.39 + 0.61/lam)``).
-    #: The rated (``lam = 1``) emission is unchanged at any value, so this re-shapes the
-    #: load dependence without moving the emission envelope.
-    emission_floor: tuple[float, float] = (0.0, 0.0)
-    #: Range for ``arg(A_h) - arg(B_h)`` [deg], the angle between the load-independent and
-    #: the load-proportional part. Non-zero makes the emission ANGLE move with loading —
-    #: measured devices rotate their harmonic phase as they unload, which decides whether
-    #: two devices at different operating points add or cancel. Ignored when
-    #: ``emission_floor`` is zero.
-    emission_floor_phase_deg: tuple[float, float] = (0.0, 0.0)
-
-    #: Diurnal availability shape.
-    activity_preset: ActivityPreset = "flat"
-    #: ``True`` → a switching appliance (on/off Markov); ``False`` → continuous
-    #: availability equal to the diurnal rate (PV irradiance, background base load).
-    discrete_activity: bool = True
-    #: Range for the on/off Markov stickiness (per-step probability of persisting).
-    on_off_dwell: tuple[float, float] = (0.85, 0.98)
-
-    #: Loading floor ``lam_min`` (the per-step loading is clamped to ``[lam_min, 1]``).
-    loading_min: float = Field(default=0.2, gt=0.0, le=1.0)
-    #: Range for the per-member mean loading (single-state classes).
-    loading_mean: tuple[float, float] = (0.6, 1.0)
-    #: Fractional std of the AR(1) per-step loading jitter.
-    loading_jitter: float = Field(default=0.05, ge=0.0)
-    #: AR(1) stickiness of the per-step loading jitter.
-    loading_rho: float = Field(default=0.85, ge=0.0, le=1.0)
-
-    #: Optional multi-state operation (empty = single-state, continuous loading).
-    states: list[DeviceState] = Field(default_factory=list)
-    #: Range for the multi-state Markov dwell (per-step probability of staying in state).
-    state_dwell: tuple[float, float] = (0.85, 0.97)
-
-    @model_validator(mode="after")
-    def _check(self) -> "DeviceClassSpec":
-        lo, hi = self.rated_power_w
-        if lo <= 0.0 or hi < lo:
-            raise ValueError(
-                f"class {self.name!r} rated_power_w must be 0 < low <= high."
-            )
-        for field_name in ("harmonic_magnitude", "harmonic_phase_deg"):
-            for order in getattr(self, field_name):
-                if order < 2:
-                    raise ValueError(
-                        f"class {self.name!r} {field_name} orders must be >= 2."
-                    )
-        if not (
-            self.loading_min <= self.loading_mean[0] <= self.loading_mean[1] <= 1.0
-        ):
-            raise ValueError(
-                f"class {self.name!r} requires loading_min <= loading_mean[0] "
-                "<= loading_mean[1] <= 1."
-            )
-        for lo_, hi_ in (
-            self.gamma,
-            self.phase_slope_deg,
-            self.on_off_dwell,
-            self.state_dwell,
-        ):
-            if hi_ < lo_:
-                raise ValueError(f"class {self.name!r} has a range with high < low.")
-        return self
-
-
-class ClassCount(_Base):
-    """How many instances of a device class an aggregated load contains.
-
-    ``count`` is an inclusive ``[min, max]`` integer range; ``power_share`` weights this
-    class's instances when :class:`CompositionConfig` scales the roster to the load's
-    nominal power (a larger share claims a larger slice of the nameplate).
-    """
-
-    class_name: str
-    count: tuple[int, int] = (1, 1)
-    power_share: float = Field(default=1.0, ge=0.0)
-
-    @model_validator(mode="after")
-    def _check(self) -> "ClassCount":
-        lo, hi = self.count
-        if lo < 0 or hi < lo:
-            raise ValueError(
-                f"ClassCount {self.class_name!r} count must be 0 <= min <= max."
-            )
-        return self
-
-
-class ConsumerComposition(_Base):
-    """A composition rule: the device-class roster of one consumer character.
-
-    A rule matches an aggregated load by explicit ``load_ids`` (a per-appliance override
-    — e.g. a public charging station is just an EV charger) if given, else by
-    ``consumer_type`` (matched against the load's own ``consumer_type``); a rule with
-    both ``load_ids`` and ``consumer_type`` unset is the fallback for any load no other
-    rule claims. ``classes`` lists the device classes and their instance counts.
-    """
-
-    consumer_type: Optional[str] = None
-    load_ids: Optional[list[int]] = None
-    classes: list[ClassCount] = Field(min_length=1)
-
-
-#: Version of the built-in device-class library and its composition rules. Bumped
-#: whenever a range changes the drawn population, and recorded in the metadata of every
-#: dataset generated from it — two datasets written from identical configs and seeds can
-#: otherwise differ numerically with nothing to show why.
-DEVICE_LIBRARY_VERSION = "3"
-
-
-def default_device_classes() -> list[DeviceClassSpec]:
-    """The built-in statistical device-class library (every range user-overridable).
-
-    Seven plausible LV device characters: a harmonic-free linear base load, an
-    SMPS-electronics class (3rd/5th-dominated), an EV charger and a PV inverter (both
-    with the measured falling-THD-fraction-with-load behaviour through
-    ``emission_floor``; PV injecting), a multi-state inverter drive (white goods: a near-linear heating state vs
-    a harmonic-rich inverter state), a kW-scale inverter heat pump, and a thermostatic
-    resistive heater. Magnitudes are loosely IEC 61000-3-2-shaped plausibility, NOT
-    appliance models.
-
-    The roster is balanced so that an observed aggregate spectrum is INFORMATIVE about
-    the drawn power: the power share sits on the kW-scale nonlinear classes (EV charging,
-    inverter heat pumps, drives) rather than on spectrally silent linear ones, the EV
-    load-dependence exponent is flat enough that its ABSOLUTE emission tracks its
-    loading, and the class power factors are spread so the composed fundamental-current
-    angles scatter like a real device population.
-
-    Per-order magnitudes up to h11 follow the measured band of that class; h13 and above
-    continue with the declining envelope of the certification-workbook populations, and
-    the emission phase saturates at the full circle from h13, where measured populations
-    show no preferred angle.
-
-    The five nonlinear classes carry the load dependence through ``emission_floor``
-    (0.43-0.73, the measured load-independent share of the rated emission) rather than
-    through a ``gamma`` exponent. Certification sweeps and lab racks show an emission
-    FLOOR — the absolute harmonic current grows only 1.2-1.9x while the fundamental grows
-    10x — which makes the ratio to the fundamental inflate 6-10x between rated and 10 %
-    loading and puts a cancellation null inside the operating range. A power law cannot
-    reproduce that: its elasticity ``d ln|I_h| / d ln lam`` is the constant ``1 + gamma``,
-    where the measured elasticity is 0.04-0.08 at 10 % loading and 0.54-0.82 at rated.
-    The mean loadings reach further down than the emission-envelope draw alone would
-    need, because the whole effect lives below ``lam ~ 0.3``.
-    """
-    return [
-        DeviceClassSpec(
-            name="base_linear",
-            sign=1,
-            rated_power_w=(150.0, 1500.0),
-            power_factor=0.97,
-            activity_preset="household",
-            discrete_activity=False,
-            loading_min=0.3,
-            loading_mean=(0.6, 1.0),
-        ),
-        DeviceClassSpec(
-            name="electronics_smps",
-            sign=1,
-            rated_power_w=(20.0, 400.0),
-            power_factor=0.97,
-            emission_class="D",
-            harmonic_magnitude={
-                3: (0.5, 0.85),
-                5: (0.25, 0.6),
-                7: (0.1, 0.4),
-                9: (0.05, 0.25),
-                11: (0.03, 0.15),
-                13: (0.02, 0.1),
-                15: (0.015, 0.08),
-                17: (0.01, 0.06),
-                19: (0.008, 0.05),
-            },
-            harmonic_phase_deg={
-                3: (-30.0, 30.0),
-                5: (-60.0, 60.0),
-                7: (-90.0, 90.0),
-                9: (-120.0, 120.0),
-                11: (-150.0, 150.0),
-                13: (-180.0, 180.0),
-                15: (-180.0, 180.0),
-                17: (-180.0, 180.0),
-                19: (-180.0, 180.0),
-            },
-            gamma=(0.0, 0.0),
-            phase_slope_deg=(-20.0, 20.0),
-            emission_floor=(0.43, 0.73),
-            emission_floor_phase_deg=(100.0, 150.0),
-            activity_preset="household",
-            on_off_dwell=(0.5, 0.8),
-            loading_min=0.1,
-            loading_mean=(0.15, 0.9),
-        ),
-        DeviceClassSpec(
-            name="ev_charger",
-            sign=1,
-            rated_power_w=(3700.0, 11000.0),
-            power_factor=0.98,
-            harmonic_magnitude={
-                3: (0.02, 0.08),
-                5: (0.03, 0.1),
-                7: (0.02, 0.06),
-                9: (0.01, 0.04),
-                11: (0.005, 0.025),
-                13: (0.005, 0.025),
-                15: (0.003, 0.016),
-                17: (0.003, 0.015),
-                19: (0.003, 0.014),
-            },
-            harmonic_phase_deg={
-                3: (-40.0, 40.0),
-                5: (-40.0, 40.0),
-                7: (-60.0, 60.0),
-                9: (-90.0, 90.0),
-                11: (-120.0, 120.0),
-                13: (-150.0, 150.0),
-                15: (-180.0, 180.0),
-                17: (-180.0, 180.0),
-                19: (-180.0, 180.0),
-            },
-            # Near-flat load dependence: the ABSOLUTE harmonic current of a charging
-            # session tracks the drawn power, so the emission carries fundamental
-            # information. A steeply negative exponent makes the harmonic current almost
-            # loading-independent and the spectrum uninformative about P.
-            gamma=(0.0, 0.0),
-            phase_slope_deg=(-15.0, 15.0),
-            emission_floor=(0.43, 0.73),
-            emission_floor_phase_deg=(100.0, 150.0),
-            activity_preset="ev",
-            on_off_dwell=(0.6, 0.82),
-            loading_min=0.2,
-            loading_mean=(0.25, 1.0),
-        ),
-        DeviceClassSpec(
-            name="pv_inverter",
-            sign=-1,
-            rated_power_w=(1000.0, 8000.0),
-            harmonic_magnitude={
-                3: (0.01, 0.04),
-                5: (0.02, 0.07),
-                7: (0.01, 0.05),
-                9: (0.005, 0.03),
-                11: (0.002, 0.045),
-                13: (0.002, 0.035),
-                15: (0.001, 0.03),
-                17: (0.001, 0.06),
-                19: (0.001, 0.025),
-            },
-            harmonic_phase_deg={
-                3: (-60.0, 60.0),
-                5: (-60.0, 60.0),
-                7: (-90.0, 90.0),
-                9: (-120.0, 120.0),
-                11: (-150.0, 150.0),
-                13: (-150.0, 150.0),
-                15: (-180.0, 180.0),
-                17: (-180.0, 180.0),
-                19: (-180.0, 180.0),
-            },
-            gamma=(0.0, 0.0),
-            phase_slope_deg=(-25.0, 25.0),
-            emission_floor=(0.43, 0.73),
-            emission_floor_phase_deg=(100.0, 150.0),
-            activity_preset="pv",
-            discrete_activity=False,
-            loading_min=0.05,
-            loading_mean=(0.2, 1.0),
-        ),
-        DeviceClassSpec(
-            name="inverter_drive",
-            sign=1,
-            rated_power_w=(500.0, 3000.0),
-            power_factor=0.92,
-            harmonic_magnitude={
-                3: (0.08, 0.3),
-                5: (0.15, 0.5),
-                7: (0.08, 0.35),
-                9: (0.03, 0.18),
-                11: (0.02, 0.12),
-                13: (0.015, 0.08),
-                15: (0.01, 0.05),
-                17: (0.008, 0.04),
-                19: (0.005, 0.03),
-            },
-            harmonic_phase_deg={
-                3: (-45.0, 45.0),
-                5: (-60.0, 60.0),
-                7: (-90.0, 90.0),
-                9: (-120.0, 120.0),
-                11: (-150.0, 150.0),
-                13: (-180.0, 180.0),
-                15: (-180.0, 180.0),
-                17: (-180.0, 180.0),
-                19: (-180.0, 180.0),
-            },
-            gamma=(0.0, 0.0),
-            phase_slope_deg=(-30.0, 30.0),
-            emission_floor=(0.43, 0.73),
-            emission_floor_phase_deg=(100.0, 150.0),
-            activity_preset="household",
-            on_off_dwell=(0.6, 0.85),
-            loading_min=0.15,
-            loading_mean=(0.2, 1.0),
-            states=[
-                DeviceState(
-                    name="heating", power_fraction=0.95, spectrum_scale=0.2, weight=0.5
-                ),
-                DeviceState(
-                    name="inverter", power_fraction=0.35, spectrum_scale=1.6, weight=0.5
-                ),
-            ],
-            state_dwell=(0.85, 0.97),
-        ),
-        DeviceClassSpec(
-            # kW-scale inverter-driven compressor: a LARGE consumer whose spectrum is
-            # both distinctive (h5/h7-dominant) and power-tracking — the class that lets
-            # a model infer significant fundamental power from an observed pattern.
-            name="heat_pump_inverter",
-            sign=1,
-            rated_power_w=(2000.0, 12000.0),
-            power_factor=0.95,
-            harmonic_magnitude={
-                3: (0.05, 0.15),
-                5: (0.1, 0.3),
-                7: (0.05, 0.2),
-                9: (0.02, 0.08),
-                11: (0.01, 0.05),
-                13: (0.008, 0.035),
-                15: (0.005, 0.025),
-                17: (0.004, 0.02),
-                19: (0.003, 0.015),
-            },
-            harmonic_phase_deg={
-                3: (-45.0, 45.0),
-                5: (-60.0, 60.0),
-                7: (-90.0, 90.0),
-                9: (-120.0, 120.0),
-                11: (-150.0, 150.0),
-                13: (-180.0, 180.0),
-                15: (-180.0, 180.0),
-                17: (-180.0, 180.0),
-                19: (-180.0, 180.0),
-            },
-            gamma=(0.0, 0.0),
-            phase_slope_deg=(-20.0, 20.0),
-            emission_floor=(0.43, 0.73),
-            emission_floor_phase_deg=(100.0, 150.0),
-            activity_preset="flat",
-            on_off_dwell=(0.9, 0.98),
-            loading_min=0.15,
-            loading_mean=(0.2, 0.95),
-            loading_jitter=0.08,
-        ),
-        DeviceClassSpec(
-            name="resistive_heating",
-            sign=1,
-            rated_power_w=(500.0, 3000.0),
-            activity_preset="flat",
-            on_off_dwell=(0.5, 0.75),
-            loading_min=0.9,
-            loading_mean=(0.95, 1.0),
-            loading_jitter=0.02,
-        ),
-    ]
-
-
-def default_compositions() -> list[ConsumerComposition]:
-    """The built-in per-``consumer_type`` composition rules (over the default library).
-
-    The power shares put the nameplate on the classes that EMIT — a roster whose power
-    sits on the spectrally silent linear classes produces an aggregate spectrum that
-    reveals device activity but almost nothing about the drawn power, which is the
-    quantity a state estimator has to recover.
-
-    Every count / share is user-overridable. The rule with no ``consumer_type`` /
-    ``load_ids`` is the fallback for any unmatched load.
-    """
-
-    def cc(name: str, lo: int, hi: int, share: float = 1.0) -> ClassCount:
-        return ClassCount(class_name=name, count=(lo, hi), power_share=share)
-
-    return [
-        ConsumerComposition(
-            consumer_type="household",
-            classes=[
-                cc("base_linear", 1, 1, 1.5),
-                cc("electronics_smps", 1, 3, 1.0),
-                cc("resistive_heating", 0, 1, 1.0),
-                cc("ev_charger", 0, 1, 2.0),
-                cc("heat_pump_inverter", 0, 1, 2.0),
-                cc("pv_inverter", 0, 1, 1.0),
-            ],
-        ),
-        ConsumerComposition(
-            consumer_type="office",
-            classes=[
-                cc("base_linear", 1, 1, 2.0),
-                cc("electronics_smps", 3, 10, 2.0),
-                cc("inverter_drive", 1, 3, 2.5),
-                cc("heat_pump_inverter", 0, 2, 1.5),
-            ],
-        ),
-        ConsumerComposition(
-            consumer_type="restaurant",
-            classes=[
-                cc("base_linear", 1, 1, 2.0),
-                cc("inverter_drive", 1, 3, 2.5),
-                cc("electronics_smps", 1, 4, 1.0),
-            ],
-        ),
-        ConsumerComposition(
-            consumer_type="heat_pump",
-            classes=[
-                cc("base_linear", 1, 1, 1.0),
-                cc("heat_pump_inverter", 1, 2, 3.0),
-            ],
-        ),
-        ConsumerComposition(
-            consumer_type="workshop",
-            classes=[
-                cc("base_linear", 1, 1, 1.5),
-                cc("inverter_drive", 2, 4, 3.0),
-                cc("electronics_smps", 1, 4, 1.0),
-                cc("resistive_heating", 0, 1, 0.5),
-            ],
-        ),
-        ConsumerComposition(
-            consumer_type="ev_charging",
-            classes=[cc("base_linear", 0, 1, 0.5), cc("ev_charger", 1, 2, 1.0)],
-        ),
-        ConsumerComposition(
-            consumer_type="pv",
-            classes=[cc("pv_inverter", 1, 1, 1.0)],
-        ),
-        ConsumerComposition(
-            classes=[
-                cc("base_linear", 1, 1, 2.0),
-                cc("electronics_smps", 1, 2, 1.0),
-                cc("inverter_drive", 0, 1, 1.0),
-            ],
-        ),
-    ]
-
-
-def composition_silent_orders(
-    classes: list[DeviceClassSpec], orders: list[int]
-) -> list[int]:
-    """Requested orders NO class in a device roster emits at (sorted, fundamental excluded).
-
-    A roster that stops short of the solved harmonic range makes those orders silent:
-    the true harmonic voltage there is zero, relative metrics turn into NaN and the
-    corresponding feature width is dead. Checking the roster against the requested orders
-    is the one-line guard that catches it before hours of generation.
-    """
-    emitting = {
-        int(order)
-        for cls in classes
-        for order, (_low, high) in cls.harmonic_magnitude.items()
-        if float(high) > 0.0
-    }
-    return [o for o in sorted({int(o) for o in orders}) if o > 1 and o not in emitting]
-
-
 class BackgroundHarmonicConfig(_Base):
     """A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.
 
     Every device behind a common supply sees the same background distortion, so the part
     of a measured harmonic that its own fundamental does not explain is largely SHARED
-    across the devices rather than private to each. Bench measurements of six inverter
-    racks driven together show 54-93 % of that unexplained emission to be common to all of
-    them within an acquisition, which a per-device emission model cannot produce: the
-    common part comes from the network upstream, not from the devices.
+    across the devices rather than private to each. In an unpublished in-house measurement
+    of six inverter racks on one low-voltage laboratory supply, driven together, 54-93 % of
+    that unexplained emission was common to all of them within an acquisition — a share a
+    per-device emission model cannot produce, because the common part comes from the
+    network upstream rather than from the devices. That observation is why this
+    construct exists; it fixes none of the levels below, which are all the caller's.
 
     Realised as the Thevenin source of ``docs/pgml/modeling/error-injection.md``,
     present in EVERY scenario rather than swept one node at a time as
@@ -1228,8 +613,8 @@ class BackgroundHarmonicConfig(_Base):
     and a snapshot recipe (``n_steps == 1``) has no step axis at all, so its scenarios
     draw the level independently from the drift's stationary distribution.
 
-    ``magnitude_pu`` empty (the default) disables the background entirely, and a run
-    configured without it is byte-identical to one from before this field existed.
+    ``magnitude_pu`` empty (the default) disables the background entirely, leaving the
+    rest of the run unaffected.
     """
 
     #: Per-order background VOLTAGE distortion at the source, per unit of the fundamental:
@@ -1266,276 +651,6 @@ class BackgroundHarmonicConfig(_Base):
 ScenarioConfig.model_rebuild()
 
 
-class CompositionConfig(_Base):
-    """Statistical device-class composition of aggregated loads.
-
-    Set on :class:`CoherentSpectrumConfig`. When present it SUPERSEDES the mode-bank
-    fingerprint machinery for the loads it covers: each such load becomes a sum of
-    statistical member devices (drawn from ``classes`` per the matching
-    :class:`ConsumerComposition` in ``compositions``), whose per-step activity drives
-    BOTH the drawn fundamental power AND the injected harmonic spectrum — so the dataset
-    carries a consistent load-to-spectrum mapping a model can learn from (and, in the
-    best case, use to attribute an observed spectrum to a device mix / an error source).
-
-    A load covered by the composition draws its fundamental P/Q and its harmonic
-    injection ENTIRELY from the composition; any ``parameters`` / ``profile`` targeting
-    the same load is superseded. Loads NOT covered (no matching rule, or outside
-    ``selector``) keep the fingerprint / profile behaviour.
-
-    Roster: per covered load a device roster is drawn once (seeded, persisted). With
-    ``scale_to_nominal`` the members' rated powers are rescaled so their share-weighted
-    installed capacity equals the load's ``p_nom_w`` (keeping the nameplate meaningful
-    across grids); otherwise the class rated ranges are absolute. Cross-device
-    correlation reuses the profile latents: one ``behavioral`` latent scales every
-    consumption activity together, one ``cloud`` latent scales every PV together.
-
-    Guard: near a net-zero aggregate fundamental (e.g. PV cancelling load) the RELATIVE
-    harmonic magnitude explodes (a physically real residual-THD effect); it is capped at
-    ``max_injection_pu`` and the binding is recorded in the samples.
-    """
-
-    #: Loads to compose. ``None`` = every in-service Load. A load covered here but
-    #: without a matching rule in ``compositions`` falls through to the fingerprint.
-    selector: Optional[Selector] = None
-    #: The device-class library.
-    classes: list[DeviceClassSpec] = Field(default_factory=default_device_classes)
-    #: The per-consumer-type composition rules.
-    compositions: list[ConsumerComposition] = Field(
-        default_factory=default_compositions
-    )
-    #: Rescale each roster's share-weighted installed capacity to the load's ``p_nom_w``.
-    scale_to_nominal: bool = True
-    #: Cap on the aggregate harmonic magnitude [pu of the aggregate fundamental current].
-    max_injection_pu: float = Field(default=3.0, gt=0.0)
-    #: Cross-device correlation strengths (shared per-scenario latents).
-    behavioral_coupling: float = Field(default=0.3, ge=0.0)
-    cloud_coupling: float = Field(default=0.5, ge=0.0)
-    #: Multiplier on every member's diurnal availability RATE (clamped back to a
-    #: probability). The class presets are per-device duty cycles, so a composed aggregate
-    #: sits at a small fraction of installed capacity — a fair average hour, but one that
-    #: never reaches the loaded states where the voltage profile actually moves and an
-    #: estimator has something to recover. Raise it to place the population in a loaded
-    #: band; the diurnal shape, the rosters and every other draw are unchanged.
-    activity_scale: float = Field(default=1.0, gt=0.0)
-    #: Optional distinct seed for the roster + temporal draws (a held-out composition
-    #: bank). ``None`` derives both streams from ``CoherentSpectrumConfig.seed``.
-    roster_seed: Optional[int] = None
-
-    def class_names(self) -> list[str]:
-        """Ordered device-class names (the ``n_class`` axis of the recorded samples)."""
-        return [c.name for c in self.classes]
-
-    @model_validator(mode="after")
-    def _check(self) -> "CompositionConfig":
-        names = [c.name for c in self.classes]
-        if len(names) != len(set(names)):
-            raise ValueError("CompositionConfig class names must be unique.")
-        known = set(names)
-        for rule in self.compositions:
-            for cc in rule.classes:
-                if cc.class_name not in known:
-                    raise ValueError(
-                        f"ConsumerComposition references unknown class "
-                        f"{cc.class_name!r} (not in classes)."
-                    )
-        return self
-
-
-# =============================================================================
-# Node-coherent harmonic "fingerprint" sampling (temporal sequences)
-# =============================================================================
-class CoherentSpectrumConfig(_Base):
-    """Node-coherent harmonic sampling: a stable per-device fingerprint over a sequence.
-
-    Each matched device draws a small set of base spectra (``n_modes`` "modes" — e.g.
-    appliance operating states like a washing machine heating vs spinning), drawn once
-    (or per scenario). Over ``n_steps`` consecutive steps it STICKS to a mode (Markov
-    dwell ``dwell``) and WANDERS around it (AR(1) jitter with stickiness ``ar1_rho``),
-    clamped to the per-order emission reference (``harmonic_reference``). This yields a
-    ``[B, T]`` batch of harmonic injections in which each node keeps a recognisable
-    signature that varies realistically — so a state estimator can attribute the pattern
-    to the node.
-
-    The result voltages are ``[B, T, H, N]`` (B = ``n_scenarios`` sequences, T = steps);
-    per-step timestamps are recorded as ``samples["time_s"]``.
-
-    ``harmonic_reference`` selects the per-order magnitude reference (and the upper
-    clamp): the default ``"iec61000-3-2"`` is the IEC 61000-3-2 appliance harmonic
-    CURRENT-emission standard — the physically correct per-device reference for a device
-    current fingerprint, keyed by ``emission_class`` (``"auto"`` resolves per device from
-    its ``consumer_type`` and nominal power). ``"en50160"`` instead SHAPES the fingerprint
-    by the DIN EN 50160 supply-VOLTAGE compatibility levels (kept for
-    background-distortion-shaped experiments and backward compatibility; it is NOT an
-    appliance emission model). ``None`` treats magnitudes as absolute pu (clamped to 1.0).
-
-    Held-out test set recipe: reproducibility hangs on both ``seed`` (the temporal
-    Markov + AR(1) stream) and ``mode_bank_seed`` (the per-device fingerprint bank). For
-    an unseen-FINGERPRINT test set, give a DISTINCT ``mode_bank_seed`` (a different
-    device signature bank while every other setting is shared); combine it with a
-    distinct ``seed`` for an entirely independent temporal realization too. Leaving
-    ``mode_bank_seed=None`` draws the bank from the ``seed`` stream (the default,
-    byte-identical to a config with no ``mode_bank_seed`` set).
-
-    ``parameters`` / ``factors`` add a FUNDAMENTAL operating-point variation on top of the
-    harmonic fingerprint: the same :class:`ParameterSpec` / :class:`LatentFactor` machinery
-    as :class:`ScenarioConfig`, but drawn ONCE PER SCENARIO (shape ``[B]``, held constant
-    across the ``T`` steps and broadcast in the solve). So a coherent sequence may vary the
-    load level, PV output, and the slack voltage (``field="u_ref"``) per scenario while the
-    per-step spectrum keeps its device fingerprint. Harmonic ``ParameterSpec`` fields
-    (``h_mag`` / ``h_phase``) are REJECTED here — the fingerprint machinery owns the
-    harmonics; ``parameters`` shapes only the fundamental. The draws are sampled on a unit
-    cube seeded from a stream DISTINCT from the fingerprint RNG, so the realized
-    ``harmonic_injection`` is byte-identical with and without ``parameters``. When
-    ``parameters`` is empty (the default) the fundamental P/Q stays nominal and the source
-    at ``u_ref_v`` — the original fingerprint-only behavior.
-
-    ``profile`` (a :class:`LoadProfileConfig`) makes the fundamental P/Q TIME-VARYING
-    across the ``T`` steps instead of constant: each device's per-scenario base P/Q (from
-    ``parameters`` if set, else nominal) is multiplied by a multi-scale synthetic
-    profile factor (seasonal / weekly / daily / short-term, class-aware by
-    ``consumer_type``). The operating point then carries the step axis (``[B, T]``),
-    aligned with the ``[B, T]`` harmonic injection, so the solve yields ``[B, T, H, N]``
-    with a moving fundamental. ``start_time`` (ISO 8601) is REQUIRED when ``profile`` is
-    set — the daily / weekly / seasonal phases need an absolute anchor. Because the
-    harmonic injection magnitude is RELATIVE to the device's fundamental current, a
-    profile-scaled fundamental already scales the absolute harmonic current; no extra
-    coupling is applied. ``profile=None`` (the default) leaves the fundamental constant
-    over the sequence — byte-identical to the fingerprint-only behavior. The profile is
-    drawn on an RNG stream distinct from the fingerprint, Markov path, AR(1) jitter, and
-    the operating-point cube, so enabling it leaves the harmonic fingerprint unchanged.
-    """
-
-    name: str = "harmonics"
-    selector: Selector
-    orders: list[int] = Field(min_length=1)
-    n_steps: int = Field(gt=0)  # T
-    n_scenarios: int = Field(default=1, gt=0)  # B
-    n_modes: int = Field(default=2, ge=1)
-    seed: int = 0
-    mag_distribution: Distribution = Field(
-        default_factory=lambda: Uniform(low=0.0, high=1.0)
-    )
-    harmonic_reference: Optional[Literal["en50160", "iec61000-3-2"]] = "iec61000-3-2"
-    emission_class: Literal["A", "B", "C", "D", "auto"] = "auto"
-    phase_distribution: Distribution = Field(
-        default_factory=lambda: Uniform(low=-180.0, high=180.0)
-    )
-    jitter_mag: float = Field(default=0.05, ge=0.0)  # AR(1) fractional std on magnitude
-    jitter_phase_deg: float = Field(default=5.0, ge=0.0)  # AR(1) std on phase (deg)
-    ar1_rho: float = Field(default=0.8, ge=0.0, le=1.0)  # temporal stickiness of jitter
-    dwell: float = Field(default=0.9, ge=0.0, le=1.0)  # P(stay in mode) per step
-    step_size_s: float = Field(default=1.0, gt=0.0)
-    resample_modes_per_scenario: bool = False
-    # Seeds ONLY the per-device fingerprint (mode) bank; None draws it from `seed`.
-    mode_bank_seed: Optional[int] = None
-    # Per-scenario fundamental operating-point variation (constant across the T steps).
-    parameters: list[ParameterSpec] = Field(default_factory=list)
-    factors: list[LatentFactor] = Field(default_factory=list)
-    # Time-varying fundamental profile (per-step P/Q). Requires ``start_time``.
-    profile: Optional[LoadProfileConfig] = None
-    # Statistical device-class composition of aggregated loads (supersedes the
-    # fingerprint + fundamental for the loads it covers). Requires ``start_time``.
-    composition: Optional[CompositionConfig] = None
-    #: Upstream harmonic background at the source, shared by every device on the feeder.
-    background: Optional[BackgroundHarmonicConfig] = None
-    # Absolute anchor for the profile's daily / weekly / seasonal phases (ISO 8601).
-    # A naive (timezone-less) timestamp is interpreted as UTC.
-    start_time: Optional[str] = None
-    #: Orders deliberately left WITHOUT emission — the escape hatch of the silent-order
-    #: guard below (e.g. the even orders of an odd-only device roster). Declaring them
-    #: makes the intent explicit; leaving an order silent by accident raises.
-    allow_silent_orders: tuple[int, ...] = ()
-
-    @model_validator(mode="after")
-    def _check(self) -> "CoherentSpectrumConfig":
-        if any(o < 2 for o in self.orders):
-            raise ValueError("harmonic `orders` must all be >= 2 (1 = fundamental).")
-        self._check_emission_covers_orders()
-        if self.emission_class != "auto" and self.harmonic_reference != "iec61000-3-2":
-            raise ValueError(
-                "emission_class is only valid with harmonic_reference='iec61000-3-2'."
-            )
-        for spec in self.parameters:
-            if spec.is_harmonic:
-                raise ValueError(
-                    f"CoherentSpectrumConfig.parameters spec {spec.name!r} is harmonic "
-                    f"(field={spec.field!r}); the fingerprint owns the harmonic spectrum. "
-                    "parameters may vary only the fundamental (p/q/pq/u_ref)."
-                )
-        if self.profile is not None and self.start_time is None:
-            raise ValueError(
-                "CoherentSpectrumConfig.profile requires start_time (ISO 8601): the "
-                "daily / weekly / seasonal phases need an absolute anchor."
-            )
-        if self.composition is not None and self.start_time is None:
-            raise ValueError(
-                "CoherentSpectrumConfig.composition requires start_time (ISO 8601): "
-                "the device activity model is temporal (diurnal activity rates need an "
-                "absolute anchor)."
-            )
-        if self.start_time is not None:
-            from datetime import datetime
-
-            try:
-                datetime.fromisoformat(self.start_time)
-            except ValueError as exc:
-                raise ValueError(
-                    f"start_time {self.start_time!r} is not a valid ISO 8601 "
-                    "timestamp (e.g. '2024-06-21T00:00:00')."
-                ) from exc
-        return self
-
-    def _check_emission_covers_orders(self) -> None:
-        """Reject a spectrum source that is silent at a requested order.
-
-        With a ``composition`` the source is the device roster: an order no class emits
-        at carries no injection at all. Without one the source is the fingerprint bank,
-        whose magnitudes are fractions of the ``harmonic_reference`` limit, so an order
-        the reference table does not list is equally silent. Both cases produce a dataset
-        whose top orders hold nothing but numerical noise; ``allow_silent_orders``
-        declares the ones that are meant to stay quiet.
-        """
-        allowed = {int(o) for o in self.allow_silent_orders}
-        if self.composition is not None:
-            silent = [
-                o
-                for o in composition_silent_orders(
-                    self.composition.classes, list(self.orders)
-                )
-                if o not in allowed
-            ]
-            if silent:
-                raise ValueError(
-                    f"no device class emits at order(s) {silent}: the composed loads "
-                    "would inject nothing there while the run solves for them. Extend "
-                    "the classes' harmonic_magnitude, drop the orders, or list them in "
-                    "allow_silent_orders to declare the silence deliberate."
-                )
-            return
-        if self.harmonic_reference is None:
-            return
-        if self.harmonic_reference == "en50160":
-            from .en50160 import en50160_limits
-
-            referenced = {o for o, limit in en50160_limits().items() if limit > 0.0}
-        else:
-            from .iec61000_3_2 import iec61000_3_2_limits
-
-            referenced = set(iec61000_3_2_limits("A")["limits"])
-        silent = [
-            int(o)
-            for o in sorted(self.orders)
-            if o not in referenced and o not in allowed
-        ]
-        if silent:
-            raise ValueError(
-                f"the {self.harmonic_reference} reference has no limit at order(s) "
-                f"{silent}, so the fingerprint would inject nothing there. Drop the "
-                "orders, choose another harmonic_reference, or list them in "
-                "allow_silent_orders."
-            )
-
-
 __all__ = [
     "Uniform",
     "Normal",
@@ -1550,17 +665,7 @@ __all__ = [
     "ScenarioConfig",
     "CartesianAxis",
     "CartesianConfig",
-    "CoherentSpectrumConfig",
-    "LoadProfileConfig",
-    "DeviceState",
-    "DeviceClassSpec",
-    "ClassCount",
-    "ConsumerComposition",
-    "CompositionConfig",
-    "DEVICE_LIBRARY_VERSION",
-    "composition_silent_orders",
-    "default_device_classes",
-    "default_compositions",
+    "BackgroundHarmonicConfig",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
@@ -1568,7 +673,7 @@ __all__ = [
 
 
 def _example() -> "ScenarioConfig":
-    """A representative, valid batch: load P/Q scaling + EN 50160-referenced harmonics."""
+    """A representative, valid batch: load P/Q scaling + IEC 61000-3-2 emission draws."""
     return ScenarioConfig(
         n_samples=256,
         seed=0,
@@ -1588,7 +693,7 @@ def _example() -> "ScenarioConfig":
                 field="h_mag",
                 mode="absolute",
                 orders=[3, 5, 7],
-                harmonic_reference="en50160",
+                harmonic_reference="iec61000-3-2",
             ),
         ],
     )

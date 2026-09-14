@@ -19,8 +19,7 @@ Phase mode
 ----------
 ``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) mirrors pgm's symmetric (sym)
 calculation: one positive-sequence equivalent per node, ``phases=(Phase.A,)``,
-``u_rated_v = node.u_rated`` (line-to-line, V), 1x1 line matrices. Reproduces the
-historical output exactly.
+``u_rated_v = node.u_rated`` (line-to-line, V), 1x1 line matrices.
 
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches
 become ``(A, B, C)``; lines are expanded from sequence quantities via the
@@ -105,6 +104,7 @@ from typing import Any, Optional
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
+    ZeroSequenceDefaults,
     build_generator,
     build_line_from_sequence,
     build_load,
@@ -112,6 +112,7 @@ from pgml.convert._common import (
     build_source,
     make_metadata,
     phases_for,
+    resolve_converted_line_models,
     thevenin_from_sk,
     warn_dropped_elements,
 )
@@ -123,11 +124,17 @@ from pgml.schemas.grid_schema import (
     LoadModel,
     Provenance,
     SourceConvention,
+    Switch,
     Transformer,
+    TransformerZeroSeq,
     WindingConnection,
 )
 
 _logger = logging.getLogger("pgml")
+
+#: power-grid-model's hardcoded zero-sequence series factor for a grounded
+#: zigzag winding (`transformer.hpp`: `z0_series = (1/y_series)*0.1 + ...`).
+_PGM_ZIGZAG_Z0_FACTOR = 0.1
 
 # pgm `WindingType` int values (not imported from `power_grid_model` -- the
 # converter treats pgm `input_data` as a plain numpy-structured-array format, with
@@ -158,6 +165,7 @@ def to_grid(
     base_frequency_hz: float = 50.0,
     load_model: LoadModel = LoadModel.CONST_IMPEDANCE,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
+    harmonic_line_model: Optional[str] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a power-grid-model ``input_data`` dict to a schema :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -179,6 +187,13 @@ def to_grid(
         reproduces the positive-sequence single-phase-equivalent output exactly;
         ``THREE_PHASE`` expands to a genuine abc grid (sequence->phase line
         matrices, balanced 3-phase sources, ``asym_load`` per-phase capture).
+    harmonic_line_model:
+        Frequency-dependent line model written to every converted line
+        (``"sequence_aware"``, ``"positive_sequence"``, ``"naive"``, or ``"none"`` to
+        leave the lines unresolved). ``None`` (default) takes the modeling defaults
+        ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
+        logged once. power-grid-model is fundamental-only, so this is a pgml modeling
+        decision, not a property of the source data.
 
     Returns
     -------
@@ -188,6 +203,7 @@ def to_grid(
 
         - ``"node"``         : ``{pgm_id: Node.id}``
         - ``"line"``         : ``{pgm_id: Line.id}``
+        - ``"link"``         : ``{pgm_id: Switch.id}`` (a perfect connection)
         - ``"transformer"``  : ``{pgm_id: Transformer.id}``
         - ``"sym_load"``     : ``{pgm_id: Load.id}``
         - ``"asym_load"``    : ``{pgm_id: Load.id}`` (THREE_PHASE only)
@@ -234,6 +250,7 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # 2. Lines                                                             #
     # ------------------------------------------------------------------ #
+    zero_seq_lines = ZeroSequenceDefaults()
     branches: list = []
     for row in input_data.get("line", []):
         if int(row["from_status"]) == 0 or int(row["to_status"]) == 0:
@@ -259,6 +276,8 @@ def to_grid(
         r0 = _opt_field(row, "r0")
         x0 = _opt_field(row, "x0")
         c0 = _opt_field(row, "c0")
+        if phase_mode is PhaseMode.THREE_PHASE:
+            zero_seq_lines.note(r0=r0, x0=x0, c0=c0)
 
         line_id = _id.next()
         id_map["line"][pgm_id] = line_id
@@ -279,6 +298,39 @@ def to_grid(
                 x0=x0,
                 c0=c0,
                 g1=g1,
+                provenance=_PROVENANCE,
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # 2b. Links (a perfect connection) -> ideal closed Switch               #
+    # ------------------------------------------------------------------ #
+    # power-grid-model's `link` is a zero-impedance connection between two nodes,
+    # which it solves with a very large (1e6 pu) stand-in admittance. The exact
+    # equivalent is an ideal closed Switch, whose terminal rows the solve collapses
+    # (`branch.zero_impedance`), so the two tools describe the same network and pgml
+    # carries no stand-in at all.
+    id_map.setdefault("link", {})
+    for row in input_data.get("link", []):
+        if int(row["from_status"]) == 0 or int(row["to_status"]) == 0:
+            continue  # out-of-service: no connection at all
+        pgm_id = int(row["id"])
+        from_pgm = int(row["from_node"])
+        to_pgm = int(row["to_node"])
+        if from_pgm not in id_map["node"] or to_pgm not in id_map["node"]:
+            continue
+        link_id = _id.next()
+        id_map["link"][pgm_id] = link_id
+        link_phases = phases_for(phase_mode)
+        branches.append(
+            Switch(
+                id=link_id,
+                name=f"link_{pgm_id}",
+                from_node=id_map["node"][from_pgm],
+                to_node=id_map["node"][to_pgm],
+                from_phases=link_phases,
+                to_phases=link_phases,
+                closed=True,
                 provenance=_PROVENANCE,
             )
         )
@@ -387,6 +439,21 @@ def to_grid(
         from_grounding = _grounding_impedance(row, "from")
         to_grounding = _grounding_impedance(row, "to")
 
+        # Zero-sequence leakage VALUE. power-grid-model has no zero-sequence u_k input:
+        # its zero sequence uses the positive-sequence winding impedance through the
+        # winding topology, EXCEPT for a zigzag winding, whose own zero-sequence series
+        # impedance it hardcodes as 0.1*Z1 (`transformer.hpp`:
+        # `z0_series = (1/y_series)*0.1 + 3*z_grounding`, an empirical stand-in for the
+        # half-coil zero-sequence leakage of a grounding transformer). Carrying that
+        # factor makes a converted zigzag unit reproduce power-grid-model's own
+        # unbalanced result instead of presenting Z0 = Z1 on the zigzag side.
+        trafo_zero_seq = None
+        if WindingConnection.ZIGZAG_GROUNDED in (from_connection, to_connection):
+            trafo_zero_seq = TransformerZeroSeq(
+                r0_ohm=_PGM_ZIGZAG_Z0_FACTOR * r_coil,
+                x0_ohm=_PGM_ZIGZAG_Z0_FACTOR * x_coil,
+            )
+
         trafo_id = _id.next()
         id_map["transformer"][pgm_id] = trafo_id
         tx_phases = phases_for(phase_mode)
@@ -408,6 +475,7 @@ def to_grid(
                 series_inductance_h=x_coil / two_pi_f0,
                 magnetizing_conductance_s=g_m,
                 magnetizing_inductance_h=l_m,
+                zero_sequence=trafo_zero_seq,
                 tap=ComplexTap(
                     ratio_magnitude=ratio_magnitude, shift_deg=float(clock * 30)
                 ),
@@ -441,6 +509,17 @@ def to_grid(
 
         r_s, l_s = thevenin_from_sk(u_rated_v, sk_va, rx_ratio, two_pi_f0)
 
+        # power-grid-model's `z01_ratio` scales the COMPLEX positive-sequence
+        # impedance: Z0 = z01_ratio * Z1, so R0/R1 = X0/X1 = z01_ratio (verified
+        # against a live asymmetric power flow: the back-calculated source Z0
+        # matches `z01_ratio * Z1` to 3e-13 relative). An unset / non-finite value
+        # falls back to the documented `source.zero_sequence.*` ratios.
+        z01 = _opt_field(row, "z01_ratio")
+        r0_ohm = x0_ohm = None
+        if z01 is not None and z01 > 0.0:
+            r0_ohm = z01 * r_s
+            x0_ohm = z01 * l_s * two_pi_f0
+
         src_id = _id.next()
         id_map["source"][pgm_id] = src_id
 
@@ -459,6 +538,10 @@ def to_grid(
                 u_angle_deg=u_ref_angle_deg,
                 r_ohm=r_s,
                 l_h=l_s,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"power-grid-model source {pgm_id}",
             )
         )
 
@@ -589,7 +672,6 @@ def to_grid(
                 "three_winding_transformer",
                 "shunt",
                 "asym_gen",
-                "link",
                 "transformer_tap_regulator",
             )
         },
@@ -610,6 +692,10 @@ def to_grid(
         branches=branches,
         appliances=appliances,
         metadata=make_metadata(name="pgm_import", description=description),
+    )
+    zero_seq_lines.warn(_logger, tool="power-grid-model")
+    resolve_converted_line_models(
+        grid, _logger, tool="power-grid-model", requested=harmonic_line_model
     )
     return grid, id_map
 

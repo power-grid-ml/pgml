@@ -50,20 +50,19 @@ electrically identical systems in parallel) divides the series impedance and
 multiplies the shunt admittance (line C/G, transformer magnetizing conductance/
 susceptance) and the rated power (``s_rated_va``), mirroring
 ``pandapower.build_branch``'s own convention exactly (``_parallel_count``).
-``parallel==1`` (pandapower's own default) reproduces the pre-``parallel``-aware
-output byte-for-byte. ``trafo3w`` is not converted at all (see below), so its own
+``parallel==1`` (pandapower's own default) leaves the series impedance and shunt
+admittance unchanged. ``trafo3w`` is not converted at all (see below), so its own
 ``parallel`` column is moot.
 
 Bus-line / bus-transformer switches (``et='l'``/``'t'``)
 ------------------------------------------------------------
-An OPEN ``et='l'``/``'t'`` switch (``net.switch``) converts its line/transformer
-as out-of-service (``_open_switch_targets``): the accepted approximation is that
-the WHOLE element drops, not just the switched terminal, so the still-connected
-terminal's shunt admittance is lost too (pandapower's own solver instead keeps
-that terminal energized via an internal auxiliary bus -- a finer-grained model
-this converter does not replicate). A closed switch, or no switch at all, changes
-nothing. Bus-bus (``et='b'``) switches are unaffected (still a near-ideal
-``Switch`` branch).
+An OPEN ``et='l'``/``'t'`` switch disconnects that element terminal. The default
+``open_switch_model='terminal'`` reproduces pandapower's auxiliary-bus treatment:
+the line/transformer remains connected at its other end, so line charging or
+transformer no-load admittance remains energized. ``'drop_element'`` retains the
+legacy reduced approximation that omits the whole element when either end is open.
+An element open at both ends is omitted in either mode. Closed switches and bus-bus
+(``et='b'``) switches are unaffected.
 
 Voltage-dependent (ZIP) loads
 -----------------------------
@@ -71,22 +70,34 @@ Voltage-dependent (ZIP) loads
 ``const_i_q_percent`` columns map onto ``ZipCoefficients`` (``_zip_coefficients``),
 honoured by pandapower's own ``runpp`` whenever ``voltage_depend_loads=True`` (the
 default). All four at zero (pandapower's own default) converts with NO
-``zip_coefficients``/``load_model`` set, so a plain constant-power load stays
-byte-identical to the pre-ZIP-aware output.
+``zip_coefficients``/``load_model`` set, leaving a plain constant-power load's
+conversion unaffected.
 
 Voltage-controlled generators (``net.gen``)
 -------------------------------------------
 ``net.gen`` is pandapower's PV bus: fixed active power, regulated voltage
-MAGNITUDE, free reactive power within ``min_q_mvar``/``max_q_mvar``. pgml has no
-PV-bus appliance (a PV bus needs a mixed residual row pair ``[P-balance;
-|V|^2 - V_set^2]``), so the table is DROPPED by default (``GenMode.DROP`` --
-reported by ``warn_dropped_elements``). ``gen_mode=GenMode.VOLT_VAR_APPROX``
-opts in to an APPROXIMATION: each row becomes a :class:`Generator` whose
-Volt-VAr inverter control is a steep ``Q(|V|)`` droop centred on ``vm_pu`` and
-saturating at the row's reactive limits, which holds the bus voltage near the
-setpoint with Q as the free variable. See :class:`GenMode` and
-``_gen_volt_var_control`` for the exact mapping, the fallbacks, and what the
-approximation does and does not give.
+MAGNITUDE ``vm_pu``, free reactive power within ``min_q_mvar``/``max_q_mvar``.
+``gen_mode=GenMode.VOLTAGE_REGULATING`` (the default) converts each in-service row
+to a :class:`Generator` carrying a
+:class:`~pgml.schemas.grid_schema.VoltageRegulation` block -- the exact PV terminal
+the solver implements (its residual row pair is ``[active balance;
+|V|^2 - V_set^2]``, with the reactive power free and bounded by the row's limits;
+see ``docs/pgml/modeling/der-pv-storage.md`` section 4.5). ``GenMode.VOLT_VAR_APPROX``
+keeps the earlier steep-Volt-VAr-droop approximation, and ``GenMode.DROP`` leaves
+the table unread. The chosen mode is logged.
+
+Shunts (``net.shunt``)
+----------------------
+A pandapower shunt is a fixed admittance at its bus: ``G = p_mw * step / vn_kv^2``
+and ``B = -q_mvar * step / vn_kv^2`` (positive ``q_mvar`` CONSUMES reactive power, so
+its susceptance is negative), referred to the SHUNT's own rated voltage exactly as
+``pandapower.build_bus._calc_shunts_and_add_on_ppc`` does. It converts to a WYE
+:class:`~pgml.schemas.grid_schema.ShuntAppliance` carrying that conductance plus the
+reactive element it physically is: a CAPACITIVE row (``q_mvar < 0``) stores
+``C = B / (2*pi*f0)`` and an INDUCTIVE one (``q_mvar > 0``, a reactor) stores
+``L = 1 / (2*pi*f0*|B|)``. Both reproduce the fundamental admittance exactly, so a
+load-flow result is identical either way, and the inductive row's susceptance
+magnitude then falls as ``1/h`` above the fundamental instead of rising as ``h``.
 
 Only in-service elements are converted.
 """
@@ -97,11 +108,13 @@ import logging
 import math
 import re
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
+from pgml import defaults
 from pgml.convert._common import (
     IdCounter,
     PhaseMode,
+    ZeroSequenceDefaults,
     build_generator,
     build_line_from_sequence,
     build_load,
@@ -109,9 +122,10 @@ from pgml.convert._common import (
     build_source,
     make_metadata,
     phases_for,
+    resolve_converted_line_models,
     warn_dropped_elements,
 )
-from pgml.errors import ConversionError
+from pgml.errors import ConfigurationError, ConversionError
 from pgml.schemas.grid_schema import (
     Characteristic,
     ComplexTap,
@@ -119,8 +133,12 @@ from pgml.schemas.grid_schema import (
     Provenance,
     QReference,
     SourceConvention,
+    ShuntAppliance,
+    Storage,
     Switch,
     Transformer,
+    TransformerZeroSeq,
+    VoltageRegulation,
     VoltVarControl,
     WindingConnection,
     ZipCoefficients,
@@ -130,7 +148,6 @@ _logger = logging.getLogger("pgml")
 
 _TINY_R = 1.0e-6  # Ohm — near-ideal Thevenin for ext_grid in Norton stamp
 _TINY_L = 1.0e-12  # H   — near-ideal Thevenin for ext_grid in Norton stamp
-_SWITCH_R = 1.0e-4  # Ohm — near-ideal resistance for closed bus-bus switches
 
 #: Reactive envelope [var] used for a ``net.gen`` row that carries neither a
 #: reactive limit nor ``sn_mva`` nor active power — no size information at all.
@@ -160,12 +177,22 @@ class GenMode(str, Enum):
 
     ``net.gen`` is a PV bus: fixed active power, regulated voltage MAGNITUDE
     ``vm_pu``, reactive power free between ``min_q_mvar`` and ``max_q_mvar``.
-    pgml's appliance model has no PV bus -- that needs a mixed residual row pair
-    (``[P-balance; |V|**2 - V_set**2]``) in the power-flow solver and an appliance
-    to carry the setpoint.
 
-    ``DROP`` (the default) keeps the historical behaviour: the table is not read
-    and :func:`~pgml.convert._common.warn_dropped_elements` reports it, so a
+    ``VOLTAGE_REGULATING`` (the default): each row becomes a
+    :class:`~pgml.schemas.grid_schema.Generator` with a
+    :class:`~pgml.schemas.grid_schema.VoltageRegulation` block, i.e. the exact PV
+    terminal. ``vm_pu`` is the setpoint (same per-unit base), ``min_q_mvar`` /
+    ``max_q_mvar`` are the reactive limits in var, and a MISSING limit stays
+    unbounded (matching pandapower, which treats an unset limit as
+    ``q_lim_default``). ``scaling`` multiplies ``p_mw`` only, as in pandapower's own
+    build. The solver holds the voltage exactly and enforces the limits by PV-to-PQ
+    switching (``solve_power_flow(enforce_q_limits=...)``; pandapower's ``runpp``
+    default is ``enforce_q_lims=False``). Several in-service rows on ONE bus merge
+    into a single regulating generator (summed active power and summed limits) --
+    one bus carries one voltage setpoint.
+
+    ``DROP``: the table is not read and
+    :func:`~pgml.convert._common.warn_dropped_elements` reports it, so a
     transmission benchmark converts to loads plus a slack and its converted
     operating point is NOT the source network's.
 
@@ -175,16 +202,11 @@ class GenMode(str, Enum):
     ``_gen_volt_var_control`` for the mapping, the fallbacks and the accuracy
     the approximation buys.
 
-    It suits a DISTRIBUTION network with voltage-regulating generation, where it is
-    accurate to well under 1e-3 pu and differentiable. It does NOT make a
-    transmission benchmark importable: the droop carries no feedback outside a band
-    of width ~1/slope, so a stiffly loaded case either fails to converge (loudly) or,
-    on some networks, settles on the collapsed low-voltage branch while reporting
-    convergence. Check the solved voltages against the source network before trusting
-    such an import; a faithful PV bus needs the mixed residual row the solver does not
-    have.
+    It suits a study that deliberately wants a droop law. For faithful import of a
+    pandapower PV bus, use the default ``VOLTAGE_REGULATING`` mode.
     """
 
+    VOLTAGE_REGULATING = "voltage_regulating"
     DROP = "drop"
     VOLT_VAR_APPROX = "volt_var_approx"
 
@@ -346,16 +368,10 @@ def _parallel_count(row: Any) -> float:
 def _open_switch_targets(net: Any) -> tuple[set[int], set[int]]:
     """Return ``(open_line_pp_indices, open_trafo_pp_indices)`` from ``net.switch``.
 
-    A bus-line (``et='l'``) or bus-transformer (``et='t'``) switch is a per-terminal
-    connectivity control: when OPEN it disconnects its element from that one bus.
-    The converter's accepted approximation treats ANY open line/trafo switch as
-    taking the WHOLE element out of service (equivalent to ``in_service=False`` on
-    that line/trafo) -- this also drops the shunt admittance (line charging,
-    transformer magnetizing) at the STILL-connected terminal, unlike pandapower's
-    own solver, which keeps that terminal energized via an internal auxiliary bus
-    (a finer-grained model this converter does not replicate). A closed switch (or
-    no switch at all) changes nothing; bus-bus (``et='b'``) switches are handled
-    separately (section 4, below).
+    This helper only collects element indices. :func:`to_grid` then applies
+    ``open_switch_model``: retain a singly-open element on an auxiliary terminal
+    node, or omit the whole element. Bus-bus (``et='b'``) switches are handled
+    separately.
     """
     open_lines: set[int] = set()
     open_trafos: set[int] = set()
@@ -465,6 +481,93 @@ def _gen_reactive_bounds(row: Any, p_w: float) -> tuple[float, float, Optional[s
             f"max_q_mvar={q_max_var / 1.0e6} -- the source row is inconsistent."
         )
     return q_min_var, q_max_var, fallback
+
+
+def _gen_raw_reactive_bounds(row: Any) -> tuple[Optional[float], Optional[float]]:
+    """``(q_min_var, q_max_var)`` of a ``net.gen`` row, unbounded side -> ``None``.
+
+    The EXACT PV terminal needs no synthesised reactive envelope: a missing
+    ``min_q_mvar`` / ``max_q_mvar`` means the machine is unconstrained on that side,
+    which is also how pandapower's own solve reads it (an unset limit becomes
+    ``q_lim_default`` = 1e9 MVAr, and the default ``enforce_q_lims=False`` ignores
+    the limits altogether). The limits are NOT multiplied by ``scaling`` --
+    pandapower's ``add_q_constraints`` reads them raw while ``p_mw`` is scaled.
+    """
+    q_min = _opt_float(row, "min_q_mvar")
+    q_max = _opt_float(row, "max_q_mvar")
+    if q_min is not None and q_max is not None and q_max < q_min:
+        raise ConversionError(
+            f"pandapower gen: min_q_mvar={q_min} exceeds max_q_mvar={q_max} -- "
+            "the source row is inconsistent."
+        )
+    return (
+        None if q_min is None else q_min * 1.0e6,
+        None if q_max is None else q_max * 1.0e6,
+    )
+
+
+def _closed_switch_resistance_ohm() -> float:
+    """Series resistance for a closed bus-bus switch that carries no ``z_ohm``.
+
+    pandapower solves such a switch by FUSING its two buses, so the faithful
+    conversion is an ideal switch (R = L = 0), whose terminal rows pgml collapses
+    exactly — the documented default ``branch.switch_model: ideal``. The alternative
+    ``near_ideal`` writes ``branch.near_ideal_series_resistance_ohm`` instead, keeping
+    the switch a stamped branch for a ``branch_states`` sweep, at the cost of a small
+    voltage drop and a worse-conditioned row; it is logged once so the deviation from
+    the source tool is never silent.
+    """
+    model = str(defaults.get("branch.switch_model"))
+    if model == "ideal":
+        return 0.0
+    if model != "near_ideal":
+        raise ConfigurationError(
+            f"branch.switch_model must be 'ideal' or 'near_ideal', got {model!r}."
+        )
+    r = float(defaults.get("branch.near_ideal_series_resistance_ohm"))
+    _logger.warning(
+        "pandapower: closed bus-bus switch(es) without z_ohm converted with the "
+        "near-ideal series resistance %g Ohm (branch.switch_model='near_ideal'). "
+        "pandapower fuses such a switch, so the converted grid carries a small voltage "
+        "drop the source tool does not have; use the default 'ideal' to reproduce it.",
+        r,
+    )
+    return r
+
+
+def _shunt_admittance(
+    row: Any, bus_vn_kv: float, two_pi_f0: float
+) -> tuple[float, float, Optional[float]]:
+    """``(conductance_s, capacitance_f, inductance_h)`` per phase of a ``net.shunt`` row.
+
+    ``Y = (p_mw - j*q_mvar) * step * 1e6 / (vn_kv * 1e3)**2`` referred to the SHUNT's
+    own rated voltage (``vn_kv``, defaulting to the bus's), which is exactly
+    pandapower's ``(G, B) = (p, -q) * step * (vn_bus/vn_shunt)**2`` per unit on the
+    bus base.
+
+    The REACTIVE part becomes the reactive element it physically is, so that its
+    susceptance carries the right frequency trend above the fundamental:
+
+    - a capacitive row (``q_mvar < 0``, ``B > 0``) stores ``C = B / (2*pi*f0)`` and
+      ``inductance_h = None`` — ``|B(h)| = h*B``;
+    - an inductive row (``q_mvar > 0``, ``B < 0``, a reactor) stores
+      ``L = 1 / (2*pi*f0*|B|)`` and ``capacitance_f = 0`` — ``|B(h)| = B/h``.
+
+    Both reproduce the fundamental admittance exactly, so a load-flow result is
+    unchanged either way; only the harmonic orders differ. ``q_mvar == 0`` stores a
+    pure conductance.
+    """
+    vn_kv = _opt_float(row, "vn_kv")
+    if vn_kv is None or vn_kv <= 0.0:
+        vn_kv = bus_vn_kv
+    step = _opt_float(row, "step")
+    step = 1.0 if step is None else step
+    v_sq = (vn_kv * 1.0e3) ** 2
+    g = float(row.get("p_mw", 0.0) or 0.0) * 1.0e6 * step / v_sq
+    b = -float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6 * step / v_sq
+    if b < 0.0:
+        return g, 0.0, 1.0 / (two_pi_f0 * -b)
+    return g, b / two_pi_f0, None
 
 
 def _gen_volt_var_control(
@@ -591,7 +694,181 @@ def _opt_float(row: Any, column: str) -> Optional[float]:
     return None if math.isnan(f) else f
 
 
-def _tap_ratio_magnitude(row: Any) -> float:
+def _ext_grid_zero_sequence(
+    row: Any, u_rated_v: float, pp_idx: Any
+) -> tuple[Optional[float], Optional[float]]:
+    """Zero-sequence ext_grid Thevenin ``(R0 [Ohm], X0 [Ohm] at f0)``, or ``(None, None)``.
+
+    pandapower's own unbalanced power flow (``runpp_3ph``) models the external grid
+    as an IDEAL positive-sequence slack plus a zero-sequence SHUNT at the slack bus
+    (``pandapower.pd2ppc_zero._add_ext_grid_sc_impedance_zero``)::
+
+        X1 = (U_LL^2 / S_sc) / sqrt(1 + rx_max^2)      (per-phase, c = 1 here)
+        X0 = x0x_max * X1
+        R0 = r0x0_max * X0
+
+    pgml keeps the POSITIVE-sequence Thevenin near-ideal for a pandapower ext_grid
+    (the same ideal slack pandapower's own power flow uses, balanced and
+    unbalanced) and carries the zero-sequence value as an absolute impedance, so
+    the converted source reproduces pandapower's zero-sequence boundary while the
+    positive sequence stays pinned at ``vm_pu``. pandapower multiplies its own
+    value by the IEC short-circuit voltage factor ``c = 1.1`` even in power-flow
+    mode; pgml stores the physical impedance (``c = 1``), so pandapower's internal
+    zero-sequence shunt is exactly 1.1x pgml's.
+
+    Returns ``(None, None)`` when the ext_grid carries no usable short-circuit data
+    (``s_sc_max_mva``/``rx_max``/``x0x_max`` missing or NaN — pandapower's own
+    defaults), which leaves the documented ``source.zero_sequence.*`` ratio
+    fallback (and its WARNING) in charge.
+    """
+    s_sc_mva = _opt_float(row, "s_sc_max_mva")
+    rx_max = _opt_float(row, "rx_max")
+    x0x_max = _opt_float(row, "x0x_max")
+    r0x0_max = _opt_float(row, "r0x0_max")
+    if s_sc_mva is None or rx_max is None or s_sc_mva <= 0.0:
+        if x0x_max is not None or r0x0_max is not None:
+            _logger.warning(
+                "pandapower ext_grid %s carries zero-sequence ratios "
+                "(x0x_max=%s, r0x0_max=%s) but no positive-sequence short-circuit "
+                "data (s_sc_max_mva / rx_max), so the absolute zero-sequence "
+                "source impedance cannot be derived; falling back to the "
+                "`source.zero_sequence.*` ratios on the near-ideal Thevenin.",
+                pp_idx,
+                x0x_max,
+                r0x0_max,
+            )
+        return None, None
+    if x0x_max is None and r0x0_max is None:
+        return None, None
+
+    z1 = (u_rated_v**2) / (s_sc_mva * 1.0e6)
+    x1 = z1 / math.sqrt(1.0 + rx_max**2)
+    x0 = (x0x_max if x0x_max is not None else 1.0) * x1
+    r0 = (r0x0_max if r0x0_max is not None else rx_max) * x0
+    return r0, x0
+
+
+#: Winding connections that give the zero sequence a path into the transformer
+#: (a solidly grounded star point on either side).
+_ZERO_SEQ_GROUNDED = (
+    WindingConnection.WYE_GROUNDED,
+    WindingConnection.ZIGZAG_GROUNDED,
+)
+
+
+def _transformer_zero_sequence(
+    row: Any,
+    *,
+    z_base_lv: float,
+    vkr_pct: float,
+    coil_factor: float,
+    parallel: float,
+    from_connection: WindingConnection,
+    to_connection: WindingConnection,
+    pp_idx: Any,
+    defaulted: list,
+) -> Optional[TransformerZeroSeq]:
+    """Zero-sequence leakage override from ``vk0_percent``/``vkr0_percent``.
+
+    pandapower stores the zero-sequence short-circuit voltage as a PER-UNIT value on
+    the transformer's own rating, so the ohmic value follows the same formula the
+    positive sequence uses (``Z0 = vk0% * Z_base_LV``, then the TO-side coil factor and
+    the ``parallel`` divide). Per-unit values are base-invariant, so it does not matter
+    that pandapower refers its own zero-sequence branch to the HV base for the ``YNd`` /
+    ``YNy`` groups.
+
+    pandapower's convention (``pd2ppc_zero._add_trafo_sc_impedance_zero``) treats a zero
+    or absent ``vk0_percent`` as "use the positive-sequence value", which is exactly
+    pgml's ``transformer.zero_sequence.*`` default, so such a row returns ``None``.
+
+    What pandapower models and pgml does not, each logged as a WARNING when set to a
+    value that would change the zero sequence:
+
+    - ``mag0_percent``/``mag0_rx`` — a finite zero-sequence MAGNETIZING impedance
+      (``Z_m0 = mag0_percent/100 * Z0``), the three-limb-core path through tank and air.
+      pgml's magnetizing branch is sequence-independent and sits on the HV terminal.
+    - ``si0_hv_partial`` — the HV/LV split of the zero-sequence leakage inside a T
+      model. pgml carries ONE series leakage per winding pair.
+    - ``xn_ohm``/``rn_ohm`` — a neutral earthing impedance (``3*Z_N`` in series with the
+      zero sequence). pgml stamps windings solidly grounded and rejects a finite
+      ``GroundingImpedance``.
+
+    A grounded pairing with no usable ``vk0_percent`` appends its index to ``defaulted``
+    instead of logging; :func:`_warn_defaulted_zero_sequence` reports the whole set once.
+    """
+    vk0 = _opt_float(row, "vk0_percent")
+    vkr0 = _opt_float(row, "vkr0_percent")
+    grounded = (
+        from_connection in _ZERO_SEQ_GROUNDED or to_connection in _ZERO_SEQ_GROUNDED
+    )
+
+    if grounded:
+        for column, what in (
+            ("mag0_percent", "a finite zero-sequence magnetizing impedance"),
+            ("si0_hv_partial", "an HV/LV split of the zero-sequence leakage"),
+            ("xn_ohm", "a neutral earthing reactance"),
+            ("rn_ohm", "a neutral earthing resistance"),
+        ):
+            value = _opt_float(row, column)
+            if value is not None and value != 0.0:
+                _logger.warning(
+                    "pandapower trafo %s sets %s=%g (%s), which pgml does not model: "
+                    "its zero sequence carries the leakage value only, on the "
+                    "topology-derived path, with a sequence-independent magnetizing "
+                    "branch at the HV terminal.",
+                    pp_idx,
+                    column,
+                    value,
+                    what,
+                )
+
+    if vk0 is None or vk0 <= 0.0:
+        if grounded:
+            # Collected and reported ONCE per conversion (see `warn_defaulted_zero_
+            # sequence`): a network of identical Dyn units would otherwise log the same
+            # sentence for every transformer.
+            defaulted.append(pp_idx)
+        return None
+
+    z0_ll = vk0 / 100.0 * z_base_lv
+    r0_ll = (vkr0 if vkr0 is not None else vkr_pct) / 100.0 * z_base_lv
+    x0_ll = math.sqrt(max(z0_ll**2 - r0_ll**2, 0.0))
+    return TransformerZeroSeq(
+        r0_ohm=coil_factor * r0_ll / parallel,
+        x0_ohm=coil_factor * x0_ll / parallel,
+    )
+
+
+def _warn_defaulted_zero_sequence(defaulted: list) -> None:
+    """Report the transformers whose zero-sequence leakage fell back to the defaults.
+
+    One WARNING per conversion, carrying the count and the pandapower indices, so a feeder
+    with many identical Dyn units does not repeat the same sentence per transformer.
+    """
+    if not defaulted:
+        return
+    _logger.warning(
+        "%d pandapower trafo(s) %s have a grounded-wye/zigzag winding (a zero-sequence "
+        "path) but no vk0_percent; their zero-sequence leakage assumes the documented "
+        "`transformer.zero_sequence.*` ratios (Z0 = Z1 by default). A three-limb core "
+        "YNyn unit typically has X0/X1 of 0.3-1.0.",
+        len(defaulted),
+        ", ".join(str(i) for i in defaulted),
+    )
+
+
+#: Sentinel distinguishing an ABSENT ``tap_changer_type`` column (a pandapower < 3.0
+#: net, whose taps are always applied) from a present-but-unset value (pandapower >= 3
+#: ignores the tap position of such a row).
+_COLUMN_ABSENT = object()
+
+#: ``tap_changer_type`` values whose tap pandapower applies as a voltage RATIO change.
+#: ``"Symmetrical"`` differs from ``"Ratio"`` only through ``tap_step_degree``, which is
+#: rejected below, so both reduce to the same real ratio here.
+_RATIO_CHANGER_TYPES = ("ratio", "symmetrical")
+
+
+def _tap_ratio_magnitude(row: Any, label: str = "trafo") -> float:
     """Off-nominal tap ratio from pandapower's ``tap_*`` columns (1.0 = no tap).
 
     ``delta = (tap_pos - tap_neutral) * tap_step_percent / 100``. Verified against a
@@ -603,11 +880,22 @@ def _tap_ratio_magnitude(row: Any) -> float:
     (``ratio_magnitude = 1 / (1 + delta)``).
 
     Any of ``tap_pos``/``tap_neutral``/``tap_step_percent``/``tap_side`` missing (NaN
-    or absent) means no tap-changer is configured -> returns 1.0. Only a plain
-    ratio changer is modelled by the schema's real-valued ``ratio_magnitude``:
-    an ideal / angle-shifting tap raises, whether declared through pandapower 3's
-    ``tap_changer_type`` column (anything but ``"Ratio"``), the legacy
-    ``tap_phase_shifter`` boolean, or a nonzero ``tap_step_degree``.
+    or absent) means no tap-changer is configured -> returns 1.0.
+
+    ``tap_changer_type`` decides WHETHER the tap is applied, following pandapower 3's
+    own rule (``pandapower.build_branch._calc_nominal_ratio_from_dataframe``): a
+    ``"Ratio"`` or ``"Symmetrical"`` changer moves the tapped side's nominal voltage
+    by ``delta``, an ``"Ideal"`` changer shifts the angle only, and a row whose type
+    is UNSET (NaN / empty) has NO tap applied at all — its ``tap_pos`` is ignored,
+    however far from neutral it sits. This converter reproduces that: an unset type
+    with an off-neutral tap position returns 1.0 and logs a WARNING naming the
+    transformer, so a dropped tap is never silent. A net that predates the column
+    (pandapower < 3.0, where the column is absent entirely) keeps the legacy
+    behaviour and applies the tap.
+
+    Only a real-valued ratio tap is modelled by the schema's ``ratio_magnitude``: an
+    ideal / angle-shifting tap raises, whether declared through ``tap_changer_type``,
+    the legacy ``tap_phase_shifter`` boolean, or a nonzero ``tap_step_degree``.
     """
     step_deg = _opt_float(row, "tap_step_degree")
     if step_deg is not None and abs(step_deg) > 1.0e-9:
@@ -616,18 +904,44 @@ def _tap_ratio_magnitude(row: Any) -> float:
             "tap) is not supported; only a real-valued off-nominal tap ratio is "
             "modelled."
         )
-    changer_type = row.get("tap_changer_type", None) if hasattr(row, "get") else None
+    changer_type = (
+        row.get("tap_changer_type", _COLUMN_ABSENT)
+        if hasattr(row, "get")
+        else _COLUMN_ABSENT
+    )
+    column_absent = changer_type is _COLUMN_ABSENT
+    if column_absent or changer_type is None:
+        changer_type = ""
     if isinstance(changer_type, float) and math.isnan(changer_type):
-        changer_type = None
-    if changer_type is not None and str(changer_type).strip().lower() not in (
-        "",
-        "none",
-        "ratio",
-    ):
+        changer_type = ""
+    type_name = str(changer_type).strip().lower()
+    if type_name in ("none",):
+        type_name = ""
+    if type_name and type_name not in _RATIO_CHANGER_TYPES:
         raise ConversionError(
-            f"pandapower trafo: tap_changer_type={changer_type!r} is not supported; "
-            "only a real-valued off-nominal ratio tap ('Ratio') is modelled."
+            f"pandapower {label}: tap_changer_type={changer_type!r} is not supported; "
+            "only a real-valued off-nominal ratio tap ('Ratio'/'Symmetrical') is "
+            "modelled."
         )
+    if not type_name and not column_absent:
+        # pandapower >= 3 applies no tap without a changer type, whatever tap_pos says.
+        tap_pos = _opt_float(row, "tap_pos")
+        tap_neutral = _opt_float(row, "tap_neutral")
+        if (
+            tap_pos is not None
+            and tap_neutral is not None
+            and abs(tap_pos - tap_neutral) > 0.0
+        ):
+            _logger.warning(
+                "pandapower %s: tap_pos=%g is %g step(s) off neutral but "
+                "tap_changer_type is not set, so the tap is NOT applied (pandapower's "
+                "own solve ignores it too). Set tap_changer_type='Ratio' on the source "
+                "net if the tap is meant to act.",
+                label,
+                tap_pos,
+                tap_pos - tap_neutral,
+            )
+        return 1.0
     phase_shifter = (
         row.get("tap_phase_shifter", False) if hasattr(row, "get") else False
     )
@@ -668,8 +982,10 @@ def to_grid(
     net: Any,
     *,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
-    gen_mode: GenMode = GenMode.DROP,
+    gen_mode: GenMode = GenMode.VOLTAGE_REGULATING,
     gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
+    harmonic_line_model: Optional[str] = None,
+    open_switch_model: Optional[Literal["terminal", "drop_element"]] = None,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -697,12 +1013,14 @@ def to_grid(
         when the dataset carries no native ``r0``/``x0``/``c0``), not the
         transformer.
     gen_mode:
-        :class:`GenMode`. ``DROP`` (default) leaves ``net.gen`` unread and reports
-        it as a dropped element -- the historical behaviour, and byte-identical to
-        it. ``VOLT_VAR_APPROX`` converts each in-service row to a
-        :class:`~pgml.schemas.grid_schema.Generator` whose Volt-VAr control
-        approximates the PV bus (see :class:`GenMode` and
-        ``_gen_volt_var_control``).
+        :class:`GenMode`. ``VOLTAGE_REGULATING`` (default) converts each in-service
+        row to a :class:`~pgml.schemas.grid_schema.Generator` with a
+        :class:`~pgml.schemas.grid_schema.VoltageRegulation` block: the exact PV
+        terminal, whose voltage the solver holds at ``vm_pu`` with the reactive power
+        free inside ``min_q_mvar``/``max_q_mvar``. ``DROP`` leaves ``net.gen`` unread
+        and reports it as a dropped element. ``VOLT_VAR_APPROX`` converts each row to
+        a generator whose steep Volt-VAr control APPROXIMATES the PV bus (see
+        :class:`GenMode` and ``_gen_volt_var_control``).
     gen_volt_var_slope_pu:
         Droop steepness of that approximation, in units of the generator's reactive
         base per per-unit terminal voltage (default
@@ -715,6 +1033,13 @@ def to_grid(
         current-injection fixed point (the default, and what
         :func:`pgml.simulate` uses) does not contract on a stiff droop. Read only
         under ``gen_mode=GenMode.VOLT_VAR_APPROX``.
+    open_switch_model:
+        ``terminal`` (default) retains a line or two-winding transformer energized
+        from its connected end, using an auxiliary node for each open terminal.
+        This preserves charging current and magnetizing admittance. ``drop_element``
+        omits the whole element when either terminal switch is open. Elements with
+        both ends open are omitted in both modes. Original bus mappings are retained;
+        ``id_map["open_terminal"]`` maps open switch indices to auxiliary node ids.
 
     Returns
     -------
@@ -723,12 +1048,18 @@ def to_grid(
         (no ``type_ref``).  ``id_map`` maps source element tables to our ids:
         ``"bus"`` -> ``{pp_bus_idx: Node.id}``,
         ``"line"`` -> ``{pp_line_idx: Line.id}``,
+        ``"trafo"`` -> ``{pp_trafo_idx: Transformer.id}``,
+        ``"switch"`` -> ``{pp_switch_idx: Switch.id}`` for closed bus-bus switches,
         ``"load"`` -> ``{pp_load_idx: Load.id}``,
         ``"asymmetric_load"`` -> ``{pp_asym_idx: Load.id}`` (THREE_PHASE only),
         ``"sgen"`` -> ``{pp_sgen_idx: Generator.id}``,
-        ``"gen"`` -> ``{pp_gen_idx: Generator.id}`` (empty unless ``gen_mode`` is
-        ``VOLT_VAR_APPROX``),
+        ``"gen"`` -> ``{pp_gen_idx: Generator.id}`` (empty under ``GenMode.DROP``;
+        several rows on one bus share the merged generator's id),
+        ``"shunt"`` -> ``{pp_shunt_idx: ShuntAppliance.id}``,
+        ``"storage"`` -> ``{pp_storage_idx: Storage.id}``,
         ``"ext_grid"`` -> ``{pp_eg_idx: Source.id}``,
+        ``"open_terminal"`` -> ``{pp_switch_idx: Node.id}`` for singly-open
+        line/transformer terminals,
         ``"slack_v_complex"`` -> complex slack voltage phasor (V, LL) for
         ideal-slack mode.
     """
@@ -737,6 +1068,13 @@ def to_grid(
             f"gen_volt_var_slope_pu={gen_volt_var_slope_pu} must be positive "
             "(it is a droop steepness in reactive base per per-unit voltage)."
         )
+    open_switch_model = (
+        defaults.get("converter.pandapower.open_switch_model")
+        if open_switch_model is None
+        else open_switch_model
+    )
+    if open_switch_model not in ("terminal", "drop_element"):
+        raise ConversionError(f"Unknown open_switch_model: {open_switch_model!r}")
     f0_hz: float = float(getattr(net, "f_hz", 50.0))
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
@@ -750,9 +1088,12 @@ def to_grid(
         "load": {},
         "asymmetric_load": {},
         "sgen": {},
+        "storage": {},
         "gen": {},
+        "shunt": {},
         "ext_grid": {},
         "slack_v_complex": None,
+        "open_terminal": {},
     }
 
     # ------------------------------------------------------------------ #
@@ -776,14 +1117,63 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # 2. Lines                                                             #
     # ------------------------------------------------------------------ #
-    # `open_line_switches`/`open_trafo_switches` (section 4's `_open_switch_targets`,
-    # computed once up front so both element loops can see it): a line/trafo with
-    # ANY open bus-element switch converts as out-of-service, same as
-    # `in_service=False` -- see `_open_switch_targets`'s docstring for the accepted
-    # approximation this implies (the still-connected terminal's shunt is dropped
-    # with it).
+    # Collect open bus-element switches once for both element loops. In terminal mode,
+    # a singly-open element is rewired to an auxiliary node at that terminal; entries
+    # left in these sets (both ends open, invalid endpoint, or explicit legacy mode)
+    # are omitted by the line/transformer loops below.
     open_line_switches, open_trafo_switches = _open_switch_targets(net)
+    terminal_nodes: dict[tuple[str, int, int], int] = {}
+    if open_switch_model == "terminal":
+        for et, table, endpoints, dropped in (
+            ("l", net.line, ("from_bus", "to_bus"), open_line_switches),
+            (
+                "t",
+                getattr(net, "trafo", None),
+                ("hv_bus", "lv_bus"),
+                open_trafo_switches,
+            ),
+        ):
+            if table is None:
+                continue
+            for element in sorted(dropped.copy()):
+                if element not in table.index:
+                    continue
+                row = table.loc[element]
+                buses = tuple(int(row[key]) for key in endpoints)
+                if not bool(row.get("in_service", True)) or any(
+                    b not in id_map["bus"] for b in buses
+                ):
+                    continue
+                switches = net.switch[
+                    (net.switch.et == et)
+                    & (net.switch.element == element)
+                    & (~net.switch.closed)
+                ]
+                open_buses = {int(b) for b in switches.bus}
+                if not open_buses.issubset(buses):
+                    raise ConversionError(
+                        f"Open switch for {et} {element} does not name an element terminal"
+                    )
+                if all(b in open_buses for b in buses):
+                    continue
+                dropped.remove(element)
+                for switch_index, switch in switches.iterrows():
+                    bus = int(switch.bus)
+                    key = (et, int(element), bus)
+                    if key not in terminal_nodes:
+                        node_id = _id.next()
+                        terminal_nodes[key] = node_id
+                        nodes.append(
+                            build_node(
+                                id=node_id,
+                                name=f"open_{et}_{element}_bus_{bus}",
+                                u_rated_v=float(net.bus.loc[bus, "vn_kv"]) * 1000.0,
+                                mode=phase_mode,
+                            )
+                        )
+                    id_map["open_terminal"][switch_index] = terminal_nodes[key]
 
+    zero_seq_lines = ZeroSequenceDefaults()
     branches: list = []
     for pp_idx, row in net.line.iterrows():
         if not bool(row.get("in_service", True)):
@@ -829,13 +1219,19 @@ def to_grid(
             x0 /= parallel
         if c0 is not None:
             c0 *= parallel
+        if phase_mode is PhaseMode.THREE_PHASE:
+            zero_seq_lines.note(r0=r0, x0=x0, c0=c0)
 
         branches.append(
             build_line_from_sequence(
                 id=line_id,
                 name=str(row.get("name", f"line_{pp_idx}") or f"line_{pp_idx}"),
-                from_node=id_map["bus"][from_bus],
-                to_node=id_map["bus"][to_bus],
+                from_node=terminal_nodes.get(
+                    ("l", int(pp_idx), from_bus), id_map["bus"][from_bus]
+                ),
+                to_node=terminal_nodes.get(
+                    ("l", int(pp_idx), to_bus), id_map["bus"][to_bus]
+                ),
                 mode=phase_mode,
                 length_m=length_m,
                 r1=r1,
@@ -914,6 +1310,7 @@ def to_grid(
     # precision with the factor applied, and are wrong by 3x without it --    #
     # see `tests/reference/test_pandapower_grid_matrix.py`.                   #
     # ------------------------------------------------------------------ #
+    zero_seq_defaulted: list = []
     if hasattr(net, "trafo") and len(net.trafo):
         for pp_idx, row in net.trafo.iterrows():
             if not bool(row.get("in_service", True)):
@@ -989,15 +1386,31 @@ def to_grid(
                     if b_m > 0.0:
                         l_m = 1.0 / (two_pi_f0 * b_m * parallel)
 
-            tap_ratio = _tap_ratio_magnitude(row)
+            tap_ratio = _tap_ratio_magnitude(row, f"trafo {pp_idx}")
+
+            trafo_zero_seq = _transformer_zero_sequence(
+                row,
+                z_base_lv=z_base_lv,
+                vkr_pct=vkr_pct,
+                coil_factor=coil_factor,
+                parallel=parallel,
+                from_connection=from_connection,
+                to_connection=to_connection,
+                pp_idx=pp_idx,
+                defaulted=zero_seq_defaulted,
+            )
 
             tx_phases = phases_for(phase_mode)
             branches.append(
                 Transformer(
                     id=trafo_id,
                     name=str(row.get("name", f"trafo_{pp_idx}") or f"trafo_{pp_idx}"),
-                    from_node=id_map["bus"][hv_bus],  # from = HV side
-                    to_node=id_map["bus"][lv_bus],  # to   = LV side
+                    from_node=terminal_nodes.get(
+                        ("t", int(pp_idx), hv_bus), id_map["bus"][hv_bus]
+                    ),
+                    to_node=terminal_nodes.get(
+                        ("t", int(pp_idx), lv_bus), id_map["bus"][lv_bus]
+                    ),
                     from_phases=tx_phases,
                     to_phases=tx_phases,
                     s_rated_va=sn_va * parallel,
@@ -1009,6 +1422,7 @@ def to_grid(
                     series_inductance_h=l_sc,
                     magnetizing_conductance_s=g_m,
                     magnetizing_inductance_h=l_m,
+                    zero_sequence=trafo_zero_seq,
                     # Nominal ratio comes from u_rated + connections; `tap` is the
                     # off-nominal tap-changer ratio plus the vector-group clock angle.
                     tap=ComplexTap(ratio_magnitude=tap_ratio, shift_deg=shift_deg),
@@ -1016,11 +1430,12 @@ def to_grid(
                 )
             )
 
+    _warn_defaulted_zero_sequence(zero_seq_defaulted)
+
     # ------------------------------------------------------------------ #
-    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).      #
-    #    Bus-line/bus-transformer switches (et='l'/'t') were already        #
-    #    resolved up front (`_open_switch_targets`, used by sections 2/3):  #
-    #    an OPEN one takes the whole line/trafo out of service.             #
+    # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).       #
+    #    Bus-line/bus-transformer switches (et='l'/'t') were handled by     #
+    #    sections 2/3 through an auxiliary terminal or element omission.    #
     # ------------------------------------------------------------------ #
     if hasattr(net, "switch") and len(net.switch):
         for pp_idx, row in net.switch.iterrows():
@@ -1036,7 +1451,7 @@ def to_grid(
             sw_id = _id.next()
             id_map["switch"][pp_idx] = sw_id
             z_ohm = float(row.get("z_ohm", 0.0) or 0.0)
-            r_sw = z_ohm if z_ohm > 0.0 else _SWITCH_R
+            r_sw = z_ohm if z_ohm > 0.0 else _closed_switch_resistance_ohm()
             sw_phases = phases_for(phase_mode)
             branches.append(
                 Switch(
@@ -1081,6 +1496,8 @@ def to_grid(
                 math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg))
             )
 
+        r0_ohm, x0_ohm = _ext_grid_zero_sequence(row, u_rated_v, pp_idx)
+
         appliances.append(
             build_source(
                 id=src_id,
@@ -1091,6 +1508,10 @@ def to_grid(
                 u_angle_deg=va_deg,
                 r_ohm=_TINY_R,
                 l_h=_TINY_L,
+                r0_ohm=r0_ohm,
+                x0_ohm=x0_ohm,
+                two_pi_f0=two_pi_f0,
+                element=f"pandapower ext_grid {pp_idx}",
             )
         )
 
@@ -1102,8 +1523,8 @@ def to_grid(
     # `ZipCoefficients`, honoured by pandapower's own `runpp` whenever
     # `voltage_depend_loads=True` (the default). A load with all four percentages
     # at zero (pandapower's own default -- a pure constant-power load) converts
-    # with NO `zip_coefficients`/`load_model` set, so it stays byte-identical to
-    # the pre-existing output.
+    # with NO `zip_coefficients`/`load_model` set, leaving a plain constant-power
+    # load's conversion unaffected.
     for pp_idx, row in net.load.iterrows():
         if not bool(row.get("in_service", True)):
             continue
@@ -1228,9 +1649,45 @@ def to_grid(
             )
 
     # ------------------------------------------------------------------ #
-    # 9. Voltage-controlled generators (net.gen) -> Volt-VAr approximation #
-    #    OPT-IN: only under `gen_mode=GenMode.VOLT_VAR_APPROX`; the default #
-    #    `GenMode.DROP` leaves the table unread (warned below).             #
+    # Storage uses pandapower's consumption-positive convention; pgml uses
+    # discharge-positive injections. Energy metadata does not alter the snapshot.
+    storage = getattr(net, "storage", None)
+    if storage is not None:
+        for pp_idx, row in storage.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            storage_id = _id.next()
+            id_map["storage"][pp_idx] = storage_id
+            scaling = _scaling_factor(row)
+            energy_mwh = _opt_float(row, "max_e_mwh")
+            min_energy_mwh = _opt_float(row, "min_e_mwh")
+            soc_percent = _opt_float(row, "soc_percent")
+            state = {}
+            if energy_mwh is not None and energy_mwh > 0.0:
+                state["energy_capacity_wh"] = energy_mwh * 1e6
+                if min_energy_mwh is not None:
+                    state["soc_min"] = min_energy_mwh / energy_mwh
+            if soc_percent is not None:
+                state["soc"] = soc_percent / 100.0
+            appliances.append(
+                Storage(
+                    id=storage_id,
+                    name=str(
+                        row.get("name", f"storage_{pp_idx}") or f"storage_{pp_idx}"
+                    ),
+                    node=id_map["bus"][bus_pp],
+                    phases=phases_for(phase_mode),
+                    p_nom_w=-float(row["p_mw"]) * 1e6 * scaling,
+                    q_nom_var=-float(row.get("q_mvar", 0.0) or 0.0) * 1e6 * scaling,
+                    **state,
+                )
+            )
+
+    # 9. Voltage-controlled generators (net.gen): exact PV by default,      #
+    #    explicit DROP or Volt-VAr approximation alternatives.              #
     # ------------------------------------------------------------------ #
     # pandapower `gen` is GENERATION-POSITIVE, like `sgen`, and carries the same
     # per-row `scaling` multiplier on `p_mw` (its reactive LIMITS are read raw --
@@ -1246,7 +1703,117 @@ def to_grid(
     # at WARNING with the row index, because the row's active power really is
     # dropped from the converted grid.
     gen = getattr(net, "gen", None)
-    if gen_mode is GenMode.VOLT_VAR_APPROX and gen is not None and len(gen):
+    if gen_mode is GenMode.VOLTAGE_REGULATING and gen is not None and len(gen):
+        slack_buses = {
+            int(r["bus"])
+            for _, r in net.ext_grid.iterrows()
+            if bool(r.get("in_service", True))
+        }
+        # One bus carries ONE voltage setpoint, so in-service rows are merged per bus
+        # (active powers and reactive limits add; pandapower's own build puts one PV
+        # bus per bus as well). `None` on a limit side stays unbounded.
+        per_bus: dict[int, dict] = {}
+        n_unbounded = 0
+        for pp_idx, row in gen.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            if bus_pp in slack_buses:
+                _logger.warning(
+                    "pandapower gen %s at bus %s is at the ext_grid bus and is NOT "
+                    "converted as a regulating generator: the slack fixes that bus's "
+                    "voltage phasor, so its %.3f MW injection is absorbed into the "
+                    "slack dispatch (pandapower's own solve treats a generator at the "
+                    "reference bus the same way).",
+                    pp_idx,
+                    bus_pp,
+                    float(row["p_mw"]),
+                )
+                continue
+            if bool(row.get("slack", False)):
+                _logger.warning(
+                    "pandapower gen %s at bus %s is flagged slack=True (a distributed "
+                    "slack). It is converted as a voltage-regulating generator with "
+                    "its %.3f MW FIXED: pgml has one reference (the Source), so this "
+                    "row does not share the slack's active-power imbalance.",
+                    pp_idx,
+                    bus_pp,
+                    float(row["p_mw"]),
+                )
+            scaling = _scaling_factor(row)
+            p_w = float(row["p_mw"]) * 1.0e6 * scaling
+            q_min_var, q_max_var = _gen_raw_reactive_bounds(row)
+            n_unbounded += q_min_var is None or q_max_var is None
+            v_set_pu = _opt_float(row, "vm_pu")
+            entry = per_bus.get(bus_pp)
+            if entry is None:
+                per_bus[bus_pp] = {
+                    "rows": [pp_idx],
+                    "p_w": p_w,
+                    "q_min_var": q_min_var,
+                    "q_max_var": q_max_var,
+                    "v_set_pu": 1.0 if v_set_pu is None else v_set_pu,
+                    "name": str(row.get("name", f"gen_{pp_idx}") or f"gen_{pp_idx}"),
+                }
+                continue
+            entry["rows"].append(pp_idx)
+            entry["p_w"] += p_w
+            entry["q_min_var"] = (
+                None
+                if (entry["q_min_var"] is None or q_min_var is None)
+                else entry["q_min_var"] + q_min_var
+            )
+            entry["q_max_var"] = (
+                None
+                if (entry["q_max_var"] is None or q_max_var is None)
+                else entry["q_max_var"] + q_max_var
+            )
+            if v_set_pu is not None and abs(v_set_pu - entry["v_set_pu"]) > 1.0e-9:
+                _logger.warning(
+                    "pandapower gen %s shares bus %s with gen(s) %s at a DIFFERENT "
+                    "vm_pu (%.5f vs %.5f); the merged regulating generator keeps the "
+                    "first setpoint (one bus holds one voltage).",
+                    pp_idx,
+                    bus_pp,
+                    entry["rows"][:-1],
+                    v_set_pu,
+                    entry["v_set_pu"],
+                )
+
+        for bus_pp, entry in per_bus.items():
+            gen_id = _id.next()
+            for pp_idx in entry["rows"]:
+                id_map["gen"][pp_idx] = gen_id
+            appliances.append(
+                build_generator(
+                    id=gen_id,
+                    name=entry["name"],
+                    node=id_map["bus"][bus_pp],
+                    mode=phase_mode,
+                    p_total_w=entry["p_w"],
+                    q_total_var=0.0,
+                    voltage_regulation=VoltageRegulation(
+                        v_set_pu=entry["v_set_pu"],
+                        q_min_var=entry["q_min_var"],
+                        q_max_var=entry["q_max_var"],
+                    ),
+                )
+            )
+        if per_bus:
+            _logger.info(
+                "pandapower -> Grid: %d 'gen' row(s) converted as %d EXACT PV "
+                "terminal(s) (voltage_regulation at the row's vm_pu, reactive power "
+                "free within min_q_mvar/max_q_mvar). %d row(s) carry an unbounded "
+                "reactive side. Reactive limits are enforced by the solver's PV-to-PQ "
+                "switching unless enforce_q_limits=False (pandapower runpp's own "
+                "default is enforce_q_lims=False).",
+                sum(len(e["rows"]) for e in per_bus.values()),
+                len(per_bus),
+                n_unbounded,
+            )
+    elif gen_mode is GenMode.VOLT_VAR_APPROX and gen is not None and len(gen):
         slack_buses = {
             int(r["bus"])
             for _, r in net.ext_grid.iterrows()
@@ -1324,6 +1891,49 @@ def to_grid(
                 n_unsized,
             )
 
+    # ------------------------------------------------------------------ #
+    # 10. Shunts (net.shunt) -> ShuntAppliance (fixed admittance to ground)#
+    # ------------------------------------------------------------------ #
+    shunt = getattr(net, "shunt", None)
+    if shunt is not None and len(shunt):
+        n_inductive = 0
+        for pp_idx, row in shunt.iterrows():
+            if not bool(row.get("in_service", True)):
+                continue
+            bus_pp = int(row["bus"])
+            if bus_pp not in id_map["bus"]:
+                continue
+            bus_vn_kv = float(net.bus.at[bus_pp, "vn_kv"])
+            g_s, c_f, l_h = _shunt_admittance(row, bus_vn_kv, two_pi_f0)
+            if g_s == 0.0 and c_f == 0.0 and l_h is None:
+                continue
+            n_inductive += l_h is not None
+            sh_id = _id.next()
+            id_map["shunt"][pp_idx] = sh_id
+            sh_phases = phases_for(phase_mode)
+            appliances.append(
+                ShuntAppliance(
+                    id=sh_id,
+                    name=str(row.get("name", f"shunt_{pp_idx}") or f"shunt_{pp_idx}"),
+                    node=id_map["bus"][bus_pp],
+                    phases=sh_phases,
+                    conductance_s=[g_s] * len(sh_phases),
+                    capacitance_f=[c_f] * len(sh_phases),
+                    inductance_h=None if l_h is None else [l_h] * len(sh_phases),
+                    connection=WindingConnection.WYE,
+                )
+            )
+        if id_map["shunt"]:
+            _logger.info(
+                "pandapower -> Grid: %d 'shunt' row(s) converted as fixed WYE shunt "
+                "admittances (G from p_mw; a capacitive row carries "
+                "C = -q_mvar / (2*pi*f0 * U^2) and an inductive one "
+                "L = U^2 / (2*pi*f0 * q_mvar), both referred to each row's vn_kv); "
+                "%d of them are inductive.",
+                len(id_map["shunt"]),
+                n_inductive,
+            )
+
     # Elements the converter does NOT read: fail loud, never silently wrong.
     warn_dropped_elements(
         _logger,
@@ -1332,13 +1942,11 @@ def to_grid(
             kind: len(tbl)
             for kind in (
                 *(("gen",) if gen_mode is GenMode.DROP else ()),
-                "shunt",
                 "trafo3w",
                 "impedance",
                 "ward",
                 "xward",
                 "dcline",
-                "storage",
                 "motor",
                 "asymmetric_sgen",
             )
@@ -1360,6 +1968,10 @@ def to_grid(
             name=str(getattr(net, "name", "") or "pandapower_import"),
             description=description,
         ),
+    )
+    zero_seq_lines.warn(_logger, tool="pandapower")
+    resolve_converted_line_models(
+        grid, _logger, tool="pandapower", requested=harmonic_line_model
     )
     return grid, id_map
 
