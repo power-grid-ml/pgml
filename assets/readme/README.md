@@ -1,14 +1,18 @@
 # README figures
 
-These small artifacts are self-contained copies/selections of the paper's
-recorded evidence. `provenance.json` identifies the paper commit and SHA-256
-hashes of the original inputs. No experiment is run by the figure renderer.
+These small artifacts contain the README's measured evidence. `provenance.json`
+identifies source revisions, the benchmark job and SHA-256 hashes of the original
+inputs. Measurement dates remain in the raw metadata. No experiment is run by
+the figure renderer.
 
-- `batch_throughput.json`: IEEE 33-bus CPU/GPU complex128 series from the
-  September 12 batch benchmark, with its original environment. The renderer
-  excludes nonconverged, nonfinite or over-tolerance records. This is a dated
-  snapshot, awaiting the current solver's job-320 result; it is not labeled as
-  a measurement of the current review build.
+- `batch_throughput.json`: complete IEEE33 and Kerber complex128 CPU/GPU series
+  and pandapower/power-grid-model baselines, with the measured environment.
+  All seven batch sizes (1–4096) are retained for all five curves. Every scenario
+  is checked, not just a prefix; the renderer rejects invalid comparison points.
+  The focused driver is `scripts/bench/bench_readme.py` in pgml-paper, submitted
+  through `scripts/cluster/run_readme.sbatch` with the suite's target settings.
+  Each grid runs in a fresh process. Eight pandapower workers each have one
+  internal thread; power-grid-model uses eight native threads.
 - `conformance_worst.svg`: the paper's Figure 5, copied without changing its
   data or layout. `conformance_worst.json` retains the selected grid records
   and valid-pair summary. Its bars compare three reference engines; they do
@@ -25,6 +29,5 @@ pixi run -e cpu python run/readme/render.py
 ```
 
 The renderer writes the throughput and recovery SVGs here and preview PNGs to
-`/tmp`. Refresh the curated batch JSON, original-source hash, environment,
-README measurement caption and `performance_current_review` flag together only
-after checking the replacement stage's provenance, coverage and validity.
+`/tmp`. Refresh batch JSON, source hashes, environment and README measurement
+caption together after checking provenance, coverage and validity.

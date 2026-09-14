@@ -2,10 +2,28 @@
   "source_paper_commit": "ae2e19895c4592164d571d2597c6f0c6341eef78",
   "source_sha256": {
     "app_digital_twin.json": "73f4ca62a44d9a223b2ba4f545e612d587d84ed67bf9e1613599278356c8aa25",
-    "bench_batch_throughput.json": "6ce4bd21795969caddee950286857ce73c93b692ca1e3a41729c372fe42a638a",
     "conformance_data.json": "4e72c5ce5fe0c5701067fdac7be124f69dd9446fb438042772f0e940ecb202ef",
-    "conformance_worst.svg": "69000548abbfeb03233575bc28f8cc017cf4202dae37ecfd5ac42229c5a1950b"
+    "conformance_worst.svg": "69000548abbfeb03233575bc28f8cc017cf4202dae37ecfd5ac42229c5a1950b",
+    "bench_batch_throughput_readme_ieee33.json": "e605b0988e563c50bd7602d509fc66d6a4c5c9eb21ad1692a9ece2d98fb7abca",
+    "bench_batch_throughput_readme_kerber.json": "ff71f40f28c5ae1146d420e5ea8ae22ef58845fe9ca4cafc637e88ca6d50e8da"
   },
-  "performance_current_review": false,
-  "performance_status": "Recorded 2026-09-12; replacement job 320 pending. Not a measurement of the current review head."
+  "performance_current_review": true,
+  "performance_status": "Validated full-range comparison; every scenario checked.",
+  "performance_source": {
+    "paper_commit": "58e4202dbc6022e470e0dcf75848ea1f78119d3d",
+    "pgml_source_commit": "ca30809",
+    "pgml_source_digest": "5a797550b9eb",
+    "elapsed": "00:02:53",
+    "exit_code": "0:0",
+    "batch_sizes": [
+      1,
+      4,
+      16,
+      64,
+      256,
+      1024,
+      4096
+    ],
+    "all_scenarios_validated": true
+  }
 }

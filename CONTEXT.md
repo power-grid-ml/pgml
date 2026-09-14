@@ -62,7 +62,9 @@ figures before installation. Figure inputs and provenance are in `assets/readme/
 `run/readme/render.py` redraws the recorded throughput and wide resistance panel
 without running a solve. Each figure's measurement date, source hashes and validation
 scope accompany its data; the README caption identifies the measured hardware and
-precision. Installation instructions target the GitHub repository.
+precision. Throughput compares IEEE33 and Kerber on one L40S with eight allocated
+CPUs against pandapower and power-grid-model, validating all scenarios at every
+batch size. Installation instructions target the GitHub repository.
 
 ## Where things live
 
