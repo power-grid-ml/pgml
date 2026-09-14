@@ -10,6 +10,8 @@ Public API
   Volt-VAr droop.
 - ``DEFAULT_GEN_VOLT_VAR_SLOPE_PU`` — the default droop steepness of that
   approximation.
+- ``from_grid(grid, *, name="pgml_export", allow_approximation=False)`` — export the
+  supported balanced, fundamental-frequency scope to a new pandapower network.
 
 Usage example::
 
@@ -55,10 +57,14 @@ Only entries that were actually converted are included.
 from pgml.convert._common import PhaseMode
 
 from .converter import DEFAULT_GEN_VOLT_VAR_SLOPE_PU, GenMode, to_grid
+from .exporter import PandapowerExport, UnsupportedGridError, from_grid
 
 __all__ = [
     "to_grid",
     "PhaseMode",
     "GenMode",
     "DEFAULT_GEN_VOLT_VAR_SLOPE_PU",
+    "PandapowerExport",
+    "UnsupportedGridError",
+    "from_grid",
 ]

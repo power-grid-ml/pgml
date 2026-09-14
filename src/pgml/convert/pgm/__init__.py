@@ -5,6 +5,8 @@ Public API
 - ``to_grid(input_data, *, base_frequency_hz=50.0, load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV) -> (Grid, id_map)``
   Convert a power-grid-model ``input_data`` dict to a
   :class:`~pgml.schemas.grid_schema.Grid` and an ``id_map``.
+- ``from_grid(grid, *, allow_approximation=False) -> PgmExport`` exports the
+  supported balanced, fundamental-frequency scope to power-grid-model input data.
 
 Usage example::
 
@@ -57,5 +59,13 @@ Only in-service elements are converted.
 from pgml.convert._common import PhaseMode
 
 from .converter import to_grid
+from .exporter import IDEAL_SLACK_SK_VA, PgmExport, UnsupportedGridError, from_grid
 
-__all__ = ["to_grid", "PhaseMode"]
+__all__ = [
+    "to_grid",
+    "from_grid",
+    "PhaseMode",
+    "PgmExport",
+    "UnsupportedGridError",
+    "IDEAL_SLACK_SK_VA",
+]

@@ -71,6 +71,7 @@ from .persistence import (
     write_dataset,
 )
 from .perturbation import perturbation_sweep
+from .random import ar1_noise
 from .run import ScenarioResult, ScenarioSpec, run_scenarios
 from .sampler import (
     NominalPower,
@@ -85,7 +86,7 @@ from .sampler import (
 #: Looked up by the module ``__getattr__`` below so an old import fails with the new home
 #: instead of a bare ``ImportError``.
 _MOVED = {
-    name: "the scenario-composition recipes of the learning package"
+    name: "pgl.data.scenarios"
     for name in (
         "CoherentSpectrumConfig",
         "LoadProfileConfig",
@@ -189,6 +190,7 @@ __all__ = [
     "LOADING_FLOOR",
     "affine_emission_correction",
     "phase_slope_shift",
+    "ar1_noise",
     "Perturbation",
     "SpectrumSweepConfig",
     "NodeInjectionSweepConfig",
