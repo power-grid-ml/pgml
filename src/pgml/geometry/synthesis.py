@@ -414,11 +414,23 @@ def _clear_harmonic_model(ln: Line) -> None:
     ln.resistance_frequency = ResistanceFrequencyModel()  # constant 1.0
 
 
-def _apply_positive_sequence_line(ln: Line, *, f0: float, skin: bool) -> None:
+def _explicit_skin(skin: Optional[bool]) -> Optional[bool]:
+    """The per-line skin flag to store: the caller's explicit choice, else unset.
+
+    An unset ``Line.harmonic_skin_effect`` resolves ``line.harmonic_model.skin_effect``
+    at assembly time, like every other option of the lumped models, so a grid keeps
+    following the active defaults and presets after it was resolved or converted.
+    """
+    return None if skin is None else bool(skin)
+
+
+def _apply_positive_sequence_line(
+    ln: Line, *, f0: float, skin: Optional[bool] = None
+) -> None:
     """Select the positive-sequence (``Z1``) harmonic model on a single R/X line."""
     _clear_harmonic_model(ln)
     ln.harmonic_line_model = "positive_sequence"
-    ln.harmonic_skin_effect = bool(skin)
+    ln.harmonic_skin_effect = _explicit_skin(skin)
 
 
 def _apply_naive_line(ln: Line) -> None:
@@ -428,7 +440,7 @@ def _apply_naive_line(ln: Line) -> None:
 
 
 def _apply_sequence_aware_line(
-    ln: Line, *, skin: bool, coeff: Optional[float] = None
+    ln: Line, *, skin: Optional[bool] = None, coeff: Optional[float] = None
 ) -> None:
     """Select the sequence-aware (``Z1`` + ``Z0``) harmonic model on one 3-phase line.
 
@@ -437,7 +449,7 @@ def _apply_sequence_aware_line(
     """
     _clear_harmonic_model(ln)
     ln.harmonic_line_model = "sequence_aware"
-    ln.harmonic_skin_effect = bool(skin)
+    ln.harmonic_skin_effect = _explicit_skin(skin)
     if coeff is not None:
         ln.earth_return = EarthReturnModel(
             resistance_coeff_ohm_per_m_per_hz=float(coeff)
@@ -456,9 +468,11 @@ def apply_positive_sequence_harmonic_model(
     :func:`synthesize_grid_geometry`, it does NOT reverse-synthesise a single-conductor
     earth-return geometry, so it never hits the GMR floor and stays well defined for
     cables / low-X feeders. Lines that already carry a ``conductor_geometry`` (genuine
-    geometry -> full Carson) are left untouched. ``skin`` defaults to the config value
-    ``line.harmonic_model.skin_effect``; ``skin=False`` keeps R constant (naive model).
-    Returns ``grid``.
+    geometry -> full Carson) are left untouched. ``skin=None`` leaves
+    ``Line.harmonic_skin_effect`` unset, so assembly resolves
+    ``line.harmonic_model.skin_effect`` (including an active preset); an explicit
+    value is stored on the line and wins. ``skin=False`` keeps R constant (naive
+    model). Returns ``grid``.
 
     On a 3-phase line the skin multiplier applies to the POSITIVE-SEQUENCE resistance
     (diagonal minus mutual) and scales only the conductor part of the resistance
@@ -467,7 +481,6 @@ def apply_positive_sequence_harmonic_model(
     :func:`apply_sequence_aware_harmonic_model`, which damps ``Z0`` explicitly.
     """
     f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
-    skin = _cfg("line.harmonic_model.skin_effect") if skin is None else bool(skin)
     for ln in grid.branches:
         if not (isinstance(ln, Line) and ln.conductor_geometry is None):
             continue
@@ -493,15 +506,15 @@ def apply_sequence_aware_harmonic_model(
 
     Needs a full 3x3 R/L matrix (the off-diagonal mutuals are what carry ``Z0``); a
     diagonal matrix gives ``Z0 = Z1`` plus the universal earth term. Single-/two-phase and
-    geometry-defined lines are left untouched. ``skin`` defaults to the modeling default
-    ``line.harmonic_model.skin_effect``; ``earth_resistance_coeff`` overrides
+    geometry-defined lines are left untouched. ``skin=None`` leaves the flag unset, so
+    assembly resolves ``line.harmonic_model.skin_effect`` (an explicit value is stored
+    on the line and wins); ``earth_resistance_coeff`` overrides
     ``line.earth_return.resistance_coeff_ohm_per_m_per_hz`` per line (``None`` keeps
     the default, so the grid follows a later change of the defaults file). The
     remaining earth-return options (``x0_frequency``, ``x0_exponent``,
     ``r0_includes_earth_return``) are modeling defaults; override them per line through
     :class:`~pgml.schemas.grid_schema.EarthReturnModel`. Returns ``grid``.
     """
-    skin = _cfg("line.harmonic_model.skin_effect") if skin is None else bool(skin)
     coeff = earth_resistance_coeff
     for ln in grid.branches:
         if not (isinstance(ln, Line) and ln.conductor_geometry is None):
@@ -539,13 +552,14 @@ def resolve_harmonic_line_models(
     or a non-default ``resistance_frequency``) or a ``conductor_geometry`` is left
     untouched. ``model`` overrides the defaults for every unresolved line
     (``"sequence_aware"``, ``"positive_sequence"``, ``"naive"`` or ``"none"`` = leave
-    unresolved); ``skin`` overrides ``line.harmonic_model.skin_effect``.
+    unresolved). An explicit ``skin`` is stored on every resolved line; ``None`` leaves
+    ``Line.harmonic_skin_effect`` unset, so ``line.harmonic_model.skin_effect``
+    resolves at assembly time together with the other options of the lumped models.
 
     Returns ``{applied model name: number of lines}`` (empty when nothing was
     resolved), which the converters turn into one log line per grid.
     """
     f0 = float(f0 if f0 is not None else grid.base_frequency_hz)
-    skin = _cfg("line.harmonic_model.skin_effect") if skin is None else bool(skin)
     model_3ph = _cfg("line.harmonic_model.three_phase") if model is None else model
     model_other = _cfg("line.harmonic_model.single_phase") if model is None else model
     counts: dict[str, int] = {}
@@ -596,9 +610,9 @@ def apply_default_harmonic_model(
     explicit and defaults-sourced, never silently implicit at solve time. A line that
     already carries an explicit harmonic model or a ``conductor_geometry`` is left
     untouched; only the remaining R/X lines get the default (``sequence_aware`` for
-    3-phase, ``positive_sequence`` for 1-/2-phase). ``skin`` defaults to
-    ``line.harmonic_model.skin_effect``; ``model`` overrides the per-phase-count
-    defaults. Returns ``grid``; see :func:`resolve_harmonic_line_models` for the
+    3-phase, ``positive_sequence`` for 1-/2-phase). ``skin=None`` leaves the skin flag
+    to ``line.harmonic_model.skin_effect`` at assembly time; ``model`` overrides the
+    per-phase-count defaults. Returns ``grid``; see :func:`resolve_harmonic_line_models` for the
     applied counts.
     """
     resolve_harmonic_line_models(grid, f0=f0, model=model, skin=skin)

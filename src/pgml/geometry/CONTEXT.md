@@ -147,9 +147,11 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   lumped models against the geometry model on the same feeder; a bare
   `line.conductor_geometry = None` now contradicts `harmonic_line_model="geometry"` and
   is rejected by the schema.
-- `apply_positive_sequence_harmonic_model(grid, *, f0=None, skin=True) -> grid` (in place,
-  RECOMMENDED for R/X feeders): sets `Line.harmonic_line_model="positive_sequence"` +
-  `harmonic_skin_effect`; assembly then derives the skin multiplier from the line's OWN
+- `apply_positive_sequence_harmonic_model(grid, *, f0=None, skin=None) -> grid` (in place,
+  RECOMMENDED for R/X feeders): sets `Line.harmonic_line_model="positive_sequence"`
+  (and `harmonic_skin_effect` only for an explicit `skin`; `None` leaves it unset so
+  `line.harmonic_model.skin_effect` resolves at assembly, like every other option of
+  the lumped models, and a preset applied after conversion still acts); assembly then derives the skin multiplier from the line's OWN
   positive-sequence resistance (mean diagonal minus mean mutual), scales the CONDUCTOR
   part of the R matrix only (the mutual entries are the earth-return path) and gives
   `X(h)=X1·h`, NO geometry, NO earth floor. `positive_sequence_resistance_model(r1, *, f0)`
@@ -157,7 +159,7 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   carries a user-supplied law instead of a typed model; assembly's
   `_resistance_multiplier` evaluates that law differentiably (and `curve` multipliers via
   linear interp).
-- `apply_sequence_aware_harmonic_model(grid, *, skin=True, earth_resistance_coeff=None)
+- `apply_sequence_aware_harmonic_model(grid, *, skin=None, earth_resistance_coeff=None)
   -> grid` (in place, for UNBALANCED 4-wire studies): sets
   `Line.harmonic_line_model="sequence_aware"` on each 3-phase R/X line (+
   `harmonic_skin_effect`, and `earth_return` when a coefficient is passed); assembly
