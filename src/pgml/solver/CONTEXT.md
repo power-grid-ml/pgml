@@ -266,9 +266,14 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
       seed collapses below `_SEED_COLLAPSE_PU = 0.5` of nominal; a start that fails is
       followed by the other, and the restart is logged (`_newton_from_starts`).
     - RESULT: `PowerFlowResult.regulation: Optional[VoltageRegulationResult]` —
-      `q_var {gen_id: [*batch] var}` (solved total, autograd-free like the
-      diagnostics), `regulating {gen_id: [*batch] bool}`, `switch_rounds`,
-      `enforce_q_limits`. The convergence diagnostics report the ACTIVE component of
+      `q_var {gen_id: [*batch] var}` (solved total, DIFFERENTIABLE whenever the solve
+      tracks gradients: the nodal residual is evaluated on-tape at the IFT-attached
+      voltages, one extra differentiable assembly), `regulating {gen_id: [*batch]
+      bool}`, `switch_rounds`, `enforce_q_limits`, `settled [*batch] bool` and
+      `unsettled_generators` (ids). When the round cap ends the switching, the kept
+      active set contradicts its own limit check, so the scenarios concerned are
+      reported as NOT converged (`converged`, `converged_mask`, `failed_states`,
+      `diagnostics.likely_cause`) and the WARNING names the generators. The convergence diagnostics report the ACTIVE component of
       the mismatch at a regulating row (its raw current mismatch is the reactive
       current the machine supplies).
     - BATCHED: `operating_point[gen_id]["v_set_pu"]` is a per-scenario setpoint (float

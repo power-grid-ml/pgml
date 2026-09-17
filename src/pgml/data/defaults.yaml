@@ -176,9 +176,11 @@ appliance:
       units: "count"
       description: >
         Maximum number of PV-to-PQ switching rounds (each round is one full Newton
-        solve at a fixed active set). The loop normally settles in one to three
-        rounds; hitting the cap logs a WARNING naming the oscillating generators and
-        keeps the last solution.
+        solve at a fixed active set, the first solve included). The loop normally
+        settles in one to three rounds; hitting the cap logs a WARNING naming the
+        generators that would still change their bus type, keeps the last solution and
+        reports the scenarios concerned as not converged
+        (`PowerFlowResult.converged_mask`, `regulation.settled`).
     q_limit_hysteresis_pu:
       value: 1.0e-6
       units: "pu"

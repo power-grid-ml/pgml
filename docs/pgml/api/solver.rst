@@ -159,8 +159,9 @@ form at a regulated row — and ``method="current_injection"`` logs the switch.
 the reactive limits bound the output; when they do, a unit outside its band is re-solved as
 a PQ injection pinned at the limit and released when its voltage crosses the setpoint from
 the other side.  :class:`~pgml.solver.VoltageRegulationResult`, on
-``PowerFlowResult.regulation``, reports per unit the resolved reactive power, the active
-set and which terminals are pinned.  The model, its scope and the reference comparisons are
+``PowerFlowResult.regulation``, reports per unit the resolved reactive power (differentiable),
+the active set and which terminals are pinned, and per scenario whether the switching settled
+within its round cap.  A scenario that did not settle is reported as not converged.  The model, its scope and the reference comparisons are
 in :doc:`/pgml/modeling/der-pv-storage`.
 
 Loadability (``loadability_limit``)

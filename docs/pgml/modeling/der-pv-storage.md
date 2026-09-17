@@ -161,6 +161,14 @@ setpoint from the other side. A hysteresis band
 the decision. `solve_power_flow(enforce_q_limits=False)` solves every terminal unbounded, which
 is what pandapower's `runpp` does by default.
 
+The number of rounds is capped (`appliance.generator.q_limit_switch_rounds_max`). A solve that
+reaches the cap keeps its last active set, which its own limit check rejects, so the scenarios
+concerned are reported as not converged. `result.regulation.settled` marks them per scenario
+and `result.regulation.unsettled_generators` names the units, as does the logged warning.
+
+The solved reactive power `result.regulation.q_var` is differentiable like the voltages, so a
+loss on a generator's reactive output needs no recomputation from the network.
+
 The switching decision is off-tape, being a comparison of converged values, while the residual
 at the resolved active set is on-tape, so the adjoint is exact for the solved configuration.
 The gradient flows through `v_set_pu` at a regulating terminal and through the binding limit at
