@@ -32,7 +32,7 @@ PV inverter, a wind plant or a genset. `consumer_type` is a closed taxonomy used
 categorical feature and never drives the physics.
 
 The control laws are a discriminated union over a common base that carries the capability
-circle `s_rated_va` and a `smoothing` half-width.
+circle `s_rated_va` and the `smoothing` width of its soft clamp, a fraction of the rating.
 
 | Control | Law |
 |---|---|
@@ -76,13 +76,22 @@ possible.
 
 ## Kinks on a differentiable path
 
-Volt-VAr and Volt-Watt curves, deadbands and capability clamps have corners. The forward pass
-evaluates the exact piecewise-linear curve and the hard clamp, which is what matches the
-reference tools at the operating point. For gradients each corner has a smooth variant, a
-blended breakpoint and a soft saturation, controlled by the `smoothing` half-width. A width of
-zero recovers the hard curve, and a positive width makes the map continuously differentiable
-so the Jacobian is well defined. This is the same approach the rest of the library takes when
-it guards a division by zero. Keep the forward correct and keep the gradient finite.
+Volt-VAr and Volt-Watt curves, deadbands and capability clamps have corners.
+
+The capability clamp has a smooth variant. `smoothing` is a fraction of the rating, and a
+positive value replaces the hard clamp by a soft saturation whose transition half-width is
+`smoothing * s_rated_va`. The map is then continuously differentiable, so the Jacobian is well
+defined at the limit. The same function is used by the solve and by its gradient, which keeps
+the implicit-function gradient consistent with the solution. A positive width therefore also
+moves the solved operating point near the limit, by about `0.7 * smoothing * s_rated_va` at
+the corner and exponentially less away from it. A width of zero, the default, is the exact
+hard clamp that matches the reference tools.
+
+Curve breakpoints are not blended. A `linear` characteristic is exactly piecewise linear,
+which is what the reference tools evaluate, and its gradient at a breakpoint is the slope of
+the segment the operating point falls in. `interpolation="cubic"` gives a continuously
+differentiable curve instead. It passes through the same points but is not monotone between
+them, so it can overshoot slightly next to a deadband corner.
 
 Genuinely discrete switches stay discrete. An inverter trip, or a cut-in and cut-out
 threshold with hysteresis, is resolved upstream into whether the device injects at all, rather
