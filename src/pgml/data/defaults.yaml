@@ -303,34 +303,46 @@ line:
         in Ω per 1000 ft). Used only by `x0_frequency: carson_sublinear`. Per-line
         override: `Line.earth_return.reactance_coeff_ohm_per_m_per_hz`.
     x0_frequency:
-      value: carson_sublinear
+      value: linear
       units: "enum{linear, carson_sublinear}"
       description: >
         Frequency law of the zero-sequence REACTANCE in the lumped sequence_aware model.
-        `linear`: X0(h) = X0·h — pure geometric scaling; the earth-return
-        reactance sub-linearity is left to the conductor-geometry path, which resolves
-        the real return path (deep earth vs a nearby neutral/sheath).
-        `carson_sublinear` (default): additionally subtract the Carson/Deri earth-return reactance
-        decay 1.5·coeff·f0·h·ln(h) (geometry- and ρ-independent), which reproduces
-        OpenDSS's Xg frequency correction for an R/X line. Exact at f0 either way.
-        Per-line override: `Line.earth_return.x0_frequency`.
+        `linear` (default): X0(h) = X0·h, the scaling of a geometric inductance. It is
+        exact for a return path that stays in metal at every order (the neutral core or
+        sheath of a cable, a 4-wire LV line), and it is the only law that is safe for an
+        X0 invented from `zero_sequence.x0_over_x1`, which carries no information about
+        the return path.
+        `carson_sublinear`: additionally subtract the Carson/Deri earth-return reactance
+        decay 1.5·coeff·f0·h·ln(h) (geometry- and ρ-independent), the correction OpenDSS
+        applies to an R/X line through its Xg. The derivation assumes that the stored X0
+        CONTAINS the deep-earth term 3·Xe(f0) = 3·coeff·f0·ln(658.5·sqrt(ρ/f0)), about
+        1.29 Ω/km at 50 Hz and 100 Ω·m. That holds for an overhead line whose measured
+        or computed X0 closes through the earth. It does not hold for a cable or a
+        ratio-derived X0 (typically 0.2 to 0.5 Ω/km): the subtracted 0.094·ln(h) Ω/km is
+        then comparable with X0 itself, X0(h) falls below X1(h) within the first few
+        orders and reaches zero near h = 13 for a 150 mm² LV cable. Select it per line
+        (`Line.earth_return.x0_frequency`) for overhead lines with real zero-sequence
+        data, or grid-wide through the `opendss` preset. Exact at f0 either way.
     x0_nonnegative:
       value: true
       units: "bool"
       description: >
-        Guard the sub-linear approximation by clamping extrapolated X0 to zero.
-        This prevents negative series reactance but does not validate an unknown earth,
-        neutral or sheath return path. The derivative is zero below the boundary;
-        use measured geometry for studies near it. Disable for the unguarded OpenDSS
-        law. Per-line override: `Line.earth_return.x0_nonnegative`.
+        Guard of the `carson_sublinear` law: clamp the extrapolated X0(h) at zero. A
+        negative series reactance is a series capacitance and can create a spurious
+        series resonance, so the guard is on by default. Reaching the clamp means the
+        stored X0 lacks the deep-earth term the law subtracts (see `x0_frequency`);
+        assembly then logs one WARNING with the number of affected lines. The derivative
+        is zero below the boundary. Disable for the unguarded OpenDSS law (the `opendss`
+        preset does). No effect under `linear`. Per-line override:
+        `Line.earth_return.x0_nonnegative`.
     x0_exponent:
       value: 1.0
       units: "exponent"
       description: >
         Exponent p in X0(h) = X0·h^p for the lumped sequence_aware model. 1.0 (default)
         is the geometric scaling. p < 1 is an EMPIRICAL way to bend the zero-sequence
-        reactance sub-linear (e.g. to match a measured Z0(h)); prefer
-        `x0_frequency: carson_sublinear` for the physically derived form. Per-line
+        reactance sub-linear (e.g. to match a measured Z0(h)); `x0_frequency:
+        carson_sublinear` is the physically derived form for an overhead line. Per-line
         override: `Line.earth_return.x0_exponent`.
 
   # Conductor-geometry (Carson/Deri) path: how the conductor's INTERNAL inductance

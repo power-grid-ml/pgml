@@ -155,32 +155,77 @@ Z_mutual(h) = (Z0(h) −   Z1(h)) / 3
 ```
 
 Each sequence is frequency-corrected separately before recombining. `Z1(h)` is the
-earth-free model above. `Z0(h)` is the conductor part (`X0 ∝ h`, optional skin) plus
-`3·(Re(f) − Re(f0))`, where `Re(f) = π²·f·10⁻⁷` Ω/m is Carson's earth-return resistance,
-geometry-independent and proportional to frequency. That is the frequency-growing damping
-the positive sequence never sees, and it keeps an unbalanced study from over-predicting
-zero-sequence harmonics. `Re` is non-negative and monotone, so `Z0(h)` can never become
-non-physical the way a single-conductor earth floor can.
+earth-free model above. The zero sequence is
+
+```
+R0(h) = R1·m_skin(h) + (R0 − R1) + 3·(Re(f) − Re(f0))
+X0(h) = X0 · (f / f0)
+```
+
+The phase conductor's share of `R0` is `R1`, and it carries the same skin-effect multiplier
+as the positive sequence. The remainder `R0 − R1` is the return path (three times the
+neutral, sheath or earth resistance), whose cross-section is not known from sequence data;
+it is held constant. `Re(f) = π²·f·10⁻⁷` Ω/m is Carson's earth-return resistance,
+geometry-independent and proportional to frequency. Its increment is the frequency-growing
+damping the positive sequence never sees, and it keeps an unbalanced study from
+over-predicting zero-sequence harmonics. Every term is non-negative and monotone in `h`, so
+under the default law `Z0(h)` cannot become non-physical the way a single-conductor earth
+floor can.
+
+The earth-resistance increment presumes that the residual current returns through the
+earth. In a 4-core cable most of it returns through the neutral core, and the increment
+(3.55 Ω/km at order 25 and 50 Hz) then overstates the triplen damping. Set
+`Line.earth_return.resistance_coeff_ohm_per_m_per_hz = 0` on such lines for a pure
+metallic return, or give them a conductor geometry with an explicit neutral.
 
 Modelling each phase as an independent single conductor with earth return, a diagonal
 `Z_abc` whose every diagonal carries the full earth floor, is wrong twice over. It ignores
 the inter-phase mutual coupling and it triple-counts the earth term.
 
-The default lumped reactance law is `carson_sublinear`:
-`X0(h) = X0·h^p − 1.5·kx·f0·h·ln(h)`, with `p=1` and `kx=μ0`.
-The earth-path term cancels from the positive sequence. Set
-`Line.earth_return.x0_frequency="linear"` to retain geometric scaling.
-Deep-earth, neutral and sheath return paths differ; measured conductor and neutral
-geometry is preferable when those details matter. The lumped law is an approximation,
-not a claim that every cable returns current through deep earth.
+### The zero-sequence reactance law
 
-`line.earth_return.x0_nonnegative` defaults to `true`: sub-linear extrapolation is
-clamped at zero if the stored X0 is too small for the requested frequency. The clamp is
-continuous, has zero derivative below the boundary, and is not differentiable at the
-boundary. It prevents negative series reactance but cannot recover missing geometry.
-Set the per-line `EarthReturnModel.x0_nonnegative=False`, or use the `opendss` preset,
-for OpenDSS's unguarded correction. Matched conformance tests disable the guard and
-match Rg/Xg and the skin-effect policy explicitly.
+`line.earth_return.x0_frequency` selects how `X0` scales. Both laws reproduce the stored
+`X0` exactly at `f0`.
+
+`linear`, the default, is `X0(h) = X0·h^p` with `p = 1`: the scaling of a geometric
+inductance. It is exact when the return path stays in metal at every order, as in a cable
+with a neutral core or sheath and in a 4-wire LV line. It is also the only safe law for an
+`X0` that was invented from the `line.zero_sequence.x0_over_x1` ratio, because such a value
+says nothing about the return path.
+
+`carson_sublinear` subtracts the frequency decay of a deep-earth return,
+`X0(h) = X0·h^p − 1.5·kx·f0·h·ln(h)` with `kx = μ0`. The soil resistivity cancels, and the
+form is the correction OpenDSS applies to an R/X line through its `Xg`. It is derived under
+the premise that the stored `X0` contains the earth term
+`3·Xe(f0) = 3·μ0·f0·ln(658.5·√(ρ/f0))`, about 1.29 Ω/km at 50 Hz and 100 Ω·m. The `X0` of
+an overhead line with earth return, measured or computed from its geometry, does. The `X0`
+of a cable, or one derived from a ratio, is typically 0.2 to 0.5 Ω/km and does not. The
+subtracted `0.094·ln(h)` Ω/km is then as large as `X0` itself:
+
+| line, `R0 = 4·R1`, `X0 = 3·X1` (Ω/km) | `X0(h)` linear | `X0(h)` carson_sublinear | `X1(h)` |
+|---|---|---|---|
+| NAYY 4x150 LV cable (0.208, 0.080) | h5 1.20, h9 2.16, h15 3.60 | h5 0.44, h9 0.30, h11 0.15, zero from h13 | h9 0.72, h15 1.20 |
+| MV cable (0.161, 0.117) | h15 5.27, h39 13.7 | peaks at 1.44 (h15), 0.22 at h39 | h15 1.76 |
+| LV overhead line (0.306, 0.29) | h25 21.8 | h25 14.2, monotone | h25 7.25 |
+
+For the LV cable the sub-linear `X0(h)` falls from order 5, drops below `X1(h)` at order 7
+(a negative mutual reactance in `Z_abc`) and is exhausted at order 13, so the triplen orders
+15, 21, ... would see a purely resistive zero-sequence line. Use `carson_sublinear` for
+overhead lines with real zero-sequence data, per line through
+`Line.earth_return.x0_frequency` or grid-wide through the `opendss` preset, and keep
+`linear` for cables and ratio-derived data. When the return path matters in detail, a
+conductor geometry with an explicit neutral is preferable to either lumped law.
+
+`line.earth_return.x0_nonnegative` defaults to `true` and only acts under
+`carson_sublinear`: the extrapolated `X0(h)` is clamped at zero. The clamp is continuous,
+has zero derivative below the boundary, and is not differentiable at the boundary. It
+prevents a negative series reactance, which would act as a series capacitance and could
+create a spurious resonance, but it cannot recover the missing return-path information.
+Whenever the law runs out of reactance inside the requested frequencies, assembly logs one
+warning with the number of affected lines. Set the per-line
+`EarthReturnModel.x0_nonnegative=False`, or use the `opendss` preset, for OpenDSS's
+unguarded correction. Matched conformance tests disable the guard and match `Rg`/`Xg` and
+the skin-effect policy explicitly.
 
 ## The conductor's internal inductance above power frequency
 
@@ -241,10 +286,10 @@ OpenDSS itself.
 
 | You have or want | How to set it | Harmonic line model | Matches OpenDSS |
 |---|---|---|---|
-| the documented defaults | applied on import, or `apply_default_harmonic_model(grid)` | 3-phase sequence-aware, 1-phase positive-sequence | 3-phase R/X with `Rg`/`Xg` (earth in `Z0`) |
+| the documented defaults | applied on import, or `apply_default_harmonic_model(grid)` | 3-phase sequence-aware, 1-phase positive-sequence | 3-phase R/X with a matched `Rg` and `Xg = 0` (earth damping in `Z0`) |
 | R/X feeder, raw `X ∝ h`, no skin or earth | nothing to set | `Z1(h) = R1 + j·X1·(f/f0)` | native 3-phase `R1/X1` LineCode (`Z1`) |
 | R/X feeder plus physical skin on R | `apply_positive_sequence_harmonic_model(grid)` | `Z1(h) = R1·m_skin(h) + j·X1·(f/f0)` | 3-phase R/X plus a skin rise OpenDSS applies only to geometry lines |
-| unbalanced 4-wire R/X feeder (`Z1` and `Z0`) | `apply_sequence_aware_harmonic_model(grid)` | `Z_abc(h)` with earth-free `Z1` and earth-damped `Z0` | native 3-phase R/X with matched `Rg`/`Xg`, no skin correction, and the guard disabled |
+| unbalanced 4-wire R/X feeder (`Z1` and `Z0`) | `apply_sequence_aware_harmonic_model(grid)` | `Z_abc(h)` with earth-free `Z1` and earth-damped `Z0` | native 3-phase R/X with matched `Rg`, `Xg = 0` (or the `opendss` preset for OpenDSS's `Xg` law) and no skin correction |
 | real 3-phase conductor coordinates | set `Line.conductor_geometry` | full Carson (earth in `Z0`, skin on R) | `LineGeometry`, 4.8e-8 relative on `Z` below 1 kHz |
 | single-conductor or SWER check | `synthesize_grid_geometry(grid)` | single conductor plus earth floor | 1-phase `LineGeometry` line |
 

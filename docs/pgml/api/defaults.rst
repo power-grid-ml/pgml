@@ -89,9 +89,11 @@ reference comparisons:
     ``bessel``.
 
 ``line.earth_return.x0_frequency``
-    ``carson_sublinear`` (shipped) or ``linear``, the zero-sequence reactance law of the
-    lumped sequence-aware model. ``line.earth_return.x0_nonnegative`` guards its
-    extrapolation by default. See :doc:`/pgml/modeling/presets` for reference choices.
+    ``linear`` (shipped) or ``carson_sublinear``, the zero-sequence reactance law of the
+    lumped sequence-aware model. ``linear`` suits cables and zero-sequence data derived
+    from a ratio; ``carson_sublinear`` suits an overhead line whose stored ``X0`` contains
+    the earth return, and ``line.earth_return.x0_nonnegative`` guards its extrapolation.
+    See :doc:`/pgml/modeling/harmonic-line-model` and :doc:`/pgml/modeling/presets`.
 
 ``branch.zero_impedance``
     ``fuse`` (shipped) collapses an ideal branch's terminal rows exactly; ``error`` refuses

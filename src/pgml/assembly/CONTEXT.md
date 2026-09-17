@@ -166,7 +166,12 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   `_sequence_aware_block_groups` (`Z_abc(f0)` -> `Z1`/`Z0`, each frequency-corrected,
   recombined; the per-line `earth_return` coefficients are stacked into tensors so a
   tensor coefficient keeps its gradient, while the DISCRETE options — skin flag,
-  `x0_frequency`, `x0_nonnegative`, `r0_includes_earth_return` — form the batching key); everything else ->
+  `x0_frequency`, `x0_nonnegative`, `r0_includes_earth_return` — form the batching key;
+  all four resolve from the defaults at assembly when the line leaves them unset; the
+  skin rise of `R0` is carried by the phase conductor's share `R1`; when
+  `carson_sublinear` exhausts `X0(h)` inside the requested frequencies
+  `_warn_x0_sublinear_deficit` logs ONE warning per affected line set with the line
+  count, which costs one host read per assembly under that law only); everything else ->
   `_line_rx_block_groups`, whose resistance is
   `R(h) = m(h)·(R − R_earth) + R_earth` with `R_earth` the mutual entries (the
   earth-return path, which the skin multiplier must NOT scale) and `m(h)` either the

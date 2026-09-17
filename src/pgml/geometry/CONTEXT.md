@@ -90,16 +90,25 @@ carrying the earth/neutral return (excited by zero-sequence/residual current).
   resistance `Re(f)=coeff·f`, geometry-independent, ∝ f (the zero-seq damping).
 - `zero_sequence_harmonic_z(r0, x0, f0, freqs, *, skin=True,
   earth_resistance_coeff=π²·1e-7, earth_reactance_coeff=μ0, x0_frequency=None, x0_nonnegative=None,
-  x0_exponent=1.0, r0_includes_earth_return=False) -> Z0[*B,H]`:
-  `R0(h) = R0_cond·m_skin(h) + 3·(Re(f) − Re_offset)` and
+  x0_exponent=1.0, r0_includes_earth_return=False, phase_resistance=None) -> Z0[*B,H]`:
+  `R0(h) = R_phase·m_skin(h) + (R0_cond − R_phase) + 3·(Re(f) − Re_offset)` with
+  `R_phase = min(R1, R0_cond)` and the skin curve fitted to `phase_resistance = R1`
+  (`sequence_aware_phase_z` passes it; without it the whole `R0_cond` is one fictitious
+  conductor, which understates the rise: m = 1.07 instead of 1.63 at h = 25 for a
+  150 mm² Al conductor with R0 = 4·R1), and
   `X0(h) = X0·h^p [− 1.5·kx·f0·h·ln h if carson_sublinear]`, exact at f0 for every
   option. `r0_includes_earth_return` chooses whether the stored `R0` already contains
   `3·Re(f0)` (real zero-sequence data; then the earth part is excluded from the skin
   multiplier) or is conductor-only (an `R0/R1`-ratio value; the earth return is added as
   an increment). `x0_frequency="carson_sublinear"` is the lumped Carson/Deri reactance
-  decay (ρ-independent, reproduces OpenDSS's `Xg` correction); `"carson_sublinear"` is the default, with non-negative clamping.
-  `x0_nonnegative=False` selects the unguarded reference law; `"linear"` omits the
-  correction. The guard has zero gradient below its boundary. Every coefficient may be a tensor
+  decay (ρ-independent, reproduces OpenDSS's `Xg` correction) for an overhead line whose
+  stored X0 contains the deep-earth term, with non-negative clamping; `"linear"` is the
+  default and omits the correction (cables, ratio-derived X0).
+  `x0_nonnegative=False` selects the unguarded reference law; the guard has zero
+  gradient below its boundary.
+  `x0_sublinear_deficit(x0, f0, freqs, *, earth_reactance_coeff, x0_exponent) -> bool[*B,H]`
+  marks where the sub-linear law is negative (assembly turns it into one warning).
+  Every coefficient may be a tensor
   (differentiable, batched over lines). Defaults come from `line.earth_return.*` /
   `line.zero_sequence.r0_includes_earth_return`; module constants
   `CARSON_EARTH_R_PER_HZ`, `CARSON_EARTH_X_PER_HZ`, `X0_FREQUENCY`, `X0_EXPONENT`,

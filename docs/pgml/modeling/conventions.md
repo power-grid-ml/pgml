@@ -317,8 +317,10 @@ pgml offers three line models, chosen per study:
   physically representative for balanced R/X feeders.
 - Sequence-aware (`apply_sequence_aware_harmonic_model`, the three-phase default for R/X
   lines) uses an earth-free `Z1` plus a zero-sequence `Z0` carrying the Carson earth
-  resistance `3·(Re(f)−Re(f₀))`. It is analytic and never non-physical, but `X0` stays
-  linear in h, so it diverges from OpenDSS's Carson `Z0` on the triplen orders.
+  resistance `3·(Re(f)−Re(f₀))`. It is analytic and never non-physical. `X0` is linear in
+  h by default, which suits cables and ratio-derived zero-sequence data; it differs from
+  OpenDSS's `Xg`-corrected `Z0` on the triplen orders unless `carson_sublinear` is
+  selected.
 
 The same physics is implemented on both sides. OpenDSS corrects a sequence-defined line as
 `R += Rg·(h−1)` and `X = h·(X − 0.5·KXg·ln h)` per matrix entry, which in sequence terms is

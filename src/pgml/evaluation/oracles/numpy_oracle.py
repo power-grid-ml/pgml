@@ -373,7 +373,9 @@ def _numpy_line_series_z(b: Line, h: int, f0: float) -> np.ndarray:
         z1_h = complex(z1.real * m1, z1.imag * h)
         r0_cond = z0.real - 3.0 * coeff * f0 if inc else z0.real
         r_earth = 3.0 * coeff * (h * f0) if inc else 3.0 * coeff * (h * f0 - f0)
-        m0 = _numpy_skin_multiplier(r0_cond, f0, h * f0) if skin else 1.0
+        # The phase conductor's share of R0 is R1 and rises with the R1 skin curve;
+        # the return-path remainder is held constant.
+        r0_phase = min(z1.real, r0_cond)
         x0_h = z0.imag * h**expo
         if law == "carson_sublinear":
             x0_h -= 1.5 * kx * f0 * h * math.log(h)
@@ -382,7 +384,7 @@ def _numpy_line_series_z(b: Line, h: int, f0: float) -> np.ndarray:
                 guard = _d.get("line.earth_return.x0_nonnegative")
             if guard:
                 x0_h = max(x0_h, 0.0)
-        z0_h = complex(r0_cond * m0 + r_earth, x0_h)
+        z0_h = complex(r0_phase * m1 + (r0_cond - r0_phase) + r_earth, x0_h)
         z_self, z_mut = (z0_h + 2.0 * z1_h) / 3.0, (z0_h - z1_h) / 3.0
         return np.where(np.eye(3, dtype=bool), z_self, z_mut)
 

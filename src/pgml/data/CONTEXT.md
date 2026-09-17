@@ -155,6 +155,10 @@ requires an env var to be set.
   `convert/pandapower/converter.py`: `branch.near_ideal_series_resistance_ohm` /
   `branch.switch_model`.
 
-The default X0 law is `carson_sublinear`, guarded by `x0_nonnegative=true`.
-OpenDSS conformance selects the unguarded law and its geometry band rule.
+The default X0 law is `linear` (exact for a metallic return, safe for a ratio-derived
+X0). `carson_sublinear` is the option for overhead lines whose stored X0 contains the
+deep-earth term; it is guarded by `x0_nonnegative=true`, and assembly warns once with the
+affected line count when the law exhausts X0(h). The `opendss` preset selects the
+unguarded sub-linear law, the geometry band rule, no skin correction and the `inductive`
+load-shunt reactance.
 `LineGeometry.internal_inductance` overrides the global geometry model per line.

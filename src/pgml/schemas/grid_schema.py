@@ -648,7 +648,7 @@ class EarthReturnModel(GridModel):
     return enters the zero sequence only (it cancels in the positive sequence), and
     every form below reproduces the stored ``R0``/``X0`` exactly at ``f0``::
 
-        R0(h) = R0_conductor * m_skin(h) + 3 * (Re(h*f0) - Re_offset)
+        R0(h) = R1 * m_skin(h) + (R0_conductor - R1) + 3 * (Re(h*f0) - Re_offset)
         X0(h) = X0 * h**x0_exponent  [- 1.5 * kx * f0 * h * ln(h)  if carson_sublinear]
 
     with ``Re(f) = resistance_coeff_ohm_per_m_per_hz * f`` (Carson's geometry-
@@ -657,7 +657,9 @@ class EarthReturnModel(GridModel):
     ``R0_conductor = R0 - 3*Re(f0)``, ``Re_offset = 0`` (the stored ``R0`` is real
     zero-sequence data that already contains the earth return) or, when false,
     ``R0_conductor = R0``, ``Re_offset = Re(f0)`` (the stored ``R0`` is a
-    conductor-only value, e.g. one synthesised from an ``R0/R1`` ratio).
+    conductor-only value, e.g. one synthesised from an ``R0/R1`` ratio). The skin
+    multiplier is the phase conductor's (fitted to ``R1``) and scales its share ``R1``
+    of ``R0_conductor``; the return-path remainder is held constant.
 
     Consumed by the ``sequence_aware`` model only (``pgml.geometry.sequence``);
     setting it on a line with another ``harmonic_line_model`` is rejected.
@@ -681,12 +683,14 @@ class EarthReturnModel(GridModel):
     x0_frequency: Optional[Literal["linear", "carson_sublinear"]] = Field(
         default=None,
         description="Frequency law of the zero-sequence REACTANCE. ``linear``: "
-        "``X0(h) = X0*h`` (geometric scaling; the earth-return reactance "
-        "sub-linearity is left to the conductor-geometry path). "
+        "``X0(h) = X0*h`` (geometric scaling; right for a cable or 4-wire line whose "
+        "residual current returns in metal, and for an ``X0`` derived from a ratio). "
         "``carson_sublinear``: additionally subtract the Carson/Deri earth-return "
         "reactance decay ``1.5*kx*f0*h*ln(h)``, which is geometry- and "
         "soil-resistivity-independent and reproduces OpenDSS's ``Xg`` frequency "
-        "correction. None = modeling default.",
+        "correction. It presumes a stored ``X0`` that contains the deep-earth "
+        "return reactance (an overhead line with real zero-sequence data). "
+        "None = modeling default (``linear``).",
     )
     x0_nonnegative: Optional[bool] = Field(
         default=None,
@@ -698,8 +702,8 @@ class EarthReturnModel(GridModel):
     x0_exponent: Optional[Num] = si_field(
         "Exponent of the zero-sequence reactance scaling ``X0(h) = X0*h**p``. "
         "1.0 = geometric. Values below 1 mimic a sub-linear earth-return reactance "
-        "empirically; prefer ``x0_frequency='carson_sublinear'`` for the physical "
-        "form. None = modeling default.",
+        "empirically; ``x0_frequency='carson_sublinear'`` is the physically derived "
+        "form for an overhead line. None = modeling default.",
         short="1",
         long="exponent",
         default=None,

@@ -34,16 +34,27 @@ def test_preset_fallback_nesting_and_exception_restore():
         pass
 
 
-def test_carson_guard_and_runtime_preset():
+def test_earth_return_law_default_guard_and_runtime_preset():
+    """Shipped law is linear; the OpenDSS preset selects the unguarded sub-linear law."""
     f = torch.tensor([50.0, 250.0, 1250.0], dtype=torch.float64)
-    args = (0.648e-3, 0.1662e-3, 50.0, f)
-    guarded = zero_sequence_harmonic_z(*args, skin=False)
+    x0 = 0.1662e-3  # a cable-like X0, far below the deep-earth reactance
+    args = (0.648e-3, x0, 50.0, f)
+    shipped = zero_sequence_harmonic_z(*args, skin=False)
+    guarded = zero_sequence_harmonic_z(
+        *args, skin=False, x0_frequency="carson_sublinear"
+    )
     with defaults.use_preset("opendss"):
+        assert defaults.get("line.earth_return.x0_frequency") == "carson_sublinear"
         unguarded = zero_sequence_harmonic_z(*args, skin=False)
-    assert guarded[0] == unguarded[0]
+    assert defaults.get("line.earth_return.x0_frequency") == "linear"
+    assert defaults.get("line.earth_return.x0_nonnegative") is True
+    # Linear law: X0(h) = h * X0 at every order.
+    torch.testing.assert_close(shipped.imag, x0 * f / 50.0, rtol=1e-14, atol=0.0)
+    assert guarded[0] == unguarded[0] == shipped[0]
     assert unguarded[-1].imag < 0
     assert guarded[-1].imag == 0
     torch.testing.assert_close(guarded.real, unguarded.real)
+    torch.testing.assert_close(shipped.real, unguarded.real)
 
 
 def test_public_carson_helpers_resolve_runtime_preset_and_preserve_explicit_args():

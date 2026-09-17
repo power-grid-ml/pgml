@@ -559,8 +559,8 @@ results are never read as more physical than they are. Details live in `docs/pgm
   Carson values at 60 Hz in Ω per 1000 ft and are reinterpreted in the line's `units`, so
   on a metric line they are ≈3.28× smaller than pgml's physical default. The sub-linear
   X0 law is available as `line.earth_return.x0_frequency: carson_sublinear` (off by
-  default: it can drive X0 negative above h ≈ 30 for a cable whose stored X0 is small,
-  exactly as OpenDSS does). Supply conductor geometry when the zero-sequence earth return
+  default: it presumes a stored X0 that contains the deep-earth term, and exhausts the
+  X0 of an LV cable near h ≈ 13; assembly warns when that happens). Supply conductor geometry when the zero-sequence earth return
   must be right (`docs/pgml/modeling/harmonic-line-model.md`).
 - **Missing zero-sequence line data** is invented with global overhead-line ratios
   (R0/R1=4, X0/X1=3, C0/C1=0.5 — `data/defaults.yaml`); weak for cables. The converters

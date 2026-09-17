@@ -679,11 +679,13 @@ def _sequence_aware_block_groups(
     model an asymmetric 4-wire study needs. Differentiable in R/L; the shunt ``C`` keeps
     the usual ``B∝h`` split.
     """
-    from pgml.geometry.sequence import sequence_aware_phase_z
+    from pgml.geometry.sequence import sequence_aware_phase_z, x0_sublinear_deficit
 
     f0 = float(grid.base_frequency_hz)
     two_pi_f0 = 2.0 * math.pi * f0
     two_pi_f = (2.0 * torch.pi) * f  # [H]
+    deficit_ids: list[str] = []
+    deficit_guarded = True
 
     # Group by the DISCRETE model options (skin flag, reactance law, R0 convention) so
     # each batched call shares them; the numeric earth coefficients stay per line and
@@ -731,6 +733,17 @@ def _sequence_aware_block_groups(
         zm = (z_f0.sum((-2, -1)) - diag.sum(-1)) / 6.0  # [K] mutual (6 off-diagonals)
         z1 = zs - zm  # [K]
         z0 = zs + 2.0 * zm
+        if x0_frequency == "carson_sublinear":
+            deficit = x0_sublinear_deficit(
+                z0.imag,
+                f0,
+                f,
+                earth_reactance_coeff=coeff_x,
+                x0_exponent=x0_exponent,
+            ).any(-1)  # [K]
+            hit = [ln.id for ln, d in zip(group, deficit.tolist()) if d]
+            deficit_ids.extend(hit)
+            deficit_guarded = deficit_guarded and (x0_nonnegative or not hit)
         z_abc = sequence_aware_phase_z(
             z1.real,
             z1.imag,
@@ -761,6 +774,41 @@ def _sequence_aware_block_groups(
         block = series_block + shunt_block
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
+    _warn_x0_sublinear_deficit(deficit_ids, len(lines), guarded=deficit_guarded)
+
+
+#: Line sets already reported by :func:`_warn_x0_sublinear_deficit`, so that the
+#: per-scenario and per-order assemblies of one study log the condition once.
+_X0_DEFICIT_REPORTED: set[tuple] = set()
+
+
+def _warn_x0_sublinear_deficit(line_ids, n_lines: int, *, guarded: bool) -> None:
+    """Warn once per affected line set that ``carson_sublinear`` exhausted ``X0(h)``.
+
+    The law subtracts the frequency decay of a deep-earth return from the stored
+    ``X0``. Where the result is negative the stored ``X0`` never contained that earth
+    term (a cable, or an ``X0`` derived from an ``X0/X1`` ratio), and the requested
+    orders are assembled with a zero (guard on) or negative (guard off) zero-sequence
+    reactance.
+    """
+    if not line_ids:
+        return
+    key = (tuple(sorted(line_ids)), guarded)
+    if key in _X0_DEFICIT_REPORTED:
+        return
+    _X0_DEFICIT_REPORTED.add(key)
+    _log.warning(
+        "pgml: x0_frequency='carson_sublinear' leaves no zero-sequence reactance on "
+        "%d of %d sequence-aware line(s) within the requested frequencies; X0(h) is "
+        "%s there. The law presumes a stored X0 that contains the deep-earth return "
+        "reactance (an overhead line); a cable or an X0 derived from an X0/X1 ratio "
+        "does not. Use line.earth_return.x0_frequency='linear' (the default) for "
+        "these lines, or give them a conductor_geometry. First affected: %s.",
+        len(line_ids),
+        n_lines,
+        "clamped at zero" if guarded else "NEGATIVE (x0_nonnegative is off)",
+        sorted(line_ids)[:5],
+    )
 
 
 def _geom_scalar(v, rdt: torch.dtype, device) -> Tensor:
