@@ -153,9 +153,14 @@ class HarmonicFlowResult:
         The compact :class:`NodePhaseIndex` describing the row layout of ``v``.
     pf:
         The fundamental :class:`PowerFlowResult` (convergence info + order-1 V). The
-        harmonic orders are direct linear solves, so all convergence telemetry —
-        :attr:`converged`, :attr:`converged_mask`, :attr:`failed_states` — comes from
-        the fundamental and is re-exposed here for convenience.
+        harmonic orders are direct linear solves without an iteration, so
+        :attr:`converged`, :attr:`converged_mask` and :attr:`failed_states` combine the
+        fundamental's verdict with :attr:`harmonic_finite`.
+    harmonic_finite:
+        Bool ``[*batch]``: ``True`` where every solved voltage of the scenario is
+        finite. A batched LU factorization does not raise on a singular ``Y(h)`` (an
+        exact resonance, an island the gates did not see); it returns ``inf`` / ``nan``.
+        Such a scenario is reported as failed instead of being returned silently.
     fusion:
         The :class:`~pgml.assembly.FusionMap` the solve collapsed zero-impedance
         branches with, else ``None``. ``v`` and ``index`` are the grid's FULL row
@@ -167,21 +172,38 @@ class HarmonicFlowResult:
     index: NodePhaseIndex
     pf: PowerFlowResult
     fusion: Optional[FusionMap] = None
+    harmonic_finite: Optional[Tensor] = None
 
     @property
     def converged(self) -> bool:
-        """``True`` iff every scenario's fundamental solve converged."""
-        return self.pf.converged
+        """``True`` iff every scenario's fundamental converged and ``v`` is finite."""
+        finite = self.harmonic_finite
+        return self.pf.converged and (finite is None or bool(finite.all()))
 
     @property
     def converged_mask(self):
-        """Per-scenario convergence flags (``None`` if unbatched); see PowerFlowResult."""
-        return self.pf.converged_mask
+        """Per-scenario flags: fundamental converged AND every order finite.
+
+        ``None`` for an unbatched solve. The shape is the fundamental's batch shape; a
+        deeper harmonic-injection batch is reduced onto it (all of its steps finite).
+        """
+        mask = self.pf.converged_mask
+        finite = self.harmonic_finite
+        if finite is None or finite.ndim == 0:
+            return mask
+        if mask is None:
+            return finite
+        return mask & finite.reshape(*mask.shape, -1).all(-1).to(mask.device)
 
     @property
     def failed_states(self) -> tuple[int, ...]:
-        """Flat indices of scenarios whose fundamental solve did not converge."""
-        return self.pf.failed_states
+        """Flat indices of the scenarios :attr:`converged_mask` marks as failed."""
+        if self.harmonic_finite is None:
+            return self.pf.failed_states
+        mask = self.converged_mask
+        if mask is None:
+            return ()
+        return tuple(i for i, ok in enumerate(mask.reshape(-1).tolist()) if not ok)
 
 
 @dataclass(frozen=True)
@@ -565,8 +587,51 @@ def solve_harmonic_flow(
     cols = [c.broadcast_to(*bshape, n) for c in cols]
     v = torch.stack(cols, dim=-2)  # [*batch, H, N]
     frequencies_hz = torch.as_tensor([h * f0 for h in orders], dtype=rdt, device=device)
+    harmonic_finite = _finite_scenarios(v)
+    _report_non_finite(harmonic_finite, pf)
     return HarmonicFlowResult(
-        v=v, frequencies_hz=frequencies_hz, index=index, pf=pf, fusion=fusion
+        v=v,
+        frequencies_hz=frequencies_hz,
+        index=index,
+        pf=pf,
+        fusion=fusion,
+        harmonic_finite=harmonic_finite,
+    )
+
+
+def _finite_scenarios(v: Tensor) -> Tensor:
+    """Bool ``[*batch]``: every order and row of the scenario is finite (no sync)."""
+    return torch.isfinite(v).all(dim=-1).all(dim=-1)
+
+
+def _report_non_finite(harmonic_finite: Tensor, pf: PowerFlowResult) -> None:
+    """Log the scenarios whose harmonic solution is not finite (one host sync).
+
+    Mirrors the fundamental's reporting: a batched solve returns every scenario and
+    names the failed ones instead of raising. Scenarios whose fundamental already
+    failed are left to that report.
+    """
+    with torch.no_grad():
+        bad = ~harmonic_finite
+        mask = pf.converged_mask
+        if mask is not None and bad.ndim >= mask.ndim and bad.ndim > 0:
+            shape = (*mask.shape, *(1,) * (bad.ndim - mask.ndim))
+            bad = bad & mask.to(bad.device).reshape(shape)
+        if not bool(bad.any()):
+            return
+        failed = torch.nonzero(bad.reshape(-1)).reshape(-1).tolist()
+    shown = ", ".join(str(i) for i in failed[:20])
+    more = "" if len(failed) <= 20 else f", … (+{len(failed) - 20})"
+    _log.error(
+        "solve_harmonic_flow: %d/%d scenario(s) have a NON-FINITE harmonic solution "
+        "although the fundamental converged; they are reported as failed "
+        "(converged_mask / failed_states). A harmonic system Y(h) is singular there, "
+        "e.g. an undamped resonance exactly at a solved order or a part of the grid "
+        "without a path to a source at that order. Failed indices: [%s%s]",
+        len(failed),
+        max(1, bad.numel()),
+        shown,
+        more,
     )
 
 
@@ -842,6 +907,7 @@ def _expand_zeroed_harmonic_result(
         index=full_index,
         pf=_expand_zeroed_result(grid, res.pf, fusion),
         fusion=fusion,
+        harmonic_finite=res.harmonic_finite,
     )
 
 

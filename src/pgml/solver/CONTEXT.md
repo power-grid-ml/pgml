@@ -409,8 +409,13 @@ verified empirically). New orchestration:
   - `HarmonicFlowResult` (frozen dataclass): `v` complex `[*batch, H, N]` (V per
     order; **order 1 = the nonlinear `solve_power_flow` solution**, other orders =
     the linear per-harmonic solve), `frequencies_hz [H]`, `index`, `pf`
-    (the fundamental `PowerFlowResult`). Convergence properties `converged` /
-    `converged_mask` / `failed_states` re-expose `pf`'s (the harmonics are direct solves).
+    (the fundamental `PowerFlowResult`), `harmonic_finite` bool `[*batch]` (every
+    solved voltage of the scenario is finite; computed without a host sync). The
+    harmonics are direct solves and a batched LU does not raise on a singular `Y(h)`, so
+    `converged` / `converged_mask` / `failed_states` combine `pf`'s verdict with
+    `harmonic_finite` (a deeper injection batch is reduced onto the fundamental's batch
+    shape), and a non-finite scenario is logged at ERROR with its index (one sync at the
+    end of the solve).
   - DIFFERENTIABLE end to end (network params, load P/Q, AND harmonic injections)
     and BATCHED over scenario dims, same conventions as `solve_power_flow`.
   - A per-scenario `operating_point` (`[B]`) combined with a DEEPER-batched
