@@ -278,6 +278,12 @@ above, and the one the harmonic solver uses). Internal API:
 `resolve_harmonic_shunt(appliance, model) -> ResolvedHarmonicShunt` (device override >
 run-level model > defaults file; `"none"` at run level wins over every device, which is
 OpenDSS's global `NeglectLoadY`),
+`REACTIVE_ELEMENT_LAWS = ("sign_aware", "inductive")` +
+`resolve_reactive_element_law(law) -> str` (`None` -> `appliance.harmonic_shunt
+.reactive_element`, shipped `sign_aware`: a leading device's reactive part scales as a
+capacitance, `h·B` parallel and `X/h` series, the same law as the const-Z fold;
+`inductive` is OpenDSS's R-L treatment of either sign and is what the `opendss` preset
+selects; `harmonic_shunt_element_admittance(..., reactive_element=None)` resolves it),
 `SHUNT_BASES = ("operating_point", "nameplate")` +
 `resolve_shunt_basis(basis) -> str` (`None` -> the modeling default
 `appliance.harmonic_shunt.basis`, shipped `operating_point`: the shunt is built from the

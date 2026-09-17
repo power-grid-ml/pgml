@@ -313,3 +313,33 @@ def test_gradcheck_on_the_nameplate_basis():
         atol=1e-6,
         rtol=1e-4,
     )
+
+
+def test_gradcheck_element_admittance_across_the_reactive_sign():
+    """The sign-aware reactive law is differentiable in P and Q on both sides of Q = 0.
+
+    The lagging / leading split is built from ``clamp``, so the element admittance has
+    a finite gradient for an inductive, a capacitive and a mixed batch of devices.
+    """
+    from pgml.assembly._load_shunt import harmonic_shunt_element_admittance
+
+    rdt = torch.float64
+    h = torch.tensor([5.0, 13.0], dtype=rdt)
+    ones = torch.ones(3, 1, dtype=rdt)
+
+    def fn(p, q):
+        y = harmonic_shunt_element_admittance(
+            torch.complex(p, q),
+            400.0 * ones,
+            h,
+            0.5 * ones,
+            motor_x_pu=0.0 * ones,
+            motor_xr=ones,
+            motor_s_base=ones,
+            cdtype=CDT,
+        )
+        return torch.view_as_real(y)
+
+    p = torch.tensor([[10e3], [8e3], [12e3]], dtype=rdt, requires_grad=True)
+    q = torch.tensor([[5e3], [-5e3], [-1e3]], dtype=rdt, requires_grad=True)
+    assert torch.autograd.gradcheck(fn, (p, q), eps=1e-3, atol=1e-7)

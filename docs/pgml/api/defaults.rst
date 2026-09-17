@@ -107,9 +107,11 @@ reference comparisons:
     ``transformer.zero_sequence.*`` are the other two transformer model choices; see
     :doc:`/pgml/modeling/transformer`.
 
-``appliance.harmonic_shunt.model`` / ``.generation_model``
-    The harmonic device Norton shunt, ``opendss`` (shipped) / ``motor`` / ``none``, and the
-    separate policy for a generation-sign device, shipped as ``none``.
+``appliance.harmonic_shunt.model`` / ``.generation_model`` / ``.reactive_element``
+    The harmonic device Norton shunt, ``opendss`` (shipped) / ``motor`` / ``none``, the
+    separate policy for a generation-sign device, shipped as ``none``, and how the
+    reactive part scales with the order: ``sign_aware`` (shipped, a leading device is a
+    capacitance) or ``inductive`` (OpenDSS's R-L treatment of either sign).
 
 ``appliance.generator.enforce_q_limits``
     Whether a voltage-regulating generator's reactive limits bound its output; shipped

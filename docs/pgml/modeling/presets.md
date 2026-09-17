@@ -24,13 +24,15 @@ changing models.
 
 Each YAML file in `pgml/data/presets/` lists only the supported reference overrides.
 Unlisted settings retain the active pgml defaults; explicit fields already stored on
-a component take precedence. A preset does not rewrite existing grids, emulate every
+a component take precedence. The converters store no line-model option on a line unless
+the caller passes one, so the skin correction and the earth-return law of a converted grid
+follow the preset that is active when the grid is assembled. A preset does not rewrite existing grids, emulate every
 reference feature, or change an external solver's configuration.
 
 | Preset | Overrides and scope |
 |---|---|
-| `pgml` | Internal defaults: split magnetizing shunt, guarded sub-linear Carson reactance, GMR internal inductance, ideal converter switches |
-| `opendss` | Last/to-terminal magnetizing shunt; GMR/Bessel frequency-band rule; unguarded sub-linear Carson law; no skin correction on lumped R/X lines |
+| `pgml` | Internal defaults: split magnetizing shunt, linear zero-sequence reactance, skin correction on lumped R/X lines, GMR internal inductance, sign-aware load-shunt reactance, ideal converter switches |
+| `opendss` | Last/to-terminal magnetizing shunt; GMR/Bessel frequency-band rule; unguarded sub-linear Carson law for the zero-sequence reactance; no skin correction on lumped R/X lines; load shunt treated as R-L whatever the sign of Q |
 | `power-grid-model` | Split magnetizing shunt; unsupported harmonic settings retain pgml defaults |
 | `pandapower` | Split magnetizing shunt for a comparison using pandapower's `trafo_model="pi"`; pandapower's default T equivalent remains a distinct model |
 

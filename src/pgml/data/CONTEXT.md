@@ -37,9 +37,11 @@ requires an env var to be set.
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
   `docs/pgml/modeling/asymmetric.md`.
 - `appliance.harmonic_shunt.{model, series_rl_fraction, motor_x_harm_pu, motor_xr_harm,
-  basis, generation_model}` — the harmonic device Norton shunt every injection appliance carries
-  at orders `h > 1` (`none` / `opendss` / `motor`; `opendss` is the shipped value and
-  OpenDSS's own). `generation_model` (shipped `none`) is the separate policy for a
+  reactive_element, basis, generation_model}` — the harmonic device Norton shunt every
+  injection appliance carries at orders `h > 1` (`none` / `opendss` / `motor`; `opendss`
+  is the shipped value and OpenDSS's own). `reactive_element` (shipped `sign_aware`)
+  scales a leading device's reactive part as a capacitance, like the const-Z fold;
+  `inductive` is OpenDSS's R-L treatment of either sign (the `opendss` preset). `generation_model` (shipped `none`) is the separate policy for a
   GENERATION-sign device: the load expression's conductance is negative for an injecting
   device, so a Generator / Storage stays a pure current source unless this is set to
   `load_style` or the device names the `motor` model. Resolved by

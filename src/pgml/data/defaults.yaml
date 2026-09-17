@@ -82,8 +82,8 @@ appliance:
         and OpenDSS's own: `NeglectLoadY=No` with `%SeriesRL=50`) splits the
         operating-point admittance Yeq = conj(S)/V_rated^2 into a PARALLEL R-L
         branch (1-s)Re(Yeq) + j(1-s)Im(Yeq)/h and a SERIES R-L branch
-        1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction`,
-        reproducing OpenDSS's own default (`NeglectLoadY=No`, `%SeriesRL=50`). `motor`
+        1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction`
+        (for a leading device the reactive parts follow `reactive_element`). `motor`
         keeps the parallel branch and replaces the series branch by a fixed blocked-rotor
         reactance (`motor_x_harm_pu`, `motor_xr_harm`), OpenDSS's `puXharm`. `none` = a
         PURE current source with no shunt at any order, identical to OpenDSS
@@ -115,6 +115,23 @@ appliance:
       description: >
         X/R of the `motor` model's series reactance at the fundamental (OpenDSS
         `XRharm`, same default), i.e. Zs = X/xr + jX before the order scaling.
+    reactive_element:
+      value: sign_aware
+      units: "enum{sign_aware, inductive}"
+      description: >
+        How the reactive part of the P,Q-derived shunt scales with the harmonic order.
+        `sign_aware` (the default) scales it as the element it is at the operating
+        point. A lagging device (Q > 0) is an inductance: the parallel susceptance goes
+        as B/h and the series reactance as h*X. A leading device (Q < 0, common for
+        electronic loads and compensated installations) is a capacitance: B*h and X/h.
+        This is the law the const-Z fold of the fundamental assembly uses, so both load
+        representations agree. `inductive` applies B/h and h*X whatever the sign of Q,
+        which is what OpenDSS computes (checked on a live YPrim of a load with negative
+        kvar); a leading device then becomes a negative inductance, with the
+        susceptance sign of a capacitor and the frequency slope of an inductor. The two
+        laws are identical for Q >= 0 and at h = 1. At order 5, s = 0.5 and power
+        factor 0.89 leading, `inductive` gives 0.037 + j0.017 S where `sign_aware` gives
+        0.070 + j0.082 S (10 kW, 400 V). The `opendss` preset selects `inductive`.
     basis:
       value: operating_point
       units: "enum{operating_point, nameplate}"
