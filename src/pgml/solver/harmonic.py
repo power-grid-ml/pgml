@@ -1356,8 +1356,8 @@ def lu_factor_system(
     is ~O(N) where dense LU is O(N³)) and the batched dense ``torch.linalg.lu_factor``
     everywhere else (CUDA is ALWAYS dense — torch has no batched sparse direct solve);
     ``"dense"`` / ``"sparse"`` / ``"block"`` force the choice. Every backend is
-    differentiable (dense and block through the torch ops, sparse through the adjoint
-    :class:`_SparseSolveFn`).
+    differentiable (dense and block through the torch ops, sparse through an explicit
+    linear-solve adjoint).
 
     ``backend="block"`` factors a BLOCK-DIAGONAL system one diagonal block at a time
     and needs ``block_rows``: one int64 row-index tensor per block, together
@@ -1381,7 +1381,7 @@ def lu_factor_system(
     factorization and back-substitution in single precision, which is the dominant cost
     of a large dense solve (and of every CUDA solve, where double precision runs at a
     fraction of the single-precision rate). Gradients flow through the exact linear-solve
-    adjoint (:class:`_MixedPrecisionSolveFn`), so the refined solve is differentiable
+    adjoint, so the refined solve is differentiable
     w.r.t. the matrix and the right-hand side at the working precision; the block
     backend keeps only its diagonal blocks and therefore refuses a mixed-precision
     factorization of a matrix that requires grad.
@@ -1653,8 +1653,7 @@ def solve_factored(
     :func:`lu_factor_system`). Identical result to :func:`solve_harmonic` with the same
     ``Y`` / slack mode; only the factorization is reused. Returns ``[*batch, N]`` (the
     leading dims broadcast ``i_inj`` against the factorization). The scenario batch is
-    solved as MULTIPLE right-hand sides of the one shared factorization
-    (:func:`_lu_solve_shared`), so the dense ``Y`` is never tiled across the batch. The
+    solved as MULTIPLE right-hand sides of the one shared factorization, so the dense ``Y`` is never tiled across the batch. The
     ``"block"`` backend does the same per diagonal block, gathering / scattering each
     block's entries of the right-hand side around its own batched back-substitution."""
     if fac.mode == "norton":

@@ -23,6 +23,11 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   - `equilibrate`: `None` (the documented default `solver.equilibration.mode`) /
     `"symmetric"` / `"off"` / a bool — the diagonal equilibration applied
     around the factorization (see EQUILIBRATION below). Invisible in the result.
+- `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
+  precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`,
+  `solve_factored(fac, i_inj, *, v_fixed=None) -> v`, `FactoredSystem` and
+  `estimate_condition` are exported from `pgml.solver` (the factor-once, solve-many form
+  of `solve_harmonic`; implemented in `pgml.solver.harmonic`).
 - `solve_anchored(y_bus, i_inj, *, row_weight=None, row_target=None, op=None,
   op_weight=None, op_target=None, fixed_rows=None, v_fixed=None) -> v` — MEASUREMENT-ANCHORED
   (over-determined) network solve: `min_V ‖Y·V−I‖² + Σ w_r|V_r−t_r|² + Σ w_k|(op·V)_k−t_k|²`

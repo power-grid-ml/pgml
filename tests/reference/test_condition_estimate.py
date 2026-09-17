@@ -93,3 +93,22 @@ def test_failing_condition_estimate_does_not_fail_the_solve(monkeypatch, caplog)
         power_flow._COMPLEX64_COND_CHECKED = False
     assert result.converged
     assert "conditioning check skipped" in caplog.text
+
+
+def test_factor_once_api_is_exported_from_the_solver_package():
+    import pgml.solver as solver
+    from pgml.solver import harmonic
+
+    for name in (
+        "lu_factor_system",
+        "solve_factored",
+        "FactoredSystem",
+        "estimate_condition",
+    ):
+        assert name in solver.__all__
+        assert getattr(solver, name) is getattr(harmonic, name)
+
+    a = _systems()[0]
+    b = torch.ones(a.shape[-1], dtype=a.dtype)
+    x = solver.solve_factored(solver.lu_factor_system(a), b)
+    assert torch.allclose(a @ x, b, atol=1e-10)
