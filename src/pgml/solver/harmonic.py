@@ -28,7 +28,7 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 import torch
 from torch import Tensor
@@ -1164,7 +1164,9 @@ class _MixedPrecisionSolveFn(torch.autograd.Function):
         return grad_y, grad_rhs, None
 
 
-def estimate_condition(fac: "FactoredSystem", *, iters: int = 5) -> float:
+def estimate_condition(
+    fac: "FactoredSystem", *, iters: int = 5, per_matrix: bool = False
+) -> Union[float, Tensor]:
     """Estimated 1-norm condition number of the factored matrix (a LOWER bound).
 
     ``cond_1(A) = ‖A‖_1 ‖A⁻¹‖_1`` with ``‖A⁻¹‖_1`` from Hager's power method: starting
@@ -1180,32 +1182,40 @@ def estimate_condition(fac: "FactoredSystem", *, iters: int = 5) -> float:
     For the condition number of the matrix as assembled, factor it with
     ``equilibrate="off"``.
 
-    Returns ``inf`` for a singular factorization and ``nan`` when the factored matrix is
-    not available as a tensor (the block backend keeps only its diagonal blocks).
+    A BATCHED factorization (one matrix per harmonic order, switch state or scenario)
+    is estimated per matrix, each with its own norm and its own probe vectors, in one
+    batched pass. The default return value is the WORST case over the batch as a Python
+    ``float`` (one host synchronisation); ``per_matrix=True`` returns the estimates as a
+    real tensor shaped like the factorization's leading batch dims, on its device,
+    without synchronising.
+
+    An entry is ``inf`` for a singular factorization. The result is ``nan`` when the
+    factored matrix is not available as a tensor (the block backend keeps only its
+    diagonal blocks). A diagnostic: no autograd.
     """
     if fac.y_mat is None:
-        return float("nan")
+        return torch.full((), float("nan")) if per_matrix else float("nan")
     with torch.no_grad():
-        a = fac.y_mat.reshape(-1, fac.y_mat.shape[-1], fac.y_mat.shape[-1])[0]
+        a = fac.y_mat
         m = a.shape[-1]
-        norm_a = float(a.abs().sum(dim=-2).max())  # max absolute column sum
-        x = torch.full((m,), 1.0 / m, dtype=a.dtype, device=a.device)
-        norm_inv = 0.0
+        fb = a.shape[:-2]
+        norm_a = a.abs().sum(dim=-2).amax(dim=-1)  # [*fb] max absolute column sum
+        x = torch.full((*fb, m), 1.0 / m, dtype=a.dtype, device=a.device)
+        norm_inv = torch.zeros_like(norm_a)
         for _ in range(max(1, iters)):
-            y = _refined_solve(fac, x)
-            norm_y = float(y.abs().sum())
-            norm_inv = max(norm_inv, norm_y / max(float(x.abs().sum()), 1e-300))
-            if not math.isfinite(norm_y) or norm_y == 0.0:
-                break
+            y = _refined_solve(fac, x)  # [*fb, m]; every probe has unit 1-norm
+            norm_inv = torch.maximum(norm_inv, y.abs().sum(dim=-1))
             # Hager's next probe: the unit-phase pattern of the current iterate pushed
             # through the adjoint solve (a subgradient of the 1-norm), then the unit
             # vector of its largest entry — whose image is a column of A^-1.
-            xi = y / y.abs().clamp_min(1e-300)
+            xi = y / y.abs().clamp_min(torch.finfo(y.real.dtype).tiny)
             z = _refined_solve(fac, xi, adjoint=True)
-            j = int(z.abs().argmax())
-            x = torch.zeros_like(x)
-            x[j] = 1.0
-        return norm_a * norm_inv
+            j = z.abs().nan_to_num(nan=0.0).argmax(dim=-1, keepdim=True)
+            x = torch.zeros_like(x).scatter(-1, j, 1.0)
+        cond = norm_a * norm_inv
+        # A singular factorization back-substitutes to inf / nan; report it as inf.
+        cond = torch.where(torch.isfinite(cond), cond, torch.full_like(cond, math.inf))
+        return cond if per_matrix else float(cond.max())
 
 
 @dataclass

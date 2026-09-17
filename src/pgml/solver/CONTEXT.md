@@ -876,9 +876,12 @@ precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`
 - All three backends work: dense (`torch.linalg.lu_factor/lu_solve` with `adjoint=`),
   scipy SuperLU (`trans="H"`), block-diagonal (per-bucket `lu_solve`, `_BlockLU.apply`
   for the residual matvec).
-- `estimate_condition(fac, *, iters=5) -> float`: 1-norm condition estimate from the
-  cached factorization (Hager's power method; a lower bound, `nan` for the block backend
-  which holds no single matrix). Used for the one-time complex64 warning; measured
+- `estimate_condition(fac, *, iters=5, per_matrix=False) -> float | Tensor`: 1-norm
+  condition estimate from the cached factorization (Hager's power method; a lower bound,
+  `nan` for the block backend which holds no single matrix, `inf` for a factorization
+  that back-substitutes to non-finite values). A batched factorization is estimated per
+  matrix in one batched pass; the default returns the worst case as a float (one host
+  sync), `per_matrix=True` the `[*fb]` tensor without a sync. Used for the one-time complex64 warning; measured
   against `torch.linalg.cond` within a factor of 1.7 on real feeders. It describes the
   matrix AS FACTORED, i.e. the EQUILIBRATED one unless `equilibrate="off"` — that is the
   conditioning the factorization actually sees, and it is what the precision decision

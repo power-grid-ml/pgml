@@ -291,14 +291,23 @@ def _warn_complex64_conditioning(fac, rdt: torch.dtype) -> None:
     ~1.7e4 to 5.5e4, decades higher with a stiff source or a near-ideal switch). The
     estimate runs against the factorization the solve already built
     (:func:`~pgml.solver.harmonic.estimate_condition`), ONCE per process, and the
-    threshold is the documented ``solver.precision.complex64_cond_warn``.
+    threshold is the documented ``solver.precision.complex64_cond_warn``. A batched
+    factorization is judged by its worst matrix. The check is a diagnostic: an estimate
+    that cannot be formed is skipped and never fails the solve.
     """
     global _COMPLEX64_COND_CHECKED
     if _COMPLEX64_COND_CHECKED or rdt != torch.float32 or fac.precision != "full":
         return
     _COMPLEX64_COND_CHECKED = True
     limit = float(defaults.get("solver.precision.complex64_cond_warn"))
-    cond = estimate_condition(fac)
+    # A low-rank-updated system is judged by its base factorization; what the update
+    # adds to the rounding is reported separately (``LowRankUpdate.amplification``).
+    base = fac.fac if isinstance(fac, LowRankUpdate) else fac
+    try:
+        cond = estimate_condition(base)  # worst case over a batched factorization
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail the solve
+        _log.debug("solve_power_flow: complex64 conditioning check skipped (%s).", exc)
+        return
     if not math.isfinite(cond) or cond <= limit:
         return
     _log.warning(
