@@ -39,8 +39,11 @@ def test_ar1_rejects_invalid_shape_and_device_mismatch() -> None:
         ar1_noise((2, 3), torch.empty(2, device="meta"), torch.Generator())
 
 
-def test_relocated_learning_recipe_names_importable_pgl_path() -> None:
+def test_removed_recipe_names_explain_themselves() -> None:
     import pgml.scenarios as scenarios
 
-    with pytest.raises(ImportError, match=r"pgl\.data\.scenarios"):
-        scenarios.CoherentSpectrumConfig
+    for name in ("CoherentSpectrumConfig", "affine_emission_correction"):
+        with pytest.raises(ImportError, match="scenario recipe"):
+            getattr(scenarios, name)
+    with pytest.raises(ImportError, match=r"pgml\.dispatch"):
+        scenarios.dispatch_storage
