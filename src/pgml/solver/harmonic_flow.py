@@ -268,7 +268,11 @@ def solve_harmonic_flow(
         current-injection fixed point can oscillate. The convergence tolerances are
         PER UNIT (power mismatch / voltage update) and apply to the nonlinear
         fundamental only: every harmonic order is a direct linear solve with no
-        iteration and therefore no convergence criterion of its own.
+        iteration and therefore no convergence criterion of its own. ``tol`` is a
+        power tolerance on the base ``s_base_va`` and not a voltage tolerance; what
+        voltage accuracy the pair gives, and how to tighten it, is described at
+        :func:`solve_power_flow`. The harmonic sources scale with the fundamental
+        currents, so the harmonic voltages inherit the fundamental's relative accuracy.
         ``enforce_q_limits`` bounds a voltage-regulating generator's reactive power
         (``None`` -> the documented default); regulation is a fundamental-frequency
         concept, so it has no effect on the harmonic orders, where such a machine is

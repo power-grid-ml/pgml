@@ -42,8 +42,9 @@ Semantics to be aware of
   (identical ``types`` entries may repeat across members; conflicting definitions under
   one name raise).
 - Convergence is evaluated on the union state vector: the fixed-point iteration advances
-  all members together and the absolute ``tol`` applies to the concatenated update norm,
-  so one hard member keeps iterating an already-settled easy member (cheap — the extra
+  all members together and both per-unit criteria (``tol``, ``tol_update_pu``) are maxima
+  over the rows of the union, so the verdict does not depend on the member count and one
+  hard member keeps iterating an already-settled easy member (cheap — the extra
   iterations are back-substitutions). Per-scenario ``converged_mask`` semantics are
   unchanged.
 - The calculation symmetry resolves once for the union: one asymmetric member makes the

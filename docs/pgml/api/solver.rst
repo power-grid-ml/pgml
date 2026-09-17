@@ -72,6 +72,15 @@ hold:
   20 kV node, and makes it independent of the row count, so a multi-voltage grid or a
   merged ensemble is judged exactly like a single feeder.
 
+``tol`` is a power tolerance, not a voltage tolerance.  On the default base it accepts 0.01 VA
+of mismatch per row, which leaves a voltage error of about ``tol * s_base_va / S_k`` per unit
+at a node of short-circuit power ``S_k``.  The update is not the remaining error either.  The
+fixed point's error is ``ρ / (1 - ρ)`` times its last update, with ``ρ`` the contraction
+factor, roughly 0.1 to 0.5 on a distribution feeder, and Newton's error is far below its last
+update.  With the defaults the voltages are good to about 1e-8 pu, a few microvolts at 230 V.
+For a tighter answer, such as a comparison at 1e-12 pu, lower both ``tol`` and
+``tol_update_pu`` at ``complex128``, or lower ``s_base_va`` for a small grid.
+
 Each is capped by what the working precision can resolve.  A tighter request logs a warning
 naming the floor, and the floor governs.
 :class:`~pgml.solver.ConvergenceDiagnostics` reports both achieved values.
