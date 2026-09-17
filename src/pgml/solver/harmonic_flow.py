@@ -721,7 +721,9 @@ def _solve_harmonic_orders(
         if y_base.ndim == 3:
             terms = _harmonic_shunt_lowrank_terms(
                 grid,
-                v1,
+                # The device shunt reads each terminal voltage through the row index it
+                # is handed, so the fundamental has to be on that same (fused) layout.
+                _fundamental_on_rows(v1, fusion),
                 node_phase_index(grid) if fusion is None else fusion.index,
                 harm,
                 operating_point,
@@ -972,10 +974,7 @@ def assemble_harmonic_system(
     index = fused.index if fused is not None else node_phase_index(grid)
     if device is None:
         device = v1.device
-    if fused is not None and v1.shape[-1] == fused.full_index.size:
-        # The fundamental comes in the full layout; a fused group's rows share one
-        # voltage, so reading the representative row is exact.
-        v1 = fused.sample(v1)
+    v1 = _fundamental_on_rows(v1, fused)
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
 
     freqs = [h * f0 for h in orders]
@@ -1077,9 +1076,10 @@ def harmonic_injections(
     CURRENT-kind :class:`NodeHarmonicSource`. Differentiable in ``v1``, the device
     powers and the spectra.
 
-    ``index`` defaults to the grid's full node-phase layout, which is also the layout
-    ``v1`` is expected in; pass a reduced (fused) index to obtain the injection summed
-    onto the fused rows. A VOLTAGE-kind node source is refused here: it is a Thevenin
+    ``index`` defaults to the grid's full node-phase layout. Pass a reduced (fused)
+    index to obtain the injection summed onto the fused rows; ``v1`` then has to be on
+    that reduced layout as well (``FusionMap.sample``), because each device reads its
+    terminal voltage through ``index``. A VOLTAGE-kind node source is refused here: it is a Thevenin
     branch to ground, i.e. an admittance as well as a current, so it belongs to the
     system assembly (:func:`assemble_harmonic_system`) and not to an injection vector.
     """
@@ -1215,11 +1215,7 @@ def assemble_harmonic_ybus(
     index = fused.index if fused is not None else node_phase_index(grid)
     if device is None:
         device = torch.device("cpu")
-    if fused is not None and v1 is not None and v1.shape[-1] == fused.full_index.size:
-        # A caller's fundamental comes in the grid's full layout, which the device shunt
-        # reads through the REDUCED index; a fused group's rows share one voltage, so
-        # reading the representative row is exact.
-        v1 = fused.sample(v1)
+    v1 = _fundamental_on_rows(v1, fused)
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
     yh = assemble_network_ybus(
@@ -1426,6 +1422,34 @@ def _align_v1_batch_rank(v1: Tensor, harmonic_injection: Optional[dict]) -> Tens
     for _ in range(max(0, extra)):
         v1 = v1.unsqueeze(-2)
     return v1
+
+
+def _fundamental_on_rows(v1: Optional[Tensor], fusion) -> Optional[Tensor]:
+    """The fundamental voltage on the row layout the harmonic system is built on.
+
+    A solve reports ``v1`` on the grid's FULL node-phase layout, while a fused harmonic
+    system is assembled on the REDUCED one. Every row of a fused group carries the same
+    voltage, so reading the representative row is exact. A ``v1`` that is already
+    reduced, a missing one and an unfused grid pass through unchanged.
+    """
+    if fusion is None or v1 is None or v1.shape[-1] != fusion.full_index.size:
+        return v1
+    return fusion.sample(v1)
+
+
+def _check_fundamental_layout(v1: Optional[Tensor], index, where: str) -> None:
+    """Refuse a fundamental voltage that is not on the rows of ``index``.
+
+    The device terms gather each terminal voltage as ``v1[..., rows]`` with ``rows``
+    taken from ``index``. A reduced (fused) index is always in range of a full-layout
+    voltage, so a layout mix-up would read another node's voltage without an error.
+    """
+    if v1 is not None and v1.shape[-1] != index.size:
+        raise InputError(
+            f"{where}: the fundamental voltage has {v1.shape[-1]} rows but the row "
+            f"index has {index.size}. Pass the voltage on the same layout as the index "
+            "(FusionMap.sample maps a full-layout voltage onto the fused rows)."
+        )
 
 
 def _element_terminal_voltage(m_c: Tensor, rows: Tensor, v1: Tensor) -> Tensor:
@@ -1643,6 +1667,7 @@ def _harmonic_injections(
     """
     n = index.size
     node_map = {nd.id: nd for nd in grid.nodes}
+    _check_fundamental_layout(v1, index, "harmonic injection")
 
     loads = [
         a for a in grid.appliances if isinstance(a, InjectionAppliance) and a.in_service
@@ -1907,6 +1932,7 @@ def _stamp_harmonic_load_shunt(
     ]
     if not loads:
         return [] if blocks_only else yh
+    _check_fundamental_layout(v1, index, "harmonic device shunt")
     if basis == "nameplate":
         # The nameplate basis is exactly the no-fundamental evaluation, applied on
         # purpose: the device's stored power at its rated terminal voltage.
@@ -2219,6 +2245,7 @@ def _apply_node_sources(
     """
     n = index.size
     node_map = {nd.id: nd for nd in grid.nodes}
+    _check_fundamental_layout(v1, index, "node harmonic source")
 
     # Accumulate per-order current and (voltage-source) diagonal Y_s contributions.
     i_cols: list[Tensor] = []  # one [*batch, N] per order (current contribution)
