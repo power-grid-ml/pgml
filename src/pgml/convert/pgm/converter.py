@@ -116,6 +116,8 @@ from pgml.convert._common import (
     thevenin_from_sk,
     warn_dropped_elements,
 )
+from pgml.convert._model_differences import PGM, finalize_report
+from pgml.convert._report import ConversionReport
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
     ComplexTap,
@@ -166,6 +168,7 @@ def to_grid(
     load_model: LoadModel = LoadModel.CONST_IMPEDANCE,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     harmonic_line_model: Optional[str] = None,
+    return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a power-grid-model ``input_data`` dict to a schema :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -194,10 +197,16 @@ def to_grid(
         ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
         logged once. power-grid-model is fundamental-only, so this is a pgml modeling
         decision, not a property of the source data.
+    return_report:
+        Also return the :class:`~pgml.convert.ConversionReport` of this conversion
+        as a third tuple element: every dropped element kind, every approximation
+        and every default-model difference between power-grid-model and pgml that applies to
+        this network, each with the setting that closes it. The report is logged
+        either way.
 
     Returns
     -------
-    (Grid, id_map)
+    (Grid, id_map) or (Grid, id_map, ConversionReport)
         ``Grid`` — materialised schema object.
         ``id_map`` — dict with the following keys:
 
@@ -213,6 +222,17 @@ def to_grid(
     """
     two_pi_f0 = 2.0 * math.pi * base_frequency_hz
     _id = IdCounter()
+    report = ConversionReport(
+        tool=PGM,
+        direction="import",
+        comparable=("fundamental", "unbalanced"),
+        options={
+            "phase_mode": phase_mode,
+            "load_model": load_model,
+            "harmonic_line_model": harmonic_line_model,
+            "base_frequency_hz": base_frequency_hz,
+        },
+    )
 
     id_map: dict[str, Any] = {
         "node": {},
@@ -277,7 +297,7 @@ def to_grid(
         x0 = _opt_field(row, "x0")
         c0 = _opt_field(row, "c0")
         if phase_mode is PhaseMode.THREE_PHASE:
-            zero_seq_lines.note(r0=r0, x0=x0, c0=c0)
+            zero_seq_lines.note(r0=r0, x0=x0, c0=c0, source_id=int(row["id"]))
 
         line_id = _id.next()
         id_map["line"][pgm_id] = line_id
@@ -542,6 +562,7 @@ def to_grid(
                 x0_ohm=x0_ohm,
                 two_pi_f0=two_pi_f0,
                 element=f"power-grid-model source {pgm_id}",
+                report=report,
             )
         )
 
@@ -675,6 +696,16 @@ def to_grid(
                 "transformer_tap_regulator",
             )
         },
+        report=report,
+        ids={
+            kind: [int(r["id"]) for r in input_data.get(kind, [])]
+            for kind in (
+                "three_winding_transformer",
+                "shunt",
+                "asym_gen",
+                "transformer_tap_regulator",
+            )
+        },
     )
 
     description = (
@@ -693,10 +724,13 @@ def to_grid(
         appliances=appliances,
         metadata=make_metadata(name="pgm_import", description=description),
     )
-    zero_seq_lines.warn(_logger, tool="power-grid-model")
+    zero_seq_lines.warn(_logger, tool="power-grid-model", report=report)
     resolve_converted_line_models(
         grid, _logger, tool="power-grid-model", requested=harmonic_line_model
     )
+    finalize_report(report, grid, _logger)
+    if return_report:
+        return grid, id_map, report
     return grid, id_map
 
 

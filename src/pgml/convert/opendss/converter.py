@@ -128,6 +128,8 @@ from pgml.convert._common import (
     thevenin_from_z,
     warn_dropped_elements,
 )
+from pgml.convert._model_differences import OPENDSS, finalize_report
+from pgml.convert._report import ConversionReport
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
     ComplexTap,
@@ -184,6 +186,7 @@ def to_grid(
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     harmonic_line_model: Optional[str] = None,
     der_harmonics: bool = True,
+    return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -216,11 +219,18 @@ def to_grid(
         Import native Generator/PVSystem/Storage harmonic impedance and voltage
         spectra (default True). Supports one-phase WYE and three-phase WYE/DELTA.
         False explicitly requests fundamental-only DER conversion and omits both.
+    return_report:
+        Also return the :class:`~pgml.convert.ConversionReport` of this conversion
+        as a third tuple element: every dropped element kind, every approximation
+        and every default-model difference between OpenDSS and pgml that applies to
+        this circuit, each with the setting that closes it. The report is logged
+        either way.
 
     Returns
     -------
     tuple[Grid, dict]
-        A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
+        A ``(Grid, id_map)`` pair, or ``(Grid, id_map, ConversionReport)`` with
+        ``return_report=True``.  ``Grid`` is the materialised schema object
         (no ``type_ref``).  ``id_map`` maps DSS element names to our schema ids:
 
         - ``"bus"``       -> ``{dss_bus_name_lower: Node.id}``
@@ -285,6 +295,15 @@ def to_grid(
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
     _id = IdCounter()
+    report = ConversionReport(
+        tool=OPENDSS,
+        direction="import",
+        options={
+            "phase_mode": phase_mode,
+            "harmonic_line_model": harmonic_line_model,
+            "der_harmonics": der_harmonics,
+        },
+    )
 
     id_map: dict[str, Any] = {
         "bus": {},
@@ -828,6 +847,7 @@ def to_grid(
                 x0_ohm=x0_ohm,
                 two_pi_f0=two_pi_f0,
                 element=f"OpenDSS Vsource '{vsrc_name}'",
+                report=report,
             )
         )
 
@@ -1389,11 +1409,16 @@ def to_grid(
         "storage",
     }
     _dropped_counts: dict[str, int] = {}
+    _dropped_names: dict[str, list] = {}
     for elt_name in dss.Circuit.AllElementNames():
-        cls = elt_name.split(".", 1)[0].lower()
+        cls, _, name = elt_name.partition(".")
+        cls = cls.lower()
         if cls not in _handled_dss_classes:
             _dropped_counts[cls] = _dropped_counts.get(cls, 0) + 1
-    warn_dropped_elements(_logger, "OpenDSS", _dropped_counts)
+            _dropped_names.setdefault(cls, []).append(name.lower())
+    warn_dropped_elements(
+        _logger, "OpenDSS", _dropped_counts, report=report, ids=_dropped_names
+    )
 
     description = f"Imported from OpenDSS circuit (f0={f0_hz} Hz). " + (
         "Single-phase positive-sequence equivalent."
@@ -1410,6 +1435,9 @@ def to_grid(
     resolve_converted_line_models(
         grid, _logger, tool="OpenDSS", requested=harmonic_line_model
     )
+    finalize_report(report, grid, _logger)
+    if return_report:
+        return grid, id_map, report
     return grid, id_map
 
 
