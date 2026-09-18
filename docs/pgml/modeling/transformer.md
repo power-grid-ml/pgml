@@ -112,6 +112,29 @@ scalar tap, and the two paths agree to machine precision. The scalar path honour
 representable there. The phase-domain stamp rejects a shift that is not a multiple of 30°,
 because no constant three-phase winding topology realises one.
 
+### Harmonic orders on the single-phase equivalent
+
+The angle `shift_deg` is the positive-sequence shift. In a balanced three-phase system the
+harmonic orders `3k+1` (4, 7, 10, 13, ...) rotate as a positive sequence, the orders `3k+2`
+(2, 5, 8, 11, ...) as a negative sequence, and the orders `3k` as a zero sequence. A
+negative-sequence quantity crosses the same windings with the opposite angle, so the scalar
+tap is `t = n·e^{−j·shift_deg}` at the orders `3k+2`. The phase-domain stamp has this property
+by construction, because its incidence is real, and the two paths agree to machine precision
+at every positive- and negative-sequence order. The sign matters as soon as harmonic sources
+sit on both sides of a Dy or Yd unit: the 5th harmonic of a converter behind a Dyn11
+transformer arrives on the HV side 60° away from where a same-sign shift would put it, which
+decides how it adds to an MV-connected source. Interharmonics have no sequence assignment and
+keep the positive-sequence angle. With `shift_deg = 0`, as in a genuinely single-phase
+network, the rule has no effect.
+
+The triplen orders are the limit of the single-phase equivalent. As zero-sequence
+quantities they would be blocked by a delta, zigzag or ungrounded-wye winding, and they would
+travel on the lines' `Z0` rather than `Z1`. The equivalent carries neither a winding topology
+nor zero-sequence line data, and a grid does not say whether it is an equivalent of a
+three-phase system or a single-phase network, so triplen orders pass through the
+positive-sequence pi unchanged. Assembly logs one warning when that happens on a pairing
+other than YNyn. Solve triplen orders on a three-phase grid.
+
 ## Leakage referral
 
 `series_resistance_ohm` and `series_inductance_h` are referred to the TO-side coil. With

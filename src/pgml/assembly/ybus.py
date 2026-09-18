@@ -1563,7 +1563,15 @@ def _transformer_block_groups(
     Shared primitive builder for the Y-bus stamp (which scatters each block) and
     :func:`branch_currents` (which multiplies it with the terminal voltage). The
     block is the full ``[H, K, 2P, 2P]`` vector-group winding-incidence primitive
-    plus the magnetizing shunt on the HV diagonal.
+    plus the magnetizing shunt on the terminal diagonal(s) the placement selects.
+
+    A single-phase (``P = 1``) unit is the positive-sequence equivalent: the vector
+    group collapses into the complex ratio ``n·e^{jθ}``. The angle follows the
+    sequence a harmonic order has in a balanced system, ``+θ`` at the orders ``3k+1``
+    and ``−θ`` at the negative-sequence orders ``3k+2``, which is what the real
+    three-phase incidence yields. Triplen orders keep ``+θ`` and pass the pi; the
+    equivalent has no zero-sequence topology, and
+    :func:`_warn_triplen_single_phase_equivalent` reports that once.
     """
     xfmrs = [
         b
@@ -1650,13 +1658,17 @@ def _transformer_block_groups(
                 # folded into a complex line-to-line ratio (magnitude n_LL, exact
                 # phase shift), the textbook off-nominal-tap pi. The exact shift
                 # honours arbitrary phase-shifter angles that no 3-phase winding
-                # topology can realise.
+                # topology can realise. The shift is that of the SEQUENCE the order
+                # belongs to in a balanced system (see `_sequence_shift_sign`).
                 theta = math.radians(vg.shift_exact_deg)
+                sign = _sequence_shift_sign(f, float(grid.base_frequency_hz))  # [H]
                 rot = torch.complex(
-                    torch.as_tensor(math.cos(theta), dtype=rdt, device=device),
-                    torch.as_tensor(math.sin(theta), dtype=rdt, device=device),
+                    torch.full_like(sign, math.cos(theta)), sign * math.sin(theta)
                 )
-                ratio_list.append((u_from / u_to * tap_mag).to(cdt) * rot)  # scalar
+                _warn_triplen_single_phase_equivalent(
+                    vg, f, float(grid.base_frequency_hz)
+                )
+                ratio_list.append((u_from / u_to * tap_mag).to(cdt) * rot.to(cdt))
             else:
                 # Phase-domain coil turns ratio (real; √3 + clock come from N).
                 ratio_list.append(
@@ -1682,7 +1694,8 @@ def _transformer_block_groups(
             )
         else:
             y_se = torch.stack(yse_list, dim=1)  # [H,K]
-        ratio = torch.stack(ratio_list, dim=0)  # [K]
+        # [K] real coil ratios, or [H,K] complex ratios of the single-phase equivalent.
+        ratio = torch.stack(ratio_list, dim=-1 if p == 1 else 0)
         if p == 1:
             # The schema stores the leakage referred to the TO-side COIL; the
             # scalar pi consumes the line-to-line equivalent. They coincide for
@@ -1705,16 +1718,82 @@ def _transformer_block_groups(
         yield group, block, rows, cols
 
 
+def _harmonic_order_class(f: Tensor, f0: float) -> Tensor:
+    """``round(f/f0) mod 3`` per frequency ``[H]``, or ``-1`` off the integer orders.
+
+    In a balanced three-phase system the characteristic harmonics rotate as
+    ``3k+1`` positive, ``3k+2`` negative and ``3k`` zero sequence. An interharmonic or
+    a sub-harmonic has no such assignment and is reported as ``-1``.
+    """
+    h = f / f0
+    hr = torch.round(h)
+    integer = (torch.abs(h - hr) < 1e-6) & (hr >= 1.0)
+    return torch.where(integer, torch.remainder(hr, 3.0), -torch.ones_like(hr))
+
+
+def _sequence_shift_sign(f: Tensor, f0: float) -> Tensor:
+    """Sign of a transformer's vector-group phase shift per frequency ``[H]``.
+
+    A single-phase equivalent of a balanced three-phase system carries the vector
+    group as one complex ratio ``n·e^{jθ}``. ``θ`` is the POSITIVE-sequence shift. A
+    negative-sequence quantity is shifted by ``−θ`` (the three-phase winding
+    incidence is real, so its negative-sequence eigenvalue is the conjugate of the
+    positive-sequence one). Orders ``3k+2`` (2, 5, 8, 11, ...) are negative sequence
+    in a balanced system and therefore get ``−1``; every other frequency, including
+    interharmonics and the zero-sequence orders ``3k``, keeps ``+1``. With ``θ = 0``
+    (a genuinely single-phase unit, a Yy0 pairing) the sign has no effect.
+    """
+    negative = _harmonic_order_class(f, f0) == 2.0
+    return torch.where(negative, -torch.ones_like(f), torch.ones_like(f))
+
+
+#: Guard so the triplen notice of the single-phase equivalent is logged once per process.
+_TRIPLEN_EQUIVALENT_NOTICE_LOGGED = False
+
+
+def _warn_triplen_single_phase_equivalent(vg, f: Tensor, f0: float) -> None:
+    """Warn once that triplen orders cross a zero-sequence-blocking unit unblocked.
+
+    Orders ``3k`` are zero sequence in a balanced system. A delta, zigzag or ungrounded
+    wye winding blocks their transfer, and the lines they travel on present ``Z0``
+    rather than ``Z1``. The single-phase equivalent has neither: it passes a triplen
+    order through the positive-sequence pi. Whether the grid is an equivalent of a
+    three-phase system or a genuinely single-phase one cannot be told from the grid,
+    so the stamp is left as it is and the condition is reported instead.
+    """
+    global _TRIPLEN_EQUIVALENT_NOTICE_LOGGED
+    if _TRIPLEN_EQUIVALENT_NOTICE_LOGGED:
+        return
+    if vg.from_side.kind == "wye_grounded" and vg.to_side.kind == "wye_grounded":
+        return
+    cls = _harmonic_order_class(f, f0)
+    if not bool(((cls == 0.0) & (f > 1.5 * f0)).any()):
+        return
+    _TRIPLEN_EQUIVALENT_NOTICE_LOGGED = True
+    _log.warning(
+        "pgml: triplen harmonic orders are assembled on a single-phase equivalent "
+        "with a %s / %s transformer. In a balanced three-phase system these orders "
+        "are zero sequence: the winding pairing would block them and the lines "
+        "would present Z0. The single-phase equivalent passes them through the "
+        "positive-sequence model, so triplen results on the far side of the "
+        "transformer are not representative. Solve triplen orders on a three-phase "
+        "grid (phase_mode THREE_PHASE).",
+        vg.from_side.kind,
+        vg.to_side.kind,
+    )
+
+
 def _scalar_tap_blocks(y_se: Tensor, t: Tensor) -> Tensor:
     """Off-nominal complex-tap pi for a single-phase / positive-sequence unit.
 
-    ``y_se`` ``[H, K]`` leakage admittance (LV-referred), ``t`` ``[K]`` complex
-    ratio ``n·e^{jθ}``. Returns the ``[H, K, 2, 2]`` primitive::
+    ``y_se`` ``[H, K]`` leakage admittance (LV-referred), ``t`` ``[K]`` or ``[H, K]``
+    complex ratio ``n·e^{jθ}`` (per order when the shift follows the harmonic's
+    sequence). Returns the ``[H, K, 2, 2]`` primitive::
 
         [[ y/|t|² , −y/conj(t) ],
          [ −y/t   ,     y      ]]
     """
-    t_c = t[None, :]  # [1,K]
+    t_c = t if t.ndim == 2 else t[None, :]  # [H,K] or [1,K]
     y_ff = y_se / (t_c * torch.conj(t_c))  # HV-HV
     y_ft = -y_se / torch.conj(t_c)  # HV-LV
     y_tf = -y_se / t_c  # LV-HV

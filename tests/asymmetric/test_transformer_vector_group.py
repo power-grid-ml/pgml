@@ -178,6 +178,85 @@ class TestPositiveSequenceRegression:
         assert abs(c1 - c11 * cmath.exp(1j * math.radians(60.0))) < 1e-9 * abs(c1)
 
 
+class TestSinglePhaseEquivalentSequenceShift:
+    """The single-phase equivalent shifts each order by ITS sequence's angle.
+
+    Reference: the three-phase winding-incidence stamp, which is sequence-correct by
+    construction. Its HV/LV 2x2 seen by a positive-sequence set must equal the
+    single-phase equivalent at orders ``3k+1``, and the one seen by a negative-sequence
+    set at orders ``3k+2`` (the shift flips sign).
+    """
+
+    @staticmethod
+    def _sequence_two_port(grid3: Grid, order: int, seq: np.ndarray) -> np.ndarray:
+        yb = assemble_network_ybus(grid3, [order * F0], dtype=torch.complex128)
+        y = yb.Y[0].numpy()
+        hv = [yb.index.row(1, p) for p in ABC]
+        lv = [yb.index.row(2, p) for p in ABC]
+        out = np.zeros((2, 2), dtype=complex)
+        for i, ri in enumerate((hv, lv)):
+            for j, rj in enumerate((hv, lv)):
+                out[i, j] = (seq.conjugate() @ y[np.ix_(ri, rj)] @ seq) / 3.0
+        return out
+
+    @staticmethod
+    def _equivalent_two_port(grid1: Grid, order: int) -> np.ndarray:
+        yb = assemble_network_ybus(grid1, [order * F0], dtype=torch.complex128)
+        y = yb.Y[0].numpy()
+        rows = [yb.index.row(1, Phase.A), yb.index.row(2, Phase.A)]
+        return y[np.ix_(rows, rows)]
+
+    @pytest.mark.parametrize("shift", [30.0, 330.0, 150.0])
+    @pytest.mark.parametrize("order", [1, 2, 4, 5, 7, 11, 13])
+    def test_matches_the_three_phase_stamp_per_sequence(self, shift, order) -> None:
+        conns = (WindingConnection.DELTA, WindingConnection.WYE_GROUNDED)
+        grid3 = _grid(*conns, shift)
+        grid1 = _grid(*conns, shift, phases=(Phase.A,))
+        a = cmath.exp(2j * math.pi / 3)
+        seq = np.array([1, a**2, a]) if order % 3 == 1 else np.array([1, a, a**2])
+        ref = self._sequence_two_port(grid3, order, seq)
+        got = self._equivalent_two_port(grid1, order)
+        assert np.abs(got - ref).max() < 1e-9 * np.abs(ref).max()
+
+    def test_negative_sequence_order_conjugates_the_rotation(self) -> None:
+        """h = 5 against h = 7 on a Dyn11: the transfer terms rotate by -/+ 30 deg."""
+        grid1 = _grid(
+            WindingConnection.DELTA,
+            WindingConnection.WYE_GROUNDED,
+            330.0,
+            phases=(Phase.A,),
+        )
+        for order, sign in ((5, -1.0), (7, 1.0), (6.5, 1.0)):
+            y = self._equivalent_two_port(grid1, order)
+            y_se = 1.0 / (R_LV + 1j * 2.0 * math.pi * order * F0 * L_LV)
+            t = (U_HV / U_LV) * cmath.exp(1j * sign * math.radians(330.0))
+            assert abs(y[0, 1] + y_se / t.conjugate()) < 1e-12 * abs(y[0, 1])
+            assert abs(y[1, 0] + y_se / t) < 1e-12 * abs(y[1, 0])
+
+    def test_triplen_order_on_a_blocking_pairing_is_reported_once(self, caplog) -> None:
+        import logging
+
+        from pgml.assembly import ybus as ybus_module
+
+        grid1 = _grid(
+            WindingConnection.DELTA,
+            WindingConnection.WYE_GROUNDED,
+            330.0,
+            phases=(Phase.A,),
+        )
+        ybus_module._TRIPLEN_EQUIVALENT_NOTICE_LOGGED = False
+        try:
+            with caplog.at_level(logging.WARNING, logger="pgml"):
+                self._equivalent_two_port(grid1, 5)
+                assert not [r for r in caplog.records if "triplen" in r.getMessage()]
+                self._equivalent_two_port(grid1, 3)
+                self._equivalent_two_port(grid1, 9)
+            hits = [r for r in caplog.records if "triplen" in r.getMessage()]
+            assert len(hits) == 1
+        finally:
+            ybus_module._TRIPLEN_EQUIVALENT_NOTICE_LOGGED = False
+
+
 class TestClockSix:
     """Clock 6 (Yy6 / Dd6) is a 180° group: reversed LV winding polarity.
 

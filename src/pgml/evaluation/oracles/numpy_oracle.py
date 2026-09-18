@@ -180,7 +180,8 @@ def _stamp_transformer_numpy(
 
     - **P == 1** (single-phase / positive-sequence equivalent): the vector group is
       folded into a complex line-to-line ratio ``t = (u_from/u_to) · tap_mag ·
-      e^{j·shift_deg}`` and the textbook off-nominal-tap pi is applied::
+      e^{±j·shift_deg}`` (``−`` at the negative-sequence orders ``3k+2``) and the
+      textbook off-nominal-tap pi is applied::
 
           Y_ff = y_se / |t|² + y_m,   Y_ft = −y_se / conj(t)
           Y_tf = −y_se / t,            Y_tt = y_se
@@ -221,6 +222,10 @@ def _stamp_transformer_numpy(
         vg1 = resolve_vector_group(b, n_phases=1)
         y_se = (3.0 if vg1.to_side.kind == "delta" else 1.0) * y_se
         shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
+        if h % 3 == 2:
+            # Orders 3k+2 are negative sequence in a balanced system: the vector
+            # group shifts them by the opposite angle.
+            shift_rad = -shift_rad
         t = (u_from / u_to) * tap_mag * cmath.exp(1j * shift_rad)
         abs_t2 = abs(t) ** 2
         y_ff = y_se / abs_t2 + ym
