@@ -884,8 +884,11 @@ class _BlockLU:
         self.batch_ref = y.new_empty((*self.fb, 0, 0))
         self.buckets: list[tuple[Tensor, Tensor, Tensor]] = []
         #: Per bucket: (solve-space positions, full-precision diagonal blocks) — the
-        #: block-diagonal matvec a mixed-precision residual needs.
+        #: block-diagonal matvec a mixed-precision residual needs. Kept ONLY for a
+        #: mixed-precision factorization: at full precision nothing forms a residual,
+        #: and a second copy of every block would double this backend's memory.
         self.blocks_full: list[tuple[Tensor, Tensor]] = []
+        self.keeps_blocks = factor_dtype is not None
         pairs = _size_buckets(blocks, blocks if solve_blocks is None else solve_blocks)
         for rows, pos in pairs:
             # [*fb, B, n, n]: gathered straight from ``y`` — no [N, N] intermediate.
@@ -902,7 +905,8 @@ class _BlockLU:
                 sub if factor_dtype is None else sub.to(factor_dtype)
             )
             self.buckets.append((pos, lu, piv))
-            self.blocks_full.append((pos, sub))
+            if self.keeps_blocks:
+                self.blocks_full.append((pos, sub))
         self.n_blocks = sum(int(pos.shape[0]) for pos, _, _ in self.buckets)
 
     def apply(self, x: Tensor, *, adjoint: bool = False) -> Tensor:
@@ -911,8 +915,14 @@ class _BlockLU:
         The counterpart of :meth:`solve` for a residual ``b − A x``: each bucket
         gathers its blocks' entries of ``x``, multiplies by its stored diagonal
         blocks, and scatters back. Rows outside every block carry no admittance in
-        this factorization and contribute 0, exactly as the solve assumes.
+        this factorization and contribute 0, exactly as the solve assumes. Available
+        for a mixed-precision factorization only (the one consumer of a residual).
         """
+        if not self.keeps_blocks:
+            raise InputError(
+                "the block-diagonal matvec is kept for a mixed-precision factorization "
+                "only; a full-precision block factorization stores its factors alone."
+            )
         batch = torch.broadcast_shapes(self.fb, x.shape[:-1])
         x_b = x.broadcast_to(*batch, self.m)
         out = torch.zeros(*batch, self.m, dtype=x_b.dtype, device=x_b.device)
@@ -1326,13 +1336,6 @@ def _block_equilibration_scale(y_bus: Tensor, eq_mode: str) -> Optional[Tensor]:
     """
     if eq_mode == "off":
         return None
-    if eq_mode != "symmetric":
-        raise InputError(
-            f"equilibrate={eq_mode!r} is unavailable with backend='block': the "
-            "block-diagonal factorization never materialises the matrix it factors, so "
-            "only the diagonal ('symmetric', the documented default) scaling can be "
-            "built for it. Use equilibrate='symmetric' or 'off' with backend='block'."
-        )
     d_row, _ = equilibration_scales(y_bus, mode=eq_mode)
     return d_row
 

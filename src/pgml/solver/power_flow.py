@@ -55,6 +55,7 @@ from copy import deepcopy
 
 import logging
 import math
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Sequence
 
@@ -90,7 +91,6 @@ from pgml.topology import connectivity_report, energized_subgrid, network_finger
 
 from ._pv_bus import PVTerminals, active_power_mismatch, collect_pv_terminals
 from .equilibration import (
-    _nonzero_magnitudes,
     equilibrated_lu_factor,
     resolve_equilibration,
 )
@@ -197,11 +197,30 @@ def _abs_row_scale(y_eff, v_abs: Tensor) -> Tensor:
     return _row_magnitude_sums(y_eff, v_abs)
 
 
+def _nonzero_magnitudes(a: Tensor) -> Optional[tuple[Tensor, Tensor, Tensor]]:
+    """Return row, column and magnitude tensors for one constant CPU matrix.
+
+    The solver's per-row precision floor reads only structural nonzeros. Batched,
+    accelerator and differentiable matrices retain the dense expression instead.
+    """
+    if (
+        a.device.type != "cpu"
+        or (torch.is_grad_enabled() and a.requires_grad)
+        or a.reshape(-1, *a.shape[-2:]).shape[0] != 1
+    ):
+        return None
+    m = a.shape[-1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        csr = a.reshape(m, m).to_sparse_csr()
+    rows = torch.repeat_interleave(csr.crow_indices().diff())
+    return rows, csr.col_indices(), csr.values().abs()
+
+
 def _row_magnitude_sums(y: Tensor, v_abs: Tensor) -> Tensor:
     """``Σ_j |Y_ij| |V_j|`` of a dense ``[*b, N, N]`` admittance -> ``[*b, N]`` real.
 
-    The row sums read the NONZEROS only (:func:`~pgml.solver.equilibration`'s sparse
-    magnitude form), which is three to six times cheaper than the dense form — a full
+    The row sums read the NONZEROS only (:func:`_nonzero_magnitudes`), which is three to six times cheaper than the dense form — a full
     ``|Y|`` temporary, a square root per entry, plus a matrix-vector product — measured at
     complex128 on this engine's own feeders: 0.5 ms against 1.3 at 294 rows, 2.3 against
     11.4 at 1176, 8.6 against 50 at 2469, 50 against 177 at 5505.
@@ -570,8 +589,9 @@ class _BatchIterationState:
     convergence at the precision floor (recorded in
     :class:`_FloorReport`, reported by the diagnostics and named by one warning); a
     stall above it is a failure reported by its own likely cause. Everything here is
-    tensor work on ``[*b]`` masks under ``no_grad`` — one ``all()`` per iteration, the
-    same synchronisation the loop already had.
+    tensor work on ``[*b]`` masks under ``no_grad``. :meth:`step` costs one host
+    synchronisation per iteration (its ``all()``); the fixed-point loop around it adds
+    one more for the test that triggers the nodal confirmation.
     """
 
     def __init__(
@@ -638,10 +658,9 @@ class _BatchIterationState:
 
     def hold(self, v_new: Tensor, v_old: Tensor) -> Tensor:
         """``v_new`` where a scenario is still iterating, ``v_old`` where it finished."""
-        keep = self.finished_mask
-        if not bool(keep.any()):
-            return v_new
-        return torch.where(keep.unsqueeze(-1), v_old, v_new)
+        # Unconditional: asking whether any scenario is held would cost a host
+        # synchronisation per iteration to save one elementwise select.
+        return torch.where(self.finished_mask.unsqueeze(-1), v_old, v_new)
 
     def report(self) -> _FloorReport:
         """The precision-floor summary of this solve."""
@@ -3116,7 +3135,7 @@ def _current_injection_forward(
         converged_mask = torch.zeros((), dtype=torch.bool, device=device)
         iterations = 0
         converged = False
-        update_history: list[float] = []
+        update_trace: list[Tensor] = []  # per-iteration maxima, read back once
         # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
         # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
@@ -3204,7 +3223,13 @@ def _current_injection_forward(
                 # residual before believing the identity above, so the reported mismatch
                 # and the convergence decision are the ones a nodal balance gives. The
                 # confirmation costs one matrix-vector product per SOLVE, not per
-                # iteration.
+                # iteration. It judges the scenarios still iterating; one that finished
+                # in an earlier iteration was accepted on the identity, which differs
+                # from the nodal residual by one back-substitution's rounding. That
+                # rounding is what the mismatch floor of the working precision already
+                # allows for, so the verdict is the same (measured: a batched solve and
+                # the per-scenario solves stop at bit-identical iterates at complex64
+                # and complex128, also on a low-rank switch sweep).
                 fc = _apply_y(y_eff0, v_new) + i_dev - i_slack0
                 fc_exact = True
                 mism_rows = ctest.mismatch_rows_pu(v_new, fc)
@@ -3215,12 +3240,13 @@ def _current_injection_forward(
             mismatch_max = mismatch_vec.max()
             update_max = update_vec.max()
             update_norm_v = torch.linalg.vector_norm(dv, dim=-1).max()
-            update_history.append(float(update_max))
+            update_trace.append(update_max)
             v = v_new
             iterations += 1
             if finished:
                 converged = bool(converged_mask.all())
                 break
+        update_history = torch.stack(update_trace).tolist() if update_trace else []
         if not fc_exact:
             # The loop ran out of iterations on the identity above; the residual the
             # diagnostics report is the nodal one.
@@ -4320,13 +4346,20 @@ def _node_voltage_bases(grid: Grid, index, rdt, device) -> Tensor:
     """Per-row line-to-neutral voltage base ``[N]`` (the per-unit denominator)."""
     from pgml.assembly._params import phase_voltage_magnitude
 
-    node_by_id = {int(nd.id): nd for nd in grid.nodes}
-    bases = [
-        phase_voltage_magnitude(
-            float(node_by_id[int(nid)].u_rated_v), len(node_by_id[int(nid)].phases)
+    # The base only scales the convergence test, the warm start and the diagnostics,
+    # none of which is on the differentiable path (the gradient of a rated voltage
+    # flows through the residual), so a tensor-valued rating is read detached. One
+    # value per NODE, shared by its rows.
+    base_by_node = {
+        int(nd.id): phase_voltage_magnitude(
+            float(nd.u_rated_v.detach())
+            if isinstance(nd.u_rated_v, Tensor)
+            else float(nd.u_rated_v),
+            len(nd.phases),
         )
-        for nid in index.node_ids.tolist()
-    ]
+        for nd in grid.nodes
+    }
+    bases = [base_by_node[int(nid)] for nid in index.node_ids.tolist()]
     return torch.tensor(bases, dtype=rdt, device=device)
 
 

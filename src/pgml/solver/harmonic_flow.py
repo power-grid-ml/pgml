@@ -816,7 +816,7 @@ def _solve_harmonic_orders(
                         precision=precision,
                         equilibrate=equilibrate,
                     )
-                    update = low_rank_update(fac, u, c)
+                    update = low_rank_update(fac, u, c, estimate_amplification=False)
                     voltage = solve_factored_updated(update, ih)
                     operator = LowRankOperator(y_base, u, c, u)
                     residual_ok, relative_residual = _lowrank_harmonic_residual_ok(
