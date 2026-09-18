@@ -237,11 +237,12 @@ law.
 
 ## Reproduce
 
-Both checks live in the paper repository under `scripts/conformance/` and take the
-pgml they find on `PYTHONPATH`.
+Both checks live in the [pgml paper repository](https://github.com/power-grid-ml/pgml-paper) (to be published soon) under `scripts/conformance/` and take
+the pgml they find on `PYTHONPATH`. Some grid sets need further packages, which the
+paper repository lists.
 
 ```bash
-export PYTHONPATH=<pgml>/src:<paper>/scripts/conformance:<pghub>/src:<pgg>/src
+export PYTHONPATH=<pgml>/src:<paper>/scripts/conformance
 
 # check 1
 python scripts/conformance/solver_conformance/run.py --out runs/solver --no-large
@@ -261,8 +262,8 @@ Every figure is written as PDF and SVG with its numbers as JSON and a generated
 caption as `<name>.caption.txt`. The copies used here are in `assets/readme/` with
 their hashes in `assets/readme/provenance.json`.
 
-<sub>pgml 0.5.1 (0eb4c7c). Check 1: 1269 solves on 19 grids, CPU and CUDA,
-Check 2: 669 rows on 68 grid and study pairs, orders 1 to 25, floors 1e-6 pu and 1e-4 relative,
+<sub>pgml 0.5.1. Check 1: 1269 solves on 19 grids, CPU and CUDA.
+Check 2: 669 rows on 68 grid and study pairs, orders 1 to 25, floors 1e-6 pu and 1e-4 relative.
 pandapower 3.5.4 with numba 0.65.1, power-grid-model 1.13.142, OpenDSSDirect.py
-0.9.4, torch 2.13.0, Python 3.13.15, six CPU threads, NVIDIA RTX A2000 12 GB, 2026-09-18.
-SimBench is not installed on that machine, so the SimBench cases of check 2 were skipped.</sub>
+0.9.4, torch 2.13.0, Python 3.13.15, six CPU threads, NVIDIA RTX A2000 12 GB.
+SimBench was not installed in that environment, so the SimBench cases of check 2 were skipped.</sub>

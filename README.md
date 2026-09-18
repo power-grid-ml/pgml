@@ -45,7 +45,7 @@ magnitude. The plot covers the forward power flow, without gradients.
 [PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
 timed, and how throughput changes with grid size.
 
-<sub>Measured 2026-09-18, with one NVIDIA L40S 48 GB and eight logical CPUs (four cores) of an AMD EPYC 9334. pgml 0.5.1 (afb5ba6), torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for pandapower and OpenDSS).</sub>
+<sub>One NVIDIA L40S 48 GB and eight logical CPUs (four cores) of an AMD EPYC 9334. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for pandapower and OpenDSS).</sub>
 
 ## Conformance: the solvers agree
 
@@ -68,10 +68,9 @@ Differences between libraries therefore come from the model, not from the solver
 modelling difference costs, and describes the conversion report that lists what an
 importer dropped, approximated or modelled differently.
 
-<sub>pgml 0.5.1 (0eb4c7c), complex128 reference at tolerance 1e-12, 1269 solves on 19 grids.
+<sub>pgml 0.5.1, complex128 reference at tolerance 1e-12, 1269 solves on 19 grids.
 pandapower 3.5.4 with numba, power-grid-model 1.13.142, OpenDSSDirect.py 0.9.4, torch 2.13.0,
-Python 3.13.15. Workstation with six CPU threads and an NVIDIA RTX A2000 12 GB,
-2026-09-18.</sub>
+Python 3.13.15. Six CPU threads and an NVIDIA RTX A2000 12 GB.</sub>
 
 ## Accurate digital twin building
 

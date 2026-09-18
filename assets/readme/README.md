@@ -1,13 +1,15 @@
 # README figures
 
-These small artifacts contain the README's measured evidence. `provenance.json`
-identifies source revisions, the benchmark job and SHA-256 hashes of the original
-inputs. Measurement dates remain in the raw metadata. No experiment is run by
+These small artifacts contain the README's measured evidence. They are produced
+by the [pgml paper repository](https://github.com/power-grid-ml/pgml-paper) (to be
+published soon). `provenance.json` identifies source revisions and SHA-256 hashes
+of the original inputs. No experiment is run by
 the figure renderer.
 
 - `batch_throughput.json`: IEEE 33-bus and Kerber complex128 series of pgml on
-  CPU and GPU with the pandapower, power-grid-model and OpenDSS baselines and the measured environment. All seven batch sizes (1 to 4096) are retained
-  for every curve. Every scenario is checked, not just a prefix, and the renderer
+  CPU and GPU with the pandapower, power-grid-model and OpenDSS baselines and the
+  measured environment. All seven batch sizes (1 to 4096) are retained for every
+  curve. Every scenario is checked, not just a prefix, and the renderer
   rejects invalid comparison points, including a pandapower point measured
   without active numba. The driver is `scripts/bench/bench_readme.py` in
   pgml-paper, one grid per process, submitted as the stages `readme_ieee33` and

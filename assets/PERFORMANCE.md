@@ -1,8 +1,8 @@
 # How the performance figures are measured
 
 This page explains the throughput figure in the README and adds a second one on
-grid size. The numbers come from the benchmark scripts of the pgml paper
-repository. The figures here are drawn from the recorded results by
+grid size. The numbers come from the benchmark scripts of the
+[pgml paper repository](https://github.com/power-grid-ml/pgml-paper) (to be published soon). The figures here are drawn from the recorded results by
 `run/readme/render.py`, which runs no experiment.
 
 ## What is compared
@@ -116,11 +116,11 @@ ahead of pgml, with 350 against 235 scenarios per second. pgml's advantage comes
 large batches of small and medium grids, as in the batch figure, and not from
 large grids.
 
-<sub>Measured 2026-09-18, Each job had one NVIDIA L40S 48 GB (driver 610.57.04, CUDA 13.0) and eight logical CPUs, which are four cores of an AMD EPYC 9334, on a node shared with other jobs. pgml 0.5.1 at commit afb5ba6, Python 3.13, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. All solves in complex128. Convergence tolerance 1e-8 for the reference tools, the library default for pgml. pgml's dense CPU path runs on one thread above 128 rows, its sparse path and power-grid-model on eight threads.</sub>
+<sub>Each measurement had one NVIDIA L40S 48 GB (CUDA 13.0) and eight logical CPUs, which are four cores of an AMD EPYC 9334, on a node shared with other jobs. pgml 0.5.1, Python 3.13, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. All solves in complex128. Convergence tolerance 1e-8 for the reference tools, the library default for pgml. pgml's dense CPU path runs on one thread above 128 rows, its sparse path and power-grid-model on eight threads.</sub>
 
 ## Reproduce
 
-The scripts live in the pgml paper repository under `scripts/bench` and
+The scripts live in the [pgml paper repository](https://github.com/power-grid-ml/pgml-paper) (to be published soon) under `scripts/bench` and
 `scripts/cluster`. On a SLURM cluster described by a target file:
 
 ```bash
@@ -146,5 +146,4 @@ Then draw the figures in the pgml checkout:
 pixi run -e cpu python run/readme/render.py
 ```
 
-`assets/readme/provenance.json` lists the software versions, the
-engine revision and the SHA-256 of every result file the figures are drawn from.
+`assets/readme/provenance.json` lists the software versions and the SHA-256 of every result file the figures are drawn from.
