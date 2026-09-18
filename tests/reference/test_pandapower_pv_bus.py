@@ -35,13 +35,14 @@ power.
 from __future__ import annotations
 
 import numpy as np
-import pandapower as pp
-import pandapower.networks as pn
 import pytest
 import torch
 
 from pgml.convert.pandapower import to_grid
 from pgml.solver import solve_power_flow
+
+pp = pytest.importorskip("pandapower", exc_type=ImportError)
+pn = pytest.importorskip("pandapower.networks", exc_type=ImportError)
 
 CDT = torch.complex128
 
