@@ -1104,10 +1104,18 @@ class Switch(BranchBase):
         "Longitudinal inductance when closed.", short="H", long="henry", default=0.0
     )
     shunt_conductance_s: NonNegNum = si_field(
-        "Shunt conductance per end.", short="S", long="siemens", default=0.0
+        "Total shunt conductance of the pi equivalent; the assembly places half at "
+        "each terminal.",
+        short="S",
+        long="siemens",
+        default=0.0,
     )
     shunt_capacitance_f: NonNegNum = si_field(
-        "Shunt capacitance per end.", short="F", long="farad", default=0.0
+        "Total shunt capacitance of the pi equivalent; the assembly places half at "
+        "each terminal (the same convention as power-grid-model's c1).",
+        short="F",
+        long="farad",
+        default=0.0,
     )
 
 
@@ -1662,7 +1670,7 @@ class VoltageRegulation(GridModel):
     reactive power-balance row with ``|V|**2 - V_set**2`` and recovers the reactive
     injection from the converged solution; see ``docs/pgml/modeling/der-pv-storage.md``
     section 4.5. It is the model behind pandapower ``net.gen``, power-grid-model's
-    ``source``-like voltage control and OpenDSS ``Generator model=3``.
+    ``voltage_regulator`` and OpenDSS ``Generator model=3``.
 
     ``v_set_pu`` is per unit of the HOST NODE's rated voltage, i.e. the regulated
     magnitude in volts is ``v_set_pu * phase_voltage_magnitude(node.u_rated_v,

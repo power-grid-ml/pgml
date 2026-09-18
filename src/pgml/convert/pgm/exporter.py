@@ -36,14 +36,17 @@ from pgml.convert._export import (
     detached,
     harmonic_fields,
     has_unbalanced_power,
+    new_export_report,
     phase_totals,
     positive_sequence,
+    record_reduction,
     scalar,
     shunt_is_unbalanced,
     shunt_positive_sequence,
     validate_balanced_grid_phases,
 )
-
+from pgml.convert._model_differences import PGM, finalize_report
+from pgml.convert._report import ConversionReport
 from pgml.schemas.grid_schema import (
     GenericBranch,
     Generator,
@@ -88,6 +91,13 @@ class PgmExport:
     pgm_of_branch: dict[int, int]
     pgm_of_appliance: dict[int, int]
     reductions: list[str] = field(default_factory=list)
+    #: the same reductions by key with element ids, plus the default-model
+    #: differences between pgml and power-grid-model that apply to this grid
+    report: ConversionReport = field(default_factory=lambda: new_export_report(PGM))
+    #: pgml appliance id -> pgm ``voltage_regulator`` id of a PV terminal
+    pgm_of_regulator: dict[int, int] = field(default_factory=dict)
+    #: system frequency to pass to ``PowerGridModel(..., system_frequency=)``
+    frequency_hz: float = 50.0
 
 
 def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
@@ -123,7 +133,11 @@ def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
     out = PgmExport(
-        input_data={}, pgm_of_node={}, pgm_of_branch={}, pgm_of_appliance={}
+        input_data={},
+        pgm_of_node={},
+        pgm_of_branch={},
+        pgm_of_appliance={},
+        frequency_hz=f0,
     )
     next_id = iter(range(1, 10_000_000))
 
@@ -191,6 +205,7 @@ def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
 
     sym_loads: list[dict] = []
     sym_gens: list[dict] = []
+    regulators: list[dict] = []
     sources: list[dict] = []
     for ap in grid.appliances:
         if isinstance(ap, Source):
@@ -209,11 +224,6 @@ def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
             )
         elif isinstance(ap, (Generator, Storage)):
             _record_appliance_scope(out, ap, allow_approximation)
-            if getattr(ap, "voltage_regulation", None) is not None:
-                raise UnsupportedGridError(
-                    f"generator {ap.id} regulates its terminal voltage; "
-                    "power-grid-model has no PV bus"
-                )
             sym_gens.append(
                 _injection_row(
                     ap,
@@ -223,6 +233,11 @@ def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
                     allow_approximation=allow_approximation,
                 )
             )
+            regulation = getattr(ap, "voltage_regulation", None)
+            if regulation is not None:
+                regulators.append(
+                    _regulator_row(ap, regulation, out, next(next_id), sym_gens[-1])
+                )
         elif isinstance(ap, ShuntAppliance):
             _record_appliance_scope(out, ap, allow_approximation)
             shunt_id = next(next_id)
@@ -250,10 +265,13 @@ def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
         ("shunt", shunts),
         ("sym_load", sym_loads),
         ("sym_gen", sym_gens),
+        ("voltage_regulator", regulators),
         ("source", sources),
     ):
         if rows:
             out.input_data[key] = _pack(key, rows)
+    out.report.options.update(allow_approximation=allow_approximation)
+    finalize_report(out.report, grid)
     return out
 
 
@@ -272,24 +290,36 @@ def _record_branch_scope(out: PgmExport, branch, allow_approximation: bool) -> N
         if name in getattr(branch, "model_fields_set", set()) and value is not None:
             harmonic.append(name)
     if harmonic:
-        out.reductions.append(
+        record_reduction(
+            out,
+            "dropped.harmonic_fields",
             f"branch {branch.id}: harmonic-only fields ignored by fundamental export "
-            f"({', '.join(harmonic)})"
+            f"({', '.join(harmonic)})",
+            element_type=type(branch).__name__,
+            element_id=branch.id,
         )
     if isinstance(branch, Switch):
-        dropped = []
-        if scalar(branch.shunt_conductance_s) != 0.0:
-            dropped.append("shunt conductance")
-        if scalar(branch.shunt_capacitance_f) != 0.0:
-            dropped.append("per-end shunt capacitance")
-        if dropped and not allow_approximation:
+        # The per-end shunt pair maps onto a pgm line exactly (total c1 and a loss
+        # tangent); only a conductance without capacitance has no counterpart.
+        lossy_only = (
+            scalar(branch.shunt_conductance_s) != 0.0
+            and scalar(branch.shunt_capacitance_f) == 0.0
+        )
+        if lossy_only and not allow_approximation:
             raise UnsupportedGridError(
-                f"switch {branch.id}: power-grid-model link/line export cannot preserve "
-                f"{', '.join(dropped)}; pass allow_approximation=True to drop and "
-                "record these terms"
+                f"switch {branch.id}: power-grid-model stores a shunt conductance as "
+                "the loss tangent of a capacitance, so a conductance without "
+                "capacitance cannot be preserved; pass allow_approximation=True to "
+                "drop and record it"
             )
-        if dropped:
-            out.reductions.append(f"switch {branch.id}: dropped {', '.join(dropped)}")
+        if lossy_only:
+            record_reduction(
+                out,
+                "approx.switch.dropped_terms",
+                f"switch {branch.id}: dropped shunt conductance without capacitance",
+                element_type="Switch",
+                element_id=branch.id,
+            )
 
 
 def _record_appliance_scope(
@@ -298,18 +328,34 @@ def _record_appliance_scope(
     """Validate model-changing reductions and record harmonic-only fields."""
     ignored = harmonic_fields(appliance)
     if ignored:
-        out.reductions.append(
+        record_reduction(
+            out,
+            "dropped.harmonic_fields",
             f"appliance {appliance.id}: harmonic-only fields ignored by fundamental "
-            f"export ({', '.join(ignored)})"
+            f"export ({', '.join(ignored)})",
+            element_type=type(appliance).__name__,
+            element_id=appliance.id,
         )
 
     approximations = []
     if has_unbalanced_power(appliance):
-        approximations.append("unbalanced per-phase P/Q folded to a balanced total")
+        approximations.append(
+            (
+                "approx.unbalanced_power",
+                "unbalanced per-phase P/Q folded to a balanced total",
+            )
+        )
     if isinstance(appliance, ShuntAppliance) and shunt_is_unbalanced(appliance):
-        approximations.append("unbalanced shunt elements averaged to positive sequence")
+        approximations.append(
+            (
+                "approx.unbalanced_shunt",
+                "unbalanced shunt elements averaged to positive sequence",
+            )
+        )
     if getattr(appliance, "control", None) is not None:
-        approximations.append("inverter control replaced by nameplate P/Q")
+        approximations.append(
+            ("approx.inverter_control", "inverter control replaced by nameplate P/Q")
+        )
     if isinstance(appliance, Source):
         u_ref = np.asarray(detached(appliance.u_ref_v), dtype=float).reshape(-1)
         angles = np.asarray(detached(appliance.u_angle_deg), dtype=float).reshape(-1)
@@ -321,15 +367,26 @@ def _record_appliance_scope(
         if (u_ref.size > 1 and not np.allclose(u_ref, u_ref[0])) or (
             angles.size > 1 and not np.allclose((relative_angle + 180.0) % 360.0, 180.0)
         ):
-            approximations.append("unbalanced source voltage reduced to phase A")
+            approximations.append(
+                (
+                    "approx.unbalanced_source",
+                    "unbalanced source voltage reduced to phase A",
+                )
+            )
     if approximations and not allow_approximation:
         raise UnsupportedGridError(
-            f"appliance {appliance.id}: {'; '.join(approximations)}; pass "
+            f"appliance {appliance.id}: "
+            f"{'; '.join(text for _, text in approximations)}; pass "
             "allow_approximation=True to enable and record this reduction"
         )
-    out.reductions.extend(
-        f"appliance {appliance.id}: {description}" for description in approximations
-    )
+    for key, description in approximations:
+        record_reduction(
+            out,
+            key,
+            f"appliance {appliance.id}: {description}",
+            element_type=type(appliance).__name__,
+            element_id=appliance.id,
+        )
 
 
 def _pack(component: str, rows: list[dict]):
@@ -367,9 +424,14 @@ def _line_row(
                 f"line {br.id}: power-grid-model cannot represent shunt conductance "
                 "without capacitance; pass allow_approximation=True to drop it"
             )
-        out.reductions.append(
+        record_reduction(
+            out,
+            "approx.line.conductance_without_capacitance",
             f"line {br.id}: shunt conductance without capacitance dropped "
-            "(power-grid-model stores a loss tangent)"
+            "(power-grid-model stores a loss tangent)",
+            element_type="Line",
+            element_id=br.id,
+            values={"g1_s": g1},
         )
         tan1 = 0.0
     else:
@@ -396,12 +458,19 @@ def _switch_row(br: Switch, out: PgmExport, w0: float, pid: int) -> dict:
     out.pgm_of_branch[br.id] = pid
     r = scalar(br.resistance_ohm)
     x = w0 * scalar(br.inductance_h)
+    c_total = scalar(br.shunt_capacitance_f)
+    g_total = scalar(br.shunt_conductance_s)
     if r == 0.0 and x == 0.0:
         # power-grid-model rejects a zero-impedance line; an ideal switch is a
         # numerically negligible series resistance instead.
         r = 1e-9
-        out.reductions.append(
-            f"switch {br.id}: ideal (zero-impedance) switch exported as 1 nOhm"
+        record_reduction(
+            out,
+            "approx.switch.ideal_as_nanoohm",
+            f"switch {br.id}: ideal (zero-impedance) switch exported as 1 nOhm",
+            element_type="Switch",
+            element_id=br.id,
+            values={"r_ohm": 1e-9},
         )
     return {
         "id": pid,
@@ -411,8 +480,10 @@ def _switch_row(br: Switch, out: PgmExport, w0: float, pid: int) -> dict:
         "to_status": status,
         "r1": r,
         "x1": x,
-        "c1": scalar(br.shunt_capacitance_f),
-        "tan1": 0.0,
+        # Both tools split the total shunt half to each end; tan1 = G/(w0*C)
+        # carries the conductance, which pgm derives as w0*c1*tan1.
+        "c1": c_total,
+        "tan1": (g_total / (w0 * c_total)) if c_total > 0.0 else 0.0,
         "i_n": 1e5,
     }
 
@@ -454,12 +525,21 @@ def _trafo_row(
                 f"transformer {br.id}: no-load current {i0:g} pu exceeds the "
                 "power-grid-model limit 0.9; pass allow_approximation=True to clip it"
             )
-        out.reductions.append(
-            f"transformer {br.id}: no-load current clipped from {i0:g} to 0.9 pu"
+        record_reduction(
+            out,
+            "approx.transformer.no_load_current_clipped",
+            f"transformer {br.id}: no-load current clipped from {i0:g} to 0.9 pu",
+            element_type="Transformer",
+            element_id=br.id,
+            values={"i0_pu": i0},
         )
     if uk < 1e-9:
-        out.reductions.append(
-            f"transformer {br.id}: ideal leakage represented by uk=1e-9 pu"
+        record_reduction(
+            out,
+            "approx.transformer.ideal_leakage",
+            f"transformer {br.id}: ideal leakage represented by uk=1e-9 pu",
+            element_type="Transformer",
+            element_id=br.id,
         )
 
     ratio = scalar(br.tap.ratio_magnitude)
@@ -516,9 +596,14 @@ def _source_row(ap: Source, out: PgmExport, grid: Grid, pid: int) -> dict:
     if impedance == 0.0:
         short_circuit_power = IDEAL_SLACK_SK_VA
         rx_ratio = 0.1
-        out.reductions.append(
+        record_reduction(
+            out,
+            "approx.source.ideal_as_finite",
             f"source {ap.id}: ideal voltage boundary represented by finite "
-            f"short-circuit power {IDEAL_SLACK_SK_VA:g} VA"
+            f"short-circuit power {IDEAL_SLACK_SK_VA:g} VA",
+            element_type="Source",
+            element_id=ap.id,
+            values={"sk_va": IDEAL_SLACK_SK_VA},
         )
     else:
         if reactance <= 0.0:
@@ -557,9 +642,13 @@ def _injection_row(
                 f"appliance {ap.id}: ZIP has no power-grid-model equivalent; pass "
                 "allow_approximation=True to export it as constant power"
             )
-        out.reductions.append(
+        record_reduction(
+            out,
+            "approx.load.zip_as_constant_power",
             f"appliance {ap.id}: ZIP load reduced to constant power "
-            "(power-grid-model has no ZIP model)"
+            "(power-grid-model has no ZIP model)",
+            element_type=type(ap).__name__,
+            element_id=ap.id,
         )
         load_type = 0
     else:
@@ -572,6 +661,33 @@ def _injection_row(
         "type": load_type,
         "p_specified": sign * p,
         "q_specified": sign * q,
+    }
+
+
+def _regulator_row(ap, regulation, out: PgmExport, pid: int, gen_row: dict) -> dict:
+    """A PV terminal exports as a ``voltage_regulator`` acting on its ``sym_gen``.
+
+    power-grid-model holds the node at ``u_ref`` (per unit of the node's rated
+    voltage, the base of ``v_set_pu``) and pins the reactive power at
+    ``q_min``/``q_max``, which is the schema's ``VoltageRegulation``. The generator's
+    own reactive setpoint is not read while the regulator is in service.
+    """
+    if getattr(regulation.regulated, "value", regulation.regulated) == "per_phase":
+        raise UnsupportedGridError(
+            f"generator {ap.id}: per-phase voltage regulation has no "
+            "power-grid-model equivalent (the voltage_regulator holds the "
+            "positive-sequence magnitude)"
+        )
+    out.pgm_of_regulator[ap.id] = pid
+    gen_row["q_specified"] = 0.0
+    nan = float("nan")
+    return {
+        "id": pid,
+        "regulated_object": gen_row["id"],
+        "status": int(bool(ap.in_service)),
+        "u_ref": scalar(regulation.v_set_pu),
+        "q_min": nan if regulation.q_min_var is None else scalar(regulation.q_min_var),
+        "q_max": nan if regulation.q_max_var is None else scalar(regulation.q_max_var),
     }
 
 

@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
@@ -169,19 +169,46 @@ class ZeroSequenceDefaults:
     r0: int = 0
     x0: int = 0
     c0: int = 0
+    ids: list = field(default_factory=list)
 
-    def note(self, *, r0=None, x0=None, c0=None) -> None:
+    def note(self, *, r0=None, x0=None, c0=None, source_id=None) -> None:
         """Record one converted line: ``None`` means the value had to be invented."""
         self.lines += 1
         self.r0 += r0 is None
         self.x0 += x0 is None
         self.c0 += c0 is None
+        if source_id is not None and (r0 is None or x0 is None or c0 is None):
+            self.ids.append(source_id)
 
-    def warn(self, logger: logging.Logger, *, tool: str) -> None:
-        """Emit the one-per-grid WARNING (no-op when nothing was invented)."""
+    def warn(self, logger: logging.Logger, *, tool: str, report=None) -> None:
+        """Emit the one-per-grid WARNING (no-op when nothing was invented).
+
+        With a ``report`` the same fact is recorded as
+        ``approx.line.zero_sequence_invented``.
+        """
         if not (self.r0 or self.x0 or self.c0):
             return
         rr0, xr0, cr0 = zero_sequence_ratios()
+        if report is not None:
+            report.approximated(
+                "line.zero_sequence_invented",
+                "The source carries no zero-sequence line data; R0, X0 and C0 were "
+                f"invented from line.zero_sequence.* (R0/R1={rr0:g}, X0/X1={xr0:g}, "
+                f"C0/C1={cr0:g}). Every unbalanced and triplen result rests on them.",
+                element_type="line",
+                ids=self.ids or None,
+                count=max(self.r0, self.x0, self.c0),
+                affects=("unbalanced", "harmonic"),
+                values={
+                    "r0_over_r1": rr0,
+                    "x0_over_x1": xr0,
+                    "c0_over_c1": cr0,
+                    "r0_invented": self.r0,
+                    "x0_invented": self.x0,
+                    "c0_invented": self.c0,
+                },
+                announced=True,
+            )
         logger.warning(
             "%s conversion: %d of %d three-phase lines carry no zero-sequence data; "
             "R0 invented for %d (R0/R1=%g), X0 for %d (X0/X1=%g), C0 for %d "
@@ -572,13 +599,22 @@ def build_generator(
     return Generator(**kwargs)
 
 
-def warn_dropped_elements(logger, source_name: str, dropped: dict) -> None:
+def warn_dropped_elements(
+    logger,
+    source_name: str,
+    dropped: dict,
+    *,
+    report=None,
+    ids: Optional[dict] = None,
+) -> None:
     """Log one WARNING per non-empty element table the converter does not read.
 
     A silently dropped element (a shunt, a 3-winding transformer, ...) yields a
     grid that solves but is physically WRONG relative to the source network —
     the caller must be told. ``dropped`` maps ``element kind -> count`` (zero /
-    falsy counts are skipped).
+    falsy counts are skipped). With a ``report``
+    (:class:`~pgml.convert._report.ConversionReport`) each kind is also recorded as a
+    ``dropped.<kind>`` entry; ``ids`` optionally maps a kind to the source ids.
     """
     for kind, count in dropped.items():
         if count:
@@ -590,6 +626,15 @@ def warn_dropped_elements(logger, source_name: str, dropped: dict) -> None:
                 count,
                 kind,
             )
+            if report is not None:
+                report.dropped(
+                    str(kind),
+                    f"{count} {kind} element(s) are not converted; the grid omits "
+                    "their physics.",
+                    ids=(ids or {}).get(kind),
+                    count=count,
+                    announced=True,
+                )
 
 
 def build_source(
@@ -607,6 +652,7 @@ def build_source(
     x0_ohm: Optional[float] = None,
     two_pi_f0: Optional[float] = None,
     element: Optional[str] = None,
+    report=None,
 ) -> Source:
     """Build a :class:`~pgml.schemas.grid_schema.Source` (balanced Thevenin).
 
@@ -684,6 +730,7 @@ def build_source(
         x0_ohm=x0_ohm,
         two_pi_f0=two_pi_f0,
         element=element if element is not None else f"source {id}",
+        report=report,
     )
     return Source(
         id=id,
@@ -707,6 +754,7 @@ def _source_impedance_matrices(
     x0_ohm: Optional[float],
     two_pi_f0: Optional[float],
     element: str,
+    report=None,
 ) -> tuple[list[list[float]], list[list[float]]]:
     """Per-phase (R, L) matrices of a 3-phase source Thevenin, zero-sequence aware.
 
@@ -748,6 +796,17 @@ def _source_impedance_matrices(
             rr0,
             xr0,
         )
+        if report is not None:
+            report.approximated(
+                "source.zero_sequence_invented",
+                f"{element} carries no zero-sequence Thevenin data; R0/R1={rr0:g} "
+                f"and X0/X1={xr0:g} were assumed from source.zero_sequence.*.",
+                element_type="source",
+                ids=[element],
+                affects=("unbalanced", "harmonic"),
+                values={"r0_over_r1": rr0, "x0_over_x1": xr0},
+                announced=True,
+            )
 
     # Floor the zero-sequence pair exactly like the positive-sequence Thevenin
     # (:func:`thevenin_from_z`): an all-zero Z0 would make the per-phase matrix

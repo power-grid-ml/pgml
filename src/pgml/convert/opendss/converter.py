@@ -111,7 +111,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pgml.assembly._params import phase_voltage_magnitude
 from pgml.convert._common import (
@@ -128,10 +128,14 @@ from pgml.convert._common import (
     thevenin_from_z,
     warn_dropped_elements,
 )
+from pgml.convert._model_differences import OPENDSS, finalize_report
+from pgml.convert._report import ConversionReport
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
+    Characteristic,
     ComplexTap,
     ConsumerType,
+    EarthReturnModel,
     Grid,
     HarmonicComponent,
     HarmonicImpedance,
@@ -145,6 +149,9 @@ from pgml.schemas.grid_schema import (
     SpectrumPoint,
     Transformer,
     VoltageRegulation,
+    VoltVarControl,
+    VoltVarVoltWattControl,
+    VoltWattControl,
     WindingConnection,
     ZipCoefficients,
 )
@@ -184,6 +191,8 @@ def to_grid(
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     harmonic_line_model: Optional[str] = None,
     der_harmonics: bool = True,
+    earth_return: Literal["pgml", "opendss"] = "pgml",
+    return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -208,24 +217,40 @@ def to_grid(
         ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
         logged once. OpenDSS recomputes its own line constants at every harmonic and
         exports only the fundamental matrices, so the model that reproduces that
-        frequency behaviour has to be chosen here. A matrix OpenDSS computed from a
-        ``LineGeometry`` contains the earth-return resistance in its mutual entries
-        at ``f0``; a matrix built from a ``LineCode``'s ``R1``/``R0`` contains whatever
-        the author put into ``R0``. The converter cannot tell the two apart and leaves
-        ``Line.earth_return.r0_includes_earth_return`` unset, so the modeling default
-        (``false``) applies; set it per line for real zero-sequence data. Under the
-        ``sequence_aware`` model the setting only matters for a line whose
-        ``R0 - 3*Re(f0)`` is below ``R1``.
+        frequency behaviour has to be chosen here.
+    earth_return:
+        What the sequence-aware lines use for the Carson earth-return correction
+        that OpenDSS applies to every lumped line at harmonic orders
+        (``R += Rg*(h-1)`` and ``X = h*(X - 0.5*KXg*ln h)`` on every matrix entry,
+        with ``KXg = Xg / ln(658.5*sqrt(rho/f0))``). ``"pgml"`` (default) leaves the
+        lines on the modeling defaults, whose coefficients are the physical metric
+        Carson values, and reports each line's ``Rg``/``Xg``/``rho`` as a model
+        difference with numbers. ``"opendss"`` writes every line's own values into
+        :class:`~pgml.schemas.grid_schema.EarthReturnModel` (resistance and reactance
+        coefficients per metre and hertz, the unguarded sub-linear reactance law when
+        ``Xg > 0``, and ``r0_includes_earth_return=True`` because the stored matrix
+        already carries the earth return at ``f0``), so pgml reproduces OpenDSS's
+        own frequency law for those lines. OpenDSS's defaults ``Rg=0.01805`` and
+        ``Xg=0.155081`` are the 60 Hz Carson values in ohms per 1000 ft and are
+        reinterpreted in each line's ``units``, so on a metric line they are 3.28
+        times smaller than the physical value.
 
     der_harmonics:
         Import native Generator/PVSystem/Storage harmonic impedance and voltage
         spectra (default True). Supports one-phase WYE and three-phase WYE/DELTA.
         False explicitly requests fundamental-only DER conversion and omits both.
+    return_report:
+        Also return the :class:`~pgml.convert.ConversionReport` of this conversion
+        as a third tuple element: every dropped element kind, every approximation
+        and every default-model difference between OpenDSS and pgml that applies to
+        this circuit, each with the setting that closes it. The report is logged
+        either way.
 
     Returns
     -------
     tuple[Grid, dict]
-        A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
+        A ``(Grid, id_map)`` pair, or ``(Grid, id_map, ConversionReport)`` with
+        ``return_report=True``.  ``Grid`` is the materialised schema object
         (no ``type_ref``).  ``id_map`` maps DSS element names to our schema ids:
 
         - ``"bus"``       -> ``{dss_bus_name_lower: Node.id}``
@@ -290,6 +315,21 @@ def to_grid(
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
     _id = IdCounter()
+    report = ConversionReport(
+        tool=OPENDSS,
+        direction="import",
+        options={
+            "phase_mode": phase_mode,
+            "harmonic_line_model": harmonic_line_model,
+            "der_harmonics": der_harmonics,
+        },
+    )
+
+    if earth_return not in ("pgml", "opendss"):
+        raise ConversionError(
+            f"earth_return must be 'pgml' or 'opendss', got {earth_return!r}"
+        )
+    line_earth: dict[int, tuple[float, float, float]] = {}
 
     id_map: dict[str, Any] = {
         "bus": {},
@@ -404,6 +444,13 @@ def to_grid(
         r_mat_flat = list(dss.Lines.RMatrix())  # Ohm/length-unit
         x_mat_flat = list(dss.Lines.XMatrix())  # Ohm/length-unit
         c_mat_flat = list(dss.Lines.CMatrix())  # nF/length-unit
+
+        # Carson earth-return parameters, Ohm per length unit at the base frequency
+        line_earth[line_id] = (
+            float(dss.Lines.Rg()) / meters_per_unit,
+            float(dss.Lines.Xg()) / meters_per_unit,
+            float(dss.Lines.Rho()),
+        )
 
         # Convert to total Ohm / H / F
         r_total = [v * length_in_unit for v in r_mat_flat]  # Ohm
@@ -833,6 +880,7 @@ def to_grid(
                 x0_ohm=x0_ohm,
                 two_pi_f0=two_pi_f0,
                 element=f"OpenDSS Vsource '{vsrc_name}'",
+                report=report,
             )
         )
 
@@ -964,6 +1012,17 @@ def to_grid(
             vmin,
             vmax,
             vlow,
+        )
+        report.approximated(
+            "load.voltage_band",
+            "OpenDSS reverts a constant-power/current load to constant impedance "
+            "outside Vminpu..Vmaxpu (and below Vlowpu); pgml applies the load law "
+            "at every voltage. Identical inside the band.",
+            element_type="load",
+            ids=names,
+            affects=("fundamental", "unbalanced", "harmonic"),
+            values={"vminpu": vmin, "vmaxpu": vmax, "vlowpu": vlow},
+            announced=True,
         )
 
     # ---------------------------------------------------------------------- #
@@ -1372,7 +1431,22 @@ def to_grid(
         ret = dss.Storages.Next()
 
     # ---------------------------------------------------------------------- #
-    # 11. Elements the converter does NOT read: fail loud, never silently   #
+    # 11. InvControl -> inverter control laws on the controlled DER            #
+    # ---------------------------------------------------------------------- #
+    _import_inv_controls(dss, id_map, nodes, appliances, report)
+    if id_map["pvsystem"]:
+        report.approximated(
+            "pvsystem.snapshot",
+            "PVSystems are imported at their present solved output (irradiance, "
+            "temperature and Pmpp derating applied by OpenDSS, kW/kvar as solved); "
+            "a different irradiance needs a new p_nom_w.",
+            element_type="pvsystem",
+            ids=list(id_map["pvsystem"]),
+            affects=(),
+        )
+
+    # ---------------------------------------------------------------------- #
+    # 12. Elements the converter does NOT read: fail loud, never silently   #
     #     wrong. Every DSS circuit element (`Circuit.AllElementNames()`,     #
     #     `"ClassName.elementname"`) whose class is not one of the ones      #
     #     handled above triggers a WARNING naming the kind and count --      #
@@ -1392,13 +1466,19 @@ def to_grid(
         "generator",
         "pvsystem",
         "storage",
+        "invcontrol",
     }
     _dropped_counts: dict[str, int] = {}
+    _dropped_names: dict[str, list] = {}
     for elt_name in dss.Circuit.AllElementNames():
-        cls = elt_name.split(".", 1)[0].lower()
+        cls, _, name = elt_name.partition(".")
+        cls = cls.lower()
         if cls not in _handled_dss_classes:
             _dropped_counts[cls] = _dropped_counts.get(cls, 0) + 1
-    warn_dropped_elements(_logger, "OpenDSS", _dropped_counts)
+            _dropped_names.setdefault(cls, []).append(name.lower())
+    warn_dropped_elements(
+        _logger, "OpenDSS", _dropped_counts, report=report, ids=_dropped_names
+    )
 
     description = f"Imported from OpenDSS circuit (f0={f0_hz} Hz). " + (
         "Single-phase positive-sequence equivalent."
@@ -1415,12 +1495,316 @@ def to_grid(
     resolve_converted_line_models(
         grid, _logger, tool="OpenDSS", requested=harmonic_line_model
     )
+    _apply_line_earth_return(grid, line_earth, f0_hz, earth_return, report)
+    finalize_report(report, grid, _logger)
+    if return_report:
+        return grid, id_map, report
     return grid, id_map
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _xy_curve(dss: Any, name: str) -> Characteristic:
+    """An OpenDSS ``XYcurve`` as a pgml characteristic (linear, held outside)."""
+    dss.XYCurves.Name(name)
+    if dss.XYCurves.Name().lower() != name.lower():
+        raise ConversionError(f"OpenDSS XYcurve '{name}' not found")
+    return Characteristic(
+        x_values=[float(v) for v in dss.XYCurves.XArray()],
+        y_values=[float(v) for v in dss.XYCurves.YArray()],
+    )
+
+
+def _import_inv_controls(
+    dss: Any, id_map: dict, nodes: list, appliances: list, report
+) -> None:
+    """Attach each ``InvControl`` as an inverter control law on its DER.
+
+    Mapped exactly: ``mode=VOLTVAR`` (``vvc_curve1`` as ``VoltVarControl``,
+    ``RefReactivePower`` VARMAX -> ``QReference.RATED`` with the inverter kVA as the
+    base, VARAVAIL -> ``QReference.AVAILABLE``), ``mode=VOLTWATT`` (``voltwatt_curve``
+    as ``VoltWattControl``) and ``CombiMode=VV_VW`` (both curves). The controlled
+    element's kVA rating becomes ``s_rated_va``. ``voltage_curvex_ref`` must be
+    ``rated``: OpenDSS then measures the per-unit voltage against the element's own
+    ``kv``, and the converter checks that it equals the host node's rated voltage,
+    the base of pgml's characteristics. A Volt-Watt curve on the ``PMPPPU`` axis is
+    a fraction of Pmpp, pgml's a fraction of the available power, so the
+    controlled element's active power is reset to ``Pmpp * irradiance`` and the
+    two agree at irradiance 1 (any other value is reported). Everything else
+    (other modes, monitored buses, averaging windows, a DER the converter did not
+    import) is reported as dropped, with the reason.
+    """
+    dss.Circuit.SetActiveClass("InvControl")
+    if dss.ActiveClass.Count() == 0:
+        return
+    by_id = {a.id: a for a in appliances}
+    node_by_id = {n.id: n for n in nodes}
+    der_ids = {}
+    for kind in ("pvsystem", "generator", "storage"):
+        for name, ident in id_map[kind].items():
+            der_ids[f"{kind}.{name}"] = ident
+    dropped: dict[str, str] = {}
+    mapped: list[str] = []
+    approximations: list[str] = []
+    ret = dss.ActiveClass.First()
+    while ret:
+        name = dss.ActiveClass.Name().lower()
+        prop = lambda key: str(dss.Properties.Value(key)).strip()  # noqa: E731
+        mode = prop("Mode").upper()
+        combi = prop("CombiMode").upper()
+        curve_ref = prop("Voltage_CurveX_Ref").upper()
+        q_ref = prop("RefReactivePower").upper()
+        vw_axis = prop("VoltWattYAxis").upper()
+        der_list = [
+            t.strip().strip("[]").lower()
+            for t in prop("DERList").strip("[]").replace(",", " ").split()
+        ]
+        try:
+            if combi and combi != "NONE":
+                if combi != "VV_VW":
+                    raise ConversionError(f"CombiMode={combi} is not mapped")
+                law = "vv_vw"
+            elif mode == "VOLTVAR":
+                law = "vv"
+            elif mode == "VOLTWATT":
+                law = "vw"
+            else:
+                raise ConversionError(f"mode={mode or 'none'} is not mapped")
+            if law in ("vv", "vv_vw") and curve_ref != "RATED":
+                raise ConversionError(
+                    f"voltage_curvex_ref={curve_ref} is not mapped (only rated)"
+                )
+            if law in ("vv", "vv_vw") and q_ref not in ("VARMAX", "VARAVAL"):
+                raise ConversionError(f"RefReactivePower={q_ref} is not mapped")
+            if law in ("vw", "vv_vw") and vw_axis not in ("PMPPPU", "PAVAILABLEPU"):
+                raise ConversionError(f"VoltWattYAxis={vw_axis} is not mapped")
+            if not der_list:
+                raise ConversionError("DERList is empty")
+            targets = []
+            for entry in der_list:
+                ident = der_ids.get(entry)
+                if ident is None:
+                    raise ConversionError(f"controlled element {entry} not imported")
+                targets.append((entry, by_id[ident]))
+            for entry, der in targets:
+                if getattr(der, "voltage_regulation", None) is not None:
+                    raise ConversionError(
+                        f"{entry} is a voltage-regulating generator (model=3)"
+                    )
+                if getattr(der, "control", None) is not None:
+                    raise ConversionError(f"{entry} already carries a control law")
+            # reading a curve changes the active element, so read the names first
+            vv_name, vw_name = prop("VVC_Curve1"), prop("VoltWatt_Curve")
+            vv = _xy_curve(dss, vv_name) if law != "vw" else None
+            vw = _xy_curve(dss, vw_name) if law != "vv" else None
+            q_reference = "available" if q_ref == "VARAVAL" else "rated"
+            for entry, der in targets:
+                cls, _, elt = entry.partition(".")
+                dss.Circuit.SetActiveElement(entry)
+                kv = float(dss.Properties.Value("kv")) * 1e3
+                kva = float(dss.Properties.Value("kva")) * 1e3
+                node = node_by_id[der.node]
+                if abs(kv - float(node.u_rated_v)) > 1e-6 * float(node.u_rated_v):
+                    raise ConversionError(
+                        f"{entry}: element kv {kv:g} V differs from the node rated "
+                        f"voltage {float(node.u_rated_v):g} V, so the curve voltage "
+                        "base is not the node base"
+                    )
+                if law != "vw" and q_ref == "VARMAX":
+                    kvar_max = float(dss.Properties.Value("kvarMax")) * 1e3
+                    if abs(kvar_max - kva) > 1e-6 * kva:
+                        raise ConversionError(
+                            f"{entry}: kvarMax {kvar_max:g} var differs from the kVA "
+                            f"rating {kva:g} VA, which pgml uses as the Q base"
+                        )
+                if law == "vv":
+                    der.control = VoltVarControl(
+                        characteristic=vv, s_rated_va=kva, q_reference=q_reference
+                    )
+                elif law == "vw":
+                    der.control = VoltWattControl(characteristic=vw, s_rated_va=kva)
+                else:
+                    der.control = VoltVarVoltWattControl(
+                        volt_var=vv,
+                        volt_watt=vw,
+                        s_rated_va=kva,
+                        q_reference=q_reference,
+                    )
+                if law != "vv" and cls == "pvsystem":
+                    dss.PVsystems.Name(elt)
+                    pmpp = float(dss.PVsystems.Pmpp()) * 1e3
+                    irradiance = float(dss.PVsystems.Irradiance())
+                    pct = float(dss.Properties.Value("%Pmpp")) / 100.0
+                    available = pmpp * irradiance * pct
+                    der.p_nom_w = available
+                    if vw_axis == "PMPPPU" and abs(irradiance * pct - 1.0) > 1e-9:
+                        approximations.append(entry)
+            mapped.append(name)
+        except ConversionError as exc:
+            dropped[name] = str(exc)
+        dss.Circuit.SetActiveClass("InvControl")
+        ret = dss.ActiveClass.Next()
+    if mapped:
+        _logger.info(
+            "OpenDSS -> Grid: %d InvControl element(s) mapped to inverter control "
+            "laws: %s.",
+            len(mapped),
+            ", ".join(mapped),
+        )
+    if approximations:
+        report.approximated(
+            "invcontrol.voltwatt_pmpp_axis",
+            "Volt-Watt curves on the PMPPPU axis limit a fraction of Pmpp, pgml a "
+            "fraction of the available power (Pmpp * irradiance * %Pmpp); with the "
+            "irradiance away from 1 the curtailment differs by that factor.",
+            element_type="pvsystem",
+            ids=approximations,
+            affects=("fundamental", "unbalanced"),
+        )
+    if dropped:
+        for name, reason in dropped.items():
+            _logger.warning(
+                "OpenDSS InvControl '%s' is NOT converted (%s); the controlled "
+                "elements keep their present solved P/Q without a control law.",
+                name,
+                reason,
+            )
+        report.dropped(
+            "invcontrol",
+            "These InvControl elements are not mapped (see values for the reason "
+            "per element); their DER keep the solved P/Q snapshot without a "
+            "control law.",
+            ids=list(dropped),
+            affects=("fundamental", "unbalanced"),
+            values=dropped,
+            announced=True,
+        )
+
+
+def _apply_line_earth_return(
+    grid: Grid,
+    line_earth: dict[int, tuple[float, float, float]],
+    f0_hz: float,
+    earth_return: str,
+    report,
+) -> None:
+    """Carry each line's ``Rg``/``Xg``/``rho`` into the grid or into the report.
+
+    OpenDSS corrects a lumped line at order ``h`` as ``R += Rg*(h-1)`` and
+    ``X = h*(X - 0.5*KXg*ln h)`` on every matrix entry, ``KXg = Xg /
+    ln(658.5*sqrt(rho/f0))``. Added to every entry, the term is a pure zero-sequence
+    one, ``R0 += 3*Rg*(h-1)`` and ``X0 = h*(X0 - 1.5*KXg*ln h)``, which is pgml's
+    sequence-aware earth-return law with ``resistance_coeff = Rg/f0`` and
+    ``reactance_coeff = KXg/f0`` per metre. Only a line resolved to the
+    ``sequence_aware`` model has a zero sequence to carry it; the other line models
+    are reported instead.
+    """
+    from pgml import defaults as _d
+
+    from pgml.convert._report import ModelMatch
+
+    lines = {ln.id: ln for ln in grid.branches if ln.id in line_earth}
+    if not lines:
+        return
+    rc_default = float(_d.get("line.earth_return.resistance_coeff_ohm_per_m_per_hz"))
+    kx_default = float(_d.get("line.earth_return.reactance_coeff_ohm_per_m_per_hz"))
+    written: list[int] = []
+    other_model: list[int] = []
+    values_rg: list[float] = []
+    values_xg: list[float] = []
+    values_rho: list[float] = []
+    for line_id, ln in lines.items():
+        rg_m, xg_m, rho = line_earth[line_id]
+        values_rg.append(rg_m)
+        values_xg.append(xg_m)
+        values_rho.append(rho)
+        if getattr(ln, "harmonic_line_model", None) != "sequence_aware":
+            other_model.append(line_id)
+            continue
+        if earth_return != "opendss":
+            continue
+        log_term = math.log(658.5 * math.sqrt(rho / f0_hz))
+        ln.earth_return = EarthReturnModel(
+            resistance_coeff_ohm_per_m_per_hz=rg_m / f0_hz,
+            reactance_coeff_ohm_per_m_per_hz=xg_m / (f0_hz * log_term),
+            x0_frequency="carson_sublinear" if xg_m > 0.0 else "linear",
+            x0_nonnegative=False,
+            r0_includes_earth_return=True,
+        )
+        written.append(line_id)
+    values = {
+        "rg_ohm_per_m_min": min(values_rg),
+        "rg_ohm_per_m_max": max(values_rg),
+        "xg_ohm_per_m_min": min(values_xg),
+        "xg_ohm_per_m_max": max(values_xg),
+        "rho_ohm_m_min": min(values_rho),
+        "rho_ohm_m_max": max(values_rho),
+        "pgml_rg_ohm_per_m": rc_default * f0_hz,
+        "pgml_kxg_ohm_per_m": kx_default * f0_hz,
+        "base_frequency_hz": f0_hz,
+    }
+    seq_ids = [i for i in lines if i not in other_model]
+    if seq_ids:
+        if written:
+            message = (
+                "Each line's OpenDSS Rg/Xg/rho was written into its earth_return, so "
+                "pgml applies OpenDSS's own earth-return law and coefficients to "
+                "these lines."
+            )
+        else:
+            message = (
+                "OpenDSS applies each line's Rg/Xg/rho earth-return correction at "
+                "harmonic orders; pgml uses the physical metric Carson coefficients "
+                "from line.earth_return.* instead (see values). OpenDSS's default "
+                "Rg/Xg are 60 Hz values per 1000 ft reinterpreted in the line's "
+                "units."
+            )
+        report.model_difference(
+            "line.earth_return_parameters",
+            message,
+            element_type="line",
+            ids=seq_ids,
+            affects=("harmonic",),
+            source_model="per-line Rg, Xg, rho at the line's base frequency",
+            pgml_model="line.earth_return.* coefficients unless earth_return='opendss'",
+            match=ModelMatch(
+                arguments={"to_grid.earth_return": "opendss"},
+                reference="Rg=0 Xg=0 on the OpenDSS lines removes the term there",
+            ),
+            matched=bool(written),
+            values=values,
+        )
+        if written:
+            _logger.info(
+                "OpenDSS -> Grid: earth-return Rg/Xg/rho of %d line(s) written into "
+                "Line.earth_return (OpenDSS's own frequency law).",
+                len(written),
+            )
+    if other_model:
+        report.model_difference(
+            "line.earth_return_unrepresented",
+            "OpenDSS applies its Rg/Xg earth-return correction to these lines at "
+            "harmonic orders, but their pgml line model carries no zero-sequence "
+            "earth term (a single-phase equivalent or a positive-sequence / naive "
+            "model), so the correction is absent in pgml.",
+            element_type="line",
+            ids=other_model,
+            affects=("harmonic",),
+            source_model="Rg/Xg correction on every matrix entry",
+            pgml_model="no earth-return term on this line model",
+            match=ModelMatch(
+                arguments={
+                    "to_grid.phase_mode": "THREE_PHASE",
+                    "to_grid.harmonic_line_model": "sequence_aware",
+                    "to_grid.earth_return": "opendss",
+                },
+                reference="Rg=0 Xg=0 on the OpenDSS lines removes the term there",
+            ),
+            values=values,
+        )
 
 
 def _phase_num_to_enum(phase_num: int) -> Phase:

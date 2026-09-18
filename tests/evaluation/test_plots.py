@@ -6,7 +6,6 @@ is exercised by ``test_ieee33_figures.py``.
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import torch
@@ -46,6 +45,8 @@ from pgml.schemas.grid_schema import (
 from pgml.solver import solve_harmonic_flow, solve_power_flow
 
 from tests.fixtures.tiny_grids import single_phase_chain, three_phase_two_bus
+
+plt = pytest.importorskip("matplotlib.pyplot", exc_type=ImportError)
 
 CDT = torch.complex128
 SPEC = [(1, 1.0, 0.0), (5, 0.2, 0.0), (7, 0.14, 0.0)]

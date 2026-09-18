@@ -125,6 +125,8 @@ from pgml.convert._common import (
     resolve_converted_line_models,
     warn_dropped_elements,
 )
+from pgml.convert._model_differences import PANDAPOWER, finalize_report
+from pgml.convert._report import ConversionReport
 from pgml.errors import ConfigurationError, ConversionError
 from pgml.schemas.grid_schema import (
     Characteristic,
@@ -986,6 +988,7 @@ def to_grid(
     gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
     harmonic_line_model: Optional[str] = None,
     open_switch_model: Optional[Literal["terminal", "drop_element"]] = None,
+    return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -1040,11 +1043,18 @@ def to_grid(
         omits the whole element when either terminal switch is open. Elements with
         both ends open are omitted in both modes. Original bus mappings are retained;
         ``id_map["open_terminal"]`` maps open switch indices to auxiliary node ids.
+    return_report:
+        Also return the :class:`~pgml.convert.ConversionReport` of this conversion
+        as a third tuple element: every dropped element kind, every approximation
+        and every default-model difference between pandapower and pgml that applies to
+        this network, each with the setting that closes it. The report is logged
+        either way.
 
     Returns
     -------
     tuple[Grid, dict]
-        A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
+        A ``(Grid, id_map)`` pair, or ``(Grid, id_map, ConversionReport)`` with
+        ``return_report=True``.  ``Grid`` is the materialised schema object
         (no ``type_ref``).  ``id_map`` maps source element tables to our ids:
         ``"bus"`` -> ``{pp_bus_idx: Node.id}``,
         ``"line"`` -> ``{pp_line_idx: Line.id}``,
@@ -1079,6 +1089,17 @@ def to_grid(
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
     _id = IdCounter()
+    report = ConversionReport(
+        tool=PANDAPOWER,
+        direction="import",
+        comparable=("fundamental", "unbalanced"),
+        options={
+            "phase_mode": phase_mode,
+            "gen_mode": gen_mode,
+            "harmonic_line_model": harmonic_line_model,
+            "open_switch_model": open_switch_model,
+        },
+    )
 
     id_map: dict[str, Any] = {
         "bus": {},
@@ -1220,7 +1241,7 @@ def to_grid(
         if c0 is not None:
             c0 *= parallel
         if phase_mode is PhaseMode.THREE_PHASE:
-            zero_seq_lines.note(r0=r0, x0=x0, c0=c0)
+            zero_seq_lines.note(r0=r0, x0=x0, c0=c0, source_id=pp_idx)
 
         branches.append(
             build_line_from_sequence(
@@ -1512,6 +1533,7 @@ def to_grid(
                 x0_ohm=x0_ohm,
                 two_pi_f0=two_pi_f0,
                 element=f"pandapower ext_grid {pp_idx}",
+                report=report,
             )
         )
 
@@ -1952,6 +1974,21 @@ def to_grid(
             )
             if (tbl := getattr(net, kind, None)) is not None
         },
+        report=report,
+        ids={
+            kind: list(tbl.index)
+            for kind in (
+                "gen",
+                "trafo3w",
+                "impedance",
+                "ward",
+                "xward",
+                "dcline",
+                "motor",
+                "asymmetric_sgen",
+            )
+            if (tbl := getattr(net, kind, None)) is not None
+        },
     )
 
     description = f"Imported from pandapower (f0={f0_hz} Hz). " + (
@@ -1969,10 +2006,13 @@ def to_grid(
             description=description,
         ),
     )
-    zero_seq_lines.warn(_logger, tool="pandapower")
+    zero_seq_lines.warn(_logger, tool="pandapower", report=report)
     resolve_converted_line_models(
         grid, _logger, tool="pandapower", requested=harmonic_line_model
     )
+    finalize_report(report, grid, _logger)
+    if return_report:
+        return grid, id_map, report
     return grid, id_map
 
 
