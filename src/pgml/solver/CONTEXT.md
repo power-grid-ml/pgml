@@ -786,7 +786,9 @@ scenario-independent base. The automatic path uses the conservative selection ru
   a 1e-4 Ω switch on an ohm-scale feeder already costs 4 digits. Therefore the sweep
   BASE omits every switched branch it can (`_woodbury_base_states` opens each in turn
   while `check_connectivity` passes; bridges stay in), and `low_rank_update` warns
-  when the measured amplification exceeds 1e6.
+  when the measured amplification exceeds 1e6 (`estimate_amplification=False` skips
+  the measurement and its host sync; the harmonic device-shunt path does, because it
+  verifies the backward error instead).
 - Internal fast paths (no API): `assembly.build_injection_plan` /
   `injections_from_plan` resolve the operating point once per solve (the
   V-independent tensors) and make every iteration pure tensor ops; residuals
