@@ -105,11 +105,16 @@ off-nominal-tap pi — while the zero sequence is now modelled correctly.
 The magnetizing (core-loss) shunt ``y_m`` is attached to a terminal phase diagonal
 directly (referred to the HV line voltage), outside the leakage incidence
 transform. WHICH terminal is the documented modeling choice
-``transformer.magnetizing_placement`` (:func:`magnetizing_placement`): the
-``from_terminal`` default, ``to_terminal`` (OpenDSS attaches the whole branch to
-its last winding's terminal) or ``split`` (power-grid-model puts half on each).
-The three differ in whether the magnetizing current sees a winding's leakage
-drop, so they are different topologies, not different referrals.
+``transformer.magnetizing_placement`` (:func:`magnetizing_placement`):
+``split`` (the default; power-grid-model puts half on each terminal),
+``from_terminal`` or ``to_terminal`` (OpenDSS attaches the whole branch to its last
+winding's terminal). The three differ in whether the magnetizing current sees a
+winding's leakage drop, so they are different topologies, not different referrals.
+The shunt runs from each phase terminal to ground. On a delta side that is a
+zero-sequence path the real winding does not have; its admittance is the
+magnetizing one (about 0.5 % of the rated admittance), so the effect is negligible.
+The referral to the to side uses the rated voltage ratio without the off-nominal
+tap.
 
 The leakage itself may be SEQUENCE-AWARE: when the zero-sequence leakage differs
 from the positive-sequence one, ``Y_winding``'s per-phase identity ``I_P`` is

@@ -164,6 +164,11 @@ because a delta coil's own base is `3·u_LL²/S`.
   (pandapower `si0_hv_partial`), and a neutral earthing impedance `3·Z_N` (pandapower
   `xn_ohm`/`rn_ohm`, OpenDSS `Rneut`/`Xneut`, which the OpenDSS converter refuses).
 - Two-winding units only. No three-winding units and no regulators.
+- The magnetizing branch is a shunt from each phase terminal to ground, outside the winding
+  incidence. On a delta side that is a zero-sequence path to ground the real winding does
+  not have; at a magnetizing current of 0.5 % its admittance is 200 times smaller than the
+  rated admittance and has no practical effect. The referral to the to side uses the rated
+  voltage ratio without the off-nominal tap.
 - The magnetizing branch defaults to `split`: half on each terminal, referred to
   each terminal's voltage base. `from_terminal` places it entirely on the from/HV
   terminal; `to_terminal` places it on the to/LV terminal, as OpenDSS does for the last

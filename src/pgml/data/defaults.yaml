@@ -29,6 +29,12 @@ converter:
         terminal retains that circuit with an auxiliary open-end node; drop_element
         omits the complete element as a reduced approximation. Both-open and
         out-of-service elements are omitted in either mode.
+        `terminal` is the default because it is what pandapower itself solves: a line
+        that is open at one end stays energized from the other and its charging
+        current loads the feeder. On the CIGRE MV network, which has three such lines,
+        omitting them moves the bus voltages by 2.9e-4 pu against pandapower's own
+        power flow, while keeping them agrees to 6e-13 pu. `drop_element` is kept for
+        studies that want the smaller system and accept that error.
 
 calculation:
   symmetry:
@@ -195,7 +201,10 @@ appliance:
         Maximum number of PV-to-PQ switching rounds (each round is one full Newton
         solve at a fixed active set). The loop normally settles in one to three
         rounds; hitting the cap logs a WARNING naming the oscillating generators and
-        keeps the last solution.
+        keeps the last solution. When limits are reached one unit after another a
+        feeder with n regulating units can need up to n rounds, so 12 covers the
+        distribution feeders the library targets and bounds the cost of a genuinely
+        oscillating case at 12 Newton solves.
     q_limit_hysteresis_pu:
       value: 1.0e-6
       units: "pu"
@@ -203,14 +212,22 @@ appliance:
         Voltage band, in per unit of the terminal's nominal, a pinned generator must
         cross before it is released back to voltage regulation. Guards the switching
         loop against cycling on solver noise; far below any physical regulation
-        deadband.
+        deadband. 1e-6 pu is two decades above the voltage-update tolerance
+        (`solver.convergence.update_pu` = 1e-8), so a converged voltage cannot cross
+        the band by rounding, and four decades below a typical regulator deadband of
+        1e-2 pu, so it does not alter which units regulate.
     q_limit_hysteresis_rel:
       value: 1.0e-9
       units: "pu"
       description: >
         Reactive band, relative to the widest of the generator's reactive limits, the
         required reactive power must exceed before the unit is pinned at that limit.
-        Guards against switching on the converged solve's rounding noise.
+        Guards against switching on the converged solve's rounding noise: 1e-9 sits
+        about three decades above the relative rounding of a double-precision power
+        evaluation (machine epsilon times the cancellation in Y*V, of order 1e-12) and
+        below the 1e-8 pu
+        mismatch tolerance, so a unit exactly at its limit is not pinned by noise and
+        a real violation of the size the solver can resolve still is.
 
 line:
 
@@ -286,7 +303,11 @@ line:
         for an R0 synthesised from `r0_over_r1`): R0 is treated as conductor resistance
         and the earth return enters only as the increment 3·(Re(f) − Re(f0)). Both forms
         reproduce the stored R0 exactly at f0; they differ only in how much of R0 the
-        skin multiplier scales. Per-line override:
+        skin multiplier scales. In the sequence_aware line model the skin multiplier
+        scales the phase conductor's share R1 of R0, so the two settings give the same
+        R0(h) whenever R0 − 3·Re(f0) ≥ R1 (every line with a real return path); they
+        differ only for an R0 smaller than R1 + 3·Re(f0) = R1 + 0.148 Ω/km at 50 Hz.
+        Per-line override:
         `Line.earth_return.r0_includes_earth_return`.
 
   # Carson/Deri earth-return path (zero-sequence and geometry lines).
@@ -377,8 +398,10 @@ line:
         `gmr`: the published GMR carries the internal inductance at every frequency and
         the internal reactance is dropped (frozen at its power-frequency value).
         `gmr_skin`: the published GMR's internal reactance is scaled by the solid-round
-        Bessel decay Im(Zint(f))/(f*mu0/4), so the power-frequency value is reproduced
-        exactly and the internal inductance decays with skin effect (continuous in f).
+        Bessel decay Im(Zint(f))/(f*mu0/4), so the internal inductance decays with skin
+        effect (continuous in f). At power frequency the decay factor is 0.997 to 0.999
+        for LV/MV conductors and 0.989 for a very large one, so the published GMR's
+        internal part, itself a few percent of X, is reproduced to within 1 %.
         `gmr_power_frequency`: `gmr` inside `power_frequency_band_hz` and `bessel`
         outside it, which is OpenDSS's rule (LineConstants/CNLineConstants/
         TSLineConstants). Reproduces OpenDSS at every frequency; discontinuous at the
@@ -698,7 +721,11 @@ solver:
         `stall_patience` window: an iteration is progress when the update drops below
         `stall_decay` times the best update the scenario had reached when the window
         opened. A value near 1 detects only a genuine plateau; a smaller value also calls
-        a slowly contracting iteration stalled.
+        a slowly contracting iteration stalled. With a patience of 4, the value 0.9
+        calls any iteration that contracts by 0.97 or better per step progress
+        (0.97^4 = 0.885), far slower than the roughly one decade per step of the
+        current-injection iteration on a distribution feeder, and still ends a true
+        plateau after five iterations.
     stall_tolerance_factor:
       value: 100.0
       units: "multiples of the precision floor"
@@ -814,7 +841,11 @@ solver:
         Caching turns every further product into one back-substitution instead of a
         complete Jacobian rebuild and factorization; above this size the factors are
         rebuilt per product instead, so a large batched solve does not hold a big
-        factorization alive for the lifetime of the graph.
+        factorization alive for the lifetime of the graph. The factors of B scenarios
+        of an N-row grid take B*(2N)^2*8 bytes in double precision: 256 MiB holds a
+        single grid of about 2900 rows or 90 scenarios of a 294-row three-phase LV
+        feeder, the sizes for which a full output Jacobian is built row by row, and
+        stays small next to the forward solve's own memory.
   loadability:
     ramp:
       value: "load"

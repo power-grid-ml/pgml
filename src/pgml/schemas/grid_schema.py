@@ -979,7 +979,15 @@ class TransformerZeroSeq(GridModel):
     as the positive-sequence leakage (the to-side/LV winding coil). The zero-sequence
     PATH is always derived from winding connections + clock; this overrides only the
     value. None => the configured `transformer.zero_sequence.*` ratios (Z0 = Z1 by
-    default), connected per topology."""
+    default), connected per topology.
+
+    Schema versions before 0.2.0 described these two values as referred to the HV
+    side, at a time when no part of the library consumed them. A persisted grid that
+    carries HV-referred values loads without a warning and is read here as
+    to-side-coil values, i.e. too large by the squared turns ratio (and by a further
+    factor 3 for a delta to-side coil). Convert such values before use:
+    ``z_to_coil = z_hv * (u_rated_to_v / u_rated_from_v)**2`` for a wye or zigzag
+    to-side winding, three times that for a delta one."""
 
     r0_ohm: Num = si_field(
         "Zero-sequence series resistance.",

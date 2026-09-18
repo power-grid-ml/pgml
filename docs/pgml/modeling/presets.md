@@ -59,3 +59,8 @@ Schema0.2.0 adds optional `Generator.harmonic_impedance` and
 `Storage.harmonic_impedance`. Older grids retain absent impedance. The explicit
 OpenDSS import selects its admittance-frequency and source-reference conventions;
 these fields are never inferred from signed P/Q.
+
+`TransformerZeroSeq` values are referred to the to-side winding coil, like the
+positive-sequence leakage. Earlier schema text named the HV side while nothing consumed
+the field. A stored grid with HV-referred values loads unchanged and must be converted
+by the squared voltage ratio, times 3 for a delta to-side coil.

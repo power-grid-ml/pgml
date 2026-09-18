@@ -388,7 +388,9 @@ def zero_sequence_harmonic_z(
     (an ``R0`` synthesised from an ``R0/R1`` ratio, which carries no earth content)
     takes ``R0_conductor = R0`` with ``Re_offset = Re(f0)``, adding the earth return as
     a pure increment. ``earth_resistance_coeff=0`` recovers a pure conductor
-    (no-earth) zero sequence.
+    (no-earth) zero sequence. With ``phase_resistance`` given, both settings yield
+    the same ``R0(h)`` as long as ``R0 - 3*Re(f0) >= R1``, because only the ``R1``
+    share is scaled.
 
     ``x0_frequency='linear'`` scales ``X0`` as a geometric inductance. That is exact
     for a return path that stays in metal (the neutral core or sheath of a cable, a
