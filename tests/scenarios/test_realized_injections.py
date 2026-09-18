@@ -3,7 +3,7 @@
 The recorded draw of a randomized ``h_mag`` spec is a FRACTION of a per-device emission
 reference, so the magnitude that reaches the solver only exists once that reference has
 been applied. These tests pin the realized ``<spec>_mag`` / ``<spec>_phase`` columns, the
-device-id axis they sit on, their post-reference and post-law values, and their dataset
+device-id axis they sit on, their post-reference values, and their dataset
 round-trip.
 """
 

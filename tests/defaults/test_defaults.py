@@ -225,9 +225,42 @@ def test_default_model_three_phase_is_sequence_aware():
     apply_default_harmonic_model(grid)
     ln = grid.branches[0]
     assert ln.harmonic_line_model == "sequence_aware"
-    assert ln.harmonic_skin_effect is True  # line.harmonic_model.skin_effect
-    # No per-line earth-return override: the line follows the defaults file.
+    # No per-line skin or earth-return override: the line follows the defaults file
+    # (and an active preset) at assembly time.
+    assert ln.harmonic_skin_effect is None
     assert ln.earth_return is None
+
+
+def test_skin_effect_default_resolves_at_assembly_under_a_preset():
+    """A grid resolved under the shipped defaults follows a later preset's skin choice.
+
+    The ``opendss`` preset turns the skin correction off. The flag is not stored at
+    resolution time, so the same grid assembles with a constant ``R1`` inside the
+    preset and with the Bessel rise outside it; an explicit per-line flag still wins.
+    """
+    import torch
+
+    from pgml import defaults
+    from pgml.assembly import assemble_network_ybus
+    from pgml.geometry import apply_default_harmonic_model
+
+    def r1_at_h25(grid):
+        yb = assemble_network_ybus(
+            grid, torch.tensor([1250.0], dtype=torch.float64), dtype=torch.complex128
+        )
+        y = yb.Y.reshape(yb.index.size, yb.index.size)
+        z_abc = torch.linalg.inv(-y[:3, 3:6]) / grid.branches[0].length_m
+        return float((z_abc[0, 0] - z_abc[0, 1]).real)
+
+    grid = apply_default_harmonic_model(_three_phase_grid())
+    r = grid.branches[0].series_resistance_ohm_per_m
+    r1 = r[0][0] - r[0][1]
+    assert r1_at_h25(grid) > 1.05 * r1
+    with defaults.use_preset("opendss"):
+        assert r1_at_h25(grid) == pytest.approx(r1, rel=1e-12)
+        explicit = apply_default_harmonic_model(_three_phase_grid(), skin=True)
+        assert explicit.branches[0].harmonic_skin_effect is True
+        assert r1_at_h25(explicit) > 1.05 * r1
 
 
 def test_default_model_single_phase_is_positive_sequence():
@@ -270,7 +303,7 @@ def test_default_model_single_phase_is_positive_sequence():
     apply_default_harmonic_model(grid)
     ln = grid.branches[0]
     assert ln.harmonic_line_model == "positive_sequence"
-    assert ln.harmonic_skin_effect is True
+    assert ln.harmonic_skin_effect is None  # resolves at assembly
 
 
 def test_default_model_respects_explicit_precedence():

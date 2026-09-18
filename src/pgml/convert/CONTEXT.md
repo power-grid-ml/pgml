@@ -42,6 +42,43 @@ Conventions: convert engineering units -> SI; record source convention in
 Provenance; map sequence/nameplate inputs via the schema's input-convention DTOs;
 never invent fields (schema has extra="forbid").
 
+## Conversion report (`convert._report`, `convert._model_differences`)
+
+Every `to_grid(..., return_report=True)` returns `(Grid, id_map, ConversionReport)`; the
+default call is unchanged. `PandapowerExport.report`, `PgmExport.report` and
+`OpenDSSExport.report` carry the export side (the `reductions` string lists stay).
+`ConversionReport(tool, direction, options, comparable, entries)`; `ReportEntry(key,
+category, message, element_type, count, ids, affects, source_model, pgml_model, match,
+matched, values)`; `ModelMatch(preset, settings, arguments, reference)`. Keys are stable
+(`dropped.<kind>`, `approx.<topic>`, `model.<topic>`) and shared across tools and
+directions; `affects` is a subset of `("fundamental", "unbalanced", "harmonic")`, empty
+for a stand-in below solver tolerance. Queries: `keys()`, `get(key)`, `in`,
+`open_entries(affects)`, `is_exact(affects)`, `match_settings()`, `summary()`,
+`to_dict()/to_json()/from_dict()`, `log(logger)`. `add_model_differences(report, grid)`
+derives the `model.*` entries from the grid content (transformer magnetizing placement and
+tap reflection, source impedance and zero sequence, reactive-limit enforcement, earth-return
+law and parameters, skin effect, harmonic load shunt, harmonic scope) and marks an entry
+`matched` when the active defaults already equal its `match.settings`. Converters add
+`dropped.*`/`approx.*` entries through `warn_dropped_elements(..., report=, ids=)`,
+`ZeroSequenceDefaults.warn(..., report=)`, `build_source(..., report=)` and
+`report.dropped/approximated/model_difference/note` (`announced=True` when the converter
+already logged the detail). Exporters use `_export.record_reduction(out, key, text, ...)`
+with the sentences in `_export.REDUCTIONS`. Logging: dropped/approximated at WARNING, model
+differences at INFO, one closing WARNING line when an open entry touches a `comparable`
+result class.
+
+New converter behaviour carried by the report: pandapower `net.controller` DERControllers
+(sgen Q-models) map to inverter control laws, `net.measurement` is reported dropped;
+power-grid-model `voltage_regulator` maps to `VoltageRegulation` (merged per node),
+`load_model="source"` keeps native load types, NaN source fields take pgm's defaults;
+OpenDSS `Rg/Xg/rho` are read (`earth_return="opendss"` writes them into
+`Line.earth_return`), `InvControl` VOLTVAR/VOLTWATT/VV_VW map to control laws, PVSystems
+are recorded as a snapshot. Exporters: PV terminals become pp `gen` / pgm
+`voltage_regulator`; `convert.opendss.from_grid(grid, mode, load_shunt,
+allow_approximation, circuit_name) -> OpenDSSExport(circuit, bus_of_node, line_of_branch,
+element_of_appliance, mode, reductions, report)` wraps the scenario oracle's exporter and
+adds the off-nominal tap and the matched-mode `Rg/Xg/rho` per line.
+
 ## `convert._common` — the shared scaffold (library-agnostic)
 
 The duplicated plumbing of every `to_grid` lives in `convert/_common.py`; each

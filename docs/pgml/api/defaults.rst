@@ -89,9 +89,11 @@ reference comparisons:
     ``bessel``.
 
 ``line.earth_return.x0_frequency``
-    ``carson_sublinear`` (shipped) or ``linear``, the zero-sequence reactance law of the
-    lumped sequence-aware model. ``line.earth_return.x0_nonnegative`` guards its
-    extrapolation by default. See :doc:`/pgml/modeling/presets` for reference choices.
+    ``linear`` (shipped) or ``carson_sublinear``, the zero-sequence reactance law of the
+    lumped sequence-aware model. ``linear`` suits cables and zero-sequence data derived
+    from a ratio; ``carson_sublinear`` suits an overhead line whose stored ``X0`` contains
+    the earth return, and ``line.earth_return.x0_nonnegative`` guards its extrapolation.
+    See :doc:`/pgml/modeling/harmonic-line-model` and :doc:`/pgml/modeling/presets`.
 
 ``branch.zero_impedance``
     ``fuse`` (shipped) collapses an ideal branch's terminal rows exactly; ``error`` refuses
@@ -105,9 +107,11 @@ reference comparisons:
     ``transformer.zero_sequence.*`` are the other two transformer model choices; see
     :doc:`/pgml/modeling/transformer`.
 
-``appliance.harmonic_shunt.model`` / ``.generation_model``
-    The harmonic device Norton shunt, ``opendss`` (shipped) / ``motor`` / ``none``, and the
-    separate policy for a generation-sign device, shipped as ``none``.
+``appliance.harmonic_shunt.model`` / ``.generation_model`` / ``.reactive_element``
+    The harmonic device Norton shunt, ``opendss`` (shipped) / ``motor`` / ``none``, the
+    separate policy for a generation-sign device, shipped as ``none``, and how the
+    reactive part scales with the order: ``sign_aware`` (shipped, a leading device is a
+    capacitance) or ``inductive`` (OpenDSS's R-L treatment of either sign).
 
 ``appliance.generator.enforce_q_limits``
     Whether a voltage-regulating generator's reactive limits bound its output; shipped

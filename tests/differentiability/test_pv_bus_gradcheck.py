@@ -230,3 +230,57 @@ def test_finite_difference_spot_check_of_dv_dvset():
     row = 3  # node 1 phase A: rows are (0,a), (0,b), (0,c), (1,a), ...
     (grad,) = torch.autograd.grad(v[row].abs(), v_set)
     assert abs(float(grad) - U_RATED / math.sqrt(3.0)) < 1e-6 * U_RATED
+
+
+def _solved_q(grid, **kw):
+    res = solve_power_flow(
+        grid,
+        method="newton",
+        tol=1e-12,
+        tol_update_pu=1e-12,
+        max_iter=60,
+        dtype=CDT,
+        criticality="never",
+        **kw,
+    )
+    return res.regulation.q_var[GEN_ID]
+
+
+def test_gradcheck_solved_reactive_power_of_a_regulating_generator():
+    """``dQ_gen/d(v_set, P_gen, R_line)``: a loss on the solved reactive output."""
+    v_set = torch.tensor(1.02, dtype=RDT, requires_grad=True)
+    p_gen = torch.tensor(6000.0, dtype=RDT, requires_grad=True)
+    r_scale = torch.tensor(1.0, dtype=RDT, requires_grad=True)
+    r_base = 3e-4 * torch.eye(3, dtype=RDT)
+
+    def fn(v_set, p_gen, r_scale):
+        q = _solved_q(_grid(v_set=v_set, p_gen=p_gen, r=r_base * r_scale))
+        assert q.requires_grad
+        return q * 1e-3  # kvar, so the absolute tolerance is meaningful
+
+    assert torch.autograd.gradcheck(
+        fn, (v_set, p_gen, r_scale), eps=1e-5, atol=1e-6, rtol=1e-5
+    )
+
+
+def test_gradcheck_solved_reactive_power_batched_setpoint():
+    v_set = torch.tensor([1.01, 1.02, 1.03], dtype=RDT, requires_grad=True)
+
+    def fn(v_set):
+        q = _solved_q(_grid(), operating_point={GEN_ID: {"v_set_pu": v_set}})
+        return q * 1e-3
+
+    assert torch.autograd.gradcheck(fn, (v_set,), eps=1e-6, atol=1e-6, rtol=1e-5)
+
+
+def test_solved_reactive_power_at_a_binding_limit_follows_the_limit():
+    """Pinned at ``q_max`` the solved Q is the limit itself: ``dQ/dq_max = 1``."""
+    q_max = torch.tensor(1500.0, dtype=RDT, requires_grad=True)
+    q = _solved_q(_grid(v_set=1.08, q_min=-1500.0, q_max=q_max))
+    (grad,) = torch.autograd.grad(q, q_max)
+    assert torch.allclose(q.detach(), q_max.detach(), rtol=0, atol=1e-6)
+    assert torch.allclose(grad, torch.ones_like(grad), rtol=0, atol=1e-8)
+
+
+def test_solved_reactive_power_without_tracked_inputs_carries_no_graph():
+    assert not _solved_q(_grid()).requires_grad

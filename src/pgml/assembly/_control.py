@@ -13,11 +13,39 @@ All quantities are in the appliance's NATIVE authoring convention (positive acti
 reactive power = overexcited / injecting). The caller applies the
 consume/inject ``sign`` afterwards, exactly as for the plain ZIP injection.
 
-Non-smooth pieces (the capability clamp, curve breakpoints) are made C\\ :sup:`1` for
-gradient-based use by a soft saturation of half-width ``smoothing`` (``0`` recovers the
-exact hard clamp / piecewise-linear curve, which matches OpenDSS ``InvControl`` /
-pandapower ``CharacteristicControl`` at the operating point). Everything is vectorized
-(no Python loop over elements), honours the input device/dtype, and is GPU-ready.
+Ratings are device totals. The power quantities of a control block (``s_rated_va``,
+``q_var``, ``p_ref_w``) describe the WHOLE device, like ``p_nom_w``. The laws are
+evaluated per connection element: one per connected phase for a WYE device, one per
+phase pair for a (three-phase) DELTA device, so ``n_elem`` equals the number of phases
+the device connects. Every element works with an equal ``1 / n_elem`` share of each
+device-level quantity: its rating is ``s_rated_va / n_elem``, its fixed
+reactive power ``q_var / n_elem``, its ``cosphi(P)`` base ``p_ref_w / n_elem``. The
+bases that derive from the rating follow (the rated Volt-VAr base, the capability
+circle, the width of the soft clamp). A balanced three-phase device therefore injects
+the same totals as its single-phase positive-sequence equivalent, and a single-phase
+device (``n_elem = 1``) sees the values as written. The split is equal whatever the
+per-phase distribution of the active power; an unbalanced device does not shift
+rating between its elements.
+
+Each element evaluates its voltage-dependent curve at ITS OWN terminal voltage
+``|V_term| / V0`` (phase-to-neutral or phase-to-ground for WYE, phase-to-phase for
+DELTA), not at a positive-sequence or phase-average magnitude. On a balanced network
+the two coincide; on an unbalanced one the elements of one device respond
+individually, where OpenDSS ``InvControl`` and pandapower apply one device-level
+response.
+
+The capability clamp is made C\\ :sup:`1` for gradient-based use by a soft saturation
+whose half-width is ``smoothing`` times the rating ``s_rated_va`` (``smoothing`` is a
+fraction of the rating; ``0`` recovers the exact hard clamp, which matches OpenDSS
+``InvControl`` / pandapower ``CharacteristicControl`` at the operating point). The soft
+clamp is ONE function, used by the forward solve and by its gradient alike, so a
+positive ``smoothing`` also moves the solved operating point near the limit, by about
+``0.7 * smoothing * s_rated_va`` at the corner (for the device as a whole; each
+element carries its share) and exponentially less away from it.
+Curve breakpoints are not blended: a ``linear`` characteristic is exactly piecewise
+linear (one-sided gradients at a breakpoint), and ``cubic`` interpolation is the
+C\\ :sup:`1` alternative. Everything is vectorized (no Python loop over elements),
+honours the input device/dtype, and is GPU-ready.
 """
 
 from __future__ import annotations
@@ -47,6 +75,15 @@ def _as_rt(x, rdt: torch.dtype, device) -> Tensor:
     if isinstance(x, Tensor):
         return x.to(dtype=rdt, device=device)
     return torch.as_tensor(x, dtype=rdt, device=device)
+
+
+def _element_share(x, n_elem: int, rdt: torch.dtype, device) -> Tensor:
+    """Equal share of a device-level power quantity carried by one of ``n_elem`` elements.
+
+    ``n_elem`` is a tensor SHAPE (the number of connection elements), not a tensor
+    value, so the division stays on the differentiable path of ``x``.
+    """
+    return _as_rt(x, rdt, device) / n_elem
 
 
 def _softplus(x: Tensor, beta: float) -> Tensor:
@@ -79,10 +116,28 @@ def smooth_clamp(x: Tensor, lo: Tensor, hi: Tensor, beta: float) -> Tensor:
 
 
 def _beta_from_smoothing(smoothing: float) -> float:
-    """Map the schema ``smoothing`` half-width to the softplus ``beta`` (inf if 0)."""
+    """Map the schema ``smoothing`` half-width to the softplus ``beta`` (inf if 0).
+
+    ``smoothing`` is a fraction of the inverter rating, so the resulting ``beta``
+    applies to quantities expressed in per unit of that rating
+    (:func:`_clamp_to_rating`).
+    """
     if smoothing is None or smoothing <= 0.0:
         return math.inf
     return 1.0 / float(smoothing)
+
+
+def _clamp_to_rating(x: Tensor, limit: Tensor, s_rated: Tensor, beta: float) -> Tensor:
+    """Soft clamp of a power ``x`` to ``[-limit, limit]``, all in W / var / VA.
+
+    The saturation is evaluated in per unit of the rating ``s_rated``, which is what
+    gives the transition the declared half-width of ``smoothing * s_rated``. The hard
+    clamp (``beta = inf``) needs no scaling.
+    """
+    if not math.isfinite(beta):
+        return smooth_clamp(x, -limit, limit, beta)
+    lim_pu = limit / s_rated
+    return s_rated * smooth_clamp(x / s_rated, -lim_pu, lim_pu, beta)
 
 
 def evaluate_characteristic(
@@ -172,7 +227,9 @@ def resolve_injection_power(
     Parameters
     ----------
     control:
-        An :data:`pgml.schemas.grid_schema.InverterControl` instance.
+        An :data:`pgml.schemas.grid_schema.InverterControl` instance. Its power
+        quantities (``s_rated_va``, ``q_var``, ``p_ref_w``) are DEVICE totals; each of
+        the ``n_elem`` elements works with a ``1 / n_elem`` share (module docstring).
     p_avail:
         Available active power per element ``[*batch, n_elem]`` (the device's MPP /
         setpoint magnitude, native sign).
@@ -186,15 +243,21 @@ def resolve_injection_power(
     -------
     (p_eff, q_eff):
         Each ``[*batch, H, n_elem]`` real, in the appliance's native convention
-        (positive = nominal direction / overexcited), bounded by the capability circle.
+        (positive = nominal direction / overexcited), per element, each bounded by
+        its share of the capability circle. The device totals are the sums over the
+        last axis.
     """
     p_avail = p_avail.to(dtype=rdt, device=device)
     v_pu = v_pu.to(dtype=rdt, device=device)
     p = p_avail.unsqueeze(-2)  # [*batch, 1, n_elem] -> broadcast over H
     p = torch.broadcast_to(p, v_pu.shape)
     beta = _beta_from_smoothing(getattr(control, "smoothing", 0.0))
+    # Device-level ratings -> the equal share one element works with. ``s_t`` is the
+    # element's capability circle, its rated Volt-VAr base and (through
+    # ``_clamp_to_rating``) the base of the soft-clamp width.
+    n_elem = v_pu.shape[-1]
     s_rated = control.s_rated_va
-    s_t = _as_rt(s_rated, rdt, device) if s_rated is not None else None
+    s_t = _element_share(s_rated, n_elem, rdt, device) if s_rated is not None else None
 
     # --- active power: Volt-Watt curtails it; others pass it through ----------
     if isinstance(control, VoltWattControl):
@@ -211,11 +274,13 @@ def resolve_injection_power(
     # to the circle before any reactive-power law sees it, so P² + Q² <= S²
     # holds for the pair actually injected (OpenDSS PVSystem kVA semantics).
     if s_t is not None:
-        p_eff = smooth_clamp(p_eff, -s_t, s_t, beta)
+        p_eff = _clamp_to_rating(p_eff, s_t, s_t, beta)
 
     # --- reactive power per mode ---------------------------------------------
     if isinstance(control, ConstantReactivePowerControl):
-        q_eff = torch.full_like(p_eff, 0.0) + _as_rt(control.q_var, rdt, device)
+        q_eff = torch.zeros_like(p_eff) + _element_share(
+            control.q_var, n_elem, rdt, device
+        )
     elif isinstance(control, ConstantPowerFactorControl):
         pf = float(control.power_factor)
         tan_phi = math.sqrt(max(1.0 - pf * pf, 0.0)) / pf
@@ -223,8 +288,12 @@ def resolve_injection_power(
         q_eff = s * p_eff.abs() * tan_phi
     elif isinstance(control, PowerFactorWattControl):
         p_ref = control.p_ref_w
+        # No reference given: the largest element share of the available power,
+        # which is |p_nom_w| / n_elem for an equally split device.
         p_ref_t = (
-            _as_rt(p_ref, rdt, device) if p_ref is not None else p_avail.abs().amax()
+            _element_share(p_ref, n_elem, rdt, device)
+            if p_ref is not None
+            else p_avail.abs().amax()
         )
         p_ref_t = torch.clamp(p_ref_t, min=1e-30)
         x = p_eff.abs() / p_ref_t
@@ -242,7 +311,7 @@ def resolve_injection_power(
         q_ref = getattr(control, "q_reference", QReference.RATED)
         if q_ref == QReference.RATED:
             # Validated to require s_rated; this branch is only reached when set.
-            q_base = _as_rt(s_rated, rdt, device)
+            q_base = s_t
         else:  # AVAILABLE: vars left under the capability circle at the present P.
             if s_t is None:
                 q_base = p_eff.abs()  # no rating -> reference the active power
@@ -255,7 +324,7 @@ def resolve_injection_power(
     # --- capability clamp: bound |Q| to the apparent-power circle -------------
     if s_t is not None:
         q_max = torch.sqrt(torch.clamp(s_t * s_t - p_eff * p_eff, min=0.0))
-        q_eff = smooth_clamp(q_eff, -q_max, q_max, beta)
+        q_eff = _clamp_to_rating(q_eff, q_max, s_t, beta)
 
     return p_eff, q_eff
 

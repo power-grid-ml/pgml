@@ -52,7 +52,9 @@ def test_pandapower_single_phase_equiv_gets_positive_sequence(pp_net):
     grid, _ = to_grid(pp_net)
     assert cfg("line.harmonic_model.single_phase") == "positive_sequence"
     assert _models(grid) == {"positive_sequence"}
-    assert all(ln.harmonic_skin_effect is True for ln in _lines(grid))
+    # The skin flag stays unset so that it resolves with the other model options at
+    # assembly time (a later preset can still switch it).
+    assert all(ln.harmonic_skin_effect is None for ln in _lines(grid))
 
 
 def test_pandapower_three_phase_gets_sequence_aware(pp_net):

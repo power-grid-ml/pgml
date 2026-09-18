@@ -11,6 +11,7 @@ earth-return synthesis blows the GMR past the conductor radius.
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import numpy as np
@@ -270,14 +271,48 @@ def test_zero_sequence_carries_earth_damping_positive_does_not():
     # at f0 both reproduce their inputs.
     assert abs(float(z0[0].real) - p["r0"]) < 1e-12
     assert abs(float(z1[0].real) - p["r1"]) < 1e-12
-    # Earth-return reactance grows sub-linearly; Z1 stays geometrically linear.
-    assert torch.all(z0.imag[1:] < p["x0"] * (freqs[1:] / F0))
-    assert torch.all(z0.imag >= 0)
+    # Shipped law: X0 scales as a geometric inductance, exactly like X1.
+    torch.testing.assert_close(z0.imag, p["x0"] * (freqs / F0), rtol=1e-14, atol=0.0)
+    # The Carson option bends it sub-linear and the guard keeps it non-negative.
+    z0_sub = zero_sequence_harmonic_z(
+        p["r0"], p["x0"], F0, freqs, x0_frequency="carson_sublinear"
+    )
+    assert torch.all(z0_sub.imag[1:] < z0.imag[1:])
+    assert torch.all(z0_sub.imag >= 0)
+    torch.testing.assert_close(z0_sub.real, z0.real)
     r0_growth = float(z0.real[-1] - z0.real[0])
     r1_growth = float(z1.real[-1] - z1.real[0])
     assert (
         r0_growth > 5.0 * r1_growth
     )  # earth-return damping lives in the zero sequence
+
+
+def test_zero_sequence_skin_rise_is_the_phase_conductors():
+    """``R0(h) - R0`` equals ``R1*(m(R1) - 1)`` plus the Carson earth increment.
+
+    The phase conductor contributes ``R1`` to ``R0`` and rises with its own skin curve;
+    the return-path remainder ``R0 - R1`` stays constant. Fitting the curve to ``R0``
+    instead (a conductor with a quarter of the cross-section for ``R0 = 4*R1``) loses
+    most of the rise: ``m(R1) = 1.63`` against ``m(R0) = 1.07`` at order 25.
+    """
+    freqs = torch.tensor([50.0, 1250.0], dtype=RDT)
+    r1, r0, x1, x0 = 0.208e-3, 0.832e-3, 0.080e-3, 0.240e-3  # NAYY 4x150, ohm/m
+    m1 = skin_resistance_multiplier(r1, 50.0, freqs)
+    m0 = skin_resistance_multiplier(r0, 50.0, freqs)
+    assert float(m1[-1]) == pytest.approx(1.63, abs=0.01)
+    assert float(m0[-1]) == pytest.approx(1.07, abs=0.01)
+
+    z_abc = sequence_aware_phase_z(r1, x1, r0, x0, 50.0, freqs)
+    z0 = z_abc.sum(-1).mean(-1)  # [H]
+    z1 = z_abc[..., 0, 0] - z_abc[..., 0, 1]
+    earth = 3.0 * math.pi**2 * 1e-7 * (freqs - 50.0)
+    torch.testing.assert_close(z1.real, r1 * m1, rtol=1e-12, atol=0.0)
+    torch.testing.assert_close(
+        z0.real, r1 * m1 + (r0 - r1) + earth, rtol=1e-12, atol=0.0
+    )
+    # Without the phase resistance the whole R0 is one fictitious conductor.
+    legacy = zero_sequence_harmonic_z(r0, x0, 50.0, freqs)
+    torch.testing.assert_close(legacy.real, r0 * m0 + earth, rtol=1e-12, atol=0.0)
 
 
 def test_zero_sequence_reduces_to_positive_without_earth():
@@ -303,7 +338,7 @@ def test_sequence_aware_phase_matrix_roundtrips():
     zabc = sequence_aware_phase_z(p["r1"], p["x1"], p["r0"], p["x0"], F0, freqs)
     assert zabc.shape == (len(ORDERS), 3, 3)
     z1 = positive_sequence_z(p["r1"], p["x1"], F0, freqs)
-    z0 = zero_sequence_harmonic_z(p["r0"], p["x0"], F0, freqs)
+    z0 = zero_sequence_harmonic_z(p["r0"], p["x0"], F0, freqs, phase_resistance=p["r1"])
     zr0, zr1, zr2 = sequence_impedances(zabc)
     assert torch.allclose(zr1, z1, atol=1e-12)
     assert torch.allclose(zr2, z1, atol=1e-12)

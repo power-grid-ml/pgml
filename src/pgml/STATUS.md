@@ -118,7 +118,7 @@ decisions. One entry per capability:
 - **Scenarios (the batch contract)** — a batch of per-component deltas on one grid:
   reproducible QMC/cartesian sampling with correlated and per-phase draws, IEC 61000-3-2
   device current-emission references (default; EN 50160 stays a voltage-shaped option), the
-  affine load-dependent emission law, the excitation sweeps (perturbation, spectrum,
+  excitation sweeps (perturbation, spectrum,
   per-node source) and the upstream `BackgroundHarmonicConfig`. `batch_from_values` builds a
   batch from tensors a caller already has, and `run_scenarios` accepts any `ScenarioSpec`
   (an object with `sample(grid)`), so a downstream generator plugs its own recipe in without
@@ -559,8 +559,8 @@ results are never read as more physical than they are. Details live in `docs/pgm
   Carson values at 60 Hz in Ω per 1000 ft and are reinterpreted in the line's `units`, so
   on a metric line they are ≈3.28× smaller than pgml's physical default. The sub-linear
   X0 law is available as `line.earth_return.x0_frequency: carson_sublinear` (off by
-  default: it can drive X0 negative above h ≈ 30 for a cable whose stored X0 is small,
-  exactly as OpenDSS does). Supply conductor geometry when the zero-sequence earth return
+  default: it presumes a stored X0 that contains the deep-earth term, and exhausts the
+  X0 of an LV cable near h ≈ 13; assembly warns when that happens). Supply conductor geometry when the zero-sequence earth return
   must be right (`docs/pgml/modeling/harmonic-line-model.md`).
 - **Missing zero-sequence line data** is invented with global overhead-line ratios
   (R0/R1=4, X0/X1=3, C0/C1=0.5 — `data/defaults.yaml`); weak for cables. The converters

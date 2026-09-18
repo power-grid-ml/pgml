@@ -7,21 +7,29 @@ admittance math; the nodal stamp (incidence, scatter) lives with the harmonic as
 in :mod:`pgml.solver.harmonic_flow`, which is where the fundamental solution the
 operating point comes from is available.
 
-Model (OpenDSS ``Load.pas`` ``TLoadObj.CalcYPrimMatrix``, verified against a live
-``CktElement.YPrim``), per element, with ``s = series_rl_fraction`` and
-``Y_eq = conj(S)/V_rated**2``::
+Model (the series / parallel split of OpenDSS ``Load.pas``
+``TLoadObj.CalcYPrimMatrix``), per element, with ``s = series_rl_fraction`` and
+``Y_eq = conj(S)/V_rated**2 = G + jB``::
 
-    Y_par(h) = (1 - s)*Re(Y_eq) + j*(1 - s)*Im(Y_eq)/h          parallel R-L
-    Z_ser    = 1/(s*Y_eq),   Z_ser(h) = Re(Z_ser) + j*h*Im(Z_ser)
-    Y_ser(h) = 1/Z_ser(h)                                        series R-L
-    Y(h)     = Y_par(h) + Y_ser(h)
+    Y_par(h) = (1 - s)*G + j*(1 - s)*B_h                        parallel branch
+    Z_ser    = 1/(s*Y_eq) = R + jX,   Z_ser(h) = R + j*X_h       series branch
+    Y(h)     = Y_par(h) + 1/Z_ser(h)
 
 ``V_rated`` is the element's RATED voltage (line-to-neutral for WYE, line-to-line for
-DELTA) and ``S`` the power the device draws at the converged fundamental solution. The
-susceptance of the parallel branch is divided by ``h`` unconditionally (OpenDSS models
-it as R parallel L whatever the sign of ``Q``), so this shunt is NOT the same frequency
-law as the const-Z fold of :func:`pgml.assembly.assemble_ybus`, which scales a
-capacitive susceptance by ``h``.
+DELTA) and ``S`` the power the device draws at the converged fundamental solution.
+
+How the reactive part scales with the order is the documented default
+``appliance.harmonic_shunt.reactive_element``. ``sign_aware`` (shipped) scales it as
+the element it is at the operating point: a lagging device (``Q > 0``, ``B < 0``,
+``X > 0``) is an inductance, ``B_h = B/h`` and ``X_h = h*X``; a leading device
+(``Q < 0``, ``B > 0``, ``X < 0``) is a capacitance, ``B_h = h*B`` and ``X_h = X/h``.
+That is the same law the const-Z fold of :func:`pgml.assembly.assemble_ybus` applies,
+so both load representations agree for either sign of ``Q``. ``inductive`` applies
+``B/h`` and ``h*X`` whatever the sign, which is what OpenDSS computes (verified on a
+live ``CktElement.YPrim`` of a load with negative kvar); for a leading device that is
+a negative inductance, an element whose susceptance has the sign of a capacitor and
+the frequency slope of an inductor. The ``opendss`` preset selects it. Both laws are
+identical for ``Q >= 0`` and exact at ``h = 1``.
 
 The ``motor`` model keeps the parallel branch and replaces the derived series impedance
 by a fixed blocked-rotor reactance (OpenDSS ``puXharm`` / ``XRharm``)::
@@ -39,8 +47,10 @@ documented default ``appliance.harmonic_shunt.generation_model``
 (:func:`generation_shunt_is_neglected`), whose ``load_style`` value applies the load
 expression anyway — what OpenDSS computes for the negative-kW ``Load`` idiom, sign
 included. A real inverter's harmonic output impedance is its filter impedance and a
-machine's its subtransient reactance (OpenDSS ``%R``/``%X``, ``Xdpp``); neither is a
-field of this schema.
+machine's its subtransient reactance (OpenDSS ``%R``/``%X``, ``Xdpp``). A device
+states it through its ``harmonic_impedance`` block
+(:class:`~pgml.schemas.grid_schema.HarmonicImpedance`), which the harmonic solve stamps
+instead of a P,Q-derived shunt.
 
 All math is autograd-safe torch: gradients flow to the operating-point power (hence to
 the fundamental solution) and the degenerate cases (zero power, ``s = 0``) are handled
@@ -66,6 +76,10 @@ HARMONIC_SHUNT_MODELS = ("none", "opendss", "motor")
 
 #: What a generation-sign device carries (``appliance.harmonic_shunt.generation_model``).
 GENERATION_SHUNT_MODELS = ("none", "load_style")
+
+#: How the reactive part of the P,Q-derived shunt scales with the order
+#: (``appliance.harmonic_shunt.reactive_element``).
+REACTIVE_ELEMENT_LAWS = ("sign_aware", "inductive")
 
 #: Which power / terminal voltage the shunt is built from
 #: (``appliance.harmonic_shunt.basis``).
@@ -128,6 +142,23 @@ def resolve_shunt_basis(basis: Optional[str]) -> str:
         raise InputError(
             f"unknown harmonic shunt basis {name!r}; use one of "
             f"{', '.join(repr(m) for m in SHUNT_BASES)}."
+        )
+    return str(name)
+
+
+def resolve_reactive_element_law(law: Optional[str] = None) -> str:
+    """Validate the reactive-element law (``None`` -> the documented default).
+
+    ``"sign_aware"`` scales a leading device's reactive part as a capacitance and a
+    lagging device's as an inductance; ``"inductive"`` treats both as an inductance
+    (OpenDSS). ``None`` resolves ``appliance.harmonic_shunt.reactive_element``; an
+    unknown name raises.
+    """
+    name = _cfg("appliance.harmonic_shunt.reactive_element") if law is None else law
+    if name not in REACTIVE_ELEMENT_LAWS:
+        raise InputError(
+            f"unknown harmonic shunt reactive-element law {name!r}; use one of "
+            f"{', '.join(repr(m) for m in REACTIVE_ELEMENT_LAWS)}."
         )
     return str(name)
 
@@ -230,6 +261,7 @@ def harmonic_shunt_element_admittance(
     motor_xr: Tensor,
     motor_s_base: Tensor,
     cdtype: torch.dtype,
+    reactive_element: Optional[str] = None,
 ) -> Tensor:
     """Per-element harmonic shunt admittance ``[*batch, H, K, E]`` (complex).
 
@@ -258,6 +290,9 @@ def harmonic_shunt_element_admittance(
         the device total for DELTA.
     cdtype:
         Complex dtype of the result.
+    reactive_element:
+        ``"sign_aware"`` or ``"inductive"`` (:func:`resolve_reactive_element_law`);
+        ``None`` resolves ``appliance.harmonic_shunt.reactive_element``.
 
     Returns
     -------
@@ -273,16 +308,25 @@ def harmonic_shunt_element_admittance(
     hb = h.to(rdt).reshape(-1, 1, 1)  # [H, 1, 1]
     s = series_rl.to(rdt)  # [K, 1]
 
-    # Parallel R-L branch: the conductance keeps its full value at every order, the
-    # susceptance falls as 1/h (OpenDSS divides the whole imaginary part by h).
-    y_par = _complex((1.0 - s) * g, (1.0 - s) * b / hb)
+    # Reactive part over the order. An inductance has B/h in the parallel branch and
+    # h*X in the series one; a capacitance (B > 0, sign-aware law only) has h*B and X/h.
+    # The sign split uses clamp, so it stays differentiable and exact at h = 1.
+    if resolve_reactive_element_law(reactive_element) == "sign_aware":
+        b_ind, b_cap = torch.clamp(b, max=0.0), torch.clamp(b, min=0.0)
+    else:
+        b_ind, b_cap = b, torch.zeros_like(b)
+    b_par = b_ind / hb + b_cap * hb  # parallel susceptance over h
+    b_ser = b_ind * hb + b_cap / hb  # -X_h*s*|Y_eq|**2 of the series branch
 
-    # Derived series R-L branch: with Z_ser = 1/(s*Y_eq) and Z_ser(h) = Re + j*h*Im,
-    # Y_ser(h) = s*|Y_eq|**2/(G - j*h*B) — one division instead of three, and the
+    # Parallel branch: the conductance keeps its full value at every order.
+    y_par = _complex((1.0 - s) * g, (1.0 - s) * b_par)
+
+    # Derived series branch: with Z_ser = 1/(s*Y_eq) = (G - jB)/(s*|Y_eq|**2),
+    # Y_ser(h) = s*|Y_eq|**2/(G - j*B_ser(h)) — one division instead of three, and the
     # |Y_eq| = 0 case (a device at zero power) masks to 0 instead of dividing by 0.
     mag2 = g * g + b * b
     num = _complex(s * mag2, torch.zeros_like(mag2))
-    den = _complex(g + 0.0 * hb, -(hb * b))
+    den = _complex(g + 0.0 * hb, -b_ser)
     zero = mag2 == 0.0
     safe_den = torch.where(zero, torch.ones_like(den), den)
     y_ser_derived = torch.where(zero, torch.zeros_like(den), num / safe_den)
@@ -314,11 +358,13 @@ def _complex(re: Tensor, im: Tensor) -> Tensor:
 __all__ = [
     "GENERATION_SHUNT_MODELS",
     "HARMONIC_SHUNT_MODELS",
+    "REACTIVE_ELEMENT_LAWS",
     "SHUNT_BASES",
     "ResolvedHarmonicShunt",
     "generation_shunt_is_neglected",
     "resolve_shunt_model_name",
     "resolve_shunt_basis",
+    "resolve_reactive_element_law",
     "resolve_harmonic_shunt",
     "harmonic_shunt_element_admittance",
 ]

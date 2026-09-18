@@ -1,0 +1,63 @@
+{
+ "tool": "opendss",
+ "toggle": "preset:line.earth_return.x0_frequency",
+ "family": "harmonic",
+ "grids": {
+  "ieee:4Bus-DY-Bal/harmonic": 0.0,
+  "ieee:4Bus-GrdYD-Bal/harmonic": 0.0,
+  "ieee:4Bus-YY-Bal/harmonic": 0.0,
+  "lv_cable_feeder/harmonic": 0.13375920489429952,
+  "lv_feeder_no_load_spectra/harmonic": 0.19077160016802852,
+  "mv_overhead_geometry/harmonic": 0.0
+ },
+ "stats": {
+  "n": 6,
+  "median": 0.0,
+  "max": 0.19077160016802852,
+  "p90": 0.162265402531164
+ },
+ "by_order": {
+  "1": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0,
+   "p90": 0.0
+  },
+  "3": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.07972240882524707,
+   "p90": 0.07815697044995715
+  },
+  "5": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.09784291951937202,
+   "p90": 0.07441687898648258
+  },
+  "7": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.08468387118740557,
+   "p90": 0.053236922215816544
+  },
+  "9": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.19077160016802852,
+   "p90": 0.162265402531164
+  },
+  "11": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.05919737135727473,
+   "p90": 0.03360805876672184
+  },
+  "13": {
+   "n": 6,
+   "median": 0.0,
+   "max": 0.007806656408615164,
+   "p90": 0.004351102275550412
+  }
+ }
+}

@@ -213,6 +213,13 @@ Key rules for harmonic :class:`~pgml.scenarios.ParameterSpec`:
   ``harmonic_reference="iec61000-3-2"``.
 - ``field="h_phase"`` sets the injection phase in degrees; requires
   ``mode="absolute"``.
+- ``field="h_param"`` draws a free per-device, per-order value; requires
+  ``mode="absolute"``.  It is recorded under ``samples[spec.name]`` and written
+  nowhere.  Use it for an emission model of your own, for instance a spectrum that
+  depends on how heavily a device is loaded.  Declare the model's per-device quantities
+  as ``h_param`` specs so they share the batch's cube, seed and persisted record, and
+  apply them to ``harmonic_injection`` in the ``sample(grid)`` of your own
+  :class:`~pgml.scenarios.ScenarioSpec`.
 - ``correlation`` and per-phase ``symmetry`` (other than ``"balanced"``) are not
   supported for harmonic specs.
 
@@ -705,6 +712,28 @@ owner is identifiable either way, and without the mapping such a config reads ba
 
 ``meta.json`` additionally carries the time axis as data — ``n_steps``, ``step_size_s``,
 ``t0_unix_s`` — so a consumer does not have to parse a generator-specific config to find it.
+
+Changes in 0.5.1
+----------------
+
+The load-dependent emission law is no longer part of this package.  It is a calibrated
+model of a device population, which a study defines, and not a property of the solver.
+
+- Removed: ``affine_emission_correction``, ``phase_slope_shift``, ``LOADING_FLOOR``, the
+  module ``pgml.scenarios.emission``, the :class:`~pgml.scenarios.ParameterSpec` fields
+  ``"h_floor"`` / ``"h_floor_phase"`` / ``"h_slope"``, the property
+  ``ParameterSpec.is_emission_law``, the constant ``EMISSION_LAW_FIELDS`` and the
+  ``"<spec>_loading"`` sample record.
+- Added: ``field="h_param"``, a per-device, per-order draw that is recorded and written
+  nowhere (see `Harmonic spectrum sampling`_), and ``ParameterSpec.is_free_parameter``.
+  A generator with its own emission model declares the model's quantities as ``h_param``
+  specs and applies them in its ``sample(grid)``.
+- A config stored with one of the removed fields no longer validates as a
+  :class:`~pgml.scenarios.ScenarioConfig`.  :func:`~pgml.scenarios.read_dataset` still
+  loads such a dataset and returns the stored config as a dict, with a warning.
+
+The same version makes the ratings of an inverter control device totals; see "Changes in
+0.5.1" in :doc:`/pgml/modeling/der-pv-storage`.
 
 .. automodule:: pgml.scenarios
    :members:

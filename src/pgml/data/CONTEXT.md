@@ -37,9 +37,11 @@ requires an env var to be set.
   default). Resolved by `pgml.assembly._symmetry.resolve_connection`. See
   `docs/pgml/modeling/asymmetric.md`.
 - `appliance.harmonic_shunt.{model, series_rl_fraction, motor_x_harm_pu, motor_xr_harm,
-  basis, generation_model}` — the harmonic device Norton shunt every injection appliance carries
-  at orders `h > 1` (`none` / `opendss` / `motor`; `opendss` is the shipped value and
-  OpenDSS's own). `generation_model` (shipped `none`) is the separate policy for a
+  reactive_element, basis, generation_model}` — the harmonic device Norton shunt every
+  injection appliance carries at orders `h > 1` (`none` / `opendss` / `motor`; `opendss`
+  is the shipped value and OpenDSS's own). `reactive_element` (shipped `sign_aware`)
+  scales a leading device's reactive part as a capacitance, like the const-Z fold;
+  `inductive` is OpenDSS's R-L treatment of either sign (the `opendss` preset). `generation_model` (shipped `none`) is the separate policy for a
   GENERATION-sign device: the load expression's conductance is negative for an injecting
   device, so a Generator / Storage stays a pure current source unless this is set to
   `load_style` or the device names the `motor` model. Resolved by
@@ -155,6 +157,10 @@ requires an env var to be set.
   `convert/pandapower/converter.py`: `branch.near_ideal_series_resistance_ohm` /
   `branch.switch_model`.
 
-The default X0 law is `carson_sublinear`, guarded by `x0_nonnegative=true`.
-OpenDSS conformance selects the unguarded law and its geometry band rule.
+The default X0 law is `linear` (exact for a metallic return, safe for a ratio-derived
+X0). `carson_sublinear` is the option for overhead lines whose stored X0 contains the
+deep-earth term; it is guarded by `x0_nonnegative=true`, and assembly warns once with the
+affected line count when the law exhausts X0(h). The `opendss` preset selects the
+unguarded sub-linear law, the geometry band rule, no skin correction and the `inductive`
+load-shunt reactance.
 `LineGeometry.internal_inductance` overrides the global geometry model per line.

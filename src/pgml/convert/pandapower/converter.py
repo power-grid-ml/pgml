@@ -125,11 +125,16 @@ from pgml.convert._common import (
     resolve_converted_line_models,
     warn_dropped_elements,
 )
+from pgml.convert._model_differences import PANDAPOWER, finalize_report
+from pgml.convert._report import ConversionReport, ReportCategory
 from pgml.errors import ConfigurationError, ConversionError
 from pgml.schemas.grid_schema import (
     Characteristic,
     ComplexTap,
+    ConstantPowerFactorControl,
+    ConstantReactivePowerControl,
     Grid,
+    PowerFactorWattControl,
     Provenance,
     QReference,
     SourceConvention,
@@ -506,7 +511,9 @@ def _gen_raw_reactive_bounds(row: Any) -> tuple[Optional[float], Optional[float]
     )
 
 
-def _closed_switch_resistance_ohm() -> float:
+def _closed_switch_resistance_ohm(
+    report: Optional[ConversionReport] = None, pp_idx: Any = None
+) -> float:
     """Series resistance for a closed bus-bus switch that carries no ``z_ohm``.
 
     pandapower solves such a switch by FUSING its two buses, so the faithful
@@ -515,7 +522,8 @@ def _closed_switch_resistance_ohm() -> float:
     ``near_ideal`` writes ``branch.near_ideal_series_resistance_ohm`` instead, keeping
     the switch a stamped branch for a ``branch_states`` sweep, at the cost of a small
     voltage drop and a worse-conditioned row; it is logged once so the deviation from
-    the source tool is never silent.
+    the source tool is never silent, and recorded as ``approx.switch.resistance_proxy``
+    when ``report`` is given.
     """
     model = str(defaults.get("branch.switch_model"))
     if model == "ideal":
@@ -532,6 +540,19 @@ def _closed_switch_resistance_ohm() -> float:
         "drop the source tool does not have; use the default 'ideal' to reproduce it.",
         r,
     )
+    if report is not None:
+        report.note(
+            "approx.switch.resistance_proxy",
+            ReportCategory.APPROXIMATED,
+            f"Closed bus-bus switch(es) without z_ohm converted with the near-ideal "
+            f"series resistance {r:g} Ohm (branch.switch_model='near_ideal') instead "
+            "of the exact fused-node representation.",
+            pp_idx,
+            element_type="switch",
+            affects=("fundamental", "unbalanced"),
+            values={"near_ideal_series_resistance_ohm": r},
+            announced=True,
+        )
     return r
 
 
@@ -576,7 +597,6 @@ def _gen_volt_var_control(
     p_w: float,
     q_min_var: float,
     q_max_var: float,
-    n_elem: int,
     slope_pu: float,
 ) -> tuple[Optional[VoltVarControl], float]:
     """Volt-VAr droop approximating a ``net.gen`` PV bus, plus the fixed ``q_nom_var``.
@@ -608,14 +628,14 @@ def _gen_volt_var_control(
     voltage: the droop sweeps one full ``q_base`` of reactive power over ``1 /
     slope_pu`` pu of voltage. Larger = closer to a PV bus, worse conditioned.
 
-    Per-phase scaling
-    -----------------
-    The control is evaluated PER ELEMENT (per phase for a three-phase appliance,
-    against that element's share of the active power), so the reactive limits and
-    the rating are divided by ``n_elem``. The per-unit x axis is unaffected: the
-    solver forms ``|V_terminal| / V0`` with ``V0`` the node's line-to-neutral (or
-    line-to-line for a delta element) nominal, which equals pandapower's ``vm_pu``
-    in both phase modes.
+    Device totals
+    -------------
+    The rating is the DEVICE total, like ``p_nom_w``: the assembly gives each
+    element of a three-phase appliance an equal share of both, so the limits and
+    the rating are written undivided in either phase mode. The per-unit x axis is
+    unaffected too: the solver forms ``|V_terminal| / V0`` with ``V0`` the node's
+    line-to-neutral (or line-to-line for a delta element) nominal, which equals
+    pandapower's ``vm_pu`` in both phase modes.
 
     What this does and does not give
     --------------------------------
@@ -647,16 +667,14 @@ def _gen_volt_var_control(
     if q_max_var == q_min_var:
         return None, q_max_var
 
-    q_min_elem = q_min_var / n_elem
-    q_max_elem = q_max_var / n_elem
-    q_span_elem = max(abs(q_min_elem), abs(q_max_elem))
+    q_span = max(abs(q_min_var), abs(q_max_var))
     # q_base = the capability circle whose reactive headroom at the present active
     # power is exactly the widest limit, so the (symmetric) circle bounds |Q| by
     # q_span while the curve applies the asymmetric [q_min, q_max] saturation.
-    q_base = math.hypot(p_w / n_elem, q_span_elem)
+    q_base = math.hypot(p_w, q_span)
 
-    y_max = q_max_elem / q_base
-    y_min = q_min_elem / q_base
+    y_max = q_max_var / q_base
+    y_min = q_min_var / q_base
     x_lo = v_set_pu - y_max / slope_pu
     x_hi = v_set_pu - y_min / slope_pu
     if not x_hi > x_lo:
@@ -678,6 +696,202 @@ def _gen_volt_var_control(
         ),
         0.0,
     )
+
+
+def _der_controller_inverter_control(
+    q_model: Any, *, sn_va: float, p_ref_w: float
+) -> Optional[Any]:
+    """Return the :data:`~pgml.schemas.grid_schema.InverterControl` reproducing one
+    pandapower ``DERController`` Q-model, or ``None`` when this converter does not
+    map it.
+
+    Identified by class NAME (duck typing, not ``isinstance``) so this module keeps
+    no hard import of ``pandapower.control`` — ``to_grid`` stays usable without
+    pandapower installed except to build the ``net`` it is handed.
+
+    ``sn_va``/``p_ref_w`` are the row's rated apparent power and active-power
+    reference, device totals in either phase mode (pgml's control ratings are device
+    totals too, so nothing is divided by the phase count), ALREADY carrying the pandapower ``scaling`` factor the same way
+    ``Generator.p_nom_w`` does, so a curve normalized to pandapower's own
+    ``sn_mva`` base lines up exactly whatever ``scaling`` is (both the DERController
+    class and pgml divide by the same ratio, so it cancels).
+
+    Verified against ``pandapower.control.controller.DERController`` (installed
+    ``pandapower`` 3.5.4, ``der_control.py`` / ``QModels.py`` / ``DERBasics.py``):
+
+    - ``QModelConstQ(q_pu)``: ``target_q_mvar = q_pu * sn_mva`` written directly to
+      ``sgen.q_mvar`` (``PQController`` never flips the sign for ``element='sgen'``
+      beyond what ``runpp`` itself reads), the same generation-positive convention
+      :class:`~pgml.schemas.grid_schema.ConstantReactivePowerControl` uses -> ``q_var
+      = q_pu * sn_va``.
+    - ``QModelCosphiPQ(cosphi)``: ``q = p_pu / |cosphi| * sign(cosphi) *
+      sqrt(1-cosphi**2) = p_pu * tan(acos(|cosphi|)) * sign(cosphi)`` -- exactly
+      :class:`~pgml.schemas.grid_schema.ConstantPowerFactorControl`'s
+      ``Q = +/-|P|*tan(acos(power_factor))``, with ``overexcited = cosphi >= 0``
+      (positive cosphi -> positive/injected Q, per ``QVCurve``'s own sign
+      convention). ``QModelCosphiP`` and ``QModelCosphiSn`` are DIFFERENT
+      (approximated) formulas and are not mapped.
+    - ``QModelQVCurve(qv_curve)``: ``q_pu = interp(vm_pu, vm_points_pu,
+      q_points_pu)``, positive = overexcited/inject (docstring diagram) ->
+      :class:`~pgml.schemas.grid_schema.VoltVarControl` with the SAME breakpoints,
+      ``q_reference=RATED`` (the curve is relative to ``sn_mva``, matching
+      ``QReference.RATED``'s "fraction of the rating" semantics) and
+      ``s_rated_va=sn_va`` (REQUIRED for the RATED reference; this also gives the
+      converted appliance pgml's capability circle, which pandapower applies only
+      when ``saturate_sn_mva`` is set -- reported separately).
+    - ``QModelCosphiPCurve(cosphi_p_curve)``: ``p_points_pu`` relative to
+      ``sn_mva``, ``cosphi_points`` SIGNED (positive = inject, per the class
+      docstring) -> :class:`~pgml.schemas.grid_schema.PowerFactorWattControl` with
+      the SAME breakpoints as ``y_values`` (already the signed power factor pgml's
+      curve expects) and ``p_ref_w=p_ref_w`` so ``x = P/p_ref`` reproduces
+      ``p_pu = p_series_mw/sn_mva`` exactly.
+
+    Everything else (``QModelCosphiP``, ``QModelCosphiSn``, ``QModelCosphiVCurve``, no
+    Q-model) returns ``None``; the caller reports it as a dropped controller.
+    """
+    name = type(q_model).__name__
+    if name == "QModelConstQ":
+        return ConstantReactivePowerControl(q_var=float(q_model.q_pu) * sn_va)
+    if name == "QModelCosphiPQ":
+        cosphi = float(q_model.cosphi)
+        return ConstantPowerFactorControl(
+            power_factor=abs(cosphi),
+            overexcited=cosphi >= 0.0,
+        )
+    if name == "QModelQVCurve":
+        curve = q_model.qv_curve
+        return VoltVarControl(
+            s_rated_va=sn_va,
+            q_reference=QReference.RATED,
+            characteristic=Characteristic(
+                x_values=tuple(float(v) for v in curve.vm_points_pu),
+                y_values=tuple(float(v) for v in curve.q_points_pu),
+            ),
+        )
+    if name == "QModelCosphiPCurve":
+        curve = q_model.cosphi_p_curve
+        return PowerFactorWattControl(
+            p_ref_w=p_ref_w,
+            characteristic=Characteristic(
+                x_values=tuple(float(v) for v in curve.p_points_pu),
+                y_values=tuple(float(v) for v in curve.cosphi_points),
+            ),
+        )
+    return None
+
+
+def _sgen_controllers(net: Any, report: ConversionReport) -> dict[int, Any]:
+    """Read ``net.controller``, returning ``{pp_sgen_idx: InverterControl}``.
+
+    Only a ``DERController`` (pandapower's flexible DER control object) driving
+    ``element='sgen'`` rows, with no ``pqv_area`` capability-area restriction, no
+    active ``saturate_sn_mva`` clamp and a Q-model
+    :func:`_der_controller_inverter_control` maps is converted. Everything else
+    present in ``net.controller`` -- ``ConstControl``, ``DiscreteTapControl``,
+    ``ContinuousTapControl``, a ``DERController`` on ``load``/``gen``/... , one
+    restricted by a PQV area or ``saturate_sn_mva``, or one whose Q-model this
+    converter does not map -- is recorded as ``dropped.controller`` (one aggregated
+    WARNING + report entry naming every affected controller index) because the
+    converted grid does not reproduce that controller's action at all.
+    """
+    controllers = getattr(net, "controller", None)
+    controls: dict[int, Any] = {}
+    if controllers is None or not len(controllers):
+        return controls
+    sgen = getattr(net, "sgen", None)
+    unsupported_ids: list = []
+    reasons: dict[str, int] = {}
+    capability_circle_ids: list = []
+
+    def _flag(pp_idx: Any, reason: str) -> None:
+        unsupported_ids.append(pp_idx)
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+    for pp_idx, row in controllers.iterrows():
+        if not bool(row.get("in_service", True)):
+            continue
+        obj = row.get("object", None)
+        cls_name = type(obj).__name__ if obj is not None else "None"
+        if cls_name != "DERController":
+            _flag(pp_idx, cls_name)
+            continue
+        element = str(getattr(obj, "element", ""))
+        if element != "sgen" or sgen is None:
+            _flag(pp_idx, f"DERController(element={element!r})")
+            continue
+        if getattr(obj, "pqv_area", None) is not None:
+            _flag(pp_idx, "DERController(pqv_area)")
+            continue
+        saturate = getattr(obj, "saturate_sn_mva", None)
+        sat_active = saturate is not None and any(
+            not math.isnan(float(v)) for v in saturate
+        )
+        if sat_active:
+            _flag(pp_idx, "DERController(saturate_sn_mva)")
+            continue
+        q_model = getattr(obj, "q_model", None)
+        element_index = list(getattr(obj, "element_index", None) or [])
+        mapped_any = False
+        for sgen_idx in element_index:
+            sgen_idx = int(sgen_idx)
+            if sgen_idx not in sgen.index:
+                continue
+            row_s = sgen.loc[sgen_idx]
+            sn_mva = _opt_float(row_s, "sn_mva")
+            if sn_mva is None or sn_mva <= 0.0:
+                _flag(pp_idx, "DERController(no sn_mva)")
+                continue
+            sn_va = sn_mva * 1.0e6 * _scaling_factor(row_s)
+            control = _der_controller_inverter_control(
+                q_model, sn_va=sn_va, p_ref_w=sn_va
+            )
+            if control is None:
+                _flag(pp_idx, f"DERController(q_model={type(q_model).__name__})")
+                continue
+            if sgen_idx in controls:
+                _logger.warning(
+                    "pandapower sgen %s is targeted by more than one net.controller "
+                    "row; keeping the first mapped control.",
+                    sgen_idx,
+                )
+                continue
+            controls[sgen_idx] = control
+            mapped_any = True
+            if isinstance(control, VoltVarControl):
+                capability_circle_ids.append(sgen_idx)
+        if not element_index and mapped_any is False:
+            _flag(pp_idx, "DERController(empty element_index)")
+
+    if capability_circle_ids:
+        report.approximated(
+            "controller.capability_circle",
+            f"{len(capability_circle_ids)} sgen row(s) driven by a DERController "
+            "Volt-VAr Q-model carry pgml's capability circle (bounded by sn_mva) so "
+            "the RATED reactive-power reference has a base; pandapower's own "
+            "saturate_sn_mva is unset by default and applies no such bound.",
+            element_type="sgen",
+            ids=capability_circle_ids,
+            affects=("fundamental", "unbalanced"),
+            announced=True,
+        )
+    if unsupported_ids:
+        detail = ", ".join(f"{n} x {k}" for k, n in sorted(reasons.items()))
+        _logger.warning(
+            "pandapower -> Grid: %d net.controller row(s) are NOT converted (%s) -- "
+            "the converted grid does not reproduce their control action.",
+            len(unsupported_ids),
+            detail,
+        )
+        report.dropped(
+            "controller",
+            f"{len(unsupported_ids)} net.controller row(s) are not converted "
+            f"({detail}); the converted grid does not reproduce their control "
+            "action.",
+            ids=unsupported_ids,
+            count=len(unsupported_ids),
+            announced=True,
+        )
+    return controls
 
 
 def _opt_float(row: Any, column: str) -> Optional[float]:
@@ -839,11 +1053,12 @@ def _transformer_zero_sequence(
     )
 
 
-def _warn_defaulted_zero_sequence(defaulted: list) -> None:
+def _warn_defaulted_zero_sequence(defaulted: list, report: ConversionReport) -> None:
     """Report the transformers whose zero-sequence leakage fell back to the defaults.
 
     One WARNING per conversion, carrying the count and the pandapower indices, so a feeder
-    with many identical Dyn units does not repeat the same sentence per transformer.
+    with many identical Dyn units does not repeat the same sentence per transformer. The
+    same fact is recorded as ``approx.transformer.zero_sequence_invented``.
     """
     if not defaulted:
         return
@@ -854,6 +1069,18 @@ def _warn_defaulted_zero_sequence(defaulted: list) -> None:
         "YNyn unit typically has X0/X1 of 0.3-1.0.",
         len(defaulted),
         ", ".join(str(i) for i in defaulted),
+    )
+    report.approximated(
+        "transformer.zero_sequence_invented",
+        f"{len(defaulted)} transformer(s) carry a grounded-wye/zigzag winding but no "
+        "vk0_percent; their zero-sequence leakage assumes the documented "
+        "transformer.zero_sequence.* ratios (Z0 = Z1 by default) instead of a measured "
+        "value.",
+        element_type="trafo",
+        ids=defaulted,
+        count=len(defaulted),
+        affects=("unbalanced", "harmonic"),
+        announced=True,
     )
 
 
@@ -986,6 +1213,7 @@ def to_grid(
     gen_volt_var_slope_pu: float = DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
     harmonic_line_model: Optional[str] = None,
     open_switch_model: Optional[Literal["terminal", "drop_element"]] = None,
+    return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert a pandapower network to a :class:`~pgml.schemas.grid_schema.Grid`.
 
@@ -1040,11 +1268,18 @@ def to_grid(
         omits the whole element when either terminal switch is open. Elements with
         both ends open are omitted in both modes. Original bus mappings are retained;
         ``id_map["open_terminal"]`` maps open switch indices to auxiliary node ids.
+    return_report:
+        Also return the :class:`~pgml.convert.ConversionReport` of this conversion
+        as a third tuple element: every dropped element kind, every approximation
+        and every default-model difference between pandapower and pgml that applies to
+        this network, each with the setting that closes it. The report is logged
+        either way.
 
     Returns
     -------
     tuple[Grid, dict]
-        A ``(Grid, id_map)`` pair.  ``Grid`` is the materialised schema object
+        A ``(Grid, id_map)`` pair, or ``(Grid, id_map, ConversionReport)`` with
+        ``return_report=True``.  ``Grid`` is the materialised schema object
         (no ``type_ref``).  ``id_map`` maps source element tables to our ids:
         ``"bus"`` -> ``{pp_bus_idx: Node.id}``,
         ``"line"`` -> ``{pp_line_idx: Line.id}``,
@@ -1079,6 +1314,17 @@ def to_grid(
     two_pi_f0 = 2.0 * math.pi * f0_hz
 
     _id = IdCounter()
+    report = ConversionReport(
+        tool=PANDAPOWER,
+        direction="import",
+        comparable=("fundamental", "unbalanced"),
+        options={
+            "phase_mode": phase_mode,
+            "gen_mode": gen_mode,
+            "harmonic_line_model": harmonic_line_model,
+            "open_switch_model": open_switch_model,
+        },
+    )
 
     id_map: dict[str, Any] = {
         "bus": {},
@@ -1220,7 +1466,7 @@ def to_grid(
         if c0 is not None:
             c0 *= parallel
         if phase_mode is PhaseMode.THREE_PHASE:
-            zero_seq_lines.note(r0=r0, x0=x0, c0=c0)
+            zero_seq_lines.note(r0=r0, x0=x0, c0=c0, source_id=pp_idx)
 
         branches.append(
             build_line_from_sequence(
@@ -1430,7 +1676,7 @@ def to_grid(
                 )
             )
 
-    _warn_defaulted_zero_sequence(zero_seq_defaulted)
+    _warn_defaulted_zero_sequence(zero_seq_defaulted, report)
 
     # ------------------------------------------------------------------ #
     # 4. Bus-bus switches (et='b', closed=True -> near-ideal Switch).       #
@@ -1451,7 +1697,9 @@ def to_grid(
             sw_id = _id.next()
             id_map["switch"][pp_idx] = sw_id
             z_ohm = float(row.get("z_ohm", 0.0) or 0.0)
-            r_sw = z_ohm if z_ohm > 0.0 else _closed_switch_resistance_ohm()
+            r_sw = (
+                z_ohm if z_ohm > 0.0 else _closed_switch_resistance_ohm(report, pp_idx)
+            )
             sw_phases = phases_for(phase_mode)
             branches.append(
                 Switch(
@@ -1512,6 +1760,7 @@ def to_grid(
                 x0_ohm=x0_ohm,
                 two_pi_f0=two_pi_f0,
                 element=f"pandapower ext_grid {pp_idx}",
+                report=report,
             )
         )
 
@@ -1626,6 +1875,10 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # pandapower sgen is GENERATION-POSITIVE (p_mw > 0 injects), matching the
     # Generator nameplate convention; the assembly applies the injection sign.
+    # A DERController naming a row in net.controller overrides q_mvar with an
+    # InverterControl (see _sgen_controllers); a controlled row's q_nom_var is 0.0,
+    # since the control law supplies Q, not the row's own (stale) q_mvar snapshot.
+    sgen_controls = _sgen_controllers(net, report)
     sgen = getattr(net, "sgen", None)
     if sgen is not None and len(sgen):
         for pp_idx, row in sgen.iterrows():
@@ -1637,6 +1890,12 @@ def to_grid(
             gen_id = _id.next()
             id_map["sgen"][pp_idx] = gen_id
             scaling = _scaling_factor(row)
+            control = sgen_controls.get(pp_idx)
+            q_total_var = (
+                0.0
+                if control is not None
+                else float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6 * scaling
+            )
             appliances.append(
                 build_generator(
                     id=gen_id,
@@ -1644,7 +1903,8 @@ def to_grid(
                     node=id_map["bus"][bus_pp],
                     mode=phase_mode,
                     p_total_w=float(row["p_mw"]) * 1.0e6 * scaling,
-                    q_total_var=float(row.get("q_mvar", 0.0) or 0.0) * 1.0e6 * scaling,
+                    q_total_var=q_total_var,
+                    control=control,
                 )
             )
 
@@ -1731,6 +1991,16 @@ def to_grid(
                     bus_pp,
                     float(row["p_mw"]),
                 )
+                report.note(
+                    "dropped.gen_at_slack",
+                    ReportCategory.DROPPED,
+                    "net.gen row(s) at the ext_grid bus are not converted as a "
+                    "regulating generator; their active power is absorbed into the "
+                    "slack dispatch instead.",
+                    pp_idx,
+                    element_type="gen",
+                    announced=True,
+                )
                 continue
             if bool(row.get("slack", False)):
                 _logger.warning(
@@ -1801,6 +2071,24 @@ def to_grid(
                     ),
                 )
             )
+        merged_buses = {
+            bus_pp: entry for bus_pp, entry in per_bus.items() if len(entry["rows"]) > 1
+        }
+        if merged_buses:
+            report.approximated(
+                "generator.merged_per_bus",
+                f"{len(merged_buses)} bus(es) carry more than one in-service net.gen "
+                "row; the rows were merged into one regulating generator per bus "
+                "(summed active power and reactive limits, the first row's vm_pu).",
+                element_type="gen",
+                ids=[
+                    pp_idx
+                    for entry in merged_buses.values()
+                    for pp_idx in entry["rows"]
+                ],
+                affects=(),
+                announced=True,
+            )
         if per_bus:
             _logger.info(
                 "pandapower -> Grid: %d 'gen' row(s) converted as %d EXACT PV "
@@ -1819,7 +2107,6 @@ def to_grid(
             for _, r in net.ext_grid.iterrows()
             if bool(r.get("in_service", True))
         }
-        n_elem = len(phases_for(phase_mode))
         n_fallback_limits = 0
         n_unsized = 0
         for pp_idx, row in gen.iterrows():
@@ -1840,6 +2127,16 @@ def to_grid(
                     "flagged slack=True" if is_slack_row else "the ext_grid bus",
                     float(row["p_mw"]),
                 )
+                report.note(
+                    "dropped.gen_at_slack",
+                    ReportCategory.DROPPED,
+                    "net.gen row(s) at the ext_grid bus, or flagged slack=True, are "
+                    "not converted; their active power is absorbed into the slack "
+                    "dispatch instead.",
+                    pp_idx,
+                    element_type="gen",
+                    announced=True,
+                )
                 continue
 
             scaling = _scaling_factor(row)
@@ -1853,7 +2150,6 @@ def to_grid(
                 p_w=p_w,
                 q_min_var=q_min_var,
                 q_max_var=q_max_var,
-                n_elem=n_elem,
                 slope_pu=gen_volt_var_slope_pu,
             )
 
@@ -1879,6 +2175,18 @@ def to_grid(
                 "voltage is held NEAR, not at, the setpoint.",
                 len(id_map["gen"]),
                 gen_volt_var_slope_pu,
+            )
+            report.approximated(
+                "generator.volt_var_pv_bus",
+                f"{len(id_map['gen'])} net.gen row(s) (PV buses) are converted as a "
+                f"Volt-VAr droop (steepness {gen_volt_var_slope_pu:g} pu/pu) instead "
+                "of the exact voltage-regulating terminal; the bus voltage is held "
+                "near, not at, vm_pu.",
+                element_type="gen",
+                ids=list(id_map["gen"]),
+                affects=("fundamental", "unbalanced"),
+                values={"slope_pu": gen_volt_var_slope_pu},
+                announced=True,
             )
         if n_fallback_limits:
             _logger.warning(
@@ -1949,6 +2257,23 @@ def to_grid(
                 "dcline",
                 "motor",
                 "asymmetric_sgen",
+                "measurement",
+            )
+            if (tbl := getattr(net, kind, None)) is not None
+        },
+        report=report,
+        ids={
+            kind: list(tbl.index)
+            for kind in (
+                "gen",
+                "trafo3w",
+                "impedance",
+                "ward",
+                "xward",
+                "dcline",
+                "motor",
+                "asymmetric_sgen",
+                "measurement",
             )
             if (tbl := getattr(net, kind, None)) is not None
         },
@@ -1969,10 +2294,13 @@ def to_grid(
             description=description,
         ),
     )
-    zero_seq_lines.warn(_logger, tool="pandapower")
+    zero_seq_lines.warn(_logger, tool="pandapower", report=report)
     resolve_converted_line_models(
         grid, _logger, tool="pandapower", requested=harmonic_line_model
     )
+    finalize_report(report, grid, _logger)
+    if return_report:
+        return grid, id_map, report
     return grid, id_map
 
 

@@ -648,7 +648,7 @@ class EarthReturnModel(GridModel):
     return enters the zero sequence only (it cancels in the positive sequence), and
     every form below reproduces the stored ``R0``/``X0`` exactly at ``f0``::
 
-        R0(h) = R0_conductor * m_skin(h) + 3 * (Re(h*f0) - Re_offset)
+        R0(h) = R1 * m_skin(h) + (R0_conductor - R1) + 3 * (Re(h*f0) - Re_offset)
         X0(h) = X0 * h**x0_exponent  [- 1.5 * kx * f0 * h * ln(h)  if carson_sublinear]
 
     with ``Re(f) = resistance_coeff_ohm_per_m_per_hz * f`` (Carson's geometry-
@@ -657,7 +657,9 @@ class EarthReturnModel(GridModel):
     ``R0_conductor = R0 - 3*Re(f0)``, ``Re_offset = 0`` (the stored ``R0`` is real
     zero-sequence data that already contains the earth return) or, when false,
     ``R0_conductor = R0``, ``Re_offset = Re(f0)`` (the stored ``R0`` is a
-    conductor-only value, e.g. one synthesised from an ``R0/R1`` ratio).
+    conductor-only value, e.g. one synthesised from an ``R0/R1`` ratio). The skin
+    multiplier is the phase conductor's (fitted to ``R1``) and scales its share ``R1``
+    of ``R0_conductor``; the return-path remainder is held constant.
 
     Consumed by the ``sequence_aware`` model only (``pgml.geometry.sequence``);
     setting it on a line with another ``harmonic_line_model`` is rejected.
@@ -681,12 +683,14 @@ class EarthReturnModel(GridModel):
     x0_frequency: Optional[Literal["linear", "carson_sublinear"]] = Field(
         default=None,
         description="Frequency law of the zero-sequence REACTANCE. ``linear``: "
-        "``X0(h) = X0*h`` (geometric scaling; the earth-return reactance "
-        "sub-linearity is left to the conductor-geometry path). "
+        "``X0(h) = X0*h`` (geometric scaling; right for a cable or 4-wire line whose "
+        "residual current returns in metal, and for an ``X0`` derived from a ratio). "
         "``carson_sublinear``: additionally subtract the Carson/Deri earth-return "
         "reactance decay ``1.5*kx*f0*h*ln(h)``, which is geometry- and "
         "soil-resistivity-independent and reproduces OpenDSS's ``Xg`` frequency "
-        "correction. None = modeling default.",
+        "correction. It presumes a stored ``X0`` that contains the deep-earth "
+        "return reactance (an overhead line with real zero-sequence data). "
+        "None = modeling default (``linear``).",
     )
     x0_nonnegative: Optional[bool] = Field(
         default=None,
@@ -698,8 +702,8 @@ class EarthReturnModel(GridModel):
     x0_exponent: Optional[Num] = si_field(
         "Exponent of the zero-sequence reactance scaling ``X0(h) = X0*h**p``. "
         "1.0 = geometric. Values below 1 mimic a sub-linear earth-return reactance "
-        "empirically; prefer ``x0_frequency='carson_sublinear'`` for the physical "
-        "form. None = modeling default.",
+        "empirically; ``x0_frequency='carson_sublinear'`` is the physically derived "
+        "form for an overhead line. None = modeling default.",
         short="1",
         long="exponent",
         default=None,
@@ -975,7 +979,15 @@ class TransformerZeroSeq(GridModel):
     as the positive-sequence leakage (the to-side/LV winding coil). The zero-sequence
     PATH is always derived from winding connections + clock; this overrides only the
     value. None => the configured `transformer.zero_sequence.*` ratios (Z0 = Z1 by
-    default), connected per topology."""
+    default), connected per topology.
+
+    Schema versions before 0.2.0 described these two values as referred to the HV
+    side, at a time when no part of the library consumed them. A persisted grid that
+    carries HV-referred values loads without a warning and is read here as
+    to-side-coil values, i.e. too large by the squared turns ratio (and by a further
+    factor 3 for a delta to-side coil). Convert such values before use:
+    ``z_to_coil = z_hv * (u_rated_to_v / u_rated_from_v)**2`` for a wye or zigzag
+    to-side winding, three times that for a delta one."""
 
     r0_ohm: Num = si_field(
         "Zero-sequence series resistance.",
@@ -1092,10 +1104,18 @@ class Switch(BranchBase):
         "Longitudinal inductance when closed.", short="H", long="henry", default=0.0
     )
     shunt_conductance_s: NonNegNum = si_field(
-        "Shunt conductance per end.", short="S", long="siemens", default=0.0
+        "Total shunt conductance of the pi equivalent; the assembly places half at "
+        "each terminal.",
+        short="S",
+        long="siemens",
+        default=0.0,
     )
     shunt_capacitance_f: NonNegNum = si_field(
-        "Shunt capacitance per end.", short="F", long="farad", default=0.0
+        "Total shunt capacitance of the pi equivalent; the assembly places half at "
+        "each terminal (the same convention as power-grid-model's c1).",
+        short="F",
+        long="farad",
+        default=0.0,
     )
 
 
@@ -1481,7 +1501,8 @@ class Characteristic(GridModel):
     curve breakpoint or level is a differentiable leaf — gradients flow to the curve
     shape through the solve. ``linear`` interpolation matches the OpenDSS XYcurve /
     pandapower ``Characteristic``; ``cubic`` gives a smooth (C\\ :sup:`1`) curve for a
-    well-behaved gradient at the breakpoints (see ``smoothing`` on the control mode).
+    well-behaved gradient at the breakpoints (the control's ``smoothing`` acts on the
+    capability clamp only, not on the curve).
     """
 
     x_values: Vec = Field(description="Strictly increasing breakpoints (x axis).")
@@ -1506,31 +1527,65 @@ class Characteristic(GridModel):
 class QReference(str, Enum):
     """Reactive-power base a Volt-VAr ``y`` (pu) scales (OpenDSS ``RefReactivePower``)."""
 
-    RATED = "rated"  # fraction of the inverter apparent-power rating (VARMAX)
-    AVAILABLE = "available"  # fraction of the vars available at the present P (VARAVAL)
+    #: Fraction of the inverter apparent-power rating ``s_rated_va`` (VARMAX). The
+    #: rating is the device total; each element scales its equal share of it.
+    RATED = "rated"
+    #: Fraction of the vars available under the capability circle at the present
+    #: active power (VARAVAL), evaluated per element on its share of the rating.
+    AVAILABLE = "available"
 
 
 class InverterControlBase(GridModel):
     """Shared fields of every inverter control mode.
 
+    DEVICE TOTALS, SPLIT EQUALLY OVER THE ELEMENTS. Every power quantity of a control
+    block (``s_rated_va`` here, ``q_var`` and ``p_ref_w`` on the modes that carry
+    them) describes the WHOLE device, exactly like ``p_nom_w``, and matches the
+    device ratings of the reference tools (pandapower ``sn_mva``, OpenDSS ``kVA`` /
+    ``kvarMax``). The control law is evaluated per connection element, and each of the
+    ``n_elem`` elements works with an equal ``1 / n_elem`` share: a rating of
+    ``s_rated_va / n_elem``, a fixed reactive power of ``q_var / n_elem``, a
+    ``cosphi(P)`` base of ``p_ref_w / n_elem``. ``n_elem`` follows the device's
+    ``connection``:
+
+    - WYE: one element per connected phase (phase to neutral or ground), so
+      ``n_elem = len(phases)``: 1, 2 or 3.
+    - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``.
+
+    A single-phase device (``n_elem = 1``) uses the values as written, and a balanced
+    three-phase device injects the same totals as its single-phase equivalent. The
+    split is equal whatever the per-phase distribution of the active power: an
+    unbalanced device does not move rating from a lightly loaded element to a heavily
+    loaded one. Each element evaluates a voltage-dependent curve at its own terminal
+    voltage (phase-to-neutral for WYE, phase-to-phase for DELTA), not at a
+    positive-sequence or phase-average magnitude.
+
     ``s_rated_va`` is the inverter apparent-power rating that bounds the (P, Q)
-    operating point to the capability circle ``P**2 + Q**2 <= s_rated_va**2``; ``None``
-    disables the clamp. ``smoothing`` (>= 0) sets the half-width, in the same units as
-    the clamped/curve quantity, of a soft saturation / soft breakpoint used so the
-    control stays C\\ :sup:`1` for gradient-based use (0 = the exact hard clamp /
-    piecewise curve, which matches the reference tools at the operating point but has
-    sub-gradients at the kinks). See ``docs/pgml/modeling/der-pv-storage.md`` section 4.3.
+    operating point to the capability circle ``P**2 + Q**2 <= s_rated_va**2`` (per
+    element: its share of P and Q against ``s_rated_va / n_elem``); ``None``
+    disables the clamp. ``smoothing`` (>= 0) is the half-width, as a fraction of
+    ``s_rated_va``, of a soft saturation that replaces the hard capability clamp so the
+    control stays C\\ :sup:`1` there for gradient-based use. The soft clamp is used by
+    the solve and its gradient alike, so a positive value also shifts the solved
+    operating point near the limit. 0 is the exact hard clamp, which matches the
+    reference tools but has one-sided gradients at the limit. Curve breakpoints are not
+    smoothed (see ``Characteristic.interpolation``). See
+    ``docs/pgml/modeling/der-pv-storage.md``, "Kinks on a differentiable path".
     """
 
     s_rated_va: Optional[PosNum] = si_field(
-        "Inverter apparent-power rating bounding the (P, Q) capability circle.",
+        "Inverter apparent-power rating bounding the (P, Q) capability circle. "
+        "DEVICE TOTAL: split equally over the device's elements, each of the n_elem "
+        "elements (phases for WYE, phase pairs for DELTA) is bounded by "
+        "s_rated_va / n_elem.",
         short="VA",
         long="volt-ampere",
         default=None,
     )
     smoothing: float = si_field(
-        "Soft-saturation / soft-breakpoint half-width for differentiable gradients "
-        "(0 = exact hard clamp / piecewise curve).",
+        "Soft-saturation half-width of the capability clamp, as a fraction of "
+        "s_rated_va (0 = exact hard clamp). Each element's clamp uses that fraction "
+        "of its own share s_rated_va / n_elem, so the device total behaves as written.",
         short="pu",
         long="fraction",
         default=0.0,
@@ -1555,18 +1610,29 @@ class ConstantPowerFactorControl(InverterControlBase):
 
 
 class ConstantReactivePowerControl(InverterControlBase):
-    """Fixed reactive-power setpoint, independent of the active power and voltage."""
+    """Fixed reactive-power setpoint, independent of the active power and voltage.
+
+    ``q_var`` is the DEVICE total: a three-phase device with ``q_var=3000`` injects
+    3 kvar in all, 1 kvar per element (see :class:`InverterControlBase`).
+    """
 
     kind: Literal["constant_reactive_power"] = "constant_reactive_power"
     q_var: Num = si_field(
-        "Reactive-power setpoint (sign per the appliance injection convention).",
+        "Reactive-power setpoint (sign per the appliance injection convention). "
+        "DEVICE TOTAL: each of the n_elem elements (phases for WYE, phase pairs for "
+        "DELTA) injects q_var / n_elem.",
         short="var",
         long="var",
     )
 
 
 class PowerFactorWattControl(InverterControlBase):
-    """Power-factor-vs-active-power characteristic ``cosphi(P)`` (VDE-AR-N 4105)."""
+    """Power-factor-vs-active-power characteristic ``cosphi(P)`` (VDE-AR-N 4105).
+
+    ``p_ref_w`` is a DEVICE total: each element forms ``x`` from its share of the
+    active power against ``p_ref_w / n_elem`` (see :class:`InverterControlBase`), so
+    a balanced device reads the curve at ``P_device / p_ref_w``.
+    """
 
     kind: Literal["power_factor_watt"] = "power_factor_watt"
     characteristic: Characteristic = Field(
@@ -1574,7 +1640,9 @@ class PowerFactorWattControl(InverterControlBase):
         "factor (y > 0 = overexcited/inject Q, y < 0 = underexcited/absorb)."
     )
     p_ref_w: Optional[PosNum] = si_field(
-        "Active-power reference normalising the curve x axis; None = |p_nom_w|.",
+        "Active-power reference normalising the curve x axis; None = |p_nom_w|. "
+        "DEVICE TOTAL: each of the n_elem elements (phases for WYE, phase pairs for "
+        "DELTA) is normalised by p_ref_w / n_elem.",
         short="W",
         long="watt",
         default=None,
@@ -1582,7 +1650,12 @@ class PowerFactorWattControl(InverterControlBase):
 
 
 class VoltVarControl(InverterControlBase):
-    """Volt-VAr ``Q(V)``: reactive power as a function of the terminal voltage."""
+    """Volt-VAr ``Q(V)``: reactive power as a function of the terminal voltage.
+
+    With ``q_reference="rated"`` the curve scales the device rating ``s_rated_va``;
+    each element evaluates the curve at its own terminal voltage and scales its share
+    ``s_rated_va / n_elem`` (see :class:`InverterControlBase`).
+    """
 
     kind: Literal["volt_var"] = "volt_var"
     characteristic: Characteristic = Field(
@@ -1646,7 +1719,7 @@ class VoltageRegulation(GridModel):
     reactive power-balance row with ``|V|**2 - V_set**2`` and recovers the reactive
     injection from the converged solution; see ``docs/pgml/modeling/der-pv-storage.md``
     section 4.5. It is the model behind pandapower ``net.gen``, power-grid-model's
-    ``source``-like voltage control and OpenDSS ``Generator model=3``.
+    ``voltage_regulator`` and OpenDSS ``Generator model=3``.
 
     ``v_set_pu`` is per unit of the HOST NODE's rated voltage, i.e. the regulated
     magnitude in volts is ``v_set_pu * phase_voltage_magnitude(node.u_rated_v,

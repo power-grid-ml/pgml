@@ -295,6 +295,54 @@ def _lead(v, rdt, dev) -> Tensor:
     return _to(v, rdt, dev).unsqueeze(-1)
 
 
+def _zero_sequence_reactance(
+    x0t: Tensor, h: Tensor, f0t: Tensor, *, x0_exponent, earth_reactance_coeff
+) -> Tensor:
+    """Unguarded ``X0(h)`` ``[*B, H]``; ``earth_reactance_coeff=None`` = the linear law."""
+    rdt, dev = h.dtype, h.device
+    if isinstance(x0_exponent, float) and x0_exponent == 1.0:
+        x = x0t.unsqueeze(-1) * h  # exact geometric scaling
+    else:
+        x = x0t.unsqueeze(-1) * torch.pow(h, _lead(x0_exponent, rdt, dev))
+    if earth_reactance_coeff is not None:
+        kx = _lead(earth_reactance_coeff, rdt, dev)  # [*B, 1]
+        x = x - (1.5 * kx * f0t) * (h * torch.log(h))
+    return x
+
+
+def x0_sublinear_deficit(
+    x0,
+    f0,
+    freqs: Tensor,
+    *,
+    earth_reactance_coeff=CARSON_EARTH_X_PER_HZ,
+    x0_exponent=X0_EXPONENT,
+) -> Tensor:
+    """Where the ``carson_sublinear`` law leaves no reactance: bool ``[*B, H]``.
+
+    True at every ``(line, frequency)`` whose unguarded
+    ``X0(h) = X0*h**p - 1.5*kx*f0*h*ln(h)`` is negative, i.e. where the non-negative
+    guard of :func:`zero_sequence_harmonic_z` clamps (or, with the guard off, where the
+    line turns into a series capacitance). A True entry means the stored ``X0`` is
+    smaller than the earth-return reactance the law subtracts, so the law's premise
+    (``X0`` contains the deep-earth term) does not hold for that line. A diagnostic:
+    evaluated without gradient tracking.
+    """
+    rdt = _rdtype(freqs)
+    dev = freqs.device
+    with torch.no_grad():
+        f = freqs.to(rdt).reshape(-1)
+        f0t = _to(f0, rdt, dev).reshape(())
+        x = _zero_sequence_reactance(
+            _to(x0, rdt, dev),
+            f / f0t,
+            f0t,
+            x0_exponent=x0_exponent,
+            earth_reactance_coeff=earth_reactance_coeff,
+        )
+        return x < 0.0
+
+
 def zero_sequence_harmonic_z(
     r0,
     x0,
@@ -308,17 +356,31 @@ def zero_sequence_harmonic_z(
     x0_nonnegative: bool | None = None,
     x0_exponent=X0_EXPONENT,
     r0_includes_earth_return: bool = R0_INCLUDES_EARTH_RETURN,
+    phase_resistance=None,
 ) -> Tensor:
     """Zero-sequence harmonic impedance ``Z0(h)`` ``[*B, H]`` (Ω/m or Ω).
 
     ::
 
-        R0(h) = R0_conductor * m_skin(h) + 3 * (Re(f) - Re_offset)
+        R0(h) = R_phase * m_skin(h) + (R0_conductor - R_phase) + 3 * (Re(f) - Re_offset)
         X0(h) = X0 * h**x0_exponent  [- 1.5*kx*f0*h*ln(h)   if carson_sublinear]
 
     with ``Re(f) = earth_resistance_coeff * f`` (Carson's geometry-independent
     earth-return resistance, ∝ f) and ``kx = earth_reactance_coeff``. Both forms
     reproduce the stored ``R0``/``X0`` exactly at ``f0``.
+
+    ``phase_resistance`` is the phase conductor's own resistance ``R1``. The phase
+    conductor's share of the zero-sequence resistance is ``R_phase = min(R1,
+    R0_conductor)``, and it carries the skin multiplier fitted to ``R1``, the same
+    curve the positive sequence uses. The remainder is the metallic or earth return
+    path (three times its resistance); its cross-section is unknown from sequence
+    data, so it is held constant. Without ``phase_resistance`` the whole
+    ``R0_conductor`` is treated as ONE conductor of that DC resistance
+    (``R_phase = R0_conductor``). For ``R0 = 4*R1`` that fictitious conductor has a
+    quarter of the cross-section, and its skin rise is much weaker than the phase
+    conductor's: at order 25 and 50 Hz a 150 mm² aluminium conductor gives
+    ``m(R1) = 1.63`` but ``m(4*R1) = 1.07``, i.e. ``R0(h)`` lacks ``0.35*R1``. Both
+    forms coincide where ``R0_conductor = R1``.
 
     ``r0_includes_earth_return`` selects how much of ``R0`` is conductor resistance:
     ``True`` (real zero-sequence data) takes ``R0_conductor = R0 - 3*Re(f0)`` with
@@ -326,18 +388,26 @@ def zero_sequence_harmonic_z(
     (an ``R0`` synthesised from an ``R0/R1`` ratio, which carries no earth content)
     takes ``R0_conductor = R0`` with ``Re_offset = Re(f0)``, adding the earth return as
     a pure increment. ``earth_resistance_coeff=0`` recovers a pure conductor
-    (no-earth) zero sequence.
+    (no-earth) zero sequence. With ``phase_resistance`` given, both settings yield
+    the same ``R0(h)`` as long as ``R0 - 3*Re(f0) >= R1``, because only the ``R1``
+    share is scaled.
 
-    The earth-return REACTANCE is sub-linear in frequency (the penetration depth
-    shrinks as ``1/sqrt(f)``). ``x0_frequency='linear'`` leaves that to the full
-    Carson geometry path, which knows the real return path (deep earth vs a nearby
-    neutral/sheath). ``x0_frequency='carson_sublinear'`` applies the lumped
-    Carson/Deri form, in which the soil resistivity cancels:
-    ``X0(h) = h*(X0 - 1.5*kx*f0*ln(h))`` — the same correction OpenDSS applies to an
-    R/X line through its ``Xg``. ``x0_exponent`` is an empirical alternative
-    (``X0 ∝ h**p``).
+    ``x0_frequency='linear'`` scales ``X0`` as a geometric inductance. That is exact
+    for a return path that stays in metal (the neutral core or sheath of a cable, a
+    4-wire LV line) and is the safe choice for an ``X0`` derived from an ``X0/X1``
+    ratio, which says nothing about the return path.
+    ``x0_frequency='carson_sublinear'`` applies the lumped Carson/Deri form of a deep
+    EARTH return, whose reactance is sub-linear in frequency because the penetration
+    depth shrinks as ``1/sqrt(f)``. The soil resistivity cancels:
+    ``X0(h) = h*(X0 - 1.5*kx*f0*ln(h))``, the same correction OpenDSS applies to an R/X
+    line through its ``Xg``. The form presumes that the stored ``X0`` contains the
+    earth term ``3*kx*f0*ln(658.5*sqrt(rho/f0))`` (about 1.29 Ω/km at 50 Hz, 100 Ω·m),
+    as the ``X0`` of an overhead line with earth return does. For a smaller ``X0`` (a
+    cable, a ratio-derived value) the subtraction is not physical and drives ``X0(h)``
+    to zero within ordinary harmonic orders; :func:`x0_sublinear_deficit` reports
+    where. ``x0_exponent`` is an empirical alternative (``X0 ∝ h**p``).
 
-    ``x0_frequency=None`` resolves the active default (``carson_sublinear``).
+    ``x0_frequency=None`` resolves the active default (``linear``).
     ``x0_nonnegative=None`` resolves the guard default (True). The guard clamps the
     sub-linear reactance at zero, with zero gradient below the boundary and a kink
     at zero; disable it to reproduce the unguarded reference approximation.
@@ -360,27 +430,35 @@ def zero_sequence_harmonic_z(
     else:
         r_cond = r0t
         r_earth = (3.0 * rc) * (f - f0t)  # [*B, H]
-    m = skin_resistance_multiplier(r_cond, f0, f) if skin else torch.ones_like(h)
-    r = r_cond.unsqueeze(-1) * m + r_earth  # [*B, H]
-
-    if isinstance(x0_exponent, float) and x0_exponent == 1.0:
-        x = x0t.unsqueeze(-1) * h  # exact geometric scaling
+    if phase_resistance is None:
+        r_phase = r_cond
+        r_fit = r_cond
     else:
-        x = x0t.unsqueeze(-1) * torch.pow(h, _lead(x0_exponent, rdt, dev))
+        r_fit = _to(phase_resistance, rdt, dev)
+        r_phase = torch.minimum(r_fit, r_cond)
+    m = skin_resistance_multiplier(r_fit, f0, f) if skin else torch.ones_like(h)
+    r = r_phase.unsqueeze(-1) * m + (r_cond - r_phase).unsqueeze(-1) + r_earth
+
     if x0_frequency is None:
         x0_frequency = _cfg("line.earth_return.x0_frequency")
     if x0_nonnegative is None:
         x0_nonnegative = _cfg("line.earth_return.x0_nonnegative")
-    if x0_frequency == "carson_sublinear":
-        kx = _lead(earth_reactance_coeff, rdt, dev)  # [*B, 1]
-        x = x - (1.5 * kx * f0t) * (h * torch.log(h))
-        if x0_nonnegative:
-            x = x.clamp_min(0.0)
-    elif x0_frequency != "linear":
+    if x0_frequency not in ("linear", "carson_sublinear"):
         raise InputError(
             f"Unknown zero-sequence reactance law x0_frequency={x0_frequency!r} "
             "(expected 'linear' or 'carson_sublinear')."
         )
+    x = _zero_sequence_reactance(
+        x0t,
+        h,
+        f0t,
+        x0_exponent=x0_exponent,
+        earth_reactance_coeff=(
+            earth_reactance_coeff if x0_frequency == "carson_sublinear" else None
+        ),
+    )
+    if x0_frequency == "carson_sublinear" and x0_nonnegative:
+        x = x.clamp_min(0.0)
     return torch.complex(r, x.expand_as(r)).to(_cdtype(rdt))
 
 
@@ -420,7 +498,8 @@ def sequence_aware_phase_z(
 
     Combines an earth-free positive sequence ``Z1(h)`` (:func:`positive_sequence_z`,
     ``X1 ∝ h`` + skin) with a damped zero sequence ``Z0(h)``
-    (:func:`zero_sequence_harmonic_z`, conductor + Carson earth return) and recombines
+    (:func:`zero_sequence_harmonic_z`, skin rise on the phase conductor's share ``R1``
+    of ``R0`` + Carson earth return) and recombines
     them (:func:`sequence_to_phase_z`). An unbalanced / zero-sequence current then sees
     the earth-return damping in ``Z0``, while a balanced positive-sequence current still
     sees only the earth-free ``Z1``. This is the model an asymmetric 4-wire LV harmonic
@@ -441,6 +520,7 @@ def sequence_aware_phase_z(
         x0_nonnegative=x0_nonnegative,
         x0_exponent=x0_exponent,
         r0_includes_earth_return=r0_includes_earth_return,
+        phase_resistance=r1,
     )
     return sequence_to_phase_z(z1, z0)
 
@@ -457,6 +537,7 @@ __all__ = [
     "CARSON_EARTH_R_PER_HZ",
     "CARSON_EARTH_X_PER_HZ",
     "zero_sequence_harmonic_z",
+    "x0_sublinear_deficit",
     "sequence_to_phase_z",
     "sequence_aware_phase_z",
 ]

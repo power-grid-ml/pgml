@@ -28,7 +28,7 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 import torch
 from torch import Tensor
@@ -884,8 +884,11 @@ class _BlockLU:
         self.batch_ref = y.new_empty((*self.fb, 0, 0))
         self.buckets: list[tuple[Tensor, Tensor, Tensor]] = []
         #: Per bucket: (solve-space positions, full-precision diagonal blocks) — the
-        #: block-diagonal matvec a mixed-precision residual needs.
+        #: block-diagonal matvec a mixed-precision residual needs. Kept ONLY for a
+        #: mixed-precision factorization: at full precision nothing forms a residual,
+        #: and a second copy of every block would double this backend's memory.
         self.blocks_full: list[tuple[Tensor, Tensor]] = []
+        self.keeps_blocks = factor_dtype is not None
         pairs = _size_buckets(blocks, blocks if solve_blocks is None else solve_blocks)
         for rows, pos in pairs:
             # [*fb, B, n, n]: gathered straight from ``y`` — no [N, N] intermediate.
@@ -902,7 +905,8 @@ class _BlockLU:
                 sub if factor_dtype is None else sub.to(factor_dtype)
             )
             self.buckets.append((pos, lu, piv))
-            self.blocks_full.append((pos, sub))
+            if self.keeps_blocks:
+                self.blocks_full.append((pos, sub))
         self.n_blocks = sum(int(pos.shape[0]) for pos, _, _ in self.buckets)
 
     def apply(self, x: Tensor, *, adjoint: bool = False) -> Tensor:
@@ -911,8 +915,14 @@ class _BlockLU:
         The counterpart of :meth:`solve` for a residual ``b − A x``: each bucket
         gathers its blocks' entries of ``x``, multiplies by its stored diagonal
         blocks, and scatters back. Rows outside every block carry no admittance in
-        this factorization and contribute 0, exactly as the solve assumes.
+        this factorization and contribute 0, exactly as the solve assumes. Available
+        for a mixed-precision factorization only (the one consumer of a residual).
         """
+        if not self.keeps_blocks:
+            raise InputError(
+                "the block-diagonal matvec is kept for a mixed-precision factorization "
+                "only; a full-precision block factorization stores its factors alone."
+            )
         batch = torch.broadcast_shapes(self.fb, x.shape[:-1])
         x_b = x.broadcast_to(*batch, self.m)
         out = torch.zeros(*batch, self.m, dtype=x_b.dtype, device=x_b.device)
@@ -1164,7 +1174,9 @@ class _MixedPrecisionSolveFn(torch.autograd.Function):
         return grad_y, grad_rhs, None
 
 
-def estimate_condition(fac: "FactoredSystem", *, iters: int = 5) -> float:
+def estimate_condition(
+    fac: "FactoredSystem", *, iters: int = 5, per_matrix: bool = False
+) -> Union[float, Tensor]:
     """Estimated 1-norm condition number of the factored matrix (a LOWER bound).
 
     ``cond_1(A) = ‖A‖_1 ‖A⁻¹‖_1`` with ``‖A⁻¹‖_1`` from Hager's power method: starting
@@ -1180,32 +1192,40 @@ def estimate_condition(fac: "FactoredSystem", *, iters: int = 5) -> float:
     For the condition number of the matrix as assembled, factor it with
     ``equilibrate="off"``.
 
-    Returns ``inf`` for a singular factorization and ``nan`` when the factored matrix is
-    not available as a tensor (the block backend keeps only its diagonal blocks).
+    A BATCHED factorization (one matrix per harmonic order, switch state or scenario)
+    is estimated per matrix, each with its own norm and its own probe vectors, in one
+    batched pass. The default return value is the WORST case over the batch as a Python
+    ``float`` (one host synchronisation); ``per_matrix=True`` returns the estimates as a
+    real tensor shaped like the factorization's leading batch dims, on its device,
+    without synchronising.
+
+    An entry is ``inf`` for a singular factorization. The result is ``nan`` when the
+    factored matrix is not available as a tensor (the block backend keeps only its
+    diagonal blocks). A diagnostic: no autograd.
     """
     if fac.y_mat is None:
-        return float("nan")
+        return torch.full((), float("nan")) if per_matrix else float("nan")
     with torch.no_grad():
-        a = fac.y_mat.reshape(-1, fac.y_mat.shape[-1], fac.y_mat.shape[-1])[0]
+        a = fac.y_mat
         m = a.shape[-1]
-        norm_a = float(a.abs().sum(dim=-2).max())  # max absolute column sum
-        x = torch.full((m,), 1.0 / m, dtype=a.dtype, device=a.device)
-        norm_inv = 0.0
+        fb = a.shape[:-2]
+        norm_a = a.abs().sum(dim=-2).amax(dim=-1)  # [*fb] max absolute column sum
+        x = torch.full((*fb, m), 1.0 / m, dtype=a.dtype, device=a.device)
+        norm_inv = torch.zeros_like(norm_a)
         for _ in range(max(1, iters)):
-            y = _refined_solve(fac, x)
-            norm_y = float(y.abs().sum())
-            norm_inv = max(norm_inv, norm_y / max(float(x.abs().sum()), 1e-300))
-            if not math.isfinite(norm_y) or norm_y == 0.0:
-                break
+            y = _refined_solve(fac, x)  # [*fb, m]; every probe has unit 1-norm
+            norm_inv = torch.maximum(norm_inv, y.abs().sum(dim=-1))
             # Hager's next probe: the unit-phase pattern of the current iterate pushed
             # through the adjoint solve (a subgradient of the 1-norm), then the unit
             # vector of its largest entry — whose image is a column of A^-1.
-            xi = y / y.abs().clamp_min(1e-300)
+            xi = y / y.abs().clamp_min(torch.finfo(y.real.dtype).tiny)
             z = _refined_solve(fac, xi, adjoint=True)
-            j = int(z.abs().argmax())
-            x = torch.zeros_like(x)
-            x[j] = 1.0
-        return norm_a * norm_inv
+            j = z.abs().nan_to_num(nan=0.0).argmax(dim=-1, keepdim=True)
+            x = torch.zeros_like(x).scatter(-1, j, 1.0)
+        cond = norm_a * norm_inv
+        # A singular factorization back-substitutes to inf / nan; report it as inf.
+        cond = torch.where(torch.isfinite(cond), cond, torch.full_like(cond, math.inf))
+        return cond if per_matrix else float(cond.max())
 
 
 @dataclass
@@ -1316,13 +1336,6 @@ def _block_equilibration_scale(y_bus: Tensor, eq_mode: str) -> Optional[Tensor]:
     """
     if eq_mode == "off":
         return None
-    if eq_mode != "symmetric":
-        raise InputError(
-            f"equilibrate={eq_mode!r} is unavailable with backend='block': the "
-            "block-diagonal factorization never materialises the matrix it factors, so "
-            "only the diagonal ('symmetric', the documented default) scaling can be "
-            "built for it. Use equilibrate='symmetric' or 'off' with backend='block'."
-        )
     d_row, _ = equilibration_scales(y_bus, mode=eq_mode)
     return d_row
 
@@ -1346,8 +1359,8 @@ def lu_factor_system(
     is ~O(N) where dense LU is O(N³)) and the batched dense ``torch.linalg.lu_factor``
     everywhere else (CUDA is ALWAYS dense — torch has no batched sparse direct solve);
     ``"dense"`` / ``"sparse"`` / ``"block"`` force the choice. Every backend is
-    differentiable (dense and block through the torch ops, sparse through the adjoint
-    :class:`_SparseSolveFn`).
+    differentiable (dense and block through the torch ops, sparse through an explicit
+    linear-solve adjoint).
 
     ``backend="block"`` factors a BLOCK-DIAGONAL system one diagonal block at a time
     and needs ``block_rows``: one int64 row-index tensor per block, together
@@ -1371,7 +1384,7 @@ def lu_factor_system(
     factorization and back-substitution in single precision, which is the dominant cost
     of a large dense solve (and of every CUDA solve, where double precision runs at a
     fraction of the single-precision rate). Gradients flow through the exact linear-solve
-    adjoint (:class:`_MixedPrecisionSolveFn`), so the refined solve is differentiable
+    adjoint, so the refined solve is differentiable
     w.r.t. the matrix and the right-hand side at the working precision; the block
     backend keeps only its diagonal blocks and therefore refuses a mixed-precision
     factorization of a matrix that requires grad.
@@ -1643,8 +1656,7 @@ def solve_factored(
     :func:`lu_factor_system`). Identical result to :func:`solve_harmonic` with the same
     ``Y`` / slack mode; only the factorization is reused. Returns ``[*batch, N]`` (the
     leading dims broadcast ``i_inj`` against the factorization). The scenario batch is
-    solved as MULTIPLE right-hand sides of the one shared factorization
-    (:func:`_lu_solve_shared`), so the dense ``Y`` is never tiled across the batch. The
+    solved as MULTIPLE right-hand sides of the one shared factorization, so the dense ``Y`` is never tiled across the batch. The
     ``"block"`` backend does the same per diagonal block, gathering / scattering each
     block's entries of the right-hand side around its own batched back-substitution."""
     if fac.mode == "norton":

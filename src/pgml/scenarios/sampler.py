@@ -36,7 +36,6 @@ from pgml.schemas.grid_schema import (
     StaticSpectrum,
 )
 
-from .emission import LOADING_FLOOR, affine_emission_correction, phase_slope_shift
 from .config import CartesianConfig, ParameterSpec, ScenarioConfig
 from .en50160 import en50160_limit
 from .iec61000_3_2 import iec61000_3_2_device_caps
@@ -403,6 +402,7 @@ def _resolve(grid: Grid, config: ScenarioConfig):
     writers += [
         (lay.spec.name, cid, (lay.spec.field, order))
         for lay in harm_layouts
+        if not lay.spec.is_free_parameter  # recorded only, so it cannot collide
         for cid in lay.ids
         for order in lay.spec.orders
     ]
@@ -458,9 +458,10 @@ def _scalar_passthrough(x):
 def nominal_power(grid: Grid) -> dict:
     """``{appliance_id: NominalPower}`` for every injection appliance of ``grid``.
 
-    The nameplate a ``mode="scale"`` operating point multiplies, and the denominator
-    the emission law's loading ratio reads. Tensor-valued nameplates pass through
-    untouched, so a scaled operating point stays differentiable w.r.t. the rated power.
+    The nameplate a ``mode="scale"`` operating point multiplies, and the denominator of
+    a device's loading (drawn power over rated power). Tensor-valued nameplates pass
+    through untouched, so a scaled operating point stays differentiable w.r.t. the rated
+    power.
     """
     out: dict[int, NominalPower] = {}
     for a in grid.appliances:
@@ -531,7 +532,6 @@ def _record_realized_injections(
     harm_layouts: list,
     u: Tensor,
     samples: dict,
-    loading: dict,
     shared: dict,
 ) -> None:
     """Record the REALIZED per-device injection of every ``h_mag`` spec into ``samples``.
@@ -548,10 +548,7 @@ def _record_realized_injections(
       (an ``h_phase`` spec's draw where one covers the device and order, otherwise the
       angle seeded from the device's stored spectrum);
     - ``"<spec>_device_ids"`` ``[n_dev]`` — the device ids of the middle axis, a
-      batch-shared record (no leading scenario axis);
-    - ``"<spec>_loading"`` ``[B, n_dev]`` — the loading the emission law read for each
-      device (its drawn active power over the nameplate, ``1`` where no power spec
-      varied it), so the magnitude-to-loading relation the dataset carries is auditable.
+      batch-shared record (no leading scenario axis).
 
     The device axis is the spec's full matched set even for ``per="shared"``: one shared
     draw still realizes as a different magnitude per device, because the emission
@@ -578,84 +575,6 @@ def _record_realized_injections(
         samples[f"{spec.name}_mag"] = torch.stack(mags, dim=1)  # [B, n_dev, n_ord]
         samples[f"{spec.name}_phase"] = torch.stack(phases, dim=1)
         shared[f"{spec.name}_device_ids"] = torch.tensor(lay.ids, dtype=torch.long)
-        samples[f"{spec.name}_loading"] = torch.stack(
-            [
-                _coefficient_column(loading.get(cid, 1.0), b, u).to(torch.float64)
-                for cid in lay.ids
-            ],
-            dim=1,
-        )  # [B, n_dev]
-
-
-def _device_loading(cid: int, operating_point: dict, nominal: dict) -> Optional[Tensor]:
-    """The loading ``lam [B]`` a device's operating-point draw realised, or ``None``.
-
-    The ratio of the drawn active power to the nameplate: the balanced total for a
-    scalar entry, the mean of the per-phase ratios for a per-phase one (each phase over
-    its own nameplate share, so an unbalanced draw reads as its average loading).
-    ``None`` when no power spec varied the device or its nameplate is zero — the law then
-    reads the device as rated.
-    """
-    entry = operating_point.get(cid)
-    rec = nominal.get(cid)
-    if entry is None or rec is None:
-        return None
-    if "p_per_phase_w" in entry:
-        ratios = [
-            torch.as_tensor(p).abs() / abs(float(pn))
-            for p, pn in zip(entry["p_per_phase_w"], rec.p_pp)
-            if float(pn) != 0.0
-        ]
-        if not ratios:
-            return None
-        return torch.stack(ratios, dim=-1).mean(dim=-1)
-    if "p_w" in entry and float(rec.p_total) != 0.0:
-        return torch.as_tensor(entry["p_w"]).abs() / abs(float(rec.p_total))
-    return None
-
-
-def _apply_emission_laws(
-    built: dict, laws: dict, operating_point: dict, nominal: dict, b: int, like: Tensor
-) -> dict:
-    """Fold the drawn load-dependence parameters into every device's (mag, phase).
-
-    ``laws`` is ``{id: {order: {field: draw[B]}}}`` from the ``h_floor`` /
-    ``h_floor_phase`` / ``h_slope`` specs. Per device the loading is what its own power
-    draw realised (:func:`_device_loading`, floored at
-    :data:`~pgml.scenarios.emission.LOADING_FLOOR`); per order the magnitude is scaled
-    by the affine law's ratio inflation and the phase shifted by the law's own rotation
-    plus the explicit slope. A device without a law entry is untouched; a zero floor
-    and zero slope leave the values bit-identical. Returns ``{id: lam_eff[B]}`` for the
-    devices a law touched (recorded beside the realized injection).
-    """
-    loading: dict[int, Tensor] = {}
-    for cid, per_order in laws.items():
-        lam = _device_loading(cid, operating_point, nominal)
-        lam = (
-            torch.ones(b, dtype=torch.float64)
-            if lam is None
-            else lam.to(torch.float64).reshape(-1).expand(b).clone()
-        )
-        lam_eff = lam.clamp(min=LOADING_FLOOR)
-        loading[cid] = lam_eff
-        dev = built.setdefault(cid, {})
-        zeros = torch.zeros(b, dtype=torch.float64)
-        for order, params in per_order.items():
-            slot = dev.setdefault(order, [0.0, 0.0])
-            floor = params.get("h_floor", zeros).to(torch.float64)
-            delta = params.get("h_floor_phase", zeros).to(torch.float64)
-            slope = params.get("h_slope", zeros).to(torch.float64)
-            corr = affine_emission_correction(lam_eff, floor, delta)  # complex [B]
-            mag = _coefficient_column(slot[0], b, like)
-            ph = _coefficient_column(slot[1], b, like)
-            # evaluated in float64, handed back in the draw's own dtype
-            slot[0] = (mag.to(torch.float64) * corr.abs()).to(mag.dtype)
-            slot[1] = (
-                ph.to(torch.float64)
-                + torch.rad2deg(torch.angle(corr))
-                + phase_slope_shift(slope, lam_eff)
-            ).to(ph.dtype)
-    return loading
 
 
 def _harmonic_injections(
@@ -664,8 +583,6 @@ def _harmonic_injections(
     u: Tensor,
     samples: dict,
     shared: dict,
-    operating_point: Optional[dict] = None,
-    nominal: Optional[dict] = None,
     seed: int = 0,
 ) -> dict:
     """Build ``{id: {order: (mag[B], phase[B])}}`` from the harmonic specs.
@@ -677,22 +594,17 @@ def _harmonic_injections(
     fraction; ``"en50160"`` -- the per-order DIN EN 50160 voltage-compatibility level),
     the stored magnitude (``mode="scale"``), or the sampled value directly (absolute pu).
 
-    The load-dependence specs (``h_floor`` / ``h_floor_phase`` / ``h_slope``) are drawn
-    the same way and then folded into the device's (mag, phase) against the loading its
-    own operating-point draw realised (:func:`_apply_emission_laws`); ``operating_point``
-    and ``nominal`` are read only for that, so a config without such specs never touches
-    them.
+    An ``h_param`` spec is drawn the same way and only recorded: it occupies its columns
+    of the cube and writes nothing.
 
     ``samples`` records both the raw draw (``<spec.name>``) and the realized
-    post-reference, post-law injection (:func:`_record_realized_injections`).
+    post-reference injection (:func:`_record_realized_injections`).
     """
     by_id = {a.id: a for a in grid.appliances if isinstance(a, InjectionAppliance)}
     # building store: {id: {order: [mag, phase]}}, seeded from stored spectra.
     built: dict[int, dict] = {}
     # pristine stored spectra (never mutated; `mode="scale"` references these).
     stored_cache: dict[int, dict] = {}
-    # the drawn load-dependence parameters: {id: {order: {field: [B]}}}
-    laws: dict[int, dict[int, dict[str, Tensor]]] = {}
 
     def _stored(cid: int) -> dict:
         if cid not in stored_cache:
@@ -731,6 +643,8 @@ def _harmonic_injections(
             block = u[:, lay.off : lay.off + lay.dim]  # [B, n_eff * n_orders]
             vals = spec.distribution.icdf(block).reshape(-1, lay.n_eff, n_orders)
         samples[spec.name] = vals  # [B, n_eff, n_orders]
+        if spec.is_free_parameter:
+            continue
         # IEC 61000-3-2 caps are PER DEVICE (from nominal P + node voltage); build once
         # per spec. EN 50160 caps are global per-order (looked up inline below).
         iec_caps = (
@@ -747,9 +661,6 @@ def _harmonic_injections(
             dev, stored = _dev(cid), _stored(cid)
             for o, order in enumerate(spec.orders):
                 v = comp[:, o]  # [B]
-                if spec.is_emission_law:
-                    laws.setdefault(cid, {}).setdefault(order, {})[spec.field] = v
-                    continue
                 slot = dev.setdefault(order, [0.0, 0.0])
                 if spec.field == "h_phase":
                     slot[1] = v
@@ -768,20 +679,9 @@ def _harmonic_injections(
                 else:
                     slot[0] = v
 
-    # After every spec has written: fold the load dependence into the (mag, phase) of
-    # the devices that drew one, then record the realized (post-reference, post-law)
-    # magnitude and the phase it pairs with, per device and order.
-    loading: dict = {}
-    if laws:
-        loading = _apply_emission_laws(
-            built,
-            laws,
-            operating_point or {},
-            nominal if nominal is not None else nominal_power(grid),
-            int(u.shape[0]),
-            u,
-        )
-    _record_realized_injections(built, harm_layouts, u, samples, loading, shared)
+    # After every spec has written: record the realized (post-reference) magnitude and
+    # the phase it pairs with, per device and order.
+    _record_realized_injections(built, harm_layouts, u, samples, shared)
     return {cid: {o: tuple(mp) for o, mp in d.items()} for cid, d in built.items()}
 
 
@@ -861,8 +761,6 @@ def sample(grid: Grid, config: ScenarioConfig) -> SampledScenarios:
             u,
             samples,
             shared,
-            operating_point,
-            nominal,
             seed=config.seed,
         )
         if harm_layouts

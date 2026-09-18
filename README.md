@@ -31,39 +31,46 @@ Each library has its own supported devices, assumptions and applications.
 
 ## Performance: solve scenarios in batches
 
-![Batch throughput of pgml, pandapower and power-grid-model on two distribution grids](assets/readme/batch_throughput.svg)
+![Batch throughput of pgml, pandapower, power-grid-model and OpenDSS on two distribution grids](assets/readme/batch_throughput.svg)
 
-Batching amortizes work across operating points of the same grid. This comparison
-uses **double precision**, one **NVIDIA L40S** and **eight allocated CPUs** on
-an **AMD EPYC 9334** node.
-All engines solve identical load scenarios, with independent load multipliers
-between 0.8 and 1.2. Every scenario converges and agrees in voltage magnitude
-within **1e-6 pu** across the compared engines.
+pgml solves many operating points of one grid in a single batched call, so its
+throughput keeps growing with the batch size. Tools that solve one scenario at a
+time level off early. On one GPU pgml overtakes every CPU tool at 4,096 scenarios
+per batch. For a few scenarios a dedicated CPU solver such as power-grid-model
+is faster.
 
-Pandapower uses numba, recycled network matrices and up to eight worker processes;
-power-grid-model uses its native iterative-current batch solver with eight threads.
-Pgml's dense CPU path uses one thread for the larger grid; its sparse path uses
-the eight-CPU allocation. Curves show median warm solve throughput over five
-repeats for pgml and power-grid-model, and three for pandapower. Grid conversion,
-GPU input staging, compilation and correctness checks are outside the timed region;
-GPU timings include synchronization. This measures forward fundamental power flow,
-without a backward pass. Performance depends on grid size and batch size.
+All tools solve identical load scenarios in double precision. A point is shown
+only if every scenario converged and matches pgml within 1e-6 pu in voltage
+magnitude. The plot covers the forward power flow, without gradients.
+[PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
+timed, and how throughput changes with grid size.
 
-## Conformance: understand the differences
+<sub>One NVIDIA L40S 48 GB and eight logical CPUs (four cores) of an AMD EPYC 9334. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for pandapower and OpenDSS).</sub>
 
-![Twelve grids with the largest worst-node voltage-magnitude deviations from the reference engines](assets/readme/conformance_worst.svg)
+## Conformance: the solvers agree
 
-The evaluation covers **2,384 grids**. This plot shows the twelve largest
-worst-node voltage-magnitude differences among valid comparisons against
-pandapower, power-grid-model and OpenDSS. Failed or unsupported reference solves
-are excluded from accuracy statistics.
+<img src="assets/readme/solverconf_factor_dtype_vs_tools.svg" alt="Largest voltage difference between pgml and pandapower, power-grid-model and OpenDSS per grid, in double, mixed and single precision" width="560">
 
-The largest pandapower difference is **1.36e-4 pu**. Controlled comparisons trace
-these cases to transformer magnetizing equivalents: pgml and power-grid-model use
-a pi equivalent, while pandapower defaults to a T equivalent. On the worst case,
-selecting pandapower's pi model reduces the difference to **1.93e-11 pu**.
-The reference engines therefore also disagree with one another when their models
-differ. Matching the physical assumptions is part of a fair solver comparison.
+Each grid is first proven to be the identical model in pgml and in the reference
+tool, then solved by both. A marker is one grid. It shows the largest difference of
+any complex node voltage between pgml and the tool's own double-precision solve, for
+pgml in double, mixed and single precision. Blue circles compare with pandapower,
+green squares with power-grid-model, red triangles with OpenDSS.
+
+In double precision pgml agrees with pandapower and power-grid-model at the 1e-14 pu
+level in the median and within 2e-12 pu on every grid. The OpenDSS markers sit at a
+constant 3.4e-10 pu, which is OpenDSS's ten-digit degree constant. With that constant
+emulated in pgml the difference drops to 4e-13 pu. Mixed precision changes nothing.
+Single precision costs about 5e-6 pu in the median and up to 8e-5 pu.
+
+Differences between libraries therefore come from the model, not from the solver.
+[assets/CONFORMANCE.md](assets/CONFORMANCE.md) explains both checks, shows what each
+modelling difference costs, and describes the conversion report that lists what an
+importer dropped, approximated or modelled differently.
+
+<sub>pgml 0.5.1, complex128 reference at tolerance 1e-12, 1269 solves on 19 grids.
+pandapower 3.5.4 with numba, power-grid-model 1.13.142, OpenDSSDirect.py 0.9.4, torch 2.13.0,
+Python 3.13.15. Six CPU threads and an NVIDIA RTX A2000 12 GB.</sub>
 
 ## Accurate digital twin building
 

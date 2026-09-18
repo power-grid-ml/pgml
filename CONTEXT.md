@@ -63,8 +63,10 @@ figures before installation. Figure inputs and provenance are in `assets/readme/
 without running a solve. Each figure's measurement date, source hashes and validation
 scope accompany its data; the README caption identifies the measured hardware and
 precision. Throughput compares IEEE33 and Kerber on one L40S with eight allocated
-CPUs against pandapower and power-grid-model, validating all scenarios at every
-batch size. Installation instructions target the GitHub repository.
+CPUs against pandapower (numba required), power-grid-model and OpenDSS, validating
+all scenarios at every batch size. `assets/PERFORMANCE.md` documents the protocol
+and adds the grid-size figure; `render.py` draws both from the recorded JSON with
+one colour per tool. Installation instructions target the GitHub repository.
 
 ## Where things live
 

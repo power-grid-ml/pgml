@@ -369,3 +369,26 @@ def test_the_sidecar_carries_the_time_axis(grid3, tmp_path):
     assert meta["n_steps"] == t and meta["dims"]["T"] == t
     assert meta["t0_unix_s"] == t0
     assert meta["step_size_s"] is None  # no config declared one
+
+
+def test_a_config_its_class_no_longer_accepts_reads_back_as_a_dict(
+    grid3, tmp_path, caplog
+):
+    """A dataset outlives the config class that wrote it: a field value the class has
+    dropped since must not make the voltages unreadable."""
+    import json
+
+    res = run_scenarios(grid3, _cfg(n=4))
+    write_dataset(res, tmp_path)
+    meta_path = tmp_path / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    stored = json.loads(meta["config_json"])
+    stored["parameters"][0]["field"] = "a_field_of_an_older_release"
+    meta["config_json"] = json.dumps(stored)
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    with caplog.at_level("WARNING", logger="pgml"):
+        L = read_dataset(tmp_path)
+    assert isinstance(L.config, dict)
+    assert L.config["parameters"][0]["field"] == "a_field_of_an_older_release"
+    assert torch.equal(L.v, res.v)
+    assert "no longer validates" in caplog.text

@@ -166,7 +166,12 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   `_sequence_aware_block_groups` (`Z_abc(f0)` -> `Z1`/`Z0`, each frequency-corrected,
   recombined; the per-line `earth_return` coefficients are stacked into tensors so a
   tensor coefficient keeps its gradient, while the DISCRETE options — skin flag,
-  `x0_frequency`, `x0_nonnegative`, `r0_includes_earth_return` — form the batching key); everything else ->
+  `x0_frequency`, `x0_nonnegative`, `r0_includes_earth_return` — form the batching key;
+  all four resolve from the defaults at assembly when the line leaves them unset; the
+  skin rise of `R0` is carried by the phase conductor's share `R1`; when
+  `carson_sublinear` exhausts `X0(h)` inside the requested frequencies
+  `_warn_x0_sublinear_deficit` logs ONE warning per affected line set with the line
+  count, which costs one host read per assembly under that law only); everything else ->
   `_line_rx_block_groups`, whose resistance is
   `R(h) = m(h)·(R − R_earth) + R_earth` with `R_earth` the mutual entries (the
   earth-return path, which the skin multiplier must NOT scale) and `m(h)` either the
@@ -273,6 +278,12 @@ above, and the one the harmonic solver uses). Internal API:
 `resolve_harmonic_shunt(appliance, model) -> ResolvedHarmonicShunt` (device override >
 run-level model > defaults file; `"none"` at run level wins over every device, which is
 OpenDSS's global `NeglectLoadY`),
+`REACTIVE_ELEMENT_LAWS = ("sign_aware", "inductive")` +
+`resolve_reactive_element_law(law) -> str` (`None` -> `appliance.harmonic_shunt
+.reactive_element`, shipped `sign_aware`: a leading device's reactive part scales as a
+capacitance, `h·B` parallel and `X/h` series, the same law as the const-Z fold;
+`inductive` is OpenDSS's R-L treatment of either sign and is what the `opendss` preset
+selects; `harmonic_shunt_element_admittance(..., reactive_element=None)` resolves it),
 `SHUNT_BASES = ("operating_point", "nameplate")` +
 `resolve_shunt_basis(basis) -> str` (`None` -> the modeling default
 `appliance.harmonic_shunt.basis`, shipped `operating_point`: the shunt is built from the
@@ -432,8 +443,22 @@ NOT baked into Y; split as implemented below.
     `device_current_injections` (the control-free majority keeps the bit-exact stacked
     ZIP path). `resolve_injection_power(control, p_avail, v_pu)` returns (P, Q) from the
     control mode (constant-PF / cosφ(P) / Volt-VAr / Volt-Watt / combined), bounded by the
-    `s_rated_va` capability circle via `smooth_clamp` (`smoothing`>0 = C¹ backward,
-    `smoothing`=0 = hard). `evaluate_characteristic` is the differentiable piecewise
+    `s_rated_va` capability circle via `smooth_clamp`, evaluated in per unit of the
+    rating so the transition half-width is `smoothing * s_rated_va` (`smoothing` is a
+    fraction of the rating; >0 = C¹ clamp used by forward and backward alike, 0 = hard).
+    DEVICE TOTALS: the control's power quantities (`s_rated_va`, `q_var`, `p_ref_w`)
+    describe the whole device like `p_nom_w`; `resolve_injection_power` gives each of the
+    `n_elem = v_pu.shape[-1]` elements (phases for WYE, phase pairs for a three-phase
+    DELTA) an equal `1 / n_elem` share, so the rated Volt-VAr base, the capability circle
+    and the clamp width are per element `s_rated_va / n_elem` and a balanced three-phase
+    device injects the same totals as its single-phase equivalent. The split is equal
+    whatever the per-phase active power. It lives in `resolve_injection_power`, so the
+    fundamental solve and the harmonic path's operating point (`solver/harmonic_flow.py`)
+    share it. Converters write device totals (pandapower `sn_mva`, OpenDSS `kVA`) and
+    never pre-divide. Each element evaluates a voltage curve at ITS OWN terminal voltage
+    `|V_term| / V0` (phase-neutral for WYE, phase-phase for DELTA), not at a
+    positive-sequence or phase-average magnitude.
+    Curve breakpoints are not smoothed. `evaluate_characteristic` is the differentiable piecewise
     (linear/cubic) curve lookup. Because the control enters `I_device(V)` and the IFT
     backward differentiates one residual eval at V*, gradients flow to the curve / rating
     with no new adjoint (gradcheck-verified). Control is honored at the FUNDAMENTAL solve;

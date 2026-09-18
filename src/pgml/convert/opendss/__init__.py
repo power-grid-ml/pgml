@@ -60,5 +60,6 @@ OpenDSS uses for its Y matrix rows/columns).
 from pgml.convert._common import PhaseMode
 
 from .converter import to_grid
+from .exporter import OpenDSSExport, UnsupportedGridError, from_grid
 
-__all__ = ["to_grid", "PhaseMode"]
+__all__ = ["to_grid", "from_grid", "OpenDSSExport", "UnsupportedGridError", "PhaseMode"]

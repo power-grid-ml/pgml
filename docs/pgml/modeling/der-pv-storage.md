@@ -32,7 +32,7 @@ PV inverter, a wind plant or a genset. `consumer_type` is a closed taxonomy used
 categorical feature and never drives the physics.
 
 The control laws are a discriminated union over a common base that carries the capability
-circle `s_rated_va` and a `smoothing` half-width.
+circle `s_rated_va` and the `smoothing` width of its soft clamp, a fraction of the rating.
 
 | Control | Law |
 |---|---|
@@ -50,6 +50,37 @@ other.
 The capability limit applies with watt priority. Active power is clipped to the rating first,
 because an oversized array cannot exceed the inverter rating through `P` alone, then the
 reactive magnitude is bounded by the remaining headroom on the circle.
+
+### Ratings are device totals
+
+Every power quantity of a control block describes the whole device, like `p_nom_w`. That
+holds for the rating `s_rated_va`, the fixed reactive power `q_var` and the `cosφ(P)`
+reference `p_ref_w`, and it matches pandapower's `sn_mva` and OpenDSS's `kVA` and `kvarMax`.
+
+The laws are evaluated per connection element, and each of the `n_elem` elements works with
+an equal `1 / n_elem` share of these quantities.
+
+| Connection | Elements | `n_elem` |
+|---|---|---|
+| WYE | one per connected phase, phase to neutral or ground | number of phases |
+| DELTA | one per phase pair of a three-phase device | 3 |
+
+A three-phase generator with `q_var=3000` injects 3 kvar in total, 1 kvar per element. A
+three-phase 6 kW unit behind `s_rated_va=5000` delivers 5 kW. Everything derived from the
+rating follows the same split, that is the rated `Q(V)` base, the capability circle and the
+width `smoothing * s_rated_va` of the soft clamp. A single-phase device uses the values as
+written, and a balanced three-phase device injects the same totals as its single-phase
+equivalent.
+
+The split is equal whatever the per-phase distribution of the active power. An unbalanced
+device does not move rating from a lightly loaded element to a heavily loaded one.
+
+Each element reads a voltage-dependent curve at its own terminal voltage, phase to neutral
+for WYE and phase to phase for DELTA, in per unit of that element's nominal. OpenDSS
+`InvControl` and pandapower form one voltage per device, the phase average by default in
+OpenDSS and the positive-sequence bus voltage in pandapower, and apply one response to all
+phases. On a balanced network the two readings coincide. On an unbalanced one the elements
+of a pgml device respond individually.
 
 ## Why the control law is not an outer loop
 
@@ -76,13 +107,22 @@ possible.
 
 ## Kinks on a differentiable path
 
-Volt-VAr and Volt-Watt curves, deadbands and capability clamps have corners. The forward pass
-evaluates the exact piecewise-linear curve and the hard clamp, which is what matches the
-reference tools at the operating point. For gradients each corner has a smooth variant, a
-blended breakpoint and a soft saturation, controlled by the `smoothing` half-width. A width of
-zero recovers the hard curve, and a positive width makes the map continuously differentiable
-so the Jacobian is well defined. This is the same approach the rest of the library takes when
-it guards a division by zero. Keep the forward correct and keep the gradient finite.
+Volt-VAr and Volt-Watt curves, deadbands and capability clamps have corners.
+
+The capability clamp has a smooth variant. `smoothing` is a fraction of the rating, and a
+positive value replaces the hard clamp by a soft saturation whose transition half-width is
+`smoothing * s_rated_va`. The map is then continuously differentiable, so the Jacobian is well
+defined at the limit. The same function is used by the solve and by its gradient, which keeps
+the implicit-function gradient consistent with the solution. A positive width therefore also
+moves the solved operating point near the limit, by about `0.7 * smoothing * s_rated_va` at
+the corner and exponentially less away from it. A width of zero, the default, is the exact
+hard clamp that matches the reference tools.
+
+Curve breakpoints are not blended. A `linear` characteristic is exactly piecewise linear,
+which is what the reference tools evaluate, and its gradient at a breakpoint is the slope of
+the segment the operating point falls in. `interpolation="cubic"` gives a continuously
+differentiable curve instead. It passes through the same points but is not monotone between
+them, so it can overshoot slightly next to a deadband corner.
 
 Genuinely discrete switches stay discrete. An inverter trip, or a cut-in and cut-out
 threshold with hysteresis, is resolved upstream into whether the device injects at all, rather
@@ -160,6 +200,14 @@ setpoint from the other side. A hysteresis band
 (`appliance.generator.q_limit_hysteresis_*` in `pgml.defaults`) keeps solver noise from cycling
 the decision. `solve_power_flow(enforce_q_limits=False)` solves every terminal unbounded, which
 is what pandapower's `runpp` does by default.
+
+The number of rounds is capped (`appliance.generator.q_limit_switch_rounds_max`). A solve that
+reaches the cap keeps its last active set, which its own limit check rejects, so the scenarios
+concerned are reported as not converged. `result.regulation.settled` marks them per scenario
+and `result.regulation.unsettled_generators` names the units, as does the logged warning.
+
+The solved reactive power `result.regulation.q_var` is differentiable like the voltages, so a
+loss on a generator's reactive output needs no recomputation from the network.
 
 The switching decision is off-tape, being a comparison of converged values, while the residual
 at the resolved active set is on-tape, so the adjoint is exact for the solved configuration.
@@ -283,10 +331,27 @@ A few per-tool details are worth knowing when comparing results.
 
 Inverter control is checked against pandapower's `CharacteristicControl` for `Q(V)`, which
 reaches the same equilibrium to about 1e-10 pu, and against OpenDSS `InvControl` in its
-Volt-VAr and Volt-Watt modes. The differentiability gate runs a float64 gradient check of the
+Volt-VAr and Volt-Watt modes. The imports of pandapower's `DERController` and of OpenDSS
+`InvControl` are checked against the tool's own controlled solution for a single-phase and
+for a balanced three-phase device, which pins the device-total reading of the ratings. The differentiability gate runs a float64 gradient check of the
 solved voltage with respect to a curve slope, the capability limit and the active setpoint
 through the smoothed variants, and the device parity gate repeats every injection term on CPU
 and CUDA.
+
+## Changes in 0.5.1
+
+The power quantities of a control block are device totals, split equally over the device's
+elements (see "Ratings are device totals" above). Before 0.5.1 each
+element of a multi-phase device worked with the full value, so a three-phase device injected
+three times its `q_var`, scaled a rated `Q(V)` curve by three times its rating, and met its
+capability limit at three times `s_rated_va`. Single-phase devices and single-phase
+equivalent grids are unchanged. Results change for every controlled device with more than
+one phase. A grid that compensated by storing a third of the rating now has to store the
+device total.
+
+The pandapower import with `gen_mode=GenMode.VOLT_VAR_APPROX` follows and writes the
+undivided rating in three-phase mode. The schema fields are unchanged. The other change of
+this version concerns scenario sampling and is listed in {doc}`/pgml/api/scenarios`.
 
 ## Sources
 

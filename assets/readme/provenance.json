@@ -2,19 +2,32 @@
   "source_paper_commit": "ae2e19895c4592164d571d2597c6f0c6341eef78",
   "source_sha256": {
     "app_digital_twin.json": "73f4ca62a44d9a223b2ba4f545e612d587d84ed67bf9e1613599278356c8aa25",
-    "conformance_data.json": "4e72c5ce5fe0c5701067fdac7be124f69dd9446fb438042772f0e940ecb202ef",
-    "conformance_worst.svg": "69000548abbfeb03233575bc28f8cc017cf4202dae37ecfd5ac42229c5a1950b",
-    "bench_batch_throughput_readme_ieee33.json": "e605b0988e563c50bd7602d509fc66d6a4c5c9eb21ad1692a9ece2d98fb7abca",
-    "bench_batch_throughput_readme_kerber.json": "ff71f40f28c5ae1146d420e5ea8ae22ef58845fe9ca4cafc637e88ca6d50e8da"
+    "bench_batch_throughput_readme_ieee33.json": "19735550398079c81df8cf368c383cdd87cf8e52573b6b50b06658634543d8d9",
+    "bench_batch_throughput_readme_kerber.json": "cde883b30b0c7de49266cc84eb29f7b2afbef993cc95fec3e4111da2a8ba0227",
+    "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce"
   },
-  "performance_current_review": true,
-  "performance_status": "Validated full-range comparison; every scenario checked.",
   "performance_source": {
-    "paper_commit": "58e4202dbc6022e470e0dcf75848ea1f78119d3d",
-    "pgml_source_commit": "ca30809",
-    "pgml_source_digest": "5a797550b9eb",
-    "elapsed": "00:02:53",
-    "exit_code": "0:0",
+    "paper_commit": "5b79a213a9827cf1e5158999e364e4bdc23a1d9b",
+    "jobs": {
+      "ieee33": {
+        "cpus": "8",
+        "date": "2026-09-18 13:05:53+0200",
+        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
+        "benchmark_source_digest": "9716959de71a"
+      },
+      "kerber": {
+        "cpus": "8",
+        "date": "2026-09-18 13:08:12+0200",
+        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
+        "benchmark_source_digest": "9716959de71a"
+      },
+      "size": {
+        "cpus": "8",
+        "date": "2026-09-18 13:09:44+0200",
+        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
+        "benchmark_source_digest": "9716959de71a"
+      }
+    },
     "batch_sizes": [
       1,
       4,
@@ -24,6 +37,66 @@
       1024,
       4096
     ],
-    "all_scenarios_validated": true
+    "size_batches": [
+      1,
+      256
+    ],
+    "all_scenarios_validated": true,
+    "pandapower_numba": {
+      "importable": true,
+      "version": "0.67.0",
+      "opt_out": false,
+      "requested": true
+    },
+    "versions": {
+      "python": "3.13.15",
+      "torch": "2.13.0",
+      "numpy": "2.4.6",
+      "scipy": "1.18.1",
+      "pgml": "0.5.1",
+      "pgml_git": "b70b5179341168e74acd5d68956fbcffc570ee1f",
+      "pandapower": "3.5.4",
+      "power_grid_model": "1.13.172",
+      "power_grid_model_io": "present",
+      "numba": "0.67.0",
+      "opendssdirect": "0.9.4"
+    },
+    "gpu": "NVIDIA L40S",
+    "driver": "610.57.04",
+    "cpu": "AMD EPYC 9334 32-Core Processor"
+  },
+  "conformance_source": {
+    "paper_commit": "e0333d6",
+    "paper_paths": [
+      "figures/solverconf",
+      "figures/modelconf"
+    ],
+    "pgml_source_commit": "bac61b0",
+    "pgml_version": "0.5.1",
+    "solver_conformance": {
+      "solves": 1269,
+      "grids": 19
+    },
+    "model_conformance": {
+      "rows": 669,
+      "grid_study_pairs": 68
+    },
+    "sha256": {
+      "modelconf_combined.caption.txt": "763460798f00c80b50a7b6bda5dc59c08a7add0e44ffa13ada59211cf4bf83ac",
+      "modelconf_combined.json": "c33927cc32fbd962d328c6b951c0cb2bf1088ab3593ddaa894424fe4b2ae0ba3",
+      "modelconf_combined.svg": "e3269a1532a6e9f8b929d6f7db6cf99481c4e5cc262bf5f5e1d9cc4f20374e18",
+      "modelconf_ranking.caption.txt": "aa3d69b2f31a1e5b1f907b40d90124300311cf2f86c7ed13361dd25053b041bb",
+      "modelconf_ranking.json": "a79dbe778b764942a1d97ec47a205ace171d22b24757cde3456ae5cf647b3d2f",
+      "modelconf_ranking.svg": "0e400a9e479bd95017aeda5f6bd6937ce15a07f8cd23101398e3d12f1ac62d36",
+      "modelconf_toggle_opendss_preset_line_earth_return_x0_frequency.caption.txt": "e5ca420ffe2ad04b7826f9312e141db8cc9552ffca5d72e626bb09c63edf799c",
+      "modelconf_toggle_opendss_preset_line_earth_return_x0_frequency.json": "5de50587b5695e56f1a0d52e99beb222c2864aeaf67f1f851f5b5c759ef4b9b7",
+      "modelconf_toggle_opendss_preset_line_earth_return_x0_frequency.svg": "279c94abd22c78147b91842bca8eabb76621fdb334f90f3724ba428e75a9d7ed",
+      "solverconf_defaults_vs_tight.caption.txt": "7a68acdbbdc83987345b7e1e1c35da5d4bc08915de9e1c1af8b6f52d4f67be7f",
+      "solverconf_defaults_vs_tight.json": "8ea1c26ea57f982f9954c9076b58ca1723681732e5b28990469cece82918f77c",
+      "solverconf_defaults_vs_tight.svg": "fda6de5977b5f862ebd2f7eb37113c4450349c4c31e6fa0d094819d316e10544",
+      "solverconf_factor_dtype_vs_tools.caption.txt": "d713337dc8d5d2ec8bf09b74087ad20547aabcba1de5ca86c4c32e4318b1c543",
+      "solverconf_factor_dtype_vs_tools.json": "d51dc1162e75928b75faabc7ddb06646c29f53f5467a079b9113d6a3db354c46",
+      "solverconf_factor_dtype_vs_tools.svg": "c76519f69ae2f2a15b6f9c35b66f8aaed54a49d3808f07b0995aea05e2d70321"
+    }
   }
 }

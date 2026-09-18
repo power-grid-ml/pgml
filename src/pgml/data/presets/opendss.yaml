@@ -6,3 +6,4 @@ line.geometry.internal_inductance: gmr_power_frequency
 line.earth_return.x0_frequency: carson_sublinear
 line.earth_return.x0_nonnegative: false
 line.harmonic_model.skin_effect: false
+appliance.harmonic_shunt.reactive_element: inductive

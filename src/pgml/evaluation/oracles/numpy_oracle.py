@@ -180,7 +180,8 @@ def _stamp_transformer_numpy(
 
     - **P == 1** (single-phase / positive-sequence equivalent): the vector group is
       folded into a complex line-to-line ratio ``t = (u_from/u_to) · tap_mag ·
-      e^{j·shift_deg}`` and the textbook off-nominal-tap pi is applied::
+      e^{±j·shift_deg}`` (``−`` at the negative-sequence orders ``3k+2``) and the
+      textbook off-nominal-tap pi is applied::
 
           Y_ff = y_se / |t|² + y_m,   Y_ft = −y_se / conj(t)
           Y_tf = −y_se / t,            Y_tt = y_se
@@ -221,6 +222,10 @@ def _stamp_transformer_numpy(
         vg1 = resolve_vector_group(b, n_phases=1)
         y_se = (3.0 if vg1.to_side.kind == "delta" else 1.0) * y_se
         shift_rad = to_float(b.tap.shift_deg) * math.pi / 180.0
+        if h % 3 == 2:
+            # Orders 3k+2 are negative sequence in a balanced system: the vector
+            # group shifts them by the opposite angle.
+            shift_rad = -shift_rad
         t = (u_from / u_to) * tap_mag * cmath.exp(1j * shift_rad)
         abs_t2 = abs(t) ** 2
         y_ff = y_se / abs_t2 + ym
@@ -373,7 +378,9 @@ def _numpy_line_series_z(b: Line, h: int, f0: float) -> np.ndarray:
         z1_h = complex(z1.real * m1, z1.imag * h)
         r0_cond = z0.real - 3.0 * coeff * f0 if inc else z0.real
         r_earth = 3.0 * coeff * (h * f0) if inc else 3.0 * coeff * (h * f0 - f0)
-        m0 = _numpy_skin_multiplier(r0_cond, f0, h * f0) if skin else 1.0
+        # The phase conductor's share of R0 is R1 and rises with the R1 skin curve;
+        # the return-path remainder is held constant.
+        r0_phase = min(z1.real, r0_cond)
         x0_h = z0.imag * h**expo
         if law == "carson_sublinear":
             x0_h -= 1.5 * kx * f0 * h * math.log(h)
@@ -382,7 +389,7 @@ def _numpy_line_series_z(b: Line, h: int, f0: float) -> np.ndarray:
                 guard = _d.get("line.earth_return.x0_nonnegative")
             if guard:
                 x0_h = max(x0_h, 0.0)
-        z0_h = complex(r0_cond * m0 + r_earth, x0_h)
+        z0_h = complex(r0_phase * m1 + (r0_cond - r0_phase) + r_earth, x0_h)
         z_self, z_mut = (z0_h + 2.0 * z1_h) / 3.0, (z0_h - z1_h) / 3.0
         return np.where(np.eye(3, dtype=bool), z_self, z_mut)
 

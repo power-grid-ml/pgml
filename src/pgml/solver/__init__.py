@@ -4,13 +4,26 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 
 - ``solve_harmonic(y_bus, i_inj, *, fixed_rows=None, v_fixed=None) -> v``
   Norton mode (default) and ideal-slack Schur-partition mode, both differentiable.
-- ``solve_power_flow(grid, *, slack, method, tol, max_iter, dtype, device,
-  operating_point, param_overrides, symmetry=None, criticality="auto",
-  linear_solver="auto", block_rows=None, on_disconnected="raise",
-  branch_states=None, branch_states_method="assemble", system=None,
-  enforce_q_limits=None) -> PowerFlowResult``
+- ``lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
+  precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`` and
+  ``solve_factored(fac, i_inj, *, v_fixed=None) -> v``
+  The factor-once, solve-many form of :func:`solve_harmonic`: one factorization
+  (dense, sparse SuperLU or block diagonal; full or mixed precision; diagonally
+  equilibrated by default) answers any number of right-hand sides, differentiably.
+  ``estimate_condition(fac, *, iters=5, per_matrix=False)`` estimates the 1-norm
+  condition number of what was factored, per matrix of a batched factorization.
+- ``solve_power_flow(grid, *, slack, method, tol, tol_update_pu, s_base_va, max_iter,
+  dtype, precision="full", device, operating_point, param_overrides, symmetry=None,
+  criticality="auto", linear_solver="auto", block_rows=None,
+  on_disconnected="raise", branch_states=None, branch_states_method="assemble",
+  system=None, enforce_q_limits=None, equilibrate=None) -> PowerFlowResult``
   Nonlinear const-P / ZIP fundamental power flow: current-injection fixed point
   forward, implicit-function-theorem backward (real-coordinate adjoint).
+  Convergence is judged per unit on two criteria that must both hold: ``tol``, the
+  nodal apparent-power mismatch on the base ``s_base_va``, and ``tol_update_pu``, the
+  per-row voltage update. ``precision="mixed"`` factors in single precision and
+  refines against double-precision residuals; ``equilibrate`` selects the diagonal
+  scaling around every factorization (:mod:`pgml.solver.equilibration`).
   ``symmetry`` selects per-phase vs balanced load modeling (``None`` -> config).
   ``linear_solver`` picks the inner factorization backend (sparse SuperLU on
   large CPU systems by default); ``linear_solver="block"`` with ``block_rows``
@@ -27,18 +40,23 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   generators (PV terminals) is solved by Newton with the regulated row pair
   substituted, its reactive limits enforced by PV-to-PQ switching
   (``enforce_q_limits``, default from :mod:`pgml.defaults`), and the solved
-  reactive powers reported in ``PowerFlowResult.regulation``
-  (:class:`VoltageRegulationResult`).
+  reactive powers (differentiable) reported in ``PowerFlowResult.regulation``
+  (:class:`VoltageRegulationResult`), together with whether the switching settled.
 - ``solve_harmonic_flow(grid, harmonic_orders, *, slack, method,
   operating_point, harmonic_injection, node_sources=None, load_shunt=None,
-  tol, max_iter, dtype, device, symmetry=None, on_disconnected="raise",
-  branch_states=None) -> HarmonicFlowResult``
+  load_shunt_basis=None, tol, tol_update_pu, s_base_va, max_iter, dtype,
+  precision="full", device, symmetry=None, on_disconnected="raise",
+  branch_states=None, branch_states_method="assemble", param_overrides=None,
+  enforce_q_limits=None, linear_solver="auto", block_rows=None, criticality="auto",
+  equilibrate=None) -> HarmonicFlowResult``
   Fundamental + per-harmonic flow; ``method`` selects the fundamental-frequency
   solver (``"current_injection"`` or ``"newton"`` for stiff inverter control
   loops). ``symmetry`` is resolved once and threaded into the fundamental solve
   and all harmonic injection steps. ``load_shunt`` selects the harmonic device
   Norton shunt (``"opendss"`` / ``"motor"`` / ``"none"``; ``None`` = the
-  documented modeling default). Optional ``node_sources`` (a list of
+  documented modeling default) and ``load_shunt_basis`` whether it is built from
+  the solved operating point or from the nameplate. A harmonic order whose solution
+  is not finite is reported as not converged. Optional ``node_sources`` (a list of
   :class:`NodeHarmonicSource`) injects per-node Thévenin/Norton harmonic
   disturbances at orders ``h > 1`` only. ``on_disconnected``/``branch_states``
   match :func:`solve_power_flow`.
@@ -84,7 +102,15 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 
 from __future__ import annotations
 
-from .harmonic import AnchoredSystem, solve_anchored, solve_harmonic
+from .harmonic import (
+    AnchoredSystem,
+    FactoredSystem,
+    estimate_condition,
+    lu_factor_system,
+    solve_anchored,
+    solve_factored,
+    solve_harmonic,
+)
 from .harmonic_flow import (
     HarmonicFlowResult,
     NodeHarmonicSource,
@@ -114,6 +140,7 @@ LoadabilityResult.__module__ = __name__
 VoltageRegulationResult.__module__ = __name__
 HarmonicFlowResult.__module__ = __name__
 NodeHarmonicSource.__module__ = __name__
+FactoredSystem.__module__ = __name__
 
 __all__ = [
     "check_branch_impedances",
@@ -121,6 +148,10 @@ __all__ = [
     "prepare_power_flow",
     "PowerFlowSystem",
     "solve_harmonic",
+    "lu_factor_system",
+    "solve_factored",
+    "FactoredSystem",
+    "estimate_condition",
     "solve_anchored",
     "AnchoredSystem",
     "solve_power_flow",

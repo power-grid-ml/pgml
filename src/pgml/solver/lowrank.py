@@ -284,6 +284,7 @@ def low_rank_update(
     c: Tensor,
     *,
     v: Optional[Tensor] = None,
+    estimate_amplification: bool = True,
 ) -> LowRankUpdate:
     """Prepare the Woodbury solve of ``(A + U C V^H) x = b`` from ``A``'s factors.
 
@@ -310,6 +311,13 @@ def low_rank_update(
     v:
         Complex ``[N, k]`` right factor; defaults to ``u`` (the symmetric case
         every branch stamp produces, ``Y[rows, rows] += block``).
+    estimate_amplification:
+        Measure by how much the update amplifies the base solve's rounding
+        (``LowRankUpdate.amplification``, with a warning when it is extreme). The
+        nonlinear solvers widen their convergence floors by it. It costs one batched
+        ``k × k`` solve and a host synchronisation, so a caller that checks its result
+        by other means (the harmonic device-shunt path verifies the backward error)
+        turns it off; the recorded factor is then 1.
 
     Returns
     -------
@@ -350,7 +358,9 @@ def low_rank_update(
         u_free=u_free,
         v_free=v_free,
         v_slack=v_slack,
-        amplification=_amplification(k_lu, k_piv, cz),
+        amplification=(
+            _amplification(k_lu, k_piv, cz) if estimate_amplification else 1.0
+        ),
     )
 
 

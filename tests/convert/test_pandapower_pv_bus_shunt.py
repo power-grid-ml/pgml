@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import math
 
-import pandapower as pp
 import pytest
 import torch
 
@@ -41,6 +40,8 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
 )
 from pgml.solver import solve_power_flow
+
+pp = pytest.importorskip("pandapower", exc_type=ImportError)
 
 CDT = torch.complex128
 _F0 = 50.0

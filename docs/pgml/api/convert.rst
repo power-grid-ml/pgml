@@ -11,6 +11,42 @@ that traces source element indices back to our schema ids.
    :members:
    :show-inheritance:
 
+.. _convert-report:
+
+Conversion report
+-----------------
+
+A conversion can change a model in three ways: a source element is dropped, an
+element is represented by a different model, or both tools solve different default
+equations for an element that converts cleanly. Every importer returns these facts
+as a :class:`~pgml.convert.ConversionReport` with ``return_report=True``, and every
+exporter carries one as ``.report``::
+
+    grid, id_map, report = to_grid(net, return_report=True)
+    print(report.summary())
+    report.is_exact("fundamental")      # nothing open for the fundamental solve
+    report.open_entries("harmonic")     # what still separates the two models
+    report.to_json()
+
+Each :class:`~pgml.convert.ReportEntry` carries a stable key (``dropped.<kind>``,
+``approx.<topic>``, ``model.<topic>``), the affected element ids and count, the
+result classes it can change (``fundamental``, ``unbalanced``, ``harmonic``) and,
+for a model difference, a :class:`~pgml.convert.ModelMatch` naming the reference
+preset, modeling-default keys or call arguments that reproduce the other tool's
+model, or none when pgml cannot. Model differences are derived from what the grid
+contains, and an entry is marked ``matched`` when the conversion ran inside the
+matching :func:`pgml.defaults.use_preset`. The report is logged either way: dropped
+and approximated entries at WARNING, model differences at INFO, and one closing
+WARNING line when an open entry touches a result class the tool computes.
+
+Import keys today include the unread tables of each tool, invented zero-sequence
+data, the load voltage band and PVSystem snapshot of OpenDSS, the transformer
+magnetizing placement, the earth-return law and parameters, the skin effect, the
+harmonic load shunt, the source impedance and the reactive-limit enforcement. Export
+keys cover every reduction of the balanced fundamental exporters plus the same model
+differences. :func:`pgml.convert.add_model_differences` applies the catalogue to any
+grid without a conversion.
+
 .. _convert-phase-mode:
 
 Phase representation — ``PhaseMode``
@@ -311,6 +347,12 @@ magnitude ``vm_pu``, reactive power free between ``min_q_mvar`` and
     Reduce the steepness when that happens.  Use this mode to model a real
     droop-controlled DER, not to import a transmission benchmark.
 
+A ``DERController`` in ``net.controller`` driving ``sgen`` rows converts its Q-model to
+the pgml control law with the same semantics (``QModelQVCurve``, ``QModelCosphiPQ``,
+``QModelConstQ``, ``QModelCosphiPCurve``); pgml's closed-loop solve agrees with
+``run_control`` to 1e-7 pu. Other controller rows and the ``measurement`` table are
+reported as dropped. ``from_grid`` exports a regulating generator as ``net.gen``.
+
 .. automodule:: pgml.convert.pandapower
    :members:
    :show-inheritance:
@@ -329,8 +371,13 @@ source-link-line-load feeder the node voltages agree with power-grid-model to 3.
 the link's own current to 6.0e-9 relative, both residuals being the reference's own
 stand-in drop.  ``asym_gen``, ``shunt``, ``three_winding_transformer`` and
 ``transformer_tap_regulator`` are not read and are reported as dropped elements.
-``voltage_regulator``, power-grid-model's own PV terminal, is not mapped yet, although the
-pgml side of the mapping exists.
+``voltage_regulator``, power-grid-model's own PV terminal, converts to a
+:class:`~pgml.schemas.grid_schema.VoltageRegulation` on its generator (the node held at
+``u_ref``, reactive power pinned at ``q_min``/``q_max`` in both tools; live agreement 1e-7
+pu). ``load_model="source"`` keeps each load's own voltage dependence; the default
+const-impedance choice names the loads it overrides in the report. ``from_grid`` exports a
+regulating generator as a ``voltage_regulator`` and a switch's shunt pair as ``c1`` with a
+loss tangent.
 
 .. automodule:: pgml.convert.pgm
    :members:
@@ -340,7 +387,22 @@ pgml.convert.opendss
 ---------------------
 
 Convert an OpenDSS circuit (via `OpenDSSDirect.py
-<https://dss-extensions.org/OpenDSSDirect.py/>`_) to a :class:`~pgml.schemas.Grid`.
+<https://dss-extensions.org/OpenDSSDirect.py/>`_) to a :class:`~pgml.schemas.Grid`, and
+export a grid as a live OpenDSS circuit.
+
+The importer reads each line's ``Rg``, ``Xg`` and ``rho``: with
+``earth_return="opendss"`` they become the line's
+:class:`~pgml.schemas.grid_schema.EarthReturnModel` so pgml applies OpenDSS's own
+frequency law (series impedance equal to OpenDSS's YPrim to 1e-8 relative at orders 1
+to 13); by default the report carries them as a model difference with numbers. An
+``InvControl`` in VOLTVAR, VOLTWATT or CombiMode VV_VW becomes the matching inverter
+control law on its DER (node voltages within 0.1 V of OpenDSS's own control sweeps);
+other modes are reported as dropped. PVSystems import at their present solved output.
+
+``from_grid`` builds the circuit through the scenario oracle's exporter, applies each
+transformer's off-nominal tap and, in matched mode, each lumped line's earth-return
+parameters, and returns an :class:`~pgml.convert.opendss.OpenDSSExport` with the report.
+Live solves of a switch feeder and a tapped Dyn11 unit agree with pgml to 1e-6 pu.
 
 .. automodule:: pgml.convert.opendss
    :members:

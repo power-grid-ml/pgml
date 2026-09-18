@@ -1,0 +1,485 @@
+{
+ "pandapower|reference": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 1.89051014930729e-12,
+   "gap_dv_pu": 1.89051014930729e-12
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 7.513729607244601e-14,
+   "gap_dv_pu": 7.513729607244601e-14
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 3.017365037070015e-13,
+   "gap_dv_pu": 3.017365037070015e-13
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 1.6439644072666905e-14,
+   "gap_dv_pu": 1.6439644072666905e-14
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 2.2085347143739146e-14,
+   "gap_dv_pu": 2.2085347143739146e-14
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 1.1206607103880507e-13,
+   "gap_dv_pu": 1.1206607103880507e-13
+  },
+  {
+   "case": "cigre_mv_pv_qlim",
+   "effect_dv_pu": 2.045825051235621e-14,
+   "gap_dv_pu": 2.045825051235621e-14
+  },
+  {
+   "case": "cigre_mv_pv_free",
+   "effect_dv_pu": 1.2551413783433517e-14,
+   "gap_dv_pu": 1.2551413783433517e-14
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 1.05861963116107e-14,
+   "gap_dv_pu": 1.05861963116107e-14
+  }
+ ],
+ "pandapower|complex64": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 4.933467667494348e-08,
+   "gap_dv_pu": 4.933467667494348e-08
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 2.3016650403918816e-06,
+   "gap_dv_pu": 2.3016650403918816e-06
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 1.8558575454744354e-06,
+   "gap_dv_pu": 1.8558575454744354e-06
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 2.7935087694285648e-06,
+   "gap_dv_pu": 2.7935087694285648e-06
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 5.389747869979257e-06,
+   "gap_dv_pu": 5.389747869979257e-06
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 2.166196763828809e-05,
+   "gap_dv_pu": 2.166196763828809e-05
+  },
+  {
+   "case": "cigre_mv_pv_qlim",
+   "effect_dv_pu": 3.9491162835421255e-06,
+   "gap_dv_pu": 3.9491162835421255e-06
+  },
+  {
+   "case": "cigre_mv_pv_free",
+   "effect_dv_pu": 3.9491162877561306e-06,
+   "gap_dv_pu": 3.9491162877561306e-06
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 6.9023296409505e-06,
+   "gap_dv_pu": 6.9023296409505e-06
+  }
+ ],
+ "pandapower|complex128 mixed": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 1.890572426439696e-12,
+   "gap_dv_pu": 1.890572426439696e-12
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 6.48205870752607e-14,
+   "gap_dv_pu": 6.48205870752607e-14
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 3.018476719615174e-13,
+   "gap_dv_pu": 3.018476719615174e-13
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 1.5245266288285707e-14,
+   "gap_dv_pu": 1.5245266288285707e-14
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 2.149736972262951e-14,
+   "gap_dv_pu": 2.149736972262951e-14
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 1.1291231521481143e-13,
+   "gap_dv_pu": 1.1291231521481143e-13
+  },
+  {
+   "case": "cigre_mv_pv_qlim",
+   "effect_dv_pu": 1.2978692352004272e-14,
+   "gap_dv_pu": 1.2978692352004272e-14
+  },
+  {
+   "case": "cigre_mv_pv_free",
+   "effect_dv_pu": 4.916420565211805e-15,
+   "gap_dv_pu": 4.916420565211805e-15
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 1.8163262255271102e-14,
+   "gap_dv_pu": 1.8163262255271102e-14
+  }
+ ],
+ "pgm|reference": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 9.550499576785472e-16,
+   "gap_dv_pu": 9.550499576785472e-16
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 5.963207919108776e-14,
+   "gap_dv_pu": 5.963207919108776e-14
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 9.8586616840963e-15,
+   "gap_dv_pu": 9.8586616840963e-15
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 9.14406764249656e-13,
+   "gap_dv_pu": 9.14406764249656e-13
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 2.2973838368880225e-14,
+   "gap_dv_pu": 2.2973838368880225e-14
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 4.890834858533177e-14,
+   "gap_dv_pu": 4.890834858533177e-14
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 4.143438003390184e-14,
+   "gap_dv_pu": 4.143438003390184e-14
+  }
+ ],
+ "pgm|complex64": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 1.0852729572878291e-07,
+   "gap_dv_pu": 1.0852729572878291e-07
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 1.924111022147691e-06,
+   "gap_dv_pu": 1.924111022147691e-06
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 1.8739181925217072e-06,
+   "gap_dv_pu": 1.8739181925217072e-06
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 2.9491332470556584e-06,
+   "gap_dv_pu": 2.9491332470556584e-06
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 4.14400282019205e-06,
+   "gap_dv_pu": 4.14400282019205e-06
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 1.9562050365775776e-05,
+   "gap_dv_pu": 1.9562050365775776e-05
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 6.857184330537032e-06,
+   "gap_dv_pu": 6.857184330537032e-06
+  }
+ ],
+ "pgm|complex128 mixed": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 9.50197851991224e-16,
+   "gap_dv_pu": 9.50197851991224e-16
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 5.004373386812943e-14,
+   "gap_dv_pu": 5.004373386812943e-14
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 9.485749680535095e-15,
+   "gap_dv_pu": 9.485749680535095e-15
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 9.133305027375054e-13,
+   "gap_dv_pu": 9.133305027375054e-13
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 2.272705444278034e-14,
+   "gap_dv_pu": 2.272705444278034e-14
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 3.3188984146446216e-14,
+   "gap_dv_pu": 3.3188984146446216e-14
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 3.0329415511115937e-14,
+   "gap_dv_pu": 3.0329415511115937e-14
+  }
+ ],
+ "opendss|reference": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 3.380147045496782e-10,
+   "gap_dv_pu": 3.380147045496782e-10
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 3.3801469662133705e-10,
+   "gap_dv_pu": 3.3801469662133705e-10
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 3.3801470421918294e-10,
+   "gap_dv_pu": 3.3801470421918294e-10
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 3.380147041100303e-10,
+   "gap_dv_pu": 3.380147041100303e-10
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 3.4815514484582413e-10,
+   "gap_dv_pu": 3.4815514484582413e-10
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 3.38014703773269e-10,
+   "gap_dv_pu": 3.38014703773269e-10
+  },
+  {
+   "case": "cigre_lv_unbalanced_switch",
+   "effect_dv_pu": 3.380147040942413e-10,
+   "gap_dv_pu": 3.380147040942413e-10
+  },
+  {
+   "case": "cigre_lv_harmonic_switch",
+   "effect_dv_pu": 3.380147041100303e-10,
+   "gap_dv_pu": 3.380147041100303e-10
+  },
+  {
+   "case": "case33bw_harmonic",
+   "effect_dv_pu": 3.3801469662133705e-10,
+   "gap_dv_pu": 3.3801469662133705e-10
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 3.464650718392911e-10,
+   "gap_dv_pu": 3.464650718392911e-10
+  },
+  {
+   "case": "simbench_1-MV-rural--0-sw",
+   "effect_dv_pu": 3.4646507227608667e-10,
+   "gap_dv_pu": 3.4646507227608667e-10
+  },
+  {
+   "case": "pgg_c_59176_2",
+   "effect_dv_pu": 3.380147042193649e-10,
+   "gap_dv_pu": 3.380147042193649e-10
+  },
+  {
+   "case": "pgg_c_59855_10",
+   "effect_dv_pu": 3.380147037367985e-10,
+   "gap_dv_pu": 3.380147037367985e-10
+  },
+  {
+   "case": "pgg_c_59952_7",
+   "effect_dv_pu": 3.3801470198395393e-10,
+   "gap_dv_pu": 3.3801470198395393e-10
+  },
+  {
+   "case": "pgg_c_760_0",
+   "effect_dv_pu": 3.380147041834339e-10,
+   "gap_dv_pu": 3.380147041834339e-10
+  }
+ ],
+ "opendss|complex64": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 2.3687427891283289e-07,
+   "gap_dv_pu": 2.3687427891283289e-07
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 7.15183386933964e-06,
+   "gap_dv_pu": 7.15183386933964e-06
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 7.7371199347107e-06,
+   "gap_dv_pu": 7.7371199347107e-06
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 6.114897079469426e-06,
+   "gap_dv_pu": 6.114897079469426e-06
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 6.9872240288538966e-06,
+   "gap_dv_pu": 6.9872240288538966e-06
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 4.881360331456384e-05,
+   "gap_dv_pu": 4.881360331456384e-05
+  },
+  {
+   "case": "cigre_lv_unbalanced_switch",
+   "effect_dv_pu": 5.240690134825099e-06,
+   "gap_dv_pu": 5.240690134825099e-06
+  },
+  {
+   "case": "cigre_lv_harmonic_switch",
+   "effect_dv_pu": 3.0284061185016515e-06,
+   "gap_dv_pu": 3.0284061185016515e-06
+  },
+  {
+   "case": "case33bw_harmonic",
+   "effect_dv_pu": 8.88630028376538e-06,
+   "gap_dv_pu": 8.88630028376538e-06
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 2.2105071766896156e-05,
+   "gap_dv_pu": 2.2105071766896156e-05
+  },
+  {
+   "case": "simbench_1-MV-rural--0-sw",
+   "effect_dv_pu": 7.894205424284632e-05,
+   "gap_dv_pu": 7.894205424284632e-05
+  },
+  {
+   "case": "pgg_c_59176_2",
+   "effect_dv_pu": 2.549360861400423e-06,
+   "gap_dv_pu": 2.549360861400423e-06
+  },
+  {
+   "case": "pgg_c_59855_10",
+   "effect_dv_pu": 7.214714217422351e-06,
+   "gap_dv_pu": 7.214714217422351e-06
+  },
+  {
+   "case": "pgg_c_59952_7",
+   "effect_dv_pu": 1.0145832587759794e-05,
+   "gap_dv_pu": 1.0145832587759794e-05
+  },
+  {
+   "case": "pgg_c_760_0",
+   "effect_dv_pu": 4.613492657966266e-06,
+   "gap_dv_pu": 4.613492657966266e-06
+  }
+ ],
+ "opendss|complex128 mixed": [
+  {
+   "case": "dickert_lv_short",
+   "effect_dv_pu": 3.380147045524998e-10,
+   "gap_dv_pu": 3.380147045524998e-10
+  },
+  {
+   "case": "case33bw",
+   "effect_dv_pu": 3.3801469657275177e-10,
+   "gap_dv_pu": 3.3801469657275177e-10
+  },
+  {
+   "case": "kerber_landnetz_kabel_1",
+   "effect_dv_pu": 3.3801470418834895e-10,
+   "gap_dv_pu": 3.3801470418834895e-10
+  },
+  {
+   "case": "cigre_lv",
+   "effect_dv_pu": 3.3801470409438356e-10,
+   "gap_dv_pu": 3.3801470409438356e-10
+  },
+  {
+   "case": "cigre_mv_pv_wind",
+   "effect_dv_pu": 3.481551448943488e-10,
+   "gap_dv_pu": 3.481551448943488e-10
+  },
+  {
+   "case": "kerber_vorstadtnetz_kabel_1",
+   "effect_dv_pu": 3.380147037274484e-10,
+   "gap_dv_pu": 3.380147037274484e-10
+  },
+  {
+   "case": "cigre_lv_unbalanced_switch",
+   "effect_dv_pu": 3.380147041045613e-10,
+   "gap_dv_pu": 3.380147041045613e-10
+  },
+  {
+   "case": "cigre_lv_harmonic_switch",
+   "effect_dv_pu": 3.380147040752792e-10,
+   "gap_dv_pu": 3.380147040752792e-10
+  },
+  {
+   "case": "case33bw_harmonic",
+   "effect_dv_pu": 3.380146965388837e-10,
+   "gap_dv_pu": 3.380146965388837e-10
+  },
+  {
+   "case": "simbench_1-LV-rural1--0-sw",
+   "effect_dv_pu": 3.464650720573331e-10,
+   "gap_dv_pu": 3.464650720573331e-10
+  },
+  {
+   "case": "simbench_1-MV-rural--0-sw",
+   "effect_dv_pu": 3.4646507231447545e-10,
+   "gap_dv_pu": 3.4646507231447545e-10
+  },
+  {
+   "case": "pgg_c_59176_2",
+   "effect_dv_pu": 3.3801470418151163e-10,
+   "gap_dv_pu": 3.3801470418151163e-10
+  },
+  {
+   "case": "pgg_c_59855_10",
+   "effect_dv_pu": 3.38014703695506e-10,
+   "gap_dv_pu": 3.38014703695506e-10
+  },
+  {
+   "case": "pgg_c_59952_7",
+   "effect_dv_pu": 3.3801470190839253e-10,
+   "gap_dv_pu": 3.3801470190839253e-10
+  },
+  {
+   "case": "pgg_c_760_0",
+   "effect_dv_pu": 3.380147041388532e-10,
+   "gap_dv_pu": 3.380147041388532e-10
+  }
+ ]
+}

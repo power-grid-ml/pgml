@@ -29,6 +29,12 @@ converter:
         terminal retains that circuit with an auxiliary open-end node; drop_element
         omits the complete element as a reduced approximation. Both-open and
         out-of-service elements are omitted in either mode.
+        `terminal` is the default because it is what pandapower itself solves: a line
+        that is open at one end stays energized from the other and its charging
+        current loads the feeder. On the CIGRE MV network, which has three such lines,
+        omitting them moves the bus voltages by 2.9e-4 pu against pandapower's own
+        power flow, while keeping them agrees to 6e-13 pu. `drop_element` is kept for
+        studies that want the smaller system and accept that error.
 
 calculation:
   symmetry:
@@ -82,8 +88,8 @@ appliance:
         and OpenDSS's own: `NeglectLoadY=No` with `%SeriesRL=50`) splits the
         operating-point admittance Yeq = conj(S)/V_rated^2 into a PARALLEL R-L
         branch (1-s)Re(Yeq) + j(1-s)Im(Yeq)/h and a SERIES R-L branch
-        1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction`,
-        reproducing OpenDSS's own default (`NeglectLoadY=No`, `%SeriesRL=50`). `motor`
+        1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction`
+        (for a leading device the reactive parts follow `reactive_element`). `motor`
         keeps the parallel branch and replaces the series branch by a fixed blocked-rotor
         reactance (`motor_x_harm_pu`, `motor_xr_harm`), OpenDSS's `puXharm`. `none` = a
         PURE current source with no shunt at any order, identical to OpenDSS
@@ -115,6 +121,23 @@ appliance:
       description: >
         X/R of the `motor` model's series reactance at the fundamental (OpenDSS
         `XRharm`, same default), i.e. Zs = X/xr + jX before the order scaling.
+    reactive_element:
+      value: sign_aware
+      units: "enum{sign_aware, inductive}"
+      description: >
+        How the reactive part of the P,Q-derived shunt scales with the harmonic order.
+        `sign_aware` (the default) scales it as the element it is at the operating
+        point. A lagging device (Q > 0) is an inductance: the parallel susceptance goes
+        as B/h and the series reactance as h*X. A leading device (Q < 0, common for
+        electronic loads and compensated installations) is a capacitance: B*h and X/h.
+        This is the law the const-Z fold of the fundamental assembly uses, so both load
+        representations agree. `inductive` applies B/h and h*X whatever the sign of Q,
+        which is what OpenDSS computes (checked on a live YPrim of a load with negative
+        kvar); a leading device then becomes a negative inductance, with the
+        susceptance sign of a capacitor and the frequency slope of an inductor. The two
+        laws are identical for Q >= 0 and at h = 1. At order 5, s = 0.5 and power
+        factor 0.89 leading, `inductive` gives 0.037 + j0.017 S where `sign_aware` gives
+        0.070 + j0.082 S (10 kW, 400 V). The `opendss` preset selects `inductive`.
     basis:
       value: operating_point
       units: "enum{operating_point, nameplate}"
@@ -176,9 +199,14 @@ appliance:
       units: "count"
       description: >
         Maximum number of PV-to-PQ switching rounds (each round is one full Newton
-        solve at a fixed active set). The loop normally settles in one to three
-        rounds; hitting the cap logs a WARNING naming the oscillating generators and
-        keeps the last solution.
+        solve at a fixed active set, the first solve included). The loop normally
+        settles in one to three rounds; hitting the cap logs a WARNING naming the
+        generators that would still change their bus type, keeps the last solution and
+        reports the scenarios concerned as not converged
+        (`PowerFlowResult.converged_mask`, `regulation.settled`). When limits are
+        reached one unit after another a feeder with n regulating units can need up to
+        n rounds, so 12 covers the distribution feeders the library targets and bounds
+        the cost of a genuinely oscillating case at 12 Newton solves.
     q_limit_hysteresis_pu:
       value: 1.0e-6
       units: "pu"
@@ -186,14 +214,22 @@ appliance:
         Voltage band, in per unit of the terminal's nominal, a pinned generator must
         cross before it is released back to voltage regulation. Guards the switching
         loop against cycling on solver noise; far below any physical regulation
-        deadband.
+        deadband. 1e-6 pu is two decades above the voltage-update tolerance
+        (`solver.convergence.update_pu` = 1e-8), so a converged voltage cannot cross
+        the band by rounding, and four decades below a typical regulator deadband of
+        1e-2 pu, so it does not alter which units regulate.
     q_limit_hysteresis_rel:
       value: 1.0e-9
       units: "pu"
       description: >
         Reactive band, relative to the widest of the generator's reactive limits, the
         required reactive power must exceed before the unit is pinned at that limit.
-        Guards against switching on the converged solve's rounding noise.
+        Guards against switching on the converged solve's rounding noise: 1e-9 sits
+        about three decades above the relative rounding of a double-precision power
+        evaluation (machine epsilon times the cancellation in Y*V, of order 1e-12) and
+        below the 1e-8 pu
+        mismatch tolerance, so a unit exactly at its limit is not pinned by noise and
+        a real violation of the size the solver can resolve still is.
 
 line:
 
@@ -269,7 +305,11 @@ line:
         for an R0 synthesised from `r0_over_r1`): R0 is treated as conductor resistance
         and the earth return enters only as the increment 3·(Re(f) − Re(f0)). Both forms
         reproduce the stored R0 exactly at f0; they differ only in how much of R0 the
-        skin multiplier scales. Per-line override:
+        skin multiplier scales. In the sequence_aware line model the skin multiplier
+        scales the phase conductor's share R1 of R0, so the two settings give the same
+        R0(h) whenever R0 − 3·Re(f0) ≥ R1 (every line with a real return path); they
+        differ only for an R0 smaller than R1 + 3·Re(f0) = R1 + 0.148 Ω/km at 50 Hz.
+        Per-line override:
         `Line.earth_return.r0_includes_earth_return`.
 
   # Carson/Deri earth-return path (zero-sequence and geometry lines).
@@ -303,34 +343,46 @@ line:
         in Ω per 1000 ft). Used only by `x0_frequency: carson_sublinear`. Per-line
         override: `Line.earth_return.reactance_coeff_ohm_per_m_per_hz`.
     x0_frequency:
-      value: carson_sublinear
+      value: linear
       units: "enum{linear, carson_sublinear}"
       description: >
         Frequency law of the zero-sequence REACTANCE in the lumped sequence_aware model.
-        `linear`: X0(h) = X0·h — pure geometric scaling; the earth-return
-        reactance sub-linearity is left to the conductor-geometry path, which resolves
-        the real return path (deep earth vs a nearby neutral/sheath).
-        `carson_sublinear` (default): additionally subtract the Carson/Deri earth-return reactance
-        decay 1.5·coeff·f0·h·ln(h) (geometry- and ρ-independent), which reproduces
-        OpenDSS's Xg frequency correction for an R/X line. Exact at f0 either way.
-        Per-line override: `Line.earth_return.x0_frequency`.
+        `linear` (default): X0(h) = X0·h, the scaling of a geometric inductance. It is
+        exact for a return path that stays in metal at every order (the neutral core or
+        sheath of a cable, a 4-wire LV line), and it is the only law that is safe for an
+        X0 invented from `zero_sequence.x0_over_x1`, which carries no information about
+        the return path.
+        `carson_sublinear`: additionally subtract the Carson/Deri earth-return reactance
+        decay 1.5·coeff·f0·h·ln(h) (geometry- and ρ-independent), the correction OpenDSS
+        applies to an R/X line through its Xg. The derivation assumes that the stored X0
+        CONTAINS the deep-earth term 3·Xe(f0) = 3·coeff·f0·ln(658.5·sqrt(ρ/f0)), about
+        1.29 Ω/km at 50 Hz and 100 Ω·m. That holds for an overhead line whose measured
+        or computed X0 closes through the earth. It does not hold for a cable or a
+        ratio-derived X0 (typically 0.2 to 0.5 Ω/km): the subtracted 0.094·ln(h) Ω/km is
+        then comparable with X0 itself, X0(h) falls below X1(h) within the first few
+        orders and reaches zero near h = 13 for a 150 mm² LV cable. Select it per line
+        (`Line.earth_return.x0_frequency`) for overhead lines with real zero-sequence
+        data, or grid-wide through the `opendss` preset. Exact at f0 either way.
     x0_nonnegative:
       value: true
       units: "bool"
       description: >
-        Guard the sub-linear approximation by clamping extrapolated X0 to zero.
-        This prevents negative series reactance but does not validate an unknown earth,
-        neutral or sheath return path. The derivative is zero below the boundary;
-        use measured geometry for studies near it. Disable for the unguarded OpenDSS
-        law. Per-line override: `Line.earth_return.x0_nonnegative`.
+        Guard of the `carson_sublinear` law: clamp the extrapolated X0(h) at zero. A
+        negative series reactance is a series capacitance and can create a spurious
+        series resonance, so the guard is on by default. Reaching the clamp means the
+        stored X0 lacks the deep-earth term the law subtracts (see `x0_frequency`);
+        assembly then logs one WARNING with the number of affected lines. The derivative
+        is zero below the boundary. Disable for the unguarded OpenDSS law (the `opendss`
+        preset does). No effect under `linear`. Per-line override:
+        `Line.earth_return.x0_nonnegative`.
     x0_exponent:
       value: 1.0
       units: "exponent"
       description: >
         Exponent p in X0(h) = X0·h^p for the lumped sequence_aware model. 1.0 (default)
         is the geometric scaling. p < 1 is an EMPIRICAL way to bend the zero-sequence
-        reactance sub-linear (e.g. to match a measured Z0(h)); prefer
-        `x0_frequency: carson_sublinear` for the physically derived form. Per-line
+        reactance sub-linear (e.g. to match a measured Z0(h)); `x0_frequency:
+        carson_sublinear` is the physically derived form for an overhead line. Per-line
         override: `Line.earth_return.x0_exponent`.
 
   # Conductor-geometry (Carson/Deri) path: how the conductor's INTERNAL inductance
@@ -348,8 +400,10 @@ line:
         `gmr`: the published GMR carries the internal inductance at every frequency and
         the internal reactance is dropped (frozen at its power-frequency value).
         `gmr_skin`: the published GMR's internal reactance is scaled by the solid-round
-        Bessel decay Im(Zint(f))/(f*mu0/4), so the power-frequency value is reproduced
-        exactly and the internal inductance decays with skin effect (continuous in f).
+        Bessel decay Im(Zint(f))/(f*mu0/4), so the internal inductance decays with skin
+        effect (continuous in f). At power frequency the decay factor is 0.997 to 0.999
+        for LV/MV conductors and 0.989 for a very large one, so the published GMR's
+        internal part, itself a few percent of X, is reproduced to within 1 %.
         `gmr_power_frequency`: `gmr` inside `power_frequency_band_hz` and `bessel`
         outside it, which is OpenDSS's rule (LineConstants/CNLineConstants/
         TSLineConstants). Reproduces OpenDSS at every frequency; discontinuous at the
@@ -627,7 +681,11 @@ solver:
         `error_tolerance`, so iteration counts are comparable across the three tools.
         The achievable value is bounded below by the cancellation error of Y*V, which the
         solver estimates per row from the working precision and reports; a tolerance
-        below that floor logs a warning and the floor governs.
+        below that floor logs a warning and the floor governs. This is a power
+        tolerance, 0.01 VA per row on the default 1 MVA base, and not a voltage
+        tolerance: it leaves a voltage error of about mismatch_pu * s_base_va / S_k per
+        unit at a node of short-circuit power S_k. Together with update_pu the default
+        gives voltages good to about 1e-8 pu. Lower both for a tighter answer.
     update_pu:
       value: 1.0e-8
       units: "per unit of each node's line-to-neutral rated voltage"
@@ -638,6 +696,9 @@ solver:
         independent of the voltage level and of the number of rows, so a multi-voltage
         grid or an ensemble of grids solved in one system is judged exactly like a single
         feeder. power-grid-model uses the same quantity (max voltage deviation in pu).
+        The update is not the remaining error: the fixed point's error is rho / (1 - rho)
+        times its last update (rho the contraction factor, roughly 0.1 to 0.5 on a
+        distribution feeder), Newton's is far below its last update.
     s_base_va:
       value: 1.0e+6
       units: "VA"
@@ -649,8 +710,9 @@ solver:
       value: 4
       units: "iterations"
       description: >
-        How many consecutive iterations a scenario may fail to reduce its voltage update
-        by the factor `stall_decay` before the solver calls it STALLED. A stalled
+        How many consecutive iterations a scenario may fail to reduce either convergence
+        measure (voltage update or power mismatch) by the factor `stall_decay` before the
+        solver calls it STALLED. A stalled
         iteration has stopped making progress: at a single-precision working dtype the
         fixed point reaches an exact fixed point of the rounded map or a small limit
         cycle whose amplitude is set by the rounding of one back-substitution, and no
@@ -665,11 +727,15 @@ solver:
       value: 0.9
       units: "factor"
       description: >
-        The improvement of the per-row voltage update that counts as progress inside the
-        `stall_patience` window: an iteration is progress when the update drops below
-        `stall_decay` times the best update the scenario had reached when the window
-        opened. A value near 1 detects only a genuine plateau; a smaller value also calls
-        a slowly contracting iteration stalled.
+        The improvement that counts as progress inside the `stall_patience` window: an
+        iteration is progress when the per-row voltage update or the power mismatch
+        drops below `stall_decay` times the best value of that measure the scenario had
+        reached. A value near 1 detects only a genuine plateau; a smaller value also calls
+        a slowly contracting iteration stalled. With a patience of 4, the value 0.9
+        calls any iteration that contracts by 0.97 or better per step progress
+        (0.97^4 = 0.885), far slower than the roughly one decade per step of the
+        current-injection iteration on a distribution feeder, and still ends a true
+        plateau after five iterations.
     stall_tolerance_factor:
       value: 100.0
       units: "multiples of the precision floor"
@@ -785,7 +851,11 @@ solver:
         Caching turns every further product into one back-substitution instead of a
         complete Jacobian rebuild and factorization; above this size the factors are
         rebuilt per product instead, so a large batched solve does not hold a big
-        factorization alive for the lifetime of the graph.
+        factorization alive for the lifetime of the graph. The factors of B scenarios
+        of an N-row grid take B*(2N)^2*8 bytes in double precision: 256 MiB holds a
+        single grid of about 2900 rows or 90 scenarios of a 294-row three-phase LV
+        feeder, the sizes for which a full output Jacobian is built row by row, and
+        stays small next to the forward solve's own memory.
   loadability:
     ramp:
       value: "load"
