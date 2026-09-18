@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import copy
 
-import pandapower as pp
 import pytest
 import torch
 
@@ -31,6 +30,8 @@ from pgml.convert.pandapower.converter import _tap_ratio_magnitude
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import Transformer
 from pgml.solver import solve_power_flow
+
+pp = pytest.importorskip("pandapower", exc_type=ImportError)
 
 CDT = torch.complex128
 
