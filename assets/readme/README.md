@@ -13,10 +13,15 @@ the figure renderer.
   through `scripts/cluster/run_readme.sbatch` with the suite's target settings.
   Each grid runs in a fresh process. Eight pandapower workers each have one
   internal thread; power-grid-model uses eight native threads.
-- `conformance_worst.svg`: the paper's Figure 5, copied without changing its
-  data or layout. `conformance_worst.json` retains the selected grid records
-  and valid-pair summary. Its bars compare three reference engines; they do
-  not show a before/after intervention.
+- `solverconf_*` and `modelconf_*`: figures of the two conformance checks, copied
+  unchanged from `figures/solverconf/` and `figures/modelconf/` of pgml-paper, each
+  with the JSON of its numbers and its generated caption (`*.caption.txt`).
+  `provenance.json` records the paper commit, the pgml source commit
+  and the SHA-256 of every copied file under `conformance_source`. The README shows
+  `solverconf_factor_dtype_vs_tools.svg`; `assets/CONFORMANCE.md` explains both
+  checks and shows the others. The figures are produced by
+  `scripts/conformance/solver_conformance/figures.py` and
+  `python -m model_conformance.figures` in pgml-paper, not by the renderer here.
 - `app_digital_twin.json`: recorded full experiment, including true parameters,
   measurement locations/noise, estimates, and four-draw standard deviations.
   `resistance_recovery.svg` redraws only the resistance panel in a wide format.

@@ -1,0 +1,222 @@
+{
+ "fundamental": [
+  {
+   "tool": "pgm",
+   "name": "load_type",
+   "title": "per-load type of the dataset against the converter's uniform load_model",
+   "side": "pgml",
+   "n": 11,
+   "median": 0.0021693098829087165,
+   "max": 0.006017074926882419,
+   "p90": 0.005714930940313036,
+   "silent_on": 0,
+   "announced_on": 10
+  },
+  {
+   "tool": "opendss",
+   "name": "slack_model",
+   "title": "Vsource as a Thevenin source (OpenDSS) against an ideal slack (pgml)",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0002100489247473276,
+   "max": 0.009241149578444552,
+   "p90": 0.004834447631889516,
+   "silent_on": 0,
+   "announced_on": 6
+  },
+  {
+   "tool": "pandapower",
+   "name": "ext_grid_sequence_impedance",
+   "title": "external grid negative- and zero-sequence impedance",
+   "side": "reference",
+   "n": 4,
+   "median": 2.8504989255262177e-05,
+   "max": 0.000686116280011034,
+   "p90": 0.0004967036546279551,
+   "silent_on": 0,
+   "announced_on": 3
+  },
+  {
+   "tool": "pgm",
+   "name": "slack_model",
+   "title": "source with short-circuit impedance (pgm) against an ideal slack (pgml)",
+   "side": "pgml",
+   "n": 11,
+   "median": 1.0332611338266814e-05,
+   "max": 0.017973295148480787,
+   "p90": 0.017973295148479132,
+   "silent_on": 0,
+   "announced_on": 10
+  },
+  {
+   "tool": "pandapower",
+   "name": "transformer_equivalent_circuit",
+   "title": "transformer T circuit (pandapower) against pi (pgml)",
+   "side": "reference",
+   "n": 23,
+   "median": 1.1753119654238199e-07,
+   "max": 0.0016358122323981352,
+   "p90": 2.4069731643609114e-05,
+   "silent_on": 1,
+   "announced_on": 5
+  },
+  {
+   "tool": "pandapower",
+   "name": "q_limits",
+   "title": "generator reactive limits enforced",
+   "side": "pgml",
+   "n": 26,
+   "median": 0.0,
+   "max": 0.09171633064529798,
+   "p90": 0.0022777796335241617,
+   "silent_on": 3,
+   "announced_on": 5
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:transformer.magnetizing_placement",
+   "title": "transformer.magnetizing_placement",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.00011390951669652217,
+   "p90": 0.00011369053209664775,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "load_voltage_band",
+   "title": "load model voltage band Vminpu/Vmaxpu/Vlowpu",
+   "side": "reference",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0,
+   "p90": 0.0,
+   "silent_on": 0,
+   "announced_on": 0
+  }
+ ],
+ "harmonic": [
+  {
+   "tool": "opendss",
+   "name": "earth_return_coefficients",
+   "title": "line earth-return coefficients Rg, Xg of the DSS line",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.273219572563829,
+   "p90": 0.2333469894453072,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:line.earth_return.x0_frequency",
+   "title": "line.earth_return.x0_frequency",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.19077160016802852,
+   "p90": 0.162265402531164,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:line.harmonic_model.skin_effect",
+   "title": "line.harmonic_model.skin_effect",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.04297811958108032,
+   "p90": 0.03120732340089036,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "slack_model",
+   "title": "Vsource as a Thevenin source (OpenDSS) against an ideal slack (pgml)",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0034738642649832893,
+   "p90": 0.002258496287174675,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "harmonic_shunt_basis",
+   "title": "harmonic load shunt built from nameplate (OpenDSS) or operating-point power",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0026015582752404714,
+   "p90": 0.0016166206254967055,
+   "silent_on": 2,
+   "announced_on": 0
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:line.earth_return.x0_nonnegative",
+   "title": "line.earth_return.x0_nonnegative",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0009895936514707428,
+   "p90": 0.0005624890366968708,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:transformer.magnetizing_placement",
+   "title": "transformer.magnetizing_placement",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0005307669531978459,
+   "p90": 0.00032713831018796953,
+   "silent_on": 0,
+   "announced_on": 2
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:line.geometry.internal_inductance",
+   "title": "line.geometry.internal_inductance",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0,
+   "p90": 0.0,
+   "silent_on": 0,
+   "announced_on": 0
+  },
+  {
+   "tool": "opendss",
+   "name": "preset:appliance.harmonic_shunt.reactive_element",
+   "title": "appliance.harmonic_shunt.reactive_element",
+   "side": "pgml",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0,
+   "p90": 0.0,
+   "silent_on": 0,
+   "announced_on": 0
+  },
+  {
+   "tool": "opendss",
+   "name": "load_voltage_band",
+   "title": "load model voltage band Vminpu/Vmaxpu/Vlowpu",
+   "side": "reference",
+   "n": 6,
+   "median": 0.0,
+   "max": 0.0,
+   "p90": 0.0,
+   "silent_on": 0,
+   "announced_on": 0
+  }
+ ]
+}
