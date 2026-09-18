@@ -31,23 +31,21 @@ Each library has its own supported devices, assumptions and applications.
 
 ## Performance: solve scenarios in batches
 
-![Batch throughput of pgml, pandapower and power-grid-model on two distribution grids](assets/readme/batch_throughput.svg)
+![Batch throughput of pgml, pandapower, power-grid-model and OpenDSS on two distribution grids](assets/readme/batch_throughput.svg)
 
-Batching amortizes work across operating points of the same grid. This comparison
-uses **double precision**, one **NVIDIA L40S** and **eight allocated CPUs** on
-an **AMD EPYC 9334** node.
-All engines solve identical load scenarios, with independent load multipliers
-between 0.8 and 1.2. Every scenario converges and agrees in voltage magnitude
-within **1e-6 pu** across the compared engines.
+pgml solves many operating points of one grid in a single batched call, so its
+throughput keeps growing with the batch size. Tools that solve one scenario at a
+time level off early. On one GPU pgml overtakes every CPU tool at 4,096 scenarios
+per batch. For a few scenarios a dedicated CPU solver such as power-grid-model
+is faster.
 
-Pandapower uses numba, recycled network matrices and up to eight worker processes;
-power-grid-model uses its native iterative-current batch solver with eight threads.
-Pgml's dense CPU path uses one thread for the larger grid; its sparse path uses
-the eight-CPU allocation. Curves show median warm solve throughput over five
-repeats for pgml and power-grid-model, and three for pandapower. Grid conversion,
-GPU input staging, compilation and correctness checks are outside the timed region;
-GPU timings include synchronization. This measures forward fundamental power flow,
-without a backward pass. Performance depends on grid size and batch size.
+All tools solve identical load scenarios in double precision. A point is shown
+only if every scenario converged and matches pgml within 1e-6 pu in voltage
+magnitude. The plot covers the forward power flow, without gradients.
+[PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
+timed, and how throughput changes with grid size.
+
+<sub>Measured 2026-09-18, with one NVIDIA L40S 48 GB and eight logical CPUs (four cores) of an AMD EPYC 9334. pgml 0.5.1 (afb5ba6), torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for pandapower and OpenDSS).</sub>
 
 ## Conformance: the solvers agree
 

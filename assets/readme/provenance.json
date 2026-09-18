@@ -2,17 +2,32 @@
   "source_paper_commit": "ae2e19895c4592164d571d2597c6f0c6341eef78",
   "source_sha256": {
     "app_digital_twin.json": "73f4ca62a44d9a223b2ba4f545e612d587d84ed67bf9e1613599278356c8aa25",
-    "bench_batch_throughput_readme_ieee33.json": "e605b0988e563c50bd7602d509fc66d6a4c5c9eb21ad1692a9ece2d98fb7abca",
-    "bench_batch_throughput_readme_kerber.json": "ff71f40f28c5ae1146d420e5ea8ae22ef58845fe9ca4cafc637e88ca6d50e8da"
+    "bench_batch_throughput_readme_ieee33.json": "19735550398079c81df8cf368c383cdd87cf8e52573b6b50b06658634543d8d9",
+    "bench_batch_throughput_readme_kerber.json": "cde883b30b0c7de49266cc84eb29f7b2afbef993cc95fec3e4111da2a8ba0227",
+    "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce"
   },
-  "performance_current_review": true,
-  "performance_status": "Validated full-range comparison; every scenario checked.",
   "performance_source": {
-    "paper_commit": "58e4202dbc6022e470e0dcf75848ea1f78119d3d",
-    "pgml_source_commit": "ca30809",
-    "pgml_source_digest": "5a797550b9eb",
-    "elapsed": "00:02:53",
-    "exit_code": "0:0",
+    "paper_commit": "5b79a213a9827cf1e5158999e364e4bdc23a1d9b",
+    "jobs": {
+      "ieee33": {
+        "cpus": "8",
+        "date": "2026-09-18 13:05:53+0200",
+        "pgml_revision": "afb5ba6a36fa889adfff1baf9a1d3867f1eab040",
+        "benchmark_source_digest": "9716959de71a"
+      },
+      "kerber": {
+        "cpus": "8",
+        "date": "2026-09-18 13:08:12+0200",
+        "pgml_revision": "afb5ba6a36fa889adfff1baf9a1d3867f1eab040",
+        "benchmark_source_digest": "9716959de71a"
+      },
+      "size": {
+        "cpus": "8",
+        "date": "2026-09-18 13:09:44+0200",
+        "pgml_revision": "afb5ba6a36fa889adfff1baf9a1d3867f1eab040",
+        "benchmark_source_digest": "9716959de71a"
+      }
+    },
     "batch_sizes": [
       1,
       4,
@@ -22,7 +37,33 @@
       1024,
       4096
     ],
-    "all_scenarios_validated": true
+    "size_batches": [
+      1,
+      256
+    ],
+    "all_scenarios_validated": true,
+    "pandapower_numba": {
+      "importable": true,
+      "version": "0.67.0",
+      "opt_out": false,
+      "requested": true
+    },
+    "versions": {
+      "python": "3.13.15",
+      "torch": "2.13.0",
+      "numpy": "2.4.6",
+      "scipy": "1.18.1",
+      "pgml": "0.5.1",
+      "pgml_git": "afb5ba6a36fa889adfff1baf9a1d3867f1eab040",
+      "pandapower": "3.5.4",
+      "power_grid_model": "1.13.172",
+      "power_grid_model_io": "present",
+      "numba": "0.67.0",
+      "opendssdirect": "0.9.4"
+    },
+    "gpu": "NVIDIA L40S",
+    "driver": "610.57.04",
+    "cpu": "AMD EPYC 9334 32-Core Processor"
   },
   "conformance_source": {
     "paper_commit": "e0333d6",

@@ -5,14 +5,20 @@ identifies source revisions, the benchmark job and SHA-256 hashes of the origina
 inputs. Measurement dates remain in the raw metadata. No experiment is run by
 the figure renderer.
 
-- `batch_throughput.json`: complete IEEE33 and Kerber complex128 CPU/GPU series
-  and pandapower/power-grid-model baselines, with the measured environment.
-  All seven batch sizes (1–4096) are retained for all five curves. Every scenario
-  is checked, not just a prefix; the renderer rejects invalid comparison points.
-  The focused driver is `scripts/bench/bench_readme.py` in pgml-paper, submitted
-  through `scripts/cluster/run_readme.sbatch` with the suite's target settings.
-  Each grid runs in a fresh process. Eight pandapower workers each have one
-  internal thread; power-grid-model uses eight native threads.
+- `batch_throughput.json`: IEEE 33-bus and Kerber complex128 series of pgml on
+  CPU and GPU with the pandapower, power-grid-model and OpenDSS baselines and the measured environment. All seven batch sizes (1 to 4096) are retained
+  for every curve. Every scenario is checked, not just a prefix, and the renderer
+  rejects invalid comparison points, including a pandapower point measured
+  without active numba. The driver is `scripts/bench/bench_readme.py` in
+  pgml-paper, one grid per process, submitted as the stages `readme_ieee33` and
+  `readme_kerber` of `scripts/cluster/run_all.sh`. Eight pandapower and eight
+  OpenDSS workers have one thread each and power-grid-model uses eight threads.
+- `size_scaling.json`: the same tools over a family of radial feeders with 16 to
+  4096 buses at 1 and 256 scenarios per batch (`scripts/bench/bench_size.py`,
+  stage `readme_size`), with the same every-scenario check.
+- Both files are assembled by `scripts/bench/readme_assets.py` in pgml-paper,
+  which also writes the jobs, versions and source hashes into `provenance.json`.
+  `../PERFORMANCE.md` describes the measurement protocol.
 - `solverconf_*` and `modelconf_*`: figures of the two conformance checks, copied
   unchanged from `figures/solverconf/` and `figures/modelconf/` of pgml-paper, each
   with the JSON of its numbers and its generated caption (`*.caption.txt`).
@@ -33,6 +39,6 @@ From the repository root:
 pixi run -e cpu python run/readme/render.py
 ```
 
-The renderer writes the throughput and recovery SVGs here and preview PNGs to
+The renderer writes the throughput, size-scaling and recovery SVGs here and preview PNGs to
 `/tmp`. Refresh batch JSON, source hashes, environment and README measurement
 caption together after checking provenance, coverage and validity.
