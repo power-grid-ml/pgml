@@ -1493,7 +1493,8 @@ class Characteristic(GridModel):
     curve breakpoint or level is a differentiable leaf — gradients flow to the curve
     shape through the solve. ``linear`` interpolation matches the OpenDSS XYcurve /
     pandapower ``Characteristic``; ``cubic`` gives a smooth (C\\ :sup:`1`) curve for a
-    well-behaved gradient at the breakpoints (see ``smoothing`` on the control mode).
+    well-behaved gradient at the breakpoints (the control's ``smoothing`` acts on the
+    capability clamp only, not on the curve).
     """
 
     x_values: Vec = Field(description="Strictly increasing breakpoints (x axis).")
@@ -1527,11 +1528,14 @@ class InverterControlBase(GridModel):
 
     ``s_rated_va`` is the inverter apparent-power rating that bounds the (P, Q)
     operating point to the capability circle ``P**2 + Q**2 <= s_rated_va**2``; ``None``
-    disables the clamp. ``smoothing`` (>= 0) sets the half-width, in the same units as
-    the clamped/curve quantity, of a soft saturation / soft breakpoint used so the
-    control stays C\\ :sup:`1` for gradient-based use (0 = the exact hard clamp /
-    piecewise curve, which matches the reference tools at the operating point but has
-    sub-gradients at the kinks). See ``docs/pgml/modeling/der-pv-storage.md`` section 4.3.
+    disables the clamp. ``smoothing`` (>= 0) is the half-width, as a fraction of
+    ``s_rated_va``, of a soft saturation that replaces the hard capability clamp so the
+    control stays C\\ :sup:`1` there for gradient-based use. The soft clamp is used by
+    the solve and its gradient alike, so a positive value also shifts the solved
+    operating point near the limit. 0 is the exact hard clamp, which matches the
+    reference tools but has one-sided gradients at the limit. Curve breakpoints are not
+    smoothed (see ``Characteristic.interpolation``). See
+    ``docs/pgml/modeling/der-pv-storage.md``, "Kinks on a differentiable path".
     """
 
     s_rated_va: Optional[PosNum] = si_field(
@@ -1541,8 +1545,8 @@ class InverterControlBase(GridModel):
         default=None,
     )
     smoothing: float = si_field(
-        "Soft-saturation / soft-breakpoint half-width for differentiable gradients "
-        "(0 = exact hard clamp / piecewise curve).",
+        "Soft-saturation half-width of the capability clamp, as a fraction of "
+        "s_rated_va (0 = exact hard clamp).",
         short="pu",
         long="fraction",
         default=0.0,

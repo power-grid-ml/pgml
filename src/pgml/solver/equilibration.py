@@ -29,7 +29,7 @@ makes the scale's own derivative zero, which is correct — the composite solve 
 depend on it — while the scaling multiplications stay on the autograd tape, so
 gradients flow to the matrix and the right-hand side exactly as without equilibration.
 
-Reference libraries for comparison (none of them scales more than one side):
+How the reference libraries scale the system they factor:
 OpenDSS factors its SI-unit system with KLU, whose default ``Common.scale = 2`` is a
 max-norm ROW scaling; MATLAB's sparse backslash (MATPOWER's default linear solver)
 applies UMFPACK's default row-sum scaling to the per-unit Jacobian; pandapower's
@@ -54,7 +54,6 @@ the input, every function is batched over leading dims.
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -92,26 +91,6 @@ def resolve_equilibration(equilibrate: Union[None, bool, str]) -> str:
 
 def _power_of_two_default() -> bool:
     return bool(defaults.get("solver.equilibration.power_of_two"))
-
-
-def _nonzero_magnitudes(a: Tensor) -> Optional[tuple[Tensor, Tensor, Tensor]]:
-    """Return row, column and magnitude tensors for one constant CPU matrix.
-
-    The solver's per-row precision floor reads only structural nonzeros. Batched,
-    accelerator and differentiable matrices retain the dense expression instead.
-    """
-    if (
-        a.device.type != "cpu"
-        or (torch.is_grad_enabled() and a.requires_grad)
-        or a.reshape(-1, *a.shape[-2:]).shape[0] != 1
-    ):
-        return None
-    m = a.shape[-1]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        csr = a.reshape(m, m).to_sparse_csr()
-    rows = torch.repeat_interleave(csr.crow_indices().diff())
-    return rows, csr.col_indices(), csr.values().abs()
 
 
 def _reciprocal(scale: Tensor, *, sqrt: bool, power_of_two: bool) -> Tensor:

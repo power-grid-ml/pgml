@@ -13,11 +13,17 @@ All quantities are in the appliance's NATIVE authoring convention (positive acti
 reactive power = overexcited / injecting). The caller applies the
 consume/inject ``sign`` afterwards, exactly as for the plain ZIP injection.
 
-Non-smooth pieces (the capability clamp, curve breakpoints) are made C\\ :sup:`1` for
-gradient-based use by a soft saturation of half-width ``smoothing`` (``0`` recovers the
-exact hard clamp / piecewise-linear curve, which matches OpenDSS ``InvControl`` /
-pandapower ``CharacteristicControl`` at the operating point). Everything is vectorized
-(no Python loop over elements), honours the input device/dtype, and is GPU-ready.
+The capability clamp is made C\\ :sup:`1` for gradient-based use by a soft saturation
+whose half-width is ``smoothing`` times the rating ``s_rated_va`` (``smoothing`` is a
+fraction of the rating; ``0`` recovers the exact hard clamp, which matches OpenDSS
+``InvControl`` / pandapower ``CharacteristicControl`` at the operating point). The soft
+clamp is ONE function, used by the forward solve and by its gradient alike, so a
+positive ``smoothing`` also moves the solved operating point near the limit, by about
+``0.7 * smoothing * s_rated_va`` at the corner and exponentially less away from it.
+Curve breakpoints are not blended: a ``linear`` characteristic is exactly piecewise
+linear (one-sided gradients at a breakpoint), and ``cubic`` interpolation is the
+C\\ :sup:`1` alternative. Everything is vectorized (no Python loop over elements),
+honours the input device/dtype, and is GPU-ready.
 """
 
 from __future__ import annotations
@@ -79,10 +85,28 @@ def smooth_clamp(x: Tensor, lo: Tensor, hi: Tensor, beta: float) -> Tensor:
 
 
 def _beta_from_smoothing(smoothing: float) -> float:
-    """Map the schema ``smoothing`` half-width to the softplus ``beta`` (inf if 0)."""
+    """Map the schema ``smoothing`` half-width to the softplus ``beta`` (inf if 0).
+
+    ``smoothing`` is a fraction of the inverter rating, so the resulting ``beta``
+    applies to quantities expressed in per unit of that rating
+    (:func:`_clamp_to_rating`).
+    """
     if smoothing is None or smoothing <= 0.0:
         return math.inf
     return 1.0 / float(smoothing)
+
+
+def _clamp_to_rating(x: Tensor, limit: Tensor, s_rated: Tensor, beta: float) -> Tensor:
+    """Soft clamp of a power ``x`` to ``[-limit, limit]``, all in W / var / VA.
+
+    The saturation is evaluated in per unit of the rating ``s_rated``, which is what
+    gives the transition the declared half-width of ``smoothing * s_rated``. The hard
+    clamp (``beta = inf``) needs no scaling.
+    """
+    if not math.isfinite(beta):
+        return smooth_clamp(x, -limit, limit, beta)
+    lim_pu = limit / s_rated
+    return s_rated * smooth_clamp(x / s_rated, -lim_pu, lim_pu, beta)
 
 
 def evaluate_characteristic(
@@ -211,7 +235,7 @@ def resolve_injection_power(
     # to the circle before any reactive-power law sees it, so P² + Q² <= S²
     # holds for the pair actually injected (OpenDSS PVSystem kVA semantics).
     if s_t is not None:
-        p_eff = smooth_clamp(p_eff, -s_t, s_t, beta)
+        p_eff = _clamp_to_rating(p_eff, s_t, s_t, beta)
 
     # --- reactive power per mode ---------------------------------------------
     if isinstance(control, ConstantReactivePowerControl):
@@ -255,7 +279,7 @@ def resolve_injection_power(
     # --- capability clamp: bound |Q| to the apparent-power circle -------------
     if s_t is not None:
         q_max = torch.sqrt(torch.clamp(s_t * s_t - p_eff * p_eff, min=0.0))
-        q_eff = smooth_clamp(q_eff, -q_max, q_max, beta)
+        q_eff = _clamp_to_rating(q_eff, q_max, s_t, beta)
 
     return p_eff, q_eff
 

@@ -31,7 +31,9 @@ request body. It carries the physics of the study.
 `tol` is the primary convergence tolerance: the largest nodal apparent-power mismatch in per
 unit of `s_base_va`, default 1e-8 pu on a 1e6 VA base. `tol_update_pu` is the secondary one,
 the largest per-row voltage update in per unit of the node's line-to-neutral rated voltage,
-also 1e-8 pu. Both criteria must hold. Each is capped by what the working precision can
+also 1e-8 pu. Both criteria must hold. `tol` is a power tolerance, 0.01 VA per row on the
+default base, and not a voltage tolerance. With the defaults the voltages are good to about
+1e-8 pu. Lower both values for a tighter answer, see {doc}`api/solver`. Each is capped by what the working precision can
 resolve, and a tighter request logs a warning naming the floor, which then governs.
 `load_shunt` lives in the config because it is a modelling choice.
 

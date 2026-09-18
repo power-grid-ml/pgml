@@ -206,6 +206,28 @@ class PVTerminals:
             groups.append(replace(g, state=new_state))
         return replace(self, groups=tuple(groups)), changed
 
+    def unsettled(self, nxt: "PVTerminals") -> tuple[Tensor, tuple[int, ...]]:
+        """Where the active set of ``nxt`` differs from this one (off-tape).
+
+        ``nxt`` is what :meth:`switch` returned for this set. Returns the scenarios
+        ``[*batch]`` (bool) in which at least one terminal would change its bus type,
+        and the ids of the generators that would, in any scenario. A solve kept at
+        this active set is inconsistent with its own limit check exactly there.
+        """
+        masks: list[Tensor] = []
+        ids: list[int] = []
+        with torch.no_grad():
+            for g, g_next in zip(self.groups, nxt.groups):
+                diff = g_next.state != g.state.broadcast_to(g_next.state.shape)
+                masks.append(diff.any(-1))
+                per_gen = diff.reshape(-1, diff.shape[-1]).any(0).tolist()
+                ids.extend(gid for gid, hit in zip(g.gen_ids, per_gen) if hit)
+        lead = torch.broadcast_shapes(*[m.shape for m in masks])
+        mask = torch.zeros(lead, dtype=torch.bool, device=masks[0].device)
+        for m in masks:
+            mask = mask | m.broadcast_to(lead)
+        return mask, tuple(ids)
+
     def setpoint_volts(self) -> tuple[Tensor, Tensor]:
         """``(rows [R] int64, v_set [*batch, R])`` in VOLTS over every regulated row.
 

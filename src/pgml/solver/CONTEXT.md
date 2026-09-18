@@ -23,6 +23,11 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
   - `equilibrate`: `None` (the documented default `solver.equilibration.mode`) /
     `"symmetric"` / `"off"` / a bool — the diagonal equilibration applied
     around the factorization (see EQUILIBRATION below). Invisible in the result.
+- `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
+  precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`,
+  `solve_factored(fac, i_inj, *, v_fixed=None) -> v`, `FactoredSystem` and
+  `estimate_condition` are exported from `pgml.solver` (the factor-once, solve-many form
+  of `solve_harmonic`; implemented in `pgml.solver.harmonic`).
 - `solve_anchored(y_bus, i_inj, *, row_weight=None, row_target=None, op=None,
   op_weight=None, op_target=None, fixed_rows=None, v_fixed=None) -> v` — MEASUREMENT-ANCHORED
   (over-determined) network solve: `min_V ‖Y·V−I‖² + Σ w_r|V_r−t_r|² + Σ w_k|(op·V)_k−t_k|²`
@@ -266,9 +271,14 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
       seed collapses below `_SEED_COLLAPSE_PU = 0.5` of nominal; a start that fails is
       followed by the other, and the restart is logged (`_newton_from_starts`).
     - RESULT: `PowerFlowResult.regulation: Optional[VoltageRegulationResult]` —
-      `q_var {gen_id: [*batch] var}` (solved total, autograd-free like the
-      diagnostics), `regulating {gen_id: [*batch] bool}`, `switch_rounds`,
-      `enforce_q_limits`. The convergence diagnostics report the ACTIVE component of
+      `q_var {gen_id: [*batch] var}` (solved total, DIFFERENTIABLE whenever the solve
+      tracks gradients: the nodal residual is evaluated on-tape at the IFT-attached
+      voltages, one extra differentiable assembly), `regulating {gen_id: [*batch]
+      bool}`, `switch_rounds`, `enforce_q_limits`, `settled [*batch] bool` and
+      `unsettled_generators` (ids). When the round cap ends the switching, the kept
+      active set contradicts its own limit check, so the scenarios concerned are
+      reported as NOT converged (`converged`, `converged_mask`, `failed_states`,
+      `diagnostics.likely_cause`) and the WARNING names the generators. The convergence diagnostics report the ACTIVE component of
       the mismatch at a regulating row (its raw current mismatch is the reactive
       current the machine supplies).
     - BATCHED: `operating_point[gen_id]["v_set_pu"]` is a per-scenario setpoint (float
@@ -404,8 +414,13 @@ verified empirically). New orchestration:
   - `HarmonicFlowResult` (frozen dataclass): `v` complex `[*batch, H, N]` (V per
     order; **order 1 = the nonlinear `solve_power_flow` solution**, other orders =
     the linear per-harmonic solve), `frequencies_hz [H]`, `index`, `pf`
-    (the fundamental `PowerFlowResult`). Convergence properties `converged` /
-    `converged_mask` / `failed_states` re-expose `pf`'s (the harmonics are direct solves).
+    (the fundamental `PowerFlowResult`), `harmonic_finite` bool `[*batch]` (every
+    solved voltage of the scenario is finite; computed without a host sync). The
+    harmonics are direct solves and a batched LU does not raise on a singular `Y(h)`, so
+    `converged` / `converged_mask` / `failed_states` combine `pf`'s verdict with
+    `harmonic_finite` (a deeper injection batch is reduced onto the fundamental's batch
+    shape), and a non-finite scenario is logged at ERROR with its index (one sync at the
+    end of the solve).
   - DIFFERENTIABLE end to end (network params, load P/Q, AND harmonic injections)
     and BATCHED over scenario dims, same conventions as `solve_power_flow`.
   - A per-scenario `operating_point` (`[B]`) combined with a DEEPER-batched
@@ -771,7 +786,9 @@ scenario-independent base. The automatic path uses the conservative selection ru
   a 1e-4 Ω switch on an ohm-scale feeder already costs 4 digits. Therefore the sweep
   BASE omits every switched branch it can (`_woodbury_base_states` opens each in turn
   while `check_connectivity` passes; bridges stay in), and `low_rank_update` warns
-  when the measured amplification exceeds 1e6.
+  when the measured amplification exceeds 1e6 (`estimate_amplification=False` skips
+  the measurement and its host sync; the harmonic device-shunt path does, because it
+  verifies the backward error instead).
 - Internal fast paths (no API): `assembly.build_injection_plan` /
   `injections_from_plan` resolve the operating point once per solve (the
   V-independent tensors) and make every iteration pure tensor ops; residuals
@@ -876,9 +893,12 @@ precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`
 - All three backends work: dense (`torch.linalg.lu_factor/lu_solve` with `adjoint=`),
   scipy SuperLU (`trans="H"`), block-diagonal (per-bucket `lu_solve`, `_BlockLU.apply`
   for the residual matvec).
-- `estimate_condition(fac, *, iters=5) -> float`: 1-norm condition estimate from the
-  cached factorization (Hager's power method; a lower bound, `nan` for the block backend
-  which holds no single matrix). Used for the one-time complex64 warning; measured
+- `estimate_condition(fac, *, iters=5, per_matrix=False) -> float | Tensor`: 1-norm
+  condition estimate from the cached factorization (Hager's power method; a lower bound,
+  `nan` for the block backend which holds no single matrix, `inf` for a factorization
+  that back-substitutes to non-finite values). A batched factorization is estimated per
+  matrix in one batched pass; the default returns the worst case as a float (one host
+  sync), `per_matrix=True` the `[*fb]` tensor without a sync. Used for the one-time complex64 warning; measured
   against `torch.linalg.cond` within a factor of 1.7 on real feeders. It describes the
   matrix AS FACTORED, i.e. the EQUILIBRATED one unless `equilibrate="off"` — that is the
   conditioning the factorization actually sees, and it is what the precision decision

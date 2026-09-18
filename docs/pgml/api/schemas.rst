@@ -81,7 +81,7 @@ operating-point control laws:
   and Volt-Watt (OpenDSS ``InvControl CombiMode=VV_VW``).
 
 All six share :class:`~pgml.schemas.grid_schema.InverterControlBase` (rating cap
-``s_rated_va``, soft-saturation ``smoothing`` for C\ :sup:`1` gradients).  Curves
+``s_rated_va``, and ``smoothing``, the soft-clamp width as a fraction of that rating).  Curves
 are represented by :class:`~pgml.schemas.grid_schema.Characteristic` (piecewise
 ``y = f(x)``); breakpoints and levels are tensor-capable, so curve parameters are
 differentiable leaves.  Use ``method="newton"`` in

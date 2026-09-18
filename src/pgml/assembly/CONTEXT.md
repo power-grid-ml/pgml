@@ -443,8 +443,10 @@ NOT baked into Y; split as implemented below.
     `device_current_injections` (the control-free majority keeps the bit-exact stacked
     ZIP path). `resolve_injection_power(control, p_avail, v_pu)` returns (P, Q) from the
     control mode (constant-PF / cosφ(P) / Volt-VAr / Volt-Watt / combined), bounded by the
-    `s_rated_va` capability circle via `smooth_clamp` (`smoothing`>0 = C¹ backward,
-    `smoothing`=0 = hard). `evaluate_characteristic` is the differentiable piecewise
+    `s_rated_va` capability circle via `smooth_clamp`, evaluated in per unit of the
+    rating so the transition half-width is `smoothing * s_rated_va` (`smoothing` is a
+    fraction of the rating; >0 = C¹ clamp used by forward and backward alike, 0 = hard).
+    Curve breakpoints are not smoothed. `evaluate_characteristic` is the differentiable piecewise
     (linear/cubic) curve lookup. Because the control enters `I_device(V)` and the IFT
     backward differentiates one residual eval at V*, gradients flow to the curve / rating
     with no new adjoint (gradcheck-verified). Control is honored at the FUNDAMENTAL solve;

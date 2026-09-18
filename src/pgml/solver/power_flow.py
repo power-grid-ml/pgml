@@ -55,6 +55,7 @@ from copy import deepcopy
 
 import logging
 import math
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Sequence
 
@@ -90,7 +91,6 @@ from pgml.topology import connectivity_report, energized_subgrid, network_finger
 
 from ._pv_bus import PVTerminals, active_power_mismatch, collect_pv_terminals
 from .equilibration import (
-    _nonzero_magnitudes,
     equilibrated_lu_factor,
     resolve_equilibration,
 )
@@ -197,11 +197,30 @@ def _abs_row_scale(y_eff, v_abs: Tensor) -> Tensor:
     return _row_magnitude_sums(y_eff, v_abs)
 
 
+def _nonzero_magnitudes(a: Tensor) -> Optional[tuple[Tensor, Tensor, Tensor]]:
+    """Return row, column and magnitude tensors for one constant CPU matrix.
+
+    The solver's per-row precision floor reads only structural nonzeros. Batched,
+    accelerator and differentiable matrices retain the dense expression instead.
+    """
+    if (
+        a.device.type != "cpu"
+        or (torch.is_grad_enabled() and a.requires_grad)
+        or a.reshape(-1, *a.shape[-2:]).shape[0] != 1
+    ):
+        return None
+    m = a.shape[-1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        csr = a.reshape(m, m).to_sparse_csr()
+    rows = torch.repeat_interleave(csr.crow_indices().diff())
+    return rows, csr.col_indices(), csr.values().abs()
+
+
 def _row_magnitude_sums(y: Tensor, v_abs: Tensor) -> Tensor:
     """``Σ_j |Y_ij| |V_j|`` of a dense ``[*b, N, N]`` admittance -> ``[*b, N]`` real.
 
-    The row sums read the NONZEROS only (:func:`~pgml.solver.equilibration`'s sparse
-    magnitude form), which is three to six times cheaper than the dense form — a full
+    The row sums read the NONZEROS only (:func:`_nonzero_magnitudes`), which is three to six times cheaper than the dense form — a full
     ``|Y|`` temporary, a square root per entry, plus a matrix-vector product — measured at
     complex128 on this engine's own feeders: 0.5 ms against 1.3 at 294 rows, 2.3 against
     11.4 at 1176, 8.6 against 50 at 2469, 50 against 177 at 5505.
@@ -291,14 +310,23 @@ def _warn_complex64_conditioning(fac, rdt: torch.dtype) -> None:
     ~1.7e4 to 5.5e4, decades higher with a stiff source or a near-ideal switch). The
     estimate runs against the factorization the solve already built
     (:func:`~pgml.solver.harmonic.estimate_condition`), ONCE per process, and the
-    threshold is the documented ``solver.precision.complex64_cond_warn``.
+    threshold is the documented ``solver.precision.complex64_cond_warn``. A batched
+    factorization is judged by its worst matrix. The check is a diagnostic: an estimate
+    that cannot be formed is skipped and never fails the solve.
     """
     global _COMPLEX64_COND_CHECKED
     if _COMPLEX64_COND_CHECKED or rdt != torch.float32 or fac.precision != "full":
         return
     _COMPLEX64_COND_CHECKED = True
     limit = float(defaults.get("solver.precision.complex64_cond_warn"))
-    cond = estimate_condition(fac)
+    # A low-rank-updated system is judged by its base factorization; what the update
+    # adds to the rounding is reported separately (``LowRankUpdate.amplification``).
+    base = fac.fac if isinstance(fac, LowRankUpdate) else fac
+    try:
+        cond = estimate_condition(base)  # worst case over a batched factorization
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail the solve
+        _log.debug("solve_power_flow: complex64 conditioning check skipped (%s).", exc)
+        return
     if not math.isfinite(cond) or cond <= limit:
         return
     _log.warning(
@@ -561,8 +589,9 @@ class _BatchIterationState:
     convergence at the precision floor (recorded in
     :class:`_FloorReport`, reported by the diagnostics and named by one warning); a
     stall above it is a failure reported by its own likely cause. Everything here is
-    tensor work on ``[*b]`` masks under ``no_grad`` — one ``all()`` per iteration, the
-    same synchronisation the loop already had.
+    tensor work on ``[*b]`` masks under ``no_grad``. :meth:`step` costs one host
+    synchronisation per iteration (its ``all()``); the fixed-point loop around it adds
+    one more for the test that triggers the nodal confirmation.
     """
 
     def __init__(
@@ -629,10 +658,9 @@ class _BatchIterationState:
 
     def hold(self, v_new: Tensor, v_old: Tensor) -> Tensor:
         """``v_new`` where a scenario is still iterating, ``v_old`` where it finished."""
-        keep = self.finished_mask
-        if not bool(keep.any()):
-            return v_new
-        return torch.where(keep.unsqueeze(-1), v_old, v_new)
+        # Unconditional: asking whether any scenario is held would cost a host
+        # synchronisation per iteration to save one elementwise select.
+        return torch.where(self.finished_mask.unsqueeze(-1), v_old, v_new)
 
     def report(self) -> _FloorReport:
         """The precision-floor summary of this solve."""
@@ -1126,7 +1154,9 @@ class VoltageRegulationResult:
         Generator id -> solved TOTAL reactive injection ``[*batch]`` [var], in the
         generator convention (positive = injected). Recovered from the converged
         residual (``Q = Q_pinned - Im(conj(V) F_c)`` summed over the unit's phases);
-        autograd-free, like :class:`ConvergenceDiagnostics`.
+        DIFFERENTIABLE with respect to the same parameters as the voltages whenever
+        the solve tracks gradients, so a loss on a generator's reactive output can be
+        written on it directly.
     regulating:
         Generator id -> bool ``[*batch]``: ``True`` where the terminal holds its
         voltage setpoint, ``False`` where a reactive limit binds and the unit was
@@ -1136,12 +1166,24 @@ class VoltageRegulationResult:
         no limit bound or enforcement is off).
     enforce_q_limits:
         Whether reactive limits were enforced in this solve.
+    settled:
+        Bool ``[*batch]``: ``True`` where the switching reached an active set its own
+        limit check accepts. ``False`` marks a scenario in which the round cap
+        (``appliance.generator.q_limit_switch_rounds_max``) ended the switching first;
+        such a scenario is also reported as not converged
+        (:attr:`PowerFlowResult.converged_mask`), because the kept active set violates
+        a reactive limit or leaves a pinned unit on the wrong side of its setpoint.
+    unsettled_generators:
+        Ids of the generators that would still have changed their bus type when the
+        round cap ended the switching (empty when it settled).
     """
 
     q_var: dict[int, Tensor]
     regulating: dict[int, Tensor]
     switch_rounds: int
     enforce_q_limits: bool
+    settled: Optional[Tensor] = None
+    unsettled_generators: tuple[int, ...] = ()
 
 
 @dataclass
@@ -1951,7 +1993,9 @@ def solve_power_flow(
     tol:
         PRIMARY convergence tolerance, the largest nodal apparent-power mismatch in PER
         UNIT: ``max_f |V_f conj(F_f)| / s_base_va`` over the free (non-slack) rows, with
-        ``F = Y_eff V + I_device(V) - I_slack``. ``None`` (default) resolves the
+        ``F = Y_eff V + I_device(V) - I_slack``. It is a POWER tolerance, not a voltage
+        tolerance: at the default base of 1 MVA, ``tol = 1e-8`` accepts 0.01 VA of
+        mismatch per row whatever the size of the grid. ``None`` (default) resolves the
         documented default ``solver.convergence.mismatch_pu`` (1e-8 pu — pandapower's
         ``tolerance_mva`` default on a 1 MVA base, and the same order as
         power-grid-model's ``error_tolerance``), so an iteration count is comparable
@@ -1964,6 +2008,18 @@ def solve_power_flow(
         it independent of the voltage level and of the number of rows, so a multi-voltage
         grid, and an ensemble of grids solved as one block-diagonal system, are judged
         exactly like a single feeder.
+
+        RESULTING VOLTAGE ACCURACY. Neither criterion is the voltage error itself. A
+        mismatch of ``tol`` leaves a voltage error of about ``tol * s_base_va / S_k`` per
+        unit at a node of short-circuit power ``S_k``, and the fixed point's remaining
+        error is ``ρ / (1 - ρ)`` times its last update (``ρ`` the contraction factor,
+        roughly 0.1 to 0.5 on a distribution feeder); Newton's is far below its last
+        update. With the defaults the voltages are good to about 1e-8 pu, a few
+        microvolts at 230 V (measured on a heavily loaded LV feeder: 3.5e-9 pu for the
+        fixed point, 1e-16 pu for Newton). For a tighter answer, e.g. a comparison at
+        1e-12 pu, lower BOTH ``tol`` and ``tol_update_pu`` (or lower ``s_base_va`` for a
+        small grid) at ``complex128``; a request below what the working precision
+        resolves logs a warning and the floor governs.
     s_base_va:
         Apparent-power base of the per-unit mismatch; ``None`` resolves
         ``solver.convergence.s_base_va`` (1e6 VA, pandapower's default ``sn_mva``).
@@ -2718,6 +2774,8 @@ def solve_power_flow(
     # the converged configuration's. The decision between rounds reads converged values
     # and is off-tape by construction.
     switch_rounds = 0
+    unsettled_mask: Optional[Tensor] = None
+    unsettled_ids: tuple[int, ...] = ()
     while True:
         (
             v_star,
@@ -2753,13 +2811,27 @@ def solve_power_flow(
         if not changed:
             break
         if switch_rounds + 1 >= pv.max_rounds:
+            # The kept solve is a converged power flow at an active set its own limit
+            # check rejects, so the scenarios concerned are reported as not converged.
+            unsettled_mask, unsettled_ids = pv.unsettled(pv_next)
+            shown = ", ".join(str(i) for i in unsettled_ids[:20])
+            more = (
+                "" if len(unsettled_ids) <= 20 else f", … (+{len(unsettled_ids) - 20})"
+            )
             _log.warning(
                 "solve_power_flow: the reactive-limit (PV-to-PQ) switching did not "
-                "settle in %d rounds; keeping the last consistent solve (%s). Widen "
-                "the hysteresis (pgml.defaults appliance.generator."
-                "q_limit_hysteresis_pu) or check for a generator whose limit and "
-                "setpoint are incompatible.",
+                "settle in %d rounds: generator(s) [%s%s] would still change their bus "
+                "type in %d scenario(s). The last solve is kept (%s) and those "
+                "scenarios are reported as NOT converged, because that active set "
+                "violates a reactive limit or leaves a pinned unit on the wrong side "
+                "of its setpoint. Widen the hysteresis (pgml.defaults "
+                "appliance.generator.q_limit_hysteresis_pu), raise "
+                "appliance.generator.q_limit_switch_rounds_max, or check for a "
+                "generator whose limit and setpoint are incompatible.",
                 pv.max_rounds,
+                shown,
+                more,
+                int(unsettled_mask.sum()),
                 pv.describe_state(),
             )
             break
@@ -2802,6 +2874,21 @@ def solve_power_flow(
         floor_report,
     )
 
+    if unsettled_mask is not None:
+        converged = False
+        converged_mask = (
+            ~unsettled_mask
+            if converged_mask is None
+            else converged_mask & ~unsettled_mask.to(converged_mask.device)
+        )
+        if diagnostics is not None:
+            diagnostics.converged = False
+            diagnostics.likely_cause = (
+                "the reactive-limit (PV-to-PQ) switching did not settle within "
+                f"{pv.max_rounds} rounds; generator(s) {list(unsettled_ids)} would "
+                "still change their bus type"
+            )
+
     if floor_report.n_floor_governed:
         # A solve that stops at what its arithmetic resolves says so: the voltage is as
         # accurate as this working precision gets, and the number is the one to quote.
@@ -2825,6 +2912,7 @@ def solve_power_flow(
         v_out = _IFTPowerFlow.apply(v_star, real_res, n, rdt, cdt, *leaves)
     else:
         v_out = v_star
+    v_solved = v_out  # on the rows the solve ran on (reduced when buses are fused)
     if fusion is not None:
         # Report on the grid's own rows: every node-phase of a fused group carries the
         # group's (single) solved voltage. A gather, so the IFT gradient reaches the
@@ -2855,13 +2943,31 @@ def solve_power_flow(
 
     regulation = None
     if pv is not None:
-        with torch.no_grad():
-            regulation = VoltageRegulationResult(
-                q_var=pv.required_q(fc_nodal, v_star),
-                regulating=pv.regulating_mask(),
-                switch_rounds=switch_rounds,
-                enforce_q_limits=pv.enforce_q_limits,
+        if leaves:
+            # The solved reactive power is an output like any other: evaluate the nodal
+            # residual differentiably at the IFT-attached voltages, so a loss on a
+            # generator's Q reaches the parameters through both the residual's own
+            # dependence on them and the solved state.
+            y_eff_q, i_slack_q = build_system()
+            q_solved = pv.required_q(
+                residual_complex(v_solved, y_eff_q, i_slack_q), v_solved
             )
+        else:
+            with torch.no_grad():
+                q_solved = pv.required_q(fc_nodal, v_star)
+        if unsettled_mask is None:
+            q_any = next(iter(q_solved.values()))
+            settled = torch.ones(q_any.shape, dtype=torch.bool, device=q_any.device)
+        else:
+            settled = ~unsettled_mask
+        regulation = VoltageRegulationResult(
+            q_var=q_solved,
+            regulating=pv.regulating_mask(),
+            switch_rounds=switch_rounds,
+            enforce_q_limits=pv.enforce_q_limits,
+            settled=settled,
+            unsettled_generators=unsettled_ids,
+        )
         _log.info(
             "solve_power_flow: %d voltage-regulating terminal(s) solved (%s) in %d "
             "switching round(s); reactive limits %s.",
@@ -3029,7 +3135,7 @@ def _current_injection_forward(
         converged_mask = torch.zeros((), dtype=torch.bool, device=device)
         iterations = 0
         converged = False
-        update_history: list[float] = []
+        update_trace: list[Tensor] = []  # per-iteration maxima, read back once
         # Y_eff is the network admittance — constant across iterations (the const-P/ZIP
         # loads enter the RHS as I_device(V), never Y). Factor it ONCE and back-substitute
         # each iteration (the whole fixed point runs under no_grad; the IFT supplies grads).
@@ -3117,7 +3223,13 @@ def _current_injection_forward(
                 # residual before believing the identity above, so the reported mismatch
                 # and the convergence decision are the ones a nodal balance gives. The
                 # confirmation costs one matrix-vector product per SOLVE, not per
-                # iteration.
+                # iteration. It judges the scenarios still iterating; one that finished
+                # in an earlier iteration was accepted on the identity, which differs
+                # from the nodal residual by one back-substitution's rounding. That
+                # rounding is what the mismatch floor of the working precision already
+                # allows for, so the verdict is the same (measured: a batched solve and
+                # the per-scenario solves stop at bit-identical iterates at complex64
+                # and complex128, also on a low-rank switch sweep).
                 fc = _apply_y(y_eff0, v_new) + i_dev - i_slack0
                 fc_exact = True
                 mism_rows = ctest.mismatch_rows_pu(v_new, fc)
@@ -3128,12 +3240,13 @@ def _current_injection_forward(
             mismatch_max = mismatch_vec.max()
             update_max = update_vec.max()
             update_norm_v = torch.linalg.vector_norm(dv, dim=-1).max()
-            update_history.append(float(update_max))
+            update_trace.append(update_max)
             v = v_new
             iterations += 1
             if finished:
                 converged = bool(converged_mask.all())
                 break
+        update_history = torch.stack(update_trace).tolist() if update_trace else []
         if not fc_exact:
             # The loop ran out of iterations on the identity above; the residual the
             # diagnostics report is the nodal one.
@@ -4233,13 +4346,20 @@ def _node_voltage_bases(grid: Grid, index, rdt, device) -> Tensor:
     """Per-row line-to-neutral voltage base ``[N]`` (the per-unit denominator)."""
     from pgml.assembly._params import phase_voltage_magnitude
 
-    node_by_id = {int(nd.id): nd for nd in grid.nodes}
-    bases = [
-        phase_voltage_magnitude(
-            float(node_by_id[int(nid)].u_rated_v), len(node_by_id[int(nid)].phases)
+    # The base only scales the convergence test, the warm start and the diagnostics,
+    # none of which is on the differentiable path (the gradient of a rated voltage
+    # flows through the residual), so a tensor-valued rating is read detached. One
+    # value per NODE, shared by its rows.
+    base_by_node = {
+        int(nd.id): phase_voltage_magnitude(
+            float(nd.u_rated_v.detach())
+            if isinstance(nd.u_rated_v, Tensor)
+            else float(nd.u_rated_v),
+            len(nd.phases),
         )
-        for nid in index.node_ids.tolist()
-    ]
+        for nd in grid.nodes
+    }
+    bases = [base_by_node[int(nid)] for nid in index.node_ids.tolist()]
     return torch.tensor(bases, dtype=rdt, device=device)
 
 

@@ -199,12 +199,14 @@ appliance:
       units: "count"
       description: >
         Maximum number of PV-to-PQ switching rounds (each round is one full Newton
-        solve at a fixed active set). The loop normally settles in one to three
-        rounds; hitting the cap logs a WARNING naming the oscillating generators and
-        keeps the last solution. When limits are reached one unit after another a
-        feeder with n regulating units can need up to n rounds, so 12 covers the
-        distribution feeders the library targets and bounds the cost of a genuinely
-        oscillating case at 12 Newton solves.
+        solve at a fixed active set, the first solve included). The loop normally
+        settles in one to three rounds; hitting the cap logs a WARNING naming the
+        generators that would still change their bus type, keeps the last solution and
+        reports the scenarios concerned as not converged
+        (`PowerFlowResult.converged_mask`, `regulation.settled`). When limits are
+        reached one unit after another a feeder with n regulating units can need up to
+        n rounds, so 12 covers the distribution feeders the library targets and bounds
+        the cost of a genuinely oscillating case at 12 Newton solves.
     q_limit_hysteresis_pu:
       value: 1.0e-6
       units: "pu"
@@ -679,7 +681,11 @@ solver:
         `error_tolerance`, so iteration counts are comparable across the three tools.
         The achievable value is bounded below by the cancellation error of Y*V, which the
         solver estimates per row from the working precision and reports; a tolerance
-        below that floor logs a warning and the floor governs.
+        below that floor logs a warning and the floor governs. This is a power
+        tolerance, 0.01 VA per row on the default 1 MVA base, and not a voltage
+        tolerance: it leaves a voltage error of about mismatch_pu * s_base_va / S_k per
+        unit at a node of short-circuit power S_k. Together with update_pu the default
+        gives voltages good to about 1e-8 pu. Lower both for a tighter answer.
     update_pu:
       value: 1.0e-8
       units: "per unit of each node's line-to-neutral rated voltage"
@@ -690,6 +696,9 @@ solver:
         independent of the voltage level and of the number of rows, so a multi-voltage
         grid or an ensemble of grids solved in one system is judged exactly like a single
         feeder. power-grid-model uses the same quantity (max voltage deviation in pu).
+        The update is not the remaining error: the fixed point's error is rho / (1 - rho)
+        times its last update (rho the contraction factor, roughly 0.1 to 0.5 on a
+        distribution feeder), Newton's is far below its last update.
     s_base_va:
       value: 1.0e+6
       units: "VA"
@@ -701,8 +710,9 @@ solver:
       value: 4
       units: "iterations"
       description: >
-        How many consecutive iterations a scenario may fail to reduce its voltage update
-        by the factor `stall_decay` before the solver calls it STALLED. A stalled
+        How many consecutive iterations a scenario may fail to reduce either convergence
+        measure (voltage update or power mismatch) by the factor `stall_decay` before the
+        solver calls it STALLED. A stalled
         iteration has stopped making progress: at a single-precision working dtype the
         fixed point reaches an exact fixed point of the rounded map or a small limit
         cycle whose amplitude is set by the rounding of one back-substitution, and no
@@ -717,10 +727,10 @@ solver:
       value: 0.9
       units: "factor"
       description: >
-        The improvement of the per-row voltage update that counts as progress inside the
-        `stall_patience` window: an iteration is progress when the update drops below
-        `stall_decay` times the best update the scenario had reached when the window
-        opened. A value near 1 detects only a genuine plateau; a smaller value also calls
+        The improvement that counts as progress inside the `stall_patience` window: an
+        iteration is progress when the per-row voltage update or the power mismatch
+        drops below `stall_decay` times the best value of that measure the scenario had
+        reached. A value near 1 detects only a genuine plateau; a smaller value also calls
         a slowly contracting iteration stalled. With a patience of 4, the value 0.9
         calls any iteration that contracts by 0.97 or better per step progress
         (0.97^4 = 0.885), far slower than the roughly one decade per step of the
