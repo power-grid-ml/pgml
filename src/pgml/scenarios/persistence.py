@@ -480,6 +480,9 @@ def read_dataset(
         here; reconstruction is explicit because reading a dataset must not import a
         module chosen by the file's contents. The sidecar records
         ``config_module`` / ``config_class`` so the owner is identifiable.
+        A stored config that its class no longer accepts (the dataset predates a change
+        of that class) also reads back as a dict, with a warning, so the voltages and
+        samples stay readable.
 
     Returns
     -------
@@ -536,7 +539,19 @@ def read_dataset(
     if config_json is None:
         config = None
     elif cfg_cls is not None:
-        config = cfg_cls.model_validate_json(config_json)
+        try:
+            config = cfg_cls.model_validate_json(config_json)
+        except ValueError as exc:
+            # The class changed since the dataset was written (a removed field value, a
+            # tightened constraint). The data is still valid, so hand the config back
+            # as stored instead of refusing the whole dataset.
+            _log.warning(
+                "The stored %s of %s no longer validates (%s); returning it as a dict.",
+                meta["config_type"],
+                path,
+                str(exc).splitlines()[0],
+            )
+            config = json.loads(config_json)
     else:
         config = json.loads(config_json)
     converged = meta.get("converged")

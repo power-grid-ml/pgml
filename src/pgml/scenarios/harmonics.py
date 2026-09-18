@@ -15,10 +15,7 @@ are plain torch and feed the solver, so no ``.item()`` / ``.detach()`` is involv
 
 from __future__ import annotations
 
-import math
-
 import torch
-from torch import Tensor
 
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
@@ -28,25 +25,10 @@ from .config import (
     Selector,
     SpectrumSweepConfig,
 )
+from .random import ar1_noise
 from .sampler import SampledScenarios
 
 _F64 = torch.float64
-
-
-def _ar1(shape: tuple, rho: float, gen: torch.Generator) -> Tensor:
-    """Standard-normal stationary AR(1) noise along the LAST axis.
-
-    ``e_t = rho*e_{t-1} + sqrt(1-rho^2)*eta_t`` with standard-normal ``eta``, so the
-    drift is marginally standard normal whatever ``rho`` is and the caller scales it into
-    the quantity it perturbs.
-    """
-    eta = torch.randn(shape, generator=gen, dtype=_F64)
-    e = torch.empty_like(eta)
-    e[..., 0] = eta[..., 0]
-    c = math.sqrt(1.0 - rho * rho)
-    for step in range(1, shape[-1]):
-        e[..., step] = rho * e[..., step - 1] + c * eta[..., step]
-    return e
 
 
 def build_background_sources(
@@ -90,7 +72,7 @@ def build_background_sources(
             ) from None
 
     if config.drift_std > 0.0 or config.drift_phase_deg > 0.0:
-        drift = _ar1(shape, config.drift_rho, gen)
+        drift = ar1_noise(shape, config.drift_rho, gen)
     else:
         drift = torch.zeros(shape, dtype=_F64)
     spectrum = {}

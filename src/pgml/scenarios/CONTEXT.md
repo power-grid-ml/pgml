@@ -101,19 +101,15 @@ leading scenario dim (verified `batched == loop-of-individual`).
     `h_phase` sets the phase (deg, `mode="absolute"`). Per-device injection is seeded from
     the stored `StaticSpectrum` so unspecified orders survive. Harmonic fields reject
     `correlation` and per-phase `symmetry`.
-  - LOAD-DEPENDENT EMISSION fields `field="h_floor"|"h_floor_phase"|"h_slope"` (+ `orders`,
-    `mode="absolute"` only; `h_floor` drawn from `[0, 1]`): drawn per (device, order) and
-    folded into the device's realized (mag, phase) AFTER every spec has written, against the
-    loading `lam` the device's OWN power draw realised (drawn active power over nameplate;
-    per-phase draws average their phase ratios; `1` when no power spec varies the device;
-    floored at `emission.LOADING_FLOOR` = 0.05). `h_floor` = the affine law's
-    load-independent share `|A_h|/(|A_h|+|B_h|)` — magnitude × `|c(lam)|`, phase +
-    `arg c(lam)` with `c = affine_emission_correction` (the rated point is unchanged, `0` =
-    proportional bit-for-bit); `h_floor_phase` = `arg A_h − arg B_h` [deg]; `h_slope` adds
-    `s_h·(lam−1)` [deg] (`phase_slope_shift`). `ParameterSpec.is_emission_law`;
-    `EMISSION_LAW_FIELDS` / `HARMONIC_FIELDS` name the field sets. Realized columns:
-    `"<spec>_mag"` / `"<spec>_phase"` are post-law; `"<spec>_loading"` `[B, n_dev]` is the
-    loading the law read.
+  - FREE PARAMETER `field="h_param"` (+ `orders`, `mode="absolute"` only): drawn per
+    (device, order) in the same cube and with the same `per` options as `h_mag` /
+    `h_phase`, recorded as `samples[<spec>]` `[B, n_eff, n_ord]` and written NOWHERE. The
+    hook for an emission model defined outside this package (for instance a device whose
+    spectrum depends on its loading): the generator declares the model's per-device
+    quantities here so they share the cube, the seed and the persisted record, and applies
+    them to the sampled `harmonic_injection` in its own `sample(grid)`. Several `h_param`
+    specs may cover the same device and order (they are exempt from the overlapping-writer
+    check). `ParameterSpec.is_free_parameter`; `HARMONIC_FIELDS` names the field set.
   - `per="fixed"` (harmonic fields only): ONE draw per matched component held across every
     scenario of the batch (a device's signature), from a stream seeded by `config.seed` and
     the spec name (`zlib.crc32`), consuming NO cube column — every other draw is unchanged.
@@ -182,10 +178,7 @@ leading scenario dim (verified `batched == loop-of-individual`).
   generator with its own step axis uses; returns `[]` when no order is configured, so a
   caller can pass the result through unconditionally.
 
-### The emission law and the standards tables
-- `pgml.scenarios.emission` — the ONE emission-law definition:
-  `affine_emission_correction(lam, floor, delta_deg) -> complex` (`z(lam)/(lam·z(1))`,
-  `z = floor·e^{jδ} + (1−floor)·lam`), `phase_slope_shift(slope_deg, lam)`, `LOADING_FLOOR`.
+### The standards tables
 - EN 50160 per-order VOLTAGE limits: `en50160_limits() -> {order: max_pu}`,
   `en50160_limit(order)` (loads `pgml/data/standards/en50160.yaml`; `PGML_EN50160` env
   override). These are supply-voltage compatibility levels, NOT an appliance emission model.
@@ -261,7 +254,8 @@ leading scenario dim (verified `batched == loop-of-individual`).
   layout-agnostic; `samples` merges the per-scenario columns and the shared records.
   `config_types` adds `{class_name: class}` entries over `SCENARIO_CONFIG_TYPES` for a config
   class defined elsewhere; reconstruction is explicit because reading a dataset must not
-  import a module the file chose. Unknown type → the raw config dict.
+  import a module the file chose. Unknown type → the raw config dict; a stored config its
+  class no longer accepts → the raw dict plus a warning (the data stays readable).
   `failed_scenarios` identifies rows whose stored voltages are best-effort iterates, not
   solutions — a consumer building training data must drop (or explicitly keep) them.
 - `SCENARIO_CONFIG_TYPES` — the config classes this package reconstructs by name.

@@ -19,7 +19,7 @@ authors:
     given-names: "Markus"
     affiliation: "Cologne Institute for Renewable Energy (CIRE), TH Köln"
     orcid: "https://orcid.org/0009-0000-7673-4519"
-version: 0.5.0
+version: 0.5.1
 date-released: "2026-08-18"   # TODO: set to the actual release date
 license: MPL-2.0
 repository-code: "https://github.com/power-grid-ml/pgml"

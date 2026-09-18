@@ -47,11 +47,6 @@ from .config import (
     SpectrumSweepConfig,
     Uniform,
 )
-from .emission import (
-    LOADING_FLOOR,
-    affine_emission_correction,
-    phase_slope_shift,
-)
 from .en50160 import en50160_limit, en50160_limits, en50160_provenance
 from .harmonics import build_background_sources, spectrum_sweep
 from .iec61000_3_2 import (
@@ -82,12 +77,12 @@ from .sampler import (
     unit_samples,
 )
 
-#: Constructs that used to live here and now belong to the package that calibrates them.
-#: Looked up by the module ``__getattr__`` below so an old import fails with the new home
-#: instead of a bare ``ImportError``.
-_MOVED = {
-    name: "pgl.data.scenarios"
-    for name in (
+#: Study recipes that used to live here: device populations, calibrated emission ranges,
+#: load-profile models and the load-dependent emission law. Looked up by the module
+#: ``__getattr__`` below so an old import fails with an explanation instead of a bare
+#: ``ImportError``.
+_RECIPE_NAMES = frozenset(
+    (
         "CoherentSpectrumConfig",
         "LoadProfileConfig",
         "CompositionConfig",
@@ -102,6 +97,9 @@ _MOVED = {
         "EMISSION_FLOOR",
         "EMISSION_FLOOR_PHASE_DEG",
         "EMISSION_PHASE_SLOPE_DEG",
+        "LOADING_FLOOR",
+        "affine_emission_correction",
+        "phase_slope_shift",
         "composition_silent_orders",
         "default_device_classes",
         "default_compositions",
@@ -113,34 +111,43 @@ _MOVED = {
         "load_profile_factors",
         "apply_load_profiles",
     )
-}
-_MOVED.update(
-    dict.fromkeys(
-        (
-            "StorageDispatchResult",
-            "integrate_soc",
-            "dispatch_storage",
-            "storage_operating_point",
-        ),
-        "pgml.dispatch",
-    )
+)
+#: Names that moved to another pgml module.
+_MOVED = dict.fromkeys(
+    (
+        "StorageDispatchResult",
+        "integrate_soc",
+        "dispatch_storage",
+        "storage_operating_point",
+    ),
+    "pgml.dispatch",
 )
 
 
 def __getattr__(name: str):
-    """Point an import of a relocated name at its new home.
+    """Explain an import of a name this package no longer defines.
 
-    Device populations, calibrated emission ranges and load-profile models are modeling
-    choices of a study rather than properties of the engine, so they live with the study.
+    Device populations, calibrated emission ranges, load-profile models and the
+    load-dependent emission law are modeling choices of a study rather than properties of
+    the engine, so the generator that calibrates them defines them and hands the result
+    to this package as a :class:`ScenarioSpec` or through :func:`batch_from_values`.
     Storage dispatch moved to :mod:`pgml.dispatch`, where a reader looks for device time
     coupling.
     """
     if name in _MOVED:
         raise ImportError(
             f"{name!r} is no longer part of pgml.scenarios; it now lives in "
-            f"{_MOVED[name]}. pgml.scenarios keeps the batch contract (ScenarioConfig, "
-            "CartesianConfig, SpectrumSweepConfig, BackgroundHarmonicConfig, "
-            "batch_from_values, run_scenarios, write_dataset) and the standards tables."
+            f"{_MOVED[name]}."
+        )
+    if name in _RECIPE_NAMES:
+        raise ImportError(
+            f"{name!r} is no longer part of pgml.scenarios. It belongs to a study's "
+            "scenario recipe (a device population, a calibrated emission model or a "
+            "load profile), which pgml does not define. pgml.scenarios keeps the batch "
+            "contract (ScenarioConfig, CartesianConfig, SpectrumSweepConfig, "
+            "BackgroundHarmonicConfig, batch_from_values, run_scenarios, write_dataset) "
+            "and the standards tables; a recipe plugs in as a ScenarioSpec, an object "
+            "with sample(grid)."
         )
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -187,9 +194,6 @@ __all__ = [
     "CartesianAxis",
     "CartesianConfig",
     "BackgroundHarmonicConfig",
-    "LOADING_FLOOR",
-    "affine_emission_correction",
-    "phase_slope_shift",
     "ar1_noise",
     "Perturbation",
     "SpectrumSweepConfig",

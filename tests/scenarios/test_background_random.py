@@ -137,3 +137,21 @@ def test_an_empty_background_builds_no_source(grid3):
         )
         == []
     )
+
+
+def test_background_drift_is_the_public_ar1_process():
+    """The drift is ``ar1_noise`` on the caller's generator, not a second recurrence."""
+    from pgml.grids import synthetic_feeder
+    from pgml.scenarios import ar1_noise
+
+    grid = synthetic_feeder(4)
+    bg = BackgroundHarmonicConfig(
+        magnitude_pu={5: 0.01}, drift_std=0.3, drift_rho=0.9, drift_phase_deg=10.0
+    )
+    sources = build_background_sources(
+        grid, bg, (3, 6), torch.Generator().manual_seed(11)
+    )
+    drift = ar1_noise((3, 6), 0.9, torch.Generator().manual_seed(11))
+    mag, phase = sources[0].spectrum[5]
+    assert torch.equal(mag, 0.01 * torch.exp(0.3 * drift))
+    assert torch.equal(phase, 0.0 + 10.0 * drift)
