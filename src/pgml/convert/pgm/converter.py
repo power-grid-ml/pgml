@@ -99,7 +99,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pgml.convert._common import (
     IdCounter,
@@ -129,6 +129,7 @@ from pgml.schemas.grid_schema import (
     Switch,
     Transformer,
     TransformerZeroSeq,
+    VoltageRegulation,
     WindingConnection,
 )
 
@@ -148,6 +149,12 @@ _WINDING_MAP: dict[int, WindingConnection] = {
     3: WindingConnection.ZIGZAG,
     4: WindingConnection.ZIGZAG_GROUNDED,
 }
+#: pgm ``LoadGenType`` -> schema load model
+_PGM_LOAD_MODEL: dict[int, LoadModel] = {
+    0: LoadModel.CONST_POWER,
+    1: LoadModel.CONST_IMPEDANCE,
+    2: LoadModel.CONST_CURRENT,
+}
 _INT8_NA = -128  # pgm's "not available" sentinel for int8 fields (no int NaN)
 
 _PROVENANCE = Provenance(
@@ -165,7 +172,7 @@ def to_grid(
     input_data: dict[str, Any],
     *,
     base_frequency_hz: float = 50.0,
-    load_model: LoadModel = LoadModel.CONST_IMPEDANCE,
+    load_model: LoadModel | Literal["source"] = LoadModel.CONST_IMPEDANCE,
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     harmonic_line_model: Optional[str] = None,
     return_report: bool = False,
@@ -182,9 +189,12 @@ def to_grid(
         System fundamental frequency in Hz.  pgm does not store f0 in the
         structured arrays; the caller must pass it explicitly (default 50 Hz).
     load_model:
-        The ``LoadModel`` assigned to every converted load.  Use
-        ``LoadModel.CONST_IMPEDANCE`` (the default) to match a const-Z linear
-        reference solve.
+        The ``LoadModel`` assigned to every converted load, or ``"source"`` to give
+        each load the model its own ``type`` names (``const_power``,
+        ``const_impedance``, ``const_current``), which is what power-grid-model
+        solves. The default ``LoadModel.CONST_IMPEDANCE`` matches a linear
+        const-impedance reference solve; loads whose ``type`` differs from an
+        applied model are named in the conversion report.
     phase_mode:
         :class:`~pgml.convert._common.PhaseMode`. ``SINGLE_PHASE_EQUIV`` (default)
         reproduces the positive-sequence single-phase-equivalent output exactly;
@@ -241,6 +251,7 @@ def to_grid(
         "sym_load": {},
         "asym_load": {},
         "sym_gen": {},
+        "voltage_regulator": {},
         "source": {},
         "load_types": {},
         "slack_v_complex": None,
@@ -518,10 +529,13 @@ def to_grid(
         if pgm_node not in id_map["node"]:
             continue
 
+        # power-grid-model fills an unspecified optional field with NaN and applies
+        # its documented default in the solve: angle 0, sk 1e10 VA, rx_ratio 0.1.
         u_ref_pu = float(row["u_ref"])  # per-unit
-        u_ref_angle_rad = float(row["u_ref_angle"])  # radians
-        sk_va = float(row["sk"])  # short-circuit VA
-        rx_ratio = float(row["rx_ratio"])  # R/X
+        u_ref_angle_rad = _opt_field(row, "u_ref_angle") or 0.0  # radians
+        sk_va = _opt_field(row, "sk") or 1.0e10  # short-circuit VA
+        rx_ratio = _opt_field(row, "rx_ratio")  # R/X
+        rx_ratio = 0.1 if rx_ratio is None else rx_ratio
 
         u_rated_v = u_rated_by_pgm.get(pgm_node, 12660.0)
         u_ref_v = u_ref_pu * u_rated_v  # magnitude (V, LL)
@@ -594,7 +608,7 @@ def to_grid(
                 mode=phase_mode,
                 p_total_w=p_w,
                 q_total_var=q_var,
-                load_model=load_model,
+                load_model=_load_model_of(load_model, pgm_type),
             )
         )
 
@@ -639,7 +653,7 @@ def to_grid(
                     mode=phase_mode,
                     p_total_w=p_total,
                     q_total_var=q_total,
-                    load_model=load_model,
+                    load_model=_load_model_of(load_model, pgm_type),
                 )
             )
         else:
@@ -654,7 +668,7 @@ def to_grid(
                     connection=WindingConnection.WYE,
                     p_per_phase_w=p_phase,
                     q_per_phase_var=q_phase,
-                    load_model=load_model,
+                    load_model=_load_model_of(load_model, pgm_type),
                 )
             )
 
@@ -663,12 +677,75 @@ def to_grid(
     # ------------------------------------------------------------------ #
     # pgm sym_gen is GENERATION-POSITIVE (p_specified > 0 injects), matching
     # the Generator nameplate convention; the assembly applies the sign.
+    # A `voltage_regulator` turns its regulated generator into a PV terminal: the node
+    # voltage is held at `u_ref` (per unit of the node's rated voltage) and the
+    # reactive power is free inside `q_min`/`q_max`, where power-grid-model pins it
+    # and reports `limit_violated`. That is the schema's `VoltageRegulation`.
+    regulators: dict[int, Any] = {}
+    unmapped_regulators: list[int] = []
+    gen_ids = {int(r["id"]) for r in input_data.get("sym_gen", [])}
+    for reg in input_data.get("voltage_regulator", []):
+        if int(reg["status"]) == 0:
+            continue
+        target = int(reg["regulated_object"])
+        if target in gen_ids:
+            regulators[target] = reg
+        else:
+            unmapped_regulators.append(int(reg["id"]))
+    if unmapped_regulators:
+        _logger.warning(
+            "power-grid-model voltage_regulator(s) %s regulate an object that is not "
+            "a converted sym_gen; the object stays a plain P/Q injection and its node "
+            "voltage is NOT held.",
+            unmapped_regulators,
+        )
+        report.dropped(
+            "voltage_regulator",
+            "These voltage regulators act on an object other than a converted "
+            "sym_gen; the object is imported as a plain P/Q injection.",
+            ids=unmapped_regulators,
+            affects=("fundamental", "unbalanced"),
+            announced=True,
+        )
+
+    regulated_at_node: dict[int, dict] = {}
     for row in input_data.get("sym_gen", []):
         if int(row["status"]) == 0:
             continue
         pgm_id = int(row["id"])
         pgm_node = int(row["node"])
         if pgm_node not in id_map["node"]:
+            continue
+        reg = regulators.get(pgm_id)
+        if reg is not None:
+            # One node holds one voltage setpoint, so regulated generators sharing a
+            # node merge into one PV terminal (active powers and limits add).
+            q_min = _opt_field(reg, "q_min")
+            q_max = _opt_field(reg, "q_max")
+            entry = regulated_at_node.get(pgm_node)
+            if entry is None:
+                regulated_at_node[pgm_node] = {
+                    "gens": [pgm_id],
+                    "regulators": [int(reg["id"])],
+                    "p_w": float(row["p_specified"]),
+                    "u_ref": float(reg["u_ref"]),
+                    "q_min": q_min,
+                    "q_max": q_max,
+                }
+            else:
+                entry["gens"].append(pgm_id)
+                entry["regulators"].append(int(reg["id"]))
+                entry["p_w"] += float(row["p_specified"])
+                entry["q_min"] = (
+                    None
+                    if entry["q_min"] is None or q_min is None
+                    else entry["q_min"] + q_min
+                )
+                entry["q_max"] = (
+                    None
+                    if entry["q_max"] is None or q_max is None
+                    else entry["q_max"] + q_max
+                )
             continue
         gen_id = _id.next()
         id_map["sym_gen"][pgm_id] = gen_id
@@ -681,6 +758,77 @@ def to_grid(
                 p_total_w=float(row["p_specified"]),
                 q_total_var=float(row["q_specified"]),
             )
+        )
+
+    for pgm_node, entry in regulated_at_node.items():
+        gen_id = _id.next()
+        for pgm_id in entry["gens"]:
+            id_map["sym_gen"][pgm_id] = gen_id
+        for reg_id in entry["regulators"]:
+            id_map["voltage_regulator"][reg_id] = gen_id
+        appliances.append(
+            build_generator(
+                id=gen_id,
+                name=f"sym_gen_{entry['gens'][0]}",
+                node=id_map["node"][pgm_node],
+                mode=phase_mode,
+                p_total_w=entry["p_w"],
+                q_total_var=0.0,
+                voltage_regulation=VoltageRegulation(
+                    v_set_pu=entry["u_ref"],
+                    q_min_var=entry["q_min"],
+                    q_max_var=entry["q_max"],
+                ),
+            )
+        )
+        if len(entry["gens"]) > 1:
+            report.approximated(
+                "generator.merged_per_node",
+                "Voltage-regulated generators sharing a node are merged into one "
+                "PV terminal; active powers and reactive limits add. Node voltages "
+                "are unchanged, the reactive split between the units is not kept.",
+                element_type="sym_gen",
+                ids=entry["gens"],
+                affects=(),
+            )
+    if regulated_at_node:
+        _logger.info(
+            "power-grid-model -> Grid: %d voltage_regulator(s) converted as %d PV "
+            "terminal(s) (voltage_regulation at u_ref, reactive power free within "
+            "q_min/q_max).",
+            sum(len(e["regulators"]) for e in regulated_at_node.values()),
+            len(regulated_at_node),
+        )
+
+    typed_gens = [
+        int(r["id"])
+        for r in input_data.get("sym_gen", [])
+        if int(r["status"]) != 0 and int(r["type"]) != 0
+    ]
+    if typed_gens:
+        report.approximated(
+            "generator.type_ignored",
+            "These generators carry a const-impedance or const-current type in "
+            "power-grid-model; pgml imports every generator as constant power.",
+            element_type="sym_gen",
+            ids=typed_gens,
+            affects=("fundamental", "unbalanced"),
+        )
+    overridden = [
+        pgm_id
+        for pgm_id, pgm_type in id_map["load_types"].items()
+        if _load_model_of(load_model, pgm_type) is not _PGM_LOAD_MODEL.get(pgm_type)
+    ]
+    if overridden:
+        report.approximated(
+            "load.model_override",
+            f"These loads are imported as {LoadModel(load_model).value} although "
+            "their power-grid-model type names another voltage dependence; "
+            "power-grid-model's own solve uses the type.",
+            element_type="sym_load",
+            ids=overridden,
+            affects=("fundamental", "unbalanced"),
+            values={"applied": LoadModel(load_model).value},
         )
 
     # Components the converter does NOT read: fail loud, never silently wrong.
@@ -732,6 +880,18 @@ def to_grid(
     if return_report:
         return grid, id_map, report
     return grid, id_map
+
+
+def _load_model_of(load_model: Any, pgm_type: int) -> LoadModel:
+    """The ``LoadModel`` of one load: its own pgm type under ``"source"``."""
+    if load_model == "source":
+        try:
+            return _PGM_LOAD_MODEL[pgm_type]
+        except KeyError:
+            raise ConversionError(
+                f"unknown power-grid-model LoadGenType {pgm_type}"
+            ) from None
+    return LoadModel(load_model)
 
 
 def _field(row: Any, name: str, default: float) -> float:
