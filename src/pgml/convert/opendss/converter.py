@@ -208,9 +208,14 @@ def to_grid(
         ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
         logged once. OpenDSS recomputes its own line constants at every harmonic and
         exports only the fundamental matrices, so the model that reproduces that
-        frequency behaviour has to be chosen here. An OpenDSS matrix already contains
-        the earth-return resistance in its mutual entries at ``f0``, so such a grid is
-        the case for ``Line.earth_return.r0_includes_earth_return = True``.
+        frequency behaviour has to be chosen here. A matrix OpenDSS computed from a
+        ``LineGeometry`` contains the earth-return resistance in its mutual entries
+        at ``f0``; a matrix built from a ``LineCode``'s ``R1``/``R0`` contains whatever
+        the author put into ``R0``. The converter cannot tell the two apart and leaves
+        ``Line.earth_return.r0_includes_earth_return`` unset, so the modeling default
+        (``false``) applies; set it per line for real zero-sequence data. Under the
+        ``sequence_aware`` model the setting only matters for a line whose
+        ``R0 - 3*Re(f0)`` is below ``R1``.
 
     der_harmonics:
         Import native Generator/PVSystem/Storage harmonic impedance and voltage

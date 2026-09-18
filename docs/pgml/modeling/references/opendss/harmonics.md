@@ -78,8 +78,15 @@ pgml implements all three models: `load_shunt="opendss"`, the default, reproduci
 The per-element admittance agrees with a live OpenDSS `Load`'s own `YPrim` to 4.7e-16 relative
 for a one-phase wye, a three-phase wye and a three-phase delta load, at `%SeriesRL` 0, 50 and
 100 and with the motor branch. Two conventions differ from a naive reading and are worth
-repeating: the voltage is the rated one, and the susceptance of the parallel branch is divided
-by `h` whatever the sign of `Q`, because OpenDSS models it as R parallel L. pgml derives `P`
+repeating: the voltage is the rated one, and OpenDSS divides the susceptance of the parallel
+branch by `h` and multiplies the series reactance by `h` whatever the sign of `Q`, because it
+models both branches as R-L. For a leading load (`Q < 0`) that is a negative inductance. pgml's
+shipped `appliance.harmonic_shunt.reactive_element: sign_aware` instead scales a leading
+load as the capacitance it is, `h·B` in the parallel branch and `X/h` in the series branch,
+which is also what the const-Z fold of the fundamental assembly does. The two laws are
+identical for `Q ≥ 0`. For a 10 kW, −5 kvar load at 400 V and order 5 a live OpenDSS `YPrim`
+reads 0.0366 + j0.0166 S, which `reactive_element: inductive` (selected by the `opendss`
+preset) reproduces to rounding, while `sign_aware` gives 0.0699 + j0.0820 S. pgml derives `P`
 and `Q` from the power the device actually draws at the converged fundamental solution rather
 than from the specified power, which is identical for a constant-power device and 6e-5 to
 1e-4 pu of nominal apart for a const-Z, const-I or ZIP one.

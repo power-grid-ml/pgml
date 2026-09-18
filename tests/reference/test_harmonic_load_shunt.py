@@ -53,7 +53,9 @@ RDT = torch.float64
 F0 = 50.0
 
 
-def _element_admittance(p_w, q_var, v_rated, orders, s, *, x_pu=0.0, xr=1.0, kva=0.0):
+def _element_admittance(
+    p_w, q_var, v_rated, orders, s, *, x_pu=0.0, xr=1.0, kva=0.0, law=None
+):
     """The module's element admittance for ONE element, as a list of complex numbers."""
     y = harmonic_shunt_element_admittance(
         torch.tensor([[complex(p_w, q_var)]], dtype=CDT),
@@ -64,6 +66,7 @@ def _element_admittance(p_w, q_var, v_rated, orders, s, *, x_pu=0.0, xr=1.0, kva
         motor_xr=torch.tensor([[xr]], dtype=RDT),
         motor_s_base=torch.tensor([[kva]], dtype=RDT),
         cdtype=CDT,
+        reactive_element=law,
     )
     return [complex(v) for v in y.reshape(-1)]
 
@@ -93,6 +96,61 @@ def test_all_series_limit_is_one_over_r_plus_jhx():
     for h, y in zip((3, 5, 25), _element_admittance(p, q, v, [3, 5, 25], 1.0)):
         expect = 1.0 / complex(z_ser.real, h * z_ser.imag)
         assert abs(y - expect) <= 1e-14 * abs(expect)
+
+
+def test_leading_load_is_a_capacitance_in_both_branches():
+    """``Q < 0``: parallel ``G + j h B``, series ``1/(R + jX/h)`` (an R-C element)."""
+    p, q, v = 10_000.0, -5_000.0, 400.0
+    y_eq = complex(p, -q) / v**2
+    assert y_eq.imag > 0.0  # capacitive susceptance
+    orders = (1, 3, 5, 25)
+    for h, y in zip(orders, _element_admittance(p, q, v, orders, 0.0)):
+        expect = complex(y_eq.real, y_eq.imag * h)
+        assert abs(y - expect) <= 1e-15 * abs(expect)
+    z_ser = 1.0 / y_eq
+    assert z_ser.imag < 0.0  # capacitive reactance
+    for h, y in zip(orders, _element_admittance(p, q, v, orders, 1.0)):
+        expect = 1.0 / complex(z_ser.real, z_ser.imag / h)
+        assert abs(y - expect) <= 1e-14 * abs(expect)
+
+
+def test_leading_load_matches_the_const_z_fold_law():
+    """The all-parallel shunt and the const-Z fold scale a leading load identically."""
+    from pgml.assembly.ybus import _const_z_frequency_scaling
+
+    p, q, v = 10_000.0, -5_000.0, 400.0
+    orders = [1.0, 5.0, 13.0]
+    y_elem = torch.tensor([[complex(p, -q) / v**2]], dtype=CDT)
+    fold = _const_z_frequency_scaling(
+        y_elem, torch.tensor(orders, dtype=RDT) * F0, F0, CDT
+    ).reshape(-1)
+    shunt = _element_admittance(p, q, v, orders, 0.0)
+    for a, b in zip(shunt, fold):
+        assert abs(a - complex(b)) <= 1e-15 * abs(a)
+
+
+def test_inductive_law_reproduces_opendss_for_a_leading_load():
+    """``inductive``: ``B/h`` and ``h X`` whatever the sign, the OpenDSS preset's law.
+
+    The expected h = 5 value is a live OpenDSS ``CktElement.YPrim`` of
+    ``Load kW=10 kvar=-5 kV=0.4 phases=1`` (``%SeriesRL=50``).
+    """
+    from pgml import defaults
+
+    p, q, v = 10_000.0, -5_000.0, 400.0
+    dss_h5 = complex(0.036637931034482756, 0.016594827586206895)
+    (y,) = _element_admittance(p, q, v, [5], 0.5, law="inductive")
+    assert abs(y - dss_h5) <= 1e-14 * abs(dss_h5)
+    with defaults.use_preset("opendss"):
+        (y_preset,) = _element_admittance(p, q, v, [5], 0.5)
+    assert y_preset == y
+    (y_default,) = _element_admittance(p, q, v, [5], 0.5)
+    assert abs(y_default - complex(0.06992574257425743, 0.08199257425742575)) < 1e-15
+    # Lagging loads are unaffected by the choice.
+    lag = _element_admittance(p, -q, v, [5], 0.5, law="inductive")
+    assert lag == _element_admittance(p, -q, v, [5], 0.5, law="sign_aware")
+    with pytest.raises(InputError):
+        _element_admittance(p, q, v, [5], 0.5, law="capacitor")
 
 
 def test_motor_branch_replaces_the_derived_series_impedance():

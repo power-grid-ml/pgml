@@ -112,6 +112,29 @@ scalar tap, and the two paths agree to machine precision. The scalar path honour
 representable there. The phase-domain stamp rejects a shift that is not a multiple of 30°,
 because no constant three-phase winding topology realises one.
 
+### Harmonic orders on the single-phase equivalent
+
+The angle `shift_deg` is the positive-sequence shift. In a balanced three-phase system the
+harmonic orders `3k+1` (4, 7, 10, 13, ...) rotate as a positive sequence, the orders `3k+2`
+(2, 5, 8, 11, ...) as a negative sequence, and the orders `3k` as a zero sequence. A
+negative-sequence quantity crosses the same windings with the opposite angle, so the scalar
+tap is `t = n·e^{−j·shift_deg}` at the orders `3k+2`. The phase-domain stamp has this property
+by construction, because its incidence is real, and the two paths agree to machine precision
+at every positive- and negative-sequence order. The sign matters as soon as harmonic sources
+sit on both sides of a Dy or Yd unit: the 5th harmonic of a converter behind a Dyn11
+transformer arrives on the HV side 60° away from where a same-sign shift would put it, which
+decides how it adds to an MV-connected source. Interharmonics have no sequence assignment and
+keep the positive-sequence angle. With `shift_deg = 0`, as in a genuinely single-phase
+network, the rule has no effect.
+
+The triplen orders are the limit of the single-phase equivalent. As zero-sequence
+quantities they would be blocked by a delta, zigzag or ungrounded-wye winding, and they would
+travel on the lines' `Z0` rather than `Z1`. The equivalent carries neither a winding topology
+nor zero-sequence line data, and a grid does not say whether it is an equivalent of a
+three-phase system or a single-phase network, so triplen orders pass through the
+positive-sequence pi unchanged. Assembly logs one warning when that happens on a pairing
+other than YNyn. Solve triplen orders on a three-phase grid.
+
 ## Leakage referral
 
 `series_resistance_ohm` and `series_inductance_h` are referred to the TO-side coil. With
@@ -141,6 +164,11 @@ because a delta coil's own base is `3·u_LL²/S`.
   (pandapower `si0_hv_partial`), and a neutral earthing impedance `3·Z_N` (pandapower
   `xn_ohm`/`rn_ohm`, OpenDSS `Rneut`/`Xneut`, which the OpenDSS converter refuses).
 - Two-winding units only. No three-winding units and no regulators.
+- The magnetizing branch is a shunt from each phase terminal to ground, outside the winding
+  incidence. On a delta side that is a zero-sequence path to ground the real winding does
+  not have; at a magnetizing current of 0.5 % its admittance is 200 times smaller than the
+  rated admittance and has no practical effect. The referral to the to side uses the rated
+  voltage ratio without the off-nominal tap.
 - The magnetizing branch defaults to `split`: half on each terminal, referred to
   each terminal's voltage base. `from_terminal` places it entirely on the from/HV
   terminal; `to_terminal` places it on the to/LV terminal, as OpenDSS does for the last

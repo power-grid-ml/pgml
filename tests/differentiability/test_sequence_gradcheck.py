@@ -227,6 +227,29 @@ def test_gradcheck_zero_sequence_earth_coefficients():
     assert torch.autograd.gradcheck(fn, args, eps=1e-9, atol=1e-6)
 
 
+def test_gradcheck_zero_sequence_phase_conductor_skin_share():
+    """``R0(h)`` with the skin rise on the phase conductor's share, both branches.
+
+    ``R_phase = min(R1, R0_conductor)``: the first row is the ordinary case
+    (``R1 < R0``), the second one has ``R0 < R1`` so the minimum takes the other arm.
+    """
+    freqs = torch.tensor([50.0, 350.0, 1250.0], dtype=RDT)
+
+    def fn(r0, x0, r1):
+        return (
+            zero_sequence_harmonic_z(r0, x0, 50.0, freqs, phase_resistance=r1)
+            .abs()
+            .sum()
+        )
+
+    args = (
+        torch.tensor([0.832e-3, 0.15e-3], dtype=RDT, requires_grad=True),
+        torch.tensor([0.24e-3, 0.24e-3], dtype=RDT, requires_grad=True),
+        torch.tensor([0.208e-3, 0.208e-3], dtype=RDT, requires_grad=True),
+    )
+    assert torch.autograd.gradcheck(fn, args, eps=1e-10, atol=1e-5)
+
+
 def test_gradcheck_zero_sequence_r0_includes_earth_return():
     """The ``r0_includes_earth_return`` split keeps R0 differentiable."""
     freqs = torch.tensor([50.0, 350.0], dtype=RDT)

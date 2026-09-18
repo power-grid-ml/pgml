@@ -99,6 +99,10 @@ non-positive `motor_x_harm_pu`/`motor_xr_harm`) instead of silently picking a br
 `TransformerZeroSeq`'s documented reference side is corrected from "HV" to "the to-side
 (LV) winding coil" — the side the positive-sequence leakage fields use and the side
 assembly consumes (a docstring / unit-metadata change; no field, name or value changes).
+The field was not consumed while it was documented as HV-referred, so no result changed,
+but a persisted grid that carries HV-referred values is read as to-side-coil values
+without a warning and is then too large by the squared turns ratio (times 3 for a delta
+to-side coil). The class docstring gives the conversion.
 
 - `grid_schema.py`  — input: Grid, Node, Branch (Line/Transformer/Switch/
   ShuntReactor/GenericBranch), Appliance (Source/Load/Generator/Storage/ShuntAppliance),
