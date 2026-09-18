@@ -196,6 +196,23 @@ def _transformer_differences(report, f: GridFeatures, tool: str) -> None:
             ),
         )
     elif tool == PGM:
+        tapped = sorted(set(ids) & set(f.tapped_transformers))
+        if tapped:
+            report.model_difference(
+                "transformer.magnetizing_tap_reflection",
+                "power-grid-model reflects the from-side half of the magnetizing "
+                "branch through the off-nominal tap ratio; pgml's 'split' refers "
+                "each half through the rated ratio only. The two differ by the tap "
+                "deviation squared on that half, visible when the from terminal is "
+                "not held by an ideal slack (measured 5e-7 pu at tap 1.025, 0.5 % "
+                "magnetizing current, behind a source impedance).",
+                element_type="Transformer",
+                ids=tapped,
+                affects=("fundamental", "unbalanced"),
+                source_model="from-side half through the tap",
+                pgml_model="from-side half through the rated ratio",
+                match=None,
+            )
         report.model_difference(
             "transformer.magnetizing_placement",
             "power-grid-model splits the magnetizing branch in halves onto both "

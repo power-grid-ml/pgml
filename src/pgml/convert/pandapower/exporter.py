@@ -44,14 +44,18 @@ from pgml.convert._export import (
     harmonic_fields,
     has_unbalanced_power,
     is_coupled,
+    new_export_report,
     phase_totals,
     positive_sequence,
+    record_reduction,
     scalar,
     shunt_is_unbalanced,
     shunt_positive_sequence,
     validate_balanced_grid_phases,
 )
 
+from pgml.convert._model_differences import PANDAPOWER, finalize_report
+from pgml.convert._report import ConversionReport
 from pgml.schemas.grid_schema import (
     GenericBranch,
     Generator,
@@ -86,6 +90,13 @@ class PandapowerExport:
     ext_grid_of_appliance: dict[int, int]
     #: notes naming every modelling reduction the export had to apply
     reductions: list[str] = field(default_factory=list)
+    #: the same reductions by key with element ids, plus the default-model
+    #: differences between pgml and pandapower that apply to this grid
+    report: ConversionReport = field(
+        default_factory=lambda: new_export_report(PANDAPOWER)
+    )
+    #: pgml appliance id -> ``net.gen`` index of a voltage-regulating generator
+    gen_of_appliance: dict[int, int] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +197,8 @@ def from_grid(
             raise UnsupportedGridError(f"appliance kind {type(ap).__name__}")
     if n_sources == 0:
         raise UnsupportedGridError("grid has no Source -- no slack for pandapower")
+    out.report.options.update(allow_approximation=allow_approximation)
+    finalize_report(out.report, grid)
     return out
 
 
@@ -195,20 +208,45 @@ def _record_appliance_scope(
     """Validate fundamental reductions and record ignored harmonic data."""
     ignored = harmonic_fields(appliance)
     if ignored:
-        out.reductions.append(
+        record_reduction(
+            out,
+            "dropped.harmonic_fields",
             f"appliance {appliance.id}: harmonic-only fields ignored by fundamental "
-            f"export ({', '.join(ignored)})"
+            f"export ({', '.join(ignored)})",
+            element_type=type(appliance).__name__,
+            element_id=appliance.id,
         )
 
     approximations = []
     if has_unbalanced_power(appliance):
-        approximations.append("unbalanced per-phase P/Q folded to a balanced total")
+        approximations.append(
+            (
+                "approx.unbalanced_power",
+                "unbalanced per-phase P/Q folded to a balanced total",
+            )
+        )
     if isinstance(appliance, ShuntAppliance) and shunt_is_unbalanced(appliance):
-        approximations.append("unbalanced shunt elements averaged to positive sequence")
+        approximations.append(
+            (
+                "approx.unbalanced_shunt",
+                "unbalanced shunt elements averaged to positive sequence",
+            )
+        )
     if getattr(appliance, "control", None) is not None:
-        approximations.append("inverter control replaced by nameplate P/Q")
-    if getattr(appliance, "voltage_regulation", None) is not None:
-        approximations.append("voltage regulation replaced by nameplate P/Q")
+        approximations.append(
+            ("approx.inverter_control", "inverter control replaced by nameplate P/Q")
+        )
+    regulation = getattr(appliance, "voltage_regulation", None)
+    if (
+        regulation is not None
+        and getattr(regulation.regulated, "value", regulation.regulated) == "per_phase"
+    ):
+        approximations.append(
+            (
+                "approx.voltage_regulation",
+                "per-phase voltage regulation replaced by nameplate P/Q",
+            )
+        )
     if isinstance(appliance, Source):
         u_ref = np.asarray(detached(appliance.u_ref_v), dtype=float).reshape(-1)
         angles = np.asarray(detached(appliance.u_angle_deg), dtype=float).reshape(-1)
@@ -220,20 +258,33 @@ def _record_appliance_scope(
         if (u_ref.size > 1 and not np.allclose(u_ref, u_ref[0])) or (
             angles.size > 1 and not np.allclose((relative_angle + 180.0) % 360.0, 180.0)
         ):
-            approximations.append("unbalanced source reduced to phase A")
+            approximations.append(
+                ("approx.unbalanced_source", "unbalanced source reduced to phase A")
+            )
         source_impedance = abs(positive_sequence(appliance.resistance_ohm)) + abs(
             positive_sequence(appliance.inductance_h)
         )
         if source_impedance != 0.0:
-            approximations.append("source impedance omitted from the ideal ext_grid")
+            approximations.append(
+                (
+                    "approx.source_impedance_omitted",
+                    "source impedance omitted from the ideal ext_grid",
+                )
+            )
     if approximations and not allow_approximation:
         raise UnsupportedGridError(
-            f"appliance {appliance.id}: {'; '.join(approximations)}; pass "
+            f"appliance {appliance.id}: "
+            f"{'; '.join(text for _, text in approximations)}; pass "
             "allow_approximation=True to enable and record this reduction"
         )
-    out.reductions.extend(
-        f"appliance {appliance.id}: {description}" for description in approximations
-    )
+    for key, description in approximations:
+        record_reduction(
+            out,
+            key,
+            f"appliance {appliance.id}: {description}",
+            element_type=type(appliance).__name__,
+            element_id=appliance.id,
+        )
 
 
 def _record_branch_scope(
@@ -253,9 +304,13 @@ def _record_branch_scope(
         if name in getattr(branch, "model_fields_set", set()) and value is not None:
             harmonic.append(name)
     if harmonic:
-        out.reductions.append(
+        record_reduction(
+            out,
+            "dropped.harmonic_fields",
             f"branch {branch.id}: harmonic-only fields ignored by fundamental export "
-            f"({', '.join(harmonic)})"
+            f"({', '.join(harmonic)})",
+            element_type=type(branch).__name__,
+            element_id=branch.id,
         )
     if isinstance(branch, Switch):
         dropped = []
@@ -276,7 +331,13 @@ def _record_branch_scope(
                 "record these terms"
             )
         if dropped:
-            out.reductions.append(f"switch {branch.id}: dropped {', '.join(dropped)}")
+            record_reduction(
+                out,
+                "approx.switch.dropped_terms",
+                f"switch {branch.id}: dropped {', '.join(dropped)}",
+                element_type="Switch",
+                element_id=branch.id,
+            )
 
 
 def _export_line(net, out: PandapowerExport, br: Line, w0: float) -> None:
@@ -291,8 +352,12 @@ def _export_line(net, out: PandapowerExport, br: Line, w0: float) -> None:
         raise UnsupportedGridError(f"line {br.id} carries an unresolved type_ref")
     for field_name in ("series_resistance_ohm_per_m", "series_inductance_h_per_m"):
         if is_coupled(getattr(br, field_name)):
-            out.reductions.append(
-                f"line {br.id}: mutual coupling reduced to positive sequence"
+            record_reduction(
+                out,
+                "approx.line.mutual_coupling",
+                f"line {br.id}: mutual coupling reduced to positive sequence",
+                element_type="Line",
+                element_id=br.id,
             )
             break
     for name in (
@@ -333,9 +398,13 @@ def _export_transformer(net, out: PandapowerExport, br: Transformer, w0: float) 
             f"transformer {br.id} carries an unresolved type_ref"
         )
     if br.zero_sequence is not None:
-        out.reductions.append(
+        record_reduction(
+            out,
+            "approx.transformer.zero_sequence",
             f"transformer {br.id}: zero-sequence override dropped "
-            "(positive-sequence export)"
+            "(positive-sequence export)",
+            element_type="Transformer",
+            element_id=br.id,
         )
     if br.from_grounding is not None or br.to_grounding is not None:
         raise UnsupportedGridError(
@@ -442,9 +511,14 @@ def _export_switch(net, out: PandapowerExport, br: Switch) -> None:
     )
     out.switch_of_branch[br.id] = int(idx)
     if z_ohm > 0.0:
-        out.reductions.append(
+        record_reduction(
+            out,
+            "approx.switch.impedance_split",
             f"switch {br.id}: z_ohm={z_ohm:g} -- pandapower splits it across R "
-            "and X at switch_rx_ratio, pgml keeps it purely resistive"
+            "and X at switch_rx_ratio, pgml keeps it purely resistive",
+            element_type="Switch",
+            element_id=br.id,
+            values={"z_ohm": z_ohm},
         )
 
 
@@ -560,13 +634,47 @@ def _export_load(net, out: PandapowerExport, ap: Load) -> None:
     )
     out.load_of_appliance[ap.id] = int(idx)
     if ap.connection == WindingConnection.DELTA:
-        out.reductions.append(f"load {ap.id}: delta connection folded to a bus total")
+        record_reduction(
+            out,
+            "approx.load.delta_folded",
+            f"load {ap.id}: delta connection folded to a bus total",
+            element_type="Load",
+            element_id=ap.id,
+        )
 
 
 def _export_generator(net, out: PandapowerExport, ap) -> None:
     import pandapower as pp
 
     p, q = phase_totals(ap)
+    regulation = getattr(ap, "voltage_regulation", None)
+    if (
+        regulation is not None
+        and getattr(regulation.regulated, "value", regulation.regulated) != "per_phase"
+    ):
+        # A PV terminal is pandapower's `gen`: vm_pu shares the base of v_set_pu
+        # (the bus rated voltage) and the reactive limits are injection-positive.
+        nan = float("nan")
+        idx = pp.create_gen(
+            net,
+            bus=out.bus_of_node[ap.node],
+            p_mw=p / 1e6,
+            vm_pu=scalar(regulation.v_set_pu),
+            min_q_mvar=(
+                nan
+                if regulation.q_min_var is None
+                else scalar(regulation.q_min_var) / 1e6
+            ),
+            max_q_mvar=(
+                nan
+                if regulation.q_max_var is None
+                else scalar(regulation.q_max_var) / 1e6
+            ),
+            name=ap.name or f"gen{ap.id}",
+            in_service=bool(ap.in_service),
+        )
+        out.gen_of_appliance[ap.id] = int(idx)
+        return
     idx = pp.create_sgen(
         net,
         bus=out.bus_of_node[ap.node],

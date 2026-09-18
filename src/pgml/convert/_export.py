@@ -6,11 +6,155 @@ from typing import Any
 
 import numpy as np
 
+from pgml.convert._report import ConversionReport, ReportCategory
 from pgml.errors import ModelingError
 
 
 class UnsupportedGridError(ModelingError):
     """A grid uses an element or option that an exporter cannot represent."""
+
+
+#: Reductions every balanced fundamental exporter can meet: key -> (category,
+#: sentence, result classes it can change). An empty tuple marks a stand-in value
+#: whose effect stays below the solver tolerance.
+REDUCTIONS: dict[str, tuple[ReportCategory, str, tuple]] = {
+    "dropped.harmonic_fields": (
+        ReportCategory.DROPPED,
+        "Harmonic-only fields (spectra, harmonic device and line models) are not "
+        "exported; the target case describes the fundamental only.",
+        ("harmonic",),
+    ),
+    "approx.unbalanced_power": (
+        ReportCategory.APPROXIMATED,
+        "Unbalanced per-phase P/Q is folded to a balanced total.",
+        ("unbalanced",),
+    ),
+    "approx.unbalanced_shunt": (
+        ReportCategory.APPROXIMATED,
+        "Unequal shunt elements are averaged to their positive-sequence value.",
+        ("unbalanced",),
+    ),
+    "approx.unbalanced_source": (
+        ReportCategory.APPROXIMATED,
+        "An unbalanced source voltage is reduced to its phase-A value.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.inverter_control": (
+        ReportCategory.APPROXIMATED,
+        "An inverter control law is replaced by the nameplate P/Q; the exported "
+        "injection no longer responds to voltage.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.voltage_regulation": (
+        ReportCategory.APPROXIMATED,
+        "A voltage-regulating generator is replaced by its nameplate P/Q.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.source_impedance_omitted": (
+        ReportCategory.APPROXIMATED,
+        "The source impedance is omitted; the target holds the source bus as an "
+        "ideal slack. It equals a pgml solve with slack='ideal'.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.line.mutual_coupling": (
+        ReportCategory.APPROXIMATED,
+        "Coupled phase matrices are reduced to the positive sequence "
+        "(Z1 = Z_self - Z_mutual); exact for balanced operation only.",
+        ("unbalanced",),
+    ),
+    "approx.switch.dropped_terms": (
+        ReportCategory.APPROXIMATED,
+        "Switch series inductance or shunt terms have no counterpart and are dropped.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.switch.impedance_split": (
+        ReportCategory.APPROXIMATED,
+        "pandapower splits a switch z_ohm across R and X at switch_rx_ratio; pgml "
+        "keeps the switch purely resistive.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.switch.ideal_as_nanoohm": (
+        ReportCategory.APPROXIMATED,
+        "An ideal (zero-impedance) switch is exported as a 1 nOhm line, because "
+        "power-grid-model rejects a zero-impedance line.",
+        (),
+    ),
+    "approx.transformer.zero_sequence": (
+        ReportCategory.APPROXIMATED,
+        "A transformer zero-sequence override is dropped by the positive-sequence "
+        "export.",
+        ("unbalanced",),
+    ),
+    "approx.transformer.no_load_current_clipped": (
+        ReportCategory.APPROXIMATED,
+        "A no-load current above power-grid-model's limit of 0.9 pu is clipped.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.transformer.ideal_leakage": (
+        ReportCategory.APPROXIMATED,
+        "An ideal (zero) leakage impedance is exported as uk = 1e-9 pu.",
+        (),
+    ),
+    "approx.line.conductance_without_capacitance": (
+        ReportCategory.APPROXIMATED,
+        "A line shunt conductance without capacitance is dropped, because "
+        "power-grid-model stores the conductance as a loss tangent of C.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.source.ideal_as_finite": (
+        ReportCategory.APPROXIMATED,
+        "An ideal voltage source is exported with a very large finite "
+        "short-circuit power, because power-grid-model has no ideal boundary.",
+        (),
+    ),
+    "approx.load.zip_as_constant_power": (
+        ReportCategory.APPROXIMATED,
+        "A ZIP load is exported as constant power; power-grid-model has no ZIP model.",
+        ("fundamental", "unbalanced"),
+    ),
+    "approx.load.delta_folded": (
+        ReportCategory.APPROXIMATED,
+        "A delta-connected load is folded to a bus total.",
+        ("unbalanced",),
+    ),
+}
+
+
+def record_reduction(
+    out: Any,
+    key: str,
+    text: str,
+    *,
+    element_type: str,
+    element_id: Any,
+    values: dict | None = None,
+) -> None:
+    """Record one reduction on an export result.
+
+    ``text`` goes to the ``reductions`` list of strings, and the element is added to
+    the ``key`` entry of ``out.report`` (:data:`REDUCTIONS` holds the sentence).
+    """
+    out.reductions.append(text)
+    category, sentence, affects = REDUCTIONS[key]
+    out.report.note(
+        key,
+        category,
+        sentence,
+        element_id,
+        element_type=element_type,
+        affects=affects,
+        values=values,
+    )
+
+
+def new_export_report(tool: str, **options: Any) -> ConversionReport:
+    """An empty export report for a balanced fundamental exporter."""
+    return ConversionReport(
+        tool=tool,
+        direction="export",
+        options=options,
+        comparable=("fundamental", "unbalanced"),
+    )
 
 
 def scalar(value: Any) -> float:
@@ -186,7 +330,10 @@ def validate_balanced_grid_phases(grid: Any) -> None:
 
 
 __all__ = [
+    "REDUCTIONS",
     "UnsupportedGridError",
+    "new_export_report",
+    "record_reduction",
     "check_matrix_shape",
     "detached",
     "harmonic_fields",

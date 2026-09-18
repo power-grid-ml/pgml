@@ -155,7 +155,9 @@ class ReportEntry:
         Identifiers of the affected elements on the side that was read, at most
         :data:`MAX_LISTED_IDS` of them.
     affects:
-        Which result classes the entry can change, a subset of :data:`AFFECTS`.
+        Which result classes the entry can change, a subset of :data:`AFFECTS`. Empty
+        for a stand-in value whose effect stays below the solver tolerance (a 1 nOhm
+        ideal switch, a 1e14 VA ideal source).
     source_model, pgml_model:
         For a model difference, the two models in a few words.
     match:
@@ -324,6 +326,32 @@ class ConversionReport:
             self._announced.add(len(self.entries) - 1)
         return entry
 
+    def note(
+        self,
+        key: str,
+        category: ReportCategory,
+        message: str,
+        element_id: Any,
+        **kwargs: Any,
+    ) -> ReportEntry:
+        """Record one more element under ``key``, merging into an existing entry.
+
+        The first call creates the entry with ``message``; later calls for the same
+        key add ``element_id`` and raise the count, so a converter that meets the
+        same situation on many elements reports it once.
+        """
+        from dataclasses import replace
+
+        for position, entry in enumerate(self.entries):
+            if entry.key == key:
+                ids = entry.ids
+                if len(ids) < MAX_LISTED_IDS:
+                    ids = ids + (_plain(element_id),)
+                merged = replace(entry, count=entry.count + 1, ids=ids)
+                self.entries[position] = merged
+                return merged
+        return self.add(key, category, message, ids=[element_id], **kwargs)
+
     def dropped(self, kind: str, message: str, **kwargs: Any) -> ReportEntry:
         """Record source elements of ``kind`` that are omitted."""
         kwargs.setdefault("element_type", kind)
@@ -389,7 +417,7 @@ class ConversionReport:
         return [
             e
             for e in self.entries
-            if not e.matched and (affects is None or affects in e.affects)
+            if not e.matched and e.affects and (affects is None or affects in e.affects)
         ]
 
     def is_exact(self, affects: Optional[str] = None) -> bool:
@@ -467,8 +495,8 @@ class ConversionReport:
     def log(self, logger: Optional[logging.Logger] = None) -> None:
         """Send the report to ``logger`` (default: the ``pgml`` logger).
 
-        Dropped and approximated entries are logged at WARNING, model differences at
-        INFO. One closing line at WARNING names the counts whenever an open entry
+        Dropped and approximated entries are logged at WARNING, model differences and
+        stand-ins below the solver tolerance at INFO. One closing line at WARNING names the counts whenever an open entry
         touches a result class the tool computes, so a session with default logging
         still learns that the converted model is not the source model; otherwise the
         closing line is INFO.
@@ -480,6 +508,7 @@ class ConversionReport:
             level = (
                 logging.INFO
                 if entry.category is ReportCategory.MODEL_DIFFERENCE
+                or not entry.affects
                 else logging.WARNING
             )
             logger.log(level, "%s", entry.describe())
