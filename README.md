@@ -49,21 +49,31 @@ GPU input staging, compilation and correctness checks are outside the timed regi
 GPU timings include synchronization. This measures forward fundamental power flow,
 without a backward pass. Performance depends on grid size and batch size.
 
-## Conformance: understand the differences
+## Conformance: the solvers agree
 
-![Twelve grids with the largest worst-node voltage-magnitude deviations from the reference engines](assets/readme/conformance_worst.svg)
+<img src="assets/readme/solverconf_factor_dtype_vs_tools.svg" alt="Largest voltage difference between pgml and pandapower, power-grid-model and OpenDSS per grid, in double, mixed and single precision" width="560">
 
-The evaluation covers **2,384 grids**. This plot shows the twelve largest
-worst-node voltage-magnitude differences among valid comparisons against
-pandapower, power-grid-model and OpenDSS. Failed or unsupported reference solves
-are excluded from accuracy statistics.
+Each grid is first proven to be the identical model in pgml and in the reference
+tool, then solved by both. A marker is one grid. It shows the largest difference of
+any complex node voltage between pgml and the tool's own double-precision solve, for
+pgml in double, mixed and single precision. Blue circles compare with pandapower,
+green squares with power-grid-model, red triangles with OpenDSS.
 
-The largest pandapower difference is **1.36e-4 pu**. Controlled comparisons trace
-these cases to transformer magnetizing equivalents: pgml and power-grid-model use
-a pi equivalent, while pandapower defaults to a T equivalent. On the worst case,
-selecting pandapower's pi model reduces the difference to **1.93e-11 pu**.
-The reference engines therefore also disagree with one another when their models
-differ. Matching the physical assumptions is part of a fair solver comparison.
+In double precision pgml agrees with pandapower and power-grid-model at the 1e-14 pu
+level in the median and within 2e-12 pu on every grid. The OpenDSS markers sit at a
+constant 3.4e-10 pu, which is OpenDSS's ten-digit degree constant. With that constant
+emulated in pgml the difference drops to 4e-13 pu. Mixed precision changes nothing.
+Single precision costs about 5e-6 pu in the median and up to 8e-5 pu.
+
+Differences between libraries therefore come from the model, not from the solver.
+[assets/CONFORMANCE.md](assets/CONFORMANCE.md) explains both checks, shows what each
+modelling difference costs, and describes the conversion report that lists what an
+importer dropped, approximated or modelled differently.
+
+<sub>pgml 0.5.1 (0eb4c7c), complex128 reference at tolerance 1e-12, 1269 solves on 19 grids.
+pandapower 3.5.4 with numba, power-grid-model 1.13.142, OpenDSSDirect.py 0.9.4, torch 2.13.0,
+Python 3.13.15. Workstation with six CPU threads and an NVIDIA RTX A2000 12 GB,
+2026-09-18.</sub>
 
 ## Accurate digital twin building
 
