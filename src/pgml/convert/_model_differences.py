@@ -167,7 +167,9 @@ def add_model_differences(
     _transformer_differences(report, f, tool)
     _source_differences(report, f, tool)
     _generator_differences(report, f, tool)
-    _line_differences(report, f, tool)
+    _line_differences(
+        report, f, tool, [br for br in grid.branches if isinstance(br, Line)]
+    )
     _harmonic_device_differences(report, f, tool)
     return report
 
@@ -336,13 +338,21 @@ def _generator_differences(report, f: GridFeatures, tool: str) -> None:
 # --------------------------------------------------------------------------- #
 # Lines
 # --------------------------------------------------------------------------- #
-def _line_differences(report, f: GridFeatures, tool: str) -> None:
+def _line_differences(report, f: GridFeatures, tool: str, grid_lines=()) -> None:
     if not f.lines:
         return
     lumped = {m: ids for m, ids in f.line_models.items() if m != "geometry"}
     if tool not in _HARMONIC_TOOLS:
         return
-    seq = lumped.get("sequence_aware", [])
+    # a line with an explicit reactance law states it; only lines on the
+    # modeling default can differ from OpenDSS through that default
+    explicit = {
+        br.id
+        for br in grid_lines
+        if getattr(br, "earth_return", None) is not None
+        and br.earth_return.x0_frequency is not None
+    }
+    seq = [i for i in lumped.get("sequence_aware", []) if i not in explicit]
     if seq:
         law = _default("line.earth_return.x0_frequency")
         guard = bool(_default("line.earth_return.x0_nonnegative"))

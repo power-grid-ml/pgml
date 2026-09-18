@@ -111,7 +111,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pgml.assembly._params import phase_voltage_magnitude
 from pgml.convert._common import (
@@ -134,6 +134,7 @@ from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
     ComplexTap,
     ConsumerType,
+    EarthReturnModel,
     Grid,
     HarmonicComponent,
     HarmonicImpedance,
@@ -186,6 +187,7 @@ def to_grid(
     phase_mode: PhaseMode = PhaseMode.SINGLE_PHASE_EQUIV,
     harmonic_line_model: Optional[str] = None,
     der_harmonics: bool = True,
+    earth_return: Literal["pgml", "opendss"] = "pgml",
     return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
@@ -211,9 +213,23 @@ def to_grid(
         ``line.harmonic_model.three_phase`` / ``.single_phase``; the applied model is
         logged once. OpenDSS recomputes its own line constants at every harmonic and
         exports only the fundamental matrices, so the model that reproduces that
-        frequency behaviour has to be chosen here. An OpenDSS matrix already contains
-        the earth-return resistance in its mutual entries at ``f0``, so such a grid is
-        the case for ``Line.earth_return.r0_includes_earth_return = True``.
+        frequency behaviour has to be chosen here.
+    earth_return:
+        What the sequence-aware lines use for the Carson earth-return correction
+        that OpenDSS applies to every lumped line at harmonic orders
+        (``R += Rg*(h-1)`` and ``X = h*(X - 0.5*KXg*ln h)`` on every matrix entry,
+        with ``KXg = Xg / ln(658.5*sqrt(rho/f0))``). ``"pgml"`` (default) leaves the
+        lines on the modeling defaults, whose coefficients are the physical metric
+        Carson values, and reports each line's ``Rg``/``Xg``/``rho`` as a model
+        difference with numbers. ``"opendss"`` writes every line's own values into
+        :class:`~pgml.schemas.grid_schema.EarthReturnModel` (resistance and reactance
+        coefficients per metre and hertz, the unguarded sub-linear reactance law when
+        ``Xg > 0``, and ``r0_includes_earth_return=True`` because the stored matrix
+        already carries the earth return at ``f0``), so pgml reproduces OpenDSS's
+        own frequency law for those lines. OpenDSS's defaults ``Rg=0.01805`` and
+        ``Xg=0.155081`` are the 60 Hz Carson values in ohms per 1000 ft and are
+        reinterpreted in each line's ``units``, so on a metric line they are 3.28
+        times smaller than the physical value.
 
     der_harmonics:
         Import native Generator/PVSystem/Storage harmonic impedance and voltage
@@ -304,6 +320,12 @@ def to_grid(
             "der_harmonics": der_harmonics,
         },
     )
+
+    if earth_return not in ("pgml", "opendss"):
+        raise ConversionError(
+            f"earth_return must be 'pgml' or 'opendss', got {earth_return!r}"
+        )
+    line_earth: dict[int, tuple[float, float, float]] = {}
 
     id_map: dict[str, Any] = {
         "bus": {},
@@ -418,6 +440,13 @@ def to_grid(
         r_mat_flat = list(dss.Lines.RMatrix())  # Ohm/length-unit
         x_mat_flat = list(dss.Lines.XMatrix())  # Ohm/length-unit
         c_mat_flat = list(dss.Lines.CMatrix())  # nF/length-unit
+
+        # Carson earth-return parameters, Ohm per length unit at the base frequency
+        line_earth[line_id] = (
+            float(dss.Lines.Rg()) / meters_per_unit,
+            float(dss.Lines.Xg()) / meters_per_unit,
+            float(dss.Lines.Rho()),
+        )
 
         # Convert to total Ohm / H / F
         r_total = [v * length_in_unit for v in r_mat_flat]  # Ohm
@@ -1435,6 +1464,7 @@ def to_grid(
     resolve_converted_line_models(
         grid, _logger, tool="OpenDSS", requested=harmonic_line_model
     )
+    _apply_line_earth_return(grid, line_earth, f0_hz, earth_return, report)
     finalize_report(report, grid, _logger)
     if return_report:
         return grid, id_map, report
@@ -1444,6 +1474,129 @@ def to_grid(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _apply_line_earth_return(
+    grid: Grid,
+    line_earth: dict[int, tuple[float, float, float]],
+    f0_hz: float,
+    earth_return: str,
+    report,
+) -> None:
+    """Carry each line's ``Rg``/``Xg``/``rho`` into the grid or into the report.
+
+    OpenDSS corrects a lumped line at order ``h`` as ``R += Rg*(h-1)`` and
+    ``X = h*(X - 0.5*KXg*ln h)`` on every matrix entry, ``KXg = Xg /
+    ln(658.5*sqrt(rho/f0))``. Added to every entry, the term is a pure zero-sequence
+    one, ``R0 += 3*Rg*(h-1)`` and ``X0 = h*(X0 - 1.5*KXg*ln h)``, which is pgml's
+    sequence-aware earth-return law with ``resistance_coeff = Rg/f0`` and
+    ``reactance_coeff = KXg/f0`` per metre. Only a line resolved to the
+    ``sequence_aware`` model has a zero sequence to carry it; the other line models
+    are reported instead.
+    """
+    from pgml import defaults as _d
+
+    from pgml.convert._report import ModelMatch
+
+    lines = {ln.id: ln for ln in grid.branches if ln.id in line_earth}
+    if not lines:
+        return
+    rc_default = float(_d.get("line.earth_return.resistance_coeff_ohm_per_m_per_hz"))
+    kx_default = float(_d.get("line.earth_return.reactance_coeff_ohm_per_m_per_hz"))
+    written: list[int] = []
+    other_model: list[int] = []
+    values_rg: list[float] = []
+    values_xg: list[float] = []
+    values_rho: list[float] = []
+    for line_id, ln in lines.items():
+        rg_m, xg_m, rho = line_earth[line_id]
+        values_rg.append(rg_m)
+        values_xg.append(xg_m)
+        values_rho.append(rho)
+        if getattr(ln, "harmonic_line_model", None) != "sequence_aware":
+            other_model.append(line_id)
+            continue
+        if earth_return != "opendss":
+            continue
+        log_term = math.log(658.5 * math.sqrt(rho / f0_hz))
+        ln.earth_return = EarthReturnModel(
+            resistance_coeff_ohm_per_m_per_hz=rg_m / f0_hz,
+            reactance_coeff_ohm_per_m_per_hz=xg_m / (f0_hz * log_term),
+            x0_frequency="carson_sublinear" if xg_m > 0.0 else "linear",
+            x0_nonnegative=False,
+            r0_includes_earth_return=True,
+        )
+        written.append(line_id)
+    values = {
+        "rg_ohm_per_m_min": min(values_rg),
+        "rg_ohm_per_m_max": max(values_rg),
+        "xg_ohm_per_m_min": min(values_xg),
+        "xg_ohm_per_m_max": max(values_xg),
+        "rho_ohm_m_min": min(values_rho),
+        "rho_ohm_m_max": max(values_rho),
+        "pgml_rg_ohm_per_m": rc_default * f0_hz,
+        "pgml_kxg_ohm_per_m": kx_default * f0_hz,
+        "base_frequency_hz": f0_hz,
+    }
+    seq_ids = [i for i in lines if i not in other_model]
+    if seq_ids:
+        if written:
+            message = (
+                "Each line's OpenDSS Rg/Xg/rho was written into its earth_return, so "
+                "pgml applies OpenDSS's own earth-return law and coefficients to "
+                "these lines."
+            )
+        else:
+            message = (
+                "OpenDSS applies each line's Rg/Xg/rho earth-return correction at "
+                "harmonic orders; pgml uses the physical metric Carson coefficients "
+                "from line.earth_return.* instead (see values). OpenDSS's default "
+                "Rg/Xg are 60 Hz values per 1000 ft reinterpreted in the line's "
+                "units."
+            )
+        report.model_difference(
+            "line.earth_return_parameters",
+            message,
+            element_type="line",
+            ids=seq_ids,
+            affects=("harmonic",),
+            source_model="per-line Rg, Xg, rho at the line's base frequency",
+            pgml_model="line.earth_return.* coefficients unless earth_return='opendss'",
+            match=ModelMatch(
+                arguments={"to_grid.earth_return": "opendss"},
+                reference="Rg=0 Xg=0 on the OpenDSS lines removes the term there",
+            ),
+            matched=bool(written),
+            values=values,
+        )
+        if written:
+            _logger.info(
+                "OpenDSS -> Grid: earth-return Rg/Xg/rho of %d line(s) written into "
+                "Line.earth_return (OpenDSS's own frequency law).",
+                len(written),
+            )
+    if other_model:
+        report.model_difference(
+            "line.earth_return_unrepresented",
+            "OpenDSS applies its Rg/Xg earth-return correction to these lines at "
+            "harmonic orders, but their pgml line model carries no zero-sequence "
+            "earth term (a single-phase equivalent or a positive-sequence / naive "
+            "model), so the correction is absent in pgml.",
+            element_type="line",
+            ids=other_model,
+            affects=("harmonic",),
+            source_model="Rg/Xg correction on every matrix entry",
+            pgml_model="no earth-return term on this line model",
+            match=ModelMatch(
+                arguments={
+                    "to_grid.phase_mode": "THREE_PHASE",
+                    "to_grid.harmonic_line_model": "sequence_aware",
+                    "to_grid.earth_return": "opendss",
+                },
+                reference="Rg=0 Xg=0 on the OpenDSS lines removes the term there",
+            ),
+            values=values,
+        )
 
 
 def _phase_num_to_enum(phase_num: int) -> Phase:
