@@ -446,6 +446,18 @@ NOT baked into Y; split as implemented below.
     `s_rated_va` capability circle via `smooth_clamp`, evaluated in per unit of the
     rating so the transition half-width is `smoothing * s_rated_va` (`smoothing` is a
     fraction of the rating; >0 = C¹ clamp used by forward and backward alike, 0 = hard).
+    DEVICE TOTALS: the control's power quantities (`s_rated_va`, `q_var`, `p_ref_w`)
+    describe the whole device like `p_nom_w`; `resolve_injection_power` gives each of the
+    `n_elem = v_pu.shape[-1]` elements (phases for WYE, phase pairs for a three-phase
+    DELTA) an equal `1 / n_elem` share, so the rated Volt-VAr base, the capability circle
+    and the clamp width are per element `s_rated_va / n_elem` and a balanced three-phase
+    device injects the same totals as its single-phase equivalent. The split is equal
+    whatever the per-phase active power. It lives in `resolve_injection_power`, so the
+    fundamental solve and the harmonic path's operating point (`solver/harmonic_flow.py`)
+    share it. Converters write device totals (pandapower `sn_mva`, OpenDSS `kVA`) and
+    never pre-divide. Each element evaluates a voltage curve at ITS OWN terminal voltage
+    `|V_term| / V0` (phase-neutral for WYE, phase-phase for DELTA), not at a
+    positive-sequence or phase-average magnitude.
     Curve breakpoints are not smoothed. `evaluate_characteristic` is the differentiable piecewise
     (linear/cubic) curve lookup. Because the control enters `I_device(V)` and the IFT
     backward differentiates one residual eval at V*, gradients flow to the curve / rating
