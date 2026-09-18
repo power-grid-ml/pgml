@@ -132,6 +132,7 @@ from pgml.convert._model_differences import OPENDSS, finalize_report
 from pgml.convert._report import ConversionReport
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
+    Characteristic,
     ComplexTap,
     ConsumerType,
     EarthReturnModel,
@@ -148,6 +149,9 @@ from pgml.schemas.grid_schema import (
     SpectrumPoint,
     Transformer,
     VoltageRegulation,
+    VoltVarControl,
+    VoltVarVoltWattControl,
+    VoltWattControl,
     WindingConnection,
     ZipCoefficients,
 )
@@ -1009,6 +1013,17 @@ def to_grid(
             vmax,
             vlow,
         )
+        report.approximated(
+            "load.voltage_band",
+            "OpenDSS reverts a constant-power/current load to constant impedance "
+            "outside Vminpu..Vmaxpu (and below Vlowpu); pgml applies the load law "
+            "at every voltage. Identical inside the band.",
+            element_type="load",
+            ids=names,
+            affects=("fundamental", "unbalanced", "harmonic"),
+            values={"vminpu": vmin, "vmaxpu": vmax, "vlowpu": vlow},
+            announced=True,
+        )
 
     # ---------------------------------------------------------------------- #
     # 6. Capacitors -> ShuntAppliance (WYE, solidly grounded only)             #
@@ -1416,7 +1431,22 @@ def to_grid(
         ret = dss.Storages.Next()
 
     # ---------------------------------------------------------------------- #
-    # 11. Elements the converter does NOT read: fail loud, never silently   #
+    # 11. InvControl -> inverter control laws on the controlled DER            #
+    # ---------------------------------------------------------------------- #
+    _import_inv_controls(dss, id_map, nodes, appliances, report)
+    if id_map["pvsystem"]:
+        report.approximated(
+            "pvsystem.snapshot",
+            "PVSystems are imported at their present solved output (irradiance, "
+            "temperature and Pmpp derating applied by OpenDSS, kW/kvar as solved); "
+            "a different irradiance needs a new p_nom_w.",
+            element_type="pvsystem",
+            ids=list(id_map["pvsystem"]),
+            affects=(),
+        )
+
+    # ---------------------------------------------------------------------- #
+    # 12. Elements the converter does NOT read: fail loud, never silently   #
     #     wrong. Every DSS circuit element (`Circuit.AllElementNames()`,     #
     #     `"ClassName.elementname"`) whose class is not one of the ones      #
     #     handled above triggers a WARNING naming the kind and count --      #
@@ -1436,6 +1466,7 @@ def to_grid(
         "generator",
         "pvsystem",
         "storage",
+        "invcontrol",
     }
     _dropped_counts: dict[str, int] = {}
     _dropped_names: dict[str, list] = {}
@@ -1474,6 +1505,183 @@ def to_grid(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _xy_curve(dss: Any, name: str) -> Characteristic:
+    """An OpenDSS ``XYcurve`` as a pgml characteristic (linear, held outside)."""
+    dss.XYCurves.Name(name)
+    if dss.XYCurves.Name().lower() != name.lower():
+        raise ConversionError(f"OpenDSS XYcurve '{name}' not found")
+    return Characteristic(
+        x_values=[float(v) for v in dss.XYCurves.XArray()],
+        y_values=[float(v) for v in dss.XYCurves.YArray()],
+    )
+
+
+def _import_inv_controls(
+    dss: Any, id_map: dict, nodes: list, appliances: list, report
+) -> None:
+    """Attach each ``InvControl`` as an inverter control law on its DER.
+
+    Mapped exactly: ``mode=VOLTVAR`` (``vvc_curve1`` as ``VoltVarControl``,
+    ``RefReactivePower`` VARMAX -> ``QReference.RATED`` with the inverter kVA as the
+    base, VARAVAIL -> ``QReference.AVAILABLE``), ``mode=VOLTWATT`` (``voltwatt_curve``
+    as ``VoltWattControl``) and ``CombiMode=VV_VW`` (both curves). The controlled
+    element's kVA rating becomes ``s_rated_va``. ``voltage_curvex_ref`` must be
+    ``rated``: OpenDSS then measures the per-unit voltage against the element's own
+    ``kv``, and the converter checks that it equals the host node's rated voltage,
+    the base of pgml's characteristics. A Volt-Watt curve on the ``PMPPPU`` axis is
+    a fraction of Pmpp, pgml's a fraction of the available power, so the
+    controlled element's active power is reset to ``Pmpp * irradiance`` and the
+    two agree at irradiance 1 (any other value is reported). Everything else
+    (other modes, monitored buses, averaging windows, a DER the converter did not
+    import) is reported as dropped, with the reason.
+    """
+    dss.Circuit.SetActiveClass("InvControl")
+    if dss.ActiveClass.Count() == 0:
+        return
+    by_id = {a.id: a for a in appliances}
+    node_by_id = {n.id: n for n in nodes}
+    der_ids = {}
+    for kind in ("pvsystem", "generator", "storage"):
+        for name, ident in id_map[kind].items():
+            der_ids[f"{kind}.{name}"] = ident
+    dropped: dict[str, str] = {}
+    mapped: list[str] = []
+    approximations: list[str] = []
+    ret = dss.ActiveClass.First()
+    while ret:
+        name = dss.ActiveClass.Name().lower()
+        prop = lambda key: str(dss.Properties.Value(key)).strip()  # noqa: E731
+        mode = prop("Mode").upper()
+        combi = prop("CombiMode").upper()
+        curve_ref = prop("Voltage_CurveX_Ref").upper()
+        q_ref = prop("RefReactivePower").upper()
+        vw_axis = prop("VoltWattYAxis").upper()
+        der_list = [
+            t.strip().strip("[]").lower()
+            for t in prop("DERList").strip("[]").replace(",", " ").split()
+        ]
+        try:
+            if combi and combi != "NONE":
+                if combi != "VV_VW":
+                    raise ConversionError(f"CombiMode={combi} is not mapped")
+                law = "vv_vw"
+            elif mode == "VOLTVAR":
+                law = "vv"
+            elif mode == "VOLTWATT":
+                law = "vw"
+            else:
+                raise ConversionError(f"mode={mode or 'none'} is not mapped")
+            if law in ("vv", "vv_vw") and curve_ref != "RATED":
+                raise ConversionError(
+                    f"voltage_curvex_ref={curve_ref} is not mapped (only rated)"
+                )
+            if law in ("vv", "vv_vw") and q_ref not in ("VARMAX", "VARAVAL"):
+                raise ConversionError(f"RefReactivePower={q_ref} is not mapped")
+            if law in ("vw", "vv_vw") and vw_axis not in ("PMPPPU", "PAVAILABLEPU"):
+                raise ConversionError(f"VoltWattYAxis={vw_axis} is not mapped")
+            if not der_list:
+                raise ConversionError("DERList is empty")
+            targets = []
+            for entry in der_list:
+                ident = der_ids.get(entry)
+                if ident is None:
+                    raise ConversionError(f"controlled element {entry} not imported")
+                targets.append((entry, by_id[ident]))
+            for entry, der in targets:
+                if getattr(der, "voltage_regulation", None) is not None:
+                    raise ConversionError(
+                        f"{entry} is a voltage-regulating generator (model=3)"
+                    )
+                if getattr(der, "control", None) is not None:
+                    raise ConversionError(f"{entry} already carries a control law")
+            # reading a curve changes the active element, so read the names first
+            vv_name, vw_name = prop("VVC_Curve1"), prop("VoltWatt_Curve")
+            vv = _xy_curve(dss, vv_name) if law != "vw" else None
+            vw = _xy_curve(dss, vw_name) if law != "vv" else None
+            q_reference = "available" if q_ref == "VARAVAL" else "rated"
+            for entry, der in targets:
+                cls, _, elt = entry.partition(".")
+                dss.Circuit.SetActiveElement(entry)
+                kv = float(dss.Properties.Value("kv")) * 1e3
+                kva = float(dss.Properties.Value("kva")) * 1e3
+                node = node_by_id[der.node]
+                if abs(kv - float(node.u_rated_v)) > 1e-6 * float(node.u_rated_v):
+                    raise ConversionError(
+                        f"{entry}: element kv {kv:g} V differs from the node rated "
+                        f"voltage {float(node.u_rated_v):g} V, so the curve voltage "
+                        "base is not the node base"
+                    )
+                if law != "vw" and q_ref == "VARMAX":
+                    kvar_max = float(dss.Properties.Value("kvarMax")) * 1e3
+                    if abs(kvar_max - kva) > 1e-6 * kva:
+                        raise ConversionError(
+                            f"{entry}: kvarMax {kvar_max:g} var differs from the kVA "
+                            f"rating {kva:g} VA, which pgml uses as the Q base"
+                        )
+                if law == "vv":
+                    der.control = VoltVarControl(
+                        characteristic=vv, s_rated_va=kva, q_reference=q_reference
+                    )
+                elif law == "vw":
+                    der.control = VoltWattControl(characteristic=vw, s_rated_va=kva)
+                else:
+                    der.control = VoltVarVoltWattControl(
+                        volt_var=vv,
+                        volt_watt=vw,
+                        s_rated_va=kva,
+                        q_reference=q_reference,
+                    )
+                if law != "vv" and cls == "pvsystem":
+                    dss.PVsystems.Name(elt)
+                    pmpp = float(dss.PVsystems.Pmpp()) * 1e3
+                    irradiance = float(dss.PVsystems.Irradiance())
+                    pct = float(dss.Properties.Value("%Pmpp")) / 100.0
+                    available = pmpp * irradiance * pct
+                    der.p_nom_w = available
+                    if vw_axis == "PMPPPU" and abs(irradiance * pct - 1.0) > 1e-9:
+                        approximations.append(entry)
+            mapped.append(name)
+        except ConversionError as exc:
+            dropped[name] = str(exc)
+        dss.Circuit.SetActiveClass("InvControl")
+        ret = dss.ActiveClass.Next()
+    if mapped:
+        _logger.info(
+            "OpenDSS -> Grid: %d InvControl element(s) mapped to inverter control "
+            "laws: %s.",
+            len(mapped),
+            ", ".join(mapped),
+        )
+    if approximations:
+        report.approximated(
+            "invcontrol.voltwatt_pmpp_axis",
+            "Volt-Watt curves on the PMPPPU axis limit a fraction of Pmpp, pgml a "
+            "fraction of the available power (Pmpp * irradiance * %Pmpp); with the "
+            "irradiance away from 1 the curtailment differs by that factor.",
+            element_type="pvsystem",
+            ids=approximations,
+            affects=("fundamental", "unbalanced"),
+        )
+    if dropped:
+        for name, reason in dropped.items():
+            _logger.warning(
+                "OpenDSS InvControl '%s' is NOT converted (%s); the controlled "
+                "elements keep their present solved P/Q without a control law.",
+                name,
+                reason,
+            )
+        report.dropped(
+            "invcontrol",
+            "These InvControl elements are not mapped (see values for the reason "
+            "per element); their DER keep the solved P/Q snapshot without a "
+            "control law.",
+            ids=list(dropped),
+            affects=("fundamental", "unbalanced"),
+            values=dropped,
+            announced=True,
+        )
 
 
 def _apply_line_earth_return(
