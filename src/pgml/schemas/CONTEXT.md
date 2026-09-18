@@ -139,6 +139,10 @@ to-side coil). The class docstring gives the conversion.
     (`kind`) of `ConstantPowerFactorControl`, `ConstantReactivePowerControl`,
     `PowerFactorWattControl`, `VoltVarControl`, `VoltWattControl`, `VoltVarVoltWattControl`,
     each over `InverterControlBase` (`s_rated_va` capability circle, `smoothing` half-width).
+    The power quantities of a control block (`s_rated_va`, `q_var`, `p_ref_w`) are DEVICE
+    totals like `p_nom_w`; assembly splits them equally over the device's `n_elem`
+    elements (WYE: one per connected phase; DELTA: the three phase pairs), which the field
+    descriptions state. No field, name or stored value changed with that wording.
     Curves use the generic tensor-capable `Characteristic` (x_values/y_values, linear/cubic).
     `Storage`: signed `p_nom_w` (>0 discharge/inject), plus inert energy-state fields
     (`energy_capacity_wh`, `soc`, `soc_min/max`, `efficiency_charge/discharge`, `p_rated_w`)

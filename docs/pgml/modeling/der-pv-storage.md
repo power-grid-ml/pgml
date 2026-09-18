@@ -51,6 +51,37 @@ The capability limit applies with watt priority. Active power is clipped to the 
 because an oversized array cannot exceed the inverter rating through `P` alone, then the
 reactive magnitude is bounded by the remaining headroom on the circle.
 
+### Ratings are device totals
+
+Every power quantity of a control block describes the whole device, like `p_nom_w`. That
+holds for the rating `s_rated_va`, the fixed reactive power `q_var` and the `cosφ(P)`
+reference `p_ref_w`, and it matches pandapower's `sn_mva` and OpenDSS's `kVA` and `kvarMax`.
+
+The laws are evaluated per connection element, and each of the `n_elem` elements works with
+an equal `1 / n_elem` share of these quantities.
+
+| Connection | Elements | `n_elem` |
+|---|---|---|
+| WYE | one per connected phase, phase to neutral or ground | number of phases |
+| DELTA | one per phase pair of a three-phase device | 3 |
+
+A three-phase generator with `q_var=3000` injects 3 kvar in total, 1 kvar per element. A
+three-phase 6 kW unit behind `s_rated_va=5000` delivers 5 kW. Everything derived from the
+rating follows the same split, that is the rated `Q(V)` base, the capability circle and the
+width `smoothing * s_rated_va` of the soft clamp. A single-phase device uses the values as
+written, and a balanced three-phase device injects the same totals as its single-phase
+equivalent.
+
+The split is equal whatever the per-phase distribution of the active power. An unbalanced
+device does not move rating from a lightly loaded element to a heavily loaded one.
+
+Each element reads a voltage-dependent curve at its own terminal voltage, phase to neutral
+for WYE and phase to phase for DELTA, in per unit of that element's nominal. OpenDSS
+`InvControl` and pandapower form one voltage per device, the phase average by default in
+OpenDSS and the positive-sequence bus voltage in pandapower, and apply one response to all
+phases. On a balanced network the two readings coincide. On an unbalanced one the elements
+of a pgml device respond individually.
+
 ## Why the control law is not an outer loop
 
 `device_current_injections` computes each element's effective power from a base power and a
@@ -300,10 +331,27 @@ A few per-tool details are worth knowing when comparing results.
 
 Inverter control is checked against pandapower's `CharacteristicControl` for `Q(V)`, which
 reaches the same equilibrium to about 1e-10 pu, and against OpenDSS `InvControl` in its
-Volt-VAr and Volt-Watt modes. The differentiability gate runs a float64 gradient check of the
+Volt-VAr and Volt-Watt modes. The imports of pandapower's `DERController` and of OpenDSS
+`InvControl` are checked against the tool's own controlled solution for a single-phase and
+for a balanced three-phase device, which pins the device-total reading of the ratings. The differentiability gate runs a float64 gradient check of the
 solved voltage with respect to a curve slope, the capability limit and the active setpoint
 through the smoothed variants, and the device parity gate repeats every injection term on CPU
 and CUDA.
+
+## Changes in 0.5.1
+
+The power quantities of a control block are device totals, split equally over the device's
+elements (see "Ratings are device totals" above). Before 0.5.1 each
+element of a multi-phase device worked with the full value, so a three-phase device injected
+three times its `q_var`, scaled a rated `Q(V)` curve by three times its rating, and met its
+capability limit at three times `s_rated_va`. Single-phase devices and single-phase
+equivalent grids are unchanged. Results change for every controlled device with more than
+one phase. A grid that compensated by storing a third of the rating now has to store the
+device total.
+
+The pandapower import with `gen_mode=GenMode.VOLT_VAR_APPROX` follows and writes the
+undivided rating in three-phase mode. The schema fields are unchanged. The other change of
+this version concerns scenario sampling and is listed in {doc}`/pgml/api/scenarios`.
 
 ## Sources
 
