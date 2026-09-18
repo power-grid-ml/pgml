@@ -32,13 +32,15 @@ import numpy as np
 import pytest
 import torch
 
-import opendssdirect as dss  # noqa: E402
+dss = pytest.importorskip("opendssdirect", exc_type=ImportError)
 
 from pgml.convert._common import PhaseMode  # noqa: E402
 from pgml.convert.opendss import to_grid  # noqa: E402
 from pgml.errors import ConversionError  # noqa: E402
 from pgml.schemas.grid_schema import Generator, Phase  # noqa: E402
 from pgml.solver import solve_power_flow  # noqa: E402
+
+pytestmark = pytest.mark.opendss
 
 CDT = torch.complex128
 _BASEKV = 20.0  # kV line-to-line
