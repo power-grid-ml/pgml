@@ -229,8 +229,9 @@ def to_grid(
         :class:`~pgml.schemas.grid_schema.EarthReturnModel` (resistance and reactance
         coefficients per metre and hertz, the unguarded sub-linear reactance law when
         ``Xg > 0``, and ``r0_includes_earth_return=True`` because the stored matrix
-        already carries the earth return at ``f0``), so pgml reproduces OpenDSS's
-        own frequency law for those lines. OpenDSS's defaults ``Rg=0.01805`` and
+        already carries the earth return at ``f0``) and switches the conductor skin
+        effect off on those lines, so pgml reproduces OpenDSS's own frequency law
+        for them. OpenDSS's defaults ``Rg=0.01805`` and
         ``Xg=0.155081`` are the 60 Hz Carson values in ohms per 1000 ft and are
         reinterpreted in each line's ``units``, so on a metric line they are 3.28
         times smaller than the physical value.
@@ -1734,6 +1735,9 @@ def _apply_line_earth_return(
             x0_nonnegative=False,
             r0_includes_earth_return=True,
         )
+        # OpenDSS applies no conductor skin effect; reproducing its law means the
+        # line must not resolve the modeling default at assembly time.
+        ln.harmonic_skin_effect = False
         written.append(line_id)
     values = {
         "rg_ohm_per_m_min": min(values_rg),
