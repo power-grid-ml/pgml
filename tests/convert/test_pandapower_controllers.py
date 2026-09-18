@@ -15,15 +15,21 @@ ppc = pytest.importorskip("pandapower.control", exc_type=ImportError)
 from pandapower.control.controller.DERController import (  # noqa: E402
     DERController,
     QModelConstQ,
+    QModelCosphiPCurve,
     QModelCosphiPQ,
     QModelQVCurve,
 )
-from pandapower.control.controller.DERController.DERBasics import QVCurve  # noqa: E402
+from pandapower.control.controller.DERController.DERBasics import (  # noqa: E402
+    CosphiPCurve,
+    QVCurve,
+)
 
+from pgml.convert._common import PhaseMode  # noqa: E402
 from pgml.convert.pandapower import to_grid  # noqa: E402
 from pgml.schemas.grid_schema import (  # noqa: E402
     ConstantPowerFactorControl,
     ConstantReactivePowerControl,
+    PowerFactorWattControl,
     VoltVarControl,
 )
 from pgml.solver import solve_power_flow  # noqa: E402
@@ -53,7 +59,10 @@ def _pgml_vm_pu(grid, id_map, bus):
     res = solve_power_flow(grid, method="newton", tol=1e-12)
     assert bool(res.converged)
     v = res.v.detach().cpu().numpy().reshape(-1)
-    return abs(v[res.index.row(id_map["bus"][bus], grid.nodes[0].phases[0])]) / 400.0
+    phases = grid.nodes[0].phases
+    # The node rating is line-to-line; a three-phase node solves line-to-neutral.
+    v_nom = 400.0 if len(phases) == 1 else 400.0 / 3.0**0.5
+    return abs(v[res.index.row(id_map["bus"][bus], phases[0])]) / v_nom
 
 
 @pytest.mark.parametrize(
@@ -71,17 +80,29 @@ def _pgml_vm_pu(grid, id_map, bus):
         (QModelCosphiPQ(cosphi=-0.95), ConstantPowerFactorControl),
         (QModelCosphiPQ(cosphi=0.95), ConstantPowerFactorControl),
         (QModelConstQ(q_pu=-0.2), ConstantReactivePowerControl),
+        (
+            QModelCosphiPCurve(
+                CosphiPCurve(
+                    p_points_pu=[0.0, 0.5, 1.0], cosphi_points=[-0.99, -0.97, -0.9]
+                )
+            ),
+            PowerFactorWattControl,
+        ),
     ],
 )
-def test_der_controller_matches_run_control(q_model, law):
+@pytest.mark.parametrize("phase_mode", list(PhaseMode), ids=lambda m: m.value)
+def test_der_controller_matches_run_control(q_model, law, phase_mode):
+    """``sn_mva`` is the rating of the whole sgen, so the three-phase conversion
+    reproduces the balanced controlled solution exactly like the equivalent."""
     net, sgen, b1 = _net()
     DERController(net, element_index=sgen, q_model=q_model, max_q_error=1e-9)
     ppc.run_control(net, numba=False, max_iter=1000)
     assert net.converged
     theirs = float(net.res_bus.vm_pu[b1])
-    grid, id_map, report = to_grid(net, return_report=True)
+    grid, id_map, report = to_grid(net, phase_mode=phase_mode, return_report=True)
     gen = next(a for a in grid.appliances if a.id == id_map["sgen"][sgen])
     assert isinstance(gen.control, law)
+    assert len(gen.phases) == (1 if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV else 3)
     assert "dropped.controller" not in report
     assert abs(_pgml_vm_pu(grid, id_map, b1) - theirs) < 1e-6
 

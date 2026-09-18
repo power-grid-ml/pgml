@@ -10,19 +10,24 @@ C\\ :sup:`1`). See ``docs/pgml/modeling/der-pv-storage.md`` §4.2-4.3.
 
 from __future__ import annotations
 
+import math
 
+import pytest
 import torch
 
 from pgml.schemas.grid_schema import (
     Characteristic,
+    ConstantReactivePowerControl,
     Generator,
     Grid,
     Line,
     Node,
     Phase,
+    PowerFactorWattControl,
     Source,
     Storage,
     VoltVarControl,
+    WindingConnection,
 )
 from pgml.solver import solve_power_flow
 
@@ -141,3 +146,58 @@ def test_gradcheck_line_param_with_control():
         ).v
 
     assert torch.autograd.gradcheck(fn, (r,), eps=1e-6, atol=1e-5, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "connection", [WindingConnection.WYE, WindingConnection.DELTA], ids=["wye", "delta"]
+)
+def test_gradcheck_device_total_ratings_three_phase(connection):
+    """dV*/d(q_var, s_rated): device totals shared by the three elements.
+
+    The request sits on the device's reactive limit ``sqrt(S² - P²)``, so every
+    element is inside its soft-clamp transition and both leaves are active.
+    """
+    p_gen, s_nom = 12000.0, 20000.0
+    q_var = torch.tensor(math.sqrt(s_nom**2 - p_gen**2), dtype=RDT, requires_grad=True)
+    s_rated = torch.tensor(s_nom, dtype=RDT, requires_grad=True)
+
+    def fn(q_var, s_rated):
+        ctrl = ConstantReactivePowerControl(
+            q_var=q_var, s_rated_va=s_rated, smoothing=0.05
+        )
+        gen = Generator(
+            id=2,
+            node=1,
+            phases=ABC,
+            connection=connection,
+            p_nom_w=p_gen,
+            control=ctrl,
+        )
+        grid = Grid(nodes=_nodes(), branches=[_line()], appliances=[_src(), gen])
+        return solve_power_flow(
+            grid, method="newton", dtype=CDT, tol=1e-12, tol_update_pu=1e-12
+        ).v
+
+    assert torch.autograd.gradcheck(
+        fn, (q_var, s_rated), eps=1e-2, atol=1e-8, rtol=1e-5
+    )
+    (grad,) = torch.autograd.grad(fn(q_var, s_rated).abs().sum(), s_rated)
+    assert float(grad.abs()) > 0.0
+
+
+def test_gradcheck_cosphi_p_reference_three_phase():
+    """dV*/d(p_ref_w): the device-level ``cosphi(P)`` base on a three-phase unit."""
+    p_ref = torch.tensor(9000.0, dtype=RDT, requires_grad=True)
+
+    def fn(p_ref):
+        ctrl = PowerFactorWattControl(
+            p_ref_w=p_ref,
+            characteristic=Characteristic(x_values=[0.0, 1.0], y_values=[-1.0, -0.9]),
+        )
+        gen = Generator(id=2, node=1, phases=ABC, p_nom_w=6000.0, control=ctrl)
+        grid = Grid(nodes=_nodes(), branches=[_line()], appliances=[_src(), gen])
+        return solve_power_flow(
+            grid, method="newton", dtype=CDT, tol=1e-12, tol_update_pu=1e-12
+        ).v
+
+    assert torch.autograd.gradcheck(fn, (p_ref,), eps=1e-2, atol=1e-8, rtol=1e-5)

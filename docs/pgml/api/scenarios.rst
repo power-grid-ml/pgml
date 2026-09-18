@@ -732,6 +732,9 @@ model of a device population, which a study defines, and not a property of the s
   :class:`~pgml.scenarios.ScenarioConfig`.  :func:`~pgml.scenarios.read_dataset` still
   loads such a dataset and returns the stored config as a dict, with a warning.
 
+The same version makes the ratings of an inverter control device totals; see "Changes in
+0.5.1" in :doc:`/pgml/modeling/der-pv-storage`.
+
 .. automodule:: pgml.scenarios
    :members:
    :show-inheritance:

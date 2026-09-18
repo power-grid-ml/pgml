@@ -205,9 +205,9 @@ class TestVoltVarMapping:
         grid, id_map = to_grid(_net(in_service=False), gen_mode=GenMode.VOLT_VAR_APPROX)
         assert _gens(grid) == [] and id_map["gen"] == {}
 
-    def test_three_phase_mode_splits_the_rating_per_phase(self):
-        """The control is evaluated per ELEMENT against that element's share of the
-        active power, so the rating and limits divide by the phase count."""
+    def test_three_phase_mode_keeps_the_device_total_rating(self):
+        """The rating is a device total like ``p_nom_w``; the assembly gives each
+        element its equal share, so the converter writes it undivided."""
         grid, _ = to_grid(
             _net(),
             phase_mode=PhaseMode.THREE_PHASE,
@@ -216,7 +216,7 @@ class TestVoltVarMapping:
         gen = _gens(grid)[0]
         assert gen.phases == (Phase.A, Phase.B, Phase.C)
         assert gen.p_nom_w == pytest.approx(1.0e6)  # total nameplate, split by assembly
-        assert gen.control.s_rated_va == pytest.approx(math.hypot(1.0e6, 3.0e6) / 3.0)
+        assert gen.control.s_rated_va == pytest.approx(math.hypot(1.0e6, 3.0e6))
 
 
 # ---------------------------------------------------------------------------

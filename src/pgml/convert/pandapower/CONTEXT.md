@@ -323,7 +323,7 @@ converter. Measured agreement against `pp.runpp` on the MATPOWER benchmarks: see
 | `p_mw`, `scaling` | `Generator.p_nom_w` | `p_mw·1e6·scaling` — the same generation-positive, `scaling`-aware convention as `sgen` (pandapower's own `build_gen` scales `gen.p_mw` too) |
 | `vm_pu` | droop centre | the x-axis is `|V_terminal| / V0` with `V0` the node's L-N (or L-L for a delta element) nominal, which equals pandapower's `vm_pu` in BOTH phase modes |
 | `min_q_mvar` / `max_q_mvar` | curve saturation levels | read RAW (NOT multiplied by `scaling` — pandapower's `add_q_constraints` does not scale them) |
-| — | `VoltVarControl.s_rated_va` | `hypot(P, max(|q_min|,|q_max|))` per element, so the capability circle's reactive headroom `sqrt(S²−P²)` equals the widest limit exactly: the circle never binds before the curve, and the curve applies the ASYMMETRIC `[q_min, q_max]` saturation |
+| — | `VoltVarControl.s_rated_va` | `hypot(P, max(|q_min|,|q_max|))` from the device totals in either phase mode (the assembly splits the rating equally over the elements), so the capability circle's reactive headroom `sqrt(S²−P²)` equals the widest limit exactly: the circle never binds before the curve, and the curve applies the ASYMMETRIC `[q_min, q_max]` saturation |
 | — | `Generator.q_nom_var` | `0.0` for a controlled row (a controlled appliance's reactive nameplate is never read by the nonlinear solve) |
 
 The curve is the two endpoints of the clamped droop line —

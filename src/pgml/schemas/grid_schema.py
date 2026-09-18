@@ -1527,15 +1527,42 @@ class Characteristic(GridModel):
 class QReference(str, Enum):
     """Reactive-power base a Volt-VAr ``y`` (pu) scales (OpenDSS ``RefReactivePower``)."""
 
-    RATED = "rated"  # fraction of the inverter apparent-power rating (VARMAX)
-    AVAILABLE = "available"  # fraction of the vars available at the present P (VARAVAL)
+    #: Fraction of the inverter apparent-power rating ``s_rated_va`` (VARMAX). The
+    #: rating is the device total; each element scales its equal share of it.
+    RATED = "rated"
+    #: Fraction of the vars available under the capability circle at the present
+    #: active power (VARAVAL), evaluated per element on its share of the rating.
+    AVAILABLE = "available"
 
 
 class InverterControlBase(GridModel):
     """Shared fields of every inverter control mode.
 
+    DEVICE TOTALS, SPLIT EQUALLY OVER THE ELEMENTS. Every power quantity of a control
+    block (``s_rated_va`` here, ``q_var`` and ``p_ref_w`` on the modes that carry
+    them) describes the WHOLE device, exactly like ``p_nom_w``, and matches the
+    device ratings of the reference tools (pandapower ``sn_mva``, OpenDSS ``kVA`` /
+    ``kvarMax``). The control law is evaluated per connection element, and each of the
+    ``n_elem`` elements works with an equal ``1 / n_elem`` share: a rating of
+    ``s_rated_va / n_elem``, a fixed reactive power of ``q_var / n_elem``, a
+    ``cosphi(P)`` base of ``p_ref_w / n_elem``. ``n_elem`` follows the device's
+    ``connection``:
+
+    - WYE: one element per connected phase (phase to neutral or ground), so
+      ``n_elem = len(phases)``: 1, 2 or 3.
+    - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``.
+
+    A single-phase device (``n_elem = 1``) uses the values as written, and a balanced
+    three-phase device injects the same totals as its single-phase equivalent. The
+    split is equal whatever the per-phase distribution of the active power: an
+    unbalanced device does not move rating from a lightly loaded element to a heavily
+    loaded one. Each element evaluates a voltage-dependent curve at its own terminal
+    voltage (phase-to-neutral for WYE, phase-to-phase for DELTA), not at a
+    positive-sequence or phase-average magnitude.
+
     ``s_rated_va`` is the inverter apparent-power rating that bounds the (P, Q)
-    operating point to the capability circle ``P**2 + Q**2 <= s_rated_va**2``; ``None``
+    operating point to the capability circle ``P**2 + Q**2 <= s_rated_va**2`` (per
+    element: its share of P and Q against ``s_rated_va / n_elem``); ``None``
     disables the clamp. ``smoothing`` (>= 0) is the half-width, as a fraction of
     ``s_rated_va``, of a soft saturation that replaces the hard capability clamp so the
     control stays C\\ :sup:`1` there for gradient-based use. The soft clamp is used by
@@ -1547,14 +1574,18 @@ class InverterControlBase(GridModel):
     """
 
     s_rated_va: Optional[PosNum] = si_field(
-        "Inverter apparent-power rating bounding the (P, Q) capability circle.",
+        "Inverter apparent-power rating bounding the (P, Q) capability circle. "
+        "DEVICE TOTAL: split equally over the device's elements, each of the n_elem "
+        "elements (phases for WYE, phase pairs for DELTA) is bounded by "
+        "s_rated_va / n_elem.",
         short="VA",
         long="volt-ampere",
         default=None,
     )
     smoothing: float = si_field(
         "Soft-saturation half-width of the capability clamp, as a fraction of "
-        "s_rated_va (0 = exact hard clamp).",
+        "s_rated_va (0 = exact hard clamp). Each element's clamp uses that fraction "
+        "of its own share s_rated_va / n_elem, so the device total behaves as written.",
         short="pu",
         long="fraction",
         default=0.0,
@@ -1579,18 +1610,29 @@ class ConstantPowerFactorControl(InverterControlBase):
 
 
 class ConstantReactivePowerControl(InverterControlBase):
-    """Fixed reactive-power setpoint, independent of the active power and voltage."""
+    """Fixed reactive-power setpoint, independent of the active power and voltage.
+
+    ``q_var`` is the DEVICE total: a three-phase device with ``q_var=3000`` injects
+    3 kvar in all, 1 kvar per element (see :class:`InverterControlBase`).
+    """
 
     kind: Literal["constant_reactive_power"] = "constant_reactive_power"
     q_var: Num = si_field(
-        "Reactive-power setpoint (sign per the appliance injection convention).",
+        "Reactive-power setpoint (sign per the appliance injection convention). "
+        "DEVICE TOTAL: each of the n_elem elements (phases for WYE, phase pairs for "
+        "DELTA) injects q_var / n_elem.",
         short="var",
         long="var",
     )
 
 
 class PowerFactorWattControl(InverterControlBase):
-    """Power-factor-vs-active-power characteristic ``cosphi(P)`` (VDE-AR-N 4105)."""
+    """Power-factor-vs-active-power characteristic ``cosphi(P)`` (VDE-AR-N 4105).
+
+    ``p_ref_w`` is a DEVICE total: each element forms ``x`` from its share of the
+    active power against ``p_ref_w / n_elem`` (see :class:`InverterControlBase`), so
+    a balanced device reads the curve at ``P_device / p_ref_w``.
+    """
 
     kind: Literal["power_factor_watt"] = "power_factor_watt"
     characteristic: Characteristic = Field(
@@ -1598,7 +1640,9 @@ class PowerFactorWattControl(InverterControlBase):
         "factor (y > 0 = overexcited/inject Q, y < 0 = underexcited/absorb)."
     )
     p_ref_w: Optional[PosNum] = si_field(
-        "Active-power reference normalising the curve x axis; None = |p_nom_w|.",
+        "Active-power reference normalising the curve x axis; None = |p_nom_w|. "
+        "DEVICE TOTAL: each of the n_elem elements (phases for WYE, phase pairs for "
+        "DELTA) is normalised by p_ref_w / n_elem.",
         short="W",
         long="watt",
         default=None,
@@ -1606,7 +1650,12 @@ class PowerFactorWattControl(InverterControlBase):
 
 
 class VoltVarControl(InverterControlBase):
-    """Volt-VAr ``Q(V)``: reactive power as a function of the terminal voltage."""
+    """Volt-VAr ``Q(V)``: reactive power as a function of the terminal voltage.
+
+    With ``q_reference="rated"`` the curve scales the device rating ``s_rated_va``;
+    each element evaluates the curve at its own terminal voltage and scales its share
+    ``s_rated_va / n_elem`` (see :class:`InverterControlBase`).
+    """
 
     kind: Literal["volt_var"] = "volt_var"
     characteristic: Characteristic = Field(
