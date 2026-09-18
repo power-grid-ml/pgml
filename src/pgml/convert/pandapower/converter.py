@@ -597,7 +597,6 @@ def _gen_volt_var_control(
     p_w: float,
     q_min_var: float,
     q_max_var: float,
-    n_elem: int,
     slope_pu: float,
 ) -> tuple[Optional[VoltVarControl], float]:
     """Volt-VAr droop approximating a ``net.gen`` PV bus, plus the fixed ``q_nom_var``.
@@ -629,14 +628,14 @@ def _gen_volt_var_control(
     voltage: the droop sweeps one full ``q_base`` of reactive power over ``1 /
     slope_pu`` pu of voltage. Larger = closer to a PV bus, worse conditioned.
 
-    Per-phase scaling
-    -----------------
-    The control is evaluated PER ELEMENT (per phase for a three-phase appliance,
-    against that element's share of the active power), so the reactive limits and
-    the rating are divided by ``n_elem``. The per-unit x axis is unaffected: the
-    solver forms ``|V_terminal| / V0`` with ``V0`` the node's line-to-neutral (or
-    line-to-line for a delta element) nominal, which equals pandapower's ``vm_pu``
-    in both phase modes.
+    Device totals
+    -------------
+    The rating is the DEVICE total, like ``p_nom_w``: the assembly gives each
+    element of a three-phase appliance an equal share of both, so the limits and
+    the rating are written undivided in either phase mode. The per-unit x axis is
+    unaffected too: the solver forms ``|V_terminal| / V0`` with ``V0`` the node's
+    line-to-neutral (or line-to-line for a delta element) nominal, which equals
+    pandapower's ``vm_pu`` in both phase modes.
 
     What this does and does not give
     --------------------------------
@@ -668,16 +667,14 @@ def _gen_volt_var_control(
     if q_max_var == q_min_var:
         return None, q_max_var
 
-    q_min_elem = q_min_var / n_elem
-    q_max_elem = q_max_var / n_elem
-    q_span_elem = max(abs(q_min_elem), abs(q_max_elem))
+    q_span = max(abs(q_min_var), abs(q_max_var))
     # q_base = the capability circle whose reactive headroom at the present active
     # power is exactly the widest limit, so the (symmetric) circle bounds |Q| by
     # q_span while the curve applies the asymmetric [q_min, q_max] saturation.
-    q_base = math.hypot(p_w / n_elem, q_span_elem)
+    q_base = math.hypot(p_w, q_span)
 
-    y_max = q_max_elem / q_base
-    y_min = q_min_elem / q_base
+    y_max = q_max_var / q_base
+    y_min = q_min_var / q_base
     x_lo = v_set_pu - y_max / slope_pu
     x_hi = v_set_pu - y_min / slope_pu
     if not x_hi > x_lo:
@@ -713,7 +710,8 @@ def _der_controller_inverter_control(
     pandapower installed except to build the ``net`` it is handed.
 
     ``sn_va``/``p_ref_w`` are the row's rated apparent power and active-power
-    reference, ALREADY carrying the pandapower ``scaling`` factor the same way
+    reference, device totals in either phase mode (pgml's control ratings are device
+    totals too, so nothing is divided by the phase count), ALREADY carrying the pandapower ``scaling`` factor the same way
     ``Generator.p_nom_w`` does, so a curve normalized to pandapower's own
     ``sn_mva`` base lines up exactly whatever ``scaling`` is (both the DERController
     class and pgml divide by the same ratio, so it cancels).
@@ -2109,7 +2107,6 @@ def to_grid(
             for _, r in net.ext_grid.iterrows()
             if bool(r.get("in_service", True))
         }
-        n_elem = len(phases_for(phase_mode))
         n_fallback_limits = 0
         n_unsized = 0
         for pp_idx, row in gen.iterrows():
@@ -2153,7 +2150,6 @@ def to_grid(
                 p_w=p_w,
                 q_min_var=q_min_var,
                 q_max_var=q_max_var,
-                n_elem=n_elem,
                 slope_pu=gen_volt_var_slope_pu,
             )
 

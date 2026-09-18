@@ -1528,7 +1528,8 @@ def _import_inv_controls(
     ``RefReactivePower`` VARMAX -> ``QReference.RATED`` with the inverter kVA as the
     base, VARAVAIL -> ``QReference.AVAILABLE``), ``mode=VOLTWATT`` (``voltwatt_curve``
     as ``VoltWattControl``) and ``CombiMode=VV_VW`` (both curves). The controlled
-    element's kVA rating becomes ``s_rated_va``. ``voltage_curvex_ref`` must be
+    element's kVA rating becomes ``s_rated_va`` undivided: both rate the whole
+    element, whatever its phase count. ``voltage_curvex_ref`` must be
     ``rated``: OpenDSS then measures the per-unit voltage against the element's own
     ``kv``, and the converter checks that it equals the host node's rated voltage,
     the base of pgml's characteristics. A Volt-Watt curve on the ``PMPPPU`` axis is
