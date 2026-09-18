@@ -632,7 +632,7 @@ def simulate(
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
         fusion = hf.fusion
         converged, iterations, residual = (
-            hf.pf.converged,
+            hf.converged,
             hf.pf.iterations,
             float(hf.pf.residual),
         )

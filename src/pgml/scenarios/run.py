@@ -281,7 +281,7 @@ def run_scenarios(
                 dtype=dtype,
                 device=device,
             )
-            return r.v, r.index, r.pf.converged, r.pf.failed_states, r.frequencies_hz
+            return r.v, r.index, r.converged, r.failed_states, r.frequencies_hz
         raise InputError(
             f"Unknown calculation {calculation!r} (use 'power_flow'/'harmonic')."
         )
