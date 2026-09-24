@@ -41,6 +41,12 @@ Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
   ``device_current_injections``: the V-independent resolution (once per solve)
   and the pure-tensor evaluation (once per iteration). The nonlinear solvers
   reuse one plan across all their iterations.
+- ``ybus_structure(grid, index, *, device=None) -> Tensor`` — the
+  topology-derived sparsity pattern of ``Y`` as sorted linear indices
+  ``row * N + col``, a superset of its nonzero positions at any frequency,
+  operating point and branch state. The sparse solver backend builds each
+  system's compressed-column form by gathering those entries instead of
+  scanning the dense matrix.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from ._fusion import (
     zero_impedance_branches,
 )
 from ._params import phase_voltage_magnitude
+from ._structure import ybus_structure
 from .index import NodePhaseIndex, base_voltage_per_row, node_phase_index
 from .ybus import (
     BranchCurrent,
@@ -100,4 +107,5 @@ __all__ = [
     "build_injections",
     "device_current_injections",
     "injections_from_plan",
+    "ybus_structure",
 ]

@@ -73,6 +73,7 @@ from pgml.assembly import (
     device_current_injections,
     injections_from_plan,
     node_phase_index,
+    ybus_structure,
 )
 from pgml.assembly._fusion import (
     NO_FUSION,
@@ -96,6 +97,7 @@ from .equilibration import (
     resolve_equilibration,
 )
 from .harmonic import (
+    _resolve_backend,
     estimate_condition,
     lu_factor_system,
     resolve_precision,
@@ -1681,6 +1683,20 @@ def _woodbury_base_states(grid: Grid, branch_states: dict) -> dict:
     return base
 
 
+def _factor_pattern(grid, index, y, backend, block_rows=None):
+    """The sparsity pattern of ``y`` for :func:`lu_factor_system`, or ``None``.
+
+    Only the sparse backend consumes it, and it depends on the topology alone, so it
+    is built once per factorization and only where that backend can be selected.
+    """
+    if (
+        not isinstance(y, Tensor)
+        or _resolve_backend(backend, y, block_rows) != "sparse"
+    ):
+        return None
+    return ybus_structure(grid, index, device=y.device)
+
+
 def _woodbury_pieces(
     grid,
     f0,
@@ -1729,6 +1745,7 @@ def _woodbury_pieces(
         precision=precision,
         refine_steps=0,  # the nonlinear outer iteration IS the refinement loop
         equilibrate=equilibrate,
+        pattern=_factor_pattern(grid, index, y_base, factor_backend, block_rows),
     )
     return (
         LowRankOperator(y_base, u, c, u),
@@ -1988,6 +2005,7 @@ def prepare_power_flow(
                 # The nonlinear outer iteration IS the refinement loop.
                 refine_steps=0,
                 equilibrate=eq_mode,
+                pattern=_factor_pattern(grid, index, y_eff, factor_backend, block_rows),
             )
     with torch.no_grad():
         v_base = _node_voltage_bases(grid, index, _rdtype(dtype), device)
@@ -3245,6 +3263,9 @@ def _current_injection_forward(
                 # needs no refinement of its own.
                 refine_steps=0,
                 equilibrate=equilibrate,
+                pattern=_factor_pattern(
+                    grid, index, y_eff0, factor_backend, block_rows
+                ),
             )
         )
         mixed = precision == "mixed"

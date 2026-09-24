@@ -5,11 +5,14 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
 - ``solve_harmonic(y_bus, i_inj, *, fixed_rows=None, v_fixed=None) -> v``
   Norton mode (default) and ideal-slack Schur-partition mode, both differentiable.
 - ``lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
-  precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`` and
-  ``solve_factored(fac, i_inj, *, v_fixed=None) -> v``
+  precision="full", refine_steps=None, equilibrate=None, pattern=None)
+  -> FactoredSystem`` and ``solve_factored(fac, i_inj, *, v_fixed=None) -> v``
   The factor-once, solve-many form of :func:`solve_harmonic`: one factorization
   (dense, sparse SuperLU or block diagonal; full or mixed precision; diagonally
   equilibrated by default) answers any number of right-hand sides, differentiably.
+  ``pattern`` is the sparsity pattern of the system (:func:`pgml.assembly.ybus_structure`);
+  the sparse backend then gathers the entries the topology stamps instead of scanning
+  the dense matrix for them.
   ``estimate_condition(fac, *, iters=5, per_matrix=False)`` estimates the 1-norm
   condition number of what was factored, per matrix of a batched factorization.
 - ``solve_power_flow(grid, *, slack, method, tol, tol_update_pu, s_base_va, max_iter,

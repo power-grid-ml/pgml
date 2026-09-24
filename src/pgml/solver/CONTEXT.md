@@ -45,7 +45,7 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
     `"symmetric"` / `"off"` / a bool — the diagonal equilibration applied
     around the factorization (see EQUILIBRATION below). Invisible in the result.
 - `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
-  precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`,
+  precision="full", refine_steps=None, equilibrate=None, pattern=None) -> FactoredSystem`,
   `solve_factored(fac, i_inj, *, v_fixed=None) -> v`, `FactoredSystem` and
   `estimate_condition` are exported from `pgml.solver` (the factor-once, solve-many form
   of `solve_harmonic`; implemented in `pgml.solver.harmonic`).
@@ -726,6 +726,42 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   SINGLE matrix, CUDA and the sparse backend are untouched, so the nonlinear solvers'
   per-iteration back-substitutions pay nothing. The thread count is process-global, so
   a caller that reaches the last resort must serialize concurrent solves.
+- STRUCTURAL HANDOFF to the sparse backend (`lu_factor_system(..., pattern=…)`): the
+  pattern is `pgml.assembly.ybus_structure`, the positions the topology can stamp, and
+  the backend builds each system's compressed-column form by GATHERING those `nnz`
+  values (`_SparseStructure`, one shared column structure per factorization) instead of
+  scanning the dense matrix for its nonzeros. Converting a dense `Y` was 96 per cent of
+  one factorization at 1,176 rows and 99 at 4,096, and allocated an `N x N` temporary per
+  system, which is why a harmonic study whose device shunt follows the operating point —
+  one matrix per (scenario, order) — spent nearly all its time there. `solve_power_flow`
+  and the harmonic orders pass it automatically wherever the backend resolves to sparse
+  (the pattern is topology-only, so ONE serves every order, scenario and chunk); an
+  omitted pattern keeps the dense scan, and the dense, block and CUDA paths are
+  untouched. Equilibration is diagonal and leaves the pattern intact; the ideal-slack
+  path restricts it to the free block with the same row selection it applies to `Y`. The
+  factorization is of the matrix as handed in either way, so results and gradients are
+  unchanged (`tests/reference/test_sparse_solver.py`,
+  `tests/differentiability/test_gradcheck.py`).
+- WITH a pattern the sparse backend forms NO dense matrix at all (`_sparse_system`).
+  The symmetric equilibration reads the diagonal alone (`equilibration.
+  scales_from_diagonal`) and then scales the stored entries; the ideal slack's free-row
+  block is a renumbering of the pattern (`_restrict_pattern`) plus a gather of the
+  entries it keeps. Both were full `O(N²)` copies ahead of the factorization, together
+  an order of magnitude more than it: one `lu_factor_system` call on a 4,096-row system
+  is 131 ms Norton and 258 ms ideal-slack before, 2.0 and 2.2 ms after, solving the
+  same system to the last bit. `FactoredSystem.y_mat` is then a zero-storage stand-in
+  carrying the shape, dtype and device a forward solve reads, and
+  `FactoredSystem.materialised_y()` rebuilds the scaled matrix for the consumers that
+  need its VALUES (the mixed-precision residual, `estimate_condition`). A
+  gradient-carrying or mixed-precision factorization builds it eagerly as before, so
+  the adjoint is unchanged.
+- The same module reads LAPACK's own failure report on every CPU factorization it makes: a
+  NEGATIVE LAPACK `info` reports a bad call rather than a singular matrix, leaves
+  unusable factors behind and is not surfaced by `lu_factor`, so it raises
+  `ComputationError` instead of reaching a back-substitution or a converged-looking
+  solve. A POSITIVE `info` is an exact zero pivot and keeps torch's own error, so the
+  batched harmonic path's per-scenario non-finite reporting is unchanged. CPU only —
+  reading `info` on CUDA would synchronise, and the failure is a CPU LAPACK one.
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL
@@ -936,7 +972,7 @@ converges in 9 iterations equilibrated (max |dV| 4.1e-5 -> 1.8e-5 pu).
 # MIXED PRECISION (complex64 factors, complex128 accuracy)
 # =====================================================================
 `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
-precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`
+precision="full", refine_steps=None, equilibrate=None, pattern=None) -> FactoredSystem`
 
 - `precision="mixed"` factors a complex64 copy of the system and keeps the
   full-precision matrix (`FactoredSystem.y_mat`, or the per-bucket blocks of the block

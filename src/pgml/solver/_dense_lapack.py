@@ -254,16 +254,41 @@ def _attempt(run, *, where: str, limit: float):
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def _info_checked(a: Tensor) -> tuple[Tensor, Tensor]:
+    """``torch.linalg.lu_factor`` with the library's own failure report read.
+
+    LAPACK reports a NEGATIVE ``info`` when it was called wrongly, which is a property
+    of the library and never of the matrix. ``torch.linalg.lu_factor`` does not surface
+    it, so such a failure leaves unusable factors behind. A POSITIVE ``info`` is an
+    exact zero pivot, a legitimate outcome that a batched harmonic solve reports per
+    scenario, so it is left to torch's own message. Reading the value on CUDA would
+    synchronise inside a solve, and the failure is a CPU one, so only CPU is checked.
+    """
+    if a.device.type != "cpu":
+        return torch.linalg.lu_factor(a)
+    lu, piv, info = torch.linalg.lu_factor_ex(a)
+    worst = int(info.min())
+    if worst < 0:
+        raise ComputationError(
+            "The dense LU factorization was rejected by the linear-algebra library "
+            f"(LAPACK info {worst}), which reports a bad call rather than a singular "
+            "matrix, so the factors are unusable. " + _ADVICE
+        )
+    if int(info.max()) > 0:
+        torch.linalg.lu_factor(a)
+    return lu, piv
+
+
 def lu_factor(a: Tensor, *, where: str) -> tuple[Tensor, Tensor]:
     """``torch.linalg.lu_factor``, verified and repaired when ``a`` is a CPU stack."""
     if not is_batched_cpu(a):
-        return torch.linalg.lu_factor(a)
+        return _info_checked(a)
     a_d = a.detach()
     b = _probe_rhs(a_d)
     limit = _limit(a.dtype)
 
     def run(per_matrix: bool):
-        lu, piv = _per_matrix_lu_factor(a) if per_matrix else torch.linalg.lu_factor(a)
+        lu, piv = _per_matrix_lu_factor(a) if per_matrix else _info_checked(a)
         with torch.no_grad():
             x = torch.linalg.lu_solve(lu.detach(), piv, b)
         return (lu, piv), _relative_residual(a_d, x, b, limit)
