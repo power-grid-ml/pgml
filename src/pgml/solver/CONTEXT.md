@@ -6,7 +6,10 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
 ## Repeated harmonic preparation
 
 - `HarmonicFlowSystem(*, cache_batched_factors=True)` — lazy, bounded preparation;
-  `stats` exposes entry hit/miss/bypass counts, `clear()` releases retained state.
+  `stats` exposes entry hit/miss/bypass counts, `nbytes()` the tensor storage the entries
+  currently hold (each storage counted once; a retained batched matrix is charged twice,
+  once as the value and once as the key snapshot the validity check compares against),
+  `clear()` releases retained state.
 - `prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs) -> HarmonicFlowSystem`
   warms the preparation with one complete solve (fundamental needed for device shunts).
 - `solve_harmonic_flow(..., system=None)` and
@@ -684,6 +687,45 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"` and
   `"block"` raise. The sparse backend is differentiable via the linear-solve adjoint
   (`_SparseSolveFn`: one trans='H' solve + batch-folded `-λ·conj(V)ᵀ`).
+- BATCHED DENSE ON CPU (`solver/_dense_lapack.py`): every dense `lu_factor` /
+  `lu_solve` / `solve` on a stack of MORE THAN ONE matrix goes through this module.
+  Some CPU LAPACK builds get the row interchange of a MULTI-THREADED batched LU
+  wrong (oneMKL `ZLASWP` parameter error, then a rejected factorization), which
+  without a guard removes every path that hands a stack of matrices to LAPACK: the
+  operating-point device shunt, a batched voltage node source, `branch_states` with
+  `branch_states_method="assemble"`, and the `[B,2N,2N]` IFT adjoint. Each such call
+  is measured against a probe right-hand side with DISTINCT entries (a constant one
+  is invariant under any row permutation and would hide the failure); a raised call
+  or a residual above round-off for the precision that was FACTORED (so the
+  single-precision factors of a mixed-precision solve are judged by their own)
+  escalates through two repairs and latches the one that works for the process, and a
+  call that is still wrong at the end raises `ComputationError` instead of returning a
+  wrong voltage. The residual is scaled by `max(‖b‖, ‖Ax‖)` first and, only when that
+  exceeds the threshold, by the sound `‖A‖‖x‖+‖b‖` — a badly scaled network (a
+  milliohm switch beside a line) cancels in `Ax` and would otherwise be rejected.
+  The MECHANISM sets the first repair: setting the thread count also disables the math
+  library's dynamic thread adjustment, which would otherwise drop it to one thread when
+  it is entered from inside another parallel region, so the batched factorization calls
+  the per-matrix routine from several threads at once and above roughly 145 rows the
+  blocked kernel rejects the pivot array it is handed and reports success anyway.
+  Factoring the stack ONE MATRIX AT A TIME (`_dense_lapack.PER_MATRIX`) therefore
+  repairs it at the caller's thread count; the batched call in ONE thread
+  (`ONE_THREAD`) stays the last resort, since the repair leans on the same library.
+  `repair_in_use()` reports which is latched. Cost on an unaffected build is the check
+  alone; on an affected one the per-matrix repair replaces the serialized factorization.
+  <sub>Sixteen systems, complex128, eight threads: the check costs 1.6 ms at 200 rows,
+  6.7 at 450, 31.0 at 900, which is 12 % to 18 % of a correct threaded factorization of
+  the same stack. The guarded call with the per-matrix repair takes 10.0 / 69.1 / 274.2
+  ms against 10.0 / 102.8 / 707.5 for the single-threaded batched repair: even at 200
+  rows, 1.5x at 450, 2.6x at 900, at the same backward error.</sub> The repair returns
+  its factors in LAPACK's COLUMN-major layout, which every later back-substitution
+  expects; stacking them as they come would cost each `lu_solve` a transpose and undo
+  the gain. `lu_solve` is left batched and multi-threaded under the
+  per-matrix repair — the defect is in the factorization's row interchange, and a build
+  that also got the back-substitution wrong is caught by the check, which uses it. A
+  SINGLE matrix, CUDA and the sparse backend are untouched, so the nonlinear solvers'
+  per-iteration back-substitutions pay nothing. The thread count is process-global, so
+  a caller that reaches the last resort must serialize concurrent solves.
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL
@@ -774,6 +816,12 @@ by the modeled devices and its compact `C` is assembled from the same WYE/DELTA/
 blocks as the exact matrix. Explicit Generator/Storage harmonic impedances belong to the
 scenario-independent base. The automatic path uses the conservative selection rule
 `3k < N`; the actual performance crossover depends on the factorization backend and hardware.
+The rule is applied to the touched-row COUNT before `C` is built (`max_rank`), so a device
+population that covers most rows never materialises the `[*batch, H, k, k]` core it would
+then discard — on a scenario batch that core is the size of the assembled system, which is
+what the low-rank path exists to avoid. The helper returns `(U, C, k)`, `(None, None, k)`
+above `max_rank`, and `None` only when no device carries a modeled shunt at all (the
+shunt-free network is then the harmonic system).
 
 - `low_rank_update(fac, u, c, *, v=None) -> LowRankUpdate` — precompute
   `W = A⁻¹U` (`k` back-substitutions of the base factorization) and the LU of the

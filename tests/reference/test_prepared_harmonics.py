@@ -214,6 +214,20 @@ def test_lowrank_updates_rebuilt_while_base_reused():
     assert cache.stats["harmonic_factors_misses"] == 1
 
 
+def test_retained_bytes_grow_with_entries_and_are_released():
+    grid, cache = _grid(), HarmonicFlowSystem()
+    assert cache.nbytes() == 0
+    _solve(grid, cache, orders=(1, 5, 7))
+    two_orders = cache.nbytes()
+    # A matrix, its factorization and the key snapshot the validity check keeps.
+    y, _, _ = assemble_harmonic_system(grid, [5, 7], _solve(grid).pf.v)
+    assert two_orders >= 2 * y.numel() * y.element_size()
+    _solve(grid, cache, orders=(1, 3, 5, 7, 9))
+    assert cache.nbytes() > two_orders
+    cache.clear()
+    assert cache.nbytes() == 0
+
+
 def test_assembly_result_cannot_mutate_cache():
     grid, cache = _grid(), HarmonicFlowSystem()
     result = _solve(grid, cache)

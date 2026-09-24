@@ -36,6 +36,7 @@ from torch import Tensor
 from pgml import defaults
 from pgml.errors import ComputationError, InputError
 
+from . import _dense_lapack
 from .equilibration import (
     equilibrate_matrix,
     equilibration_scales,
@@ -526,7 +527,9 @@ def _solve_norton(y: Tensor, i: Tensor, eq_mode: str = "off") -> Tensor:
     i_b = i.broadcast_to(*batch, n)
     y_hat, d_row, d_col = equilibrate_matrix(y_b, mode=eq_mode)
     rhs = i_b if d_row is None else i_b * d_row
-    v = torch.linalg.solve(y_hat, rhs.unsqueeze(-1)).squeeze(-1)
+    v = _dense_lapack.solve(y_hat, rhs.unsqueeze(-1), where="solve_harmonic").squeeze(
+        -1
+    )
     return v if d_col is None else v * d_col
 
 
@@ -570,7 +573,9 @@ def _solve_ideal_slack(
     # because it is applied to the right-hand side before the scaling.
     y_hat, d_row, d_col = equilibrate_matrix(y_ff, mode=eq_mode)
     rhs_hat = rhs if d_row is None else rhs * d_row
-    v_free = torch.linalg.solve(y_hat, rhs_hat.unsqueeze(-1)).squeeze(-1)  # [..., F]
+    v_free = _dense_lapack.solve(
+        y_hat, rhs_hat.unsqueeze(-1), where="solve_harmonic"
+    ).squeeze(-1)  # [..., F]
     if d_col is not None:
         v_free = v_free * d_col
 
@@ -901,8 +906,9 @@ class _BlockLU:
                     *scale.shape[:-1], *rows.shape
                 )
                 sub = sub * d.unsqueeze(-1) * d.unsqueeze(-2)
-            lu, piv = torch.linalg.lu_factor(
-                sub if factor_dtype is None else sub.to(factor_dtype)
+            lu, piv = _dense_lapack.lu_factor(
+                sub if factor_dtype is None else sub.to(factor_dtype),
+                where="lu_factor_system(backend='block')",
             )
             self.buckets.append((pos, lu, piv))
             if self.keeps_blocks:
@@ -1453,7 +1459,10 @@ def lu_factor_system(
                 **kw_eq,
                 **kw,
             )
-        lu, piv = torch.linalg.lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
+        lu, piv = _dense_lapack.lu_factor(
+            y_hat if not mixed else y_hat.to(factor_dtype),
+            where="lu_factor_system",
+        )
         return FactoredSystem("norton", lu, piv, n, y_mat=y_hat, **kw_eq, **kw)
     fixed_rows = fixed_rows.to(device=y_bus.device, dtype=torch.int64)
     all_rows = torch.arange(n, device=y_bus.device)
@@ -1503,7 +1512,9 @@ def lu_factor_system(
             **kw_eq,
             **kw,
         )
-    lu, piv = torch.linalg.lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
+    lu, piv = _dense_lapack.lu_factor(
+        y_hat if not mixed else y_hat.to(factor_dtype), where="lu_factor_system"
+    )
     return FactoredSystem(
         "ideal", lu, piv, n, free_rows, fixed_rows, y_fs, y_mat=y_hat, **kw_eq, **kw
     )
@@ -1562,7 +1573,7 @@ def _lu_solve_shared(
     cols = rhs_b.permute(*perm).reshape(*factor_shape, m, k)
     lu_f = lu.reshape(*factor_shape, m, m)
     piv_f = piv.reshape(*factor_shape, m)
-    sol = torch.linalg.lu_solve(lu_f, piv_f, cols, adjoint=adjoint)
+    sol = _dense_lapack.lu_solve(lu_f, piv_f, cols, adjoint=adjoint)
     sol = sol.reshape(*factor_shape, m, *shared_shape)
     current_axes = [*factor_axes, nb, *shared_axes]
     inverse = [current_axes.index(axis) for axis in range(nb + 1)]

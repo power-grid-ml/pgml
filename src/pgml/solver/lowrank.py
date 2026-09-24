@@ -80,6 +80,7 @@ from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 
+from . import _dense_lapack
 from .harmonic import (
     FactoredSystem,
     back_substitute,
@@ -247,7 +248,7 @@ class LowRankUpdate:
     def _corrected(self, v0: Tensor) -> Tensor:
         """Apply the Woodbury correction to a base solution ``v0`` ``[*batch, m]``."""
         ct = torch.matmul(self.c, _vh_x(self.v_free, v0).unsqueeze(-1))  # [*b, k, 1]
-        x = torch.linalg.lu_solve(self.k_lu, self.k_piv, ct)  # [*b, k, 1]
+        x = _dense_lapack.lu_solve(self.k_lu, self.k_piv, ct)  # [*b, k, 1]
         return v0 - torch.matmul(self.w, x).squeeze(-1)
 
 
@@ -261,7 +262,7 @@ def _amplification(k_lu: Tensor, k_piv: Tensor, cz: Tensor) -> float:
     warned about. No autograd, no effect on the solved value.
     """
     with torch.no_grad():
-        amp = torch.linalg.lu_solve(k_lu, k_piv, cz).abs().sum(-1).max()
+        amp = _dense_lapack.lu_solve(k_lu, k_piv, cz).abs().sum(-1).max()
         factor = float(amp)
     if factor > _AMPLIFICATION_WARN:
         _log.warning(
@@ -346,7 +347,7 @@ def low_rank_update(
     z = torch.matmul(v_free.conj().mT, w)  # V^H A^-1 U  [*fb, k, k]
     eye = torch.eye(k, dtype=w.dtype, device=w.device)
     cz = torch.matmul(c, z)
-    k_lu, k_piv = torch.linalg.lu_factor(eye + cz)
+    k_lu, k_piv = _dense_lapack.lu_factor(eye + cz, where="low_rank_update")
     return LowRankUpdate(
         fac=fac,
         u=u,
