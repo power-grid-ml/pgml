@@ -573,6 +573,15 @@ Keeping the assembly and the factorisation across calls, which the harmonic path
 already offers, is worth little inside one large batch and a great deal to a
 caller that solves the same grid again and again at a small batch.
 
+One more thing the timings show, which costs nothing here and a great deal
+elsewhere. pgml assembles the admittance as a dense matrix and the sparse backend
+converts it, so every factorisation scans all of the row count squared entries to
+find the three per row that are nonzero. Shared over 4,096 scenarios that is two
+microseconds each and invisible. It is 96 per cent of the cost of one
+factorisation at 1,176 rows and 99 per cent at 4,096, so wherever the matrix is
+per scenario rather than shared by the batch, as it is in a harmonic study whose
+device shunt follows the operating point, that conversion is the whole cost.
+
 <sub>This subsection only: measured 2026-09-24, library 0.5.1, complex128, one NVIDIA
 RTX A2000 12 GB and sixteen CPUs of one workstation on an idle node, phases timed by
 wrapping the functions the solver calls, a CUDA configuration synchronising inside every
