@@ -28,7 +28,7 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union
 
 import torch
 from torch import Tensor
@@ -40,6 +40,8 @@ from .equilibration import (
     equilibrate_matrix,
     equilibration_scales,
     resolve_equilibration,
+    scale_matrix,
+    scales_from_diagonal,
 )
 
 #: Working complex dtype -> the single-precision dtype a mixed-precision factorization uses.
@@ -584,7 +586,15 @@ def _solve_ideal_slack(
 
 
 def _index_2d(y: Tensor, rows: Tensor, cols: Tensor) -> Tensor:
-    """Select a sub-block ``y[..., rows, cols]`` (outer product of index sets)."""
+    """Select a sub-block ``y[..., rows, cols]`` (outer product of index sets).
+
+    The two gathers are done narrow side first, which is the same block by either
+    order and costs ``O(N * min(len(rows), len(cols)))`` for the intermediate instead
+    of ``O(N * len(rows))``. It matters for the ideal-slack coupling block, where the
+    columns are the handful of source rows and the rows are the rest of the system.
+    """
+    if cols.numel() < rows.numel():
+        return y.index_select(-1, cols).index_select(-2, rows)
     return y.index_select(-2, rows).index_select(-1, cols)
 
 
@@ -626,6 +636,31 @@ def _sparse_executor() -> ThreadPoolExecutor:
     return _sparse_pool
 
 
+def _sparse_factorization_error(e: Exception) -> ComputationError:
+    return ComputationError(
+        f"Sparse factorization failed: {e}. A singular Y usually means "
+        "disconnected (node, phase) rows — run pgml.solver.check_connectivity "
+        "on the grid, or fix zero-impedance / degenerate branch parameters."
+    )
+
+
+def _splu_from_values(values: Tensor, structure: "_SparseStructure") -> list:
+    """One SuperLU factorization per row of ``values`` ``[F, nnz]``."""
+    import scipy.sparse as sp
+
+    shape = (structure.m, structure.m)
+    data = values.numpy()
+    try:
+        return [
+            sp.linalg.splu(
+                sp.csc_matrix((row, structure.indices, structure.indptr), shape=shape)
+            )
+            for row in data
+        ]
+    except RuntimeError as e:
+        raise _sparse_factorization_error(e) from e
+
+
 class _SparseStructure:
     """Compressed-column structure shared by every system of one factorization.
 
@@ -654,7 +689,11 @@ class _SparseStructure:
         self.m = m
         self.nnz = int(lin.numel())
         self.gather = lin[order]
-        self.indices = rows[order].to(torch.int32).numpy()
+        # The row and column of every stored entry, in the same order: what a
+        # diagonal equilibration has to multiply the values by.
+        self.row_of = rows[order]
+        self.col_of = cols[order]
+        self.indices = self.row_of.to(torch.int32).numpy()
         counts = torch.bincount(cols, minlength=m)
         self.indptr = np.concatenate(
             ([np.int32(0)], counts.cumsum(0).to(torch.int32).numpy())
@@ -679,8 +718,6 @@ class _SciPySparseLU:
     """
 
     def __init__(self, y: Tensor, structure: Optional[_SparseStructure] = None) -> None:
-        import scipy.sparse as sp
-
         if y.device.type != "cpu":
             raise InputError(
                 "The sparse solver backend runs on CPU only (scipy SuperLU); "
@@ -693,31 +730,43 @@ class _SciPySparseLU:
         y = y.detach()
         if structure is not None and structure.m != self.m:
             structure = None
+        if structure is not None and y.is_contiguous():
+            values = y.reshape(-1, self.m * self.m).index_select(1, structure.gather)
+            self.lus = _splu_from_values(values, structure)
+        else:
+            self._factor_dense(y)
+
+    @classmethod
+    def from_values(
+        cls,
+        values: Tensor,
+        structure: _SparseStructure,
+        *,
+        factor_batch: tuple,
+        dtype: torch.dtype,
+    ) -> "_SciPySparseLU":
+        """Factor systems given only their structural entries, ``[*fb, nnz]``.
+
+        The caller has gathered (and, under equilibration, scaled) the entries the
+        pattern names, so the matrix itself is never formed. This is the path that
+        keeps a factorization ``O(nnz)`` from end to end.
+        """
+        self = cls.__new__(cls)
+        self.fb = tuple(factor_batch)
+        self.m = structure.m
+        self.dtype = dtype
+        self.device = torch.device("cpu")
+        self.lus = _splu_from_values(values.reshape(-1, structure.nnz), structure)
+        return self
+
+    def _factor_dense(self, y: Tensor) -> None:
+        import scipy.sparse as sp
+
+        mats = y.reshape(-1, self.m, self.m)
         try:
-            if structure is not None and y.is_contiguous():
-                shape = (self.m, self.m)
-                data = (
-                    y.reshape(-1, self.m * self.m)
-                    .index_select(1, structure.gather)
-                    .numpy()
-                )
-                self.lus = [
-                    sp.linalg.splu(
-                        sp.csc_matrix(
-                            (row, structure.indices, structure.indptr), shape=shape
-                        )
-                    )
-                    for row in data
-                ]
-            else:
-                mats = y.reshape(-1, self.m, self.m)
-                self.lus = [sp.linalg.splu(sp.csc_matrix(mat.numpy())) for mat in mats]
+            self.lus = [sp.linalg.splu(sp.csc_matrix(mat.numpy())) for mat in mats]
         except RuntimeError as e:
-            raise ComputationError(
-                f"Sparse factorization failed: {e}. A singular Y usually means "
-                "disconnected (node, phase) rows — run pgml.solver.check_connectivity "
-                "on the grid, or fix zero-impedance / degenerate branch parameters."
-            ) from e
+            raise _sparse_factorization_error(e) from e
 
     @staticmethod
     def _solve_cols(lu, cols, trans: str):
@@ -961,7 +1010,7 @@ class _BlockLU:
                     *scale.shape[:-1], *rows.shape
                 )
                 sub = sub * d.unsqueeze(-1) * d.unsqueeze(-2)
-            lu, piv = torch.linalg.lu_factor(
+            lu, piv = _checked_lu_factor(
                 sub if factor_dtype is None else sub.to(factor_dtype)
             )
             self.buckets.append((pos, lu, piv))
@@ -1149,7 +1198,7 @@ def _factor_matvec(
     """``A x`` (``Aᴴ x``) with the factored matrix at the WORKING precision."""
     if fac.backend == "block":
         return fac.block.apply(x, adjoint=adjoint)
-    return _matmul_shared(fac.y_mat, x, adjoint=adjoint)
+    return _matmul_shared(fac.materialised_y(), x, adjoint=adjoint)
 
 
 def _refined_solve(
@@ -1263,10 +1312,11 @@ def estimate_condition(
     factored matrix is not available as a tensor (the block backend keeps only its
     diagonal blocks). A diagnostic: no autograd.
     """
-    if fac.y_mat is None:
+    a_full = fac.materialised_y()
+    if a_full is None:
         return torch.full((), float("nan")) if per_matrix else float("nan")
     with torch.no_grad():
-        a = fac.y_mat
+        a = a_full
         m = a.shape[-1]
         fb = a.shape[:-2]
         norm_a = a.abs().sum(dim=-2).amax(dim=-1)  # [*fb] max absolute column sum
@@ -1345,6 +1395,19 @@ class FactoredSystem:
     equilibration: str = "off"  # "off" | "symmetric"
     scale_row: Optional[Tensor] = None  # [*fb, m] real, applied to the RHS
     scale_col: Optional[Tensor] = None  # [*fb, m] real, applied to the solution
+    # Rebuilds the factored matrix when the sparse backend never formed it (see
+    # _sparse_system). None means ``y_mat`` already holds it.
+    y_rebuild: Optional[Callable[[], Tensor]] = None
+
+    def materialised_y(self) -> Optional[Tensor]:
+        """The factored matrix as a dense tensor, built now if it was never formed.
+
+        Everything that needs the VALUES of the factored matrix goes through here: the
+        mixed-precision residual, :func:`estimate_condition`, and any consumer that
+        wants the scaled system back. A forward solve does not, which is why the
+        sparse backend is free to skip building it.
+        """
+        return self.y_rebuild() if self.y_rebuild is not None else self.y_mat
 
     @property
     def _fb_tensor(self) -> Tensor:
@@ -1405,6 +1468,114 @@ def _restrict_pattern(pattern: Tensor, n: int, free_rows: Tensor) -> Tensor:
     pc = pos[cols]
     keep = (pr >= 0) & (pc >= 0)
     return pr[keep] * f + pc[keep]
+
+
+def _sparse_system(
+    y_bus: Tensor,
+    pattern: Tensor,
+    free_rows: Optional[Tensor],
+    eq_mode: str,
+    factor_dtype: Optional[torch.dtype],
+    needs_dense: bool,
+):
+    """Factor a system sparsely, forming no dense matrix unless one is needed.
+
+    With the topology-derived ``pattern`` the factorization needs only the entries it
+    names, so the free-row block of an ideal-slack system and the diagonal
+    equilibration around it both reduce to work on those ``nnz`` values: the row scale
+    reads the diagonal alone and the column selection is a renumbering of the pattern.
+    Both were full ``O(N^2)`` copies of the matrix, together an order of magnitude more
+    than the factorization they prepared.
+
+    The scaled matrix itself is still what :attr:`FactoredSystem.y_mat` means, and the
+    mixed-precision residual, :func:`estimate_condition` and the adjoint of a
+    gradient-carrying solve all read it. It is therefore built eagerly when it is
+    needed (``needs_dense``) and otherwise left to :meth:`FactoredSystem.materialised_y`,
+    which rebuilds it on demand; a forward solve, which is where the cost shows, never
+    asks.
+
+    Returns ``(sparse, y_mat, y_rebuild, d_row, d_col)``.
+    """
+    n = int(y_bus.shape[-1])
+    fb = tuple(y_bus.shape[:-2])
+    if free_rows is None:
+        structure = _SparseStructure(pattern, n)
+        gather_full = structure.gather
+        diag = y_bus.detach().diagonal(dim1=-2, dim2=-1)
+    else:
+        free_cpu = free_rows.to(device="cpu", dtype=torch.int64)
+        structure = _SparseStructure(
+            _restrict_pattern(pattern, n, free_cpu), int(free_cpu.numel())
+        )
+        gather_full = free_cpu[structure.row_of] * n + free_cpu[structure.col_of]
+        diag = y_bus.detach().diagonal(dim1=-2, dim2=-1).index_select(-1, free_rows)
+    d_row, d_col = scales_from_diagonal(diag, mode=eq_mode)
+
+    def rebuild() -> Tensor:
+        block = y_bus if free_rows is None else _index_2d(y_bus, free_rows, free_rows)
+        return scale_matrix(block, d_row, d_col)
+
+    if needs_dense:
+        y_hat = rebuild()
+        operand = y_hat if factor_dtype is None else y_hat.to(factor_dtype)
+        return _SciPySparseLU(operand, structure), y_hat, None, d_row, d_col
+
+    flat = y_bus.detach()
+    if not flat.is_contiguous():
+        flat = flat.contiguous()
+    values = flat.reshape(*fb, n * n).index_select(-1, gather_full)
+    if d_row is not None:
+        scale = d_row.index_select(-1, structure.row_of) * d_col.index_select(
+            -1, structure.col_of
+        )
+        values = values * scale.to(values.dtype)
+    if factor_dtype is not None:
+        values = values.to(factor_dtype)
+    sparse = _SciPySparseLU.from_values(
+        values, structure, factor_batch=fb, dtype=values.dtype
+    )
+    # A zero-storage stand-in: the shape, dtype and device of the factored matrix,
+    # which is all a forward solve reads, without its N^2 numbers.
+    placeholder = torch.zeros((), dtype=y_bus.dtype, device=y_bus.device).expand(
+        *fb, structure.m, structure.m
+    )
+    return sparse, placeholder, rebuild, d_row, d_col
+
+
+def _checked_lu_factor(a: Tensor) -> tuple[Tensor, Tensor]:
+    """``torch.linalg.lu_factor`` with the library's own failure report checked.
+
+    LAPACK reports a NEGATIVE ``info`` when it was called wrongly — a wrong leading
+    dimension, a bad workspace — which is a property of the library and never of the
+    matrix. ``torch.linalg.lu_factor`` does not surface it, so such a failure leaves
+    unusable factors behind and is discovered either as an error inside the following
+    back-substitution or not at all, as a converged solve whose voltages solve nothing
+    (a batched complex factorization on several CPU threads has been observed to do
+    exactly this). A POSITIVE ``info`` is an exact zero pivot, i.e. a singular matrix,
+    which is a legitimate outcome here: a batched harmonic solve reports a
+    non-finite result per scenario instead of failing the batch, so it is left alone.
+
+    The check reads one integer per matrix. On CUDA that would be a host
+    synchronisation in the middle of a solve, and the failure mode is a CPU LAPACK
+    one, so only CPU factorizations are checked.
+    """
+    if a.device.type != "cpu":
+        return torch.linalg.lu_factor(a)
+    lu, piv, info = torch.linalg.lu_factor_ex(a)
+    worst = int(info.min())
+    if worst < 0:
+        raise ComputationError(
+            "The dense LU factorization was rejected by the linear-algebra library "
+            f"(LAPACK info {worst}), which reports a bad call rather than a singular "
+            "matrix, so the factors are unusable. This has been seen on batched "
+            "complex factorizations with several CPU threads; retry with "
+            "torch.set_num_threads(1), or use linear_solver='sparse' on a system "
+            "large enough for it."
+        )
+    if int(info.max()) > 0:
+        # An exact zero pivot. Let torch raise its own message for it, unchanged.
+        torch.linalg.lu_factor(a)
+    return lu, piv
 
 
 def _block_equilibration_scale(y_bus: Tensor, eq_mode: str) -> Optional[Tensor]:
@@ -1530,25 +1701,45 @@ def lu_factor_system(
                 scale_col=d_full,
                 **kw,
             )
-        y_hat, d_row, d_col = equilibrate_matrix(y_bus, mode=eq_mode)
-        kw_eq = {"scale_row": d_row, "scale_col": d_col}
-        if resolved == "sparse":
-            # Equilibration is a diagonal scaling, so it leaves the pattern intact.
-            structure = None if pattern is None else _SparseStructure(pattern, n)
+        if resolved == "sparse" and pattern is not None:
+            # Equilibration is a diagonal scaling, so it leaves the pattern intact and
+            # reduces to a scaling of the stored entries.
+            sparse, y_mat, rebuild, d_row, d_col = _sparse_system(
+                y_bus,
+                pattern,
+                None,
+                eq_mode,
+                factor_dtype if mixed else None,
+                mixed or y_bus.requires_grad,
+            )
             return FactoredSystem(
                 "norton",
                 None,
                 None,
                 n,
                 backend="sparse",
-                sparse=_SciPySparseLU(
-                    y_hat if not mixed else y_hat.to(factor_dtype), structure
-                ),
+                sparse=sparse,
+                y_mat=y_mat,
+                y_rebuild=rebuild,
+                scale_row=d_row,
+                scale_col=d_col,
+                **kw,
+            )
+        y_hat, d_row, d_col = equilibrate_matrix(y_bus, mode=eq_mode)
+        kw_eq = {"scale_row": d_row, "scale_col": d_col}
+        if resolved == "sparse":
+            return FactoredSystem(
+                "norton",
+                None,
+                None,
+                n,
+                backend="sparse",
+                sparse=_SciPySparseLU(y_hat if not mixed else y_hat.to(factor_dtype)),
                 y_mat=y_hat,
                 **kw_eq,
                 **kw,
             )
-        lu, piv = torch.linalg.lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
+        lu, piv = _checked_lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
         return FactoredSystem("norton", lu, piv, n, y_mat=y_hat, **kw_eq, **kw)
     fixed_rows = fixed_rows.to(device=y_bus.device, dtype=torch.int64)
     all_rows = torch.arange(n, device=y_bus.device)
@@ -1580,16 +1771,14 @@ def lu_factor_system(
             scale_col=d_free,
             **kw,
         )
-    y_ff = _index_2d(y_bus, free_rows, free_rows)
-    y_hat, d_row, d_col = equilibrate_matrix(y_ff, mode=eq_mode)
-    kw_eq = {"scale_row": d_row, "scale_col": d_col}
-    if resolved == "sparse":
-        structure = (
-            None
-            if pattern is None
-            else _SparseStructure(
-                _restrict_pattern(pattern, n, free_rows), int(free_rows.numel())
-            )
+    if resolved == "sparse" and pattern is not None:
+        sparse, y_mat, rebuild, d_row, d_col = _sparse_system(
+            y_bus,
+            pattern,
+            free_rows,
+            eq_mode,
+            factor_dtype if mixed else None,
+            mixed or y_bus.requires_grad,
         )
         return FactoredSystem(
             "ideal",
@@ -1600,14 +1789,32 @@ def lu_factor_system(
             fixed_rows,
             y_fs,
             backend="sparse",
-            sparse=_SciPySparseLU(
-                y_hat if not mixed else y_hat.to(factor_dtype), structure
-            ),
+            sparse=sparse,
+            y_mat=y_mat,
+            y_rebuild=rebuild,
+            scale_row=d_row,
+            scale_col=d_col,
+            **kw,
+        )
+    y_ff = _index_2d(y_bus, free_rows, free_rows)
+    y_hat, d_row, d_col = equilibrate_matrix(y_ff, mode=eq_mode)
+    kw_eq = {"scale_row": d_row, "scale_col": d_col}
+    if resolved == "sparse":
+        return FactoredSystem(
+            "ideal",
+            None,
+            None,
+            n,
+            free_rows,
+            fixed_rows,
+            y_fs,
+            backend="sparse",
+            sparse=_SciPySparseLU(y_hat if not mixed else y_hat.to(factor_dtype)),
             y_mat=y_hat,
             **kw_eq,
             **kw,
         )
-    lu, piv = torch.linalg.lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
+    lu, piv = _checked_lu_factor(y_hat if not mixed else y_hat.to(factor_dtype))
     return FactoredSystem(
         "ideal", lu, piv, n, free_rows, fixed_rows, y_fs, y_mat=y_hat, **kw_eq, **kw
     )

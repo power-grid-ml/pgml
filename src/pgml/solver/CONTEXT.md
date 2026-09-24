@@ -700,6 +700,26 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   factorization is of the matrix as handed in either way, so results and gradients are
   unchanged (`tests/reference/test_sparse_solver.py`,
   `tests/differentiability/test_gradcheck.py`).
+- WITH a pattern the sparse backend forms NO dense matrix at all (`_sparse_system`).
+  The symmetric equilibration reads the diagonal alone (`equilibration.
+  scales_from_diagonal`) and then scales the stored entries; the ideal slack's free-row
+  block is a renumbering of the pattern (`_restrict_pattern`) plus a gather of the
+  entries it keeps. Both were full `O(N²)` copies ahead of the factorization, together
+  an order of magnitude more than it: one `lu_factor_system` call on a 4,096-row system
+  is 131 ms Norton and 258 ms ideal-slack before, 2.0 and 2.2 ms after, solving the
+  same system to the last bit. `FactoredSystem.y_mat` is then a zero-storage stand-in
+  carrying the shape, dtype and device a forward solve reads, and
+  `FactoredSystem.materialised_y()` rebuilds the scaled matrix for the consumers that
+  need its VALUES (the mixed-precision residual, `estimate_condition`). A
+  gradient-carrying or mixed-precision factorization builds it eagerly as before, so
+  the adjoint is unchanged.
+- `_checked_lu_factor` wraps every dense `torch.linalg.lu_factor` in the solver: a
+  NEGATIVE LAPACK `info` reports a bad call rather than a singular matrix, leaves
+  unusable factors behind and is not surfaced by `lu_factor`, so it raises
+  `ComputationError` instead of reaching a back-substitution or a converged-looking
+  solve. A POSITIVE `info` is an exact zero pivot and keeps torch's own error, so the
+  batched harmonic path's per-scenario non-finite reporting is unchanged. CPU only —
+  reading `info` on CUDA would synchronise, and the failure is a CPU LAPACK one.
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL

@@ -129,11 +129,33 @@ def equilibration_scales(
             f"Unsupported equilibration mode {mode!r} "
             f"(use one of {', '.join(repr(m) for m in EQUILIBRATION_MODES)})."
         )
+    return scales_from_diagonal(
+        a.diagonal(dim1=-2, dim2=-1), mode=mode, power_of_two=power_of_two
+    )
+
+
+def scales_from_diagonal(
+    diagonal: Tensor, *, mode: str = "symmetric", power_of_two: Optional[bool] = None
+) -> tuple[Optional[Tensor], Optional[Tensor]]:
+    """:func:`equilibration_scales` from the matrix DIAGONAL alone, ``[*batch, m]``.
+
+    The symmetric (van der Sluis) scaling reads nothing but the diagonal, so a caller
+    that already holds it — or that can gather it without materialising the matrix,
+    which is what the sparse backend does for the free-row block of an ideal-slack
+    system — builds the scales without an ``O(m^2)`` pass. ``mode`` is validated
+    exactly as in :func:`equilibration_scales`.
+    """
+    if mode == "off":
+        return None, None
+    if mode not in EQUILIBRATION_MODES:
+        raise InputError(
+            f"Unsupported equilibration mode {mode!r} "
+            f"(use one of {', '.join(repr(m) for m in EQUILIBRATION_MODES)})."
+        )
     if power_of_two is None:
         power_of_two = _power_of_two_default()
-    rdt = a.real.dtype if a.is_complex() else a.dtype
-    diag = a.diagonal(dim1=-2, dim2=-1).abs().to(rdt)  # [*batch, m]
-    d = _reciprocal(diag, sqrt=True, power_of_two=power_of_two)
+    rdt = diagonal.real.dtype if diagonal.is_complex() else diagonal.dtype
+    d = _reciprocal(diagonal.abs().to(rdt), sqrt=True, power_of_two=power_of_two)
     return d, d
 
 
@@ -247,6 +269,7 @@ __all__ = [
     "equilibrate_matrix",
     "equilibrated_lu_factor",
     "equilibration_scales",
+    "scales_from_diagonal",
     "resolve_equilibration",
     "scale_matrix",
 ]

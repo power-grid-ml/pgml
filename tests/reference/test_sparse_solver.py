@@ -8,6 +8,8 @@ scenario batches — and a singular system must fail with an actionable message.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -287,3 +289,101 @@ def test_sparse_pattern_solve_is_differentiable():
         return solve_factored(fac, i)
 
     assert torch.autograd.gradcheck(f, (values, rhs), eps=1e-6, atol=1e-7, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# the sparse operand: no dense matrix is formed for it either
+# --------------------------------------------------------------------------- #
+def _pattern_for(grid, frequencies):
+    from pgml.assembly import ybus_structure
+
+    yb = assemble_network_ybus(grid, frequencies)
+    return yb, ybus_structure(grid, yb.index)
+
+
+def test_sparse_factorization_forms_no_dense_operand(feeder):
+    """The free-row block and the equilibration are values work, not matrix work.
+
+    Both were full copies of the system before the factorization they prepare, and at
+    4,096 rows they cost two orders of magnitude more than that factorization. With
+    the pattern the row scale reads the diagonal and the free-row selection renumbers
+    the pattern, so the factored matrix is never formed; it is rebuilt only for a
+    consumer that needs its values.
+    """
+    yb, pattern = _pattern_for(feeder, [50.0])
+    fixed_rows = torch.tensor([0, 1, 2])
+    for kw in ({}, {"fixed_rows": fixed_rows}):
+        fac = lu_factor_system(yb.Y, backend="sparse", pattern=pattern, **kw)
+        assert fac.y_rebuild is not None
+        # A zero-storage stand-in: the right shape, none of the numbers.
+        assert fac.y_mat.untyped_storage().nbytes() <= 16
+        assert fac.y_mat.shape[-1] == (yb.index.size - 3 if kw else yb.index.size)
+        # ... and the matrix is still available, equal to the eagerly built one.
+        eager = lu_factor_system(yb.Y, backend="sparse", **kw)
+        assert torch.allclose(fac.materialised_y(), eager.y_mat)
+        assert fac.materialised_y().shape == eager.y_mat.shape
+
+
+def test_sparse_operand_keeps_the_factored_matrix_when_it_is_needed(feeder):
+    """A gradient-carrying or mixed-precision factorization still holds its matrix."""
+    yb, pattern = _pattern_for(feeder, [50.0])
+    y = yb.Y.detach().clone().requires_grad_(True)
+    fac = lu_factor_system(y, backend="sparse", pattern=pattern)
+    assert fac.y_rebuild is None
+    assert fac.y_mat.untyped_storage().nbytes() > 16
+
+    mixed = lu_factor_system(
+        yb.Y.detach(), backend="sparse", pattern=pattern, precision="mixed"
+    )
+    assert mixed.y_rebuild is None
+    assert mixed.y_mat.dtype == yb.Y.dtype
+
+
+def test_estimate_condition_survives_the_lazy_operand(feeder):
+    from pgml.solver import estimate_condition
+
+    yb, pattern = _pattern_for(feeder, [50.0])
+    lazy = lu_factor_system(yb.Y, backend="sparse", pattern=pattern)
+    eager = lu_factor_system(yb.Y, backend="sparse")
+    a = estimate_condition(lazy, iters=4)
+    b = estimate_condition(eager, iters=4)
+    assert math.isfinite(a) and abs(a - b) <= 1e-6 * b
+
+
+@pytest.mark.parametrize("slack", ["ideal", "norton"])
+def test_lazy_operand_solves_the_same_system(feeder, slack):
+    ref = solve_power_flow(feeder, slack=slack, linear_solver="dense")
+    got = solve_power_flow(feeder, slack=slack, linear_solver="sparse")
+    assert got.converged
+    assert torch.allclose(ref.v, got.v, atol=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# the dense factorization reports a library failure instead of hiding it
+# --------------------------------------------------------------------------- #
+def test_dense_lu_reports_a_rejected_call(monkeypatch):
+    """A negative LAPACK ``info`` is a bad call, and must not reach a solve.
+
+    It leaves unusable factors behind, which surface either as an error inside the
+    following back-substitution or as a converged solve whose voltages solve nothing.
+    """
+    from pgml.solver import harmonic as H
+
+    real = torch.linalg.lu_factor_ex
+
+    def failing(a, *args, **kwargs):
+        lu, piv, info = real(a, *args, **kwargs)
+        return lu, piv, torch.full_like(info, -6)
+
+    monkeypatch.setattr(torch.linalg, "lu_factor_ex", failing)
+    y = torch.eye(6, dtype=torch.complex128) * 3.0
+    with pytest.raises(ComputationError, match="rejected by the linear-algebra"):
+        H.lu_factor_system(y, backend="dense")
+
+
+def test_dense_lu_still_raises_on_a_singular_matrix():
+    """A positive ``info`` is an exact zero pivot and keeps its own error."""
+    y = torch.eye(6, dtype=torch.complex128)
+    y[3, 3] = 0.0
+    with pytest.raises(RuntimeError, match="lu_factor"):
+        lu_factor_system(y, backend="dense")
