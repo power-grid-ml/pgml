@@ -255,18 +255,31 @@ def _refactor_case(grid, name, batch, device, cdt, args, use_sparse):
     y_share, y_free, y_scen, i_rhs = _harmonic_systems(grid, batch, device, cdt)
     n = y_scen.shape[-1]
     diag = torch.diagonal(y_scen, dim1=-2, dim2=-1)
-    # Some LAPACK builds refuse the row interchange of a batched complex LU on
-    # matrices that need pivoting. That takes a strategy off the table on that
-    # machine without saying anything about the others, so each one is measured on
-    # its own and a refusal is recorded next to the strategy it belongs to.
+    rhs_scale = i_rhs.abs().amax()
+
+    def backward_error(v, mat=None) -> float:
+        """Relative residual of the system the strategy claims to have solved.
+
+        Judging a strategy by its distance from a reference solution only works if
+        the reference itself is right. Some LAPACK builds get a batched complex LU
+        wrong without raising, so every solution is checked against its own matrix
+        instead, which needs no reference at all.
+        """
+        mat = y_scen if mat is None else mat
+        resid = torch.einsum("...ij,...j->...i", mat, v) - i_rhs
+        return float(resid.abs().amax() / rhs_scale)
+
+    # Two independent references; they disagree exactly when the batched dense LU is
+    # unreliable on this machine, and the one with the smaller residual is used.
+    looped_reference = torch.stack(
+        [torch.linalg.solve(y_scen[b], i_rhs[b]) for b in range(batch)]
+    )
     try:
-        reference = torch.linalg.solve(y_scen, i_rhs.unsqueeze(-1)).squeeze(-1)
-        batched_dense = True
+        batched_reference = torch.linalg.solve(y_scen, i_rhs.unsqueeze(-1)).squeeze(-1)
+        batched_dense = backward_error(batched_reference) <= 1e-9
     except RuntimeError:
-        reference = torch.stack(
-            [torch.linalg.solve(y_scen[b], i_rhs[b]) for b in range(batch)]
-        )
         batched_dense = False
+    reference = looped_reference
     ref_scale = reference.abs().amax()
     terms, k_support = _lowrank_terms(y_scen, y_free, args.lowrank_limit)
 
@@ -326,22 +339,28 @@ def _refactor_case(grid, name, batch, device, cdt, args, use_sparse):
             continue
         extra = {}
         if label == "iterative_no_factor":
-            v, iters, residual = out
-            extra = dict(iterations=iters, relative_backward_error=residual)
+            v, iters, _ = out
+            extra = dict(iterations=iters)
         else:
             v = out
         finite = bool(torch.isfinite(v).all())
+        # The shared-network strategy answers a DIFFERENT model (the nameplate-basis
+        # shunt), so it is judged against the matrix it actually solves, and its
+        # distance from the reference is a modeling error rather than round-off.
+        shared = label == "factor_reuse_shared"
         modes[label] = dict(
             seconds=seconds,
             scenarios_per_s=batch / seconds,
+            backward_error=(
+                backward_error(v, y_share if shared else None)
+                if finite
+                else float("nan")
+            ),
             max_rel_difference=error(v) if finite else float("nan"),
+            difference_is_model_error=shared,
             finite=finite,
             **extra,
         )
-    # The shared-network strategy answers a DIFFERENT model (the nameplate-basis
-    # shunt), so its difference from the reference is a modeling error, not round-off.
-    if "seconds" in modes["factor_reuse_shared"]:
-        modes["factor_reuse_shared"]["difference_is_model_error"] = True
     result = dict(
         grid=name,
         rows=n,
@@ -380,6 +399,11 @@ def run_refactor(args, device) -> list[dict]:
                     f"k={row['lowrank_support_rows']}: "
                     + "  ".join(
                         f"{k}={v['seconds'] * 1e3:.2f}ms" for k, v in timed.items()
+                    )
+                    + (
+                        ""
+                        if row["batched_dense_lu_available"]
+                        else "  [batched dense LU unreliable here]"
                     )
                     + f"  -> best {best[0]}",
                     flush=True,
