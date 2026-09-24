@@ -75,12 +75,15 @@ class HarmonicFlowSystem:
     gradients also bypass network caching. RHS-only gradients retain factor reuse.
     No autograd graph is retained by the harmonic entries.
 
-    ``cache_batched_factors=False`` retains only scenario-independent harmonic
-    factors. Use it for streams of different scenario chunks: snapshotting and
-    retaining a full scenario matrix is unnecessary when the next chunk changes
-    its admittances. The default also caches a repeated identical scenario batch.
-    Retention adds a matrix snapshot and factors to the live solve workspace;
-    one entry may still be large. This is bounded by entry count, not a byte cap.
+    By default only scenario-independent harmonic factors are retained. A device
+    shunt on the ``operating_point`` basis makes ``Y(h)`` one matrix PER SCENARIO,
+    and such a batched factorization is then neither validated nor kept: the
+    validity check alone is a second full copy of a ``[B, H, N, N]`` system, and
+    the next batch changes its admittances anyway. Set ``cache_batched_factors``
+    to ``True`` only to replay the SAME scenario batch at the same admittances,
+    which is the one case the entry can serve; it then costs a clone and an exact
+    comparison of the whole batched matrix on every call and retains hundreds of
+    MiB on a moderate grid. Retention is bounded by entry count, not by a byte cap.
 
     ``stats`` returns hit/miss/bypass counts for these three entries. Counts refer
     to calls, not individual matrices in a frequency/scenario batch. ``clear()``
@@ -98,7 +101,7 @@ class HarmonicFlowSystem:
     independently owned while workers solve.
     """
 
-    def __init__(self, *, cache_batched_factors: bool = True):
+    def __init__(self, *, cache_batched_factors: bool = False):
         self.cache_batched_factors = cache_batched_factors
         self._entries = {}
         self._stats = {}

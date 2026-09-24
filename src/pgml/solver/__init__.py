@@ -60,11 +60,14 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   :class:`NodeHarmonicSource`) injects per-node Thévenin/Norton harmonic
   disturbances at orders ``h > 1`` only. ``on_disconnected``/``branch_states``
   match :func:`solve_power_flow`.
-- ``HarmonicFlowSystem(*, cache_batched_factors=True)`` and
+- ``HarmonicFlowSystem(*, cache_batched_factors=False)`` and
   ``prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs)`` provide explicit
   repeated-call preparation. Pass it as ``system`` to the harmonic solve; current
   input values and evaluated admittances govern reuse, and changes automatically
   rebuild the affected entries. Matrix gradients bypass harmonic numerical caches.
+  A per-scenario ``Y(h)`` (an ``operating_point`` device shunt over a batch) is not
+  retained unless ``cache_batched_factors=True``, which serves a replay of the same
+  batch and keeps a copy of the whole ``[B, H, N, N]`` system beside its factors.
 - ``check_connectivity(grid) -> None``
   Raises :class:`~pgml.errors.ConnectivityError` when part of the grid has no
   galvanic path to an in-service source; the pre-solve gate every entry point

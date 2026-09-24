@@ -5,8 +5,11 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
 
 ## Repeated harmonic preparation
 
-- `HarmonicFlowSystem(*, cache_batched_factors=True)` — lazy, bounded preparation;
+- `HarmonicFlowSystem(*, cache_batched_factors=False)` — lazy, bounded preparation;
   `stats` exposes entry hit/miss/bypass counts, `clear()` releases retained state.
+  A per-scenario `Y(h)` is factored but not retained unless `cache_batched_factors=True`,
+  which only serves a replay of the same batch and retains a copy of the whole
+  `[B, H, N, N]` system beside its factors.
 - `prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs) -> HarmonicFlowSystem`
   warms the preparation with one complete solve (fundamental needed for device shunts).
 - `solve_harmonic_flow(..., system=None)` and

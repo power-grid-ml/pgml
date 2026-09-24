@@ -108,11 +108,14 @@ bypass assembly caching, so an equal-valued replacement tensor uses the current
 autograd graph. RHS-only gradients can reuse constant factors. Cached numerical
 entries own their storage; they do not retain the harmonic autograd graph.
 
-Preparation retains at most one entry at each level, but a scenario matrix and
-its factors can be large. ``HarmonicFlowSystem(cache_batched_factors=False)``
-avoids retaining scenario-dependent factors; chunked ``run_scenarios`` uses this
-mode automatically. Use ``system.clear()`` to release entries. Preparation is
-not thread-safe and exact tensor comparisons can synchronize CUDA.
+Preparation retains at most one entry at each level. A device shunt on the
+``operating_point`` basis makes ``Y(h)`` one matrix per scenario, and by default
+those factors are rebuilt every call, because retaining them also retains a copy
+of the whole ``[B, H, N, N]`` system as the validity check and only a replay of
+the identical batch can use it.
+``HarmonicFlowSystem(cache_batched_factors=True)`` asks for that replay and is
+worth its memory nowhere else. Use ``system.clear()`` to release entries.
+Preparation is not thread-safe and exact tensor comparisons can synchronize CUDA.
 
 Whether preparation pays depends on the system size and on the device. What it
 removes is one network assembly and one operating-point-independent

@@ -326,6 +326,34 @@ def test_prepared_parameter_gradcheck():
     )
 
 
+def test_batched_scenario_factors_are_retained_only_on_request():
+    """A per-scenario Y(h) is factored but not kept unless a replay asks for it.
+
+    Retaining it also retains a full copy of the [B, H, N, N] system as the validity
+    check, and only the identical batch at the identical admittances can use either.
+    """
+    grid = _grid()
+    op = {2: {"p_w": torch.tensor([1800.0, 2000.0, 2200.0], dtype=torch.float64)}}
+    reference = _solve(grid, operating_point=op).v
+
+    default = HarmonicFlowSystem()
+    assert default.cache_batched_factors is False
+    for _ in range(2):
+        torch.testing.assert_close(
+            _solve(grid, default, operating_point=op).v, reference
+        )
+    assert default.stats["harmonic_factors_bypasses"] == 2
+    assert "harmonic_factors_misses" not in default.stats
+
+    replay = HarmonicFlowSystem(cache_batched_factors=True)
+    for _ in range(2):
+        torch.testing.assert_close(
+            _solve(grid, replay, operating_point=op).v, reference
+        )
+    assert replay.stats["harmonic_factors_misses"] == 1
+    assert replay.stats["harmonic_factors_hits"] == 1
+
+
 def test_streaming_batches_do_not_retain_scenario_factors(monkeypatch):
     import pgml.solver.harmonic_flow as harmonic
 

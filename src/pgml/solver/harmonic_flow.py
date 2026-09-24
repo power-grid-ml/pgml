@@ -426,6 +426,10 @@ def solve_harmonic_flow(
         on changed inputs. Device shunts and injections are evaluated every call.
         An empty instance prepares lazily; :func:`prepare_harmonic_flow` warms one
         using a complete initial solve. Omitting it keeps the uncached path.
+        Reuse is worth its bookkeeping from a few hundred matrix rows up on CPU and
+        at every size on an accelerator; a scenario-dependent ``Y(h)`` is factored
+        but not retained unless ``HarmonicFlowSystem(cache_batched_factors=True)``
+        replays the same batch.
 
     Returns
     -------
@@ -653,6 +657,12 @@ def prepare_harmonic_flow(grid: Grid, harmonic_orders, **kwargs) -> HarmonicFlow
 
     To keep the initial result, create ``HarmonicFlowSystem()`` and pass it to
     the first solve instead. No global cache or changed physical model is involved.
+
+    What comes back reuses the network assembly and any factorization that does not
+    depend on the operating point. A device shunt on the ``operating_point`` basis
+    makes ``Y(h)`` per-scenario, and those factors are rebuilt every call; construct
+    ``HarmonicFlowSystem(cache_batched_factors=True)`` instead to retain them, which
+    is worth its memory only when the same scenario batch is solved again.
     """
     system = HarmonicFlowSystem()
     solve_harmonic_flow(grid, harmonic_orders, system=system, **kwargs)
