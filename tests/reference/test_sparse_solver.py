@@ -17,7 +17,16 @@ from pgml.assembly import assemble_network_ybus, assemble_ybus
 from pgml.errors import ComputationError, InputError
 from pgml.grids import synthetic_feeder
 from pgml.solver import solve_power_flow
-from pgml.solver.harmonic import _SPARSE_MIN_ROWS, lu_factor_system, solve_factored
+from pgml.solver import harmonic
+from pgml.solver.harmonic import (
+    _SPARSE_MIN_ROWS,
+    _SPARSE_SOLVE_MAX_THREADS,
+    _SPARSE_SOLVE_MIN_COLS,
+    _back_substitution_tasks,
+    _SciPySparseLU,
+    lu_factor_system,
+    solve_factored,
+)
 
 
 @pytest.fixture(scope="module")
@@ -387,3 +396,108 @@ def test_dense_lu_still_raises_on_a_singular_matrix():
     y[3, 3] = 0.0
     with pytest.raises(RuntimeError, match="lu_factor"):
         lu_factor_system(y, backend="dense")
+class TestRightHandSideMarshalling:
+    """One array layout from the torch right-hand side to SuperLU and back.
+
+    The back-substitution reads a column-major ``[m, k]`` block. Keeping the
+    scenario-major ``[k, m]`` layout the caller already holds — whose numpy
+    transpose IS that block — means nothing is transposed on the way in, inside
+    scipy, or on the way out; the right-hand side shares its memory with the array
+    SuperLU reads, and the answer comes back as the caller's own layout.
+    """
+
+    @staticmethod
+    def _handle(n: int = 600):
+        y = torch.eye(n, dtype=torch.complex128) * 4.0
+        y = y + torch.diag(torch.full((n - 1,), -1.0, dtype=torch.complex128), 1)
+        y = y + torch.diag(torch.full((n - 1,), -1.0, dtype=torch.complex128), -1)
+        return _SciPySparseLU(y), y
+
+    def test_the_right_hand_side_reaches_superlu_without_a_copy(self):
+        handle, _ = self._handle()
+        rhs = torch.randn(256, handle.m, dtype=torch.complex128)
+        seen = []
+
+        class Recording:
+            """Reports the blocks the back-substitution is actually handed."""
+
+            def __init__(self, lu):
+                self.lu = lu
+
+            def solve(self, block, trans="N"):
+                seen.append(
+                    (
+                        bool(block.flags["F_CONTIGUOUS"]),
+                        block.__array_interface__["data"][0],
+                    )
+                )
+                return self.lu.solve(block, trans=trans)
+
+        handle.lus = [Recording(lu) for lu in handle.lus]
+        v = handle.solve(rhs)
+        assert all(f_order for f_order, _ in seen), (
+            "SuperLU was handed a row-major block, which it transposes internally"
+        )
+        assert min(address for _, address in seen) == rhs.data_ptr(), (
+            "the right-hand side was copied on its way into the back-substitution"
+        )
+        assert v.is_contiguous(), "the solution comes back in a transposed layout"
+        assert v.shape == rhs.shape
+
+    def test_a_multi_factorization_solve_keeps_the_broadcasting_contract(self):
+        n = 40
+        y = torch.stack(
+            [torch.eye(n, dtype=torch.complex128) * (2.0 + i) for i in range(3)]
+        )
+        handle = _SciPySparseLU(y)
+        rhs = torch.randn(5, 3, n, dtype=torch.complex128)
+        v = handle.solve(rhs)
+        assert v.shape == (5, 3, n)
+        for i in range(3):
+            expect = torch.linalg.solve(y[i], rhs[:, i, :].unsqueeze(-1)).squeeze(-1)
+            assert torch.allclose(v[:, i, :], expect, atol=1e-12)
+
+
+class TestThreadedBackSubstitution:
+    """A wide batch is split by columns across threads, and nothing moves.
+
+    Every chunk stays at or above the width at which the multiple-right-hand-side
+    back-substitution keeps its blocking, so the threaded solve reproduces the
+    single call BIT FOR BIT — the property that lets the split be on by default.
+    """
+
+    def test_chunks_partition_the_columns_at_the_minimum_width(self):
+        tasks = _back_substitution_tasks(1, 1176, 4096)
+        assert [t[0] for t in tasks] == [0] * len(tasks)
+        assert tasks[0][1] == 0 and tasks[-1][2] == 4096
+        for (_, _, stop), (_, start, _) in zip(tasks, tasks[1:]):
+            assert stop == start
+        assert all(stop - start >= _SPARSE_SOLVE_MIN_COLS for _, start, stop in tasks)
+        if _SPARSE_SOLVE_MAX_THREADS > 1:
+            assert len(tasks) > 1
+
+    def test_a_narrow_batch_is_not_split(self):
+        assert _back_substitution_tasks(1, 1176, _SPARSE_SOLVE_MIN_COLS) == [
+            (0, 0, 128)
+        ]
+        assert _back_substitution_tasks(1, 4, 8) == [(0, 0, 8)]
+
+    def test_independent_factorizations_get_one_task_each(self):
+        tasks = _back_substitution_tasks(3, 400, 8)
+        assert [t[0] for t in tasks] == [0, 1, 2]
+        assert all((start, stop) == (0, 8) for _, start, stop in tasks)
+
+    def test_the_split_solve_is_bit_identical_to_the_undivided_one(self, monkeypatch):
+        n = 1176
+        y = torch.eye(n, dtype=torch.complex128) * 4.0
+        y = y + torch.diag(torch.full((n - 1,), -1.0, dtype=torch.complex128), 1)
+        y = y + torch.diag(torch.full((n - 1,), -1.0, dtype=torch.complex128), -1)
+        handle = _SciPySparseLU(y)
+        rhs = torch.randn(2048, n, dtype=torch.complex128)
+        split = handle.solve(rhs)
+        monkeypatch.setattr(harmonic, "_SPARSE_SOLVE_MAX_THREADS", 1)
+        whole = handle.solve(rhs)
+        assert torch.equal(split, whole), (
+            "the threaded column split moved the solution; every chunk must stay "
+            "at or above the width that preserves the back-substitution's blocking"
+        )

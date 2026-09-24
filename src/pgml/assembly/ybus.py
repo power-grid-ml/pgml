@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
 import torch
@@ -2406,6 +2406,13 @@ class _UncontrolledGroupPlan:
     v0: Tensor  # [K, n_elem] nominal voltage magnitude
     zip_p: Tensor  # [K, 3] ZIP triples (z, i, p) for P
     zip_q: Tensor  # [K, 3] ZIP triples for Q
+    #: Every device of the group is constant power, i.e. both ZIP triples are
+    #: ``(0, 0, 1)`` and the law returns the nameplate power at any voltage. The
+    #: evaluation then skips the terminal magnitude, the per-unit ratio and both
+    #: polynomials, which is the same number by exact arithmetic (``0·r² + 0·r + 1``
+    #: is 1 and ``P·1`` is ``P``) and several passes over the batch less per
+    #: iteration. Resolved once, from constants, never from the voltage.
+    constant_power: bool = False
 
 
 @dataclass(frozen=True)
@@ -2561,6 +2568,9 @@ def build_injection_plan(
         )  # [*pbatch, K, n_elem]
         q_pp = torch.stack([t.broadcast_to(*q_lead, t.shape[-1]) for t in q_list], -2)
         rows = used_rows(grp, index, device)  # [K, n_used] int64
+        zip_p = torch.stack(zipp_list, 0)  # [K, 3]
+        zip_q = torch.stack(zipq_list, 0)
+        const_target = torch.tensor([0.0, 0.0, 1.0], dtype=rdt, device=device)
         group_plans.append(
             _UncontrolledGroupPlan(
                 m_c=m_c,
@@ -2571,8 +2581,10 @@ def build_injection_plan(
                 p_pp=p_pp.unsqueeze(-3),  # [*pbatch, 1, K, n_elem]
                 q_pp=q_pp.unsqueeze(-3),
                 v0=torch.stack(v0_list, -2),  # [K, n_elem]
-                zip_p=torch.stack(zipp_list, 0),  # [K, 3]
-                zip_q=torch.stack(zipq_list, 0),
+                zip_p=zip_p,
+                zip_q=zip_q,
+                constant_power=bool((zip_p == const_target).all())
+                and bool((zip_q == const_target).all()),
             )
         )
 
@@ -2640,17 +2652,7 @@ def flatten_plan_batch(
         return power
 
     uncontrolled = tuple(
-        _UncontrolledGroupPlan(
-            m_c=g.m_c,
-            rows=g.rows,
-            flat_rows=g.flat_rows,
-            n_used=g.n_used,
-            p_pp=_flat(g.p_pp, 3),
-            q_pp=_flat(g.q_pp, 3),
-            v0=g.v0,
-            zip_p=g.zip_p,
-            zip_q=g.zip_q,
-        )
+        replace(g, p_pp=_flat(g.p_pp, 3), q_pp=_flat(g.q_pp, 3))
         for g in plan.uncontrolled
     )
     controlled = tuple(
@@ -2703,17 +2705,7 @@ def select_plan_batch(
         return power
 
     uncontrolled = tuple(
-        _UncontrolledGroupPlan(
-            m_c=g.m_c,
-            rows=g.rows,
-            flat_rows=g.flat_rows,
-            n_used=g.n_used,
-            p_pp=_sel(g.p_pp, 3),
-            q_pp=_sel(g.q_pp, 3),
-            v0=g.v0,
-            zip_p=g.zip_p,
-            zip_q=g.zip_q,
-        )
+        replace(g, p_pp=_sel(g.p_pp, 3), q_pp=_sel(g.q_pp, 3))
         for g in plan.uncontrolled
     )
     controlled = tuple(
@@ -2779,16 +2771,26 @@ def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
         # V_term[..., e] = sum_u M[e,u] V_used[..., u]  -> [*b,H,K,n_elem].
         vt = torch.einsum("eu,...ku->...ke", g.m_c, v_used)
 
-        vmag = torch.abs(vt)  # [*b, H, K, n_elem] real
-        ratio = vmag / g.v0  # |V_term| / |V0|  broadcasts [K,n_elem]
+        if g.constant_power:
+            # The ZIP law is the identity here, so the terminal magnitude, the
+            # per-unit ratio and both polynomials are not formed: the group draws
+            # its nameplate power at every voltage and every iteration.
+            s_eff = torch.complex(*torch.broadcast_tensors(g.p_pp, g.q_pp)).to(cdt)
+        else:
+            vmag = torch.abs(vt)  # [*b, H, K, n_elem] real
+            ratio = vmag / g.v0  # |V_term| / |V0|  broadcasts [K,n_elem]
 
-        # ZIP scaling per power component: z*ratio^2 + i*ratio + p.
-        z_p, i_p, pp_p = g.zip_p[..., 0], g.zip_p[..., 1], g.zip_p[..., 2]  # [K]
-        z_q, i_q, pp_q = g.zip_q[..., 0], g.zip_q[..., 1], g.zip_q[..., 2]
-        scale_p = z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
-        scale_q = z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
+            # ZIP scaling per power component: z*ratio^2 + i*ratio + p.
+            z_p, i_p, pp_p = g.zip_p[..., 0], g.zip_p[..., 1], g.zip_p[..., 2]  # [K]
+            z_q, i_q, pp_q = g.zip_q[..., 0], g.zip_q[..., 1], g.zip_q[..., 2]
+            scale_p = (
+                z_p[..., None] * ratio**2 + i_p[..., None] * ratio + pp_p[..., None]
+            )
+            scale_q = (
+                z_q[..., None] * ratio**2 + i_q[..., None] * ratio + pp_q[..., None]
+            )
 
-        s_eff = torch.complex(g.p_pp * scale_p, g.q_pp * scale_q).to(cdt)
+            s_eff = torch.complex(g.p_pp * scale_p, g.q_pp * scale_q).to(cdt)
         # i_elem = conj(S_eff) / conj(V_term). NOTE: terminal voltage is assumed
         # non-zero here (a converged PF never has a 0 V live terminal), so this
         # divide is UNGUARDED — unlike the otherwise-identical conj(vt) divide in

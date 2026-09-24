@@ -505,7 +505,12 @@ load P/Q passes; full suite green.
   V-independent operating-point resolution (once per solve) and the pure-tensor
   per-iteration evaluation. The nonlinear solvers reuse one plan across all
   iterations; a plan built under `no_grad` is the detached fast path, one built
-  on the tape stays differentiable. `v` with `H == 1`: only a bare `[1, N]` is
+  on the tape stays differentiable. A group whose devices are ALL constant power
+  (both ZIP triples `(0,0,1)`, the resolved default) records that with the plan and
+  evaluates `S_eff = S0` directly: the law is the identity there, so the terminal
+  magnitude, the per-unit ratio and both polynomials are not formed, which is the
+  same number by exact arithmetic and several passes over the batch less per
+  iteration. `v` with `H == 1`: only a bare `[1, N]` is
   read as carrying the H axis; any deeper `v` is `[*batch, N]`, so a trailing
   scenario dim of one (a `[B, 1]` operating point) is never mistaken for H.
   Two plan-reshaping helpers live next to them for consumers that evaluate the residual

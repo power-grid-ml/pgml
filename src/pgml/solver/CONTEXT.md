@@ -243,6 +243,16 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     so the reported mismatch and the convergence decision are still the nodal ones: one
     matrix-vector product per SOLVE instead of one per iteration. `precision="mixed"`
     keeps the explicit residual — there it IS the next right-hand side.
+    Three more passes over the scenarios-by-rows tensor carry no information and are
+    not made. Both criteria are read off the row MAXIMUM the test reports anyway
+    wherever their threshold is one number for every row (`max_i x_i <= t` and
+    `x_i <= t for all i` are the same statement, non-finite rows included); the
+    voltage-update threshold always is, the mismatch threshold is unless the per-row
+    precision floor binds (`_PuConvergence.uniform_mismatch`). The select that holds
+    a finished scenario is skipped until one has finished (`_BatchIterationState`
+    reads that back with the synchronisation the loop makes anyway). And the
+    per-iteration voltage-update NORM is formed once, after the loop, from the last
+    iterate — only the per-row update maximum is a history.
   - `method="newton"` forward = NEWTON on the real residual `R(x)=0` (`x=[Re V; Im V]`):
     per step solve `J·Δx = −R` with `J = dR/dx` (the SAME real `[2N,2N]` Jacobian the IFT
     backward builds, via `torch.autograd.functional.jacobian`), backtracking line search
@@ -762,6 +772,18 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   solve. A POSITIVE `info` is an exact zero pivot and keeps torch's own error, so the
   batched harmonic path's per-scenario non-finite reporting is unchanged. CPU only —
   reading `info` on CUDA would synchronise, and the failure is a CPU LAPACK one.
+  ONE array layout serves a back-substitution: the scenario-major `[k, m]` block the
+  caller already holds IS, transposed, the column-major block SuperLU reads, so a
+  contiguous right-hand side shares its memory with the array handed to SuperLU and a
+  single-factorization solve returns a torch view of SuperLU's own output — nothing is
+  transposed in either direction (measured at complex128 on 1176-row and 4096-row
+  feeders: the backend entry was 1.5 to 1.7x the bare back-substitution and is now
+  within one per cent of it).
+  A single factorization answering many right-hand sides splits those right-hand sides
+  by COLUMNS across `_SPARSE_SOLVE_MAX_THREADS` workers, in chunks no narrower than
+  `_SPARSE_SOLVE_MIN_COLS`, which is the width above which a chunk reproduces the
+  undivided call's blocking bit for bit (a further 3.2x and 5.0x at 4096 right-hand
+  sides on those two feeders).
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL
