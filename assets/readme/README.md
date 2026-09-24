@@ -6,21 +6,34 @@ published soon). `provenance.json` identifies source revisions and SHA-256 hashe
 of the original inputs. No experiment is run by
 the figure renderer.
 
-- `batch_throughput.json`: IEEE 33-bus and Kerber complex128 series of pgml on
-  CPU and GPU with the pandapower, power-grid-model and OpenDSS baselines and the
-  measured environment. All seven batch sizes (1 to 4096) are retained for every
-  curve. Every scenario is checked, not just a prefix, and the renderer
-  rejects invalid comparison points, including a pandapower point measured
-  without active numba. The driver is `scripts/bench/bench_readme.py` in
-  pgml-paper, one grid per process, submitted as the stages `readme_ieee33` and
-  `readme_kerber` of `scripts/cluster/run_all.sh`. Eight pandapower and eight
-  OpenDSS workers have one thread each and power-grid-model uses eight threads.
+- `batch_throughput.json`: complex128 throughput against batch size on four
+  grids, for pgml on one GPU, pgml on eight CPU worker processes, pgml in one
+  batched CPU call, pandapower, power-grid-model and OpenDSS, with the measured
+  environment and the CPU allocation each run had. The driver is
+  `scripts/bench/bench_batch.py` in pgml-paper, stage `fair_batch` of
+  `scripts/cluster/run_all.sh`. Every engine on the CPU side gets the same eight
+  physical cores and the same eight workers or threads.
+- `harmonic_throughput.json`: the same sweep for whole harmonic studies, where
+  OpenDSS is the only reference tool with a harmonic power flow. Its points are
+  accepted at a looser tolerance than the fundamental ones, and each record
+  carries the tolerance it was judged at.
 - `size_scaling.json`: the same tools over a family of radial feeders with 16 to
-  4096 buses at 1 and 256 scenarios per batch (`scripts/bench/bench_size.py`,
-  stage `readme_size`), with the same every-scenario check.
-- Both files are assembled by `scripts/bench/readme_assets.py` in pgml-paper,
-  which also writes the jobs, versions and source hashes into `provenance.json`.
-  `../PERFORMANCE.md` describes the measurement protocol.
+  4096 buses at four batch sizes (`scripts/bench/bench_size.py`, stage
+  `fair_size`).
+- `footprint.json`, `footprint_harmonic.json`: peak host memory per tool and peak
+  device memory for pgml, one fresh interpreter per measured point, the process
+  tree sampled during the solve (`scripts/bench/bench_footprint.py`).
+- `cost.json`: cost per million solved scenarios from the measured throughput and
+  published list prices (`scripts/bench/bench_cost.py`, `scripts/bench/prices.py`).
+  A price model, not a measurement.
+- `crossovers.json`: the batch and grid sizes at which each pair of tools crosses
+  (`scripts/bench/fairness_tables.py`).
+- The renderer rejects invalid comparison points, including a pandapower point
+  measured without active numba, a point whose deviation exceeds the tolerance its
+  record carries, and a point validated on fewer scenarios than the run declares.
+- All files are assembled by `scripts/bench/readme_assets.py --fair` in
+  pgml-paper, which also writes the jobs, versions and source hashes into
+  `provenance.json`. `../PERFORMANCE.md` describes the measurement protocol.
 - `solverconf_*` and `modelconf_*`: figures of the two conformance checks, copied
   unchanged from `figures/solverconf/` and `figures/modelconf/` of pgml-paper, each
   with the JSON of its numbers and its generated caption (`*.caption.txt`).
@@ -41,6 +54,8 @@ From the repository root:
 pixi run -e cpu python run/readme/render.py
 ```
 
-The renderer writes the throughput, size-scaling and recovery SVGs here and preview PNGs to
-`/tmp`. Refresh batch JSON, source hashes, environment and README measurement
-caption together after checking provenance, coverage and validity.
+The renderer writes the throughput, size-scaling, harmonic, memory, cost and
+recovery SVGs here and preview PNGs to `/tmp`. A figure whose source file is not
+published is skipped; the README's own figure and the recovery panel are
+required. Refresh the result JSONs, source hashes, environment and the README
+measurement caption together after checking provenance, coverage and validity.

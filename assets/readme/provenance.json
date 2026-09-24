@@ -4,44 +4,91 @@
     "app_digital_twin.json": "73f4ca62a44d9a223b2ba4f545e612d587d84ed67bf9e1613599278356c8aa25",
     "bench_batch_throughput_readme_ieee33.json": "19735550398079c81df8cf368c383cdd87cf8e52573b6b50b06658634543d8d9",
     "bench_batch_throughput_readme_kerber.json": "cde883b30b0c7de49266cc84eb29f7b2afbef993cc95fec3e4111da2a8ba0227",
-    "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce"
+    "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce",
+    "bench_batch_throughput_fair.json": "3c5a1b038eb34dba8b90837bda5e961503f9c102698eb8056b2e31822199df1d",
+    "bench_harmonic_batch_fair.json": "16b6a900b361963de4f9f11fedd6dd3114b049dc7e86120b057d39c4dfbcac26",
+    "bench_size_fair.json": "3bffc57a70e061e533096dbb72a0e762a74d8f34d4d1c83d32df60cfcaf4001c",
+    "bench_footprint.json": "d1022ab77c87b4786452fa8a39da42851d2dfa726eaca864182d5ad4aa99bc87",
+    "bench_footprint_harmonic.json": "aa86ee398ee9faaaae5c44ea4f76c4e48edd9db802474da814c89cd73985b553",
+    "bench_cost_fair.json": "fae7b8b2e386cc3691692ba951f313911c70d3e432702a5e8530078d60420dcc",
+    "bench_fairness_tables.json": "70b89b17975a69e444f5ac38a915d0e058e1d6185ba1102fe7647973b24de6fc"
   },
   "performance_source": {
-    "paper_commit": "5b79a213a9827cf1e5158999e364e4bdc23a1d9b",
+    "paper_commit": "ef7656523227095e38d4ccae9d4856ed1b099f21",
+    "published": [
+      "batch_throughput.json",
+      "harmonic_throughput.json",
+      "size_scaling.json",
+      "footprint.json",
+      "footprint_harmonic.json",
+      "cost.json",
+      "crossovers.json"
+    ],
     "jobs": {
-      "ieee33": {
-        "cpus": "8",
-        "date": "2026-09-18 13:05:53+0200",
-        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
-        "benchmark_source_digest": "9716959de71a"
+      "batch_throughput.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-24 17:39:34+0200",
+        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
+        "benchmark_source_digest": "cb0e998827d6"
       },
-      "kerber": {
-        "cpus": "8",
-        "date": "2026-09-18 13:08:12+0200",
-        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
-        "benchmark_source_digest": "9716959de71a"
+      "harmonic_throughput.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-24 17:43:10+0200",
+        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
+        "benchmark_source_digest": "cb0e998827d6"
       },
-      "size": {
-        "cpus": "8",
-        "date": "2026-09-18 13:09:44+0200",
-        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
-        "benchmark_source_digest": "9716959de71a"
+      "size_scaling.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-24 17:04:52+0200",
+        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
+        "benchmark_source_digest": "f3e94519c122"
+      },
+      "footprint.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-24 17:20:59+0200",
+        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
+        "benchmark_source_digest": "95ce161bd89c"
+      },
+      "footprint_harmonic.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-24 17:23:49+0200",
+        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
+        "benchmark_source_digest": "ba6b5266560f"
+      },
+      "cost.json": {
+        "cpus": null,
+        "memory_mb": null,
+        "date": "2026-09-24 18:19:44+0200",
+        "pgml_revision": "966df9d-dirty",
+        "benchmark_source_digest": "580573102c84"
+      },
+      "crossovers.json": {
+        "cpus": null,
+        "memory_mb": null,
+        "date": "2026-09-24 18:19:48+0200",
+        "pgml_revision": "966df9d-dirty",
+        "benchmark_source_digest": "580573102c84"
       }
     },
-    "batch_sizes": [
-      1,
-      4,
-      16,
-      64,
-      256,
-      1024,
-      4096
-    ],
-    "size_batches": [
-      1,
-      256
-    ],
-    "all_scenarios_validated": true,
+    "validated_scenarios_per_batch": 32,
+    "validation_scope": "the leading 32 scenarios of every timed batch are re-solved outside the clock and compared with a pgml CPU complex128 reference; a smaller batch is checked in full",
+    "cpu_allocation": {
+      "logical_cpus": 16,
+      "physical_cores": 8,
+      "threads_per_core": 2.0,
+      "cpu_workers": 8,
+      "blas_thread_env": {
+        "OMP_NUM_THREADS": "8",
+        "MKL_NUM_THREADS": "8",
+        "OPENBLAS_NUM_THREADS": "8",
+        "NUMEXPR_NUM_THREADS": "8"
+      }
+    },
     "pandapower_numba": {
       "importable": true,
       "version": "0.67.0",
@@ -54,7 +101,7 @@
       "numpy": "2.4.6",
       "scipy": "1.18.1",
       "pgml": "0.5.1",
-      "pgml_git": "b70b5179341168e74acd5d68956fbcffc570ee1f",
+      "pgml_git": "966df9debde4b28754805683dddae0462e48134d",
       "pandapower": "3.5.4",
       "power_grid_model": "1.13.172",
       "power_grid_model_io": "present",

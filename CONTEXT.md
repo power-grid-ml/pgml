@@ -56,17 +56,20 @@ The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTE
 
 ## GitHub publication landing page
 
-README leads with capabilities, a seven-library comparison, then throughput,
-conformance and resistance-recovery
+README leads with capabilities, a seven-library comparison, then ONE throughput
+figure, the conformance and resistance-recovery
 figures before installation. Figure inputs and provenance are in `assets/readme/`;
-`run/readme/render.py` redraws the recorded throughput and wide resistance panel
-without running a solve. Each figure's measurement date, source hashes and validation
+`run/readme/render.py` redraws every recorded figure without running a solve. Each
+figure's measurement date, source hashes and validation
 scope accompany its data; the README caption identifies the measured hardware and
-precision. Throughput compares IEEE33 and Kerber on one L40S with eight allocated
-CPUs against pandapower (numba required), power-grid-model and OpenDSS, validating
-all scenarios at every batch size. `assets/PERFORMANCE.md` documents the protocol
-and adds the grid-size figure; `render.py` draws both from the recorded JSON with
-one colour per tool. Installation instructions target the GitHub repository.
+precision. The throughput comparison gives every engine the SAME allocation: one
+L40S against eight physical CPU cores, on which pgml, pandapower and OpenDSS each
+get eight single-threaded worker processes and power-grid-model eight threads.
+pgml's single batched CPU call is a second configuration of the same engine and
+belongs on the performance page, not in the README figure.
+`assets/PERFORMANCE.md` documents the protocol and carries the grid-size,
+harmonic, memory and cost figures, the crossover table, and where pgml loses.
+Installation instructions target the GitHub repository.
 
 ## Where things live
 

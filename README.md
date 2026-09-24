@@ -35,17 +35,25 @@ Each library has its own supported devices, assumptions and applications.
 
 pgml solves many operating points of one grid in a single batched call, so its
 throughput keeps growing with the batch size. Tools that solve one scenario at a
-time level off early. On one GPU pgml overtakes every CPU tool at 4,096 scenarios
-per batch. For a few scenarios a dedicated CPU solver such as power-grid-model
-is faster.
+time level off early. Most of that gain needs no GPU: the pgml CPU curve is the
+same engine on the same eight cores, split over the same eight worker processes
+the other tools get.
 
-All tools solve identical load scenarios in double precision. A point is shown
-only if every scenario converged and matches pgml within 1e-6 pu in voltage
-magnitude. The plot covers the forward power flow, without gradients.
+For a few scenarios pgml is the slowest tool here. At one scenario per batch
+power-grid-model solves 5,700 per second on the 33-bus feeder where pgml manages
+140. pgml passes it at about 4,096 scenarios per batch and reaches 1.2 million
+per second on one GPU. On grids of about a thousand buses and more it does not
+pass power-grid-model at any batch size.
+
+All tools solve identical load scenarios in double precision on the same
+allocation. A point is shown only if the solution converged and matches a pgml
+double-precision reference within 1e-6 pu in voltage magnitude. The plot covers
+the forward power flow, without gradients.
 [PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
-timed, and how throughput changes with grid size.
+timed, how throughput changes with grid size, what each tool costs in memory and
+in money, and where pgml loses.
 
-<sub>One NVIDIA L40S 48 GB and eight logical CPUs (four cores) of an AMD EPYC 9334. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for pandapower and OpenDSS).</sub>
+<sub>One NVIDIA L40S 48 GB against eight physical cores of an AMD EPYC 9334, on which every CPU tool gets eight workers or eight threads. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for the per-scenario tools), the leading 32 scenarios of every batch re-solved and compared.</sub>
 
 ## Conformance: the solvers agree
 
