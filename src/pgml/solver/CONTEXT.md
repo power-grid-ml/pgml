@@ -17,7 +17,9 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
   and RHS are always current. Harmonic matrix gradients bypass numerical caching;
   RHS-only gradients can reuse factors. No cached harmonic autograd graph.
 - Chunked harmonic `run_scenarios` shares a preparation with
-  `cache_batched_factors=False`; small Woodbury corrections remain per-call.
+  `cache_batched_factors=False`, and on CPU only from
+  `solver.harmonic.preparation_min_rows` rows up (an accelerator is never gated);
+  small Woodbury corrections remain per-call.
   No global or independent sparse-symbolic cache. Not thread-safe; CUDA comparisons
   can synchronize. Storage is bounded by entry count, not bytes.
 

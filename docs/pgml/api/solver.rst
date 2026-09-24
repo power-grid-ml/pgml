@@ -112,11 +112,20 @@ Preparation retains at most one entry at each level, but a scenario matrix and
 its factors can be large. ``HarmonicFlowSystem(cache_batched_factors=False)``
 avoids retaining scenario-dependent factors; chunked ``run_scenarios`` uses this
 mode automatically. Use ``system.clear()`` to release entries. Preparation is
-not thread-safe and exact tensor comparisons can synchronize CUDA. Benchmarks
-should distinguish uncached calls, the first prepared call, repeated identical
-batches and genuinely changed operating points. Preparation is not guaranteed
-to improve small-system latency. ``load_shunt_basis="nameplate"`` is a physical
-model choice, not a cache optimization interchangeable with operating-point shunts.
+not thread-safe and exact tensor comparisons can synchronize CUDA.
+
+Whether preparation pays depends on the system size and on the device. What it
+removes is one network assembly and one operating-point-independent
+factorization per call. On an accelerator that is worth 1.1x to 2.5x at every
+size measured, from 99 rows up. On CPU it is a smaller share of the call, so
+preparation loses up to about 200 rows and gains from roughly 256 rows up,
+reaching 1.3x to 1.6x on a feeder of several hundred rows. A per-scenario
+``Y(h)`` has no reusable factorization and gains nothing at any size.
+A chunked harmonic ``run_scenarios`` therefore
+prepares on an accelerator always and on CPU from
+``solver.harmonic.preparation_min_rows`` rows up.
+``load_shunt_basis="nameplate"`` is a physical model choice, not a cache
+optimization interchangeable with operating-point shunts.
 
 For threaded execution, allocate one ``HarmonicFlowSystem`` per worker and reuse
 it sequentially within that worker. Shared-instance lookups, rebuilds, eviction,

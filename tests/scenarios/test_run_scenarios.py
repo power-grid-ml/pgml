@@ -277,3 +277,83 @@ def test_a_spec_without_sample_is_rejected(grid3):
 
     with pytest.raises(InputError, match="scenario spec"):
         run_scenarios(grid3, object())
+
+
+def _recorded_preparations(monkeypatch) -> list:
+    """Every ``HarmonicFlowSystem`` the chunked run builds, in construction order."""
+    from pgml.scenarios import run as run_module
+
+    built: list = []
+    real = run_module.HarmonicFlowSystem
+
+    def record(**kwargs):
+        system = real(**kwargs)
+        built.append(system)
+        return system
+
+    monkeypatch.setattr(run_module, "HarmonicFlowSystem", record)
+    return built
+
+
+def _harmonic_chunked(grid, **kwargs):
+    return run_scenarios(
+        grid,
+        _cfg(n=8),
+        calculation="harmonic",
+        harmonic_orders=[1, 5],
+        slack="norton",
+        dtype=CDT,
+        chunk_size=3,
+        **kwargs,
+    )
+
+
+def test_small_cpu_grid_is_solved_without_a_preparation(grid3, monkeypatch):
+    """Below the row gate the reuse bookkeeping costs more than the assembly it saves."""
+    built = _recorded_preparations(monkeypatch)
+    res = _harmonic_chunked(grid3)
+    assert built == []
+    assert res.v.shape == (8, 2, grid3_n(grid3))
+
+
+def test_large_cpu_grid_prepares_once_for_the_whole_run(monkeypatch):
+    """Above the gate every chunk reuses one network assembly and its factors."""
+    from pgml.assembly import node_phase_index
+    from pgml.grids import synthetic_feeder
+
+    grid = synthetic_feeder(100)
+    assert node_phase_index(grid).size >= 256
+    built = _recorded_preparations(monkeypatch)
+    _harmonic_chunked(grid)
+    assert len(built) == 1
+    assert built[0].cache_batched_factors is False
+    assert built[0].stats["harmonic_network_hits"] > 0
+
+
+def test_accelerator_is_never_gated_by_the_row_count(grid3):
+    """A GPU gains at every size measured, so the gate applies to the CPU only."""
+    from pgml.scenarios.run import _preparation_pays
+
+    assert not _preparation_pays(grid3, torch.device("cpu"))
+    assert _preparation_pays(grid3, torch.device("cuda"))
+
+
+def test_row_gate_follows_the_documented_default(grid3, monkeypatch, tmp_path):
+    """``solver.harmonic.preparation_min_rows`` decides, not a hard-coded constant."""
+    import yaml
+
+    from pgml import defaults
+
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["solver"]["harmonic"]["preparation_min_rows"]["value"] = 0
+    custom = tmp_path / "defaults.yaml"
+    custom.write_text(yaml.safe_dump(data))
+    built = _recorded_preparations(monkeypatch)
+    monkeypatch.setenv("PGML_DEFAULTS", str(custom))
+    try:
+        defaults.reload(str(custom))
+        _harmonic_chunked(grid3)
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
+    assert len(built) == 1
