@@ -13,11 +13,39 @@ collection of components, building lists that are stacked ONCE into a tensor.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
+
+
+class _SolvedPVOperatingPoint(dict):
+    """Solver-produced device readout, not a prescribed per-phase Q override.
+
+    Created by PowerFlowResult.resolved_operating_point. The distinct entry type
+    prevents ordinary input dictionaries from bypassing symmetric power splitting.
+    It carries no additional state and must be preserved when slicing a batch.
+    """
+
+
+def _preserve_solved_pv_q(appliance, operating_point) -> bool:
+    """Identify solved Q readout; warn if a raw PV phase split will be averaged."""
+    if getattr(appliance, "voltage_regulation", None) is None:
+        return False
+    entry = (operating_point or {}).get(appliance.id, {})
+    if "q_per_phase_var" not in entry:
+        return False
+    if isinstance(entry, _SolvedPVOperatingPoint):
+        return True
+    logging.getLogger("pgml").warning(
+        "generator %s: q_per_phase_var phase allocation is ignored for a "
+        "symmetric calculation; the total is split equally. Only solver-produced "
+        "PV reactive-power readout retains its solved phase allocation.",
+        appliance.id,
+    )
+    return False
 
 
 def phase_voltage_magnitude(
@@ -131,6 +159,17 @@ def resolve_operating_power(
     ``docs/pgml/modeling/asymmetric.md`` section 1). The total is taken from a
     total operating-point override if given, else from the per-phase override / the
     per-phase nameplate (summed), else from the total nameplate.
+
+    Ordinary per-phase Q overrides are not exempt for voltage-regulating generators:
+    their phase split is ignored with a warning in symmetric calculations. The
+    fundamental PV solver ignores prescribed Q altogether and replaces it with
+    constraint/limit values before evaluating its residual.
+
+    Solver-produced entries from ``PowerFlowResult.resolved_operating_point`` are
+    READOUT, not prescribed inputs: their solved Q allocation is preserved for
+    harmonic initialization and device-current recovery. Symmetry balances input
+    powers, not the phase-domain network or its solved outputs. Averaging solved Q
+    on an unbalanced network would invalidate the converged nodal balance.
     """
     n = len(appliance.phases)
     p_total = appliance.p_nom_w
@@ -162,7 +201,13 @@ def resolve_operating_power(
         # Build n INDEPENDENT entries (each ``/ n`` is a fresh autograd node). A
         # ``[x] * n`` literal would alias ONE object into every slot, so a per-phase
         # gradient would wrongly perturb all phases under tensor duality.
-        return [p_t / n for _ in range(n)], [q_t / n for _ in range(n)]
+        # PV input Q is replaced by the fundamental solver. A per-phase Q
+        # override on its solved operating point is an OUTPUT allocation, which
+        # must survive even when the requested input powers were symmetric.
+        solved_q = _preserve_solved_pv_q(appliance, operating_point)
+        return [p_t / n for _ in range(n)], (
+            list(q_per) if solved_q else [q_t / n for _ in range(n)]
+        )
 
     # Same independent-entries rule as the symmetric branch above: each ``/ n``
     # is a fresh autograd node, never one object aliased into every slot.

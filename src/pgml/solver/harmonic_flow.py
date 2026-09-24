@@ -78,7 +78,11 @@ from pgml.assembly._load_shunt import (
     resolve_shunt_basis,
     resolve_shunt_model_name,
 )
-from pgml.assembly._params import phase_voltage_magnitude, resolve_operating_power
+from pgml.assembly._params import (
+    _SolvedPVOperatingPoint,
+    phase_voltage_magnitude,
+    resolve_operating_power,
+)
 from pgml.assembly._scatter import scatter_blocks_into
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
@@ -539,6 +543,7 @@ def solve_harmonic_flow(
         equilibrate=eq_mode,
     )
     v1 = pf.v  # [*batch, N] complex
+    operating_point = pf.resolved_operating_point(operating_point)
     if device is None:
         device = v1.device
 
@@ -678,7 +683,12 @@ def _slice_batch(obj, sl: slice, b: int):
     if isinstance(obj, Tensor):
         return obj[sl] if obj.ndim >= 1 and obj.shape[0] == b else obj
     if isinstance(obj, dict):
-        return {k: _slice_batch(v, sl, b) for k, v in obj.items()}
+        sliced = {k: _slice_batch(v, sl, b) for k, v in obj.items()}
+        return (
+            _SolvedPVOperatingPoint(sliced)
+            if isinstance(obj, _SolvedPVOperatingPoint)
+            else sliced
+        )
     if isinstance(obj, (list, tuple)):
         return type(obj)(_slice_batch(e, sl, b) for e in obj)
     return obj
@@ -965,7 +975,10 @@ def assemble_harmonic_system(
         which is the layout a result reports, fused or not.
     operating_point:
         Optional scenario P/Q override, forwarded to the harmonic-injection power
-        resolution (same meaning as in :func:`solve_harmonic_flow`).
+        resolution. For a separately solved PV operating point, pass
+        ``pf.resolved_operating_point(operating_point)`` so the solved per-phase
+        reactive output replaces the configured Q. ``solve_harmonic_flow`` does
+        this automatically.
     harmonic_injection:
         Optional per-device spectrum override (same format/convention as in
         :func:`solve_harmonic_flow`).
@@ -1568,7 +1581,8 @@ def _effective_element_power(
     # per-element vector, as in the assembly).
     kind = "load" if isinstance(a, Load) else "generator"
     p_t = _override(param_overrides, (kind, a.id, "p_nom_per_phase_w"), p_t)
-    q_t = _override(param_overrides, (kind, a.id, "q_nom_per_phase_var"), q_t)
+    if getattr(a, "voltage_regulation", None) is None:
+        q_t = _override(param_overrides, (kind, a.id, "q_nom_per_phase_var"), q_t)
 
     lm = getattr(a, "load_model", None)
     if getattr(a, "control", None) is None and (

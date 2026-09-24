@@ -183,6 +183,22 @@ class PVTerminals:
                 out[gid] = q[..., ki]
         return out
 
+    def required_q_per_phase(self, fc: Tensor, v: Tensor) -> dict[int, Tensor]:
+        """Solved injection ``[*batch, phases]`` in each generator's phase order.
+
+        Per-phase regulation can supply unequal vars even with a balanced active
+        setpoint. Keep that allocation when initializing harmonics or recovering
+        device currents; dividing the solved total equally loses it.
+        """
+        out: dict[int, Tensor] = {}
+        for g in self.groups:
+            lead = _lead(g, fc, v)
+            correction = (torch.conj(_gather(g, v, lead)) * _gather(g, fc, lead)).imag
+            q = _pinned_q(g).unsqueeze(-1) / g.n_elem - correction
+            for ki, gid in enumerate(g.gen_ids):
+                out[gid] = q[..., ki, :]
+        return out
+
     def regulating_mask(self) -> dict[int, Tensor]:
         """Per generator id: ``True`` where the terminal holds its voltage setpoint."""
         out: dict[int, Tensor] = {}

@@ -45,12 +45,23 @@ The solver package provides the following entry points:
   operating-point-independent part of a nonlinear solve once, returning a
   :class:`~pgml.solver.PowerFlowSystem` that repeated
   :func:`~pgml.solver.solve_power_flow` calls on the same grid can reuse.
+  Reuse validates stored network values, voltage bases, modeling defaults, and
+  detached snapshots of ``param_overrides`` and ``branch_states``. Changed values
+  (including in-place tensor edits) raise ``InputError``; re-prepare the system.
+  Equal-valued replacement tensors can reuse factors and receive their own gradients.
 - :mod:`pgml.solver.equilibration` — the diagonal scaling used by the power-flow and
   harmonic factorization paths, and the factored handle
   :class:`~pgml.solver.equilibration.EquilibratedLU` for a caller that wants it
   directly.
 
 .. rubric:: Differentiability
+
+When assembling harmonics separately after a fundamental solve, use
+``operating_point=pf.resolved_operating_point(original_operating_point)``. This
+replaces configured PV reactive powers with the solved output, including binding
+limits and unequal phase allocation. ``solve_harmonic_flow`` and ``simulate``
+perform this handoff automatically. The input dictionary is not mutated and the
+resolved powers remain differentiable.
 
 ``solve_harmonic`` differentiates cleanly via the linear solve adjoint.
 ``solve_power_flow`` uses an explicit IFT adjoint (the only sanctioned

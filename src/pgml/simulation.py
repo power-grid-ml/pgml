@@ -192,6 +192,7 @@ class SolvedState:
         fusion=None,
         harmonic_injection: Optional[dict] = None,
         node_sources: Optional[Sequence] = None,
+        resolved_operating_point: Optional[dict] = None,
     ) -> None:
         self.grid = grid
         self.config = config
@@ -209,6 +210,11 @@ class SolvedState:
         self.fusion = fusion
         self.harmonic_injection = harmonic_injection
         self.node_sources = node_sources
+        self.resolved_operating_point = (
+            config.operating_point
+            if resolved_operating_point is None
+            else resolved_operating_point
+        )
 
     # -- node quantities ---------------------------------------------------- #
     def node_voltages(self) -> Tensor:
@@ -314,7 +320,7 @@ class SolvedState:
                         [f0],
                         dtype=self.dtype,
                         device=self.device,
-                        operating_point=self.config.operating_point,
+                        operating_point=self.resolved_operating_point,
                         param_overrides=self.param_overrides,
                         symmetry=self.config.symmetry,
                     ).squeeze(-2)
@@ -325,7 +331,7 @@ class SolvedState:
                     self.grid,
                     v1,
                     [order],
-                    operating_point=self.config.operating_point,
+                    operating_point=self.resolved_operating_point,
                     harmonic_injection=self.harmonic_injection,
                     node_sources=self.node_sources,
                     symmetry=self.config.symmetry,
@@ -338,7 +344,7 @@ class SolvedState:
                     v1,
                     self.v[..., k : k + 1, :],
                     [order],
-                    operating_point=self.config.operating_point,
+                    operating_point=self.resolved_operating_point,
                     load_shunt=self.config.load_shunt,
                     load_shunt_basis=self.config.load_shunt_basis,
                     symmetry=self.config.symmetry,
@@ -637,6 +643,7 @@ def simulate(
             float(hf.pf.residual),
         )
         pf_diag = hf.pf.diagnostics
+        pf = hf.pf
 
     if strict and not converged:
         diag: dict = {"calculation": config.calculation, "max_iter": config.max_iter}
@@ -667,6 +674,7 @@ def simulate(
         fusion=fusion,
         harmonic_injection=harmonic_injection,
         node_sources=node_sources,
+        resolved_operating_point=pf.resolved_operating_point(config.operating_point),
     )
 
 

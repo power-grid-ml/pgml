@@ -84,6 +84,7 @@ from pgml.assembly._fusion import (
 )
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
+from pgml.assembly._params import _SolvedPVOperatingPoint
 from pgml.assembly.ybus import _stamp_sources, flatten_plan_batch, select_plan_batch
 from pgml.errors import ConnectivityError, InputError, ModelingError
 from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source
@@ -1041,6 +1042,7 @@ def _expand_zeroed_result(
         diagnostics=res.diagnostics,
         converged_mask=res.converged_mask,
         failed_states=res.failed_states,
+        regulation=res.regulation,
         fusion=fusion,
     )
 
@@ -1143,6 +1145,33 @@ class PowerFlowResult:
     regulation: Optional[VoltageRegulationResult] = None
     fusion: Optional[FusionMap] = None
 
+    def resolved_operating_point(
+        self, operating_point: Optional[dict] = None
+    ) -> Optional[dict]:
+        """Overlay solved PV reactive powers for harmonic assembly/current readout.
+
+        The input dictionary and its entries are not mutated. Tensor values retain
+        their gradients and scenario axes; per-phase vars retain the allocation
+        solved by independent phase regulators. Regulating-generator entries are
+        marked as solver readout so symmetric downstream resolution preserves
+        the solved Q without granting ordinary input dictionaries an exemption.
+        Keep these entries when assembling from the result: rebuilding them as
+        plain dictionaries makes them prescribed inputs again.
+        """
+        if self.regulation is None:
+            return operating_point
+        resolved = dict(operating_point or {})
+        for gid, q in self.regulation.q_var.items():
+            entry = _SolvedPVOperatingPoint(resolved.get(gid, {}))
+            entry.pop("q_per_phase_var", None)
+            entry["q_var"] = q
+            if gid in self.regulation.q_per_phase_var:
+                entry["q_per_phase_var"] = self.regulation.q_per_phase_var[gid].unbind(
+                    -1
+                )
+            resolved[gid] = entry
+        return resolved
+
 
 @dataclass(frozen=True)
 class VoltageRegulationResult:
@@ -1157,6 +1186,10 @@ class VoltageRegulationResult:
         DIFFERENTIABLE with respect to the same parameters as the voltages whenever
         the solve tracks gradients, so a loss on a generator's reactive output can be
         written on it directly.
+    q_per_phase_var:
+        Generator id -> solved reactive injection ``[*batch, phases]`` in the
+        generator's phase order. Preserves unequal phase-regulator outputs for
+        harmonic initialization and device-current readout.
     regulating:
         Generator id -> bool ``[*batch]``: ``True`` where the terminal holds its
         voltage setpoint, ``False`` where a reactive limit binds and the unit was
@@ -1184,6 +1217,8 @@ class VoltageRegulationResult:
     enforce_q_limits: bool
     settled: Optional[Tensor] = None
     unsettled_generators: tuple[int, ...] = ()
+    #: Solved injection by phase, ``[*batch, phases]``, preserving phase allocation.
+    q_per_phase_var: dict[int, Tensor] = field(default_factory=dict)
 
 
 @dataclass
@@ -1765,8 +1800,8 @@ class PowerFlowSystem:
     :func:`~pgml.topology.network_fingerprint` (nodes, branches, sources, shunts and
     their parameter values) — a different preset or a same-size grid with changed
     topology or impedances is rejected instead of silently reusing the stale
-    factorization. ``param_overrides`` / ``branch_states`` equality remains the
-    caller's contract.
+    factorization. ``param_overrides`` and ``branch_states`` are compared against
+    detached value snapshots, including in-place edits of tensor arguments.
 
     With ``branch_states_method="woodbury"`` the cached system describes the sweep's
     BASE network instead: ``y_eff`` is a matrix-free
@@ -1802,6 +1837,35 @@ class PowerFlowSystem:
     #: convergence criteria and of the voltage-band diagnostics. A property of the rated
     #: voltages, so it is built once with the system.
     v_base: Optional[Tensor] = None
+    param_overrides_snapshot: dict = field(default_factory=dict)
+    branch_states_snapshot: dict = field(default_factory=dict)
+
+
+def _parameter_snapshot(values: Optional[dict]) -> dict:
+    """Own a value copy, independent of mutable inputs and their autograd graphs."""
+    return {
+        key: torch.as_tensor(value, dtype=torch.complex128).detach().clone()
+        for key, value in (values or {}).items()
+    }
+
+
+def _check_parameter_snapshot(
+    snapshot: dict, values: Optional[dict], name: str
+) -> None:
+    values = values or {}
+    if snapshot.keys() == values.keys() and all(
+        torch.equal(
+            saved,
+            torch.as_tensor(values[key], dtype=saved.dtype, device=saved.device),
+        )
+        for key, saved in snapshot.items()
+    ):
+        return
+    raise InputError(
+        f"The provided PowerFlowSystem was prepared with different {name}; "
+        "its cached matrix and factors are stale. Re-prepare the system with "
+        "the current arguments."
+    )
 
 
 def prepare_power_flow(
@@ -1946,6 +2010,8 @@ def prepare_power_flow(
         row_abs_scale=row_abs,
         full_index=fusion.full_index if fusion is not None else index,
         v_base=v_base,
+        param_overrides_snapshot=_parameter_snapshot(param_overrides),
+        branch_states_snapshot=_parameter_snapshot(branch_states),
     )
 
 
@@ -2223,6 +2289,15 @@ def solve_power_flow(
             "fixed-point factorization backend of method='current_injection'."
         )
     _validate_block_solver(linear_solver, block_rows, have_system=system is not None)
+    if system is not None:
+        # Check before reusing even the fusion map: overrides and states can change
+        # both matrix values and which rows are merged.
+        _check_parameter_snapshot(
+            system.param_overrides_snapshot, param_overrides, "param_overrides"
+        )
+        _check_parameter_snapshot(
+            system.branch_states_snapshot, branch_states, "branch_states"
+        )
     if (
         system is not None
         and system.modeling_defaults is not None
@@ -2382,17 +2457,11 @@ def solve_power_flow(
             "point only); batch one of the two, or use method='current_injection'."
         )
 
-    if system is not None:
-        # The grid-side leaves were walked once in prepare_power_flow; only the
-        # per-call operating point can add new ones.
-        leaves = list(system.static_leaves)
-        seen = {id(t) for t in leaves}
-        if operating_point is not None:
-            _collect_leaves(operating_point, leaves, seen)
-    else:
-        leaves = _grid_param_leaves(
-            grid, param_overrides, None, operating_point, branch_states
-        )
+    # Equal-valued replacement tensors may safely share numerical factors, but
+    # their gradients must reach the CURRENT leaves, not those used at preparation.
+    leaves = _grid_param_leaves(
+        grid, param_overrides, None, operating_point, branch_states
+    )
     if device is None:
         device = (
             system.y_eff.device
@@ -2949,12 +3018,35 @@ def solve_power_flow(
             # generator's Q reaches the parameters through both the residual's own
             # dependence on them and the solved state.
             y_eff_q, i_slack_q = build_system()
-            q_solved = pv.required_q(
+            q_per_phase = pv.required_q_per_phase(
                 residual_complex(v_solved, y_eff_q, i_slack_q), v_solved
             )
         else:
             with torch.no_grad():
-                q_solved = pv.required_q(fc_nodal, v_star)
+                q_per_phase = pv.required_q_per_phase(fc_nodal, v_star)
+        q_solved = {gid: q.sum(-1) for gid, q in q_per_phase.items()}
+        if not asymmetric:
+            with torch.no_grad():
+                unequal = [
+                    gid
+                    for gid, q in q_per_phase.items()
+                    if q.shape[-1] > 1
+                    and not torch.allclose(
+                        q,
+                        q.mean(-1, keepdim=True).expand_as(q),
+                        rtol=1e-6,
+                        atol=1e-3,
+                    )
+                ]
+            if unequal:
+                _log.warning(
+                    "solve_power_flow: symmetric calculation balances prescribed "
+                    "input powers, not solved outputs. PV generator(s) %s have "
+                    "unequal solved per-phase Q on this network; preserving it "
+                    "for nodal balance and harmonic initialization. Use a balanced "
+                    "network and compatible regulation if balanced outputs are required.",
+                    unequal,
+                )
         if unsettled_mask is None:
             q_any = next(iter(q_solved.values()))
             settled = torch.ones(q_any.shape, dtype=torch.bool, device=q_any.device)
@@ -2967,6 +3059,7 @@ def solve_power_flow(
             enforce_q_limits=pv.enforce_q_limits,
             settled=settled,
             unsettled_generators=unsettled_ids,
+            q_per_phase_var=q_per_phase,
         )
         _log.info(
             "solve_power_flow: %d voltage-regulating terminal(s) solved (%s) in %d "
