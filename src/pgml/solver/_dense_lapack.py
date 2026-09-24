@@ -263,6 +263,9 @@ def _info_checked(a: Tensor) -> tuple[Tensor, Tensor]:
     exact zero pivot, a legitimate outcome that a batched harmonic solve reports per
     scenario, so it is left to torch's own message. Reading the value on CUDA would
     synchronise inside a solve, and the failure is a CPU one, so only CPU is checked.
+
+    A stack of matrices does not come here: it is verified by its backward error
+    instead, which catches a wrong factorization whatever the library reported.
     """
     if a.device.type != "cpu":
         return torch.linalg.lu_factor(a)
@@ -288,7 +291,7 @@ def lu_factor(a: Tensor, *, where: str) -> tuple[Tensor, Tensor]:
     limit = _limit(a.dtype)
 
     def run(per_matrix: bool):
-        lu, piv = _per_matrix_lu_factor(a) if per_matrix else _info_checked(a)
+        lu, piv = _per_matrix_lu_factor(a) if per_matrix else torch.linalg.lu_factor(a)
         with torch.no_grad():
             x = torch.linalg.lu_solve(lu.detach(), piv, b)
         return (lu, piv), _relative_residual(a_d, x, b, limit)
