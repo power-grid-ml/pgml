@@ -63,6 +63,8 @@ from torch import Tensor
 from pgml import defaults
 from pgml.errors import InputError
 
+from . import _dense_lapack
+
 #: Accepted equilibration modes (``"off"`` disables it).
 EQUILIBRATION_MODES = ("off", "symmetric")
 
@@ -210,7 +212,7 @@ class EquilibratedLU:
         """
         d_in, d_out = (self.d_col, self.d_row) if adjoint else (self.d_row, self.d_col)
         b = rhs if d_in is None else rhs * d_in
-        x = torch.linalg.lu_solve(
+        x = _dense_lapack.lu_solve(
             self.lu, self.piv, b.to(self.lu.dtype).unsqueeze(-1), adjoint=adjoint
         ).squeeze(-1)
         if d_out is not None:
@@ -233,8 +235,9 @@ def equilibrated_lu_factor(
     re-factoring, which is what makes a repeated vector-Jacobian product cheap.
     """
     a_hat, d_row, d_col = equilibrate_matrix(a, mode=mode, power_of_two=power_of_two)
-    lu, piv = torch.linalg.lu_factor(
-        a_hat if factor_dtype is None else a_hat.to(factor_dtype)
+    lu, piv = _dense_lapack.lu_factor(
+        a_hat if factor_dtype is None else a_hat.to(factor_dtype),
+        where="equilibrated_lu_factor",
     )
     return EquilibratedLU(
         lu=lu, piv=piv, d_row=d_row, d_col=d_col, mode=mode, out_dtype=a.dtype

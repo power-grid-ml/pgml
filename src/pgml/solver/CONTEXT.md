@@ -687,6 +687,27 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"` and
   `"block"` raise. The sparse backend is differentiable via the linear-solve adjoint
   (`_SparseSolveFn`: one trans='H' solve + batch-folded `-λ·conj(V)ᵀ`).
+- BATCHED DENSE ON CPU (`solver/_dense_lapack.py`): every dense `lu_factor` /
+  `lu_solve` / `solve` on a stack of MORE THAN ONE matrix goes through this module.
+  Some CPU LAPACK builds get the row interchange of a MULTI-THREADED batched LU
+  wrong (oneMKL `ZLASWP` parameter error, then a rejected factorization), which
+  without a guard removes every path that hands a stack of matrices to LAPACK: the
+  operating-point device shunt, a batched voltage node source, `branch_states` with
+  `branch_states_method="assemble"`, and the `[B,2N,2N]` IFT adjoint. Each such call
+  is measured against a probe right-hand side with DISTINCT entries (a constant one
+  is invariant under any row permutation and would hide the failure); a raised call
+  or a residual above round-off for the precision that was FACTORED (so the
+  single-precision factors of a mixed-precision solve are judged by their own)
+  repeats it in ONE thread and latches that for the process, and a single-threaded
+  call that is still wrong raises `ComputationError` instead of returning a wrong
+  voltage. The residual is scaled by `max(‖b‖, ‖Ax‖)` first and, only when that
+  exceeds the threshold, by the sound `‖A‖‖x‖+‖b‖` — a badly scaled network (a
+  milliohm switch beside a line) cancels in `Ax` and would otherwise be rejected.
+  Cost on an unaffected build is the check alone: 11 % of a batched factorization of
+  sixteen 300-row systems, 6 % at 450 rows, within noise at 900. A SINGLE matrix,
+  CUDA and the sparse backend are untouched, so the nonlinear solvers'
+  per-iteration back-substitutions pay nothing. The thread
+  count is process-global, so concurrent solves must be serialized by the caller.
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL
