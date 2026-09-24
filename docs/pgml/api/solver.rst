@@ -63,6 +63,68 @@ limits and unequal phase allocation. ``solve_harmonic_flow`` and ``simulate``
 perform this handoff automatically. The input dictionary is not mutated and the
 resolved powers remain differentiable.
 
+Repeated harmonic studies
+-------------------------
+
+Use explicit preparation for repeated calls on one network::
+
+    from pgml.solver import HarmonicFlowSystem, solve_harmonic_flow
+
+    system = HarmonicFlowSystem()
+    first = solve_harmonic_flow(grid, [1, 5, 7], system=system)
+    next_state = solve_harmonic_flow(
+        grid, [1, 5, 7], operating_point=new_op, system=system,
+    )
+    print(system.stats)
+
+Alternatively, ``prepare_harmonic_flow(grid, orders, **solve_kwargs)`` warms the
+same preparation with a complete initial solve and returns only the preparation.
+``simulate(..., harmonic_system=system)`` accepts it too. Without a preparation,
+the solver retains its uncached behavior. No process-global harmonic cache exists.
+
+Unlike ``PowerFlowSystem`` (which rejects changes), harmonic preparation
+automatically rebuilds affected entries. Three separate checks govern reuse:
+
+* Fundamental preparation: current grid data, defaults, parameter overrides,
+  branch states and numerical settings must match their value snapshots. A new
+  fundamental operating point is always solved. The explicit ``ignore``
+  connectivity policy and zeroed-subgrid recursion bypass fundamental preparation
+  because its constructor requires connectivity; harmonic reuse remains available.
+* Network assembly: current grid data (including DER impedances and connection
+  flags), defaults, frequencies, overrides, branch states, dtype/device and fused
+  row layout must match. This is deliberately more conservative than the
+  fundamental-only network fingerprint: even irrelevant stored device changes
+  can cause a rebuild. Load shunts and node-source shunts are evaluated anew.
+* Numerical harmonic factors: the **evaluated matrix**, backend, block partition,
+  precision, equilibration and defaults must match exactly. A new RHS alone does
+  not require new factors. An operating-point shunt change does; a Woodbury
+  device-shunt update instead rebuilds its small correction and reuses a matching
+  base. Sparse numerical factorization still includes symbolic analysis; there
+  is no separate symbolic-analysis cache.
+
+Snapshots detect replacement, addition, removal and in-place edits. Gradients
+through a harmonic matrix bypass factor caching and network-parameter gradients
+bypass assembly caching, so an equal-valued replacement tensor uses the current
+autograd graph. RHS-only gradients can reuse constant factors. Cached numerical
+entries own their storage; they do not retain the harmonic autograd graph.
+
+Preparation retains at most one entry at each level, but a scenario matrix and
+its factors can be large. ``HarmonicFlowSystem(cache_batched_factors=False)``
+avoids retaining scenario-dependent factors; chunked ``run_scenarios`` uses this
+mode automatically. Use ``system.clear()`` to release entries. Preparation is
+not thread-safe and exact tensor comparisons can synchronize CUDA. Benchmarks
+should distinguish uncached calls, the first prepared call, repeated identical
+batches and genuinely changed operating points. Preparation is not guaranteed
+to improve small-system latency. ``load_shunt_basis="nameplate"`` is a physical
+model choice, not a cache optimization interchangeable with operating-point shunts.
+
+For threaded execution, allocate one ``HarmonicFlowSystem`` per worker and reuse
+it sequentially within that worker. Shared-instance lookups, rebuilds, eviction,
+statistics and backend-factor use are not synchronized. If sharing is necessary,
+hold an external lock for the entire solve and for ``clear()``. Per-thread
+preparations do not make concurrent mutation of a shared grid, input tensors or
+defaults safe; keep those inputs read-only or give each worker its own copies.
+
 ``solve_harmonic`` differentiates cleanly via the linear solve adjoint.
 ``solve_power_flow`` uses an explicit IFT adjoint (the only sanctioned
 ``.detach()`` in the codebase) so gradients flow through the converged solution.

@@ -48,7 +48,7 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   precision="full", device, symmetry=None, on_disconnected="raise",
   branch_states=None, branch_states_method="assemble", param_overrides=None,
   enforce_q_limits=None, linear_solver="auto", block_rows=None, criticality="auto",
-  equilibrate=None) -> HarmonicFlowResult``
+  equilibrate=None, system=None) -> HarmonicFlowResult``
   Fundamental + per-harmonic flow; ``method`` selects the fundamental-frequency
   solver (``"current_injection"`` or ``"newton"`` for stiff inverter control
   loops). ``symmetry`` is resolved once and threaded into the fundamental solve
@@ -60,6 +60,11 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   :class:`NodeHarmonicSource`) injects per-node Thévenin/Norton harmonic
   disturbances at orders ``h > 1`` only. ``on_disconnected``/``branch_states``
   match :func:`solve_power_flow`.
+- ``HarmonicFlowSystem(*, cache_batched_factors=True)`` and
+  ``prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs)`` provide explicit
+  repeated-call preparation. Pass it as ``system`` to the harmonic solve; current
+  input values and evaluated admittances govern reuse, and changes automatically
+  rebuild the affected entries. Matrix gradients bypass harmonic numerical caches.
 - ``check_connectivity(grid) -> None``
   Raises :class:`~pgml.errors.ConnectivityError` when part of the grid has no
   galvanic path to an in-service source; the pre-solve gate every entry point
@@ -113,10 +118,12 @@ from .harmonic import (
 )
 from .harmonic_flow import (
     HarmonicFlowResult,
+    HarmonicFlowSystem,
     NodeHarmonicSource,
     assemble_harmonic_system,
     assemble_harmonic_ybus,
     harmonic_injections,
+    prepare_harmonic_flow,
     solve_harmonic_flow,
 )
 from .power_flow import (
@@ -139,6 +146,7 @@ ConvergenceDiagnostics.__module__ = __name__
 LoadabilityResult.__module__ = __name__
 VoltageRegulationResult.__module__ = __name__
 HarmonicFlowResult.__module__ = __name__
+HarmonicFlowSystem.__module__ = __name__
 NodeHarmonicSource.__module__ = __name__
 FactoredSystem.__module__ = __name__
 
@@ -161,6 +169,8 @@ __all__ = [
     "loadability_limit",
     "LoadabilityResult",
     "solve_harmonic_flow",
+    "prepare_harmonic_flow",
+    "HarmonicFlowSystem",
     "assemble_harmonic_system",
     "assemble_harmonic_ybus",
     "harmonic_injections",

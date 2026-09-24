@@ -3,6 +3,24 @@
 Complex linear solve of the per-frequency nodal system `Y(f) V(f) = I(f)`, batched,
 differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
 
+## Repeated harmonic preparation
+
+- `HarmonicFlowSystem(*, cache_batched_factors=True)` — lazy, bounded preparation;
+  `stats` exposes entry hit/miss/bypass counts, `clear()` releases retained state.
+- `prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs) -> HarmonicFlowSystem`
+  warms the preparation with one complete solve (fundamental needed for device shunts).
+- `solve_harmonic_flow(..., system=None)` and
+  `assemble_harmonic_system(..., system=None)` accept the preparation.
+  `simulate(..., harmonic_system=None)` forwards it for harmonic calculations.
+- Changed grid/default/override/state/frequency/layout inputs rebuild network assembly;
+  evaluated matrix and numerical options govern exact factor reuse. Device admittances
+  and RHS are always current. Harmonic matrix gradients bypass numerical caching;
+  RHS-only gradients can reuse factors. No cached harmonic autograd graph.
+- Chunked harmonic `run_scenarios` shares a preparation with
+  `cache_batched_factors=False`; small Woodbury corrections remain per-call.
+  No global or independent sparse-symbolic cache. Not thread-safe; CUDA comparisons
+  can synchronize. Storage is bounded by entry count, not bytes.
+
 ## Public API (IMPLEMENTED — final signature)
 Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
 - `solve_harmonic(y_bus, i_inj, *, fixed_rows=None, v_fixed=None, precision="full",

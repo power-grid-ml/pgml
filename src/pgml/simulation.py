@@ -42,7 +42,7 @@ from .schemas.result_schema import (
     ResultSet,
     SolverDiagnostics,
 )
-from .solver import solve_harmonic_flow, solve_power_flow
+from .solver import HarmonicFlowSystem, solve_harmonic_flow, solve_power_flow
 
 Calculation = Literal["power_flow", "harmonic"]
 Slack = Literal["ideal", "norton"]
@@ -518,6 +518,7 @@ def simulate(
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
     equilibrate: Optional[str] = None,
+    harmonic_system: Optional[HarmonicFlowSystem] = None,
 ) -> SolvedState:
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
@@ -529,6 +530,11 @@ def simulate(
     the state threads it into its lazy branch quantities so voltage and currents
     describe the same overridden network, and the harmonic calculation applies it to
     every order's admittance and device power.
+
+    ``harmonic_system`` optionally supplies a reusable
+    :class:`~pgml.solver.HarmonicFlowSystem` for harmonic calculations. Its entries
+    are value-validated on every call; changed overrides and device admittances
+    rebuild the affected preparations. It is not used for power-flow-only calls.
 
     ``precision`` selects the working precision of the linear algebra: ``"full"``
     (default) factors at ``dtype``, ``"mixed"`` factors at complex64 and refines
@@ -634,6 +640,7 @@ def simulate(
             linear_solver=linear_solver,
             block_rows=block_rows,
             equilibrate=equilibrate,
+            system=harmonic_system,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
         fusion = hf.fusion

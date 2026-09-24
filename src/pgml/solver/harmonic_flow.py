@@ -102,14 +102,17 @@ from pgml.schemas.grid_schema import (
 )
 
 from .equilibration import resolve_equilibration
+from ._harmonic_cache import HarmonicFlowSystem, _requires_grad
 from .harmonic import lu_factor_system, solve_factored
 from .lowrank import LowRankOperator, low_rank_update, solve_factored_updated
 from .power_flow import (
     PowerFlowResult,
+    _grid_param_leaves,
     _expand_zeroed_result,
     _reduce_block_rows,
     check_branch_impedances,
     check_connectivity,
+    prepare_power_flow,
     solve_power_flow,
 )
 
@@ -279,6 +282,7 @@ def solve_harmonic_flow(
     block_rows: Optional[Sequence[Tensor]] = None,
     criticality: str = "auto",
     equilibrate: Optional[str] = None,
+    system: Optional[HarmonicFlowSystem] = None,
 ) -> HarmonicFlowResult:
     """Solve the harmonic power flow (nonlinear fundamental + linear harmonics).
 
@@ -416,6 +420,12 @@ def solve_harmonic_flow(
         ``"woodbury"``, as in :func:`solve_power_flow`). The harmonic orders always
         assemble their own per-state ``Y(h)``: a Woodbury update is built from one
         frequency's stamps, so it does not carry to another order.
+    system:
+        Optional :class:`HarmonicFlowSystem` for repeated calls. It reuses network
+        assembly and factors only after value validation, automatically rebuilding
+        on changed inputs. Device shunts and injections are evaluated every call.
+        An empty instance prepares lazily; :func:`prepare_harmonic_flow` warms one
+        using a complete initial solve. Omitting it keeps the uncached path.
 
     Returns
     -------
@@ -505,6 +515,7 @@ def solve_harmonic_flow(
                 linear_solver=linear_solver,
                 criticality=criticality,
                 equilibrate=eq_mode,
+                system=system,
             )
             return _expand_zeroed_harmonic_result(grid, sub_res, fusion)
 
@@ -516,6 +527,31 @@ def solve_harmonic_flow(
     # fundamental PF (which emits the single modeling-summary log, and the fusion one).
     asymmetric = resolve_asymmetric(grid, operating_point, mode=symmetry)
     sym_resolved = "asymmetric" if asymmetric else "symmetric"
+
+    pf_system = None
+    if system is not None and on_disconnected != "ignore":
+        if device is None:
+            leaves = _grid_param_leaves(
+                grid, param_overrides, None, operating_point, branch_states
+            )
+            device = leaves[0].device if leaves else torch.device("cpu")
+        prepare_kwargs = dict(
+            slack=slack,
+            dtype=dtype,
+            device=device,
+            precision=precision,
+            param_overrides=param_overrides,
+            branch_states=branch_states,
+            branch_states_method=branch_states_method,
+            linear_solver=linear_solver,
+            block_rows=block_rows,
+            equilibrate=eq_mode,
+        )
+        pf_system = system._get(
+            "fundamental",
+            (grid.model_dump(), defaults.defaults(), prepare_kwargs),
+            lambda: prepare_power_flow(grid, **prepare_kwargs),
+        )
 
     # 1. Fundamental nonlinear power flow (order 1). Connectivity was already
     # handled above, so the inner solve skips the (redundant) check.
@@ -541,6 +577,7 @@ def solve_harmonic_flow(
         block_rows=block_rows,
         criticality=criticality,
         equilibrate=eq_mode,
+        system=pf_system,
     )
     v1 = pf.v  # [*batch, N] complex
     operating_point = pf.resolved_operating_point(operating_point)
@@ -579,6 +616,7 @@ def solve_harmonic_flow(
             precision=precision,
             equilibrate=eq_mode,
             n_rows=index.size if fusion is None else fusion.index.size,
+            system=system,
         )
         for k, h in enumerate(harm):
             # Each order is solved on the fused rows; report it on the grid's own.
@@ -602,6 +640,23 @@ def solve_harmonic_flow(
         fusion=fusion,
         harmonic_finite=harmonic_finite,
     )
+
+
+def prepare_harmonic_flow(grid: Grid, harmonic_orders, **kwargs) -> HarmonicFlowSystem:
+    """Warm reusable harmonic preparation with one complete initial solve.
+
+    ``kwargs`` are the same as :func:`solve_harmonic_flow` except ``system``.
+    Preparation includes a fundamental solve because operating-point device
+    admittances cannot be evaluated before that solve. Its result is not retained.
+    Pass the returned object as ``system`` to subsequent solves. Changes to any
+    arguments are allowed: affected cache entries rebuild automatically.
+
+    To keep the initial result, create ``HarmonicFlowSystem()`` and pass it to
+    the first solve instead. No global cache or changed physical model is involved.
+    """
+    system = HarmonicFlowSystem()
+    solve_harmonic_flow(grid, harmonic_orders, system=system, **kwargs)
+    return system
 
 
 def _finite_scenarios(v: Tensor) -> Tensor:
@@ -715,6 +770,7 @@ def _solve_harmonic_orders(
     precision: str,
     equilibrate: str,
     n_rows: int,
+    system: Optional[HarmonicFlowSystem] = None,
 ) -> Tensor:
     """Assemble and solve every harmonic order ``h > 1``, ``[*batch, Hh, N]``.
 
@@ -732,20 +788,31 @@ def _solve_harmonic_orders(
     leading axis the chunking narrows.
     """
 
-    def solve_chunk(yh: Tensor, ih: Tensor) -> Tensor:
-        # Every system — one per order, or one per (scenario, order) — is factored by the
-        # requested backend in ONE call, so a batched Y(h) honours linear_solver instead
-        # of falling back to the dense direct solve.
-        return solve_factored(
-            lu_factor_system(
+    def factor(yh: Tensor):
+        def build():
+            return lu_factor_system(
                 yh,
                 backend=backend,
                 block_rows=block_rows,
                 precision=precision,
                 equilibrate=equilibrate,
-            ),
-            ih,
+            )
+
+        if system is None:
+            return build()
+        return system._get(
+            "harmonic_factors",
+            (yh, backend, block_rows, precision, equilibrate, defaults.defaults()),
+            build,
+            cacheable=not yh.requires_grad
+            and (system.cache_batched_factors or yh.ndim <= 3),
         )
+
+    def solve_chunk(yh: Tensor, ih: Tensor) -> Tensor:
+        # Every system — one per order, or one per (scenario, order) — is factored by the
+        # requested backend in ONE call, so a batched Y(h) honours linear_solver instead
+        # of falling back to the dense direct solve.
+        return solve_factored(factor(yh), ih)
 
     def assemble(
         v1_in,
@@ -770,6 +837,7 @@ def _solve_harmonic_orders(
             branch_states=branch_states,
             param_overrides=param_overrides,
             fusion=NO_FUSION if fusion is None else fusion,
+            system=system,
         )
 
     b_scen = int(v1.shape[0]) if v1.ndim == 2 else 1
@@ -819,13 +887,7 @@ def _solve_harmonic_orders(
             if 3 * u.shape[1] < n_rows:
                 fac = update = voltage = operator = None
                 try:
-                    fac = lu_factor_system(
-                        y_base,
-                        backend=backend,
-                        block_rows=block_rows,
-                        precision=precision,
-                        equilibrate=equilibrate,
-                    )
+                    fac = factor(y_base)
                     update = low_rank_update(fac, u, c, estimate_amplification=False)
                     voltage = solve_factored_updated(update, ih)
                     operator = LowRankOperator(y_base, u, c, u)
@@ -937,6 +999,7 @@ def assemble_harmonic_system(
     branch_states: Optional[dict] = None,
     param_overrides: Optional[dict] = None,
     fusion: Optional[object] = None,
+    system: Optional[HarmonicFlowSystem] = None,
 ) -> tuple[Tensor, Tensor, NodePhaseIndex]:
     """Assemble the per-harmonic LINEAR system ``Y(h) V(h) = I(h)`` for orders ``h > 1``.
 
@@ -1040,6 +1103,10 @@ def assemble_harmonic_system(
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y`` / ``I``
         (the REDUCED layout when ``fusion`` applies; ``fusion.prolong`` maps a solved
         ``V(h)`` back to the grid's full rows).
+    system:
+        Optional reusable preparation; only the operating-point-independent
+        network/source/explicit-DER matrix is cached here. The returned matrix
+        owns its storage, so modifying it cannot corrupt that preparation.
     """
     orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
@@ -1062,23 +1129,46 @@ def assemble_harmonic_system(
 
     freqs = [h * f0 for h in orders]
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
-    yh = assemble_network_ybus(
-        grid,
-        freqs,
-        dtype=dtype,
-        device=device,
-        branch_states=branch_states,
-        param_overrides=param_overrides,
-        # The map is resolved above; ``NO_FUSION`` carries "resolved to nothing" so the
-        # assembler does not walk the branch list again.
-        fusion=NO_FUSION if fused is None else fused,
-    ).Y
-    if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
-        yh = yh.unsqueeze(0)
-    yh = _stamp_sources(
-        grid, fvec, yh, index, cdt, rdt, device, param_overrides
-    )  # [Hh, N, N]
-    yh = _stamp_der_harmonic_impedance(grid, yh, index, orders, cdt, rdt, device)
+
+    def build_network():
+        network = assemble_network_ybus(
+            grid,
+            freqs,
+            dtype=dtype,
+            device=device,
+            branch_states=branch_states,
+            param_overrides=param_overrides,
+            fusion=NO_FUSION if fused is None else fused,
+        ).Y
+        if network.ndim == 2:
+            network = network.unsqueeze(0)
+        network = _stamp_sources(
+            grid, fvec, network, index, cdt, rdt, device, param_overrides
+        )
+        return _stamp_der_harmonic_impedance(
+            grid, network, index, orders, cdt, rdt, device
+        )
+
+    if system is None:
+        yh = build_network()
+    else:
+        network_key = (
+            grid.model_dump(),
+            defaults.defaults(),
+            orders,
+            dtype,
+            torch.device(device),
+            param_overrides,
+            branch_states,
+            # Include the actual quotient layout, not just its row count.
+            None if fused is None else fused.row_to_reduced,
+        )
+        yh = system._get(
+            "harmonic_network",
+            network_key,
+            build_network,
+            cacheable=not _requires_grad(network_key),
+        ).clone()
     harmonic_shunt = resolve_shunt_model_name(load_shunt)
     if harmonic_shunt != "none":
         yh = _stamp_harmonic_load_shunt(

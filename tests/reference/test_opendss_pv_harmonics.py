@@ -6,7 +6,7 @@ import torch
 
 from pgml import defaults
 from pgml.convert.opendss import PhaseMode, to_grid
-from pgml.solver import solve_harmonic_flow
+from pgml.solver import HarmonicFlowSystem, solve_harmonic_flow
 from tests.reference.test_opendss_pv_bus import _build
 from tests.reference.test_native_der_harmonics import native_voltages
 
@@ -15,7 +15,8 @@ pytestmark = pytest.mark.opendss
 
 
 @pytest.mark.parametrize("mode", ["upper", "lower", "regulating"])
-def test_native_pv_harmonics_use_solved_q(mode, tmp_path):
+@pytest.mark.parametrize("prepared", [False, True])
+def test_native_pv_harmonics_use_solved_q(mode, prepared, tmp_path):
     dss.Command("set defaultbasefrequency=50")
     _build(1.02 if mode != "lower" else 0.98, 500.0)
     dss.Command(f"set datapath={tmp_path}")
@@ -48,6 +49,18 @@ def test_native_pv_harmonics_use_solved_q(mode, tmp_path):
     )
     gid = mapping["generator"]["g1"]
     with defaults.use_preset("opendss"):
+        cache = HarmonicFlowSystem() if prepared else None
+        if prepared:
+            solve_harmonic_flow(
+                grid,
+                [1, 5, 7],
+                slack="norton",
+                method="newton",
+                load_shunt="none",
+                tol=1e-11,
+                max_iter=100,
+                system=cache,
+            )
         result = solve_harmonic_flow(
             grid,
             [1, 5, 7],
@@ -56,7 +69,10 @@ def test_native_pv_harmonics_use_solved_q(mode, tmp_path):
             load_shunt="none",
             tol=1e-11,
             max_iter=100,
+            system=cache,
         )
+        if prepared:
+            assert cache.stats["harmonic_factors_hits"] == 1
     assert result.converged
     assert float(result.pf.regulation.q_var[gid]) == pytest.approx(q_ref, abs=0.02)
     assert bool(result.pf.regulation.regulating[gid]) == (mode == "regulating")
