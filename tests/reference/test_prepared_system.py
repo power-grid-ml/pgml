@@ -133,3 +133,79 @@ def test_assemble_ybus_batched_operating_point(grid):
             grid, [50.0], operating_point={load_id: {"p_w": float(p[i])}}
         ).Y
         assert torch.allclose(yb[i], yi)
+
+
+@pytest.mark.parametrize("argument", ["param_overrides", "branch_states"])
+@pytest.mark.parametrize("edit", ["replace", "in_place", "remove", "add"])
+@pytest.mark.parametrize("method", ["assemble", "woodbury"])
+def test_prepared_arguments_cannot_silently_change(argument, edit, method):
+    from tests.fixtures.tiny_grids import single_phase_chain
+
+    grid = single_phase_chain()
+    key = (
+        ("line", 20, "series_resistance_ohm_per_m")
+        if argument == "param_overrides"
+        else 20
+    )
+    value = torch.tensor(
+        [[0.001]] if argument == "param_overrides" else [0.5, 1.0], dtype=torch.float64
+    )
+    kwargs = {"branch_states_method": method, "branch_states": {21: 1.0}}
+    kwargs[argument] = (
+        ({21: 1.0} if argument == "branch_states" else {})
+        if edit == "add"
+        else {key: value}
+    )
+    system = prepare_power_flow(grid, **kwargs)
+    if edit == "replace":
+        kwargs[argument] = {key: value * 0.5}
+    elif edit == "in_place":
+        value.mul_(0.5)
+    elif edit == "remove":
+        kwargs[argument] = None
+    else:
+        kwargs[argument] = {key: value}
+    with pytest.raises(InputError, match=argument):
+        solve_power_flow(grid, system=system, **kwargs)
+
+
+@pytest.mark.parametrize("argument", ["param_overrides", "branch_states"])
+def test_equal_replacement_parameters_reuse_factors_and_current_gradients(
+    monkeypatch, argument
+):
+    from tests.fixtures.tiny_grids import single_phase_chain
+    import pgml.solver.power_flow as pf
+
+    grid = single_phase_chain()
+    key = (
+        ("line", 20, "series_resistance_ohm_per_m")
+        if argument == "param_overrides"
+        else 20
+    )
+    old = torch.tensor(
+        [[0.001]] if argument == "param_overrides" else 0.8,
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    new = old.detach().clone().requires_grad_()
+    system = prepare_power_flow(grid, **{argument: {key: old}})
+    fresh = solve_power_flow(grid, **{argument: {key: new}}, tol=1e-11)
+    (expected_grad,) = torch.autograd.grad(fresh.v.abs().sum(), new)
+
+    def no_factor(*args, **kwargs):
+        raise AssertionError("unchanged numeric matrix must reuse its factors")
+
+    monkeypatch.setattr(pf, "lu_factor_system", no_factor)
+    reused = solve_power_flow(grid, system=system, **{argument: {key: new}}, tol=1e-11)
+    (actual_grad,) = torch.autograd.grad(reused.v.abs().sum(), new)
+    torch.testing.assert_close(reused.v, fresh.v)
+    torch.testing.assert_close(actual_grad, expected_grad)
+    assert old.grad is None
+
+
+def test_prepared_voltage_bases_cannot_change(grid):
+    system = prepare_power_flow(grid)
+    other = grid.model_copy(deep=True)
+    other.nodes[-1].u_rated_v *= 1.1
+    with pytest.raises(InputError, match="different network"):
+        solve_power_flow(other, system=system)

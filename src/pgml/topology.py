@@ -490,7 +490,8 @@ def network_fingerprint(grid: Grid) -> str:
     admittance and slack quantities: the layout (see :func:`layout_fingerprint`),
     every branch and its physical parameters, every :class:`Source` (reference +
     Thevenin) and shunt appliance, and each injection appliance's IDENTITY (id, kind,
-    node, phases, connection, in-service) — but NOT its nameplate P/Q, which stays
+    node, phases, connection, return path, in-service), and node metadata including
+    rated voltage bases — but NOT its nameplate P/Q, which stays
     per-call operating-point data. Used to reject a stale
     :class:`~pgml.solver.PowerFlowSystem` when the grid it was prepared from has
     structurally changed. Tensor-valued parameters hash by VALUE (detached), so a
@@ -498,6 +499,10 @@ def network_fingerprint(grid: Grid) -> str:
     """
     h = hashlib.sha256()
     h.update(layout_fingerprint(grid).encode())
+    # Prepared systems also cache voltage bases and convergence scales.
+    for node in grid.nodes:
+        h.update(b"|n:")
+        h.update(node.model_dump_json().encode())
     for b in grid.branches:
         h.update(b"|b:")
         h.update(b.model_dump_json().encode())
@@ -508,7 +513,7 @@ def network_fingerprint(grid: Grid) -> str:
             ident = (
                 f"|i:{a.component}:{int(a.id)}:{int(a.node)}:{phases}:"
                 f"{conn.value if conn is not None else None}:"
-                f"{getattr(a, 'in_service', True)}"
+                f"{getattr(a, 'in_service', True)}:{getattr(a, 'return_path', 'auto')}"
             )
             h.update(ident.encode())
         else:

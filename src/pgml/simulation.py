@@ -42,7 +42,7 @@ from .schemas.result_schema import (
     ResultSet,
     SolverDiagnostics,
 )
-from .solver import solve_harmonic_flow, solve_power_flow
+from .solver import HarmonicFlowSystem, solve_harmonic_flow, solve_power_flow
 
 Calculation = Literal["power_flow", "harmonic"]
 Slack = Literal["ideal", "norton"]
@@ -192,6 +192,7 @@ class SolvedState:
         fusion=None,
         harmonic_injection: Optional[dict] = None,
         node_sources: Optional[Sequence] = None,
+        resolved_operating_point: Optional[dict] = None,
     ) -> None:
         self.grid = grid
         self.config = config
@@ -209,6 +210,11 @@ class SolvedState:
         self.fusion = fusion
         self.harmonic_injection = harmonic_injection
         self.node_sources = node_sources
+        self.resolved_operating_point = (
+            config.operating_point
+            if resolved_operating_point is None
+            else resolved_operating_point
+        )
 
     # -- node quantities ---------------------------------------------------- #
     def node_voltages(self) -> Tensor:
@@ -314,7 +320,7 @@ class SolvedState:
                         [f0],
                         dtype=self.dtype,
                         device=self.device,
-                        operating_point=self.config.operating_point,
+                        operating_point=self.resolved_operating_point,
                         param_overrides=self.param_overrides,
                         symmetry=self.config.symmetry,
                     ).squeeze(-2)
@@ -325,7 +331,7 @@ class SolvedState:
                     self.grid,
                     v1,
                     [order],
-                    operating_point=self.config.operating_point,
+                    operating_point=self.resolved_operating_point,
                     harmonic_injection=self.harmonic_injection,
                     node_sources=self.node_sources,
                     symmetry=self.config.symmetry,
@@ -338,7 +344,7 @@ class SolvedState:
                     v1,
                     self.v[..., k : k + 1, :],
                     [order],
-                    operating_point=self.config.operating_point,
+                    operating_point=self.resolved_operating_point,
                     load_shunt=self.config.load_shunt,
                     load_shunt_basis=self.config.load_shunt_basis,
                     symmetry=self.config.symmetry,
@@ -512,6 +518,7 @@ def simulate(
     linear_solver: str = "auto",
     block_rows: Optional[Sequence[Tensor]] = None,
     equilibrate: Optional[str] = None,
+    harmonic_system: Optional[HarmonicFlowSystem] = None,
 ) -> SolvedState:
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
@@ -523,6 +530,11 @@ def simulate(
     the state threads it into its lazy branch quantities so voltage and currents
     describe the same overridden network, and the harmonic calculation applies it to
     every order's admittance and device power.
+
+    ``harmonic_system`` optionally supplies a reusable
+    :class:`~pgml.solver.HarmonicFlowSystem` for harmonic calculations. Its entries
+    are value-validated on every call; changed overrides and device admittances
+    rebuild the affected preparations. It is not used for power-flow-only calls.
 
     ``precision`` selects the working precision of the linear algebra: ``"full"``
     (default) factors at ``dtype``, ``"mixed"`` factors at complex64 and refines
@@ -628,6 +640,7 @@ def simulate(
             linear_solver=linear_solver,
             block_rows=block_rows,
             equilibrate=equilibrate,
+            system=harmonic_system,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
         fusion = hf.fusion
@@ -637,6 +650,7 @@ def simulate(
             float(hf.pf.residual),
         )
         pf_diag = hf.pf.diagnostics
+        pf = hf.pf
 
     if strict and not converged:
         diag: dict = {"calculation": config.calculation, "max_iter": config.max_iter}
@@ -667,6 +681,7 @@ def simulate(
         fusion=fusion,
         harmonic_injection=harmonic_injection,
         node_sources=node_sources,
+        resolved_operating_point=pf.resolved_operating_point(config.operating_point),
     )
 
 

@@ -109,7 +109,8 @@ tensor or a trained model needs to detect that the grid underneath it has change
   everything a prepared power-flow system bakes into the effective admittance: every
   branch and its physical parameters, every :class:`~pgml.schemas.grid_schema.Source`
   and shunt appliance, and each injection appliance's IDENTITY (id, kind, node,
-  phases, connection, in-service) — but deliberately NOT its nameplate P/Q, which
+  phases, connection, return path, in-service), plus node metadata including rated
+  voltage bases — but deliberately NOT its nameplate P/Q, which
   stays per-call operating-point data. Tensor-valued parameters hash by their
   detached VALUE, so editing an impedance changes the fingerprint even though the
   topology is unchanged. A :class:`~pgml.solver.PowerFlowSystem` records the network

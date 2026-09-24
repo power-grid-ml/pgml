@@ -79,6 +79,7 @@ from ._transformer import (
     zero_sequence_leakage,
 )
 from ._params import (
+    _preserve_solved_pv_q,
     const_z_shunt_admittance,
     phase_voltage_magnitude,
     resolve_operating_power,
@@ -2518,7 +2519,8 @@ def build_injection_plan(
                 # equally over the elements (power-grid-model rule).
                 if p_per is not None:
                     p_total, p_per = _tensor_sum(p_per, rdt, device), None
-                if q_per is not None:
+                solved_q = _preserve_solved_pv_q(a, operating_point)
+                if q_per is not None and not solved_q:
                     q_total, q_per = _tensor_sum(q_per, rdt, device), None
 
             p_t = _override(
@@ -2527,7 +2529,10 @@ def build_injection_plan(
                 _per_phase_power_tensor(p_total, p_per, n_elem, rdt, device),
             )
             q_t = _override(
-                param_overrides,
+                # PV Q comes from the constraint/limit or solved phase readout.
+                None
+                if getattr(a, "voltage_regulation", None) is not None
+                else param_overrides,
                 (kind, a.id, "q_nom_per_phase_var"),
                 _per_phase_power_tensor(q_total, q_per, n_elem, rdt, device),
             )

@@ -36,6 +36,30 @@ whole calculation even on a symmetrically defined grid. Imbalance only becomes v
 genuinely multi-phase nodes, so a single-phase-equivalent grid from a converter has to be
 expanded to abc nodes first.
 
+`"symmetric"` is **not a guarantee of balanced solved voltages or currents**:
+unequal phase impedances, single-phase devices and independent per-phase voltage
+regulation remain in the phase-domain model. In particular, a PV generator's Q is
+solved from its voltage constraints, not prescribed by its input Q fields.
+Prescribed Q overrides on such a generator are ignored with a warning by the
+fundamental solver, regardless of symmetry. In direct power resolution, an ordinary
+per-phase Q override is averaged in symmetric mode, with a warning that its phase
+allocation is not accepted.
+
+`PowerFlowResult.resolved_operating_point()` produces distinct solver-readout
+entries for downstream harmonic initialization and device-current recovery. Only
+these entries preserve the **solved** Q allocation in symmetric mode; a plain
+user-supplied dictionary does not bypass symmetric splitting. If symmetric inputs
+nevertheless produce unequal solved PV Q, the solver warns explicitly. Averaging
+that output after convergence would make its device currents inconsistent with
+the solved network. Enforcing a balanced-output model would instead require a
+balanced network/compatible constraints or a separate sequence-reduced formulation.
+For equal per-phase generator Q, `VoltageRegulation(regulated="positive_sequence")`
+(the default) uses one total Q with equal shares and regulates the positive-sequence
+voltage magnitude. `regulated="per_phase"` instead regulates each phase magnitude
+independently and can require unequal Q. This choice belongs in the fundamental
+regulation constraints, not in a post-solve averaging of the readout. Neither choice
+makes arbitrary network voltages balanced.
+
 ## Load connection
 
 power-grid-model has no connection field on loads or generators. Every load is wye and
