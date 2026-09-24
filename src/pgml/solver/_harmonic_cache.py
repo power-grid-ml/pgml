@@ -46,6 +46,40 @@ def _equal(saved, current):
     return saved == current
 
 
+def _nbytes(value, seen: set, visited: set) -> int:
+    """Tensor storage reachable from ``value``, counting each storage once.
+
+    Walks containers and object attributes, so a factorization or a prepared system is
+    measured through whatever it happens to hold. ``visited`` carries object ids to
+    keep a cyclic object graph (a grid referencing its own components) finite.
+    """
+    if isinstance(value, Tensor):
+        storage = value.untyped_storage()
+        key = (storage.data_ptr(), storage.nbytes())
+        if key in seen or key[0] == 0:
+            return 0
+        seen.add(key)
+        return key[1]
+    if isinstance(value, (str, bytes, int, float, complex, bool, type(None))):
+        return 0
+    if id(value) in visited:
+        return 0
+    visited.add(id(value))
+    if isinstance(value, dict):
+        return sum(_nbytes(v, seen, visited) for v in value.values())
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return sum(_nbytes(v, seen, visited) for v in value)
+    fields = getattr(value, "__dict__", None)
+    if fields is not None:
+        return sum(_nbytes(v, seen, visited) for v in fields.values())
+    slots = getattr(type(value), "__slots__", ())
+    return sum(
+        _nbytes(getattr(value, name), seen, visited)
+        for name in slots
+        if hasattr(value, name)
+    )
+
+
 def _requires_grad(value):
     if isinstance(value, Tensor):
         return value.requires_grad
@@ -83,9 +117,11 @@ class HarmonicFlowSystem:
     one entry may still be large. This is bounded by entry count, not a byte cap.
 
     ``stats`` returns hit/miss/bypass counts for these three entries. Counts refer
-    to calls, not individual matrices in a frequency/scenario batch. ``clear()``
-    releases the entries and resets the counters. Cache lookup includes exact
-    tensor comparisons, which can synchronize a CUDA device.
+    to calls, not individual matrices in a frequency/scenario batch. ``nbytes()``
+    reports the tensor storage the entries currently hold, so a caller can size the
+    retention against its own memory budget. ``clear()`` releases the entries and
+    resets the counters. Cache lookup includes exact tensor comparisons, which can
+    synchronize a CUDA device.
 
     Give each worker thread its OWN instance, reused sequentially by that worker.
     A shared instance has no locking around lookup/build/publication, ``clear()``,
@@ -107,6 +143,17 @@ class HarmonicFlowSystem:
     def stats(self) -> dict[str, int]:
         """Copy of preparation hit/miss/bypass counters."""
         return dict(self._stats)
+
+    def nbytes(self) -> int:
+        """Bytes of tensor storage retained by the preparation, counting each once.
+
+        Covers both halves of every entry: the value (a matrix, a factorization, a
+        prepared fundamental system) and the key snapshot the validity check compares
+        against, which for a numerical factor is a copy of the matrix itself. Shared
+        storage is counted once, so a view of a retained tensor adds nothing. Python
+        object overhead and non-tensor keys are not included.
+        """
+        return _nbytes(self._entries, set(), set())
 
     def clear(self) -> None:
         """Release all retained preparations and reset counters."""
