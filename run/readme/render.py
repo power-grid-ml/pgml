@@ -335,6 +335,61 @@ def memory():
     save(fig, "memory_footprint")
 
 
+def capacity():
+    """What fills the machine, and what it then solves per second, against size."""
+    data = json.loads((ASSETS / "capacity.json").read_text())
+    rows = [row for row in data["rows"] if row.get("capacity")]
+    if not rows:
+        raise FileNotFoundError("capacity.json carries no measured capacity")
+    fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.0))
+    fits, rate = axes
+    for tool, (label, color, style) in TOOLS.items():
+        points = sorted(
+            (
+                (row["rows"], row["capacity"], row["censored"])
+                for row in rows
+                if row["engine"] == tool
+            ),
+            key=lambda point: point[0],
+        )
+        if not points:
+            continue
+        sizes = [p[0] for p in points]
+        fits.plot(
+            sizes,
+            [p[1]["batch"] for p in points],
+            style,
+            color=color,
+            label=label,
+            markersize=5,
+            markerfacecolor="white",
+        )
+        rate.plot(
+            sizes,
+            [p[1]["throughput_per_s"] for p in points],
+            style,
+            color=color,
+            label=label,
+            markersize=5,
+        )
+        measured = [p for p in points if not p[2]]
+        if measured:
+            fits.plot(
+                [p[0] for p in measured],
+                [p[1]["batch"] for p in measured],
+                style[0],
+                color=color,
+                markersize=5,
+            )
+    for ax in (fits, rate):
+        ax.set(xscale="log", yscale="log", xlabel="Node-phase rows")
+        ax.grid(alpha=0.2, which="both")
+    fits.set_ylabel("Scenarios in one batch at the ceiling")
+    rate.set_ylabel("Scenarios per second there")
+    _legend_below(fig, rate, ncol=3)
+    save(fig, "capacity")
+
+
 #: cost figure series -> tool, so the money figure uses the same colours
 COST_SERIES_TOOL = {
     "pandapower": "pandapower",
@@ -429,6 +484,7 @@ FIGURES = (
     (harmonic_throughput, False),
     (size_scaling, False),
     (memory, False),
+    (capacity, False),
     (cost, False),
     (resistance, True),
 )

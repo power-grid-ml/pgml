@@ -173,5 +173,45 @@
       "harmonic_shunt_basis.caption.txt": "8b389774eb2f4526d124360e8b0ccbf79dda8b7034054b757ece977f85b2dfad"
     },
     "paper_commit": "6fbd73a341634080b9792a89a23ef1839da6ef87"
+  },
+  "capacity_source": {
+    "paper_commit": "f1414719cfbc9c1d523e6b312027f3a6db975446",
+    "published": [
+      "capacity.json",
+      "largegrid.json"
+    ],
+    "pgml_version": "0.5.1",
+    "hardware": "one NVIDIA RTX A2000 12 GB and sixteen CPUs of one workstation, one engine at a time on an otherwise idle node",
+    "cpu_allocation": {
+      "logical_cpus": 8,
+      "physical_cores": 8,
+      "threads_per_core": 1.0,
+      "cpu_workers": 8,
+      "blas_thread_env": {
+        "OMP_NUM_THREADS": "8",
+        "MKL_NUM_THREADS": null,
+        "OPENBLAS_NUM_THREADS": null,
+        "NUMEXPR_NUM_THREADS": null
+      }
+    },
+    "gpu": "NVIDIA RTX A2000 12GB",
+    "versions": {
+      "python": "3.13.15",
+      "torch": "2.13.0",
+      "numpy": "2.4.6",
+      "scipy": "1.18.0",
+      "pgml": "0.5.1",
+      "pgml_git": "sha256:e40a8c2e0fac",
+      "pandapower": "3.5.4",
+      "power_grid_model": "1.13.142",
+      "power_grid_model_io": "present",
+      "numba": "0.65.1",
+      "opendssdirect": "0.9.4"
+    },
+    "sha256": {
+      "capacity.json": "338c6452e7ff33822ee0c38beba4c74f26347b2a7273b003700c8a20d8d1b146",
+      "largegrid.json": "75d360d621808a2116ca23483236b81835045ae103b50422a18b53c980688023",
+      "capacity.svg": "dbc39dfde883a1cfafd5787776f6ab3494c5c167103168fef138ffbec5aaf0f4"
+    }
   }
 }

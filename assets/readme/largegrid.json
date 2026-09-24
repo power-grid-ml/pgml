@@ -1,0 +1,1154 @@
+{
+ "environment": {
+  "date": "2026-09-24 21:41:18+0200",
+  "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12700",
+  "cpu_count_logical": 20,
+  "ram_gb": 62.5,
+  "torch_threads": 8,
+  "cuda_available": true,
+  "cuda_runtime": "12.9",
+  "versions": {
+   "python": "3.13.15",
+   "torch": "2.13.0",
+   "numpy": "2.4.6",
+   "scipy": "1.18.0",
+   "pgml": "0.5.1",
+   "pgml_git": "sha256:e40a8c2e0fac",
+   "pandapower": "3.5.4",
+   "power_grid_model": "1.13.142",
+   "power_grid_model_io": "present",
+   "numba": "0.65.1",
+   "opendssdirect": "0.9.4"
+  },
+  "pandapower_numba": {
+   "importable": true,
+   "version": "0.65.1",
+   "opt_out": false,
+   "requested": true
+  },
+  "kerber_seed": 20260912,
+  "pgml_source_digest": "e40a8c2e0fac",
+  "benchmark_source_digest": "d17f30f43a03",
+  "modeling_defaults": {
+   "converter": {
+    "pandapower": {
+     "open_switch_model": {
+      "value": "terminal",
+      "units": "enum{terminal, drop_element}",
+      "description": "An open bus-line or bus-transformer switch disconnects only its terminal. The connected end still draws line charging or transformer no-load current. terminal retains that circuit with an auxiliary open-end node; drop_element omits the complete element as a reduced approximation. Both-open and out-of-service elements are omitted in either mode. `terminal` is the default because it is what pandapower itself solves: a line that is open at one end stays energized from the other and its charging current loads the feeder. On the CIGRE MV network, which has three such lines, omitting them moves the bus voltages by 2.9e-4 pu against pandapower's own power flow, while keeping them agrees to 6e-13 pu. `drop_element` is kept for studies that want the smaller system and accept that error.\n"
+     }
+    }
+   },
+   "calculation": {
+    "symmetry": {
+     "value": "auto",
+     "units": "enum{auto, symmetric, asymmetric}",
+     "description": "Whether a calculation is SYMMETRIC (each appliance's total P/Q split equally over its connected phases \u2014 balanced) or ASYMMETRIC (per-phase values honored, falling back to an equal split where a given appliance has none). `auto` (default) selects asymmetric iff ANY appliance or operating point carries per-phase data (*_per_phase_* or a per-phase operating point), else symmetric \u2014 so an asymmetric load distribution in the simulation config promotes the whole calculation to asymmetric even on a symmetrically-defined grid. Mirrors power-grid-model's symmetric=True/False (a symmetric calc averages an asymmetric load). See docs/pgml/modeling/asymmetric.md \u00a71.\n"
+    }
+   },
+   "appliance": {
+    "load": {
+     "default_connection": {
+      "value": "wye",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "Connection for a MULTI-phase Load/Generator with no explicit `connection`. `wye` = each phase to neutral/ground; `delta` = phase-to-phase (line-to-line). LV distribution is predominantly wye; matches the OpenDSS `conn=wye` default. For wye, the return path is the node's Phase.N row if present, else ground. See docs/pgml/modeling/asymmetric.md \u00a72, \u00a74.\n"
+     },
+     "single_phase_connection": {
+      "value": "wye",
+      "units": "enum{wye, wye_grounded}",
+      "description": "Connection for a 1-phase Load/Generator with no explicit `connection`. `wye` = line-to-neutral (the European LV residential convention; the node's L-N voltage is the base). A line-to-line single-phase load is modeled as a 2-phase delta load instead. See docs/pgml/modeling/asymmetric.md \u00a73.\n"
+     }
+    },
+    "harmonic_shunt": {
+     "model": {
+      "value": "opendss",
+      "units": "enum{none, opendss, motor}",
+      "description": "Which harmonic shunt every injection appliance carries. `opendss` (the default, and OpenDSS's own: `NeglectLoadY=No` with `%SeriesRL=50`) splits the operating-point admittance Yeq = conj(S)/V_rated^2 into a PARALLEL R-L branch (1-s)Re(Yeq) + j(1-s)Im(Yeq)/h and a SERIES R-L branch 1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction` (for a leading device the reactive parts follow `reactive_element`). `motor` keeps the parallel branch and replaces the series branch by a fixed blocked-rotor reactance (`motor_x_harm_pu`, `motor_xr_harm`), OpenDSS's `puXharm`. `none` = a PURE current source with no shunt at any order, identical to OpenDSS `Set NeglectLoadY=Yes`; it reports MORE distortion, because the load conductance is the main damping of a feeder-end parallel resonance.\n"
+     },
+     "series_rl_fraction": {
+      "value": 0.5,
+      "units": "pu",
+      "description": "Fraction s of the shunt carried by the SERIES R-L branch; the rest is the PARALLEL R-L branch (OpenDSS `%SeriesRL`/100, whose own default is 50). Both splits are exact at the fundamental (Y_par(1) + Y_ser(1) = Yeq for any s); they differ only in how the shunt rolls off with frequency: the parallel branch keeps the full conductance at every order, while the series branch's admittance falls roughly as 1/h. So s = 0 damps the most and s = 1 the least. The value is an OpenDSS modeling convention, not a measured quantity.\n"
+     },
+     "motor_x_harm_pu": {
+      "value": 0.2,
+      "units": "pu of the device's rated kVA",
+      "description": "Blocked-rotor (subtransient) reactance of the `motor` model's series branch, in per unit of the device's own apparent power: X = V_rated^2/(S*s)*x_pu. Applies only where the resolved model is `motor` and the device carries no explicit `motor_x_harm_pu`. 0.2 pu is the value OpenDSS's documentation gives for a motor-dominated load.\n"
+     },
+     "motor_xr_harm": {
+      "value": 6.0,
+      "units": "ratio X/R",
+      "description": "X/R of the `motor` model's series reactance at the fundamental (OpenDSS `XRharm`, same default), i.e. Zs = X/xr + jX before the order scaling.\n"
+     },
+     "reactive_element": {
+      "value": "sign_aware",
+      "units": "enum{sign_aware, inductive}",
+      "description": "How the reactive part of the P,Q-derived shunt scales with the harmonic order. `sign_aware` (the default) scales it as the element it is at the operating point. A lagging device (Q > 0) is an inductance: the parallel susceptance goes as B/h and the series reactance as h*X. A leading device (Q < 0, common for electronic loads and compensated installations) is a capacitance: B*h and X/h. This is the law the const-Z fold of the fundamental assembly uses, so both load representations agree. `inductive` applies B/h and h*X whatever the sign of Q, which is what OpenDSS computes (checked on a live YPrim of a load with negative kvar); a leading device then becomes a negative inductance, with the susceptance sign of a capacitor and the frequency slope of an inductor. The two laws are identical for Q >= 0 and at h = 1. At order 5, s = 0.5 and power factor 0.89 leading, `inductive` gives 0.037 + j0.017 S where `sign_aware` gives 0.070 + j0.082 S (10 kW, 400 V). The `opendss` preset selects `inductive`.\n"
+     },
+     "basis": {
+      "value": "operating_point",
+      "units": "enum{operating_point, nameplate}",
+      "description": "Which power and terminal voltage the shunt admittance Yeq = conj(S)/V_rated^2 is built from. `operating_point` (the default) uses the power the device actually draws in THIS scenario at the solved fundamental terminal voltage, so the shunt follows a scenario batch exactly as OpenDSS's own YPrim follows its Load's specified kW/kvar. `nameplate` uses the device's stored (nameplate) P, Q at its rated terminal voltage, which makes Y(h) independent of the scenario: one factorisation per harmonic order serves the whole batch instead of one per scenario and order, and the assembled matrix stays [H, N, N] instead of [B, H, N, N]. The cost is a model error wherever a scenario's loading differs from nameplate: the shunt is then that of the nameplate load, i.e. the damping is too strong for a lightly loaded scenario and too weak for a heavily loaded one. Measured on IEEE-33 and three-phase CIGRE LV against a live OpenDSS that carries the scenario's own kW, the deviation of the harmonic voltages grows roughly linearly with the load deviation and with the sharpness of any resonance; the numbers are in the reference test that pins both bases (tests/reference/test_opendss_load_shunt.py).\n"
+     },
+     "generation_model": {
+      "value": "none",
+      "units": "enum{none, load_style}",
+      "description": "What a GENERATION-sign device (Generator, Storage) carries at orders h > 1. `none` (the default) adds no shunt derived from the device's P/Q, so a device without an explicit `harmonic_impedance` remains a PURE harmonic current source. The reason is physical: Yeq = conj(S)/V_rated^2 has a NEGATIVE conductance for a device that injects power, i.e. the load expression would make every inverter FEED harmonic energy into the network instead of damping it. OpenDSS instead derives a `PVSystem`'s or `Generator`'s harmonic shunt from its separate subtransient / filter impedance (`Xdpp`, `%R`/`%X`), which the optional `harmonic_impedance` schema block represents. That explicit physical impedance remains present under `none`. `load_style` applies the same expression a Load carries, which is what OpenDSS computes for the negative-kW `Load` idiom a matched-mode export writes; use it to reproduce such a comparison, knowing the sign. A device whose own `harmonic_model` names the `motor` model (`motor_x_harm_pu`) carries that model either way, and `neglect_shunt: true` always wins when no explicit impedance supersedes the derived model.\n"
+     }
+    },
+    "generator": {
+     "enforce_q_limits": {
+      "value": true,
+      "units": "bool",
+      "description": "Whether a regulating generator's `q_min_var`/`q_max_var` bound its reactive output. true (default) enforces them by PV-to-PQ switching: a unit whose required reactive power leaves the band is re-solved as a plain PQ injection pinned at the violated limit, and returns to regulation when the terminal voltage crosses its setpoint from the other side. false solves every regulating generator unbounded, which is pandapower `runpp`'s own default (`enforce_q_lims=False`). Overridable per call: `solve_power_flow(enforce_q_limits=...)`.\n"
+     },
+     "q_limit_switch_rounds_max": {
+      "value": 12,
+      "units": "count",
+      "description": "Maximum number of PV-to-PQ switching rounds (each round is one full Newton solve at a fixed active set, the first solve included). The loop normally settles in one to three rounds; hitting the cap logs a WARNING naming the generators that would still change their bus type, keeps the last solution and reports the scenarios concerned as not converged (`PowerFlowResult.converged_mask`, `regulation.settled`). When limits are reached one unit after another a feeder with n regulating units can need up to n rounds, so 12 covers the distribution feeders the library targets and bounds the cost of a genuinely oscillating case at 12 Newton solves.\n"
+     },
+     "q_limit_hysteresis_pu": {
+      "value": 1e-06,
+      "units": "pu",
+      "description": "Voltage band, in per unit of the terminal's nominal, a pinned generator must cross before it is released back to voltage regulation. Guards the switching loop against cycling on solver noise; far below any physical regulation deadband. 1e-6 pu is two decades above the voltage-update tolerance (`solver.convergence.update_pu` = 1e-8), so a converged voltage cannot cross the band by rounding, and four decades below a typical regulator deadband of 1e-2 pu, so it does not alter which units regulate.\n"
+     },
+     "q_limit_hysteresis_rel": {
+      "value": 1e-09,
+      "units": "pu",
+      "description": "Reactive band, relative to the widest of the generator's reactive limits, the required reactive power must exceed before the unit is pinned at that limit. Guards against switching on the converged solve's rounding noise: 1e-9 sits about three decades above the relative rounding of a double-precision power evaluation (machine epsilon times the cancellation in Y*V, of order 1e-12) and below the 1e-8 pu mismatch tolerance, so a unit exactly at its limit is not pinned by noise and a real violation of the size the solver can resolve still is.\n"
+     }
+    }
+   },
+   "line": {
+    "harmonic_model": {
+     "three_phase": {
+      "value": "sequence_aware",
+      "units": "enum{sequence_aware, positive_sequence, naive, none}",
+      "description": "Default model for a 3-phase R/X line. `sequence_aware` decomposes Z_abc into Z1 (earth-free, X\u221dh + skin) and Z0 (carries the Carson earth-return resistance), then recombines \u2014 the model a 4-wire UNBALANCED LV harmonic study needs. Earth return is excited only by zero-sequence / residual current, so it correctly vanishes for balanced operation. `positive_sequence` = Z1 only (no Z0 damping); `naive` = R const, X\u221dh; `none` = leave the line unresolved (no model written).\n"
+     },
+     "single_phase": {
+      "value": "positive_sequence",
+      "units": "enum{sequence_aware, positive_sequence, naive, none}",
+      "description": "Default model for a 1- or 2-phase R/X line: skin-corrected R, X\u221dh, no earth floor. A genuine single-wire-earth-return (SWER) line should instead carry an explicit `conductor_geometry` so the full Carson earth return applies.\n"
+     },
+     "skin_effect": {
+      "value": true,
+      "units": "bool",
+      "description": "Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and sequence-aware models. false \u2192 R constant (the naive X\u221dh, R-const model). Per-line override: `Line.harmonic_skin_effect`.\n"
+     }
+    },
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 4.0,
+      "units": "ratio",
+      "description": "Assumed series RESISTANCE ratio R0/R1 for sequence->phase line expansion when no explicit R0 is available. ~4 is a common overhead-line rule of thumb (the earth return dominates the zero-sequence resistance).\n"
+     },
+     "x0_over_x1": {
+      "value": 3.0,
+      "units": "ratio",
+      "description": "Assumed series REACTANCE ratio X0/X1 for sequence->phase line expansion when no explicit X0 is available (~3 typical for overhead lines).\n"
+     },
+     "c0_over_c1": {
+      "value": 0.5,
+      "units": "ratio",
+      "description": "Assumed shunt CAPACITANCE ratio C0/C1 for sequence->phase line expansion when no explicit C0 is available (~0.5 typical: less zero-sequence than positive-sequence capacitance).\n"
+     },
+     "r0_includes_earth_return": {
+      "value": false,
+      "units": "bool",
+      "description": "Whether a line's R0 already contains the Carson earth-return resistance at f0. true (real zero-sequence measurements / datasheet values): the harmonic model splits R0 into a conductor part R0 \u2212 3\u00b7Re(f0) that carries the skin-effect multiplier and an earth part 3\u00b7Re(f) that does not. false (the default, correct for an R0 synthesised from `r0_over_r1`): R0 is treated as conductor resistance and the earth return enters only as the increment 3\u00b7(Re(f) \u2212 Re(f0)). Both forms reproduce the stored R0 exactly at f0; they differ only in how much of R0 the skin multiplier scales. In the sequence_aware line model the skin multiplier scales the phase conductor's share R1 of R0, so the two settings give the same R0(h) whenever R0 \u2212 3\u00b7Re(f0) \u2265 R1 (every line with a real return path); they differ only for an R0 smaller than R1 + 3\u00b7Re(f0) = R1 + 0.148 \u03a9/km at 50 Hz. Per-line override: `Line.earth_return.r0_includes_earth_return`.\n"
+     }
+    },
+    "earth_return": {
+     "resistivity_ohm_m": {
+      "value": 100.0,
+      "units": "ohm*m",
+      "description": "Soil resistivity \u03c1 for the Carson/Deri earth-return path (Z0 and geometry lines). 100 \u03a9\u00b7m is the OpenDSS / IEEE standard default (average soil).\n"
+     },
+     "resistance_coeff_ohm_per_m_per_hz": {
+      "value": 9.869604401089357e-07,
+      "units": "ohm/(m*Hz)",
+      "description": "Carson earth-return resistance per unit length per Hz: Re(f) = coeff\u00b7f. The physical Carson value is \u03c0\u00b2\u00b71e-7 \u03a9/m/Hz (= \u03c9\u00b7\u03bc0/8 divided by f). Geometry- independent; the dominant frequency-dependent DAMPING of zero-sequence harmonics. Mirrors OpenDSS's user-settable per-LineCode Rg (whose default 0.01805 is this same physical value at 60 Hz in \u03a9 per 1000 ft, so on a metric line OpenDSS's default is \u22483.28\u00d7 smaller). Per-line override: `Line.earth_return.resistance_coeff_ohm_per_m_per_hz`; 0 removes the earth path.\n"
+     },
+     "reactance_coeff_ohm_per_m_per_hz": {
+      "value": 1.2566370614359173e-06,
+      "units": "ohm/(m*Hz) per ln-unit",
+      "description": "Carson/Deri earth-return reactance per unit length per Hz per ln-unit: Xg(f) = coeff\u00b7f\u00b7ln(658.5\u00b7sqrt(\u03c1/f)). The physical value is \u03bc0. Only its frequency DERIVATIVE enters the lumped zero-sequence model, where the \u03c1-dependent log cancels: X0(h) = h\u00b7X0(f0) \u2212 1.5\u00b7coeff\u00b7f0\u00b7h\u00b7ln(h). Mirrors OpenDSS's per-LineCode Xg (its default 0.155081 is this value at 60 Hz, \u03c1=100, in \u03a9 per 1000 ft). Used only by `x0_frequency: carson_sublinear`. Per-line override: `Line.earth_return.reactance_coeff_ohm_per_m_per_hz`.\n"
+     },
+     "x0_frequency": {
+      "value": "linear",
+      "units": "enum{linear, carson_sublinear}",
+      "description": "Frequency law of the zero-sequence REACTANCE in the lumped sequence_aware model. `linear` (default): X0(h) = X0\u00b7h, the scaling of a geometric inductance. It is exact for a return path that stays in metal at every order (the neutral core or sheath of a cable, a 4-wire LV line), and it is the only law that is safe for an X0 invented from `zero_sequence.x0_over_x1`, which carries no information about the return path. `carson_sublinear`: additionally subtract the Carson/Deri earth-return reactance decay 1.5\u00b7coeff\u00b7f0\u00b7h\u00b7ln(h) (geometry- and \u03c1-independent), the correction OpenDSS applies to an R/X line through its Xg. The derivation assumes that the stored X0 CONTAINS the deep-earth term 3\u00b7Xe(f0) = 3\u00b7coeff\u00b7f0\u00b7ln(658.5\u00b7sqrt(\u03c1/f0)), about 1.29 \u03a9/km at 50 Hz and 100 \u03a9\u00b7m. That holds for an overhead line whose measured or computed X0 closes through the earth. It does not hold for a cable or a ratio-derived X0 (typically 0.2 to 0.5 \u03a9/km): the subtracted 0.094\u00b7ln(h) \u03a9/km is then comparable with X0 itself, X0(h) falls below X1(h) within the first few orders and reaches zero near h = 13 for a 150 mm\u00b2 LV cable. Select it per line (`Line.earth_return.x0_frequency`) for overhead lines with real zero-sequence data, or grid-wide through the `opendss` preset. Exact at f0 either way.\n"
+     },
+     "x0_nonnegative": {
+      "value": true,
+      "units": "bool",
+      "description": "Guard of the `carson_sublinear` law: clamp the extrapolated X0(h) at zero. A negative series reactance is a series capacitance and can create a spurious series resonance, so the guard is on by default. Reaching the clamp means the stored X0 lacks the deep-earth term the law subtracts (see `x0_frequency`); assembly then logs one WARNING with the number of affected lines. The derivative is zero below the boundary. Disable for the unguarded OpenDSS law (the `opendss` preset does). No effect under `linear`. Per-line override: `Line.earth_return.x0_nonnegative`.\n"
+     },
+     "x0_exponent": {
+      "value": 1.0,
+      "units": "exponent",
+      "description": "Exponent p in X0(h) = X0\u00b7h^p for the lumped sequence_aware model. 1.0 (default) is the geometric scaling. p < 1 is an EMPIRICAL way to bend the zero-sequence reactance sub-linear (e.g. to match a measured Z0(h)); `x0_frequency: carson_sublinear` is the physically derived form for an overhead line. Per-line override: `Line.earth_return.x0_exponent`.\n"
+     }
+    },
+    "geometry": {
+     "internal_inductance": {
+      "value": "gmr",
+      "units": "enum{gmr, gmr_skin, gmr_power_frequency, bessel}",
+      "description": "Which internal-inductance model the conductor-geometry path uses. `gmr`: the published GMR carries the internal inductance at every frequency and the internal reactance is dropped (frozen at its power-frequency value). `gmr_skin`: the published GMR's internal reactance is scaled by the solid-round Bessel decay Im(Zint(f))/(f*mu0/4), so the internal inductance decays with skin effect (continuous in f). At power frequency the decay factor is 0.997 to 0.999 for LV/MV conductors and 0.989 for a very large one, so the published GMR's internal part, itself a few percent of X, is reproduced to within 1 %. `gmr_power_frequency`: `gmr` inside `power_frequency_band_hz` and `bessel` outside it, which is OpenDSS's rule (LineConstants/CNLineConstants/ TSLineConstants). Reproduces OpenDSS at every frequency; discontinuous at the band edges unless GMR = e^(-1/4)*radius. `bessel`: physical radius for the spacing term plus the full frequency-dependent Bessel internal impedance at every frequency, i.e. the first-principles solid round conductor; it discards the published GMR and so ignores stranding. `gmr`, `gmr_skin` and `bessel` are continuous in frequency; all four agree at power frequency for a solid round conductor. Needs a conductor radius for every option except `gmr`.\n"
+     },
+     "power_frequency_band_hz": {
+      "value": [
+       40.0,
+       1000.0
+      ],
+      "units": "Hz",
+      "description": "Exclusive frequency band (low, high) in which `internal_inductance: gmr_power_frequency` keeps the published GMR. OpenDSS hard-codes `(f < 1000.0) and (f > 40.0)` in LineConstants.pas, so (40, 1000) reproduces it; only change this to study the sensitivity of the threshold.\n"
+     }
+    },
+    "conductor": {
+     "gmr_over_radius": {
+      "value": 0.7788,
+      "units": "ratio",
+      "description": "Geometric-mean-radius / physical-radius for a solid round conductor (e^{-1/4}). Used to pick a PHYSICAL GMR when synthesizing a two-conductor go/return equivalent from positive-sequence R1/X1 (so the GMR never exceeds the radius).\n"
+     },
+     "radius_m": {
+      "value": 0.0102,
+      "units": "m",
+      "description": "Default conductor outer radius (~ACSR) for R/X\u2192geometry synthesis when no conductor data is supplied. Affects only the (tiny) synthesized capacitance.\n"
+     },
+     "phase_spacing_m": {
+      "value": 1.0,
+      "units": "m",
+      "description": "Initial phase-conductor spacing for the equilateral 3-phase R/X\u2192geometry synthesis (the Newton fit then adjusts the spacing + GMR to reproduce X1 and X0). ~1 m is a typical LV/MV phase separation; the value only seeds the solve and trades off against the fitted GMR, so the reproduced Z1/X0 are independent of it (within the physical range).\n"
+     },
+     "height_overhead_m": {
+      "value": 10.0,
+      "units": "m",
+      "description": "Default conductor height above ground for an overhead ('ol') line."
+     },
+     "height_cable_m": {
+      "value": 1.0,
+      "units": "m",
+      "description": "Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.\n"
+     }
+    }
+   },
+   "branch": {
+    "zero_impedance": {
+     "value": "fuse",
+     "units": "enum{fuse, error}",
+     "description": "How a solve treats an in-service branch whose series impedance is EXACTLY zero \u2014 a closed switch with no impedance data, a bus coupler or jumper modelled as a zero-impedance line, a zero-length line. `fuse` (default) collapses the branch's terminal node-phase rows into ONE row of the solved system (exact bus fusion: the two terminals share a voltage and their current balances are summed), solves the reduced system and reports the result on the original node ids; the current through the fused branch follows from Kirchhoff's law at the fused node. `error` refuses such a branch by name (`pgml.solver.check_branch_impedances`) and points at `near_ideal_series_resistance_ohm` instead. Fusion is exact and better conditioned than any small-impedance stand-in, which buys its finite voltage drop with an admittance of 1/R in that row. A branch under a `branch_states` sweep is never fused (a swept branch is reached by scaling a stamped admittance): a zero-impedance branch listed there raises under either policy.\n"
+    },
+    "near_ideal_series_resistance_ohm": {
+     "value": 0.0001,
+     "units": "ohm",
+     "description": "Series resistance that stands in for an IDEAL (zero-impedance) branch where the branch has to remain STAMPED \u2014 under `zero_impedance: error`, or for a switch whose state a `branch_states` sweep toggles. 1e-4 Ohm is small enough to be electrically negligible on a distribution feeder and large enough to keep the admittance matrix conditioned, but it is not exact: it adds a voltage drop and it raises that row's admittance scale, and with it the achievable mismatch floor. Prefer exact impedance data where it exists and fusion where the element really is an ideal conductor.\n"
+    },
+    "switch_model": {
+     "value": "ideal",
+     "units": "enum{ideal, near_ideal}",
+     "description": "What a CONVERTER writes for a closed switch whose source library gives no impedance (a pandapower bus-bus switch with `z_ohm = 0`, which pandapower itself solves by fusing the two buses). `ideal` (default) writes a `Switch` with R = L = 0, which the solve collapses exactly (see `zero_impedance`) and which therefore reproduces the source tool's own treatment. `near_ideal` writes `near_ideal_series_resistance_ohm` instead, keeping the switch a stamped branch \u2014 the choice to make when the switch's state has to be swept by `branch_states`.\n"
+    }
+   },
+   "transformer": {
+    "vector_group": {
+     "from": {
+      "value": "delta",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "HV-side winding connection assumed when none is given. `delta` (the D of Dyn) is the standard distribution-transformer HV winding: it blocks zero-sequence / triplen harmonics from propagating to the MV network.\n"
+     },
+     "to": {
+      "value": "wye_grounded",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "LV-side winding connection assumed when none is given. `wye_grounded` (the yn of Dyn) is the standard LV winding: the solidly grounded neutral provides the zero-sequence return path on the LV side.\n"
+     },
+     "clock": {
+      "value": 11,
+      "units": "integer 0..11 (IEC clock; HV->LV shift = +30*clock degrees, mod 360, positive = LV lags HV)",
+      "description": "IEC clock number assumed when no explicit tap.shift_deg is given. `11` (Dyn11, LV leads HV by 30 deg) is the IEC / European distribution-transformer default. For a transformer with explicit connections the clock is read from tap.shift_deg (rounded to the nearest 30 deg) instead.\n"
+     }
+    },
+    "harmonic_resistance": {
+     "law": {
+      "value": "element",
+      "units": "enum{element, constant, xr_constant}",
+      "description": "`element` = per-transformer `harmonic_xr_constant` (False = R constant, True = R scales with the order so X/R stays constant); `constant` = force R constant on every transformer (OpenDSS's `XRConst=No`, the conservative default of every reference tool: transformer damping at high orders is then UNDERSTATED because no eddy-current/stray-loss rise is modelled); `xr_constant` = force R proportional to the order on every transformer (OpenDSS's `XRConst=Yes`). A `Transformer.resistance_frequency` multiplier curve (skin effect / a measured frequency correction) multiplies on top of whichever law applies.\n"
+     }
+    },
+    "magnetizing_placement": {
+     "value": "split",
+     "units": "enum{from_terminal, to_terminal, split}",
+     "description": "Terminal the magnetizing shunt is stamped on: `from_terminal` = the HV/from phase diagonal, `to_terminal` = the LV/to diagonal with the branch referred through the squared rated-voltage ratio (OpenDSS's own placement), `split` (default) = half on each terminal, each referred to its own side (power-grid-model's placement). The VALUE is always `magnetizing_conductance_s`/`magnetizing_inductance_h` as stored, i.e. referred to the from side. Typical residual between the choices: ~2e-4 pu of the transformer admittance at a realistic 0.5 % magnetizing current.\n"
+    },
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed R0/R1 of the leakage impedance when a transformer carries no explicit `zero_sequence` override. 1.0 (Z0 = Z1) is what OpenDSS's and power-grid-model's two-winding transformer models imply -- neither has a zero-sequence leakage input, so their zero sequence sees the positive-sequence winding impedance through the winding topology.\n"
+     },
+     "x0_over_x1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed X0/X1 of the leakage impedance when a transformer carries no explicit `zero_sequence` override (1.0 = Z0 = Z1). A THREE-LIMB core YNyn unit has X0/X1 ~ 0.3-1.0 (the zero-sequence flux closes through tank and air, not the core); a five-limb or shell-type unit is close to 1.0. A zigzag grounding transformer has X0/X1 well below 1 by design.\n"
+     }
+    }
+   },
+   "source": {
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed R0/R1 of the source Thevenin when the dataset has no zero-sequence data. 1.0 (Z0 = Z1) is the value power-grid-model (`z01_ratio`) and pandapower (`x0x_max`) themselves default to, i.e. the assumption of a solidly grounded upstream network. A network whose zero-sequence path runs through an additional transformer or an impedance-earthed neutral has R0/R1 > 1 -- set the native field (or raise this ratio) for a study where triplen/residual current reaches the source.\n"
+     },
+     "x0_over_x1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed X0/X1 of the source Thevenin when the dataset has no zero-sequence data (1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). X0/X1 of a real feeding network ranges from ~1 (solidly grounded, close ground source) to >10 (remote or impedance-earthed ground source).\n"
+     }
+    },
+    "series_impedance_ohm": {
+     "value": 5.0,
+     "units": "ohm",
+     "description": "|Z| of the upstream-grid Thevenin/Norton series impedance at the source's rated voltage, used when the converted source is near-ideal. Larger = weaker grid = more harmonic voltage at the source bus and more cross-feeder coupling.\n"
+    },
+    "xr_ratio": {
+     "value": 10.0,
+     "units": "ratio X/R",
+     "description": "X/R ratio of the source series impedance (R = |Z|/sqrt(1+xr^2), X = xr*R). ~10 is typical for a stiff MV grid. NOT the same convention as the short-circuit-input converter's `rx_ratio` (`SourceShortCircuitInput.rx_ratio`, consumed by `pgml.convert._common.thevenin_from_sk`): that one is R/X (the reciprocal of this one), matching power-grid-model's own `rx_ratio` field. Converting a value between the two means inverting it, not copying it.\n"
+    }
+   },
+   "solver": {
+    "convergence": {
+     "mismatch_pu": {
+      "value": 1e-08,
+      "units": "per unit of s_base_va (apparent-power mismatch)",
+      "description": "PRIMARY convergence criterion of the nonlinear power flow: the largest nodal apparent-power mismatch |V_i * conj(F_i)| / s_base_va over the free (non-slack) rows, where F = Y*V + I_device(V) - I_slack. 1e-8 pu is pandapower's default (`tolerance_mva` on a 1 MVA base) and the same order as power-grid-model's `error_tolerance`, so iteration counts are comparable across the three tools. The achievable value is bounded below by the cancellation error of Y*V, which the solver estimates per row from the working precision and reports; a tolerance below that floor logs a warning and the floor governs. This is a power tolerance, 0.01 VA per row on the default 1 MVA base, and not a voltage tolerance: it leaves a voltage error of about mismatch_pu * s_base_va / S_k per unit at a node of short-circuit power S_k. Together with update_pu the default gives voltages good to about 1e-8 pu. Lower both for a tighter answer.\n"
+     },
+     "update_pu": {
+      "value": 1e-08,
+      "units": "per unit of each node's line-to-neutral rated voltage",
+      "description": "SECONDARY convergence criterion: the largest per-row voltage update |V_new - V_old| / V_LN(node) of the current-injection fixed point (or of the Newton step). Both criteria must hold. Per-row normalisation makes the measure independent of the voltage level and of the number of rows, so a multi-voltage grid or an ensemble of grids solved in one system is judged exactly like a single feeder. power-grid-model uses the same quantity (max voltage deviation in pu). The update is not the remaining error: the fixed point's error is rho / (1 - rho) times its last update (rho the contraction factor, roughly 0.1 to 0.5 on a distribution feeder), Newton's is far below its last update.\n"
+     },
+     "s_base_va": {
+      "value": 1000000.0,
+      "units": "VA",
+      "description": "Apparent-power base of the per-unit power mismatch. 1 MVA matches pandapower's default `sn_mva`, so the mismatch tolerance carries the same meaning there. A grid-specific base (e.g. the transformer rating) only rescales the criterion.\n"
+     },
+     "stall_patience": {
+      "value": 4,
+      "units": "iterations",
+      "description": "How many consecutive iterations a scenario may fail to reduce either convergence measure (voltage update or power mismatch) by the factor `stall_decay` before the solver calls it STALLED. A stalled iteration has stopped making progress: at a single-precision working dtype the fixed point reaches an exact fixed point of the rounded map or a small limit cycle whose amplitude is set by the rounding of one back-substitution, and no further iteration can improve it. Detecting that is what lets a solve stop at the precision it can actually reach instead of running to `max_iter` at a converged voltage. 4 iterations with a 10 % improvement requirement never fires on a contracting fixed point (the current-injection map contracts by about a decade per iteration on a distribution feeder, and even a contraction factor of 0.9 per iteration improves by 34 % over four), while a plateau is detected within five iterations of reaching it.\n"
+     },
+     "stall_decay": {
+      "value": 0.9,
+      "units": "factor",
+      "description": "The improvement that counts as progress inside the `stall_patience` window: an iteration is progress when the per-row voltage update or the power mismatch drops below `stall_decay` times the best value of that measure the scenario had reached. A value near 1 detects only a genuine plateau; a smaller value also calls a slowly contracting iteration stalled. With a patience of 4, the value 0.9 calls any iteration that contracts by 0.97 or better per step progress (0.97^4 = 0.885), far slower than the roughly one decade per step of the current-injection iteration on a distribution feeder, and still ends a true plateau after five iterations.\n"
+     },
+     "stall_tolerance_factor": {
+      "value": 100.0,
+      "units": "multiples of the precision floor",
+      "description": "How far above the working precision's voltage-update floor (1.2e-5 per unit for complex64 with the sparse backend, 1e-6 for complex64 dense, 16 eps for complex128) a STALLED scenario may sit and still count as converged at its precision floor rather than as a failure. The floor is a calibrated estimate of one back-substitution's rounding, while the plateau a scenario actually reaches is a limit cycle whose amplitude varies per scenario, per grid and (through the reduction order of a multithreaded matrix-vector product) from run to run, by up to about two orders of magnitude on the grids measured. Accepting a stall inside this band keeps a single-precision solve deterministic and honest \u2014 it converges at the accuracy it reached and the diagnostics report that the floor governed \u2014 while a stall above the band is reported as a failure, because at complex128 it means the iteration is stuck on the physics (a scenario past the loadability limit), not on the arithmetic.\n"
+     }
+    },
+    "precision": {
+     "complex64_cond_warn": {
+      "value": 1000.0,
+      "units": "condition number of the factored system",
+      "description": "Estimated 1-norm condition number above which a plain complex64 solve logs a one-time WARNING. The relative error of a single-precision solve grows like cond * eps_single (eps_single ~ 1.2e-7), so at cond = 1e3 about four of the seven single-precision digits are already gone. SI-unit power systems sit above this routinely \u2014 measured on the factored fundamental system: IEEE-33 cond ~2.8e3, CIGRE LV ~1.7e4 single-phase-equivalent and ~5.5e4 three-phase, and a stiff source or a near-ideal switch pushes it decades higher \u2014 which is the point of the warning. The recommended recipe: solve at complex128, or at complex128 with precision=\"mixed\" (single-precision factorization refined against double-precision residuals), and store complex64. The estimate itself costs a few back-substitutions and is taken ONCE per process.\n"
+     },
+     "refine_steps": {
+      "value": 2,
+      "units": "count",
+      "description": "Iterative-refinement steps applied by a mixed-precision solve: the solution of the single-precision factorization is corrected with residuals formed at the working precision, x <- x + A_single^-1 (b - A*x). Each step multiplies the relative error by about cond * eps_single, so two steps recover double-precision accuracy for cond up to ~1e5 and are the documented default; the nonlinear outer iteration (itself a residual correction) continues the refinement beyond that.\n"
+     }
+    },
+    "equilibration": {
+     "mode": {
+      "value": "symmetric",
+      "units": "name: off | symmetric",
+      "description": "Diagonal equilibration applied around the power-flow and harmonic factorization paths (the nodal admittance, the Newton state Jacobian, the implicit-function adjoint). `solve_anchored` and `AnchoredSystem` do not yet apply this setting. An SI-unit admittance matrix spans decades \u2014 a stiff source row near 1e5 S next to a low-voltage cable row near 1e-2 S \u2014 so it is badly SCALED rather than intrinsically ill-conditioned, and a rescaling removes most of the condition number. \"symmetric\" is van der Sluis scaling d_i = |Y_ii|^-1/2 applied as the congruence D Y D: it keeps symmetry and sparsity, reads only the diagonal, and is within sqrt(n) of the best condition number any diagonal scaling can reach. \"off\" factors the matrix as assembled. The scaling is undone on the solution, so results, reported quantities and gradients are unchanged; what changes is the conditioning of the factored system, the meaning of the condition estimate, and the robustness of a single-precision factorization.\n"
+     },
+     "power_of_two": {
+      "value": true,
+      "units": "boolean",
+      "description": "Round every equilibration scale factor to a power of two. The scaled matrix D Y D is then exact in binary floating point, so the equilibration introduces no rounding error of its own and cannot move a solution it was only meant to condition; the cost is at most a factor 2 per scale factor (4 in the condition number), which is negligible against the decades it removes. Set to false to use the unrounded scales.\n"
+     }
+    },
+    "harmonic": {
+     "system_budget_mb": {
+      "value": 1024.0,
+      "units": "MiB",
+      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted); it is charged the matrix AND its factorisation, which for a dense LU is a second copy of the same size. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
+     }
+    },
+    "ift": {
+     "jacobian_budget_mb": {
+      "value": 1024.0,
+      "units": "MiB",
+      "description": "Memory budget for building the block-diagonal real state Jacobian of the implicit-function (gradient) path and of the dense Newton direction. The vectorized build differentiates the batched residual in one call, which replicates the residual's [B, N, N] admittance once per output row and therefore peaks at B^2 * 2N^3 * itemsize bytes; the budget decides how many scenarios are built at a time (the solver falls back to a column-by-column build costing 2N Jacobian-vector products and O(B*(2N)^2) memory when a single scenario already exceeds it). 1 GiB keeps the fast whole-batch build for small systems and small batches, bounds the peak monotonically in the batch size, and fits alongside the forward solve on a 12 GB accelerator. Raise it on a larger card to keep the vectorized build at larger batches; lower it to leave more room for the forward.\n"
+     },
+     "adjoint_factor_cache_mb": {
+      "value": 256.0,
+      "units": "MiB",
+      "description": "Largest LU factorization of the state Jacobian that the gradient path keeps cached for REPEATED vector-Jacobian products of the same solve (building a full output Jacobian row by row, or any second backward pass with retain_graph). Caching turns every further product into one back-substitution instead of a complete Jacobian rebuild and factorization; above this size the factors are rebuilt per product instead, so a large batched solve does not hold a big factorization alive for the lifetime of the graph. The factors of B scenarios of an N-row grid take B*(2N)^2*8 bytes in double precision: 256 MiB holds a single grid of about 2900 rows or 90 scenarios of a 294-row three-phase LV feeder, the sizes for which a full output Jacobian is built row by row, and stays small next to the forward solve's own memory.\n"
+     }
+    },
+    "loadability": {
+     "ramp": {
+      "value": "load",
+      "units": "name: load | all",
+      "description": "What the loadability analysis' scaling factor lambda multiplies. \"load\" scales the loads only and holds generation at its nameplate value \u2014 the textbook continuation-power-flow ramp, and what a published loadability or P-V curve means. \"all\" scales every injecting device, loads and generation together, which is the joint ramp of a whole operating point; on a feeder with substantial generation the two limits differ materially, because ramping generation with the load offsets the voltage drop the ramp is meant to create.\n"
+     }
+    }
+   }
+  },
+  "pgml_tolerance_defaults": {
+   "solve_power_flow": null,
+   "solve_power_flow_unit": "per unit",
+   "solve_harmonic_flow": null,
+   "solve_harmonic_flow_unit": "per unit"
+  },
+  "tolerance_mode": "library",
+  "guard_tol_pu": 1e-06,
+  "cpu_allocation": {
+   "logical_cpus": 8,
+   "physical_cores": 8,
+   "threads_per_core": 1.0,
+   "cpu_workers": 8,
+   "blas_thread_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": null,
+    "OPENBLAS_NUM_THREADS": null,
+    "NUMEXPR_NUM_THREADS": null
+   }
+  },
+  "allocation": {
+   "logical_cpus": "16",
+   "memory_mb": "53248"
+  },
+  "gpu": "NVIDIA RTX A2000 12GB",
+  "gpu_memory": "12282 MiB",
+  "driver": "580.173.02",
+  "gpu_torch": "NVIDIA RTX A2000 12GB",
+  "gpu_total_mib": 11905
+ },
+ "backend_resolution": {
+  "sparse_min_rows": 512,
+  "auto": {
+   "cpu:33": "dense",
+   "cuda:33": "dense",
+   "cpu:294": "dense",
+   "cuda:294": "dense",
+   "cpu:512": "sparse",
+   "cuda:512": "dense",
+   "cpu:1176": "sparse",
+   "cuda:1176": "dense",
+   "cpu:4096": "sparse",
+   "cuda:4096": "dense"
+  }
+ },
+ "configs": [
+  [
+   "cpu",
+   "sparse",
+   8,
+   [
+    256,
+    4096
+   ]
+  ],
+  [
+   "cpu",
+   "dense",
+   1,
+   [
+    256
+   ]
+  ],
+  [
+   "cuda",
+   "dense",
+   null,
+   [
+    256,
+    1024
+   ]
+  ]
+ ],
+ "phases": [
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "device": "cpu",
+   "backend_requested": "sparse",
+   "backend_used": "sparse",
+   "threads": 8,
+   "batch": 256,
+   "iterations": 7,
+   "converged": true,
+   "median_s": 0.15559197300171945,
+   "throughput_per_s": 1645.329094176156,
+   "instrumented_total_s": 0.1580528070044238,
+   "phases_s": {
+    "assembly": 0.033152702992083505,
+    "convergence_test": 0.014163783067488112,
+    "device_currents": 0.013039091994869523,
+    "factorization": 0.012927254007081501,
+    "residual_matvec": 0.006988082008319907,
+    "triangular_solve": 0.05248899999423884
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 37,
+    "device_currents": 8,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 7
+   },
+   "remainder_s": 0.025292892940342426,
+   "phase_share": {
+    "assembly": 0.2097571287750402,
+    "convergence_test": 0.0896142456178692,
+    "device_currents": 0.08249832598357185,
+    "factorization": 0.08179072711261416,
+    "residual_matvec": 0.044213590006815344,
+    "triangular_solve": 0.33209786646035144
+   },
+   "per_scenario_us": {
+    "assembly": 129.5027460628262,
+    "convergence_test": 55.327277607375436,
+    "device_currents": 50.93395310495907,
+    "factorization": 50.497085965162114,
+    "residual_matvec": 27.297195344999636,
+    "triangular_solve": 205.03515622749546
+   }
+  },
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "device": "cpu",
+   "backend_requested": "sparse",
+   "backend_used": "sparse",
+   "threads": 8,
+   "batch": 4096,
+   "iterations": 7,
+   "converged": true,
+   "median_s": 2.8972737440053606,
+   "throughput_per_s": 1413.742836166199,
+   "instrumented_total_s": 2.8775768800114747,
+   "phases_s": {
+    "assembly": 0.05679391800367739,
+    "convergence_test": 0.42082126600143965,
+    "device_currents": 0.4616781350050587,
+    "factorization": 0.013107112987199798,
+    "residual_matvec": 0.08741604100214317,
+    "triangular_solve": 1.4878510429989547
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 37,
+    "device_currents": 8,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 7
+   },
+   "remainder_s": 0.3499093640130013,
+   "phase_share": {
+    "assembly": 0.019736716123272064,
+    "convergence_test": 0.14624153708093512,
+    "device_currents": 0.1604398958762894,
+    "factorization": 0.004554913225167257,
+    "residual_matvec": 0.0303783511778127,
+    "triangular_solve": 0.5170499712219754
+   },
+   "per_scenario_us": {
+    "assembly": 13.86570263761655,
+    "convergence_test": 102.73956689488273,
+    "device_currents": 112.71438842896941,
+    "factorization": 3.1999787566405757,
+    "residual_matvec": 21.34180688528886,
+    "triangular_solve": 363.24488354466666
+   }
+  },
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "device": "cpu",
+   "backend_requested": "dense",
+   "backend_used": "dense",
+   "threads": 1,
+   "batch": 256,
+   "iterations": 7,
+   "converged": true,
+   "median_s": 0.6001232509879628,
+   "throughput_per_s": 426.5790395198916,
+   "instrumented_total_s": 0.6020666710101068,
+   "phases_s": {
+    "assembly": 0.034537109997472726,
+    "convergence_test": 0.06046857501496561,
+    "device_currents": 0.035932643004343845,
+    "factorization": 0.07300673700228799,
+    "residual_matvec": 0.046890551995602436,
+    "triangular_solve": 0.30512751200876664
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 37,
+    "device_currents": 8,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 7
+   },
+   "remainder_s": 0.04610354198666755,
+   "phase_share": {
+    "assembly": 0.057364261568455026,
+    "convergence_test": 0.1004350148024562,
+    "device_currents": 0.05968216600340703,
+    "factorization": 0.12126022003477159,
+    "residual_matvec": 0.07788265694384416,
+    "triangular_solve": 0.5068002045302463
+   },
+   "per_scenario_us": {
+    "assembly": 134.91058592762784,
+    "convergence_test": 236.2053711522094,
+    "device_currents": 140.36188673571814,
+    "factorization": 285.18256641518747,
+    "residual_matvec": 183.16621873282202,
+    "triangular_solve": 1191.9043437842447
+   }
+  },
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "device": "cuda",
+   "backend_requested": "dense",
+   "backend_used": "dense",
+   "threads": null,
+   "batch": 256,
+   "iterations": 7,
+   "converged": true,
+   "median_s": 0.3512808090017643,
+   "throughput_per_s": 728.7617012938338,
+   "instrumented_total_s": 0.3123503770038951,
+   "phases_s": {
+    "assembly": 0.07361622799362522,
+    "convergence_test": 0.0056847479863790795,
+    "device_currents": 0.003445840979111381,
+    "factorization": 0.040780025999993086,
+    "residual_matvec": 0.017876547994092107,
+    "triangular_solve": 0.1510084510082379
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 37,
+    "device_currents": 8,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 7
+   },
+   "remainder_s": 0.01993853504245635,
+   "phase_share": {
+    "assembly": 0.23568477393804202,
+    "convergence_test": 0.01819990755544434,
+    "device_currents": 0.011031973171168639,
+    "factorization": 0.13055859381749535,
+    "residual_matvec": 0.05723235606617878,
+    "triangular_solve": 0.48345852006560813
+   },
+   "per_scenario_us": {
+    "assembly": 287.5633906000985,
+    "convergence_test": 22.20604682179328,
+    "device_currents": 13.460316324653832,
+    "factorization": 159.296976562473,
+    "residual_matvec": 69.83026560192229,
+    "triangular_solve": 589.8767617509293
+   }
+  },
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "device": "cuda",
+   "backend_requested": "dense",
+   "backend_used": "dense",
+   "threads": null,
+   "batch": 1024,
+   "iterations": 7,
+   "converged": true,
+   "median_s": 0.8876514809962828,
+   "throughput_per_s": 1153.6059161988692,
+   "instrumented_total_s": 0.8885828890051926,
+   "phases_s": {
+    "assembly": 0.074683170998469,
+    "convergence_test": 0.016547400009585544,
+    "device_currents": 0.014179363977746107,
+    "factorization": 0.040759077994152904,
+    "residual_matvec": 0.06836105200636666,
+    "triangular_solve": 0.6474674419878284
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 37,
+    "device_currents": 8,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 7
+   },
+   "remainder_s": 0.02658538203104399,
+   "phase_share": {
+    "assembly": 0.08404750071440165,
+    "convergence_test": 0.01862223571299137,
+    "device_currents": 0.015957277765747353,
+    "factorization": 0.0458697534000283,
+    "residual_matvec": 0.07693266756790675,
+    "triangular_solve": 0.7286517104923059
+   },
+   "per_scenario_us": {
+    "assembly": 72.93278417819238,
+    "convergence_test": 16.159570321860883,
+    "device_currents": 13.847035134517682,
+    "factorization": 39.803787103664945,
+    "residual_matvec": 66.75883984996744,
+    "triangular_solve": 632.2924238162386
+   }
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "device": "cpu",
+   "backend_requested": "sparse",
+   "backend_used": "sparse",
+   "threads": 8,
+   "batch": 256,
+   "iterations": 6,
+   "converged": true,
+   "median_s": 0.8848594630107982,
+   "throughput_per_s": 289.31147905560226,
+   "instrumented_total_s": 0.9997702539985767,
+   "phases_s": {
+    "assembly": 0.3111718879954424,
+    "convergence_test": 0.04205121700942982,
+    "device_currents": 0.06878596395836212,
+    "factorization": 0.21747873499407433,
+    "residual_matvec": 0.07179504798841663,
+    "triangular_solve": 0.16789369100297336
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 32,
+    "device_currents": 7,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 6
+   },
+   "remainder_s": 0.12059371104987804,
+   "phase_share": {
+    "assembly": 0.31124339492089487,
+    "convergence_test": 0.04206088032850164,
+    "device_currents": 0.06880177089011497,
+    "factorization": 0.2175287113457008,
+    "residual_matvec": 0.07181154640405898,
+    "triangular_solve": 0.16793227277115247
+   },
+   "per_scenario_us": {
+    "assembly": 1215.5151874821968,
+    "convergence_test": 164.26256644308523,
+    "device_currents": 268.695171712352,
+    "factorization": 849.5263085706029,
+    "residual_matvec": 280.44940620475245,
+    "triangular_solve": 655.8347304803647
+   }
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "device": "cpu",
+   "backend_requested": "sparse",
+   "backend_used": "sparse",
+   "threads": 8,
+   "batch": 4096,
+   "iterations": 6,
+   "converged": true,
+   "median_s": 11.377536831001635,
+   "throughput_per_s": 360.0076238680393,
+   "instrumented_total_s": 11.22282593199634,
+   "phases_s": {
+    "assembly": 0.43152398501115385,
+    "convergence_test": 1.1871503650036175,
+    "device_currents": 2.1843216080014827,
+    "factorization": 0.1987222759926226,
+    "residual_matvec": 1.0176754610001808,
+    "triangular_solve": 5.155547144997399
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 32,
+    "device_currents": 7,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 6
+   },
+   "remainder_s": 1.0478850919898832,
+   "phase_share": {
+    "assembly": 0.03845056384425215,
+    "convergence_test": 0.1057799855577413,
+    "device_currents": 0.1946320491146503,
+    "factorization": 0.017706973020588716,
+    "residual_matvec": 0.09067907380607075,
+    "triangular_solve": 0.45938047834270557
+   },
+   "per_scenario_us": {
+    "assembly": 105.35253540311373,
+    "convergence_test": 289.8316320809613,
+    "device_currents": 533.281642578487,
+    "factorization": 48.51618066226138,
+    "residual_matvec": 248.45592309574727,
+    "triangular_solve": 1258.6785021966307
+   }
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "device": "cpu",
+   "backend_requested": "dense",
+   "backend_used": "dense",
+   "threads": 1,
+   "batch": 256,
+   "iterations": 6,
+   "converged": true,
+   "median_s": 7.450187805996393,
+   "throughput_per_s": 34.36154989193086,
+   "instrumented_total_s": 7.436726052997983,
+   "phases_s": {
+    "assembly": 0.41102989799401257,
+    "convergence_test": 0.18733213796804193,
+    "device_currents": 0.23363041401898954,
+    "factorization": 2.9393671010038815,
+    "residual_matvec": 0.4710798110027099,
+    "triangular_solve": 2.974666927999351
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 32,
+    "device_currents": 7,
+    "factorization": 1,
+    "residual_matvec": 1,
+    "triangular_solve": 6
+   },
+   "remainder_s": 0.2196197630109964,
+   "phase_share": {
+    "assembly": 0.05527027553049547,
+    "convergence_test": 0.025190135636705663,
+    "device_currents": 0.03141576176855481,
+    "factorization": 0.3952501517544711,
+    "residual_matvec": 0.0633450536762481,
+    "triangular_solve": 0.3999968409217074
+   },
+   "per_scenario_us": {
+    "assembly": 1605.5855390391116,
+    "convergence_test": 731.7661639376638,
+    "device_currents": 912.6188047616779,
+    "factorization": 11481.902738296412,
+    "residual_matvec": 1840.1555117293356,
+    "triangular_solve": 11619.792687497466
+   }
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "device": "cuda",
+   "backend_requested": "dense",
+   "backend_used": "dense",
+   "threads": null,
+   "batch": 256,
+   "iterations": 6,
+   "converged": true,
+   "median_s": 3.2137750150141073,
+   "throughput_per_s": 79.65710070058412,
+   "instrumented_total_s": 3.1474048539967043,
+   "phases_s": {
+    "assembly": 0.35492565199092496,
+    "convergence_test": 0.01298930199118331,
+    "device_currents": 0.01845621100801509,
+    "factorization": 1.1444689810014097,
+    "residual_matvec": 0.20518384501338005,
+    "triangular_solve": 1.3382580629986478
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 32,
+    "device_currents": 7,
+    "factorization": 1,
+    "residual_matvec": 2,
+    "triangular_solve": 6
+   },
+   "remainder_s": 0.07312279999314342,
+   "phase_share": {
+    "assembly": 0.11276771449984445,
+    "convergence_test": 0.004126987976996019,
+    "device_currents": 0.005863945651789483,
+    "factorization": 0.363623059025316,
+    "residual_matvec": 0.06519143692392453,
+    "triangular_solve": 0.42519412820351743
+   },
+   "per_scenario_us": {
+    "assembly": 1386.4283280895506,
+    "convergence_test": 50.73946090305981,
+    "device_currents": 72.09457425005894,
+    "factorization": 4470.581957036757,
+    "residual_matvec": 801.4993945835158,
+    "triangular_solve": 5227.570558588468
+   }
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "device": "cuda",
+   "backend_requested": "dense",
+   "backend_used": "dense",
+   "threads": null,
+   "batch": 1024,
+   "iterations": 6,
+   "converged": true,
+   "median_s": 7.881272662998526,
+   "throughput_per_s": 129.9282544566104,
+   "instrumented_total_s": 8.046568311998271,
+   "phases_s": {
+    "assembly": 0.48561891399731394,
+    "convergence_test": 0.044839738024165854,
+    "device_currents": 0.07100555500073824,
+    "factorization": 1.1576993889902951,
+    "residual_matvec": 0.8195670030108886,
+    "triangular_solve": 5.370453665003879
+   },
+   "phase_calls": {
+    "assembly": 2,
+    "convergence_test": 32,
+    "device_currents": 7,
+    "factorization": 1,
+    "residual_matvec": 2,
+    "triangular_solve": 6
+   },
+   "remainder_s": 0.09738404797099065,
+   "phase_share": {
+    "assembly": 0.06035105838512619,
+    "convergence_test": 0.005572529342391232,
+    "device_currents": 0.008824327619870146,
+    "factorization": 0.14387492209120312,
+    "residual_matvec": 0.10185298517739902,
+    "triangular_solve": 0.6674216208412689
+   },
+   "per_scenario_us": {
+    "assembly": 474.2372207005019,
+    "convergence_test": 43.78880666422447,
+    "device_currents": 69.34136230540844,
+    "factorization": 1130.565809560835,
+    "residual_matvec": 800.3584013778209,
+    "triangular_solve": 5244.583657230351
+   }
+  }
+ ],
+ "ordering": [
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "free_rows": 1176,
+   "nnz_Y": 3520,
+   "nnz_per_row": 2.993197278911565,
+   "rhs_cols": 256,
+   "orderings": [
+    {
+     "ordering": "colamd",
+     "permc_spec": "COLAMD",
+     "nnz_L": 2492,
+     "nnz_U": 2492,
+     "fill_ratio": 1.415909090909091,
+     "factor_s": 0.001245093997567892,
+     "backsubstitution_us_per_rhs": 44.1335611943335
+    },
+    {
+     "ordering": "natural",
+     "permc_spec": "NATURAL",
+     "nnz_L": 8228,
+     "nnz_U": 8228,
+     "fill_ratio": 4.675,
+     "factor_s": 0.0008184220011268432,
+     "backsubstitution_us_per_rhs": 73.94600000528347
+    },
+    {
+     "ordering": "minimum_degree",
+     "permc_spec": "MMD_AT_PLUS_A",
+     "nnz_L": 2348,
+     "nnz_U": 2348,
+     "fill_ratio": 1.334090909090909,
+     "factor_s": 0.00022171333451600125,
+     "backsubstitution_us_per_rhs": 16.07316016816185
+    },
+    {
+     "ordering": "reverse_cuthill_mckee",
+     "permc_spec": "NATURAL",
+     "nnz_L": 2348,
+     "nnz_U": 2348,
+     "fill_ratio": 1.334090909090909,
+     "factor_s": 0.00018231899593956769,
+     "backsubstitution_us_per_rhs": 12.702007817703512
+    },
+    {
+     "ordering": "depth_first_leaves_first",
+     "permc_spec": "NATURAL",
+     "nnz_L": 2348,
+     "nnz_U": 2348,
+     "fill_ratio": 1.334090909090909,
+     "factor_s": 0.00017776599755355468,
+     "backsubstitution_us_per_rhs": 15.990229182231513
+    }
+   ]
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "free_rows": 4096,
+   "nnz_Y": 12286,
+   "nnz_per_row": 2.99951171875,
+   "rhs_cols": 256,
+   "orderings": [
+    {
+     "ordering": "colamd",
+     "permc_spec": "COLAMD",
+     "nnz_L": 8212,
+     "nnz_U": 8212,
+     "fill_ratio": 1.3368061207878887,
+     "factor_s": 0.0007188906650602197,
+     "backsubstitution_us_per_rhs": 149.32566275168332
+    },
+    {
+     "ordering": "natural",
+     "permc_spec": "NATURAL",
+     "nnz_L": 36828,
+     "nnz_U": 36828,
+     "fill_ratio": 5.995116392642031,
+     "factor_s": 0.0015350270017127816,
+     "backsubstitution_us_per_rhs": 154.61725130686924
+    },
+    {
+     "ordering": "minimum_degree",
+     "permc_spec": "MMD_AT_PLUS_A",
+     "nnz_L": 8191,
+     "nnz_U": 8191,
+     "fill_ratio": 1.3333875956373107,
+     "factor_s": 0.0006565080014600729,
+     "backsubstitution_us_per_rhs": 137.49433202292494
+    },
+    {
+     "ordering": "reverse_cuthill_mckee",
+     "permc_spec": "NATURAL",
+     "nnz_L": 8191,
+     "nnz_U": 8191,
+     "fill_ratio": 1.3333875956373107,
+     "factor_s": 0.0005449579960744207,
+     "backsubstitution_us_per_rhs": 139.44301432881426
+    },
+    {
+     "ordering": "depth_first_leaves_first",
+     "permc_spec": "NATURAL",
+     "nnz_L": 8191,
+     "nnz_U": 8191,
+     "fill_ratio": 1.3333875956373107,
+     "factor_s": 0.0005021436663810164,
+     "backsubstitution_us_per_rhs": 141.63222266461162
+    }
+   ]
+  }
+ ],
+ "sparse_overhead": [
+  {
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "free_rows": 1176,
+   "points": [
+    {
+     "batch": 256,
+     "backend_entry_s": 0.0052854823297820985,
+     "superlu_solve_s": 0.003729395330689537,
+     "marshalling_s": 0.0015560869990925616,
+     "marshalling_share": 0.2944077573250942,
+     "backend_entry_us_per_rhs": 20.646415350711322,
+     "superlu_us_per_rhs": 14.567950510506003
+    },
+    {
+     "batch": 4096,
+     "backend_entry_s": 0.1484624229973027,
+     "superlu_solve_s": 0.08953854666712384,
+     "marshalling_s": 0.058923876330178857,
+     "marshalling_share": 0.39689421161642635,
+     "backend_entry_us_per_rhs": 36.24570873957585,
+     "superlu_us_per_rhs": 21.85999674490328
+    }
+   ]
+  },
+  {
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "free_rows": 4096,
+   "points": [
+    {
+     "batch": 256,
+     "backend_entry_s": 0.05615932233437585,
+     "superlu_solve_s": 0.04207979866866177,
+     "marshalling_s": 0.014079523665714078,
+     "marshalling_share": 0.25070679417895714,
+     "backend_entry_us_per_rhs": 219.37235286865567,
+     "superlu_us_per_rhs": 164.37421354946005
+    },
+    {
+     "batch": 4096,
+     "backend_entry_s": 1.2309130766661838,
+     "superlu_solve_s": 0.8116069036671737,
+     "marshalling_s": 0.4193061729990101,
+     "marshalling_share": 0.3406464525786522,
+     "backend_entry_us_per_rhs": 300.515887857955,
+     "superlu_us_per_rhs": 198.14621671561858
+    }
+   ]
+  }
+ ],
+ "reference": [
+  {
+   "tool": "power-grid-model",
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "batch": 256,
+   "median_s": 0.019979585995315574,
+   "throughput_per_s": 12813.07831203419,
+   "per_scenario_us": 78.04525779420146
+  },
+  {
+   "tool": "power-grid-model",
+   "grid": "kerber_x4",
+   "rows": 1176,
+   "batch": 4096,
+   "median_s": 0.2987350469920784,
+   "throughput_per_s": 13711.146520108883,
+   "per_scenario_us": 72.9333610820504
+  },
+  {
+   "tool": "power-grid-model",
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "batch": 256,
+   "median_s": 3.089735660003498,
+   "throughput_per_s": 82.85498442922142,
+   "per_scenario_us": 12069.279921888665
+  },
+  {
+   "tool": "power-grid-model",
+   "grid": "ppladder4096",
+   "rows": 4096,
+   "batch": 4096,
+   "median_s": 50.85120472499693,
+   "throughput_per_s": 80.5487307950942,
+   "per_scenario_us": 12414.844903563704
+  }
+ ]
+}

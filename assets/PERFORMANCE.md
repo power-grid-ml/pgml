@@ -1,7 +1,7 @@
 # How the performance figures are measured
 
 This page explains the throughput figure in the README and adds the rest of the
-comparison: grid size, harmonic studies, memory and cost. The numbers come from
+comparison: grid size, harmonic studies, memory, capacity and cost. The numbers come from
 the benchmark scripts of the
 [pgml paper repository](https://github.com/power-grid-ml/pgml-paper) (to be published soon). The figures here are drawn from the recorded results by
 `run/readme/render.py`, which runs no experiment.
@@ -384,10 +384,10 @@ is not the engine.
 
 A worker pool holds nine interpreters, one parent and eight workers, and each of
 them imports the library, builds its own model of the grid and keeps its own
-working arrays. The figure already splits a page shared between processes between
-them, so those three gigabytes are pages no other process holds. They are there
-before the first scenario is solved. Measured at rest, with the pool up and
-nothing solving, pgml over eight workers stands at 2.9 to 3.6 GB, OpenDSS at 3.3
+working arrays. A page mapped by several of them is already split across them by
+the proportional set size, so those three gigabytes are pages no other process
+holds. They are there before the first scenario is solved. Measured at rest,
+with the pool up and nothing solving, pgml over eight workers stands at 2.9 to 3.6 GB, OpenDSS at 3.3
 to 3.5 and pandapower at 4.3 to 4.9, and the grid and the batch barely move those
 numbers.
 
@@ -441,6 +441,80 @@ The capacity search doubles the batch until the device runs out of memory.
 Only the first row is a capacity. The other two are lower bounds: the search
 reached its own cap with the card less than a third full, so the real limit is
 higher and was not measured.
+
+## Filling the machine with scenarios
+
+Every figure above fixes the batch and compares speed. The other question is how
+many scenarios a machine holds at once, and how fast they are solved when it is
+full. It is worth asking because the tools answer it differently. A per-scenario
+engine never holds more than the scenario it is working on, so its batch is a
+convenience; pgml holds the whole batch and gets its speed from it, so its batch
+is a resource.
+
+The measurement fills one workstation, an RTX A2000 with 12 GB beside sixteen
+CPUs. That is a much smaller accelerator than the L40S every figure above uses,
+so these numbers say what one workstation does and are not a second reading of
+the comparison. For each tool and grid the batch doubles until the memory
+ceiling is passed, a probe runs out of memory, the batch cap of 131,072 is reached or one
+solve takes longer than a minute. The ceiling is 10.5 GiB of device memory for
+the GPU arm and 32 GiB of host memory for every other arm, measured the way the
+memory figure measures it, with nothing subtracted. Every probe runs in its own
+interpreter, so a failure ends the probe and not the search. A search that ended
+at the cap or the time limit is a lower bound and not a capacity, and the figure
+draws those with an open marker.
+
+![Scenarios that fit and the throughput reached there, against grid size](readme/capacity.svg)
+
+Scenarios per second at the batch each tool reached:
+
+| Tool | IEEE 33 | Kerber, 294 rows | Kerber x4, 1,176 rows |
+|---|---|---|---|
+| power-grid-model, 8 threads | 254,800 | 45,500 | 10,300 |
+| pgml GPU | 126,900 | 15,400 | 1,500 |
+| pgml CPU, 8 workers | 106,600 | 13,200 | 2,600 |
+| OpenDSS, 8 workers | 103,200 | 27,900 | 5,700 |
+| pgml CPU, one call | 41,600 | 2,100 | 1,000 |
+| pandapower, 8 workers | 1,800 | 1,300 | 760 |
+
+Every one of those batches is 131,072, the search cap, with three exceptions. pgml
+on the GPU at 1,176 rows ran out of device memory at 65,536 and is reported at
+32,768, which is the only measured capacity in the whole table. pgml's single call
+and pandapower at 1,176 rows passed the one-minute budget at 65,536 and are
+reported there.
+
+What held those batches on the largest grid: power-grid-model 14.5 GiB of host
+memory, pgml over eight workers 30.9, pgml's single call 15.8, pandapower 7.3,
+OpenDSS 7.1, and pgml on the GPU 7.2 GiB of device memory for a quarter of the
+batch.
+
+Three things come out of it.
+
+Memory is rarely what stops a tool. On the two smaller grids every arm reached
+the batch cap or its own time limit with the ceiling untouched, and on the
+largest grid only the GPU arm was stopped by memory. What limits a study on this
+machine is time, and after that price. Memory decides whether a tool fits at all,
+which is what the previous section is about, and then stops deciding.
+
+power-grid-model is first at capacity on every grid here, by a factor of two on
+the 33-bus feeder and nearly seven on the 1,176-row network. That is a different
+order from the fixed-batch figures above, where pgml on the GPU leads it four
+times over on the 33-bus feeder. The metric is not what changed. The accelerator
+is: an RTX A2000 is a workstation card with a fraction of an L40S's
+double-precision throughput, and pgml's GPU arm is the one arm that depends on
+it. Who wins therefore depends on which accelerator is bought at least as much as
+on how the batch is chosen, which is why neither number should be read as a
+ranking of engines.
+
+The metric itself rewards a property only one tool has. A per-scenario engine
+never needs its scenarios resident, so filling the machine measures pgml's design
+and very little about the others, and their throughput at capacity is the plateau
+the batch figure already showed. The number is worth reporting because it says
+what a single call can hold, not because it settles anything.
+
+<sub>This section only: measured 2026-09-24, library 0.5.1, complex128, one NVIDIA RTX
+A2000 12 GB and sixteen CPUs of one workstation on an idle node, eight worker processes or
+eight threads for every arm that uses them, one engine at a time, every probe in a fresh
+interpreter.</sub>
 
 ## Cost
 
