@@ -57,10 +57,10 @@ more than it saves, and it is what the same code does on a GPU.
   two in-process tools (power-grid-model, pgml's single call) do not. That is a
   genuine cost of running an engine over processes and it is why the pooled arms
   lose at a batch of one.
-- pgml and OpenDSS do not solve quite the same harmonic device model. The
-  harmonic comparison is therefore accepted at 1e-4 per unit rather than the 1e-6
-  the fundamental comparison uses, and each recorded point carries the tolerance
-  it was judged at.
+- pgml and OpenDSS build the same harmonic device shunt but not quite the same
+  line impedance above the fundamental. The harmonic comparison is therefore
+  accepted at 1e-4 per unit rather than the 1e-6 the fundamental comparison uses,
+  and each recorded point carries the tolerance it was judged at.
 - pandapower and power-grid-model have no harmonic power flow, so the harmonic
   figure has one reference tool instead of three.
 - The measurements ran on a node shared with other jobs.
@@ -194,9 +194,29 @@ A study is one nonlinear solve at the fundamental plus a linear solve at each of
 twelve further odd orders. OpenDSS is the only reference tool that can do it;
 pandapower and power-grid-model have no harmonic power flow.
 
-The two engines do not solve quite the same harmonic device model, so this arm is
-accepted at 1e-4 per unit rather than 1e-6. The measured difference is 3.1e-5 per
-unit on the 33-bus feeder and below 1e-5 on the two larger grids.
+Above the fundamental a load is a harmonic current source in parallel with a
+shunt admittance `conj(P + jQ)/V_rated²`, which OpenDSS splits half and half
+between a parallel and a series R-L branch. `P`, `Q` and `V_rated` are the values
+declared on the element, not quantities read off the fundamental solution: the
+same load returns the same order-5 admittance whether its terminal settles at 224
+or at 217 volts. What the fundamental solution carries is the current injection,
+whose magnitude and angle follow the element's own fundamental current.
+
+A scenario here multiplies every load's declared power, so every shunt in the
+circuit moves with it. OpenDSS's admittance scales exactly with the edited power
+and the system matrix is rebuilt whenever an element's is, and again at every
+order because branch reactances scale with frequency. Both engines therefore
+factorize one matrix per scenario and per order. OpenDSS never holds more than
+one of them, because it solves the scenarios one after another; pgml assembles
+the whole batch at once, and that is where its memory goes.
+
+pgml's default builds the same expression from the power the device draws at the
+converged fundamental over the same rated voltage, which for a constant-power
+device is the declared power. That is the configuration in the figure above and
+the one that reproduces OpenDSS. On sixteen scenarios of the 33-bus feeder the
+two engines agree to 3.2e-5 per unit on harmonic voltages of about 1.9e-2 per
+unit. The arm is nonetheless accepted at 1e-4 rather than 1e-6, because the two
+line models still differ above the fundamental.
 
 On the 33-bus feeder OpenDSS levels off near 8,000 studies per second. pgml
 passes it at about 1,000 studies per batch and reaches 39,000 on the GPU and
@@ -207,14 +227,59 @@ network OpenDSS reaches 1,900 studies per second against 383 for pgml's best
 arm, and on the 1,176-row network 390 against 21. pgml never overtakes OpenDSS
 on either.
 
-pgml's harmonic batch is bounded by memory in a way its fundamental batch is not.
-The device shunt of a load follows the solved operating point, so the per-order
-admittance becomes one matrix per scenario rather than one matrix shared by all
-of them, and the working set grows as batch times orders times the square of the
-grid. On the 1,176-row network that limits a GPU study to about 16 scenarios per
-batch on a 48 GB card, and it is why the harmonic curves stop earlier than the
-fundamental ones. A device shunt on a nameplate basis removes the dependence and
-is a separate configuration of the solver.
+#### What the per-scenario matrix costs
+
+![Studies per second for a per-scenario and a shared device shunt, against batch size](readme/harmonic_shunt_basis.svg)
+
+`load_shunt_basis="nameplate"` builds the shunt from each device's stored power
+instead and ignores the scenario, so `Y(h)` is one matrix per order shared by the
+whole batch and one factorization per order answers all of it. It is the cheaper
+model and it is a different one. On the 33-bus feeder it sits 1.6e-4 per unit
+from OpenDSS against 3.2e-5 for the default, five times further away and past the
+1e-4 this arm is accepted at; on the two Kerber networks, where the loads are
+smaller against the source, it is about twice as far and still inside.
+
+Measured on a workstation card, each basis at its own fastest batch, against
+OpenDSS on the same scenarios in the same job:
+
+| Grid | OpenDSS, 8 workers | pgml GPU, per-scenario shunt | pgml GPU, shared shunt | agreement, per-scenario | agreement, shared |
+|---|---|---|---|---|---|
+| IEEE 33, 33 rows | 11,300 | 12,100 | 76,200 | 3.2e-5 | 1.6e-4 |
+| Kerber, 294 rows | 2,470 | 93 | 4,130 | 8.5e-6 | 1.6e-5 |
+| Kerber x4, 1,176 rows | 434 | 2.1 | 225 | 9.7e-6 | 1.6e-5 |
+
+Throughput is studies per second, agreement the largest difference in per-unit
+voltage magnitude. So the matched model is the one that costs, and it costs a
+factor of six on the smallest grid and a hundred on the largest. With it, pgml
+matches OpenDSS on the 33-bus feeder and is 27 and 207 times slower on the two
+larger ones. Without it, pgml is seven times OpenDSS on the feeder and 1.7 times
+on the 294-row network, and still half its speed at 1,176 rows.
+
+The solver does not hold the whole `[B, H, N, N]` admittance. It assembles and
+factors as many scenarios at a time as fit `solver.harmonic.system_budget_mb` and
+concatenates the results, so the peak is bounded by that budget and not by the
+batch. On the 294-row network the device peak holds at 1,540 and 1,552 MiB
+while the nominal admittance grows from 1.07 to 4.29 GiB, and on the 1,176-row
+network at 1,534 MiB against a nominal 4.29 GiB. The shared shunt needs 114 and
+998 MiB for the same batches, because there is one matrix per order rather than
+one per scenario. The harmonic curves above stop earlier than the fundamental
+ones because the benchmark refuses a batch whose nominal admittance exceeds its
+own device budget, which is a harness guard rather than a capacity of the card.
+
+An exact alternative exists and does not apply here. The solver can factor the
+shunt-free network once and reach each scenario's own matrix through a low-rank
+correction, which is selected when three times the number of node-phase rows a
+device shunt touches stays below the row count. A distribution feeder carries a
+load on most buses, so that number is 32 of 33 rows on the IEEE feeder and 146 of
+294 and 584 of 1,176 on the two Kerber networks. At half the rows a low-rank
+correction costs more than a fresh factorization, so the per-scenario assembly is
+what runs.
+
+<sub>This subsection only: measured 2026-09-24, library 0.5.1, complex128, thirteen orders,
+one NVIDIA RTX A2000 12 GB and the CPU of a 16-core workstation, medians of three repeats
+after warm-up; the CPU arm runs on one thread wherever the dense backend is selected,
+for both bases alike. Agreement is the largest absolute difference in per-unit voltage
+magnitude against a live OpenDSS on the matched circuit over the same sixteen scenarios.</sub>
 
 ## Solver configuration
 

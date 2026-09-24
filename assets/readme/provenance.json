@@ -147,11 +147,11 @@
     }
   },
   "solver_strategy_source": {
-    "paper_commit": "5f47ca5e4534fed24992e9d81348e9b3cc62c829",
+    "paper_commit": "6fbd73a341634080b9792a89a23ef1839da6ef87",
     "pgml_version": "0.5.1",
     "hardware": "one NVIDIA RTX A2000 12 GB and eight CPU threads of a 16-core workstation",
     "sha256": {
-      "solver_strategy_preparation.svg": "b34753be9dd8a3c8392b935ea53b1d66a156326b900e851000db3a8c7d7aeede",
+      "solver_strategy_preparation.svg": "fb74b53b4e9b8e384aebffd278504b83aeb2399cf773bdd1898d8ca88ce4c7cc",
       "solver_strategy_preparation.json": "a61e71a56a5d5c142a2d1391e34a59a222db6ffd19258b85ba374468bc9d7729",
       "solver_strategy_preparation.caption.txt": "6eebd2c50119b7de458c151b512380e1747fdb22930a92c969d118b39b0729b5",
       "solver_strategy_refactor.svg": "41d9a3b48e9d9dfb7554fb0a2e063c6a3f20a71d9601e8fc54fa0aa83d2b251b",
@@ -161,5 +161,17 @@
       "solver_strategy_method.json": "91c299a2733530b05819732e12f13ec746fa1632eef5468c01f0e5d850087c0e",
       "solver_strategy_method.caption.txt": "96cb3059af1d17287444f645286a585e31fcd4a2ecb3170036bb653c582c6c76"
     }
+  },
+  "harmonic_basis_source": {
+    "pgml_version": "0.5.1",
+    "measured": "2026-09-24",
+    "hardware": "one NVIDIA RTX A2000 12 GB and the CPU of a 16-core workstation",
+    "driver": "scripts/bench/bench_harmonic_basis.py, drawn by scripts/fig_harmonic_basis.py",
+    "sha256": {
+      "harmonic_shunt_basis.svg": "47ecdb366c3b208a4c28e212934b47762eebeac5ac53a88a942f5a7c12bc7f24",
+      "harmonic_shunt_basis.json": "f7afdae2ce763e73305c733bde84ce2d5869a4d6a8831d1a4dd892f84adf6387",
+      "harmonic_shunt_basis.caption.txt": "8b389774eb2f4526d124360e8b0ccbf79dda8b7034054b757ece977f85b2dfad"
+    },
+    "paper_commit": "6fbd73a341634080b9792a89a23ef1839da6ef87"
   }
 }

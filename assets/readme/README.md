@@ -17,6 +17,11 @@ the figure renderer.
   OpenDSS is the only reference tool with a harmonic power flow. Its points are
   accepted at a looser tolerance than the fundamental ones, and each record
   carries the tolerance it was judged at.
+- `harmonic_shunt_basis.json`: what the harmonic device-shunt basis costs. The
+  same studies with the shunt built per scenario, which is the model OpenDSS
+  solves, and with one shunt shared by the batch, against OpenDSS on both
+  (`scripts/bench/bench_harmonic_basis.py`, drawn by
+  `scripts/fig_harmonic_basis.py` in pgml-paper, not by the renderer here).
 - `size_scaling.json`: the same tools over a family of radial feeders with 16 to
   4096 buses at four batch sizes (`scripts/bench/bench_size.py`, stage
   `fair_size`).
