@@ -694,6 +694,18 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"` and
   `"block"` raise. The sparse backend is differentiable via the linear-solve adjoint
   (`_SparseSolveFn`: one trans='H' solve + batch-folded `-λ·conj(V)ᵀ`).
+  ONE array layout serves a back-substitution: the scenario-major `[k, m]` block the
+  caller already holds IS, transposed, the column-major block SuperLU reads, so a
+  contiguous right-hand side shares its memory with the array handed to SuperLU and a
+  single-factorization solve returns a torch view of SuperLU's own output — nothing is
+  transposed in either direction (measured at complex128 on 1176-row and 4096-row
+  feeders: the backend entry was 1.5 to 1.7x the bare back-substitution and is now
+  within one per cent of it).
+  A single factorization answering many right-hand sides splits those right-hand sides
+  by COLUMNS across `_SPARSE_SOLVE_MAX_THREADS` workers, in chunks no narrower than
+  `_SPARSE_SOLVE_MIN_COLS`, which is the width above which a chunk reproduces the
+  undivided call's blocking bit for bit (a further 3.2x and 5.0x at 4096 right-hand
+  sides on those two feeders).
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL

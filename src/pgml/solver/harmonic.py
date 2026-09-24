@@ -605,14 +605,20 @@ _SPARSE_MIN_ROWS = 512
 
 # SuperLU's back-substitution releases the GIL and is deterministic under
 # concurrent solves against one factorization (each call owns its output/work
-# arrays), so a large multi-RHS batch is split across threads — measured 4.5x
-# with 8 workers on a 4800-row / 256-RHS system, the large-N fixed-point
-# bottleneck. Chunked solves differ from the single multi-RHS call only at
-# machine epsilon (a different internal blocking), like any BLAS reordering;
-# for a fixed column count the chunk layout — and thus the result — is
-# deterministic.
+# arrays), so a large multi-RHS batch is split across threads — measured 3.2x
+# with 8 workers on a 1176-row / 4096-RHS system and 5.0x on a 4096-row one, the
+# large-N fixed-point bottleneck. Chunked solves differ from the single multi-RHS
+# call only at machine epsilon (a different internal blocking), like any BLAS
+# reordering; for a fixed column count the chunk layout — and thus the result —
+# is deterministic.
 _SPARSE_SOLVE_MAX_THREADS = max(1, min(8, os.cpu_count() or 1))
 _SPARSE_SOLVE_MIN_WORK = 100_000  # m * k below this solves sequentially
+# Narrower chunks change the blocking of the multiple-right-hand-side
+# back-substitution, so a chunked solve stops reproducing the single call bit for
+# bit: measured identical from 128 columns upward and different below it, which is
+# where the underlying GEMM switches kernel. Keeping every chunk at or above this
+# width buys the threading without moving a single digit of the solution.
+_SPARSE_SOLVE_MIN_COLS = 128
 
 _sparse_pool: Optional[ThreadPoolExecutor] = None
 
@@ -624,6 +630,41 @@ def _sparse_executor() -> ThreadPoolExecutor:
             max_workers=_SPARSE_SOLVE_MAX_THREADS, thread_name_prefix="pgml-sparse"
         )
     return _sparse_pool
+
+
+def _threaded_back_substitution(fb_numel: int, m: int, k: int) -> bool:
+    """Is one batched back-substitution big enough to pay for the thread pool?"""
+    return (
+        _SPARSE_SOLVE_MAX_THREADS > 1
+        and fb_numel * m * k >= _SPARSE_SOLVE_MIN_WORK
+        and (fb_numel > 1 or k >= 2 * _SPARSE_SOLVE_MIN_COLS)
+    )
+
+
+def _back_substitution_tasks(
+    fb_numel: int, m: int, k: int
+) -> list[tuple[int, int, int]]:
+    """``(factorization, first column, last column)`` of every independent solve.
+
+    Independent factorizations already give one task each. A single factorization
+    answering many right-hand sides — the scenario batch of a fixed-point iteration,
+    and the case that dominates a large CPU solve — is split by COLUMNS instead, in
+    chunks no narrower than ``_SPARSE_SOLVE_MIN_COLS`` so each chunk reproduces the
+    arithmetic of the undivided call. Both give the same work to one worker each.
+    """
+    if not _threaded_back_substitution(fb_numel, m, k):
+        return [(i, 0, k) for i in range(fb_numel)]
+    per_factor = max(
+        1,
+        min(
+            -(-_SPARSE_SOLVE_MAX_THREADS // fb_numel),
+            k // _SPARSE_SOLVE_MIN_COLS,
+        ),
+    )
+    edges = [(j * k) // per_factor for j in range(per_factor + 1)]
+    return [
+        (i, edges[j], edges[j + 1]) for i in range(fb_numel) for j in range(per_factor)
+    ]
 
 
 class _SciPySparseLU:
@@ -659,30 +700,21 @@ class _SciPySparseLU:
                 "on the grid, or fix zero-impedance / degenerate branch parameters."
             ) from e
 
-    @staticmethod
-    def _solve_cols(lu, cols, trans: str):
-        """Back-substitute ``cols`` ``[m, k]``, splitting large ``k`` across threads."""
-        import numpy as np
-
-        m, k = cols.shape
-        n_threads = _SPARSE_SOLVE_MAX_THREADS
-        if n_threads <= 1 or k < 4 * n_threads or m * k < _SPARSE_SOLVE_MIN_WORK:
-            return lu.solve(cols, trans=trans)
-        chunks = np.array_split(np.arange(k), min(n_threads, (k + 7) // 8))
-        parts = list(
-            _sparse_executor().map(
-                lambda c: lu.solve(np.ascontiguousarray(cols[:, c]), trans=trans),
-                chunks,
-            )
-        )
-        return np.concatenate(parts, axis=1)
-
     def solve(self, rhs: Tensor, trans: str = "N") -> Tensor:
         """Solve against every RHS in ``rhs`` broadcastable with ``[*fb, m]``.
 
         Identical broadcasting contract to :func:`_lu_solve_shared`: non-singleton
         factor-batch axes select the factorization, while extra and singleton axes
         become multiple right-hand sides of that factorization.
+
+        ONE array layout serves the whole call. The right-hand sides keep the
+        scenario-major order they arrive in — ``[*factor, k, m]``, whose numpy
+        transpose is the column-major ``[m, k]`` block SuperLU reads and writes —
+        so nothing is transposed on the way in, inside scipy, or on the way back.
+        A right-hand side that already arrives contiguous in that order shares its
+        memory with the numpy view (no copy at all), and a single-factorization
+        solve hands the answer straight back as a torch view of SuperLU's own
+        output buffer.
         """
         import numpy as np
 
@@ -700,31 +732,33 @@ class _SciPySparseLU:
         k = 1
         for sz in shared_shape:
             k *= sz
-        perm = [*factor_axes, nb, *shared_axes]  # [*factor, m, *shared]
-        cols = rhs_b.permute(*perm).reshape(fb_numel, m, k).contiguous().numpy()
-        if (
-            _SPARSE_SOLVE_MAX_THREADS > 1
-            and fb_numel > 1
-            and fb_numel * m * k >= _SPARSE_SOLVE_MIN_WORK
-        ):
-            # Independent factorizations (per frequency / per scenario topology):
-            # solve them concurrently, one factorization per task.
-            sols = list(
-                _sparse_executor().map(
-                    lambda i: self.lus[i].solve(
-                        np.ascontiguousarray(cols[i]), trans=trans
-                    ),
-                    range(fb_numel),
-                )
-            )
+        perm = [*factor_axes, *shared_axes, nb]  # [*factor, *shared, m]
+        rows = rhs_b.permute(*perm).reshape(fb_numel, k, m)
+        # A lazily conjugated / negated view has no numpy equivalent; both resolve
+        # to the tensor itself when the bits are not set, so the common path is free.
+        rows = rows.resolve_conj().resolve_neg()
+        cols = rows.numpy().transpose(0, 2, 1)  # [*factor, m, k], column-major
+        tasks = _back_substitution_tasks(fb_numel, m, k)
+        if len(tasks) == 1:
+            # One factorization, one block: SuperLU's own output IS the answer.
+            index, _, _ = tasks[0]
+            sol_np = self.lus[index].solve(cols[index], trans=trans).T  # [k, m]
         else:
-            sols = [
-                self.lus[i].solve(np.ascontiguousarray(cols[i]), trans=trans)
-                for i in range(fb_numel)
-            ]
-        sol = torch.from_numpy(np.ascontiguousarray(np.stack(sols, 0)))
-        sol = sol.reshape(*factor_shape, m, *shared_shape).to(self.dtype)
-        current_axes = [*factor_axes, nb, *shared_axes]
+            sol_np = np.empty((fb_numel, k, m), dtype=cols.dtype)
+
+            def run(task) -> None:
+                index, start, stop = task
+                block = self.lus[index].solve(cols[index][:, start:stop], trans=trans)
+                sol_np[index, start:stop] = block.T
+
+            if _threaded_back_substitution(fb_numel, m, k):
+                list(_sparse_executor().map(run, tasks))
+            else:
+                for task in tasks:
+                    run(task)
+        sol = torch.from_numpy(sol_np).reshape(*factor_shape, *shared_shape, m)
+        sol = sol.to(self.dtype)
+        current_axes = [*factor_axes, *shared_axes, nb]
         inverse = [current_axes.index(axis) for axis in range(nb + 1)]
         return sol.permute(*inverse)  # [*batch, m]
 
