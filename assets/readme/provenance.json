@@ -145,5 +145,21 @@
       "solverconf_factor_dtype_vs_tools.json": "d51dc1162e75928b75faabc7ddb06646c29f53f5467a079b9113d6a3db354c46",
       "solverconf_factor_dtype_vs_tools.svg": "c76519f69ae2f2a15b6f9c35b66f8aaed54a49d3808f07b0995aea05e2d70321"
     }
+  },
+  "solver_strategy_source": {
+    "paper_commit": "5f47ca5e4534fed24992e9d81348e9b3cc62c829",
+    "pgml_version": "0.5.1",
+    "hardware": "one NVIDIA RTX A2000 12 GB and eight CPU threads of a 16-core workstation",
+    "sha256": {
+      "solver_strategy_preparation.svg": "b34753be9dd8a3c8392b935ea53b1d66a156326b900e851000db3a8c7d7aeede",
+      "solver_strategy_preparation.json": "a61e71a56a5d5c142a2d1391e34a59a222db6ffd19258b85ba374468bc9d7729",
+      "solver_strategy_preparation.caption.txt": "6eebd2c50119b7de458c151b512380e1747fdb22930a92c969d118b39b0729b5",
+      "solver_strategy_refactor.svg": "41d9a3b48e9d9dfb7554fb0a2e063c6a3f20a71d9601e8fc54fa0aa83d2b251b",
+      "solver_strategy_refactor.json": "ce069d6a7f3c0bd75181cac7128f62824ae07909f22968b844b22d4cad634307",
+      "solver_strategy_refactor.caption.txt": "133e748fa69ae8461f73a8386b6c81f1d96fd67c91d0e31efd0fd9c064e60c8f",
+      "solver_strategy_method.svg": "5df1df0b059b9bc21dfb69cff138758b26012bc4462675ea98678996a449e925",
+      "solver_strategy_method.json": "91c299a2733530b05819732e12f13ec746fa1632eef5468c01f0e5d850087c0e",
+      "solver_strategy_method.caption.txt": "96cb3059af1d17287444f645286a585e31fcd4a2ecb3170036bb653c582c6c76"
+    }
   }
 }

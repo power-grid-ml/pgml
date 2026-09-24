@@ -216,6 +216,55 @@ batch on a 48 GB card, and it is why the harmonic curves stop earlier than the
 fundamental ones. A device shunt on a nameplate basis removes the dependence and
 is a separate configuration of the solver.
 
+## Solver configuration
+
+The comparison above runs the solver's defaults. Three choices inside the solver
+change what it costs, measured separately on a workstation card.
+
+![Speed-up of a prepared harmonic study against the grid size, on a CPU and on a GPU](readme/solver_strategy_preparation.svg)
+
+A `HarmonicFlowSystem` passed as `system=` keeps the factored fundamental system, the harmonic
+network matrix for the requested orders, and the factorization of the assembled `Y(h)`.
+Everything that depends on the operating point is recomputed: the fundamental power flow is
+solved again, the device shunts are evaluated from the new solution, and `I(h)` is rebuilt.
+Reuse is decided by value, not identity, and an unchanged operating point is neither necessary
+nor sufficient for it. Network assembly and an operating-point-independent factorization are
+reused across genuinely different scenarios; a `load_shunt_basis="operating_point"` shunt puts
+the scenario into `Y(h)`, and then only the network entry is reusable.
+
+Whether the preparation pays depends on the device. On eight CPU threads at complex128 and
+orders 1 to 13 it is a loss at 99 rows in every configuration, clears 1.0x between 129 and 600
+rows, and returns 1.38x to 1.62x at 900 rows. On one RTX A2000 it pays at every size measured,
+1.12x to 1.27x at 99 rows and 1.38x to 2.49x at 900, with the gain growing with the grid.
+Retention with an operating-point-independent `Y(h)` is 4 MiB at 99 rows and 247 MiB at 900;
+with a per-scenario `Y(h)` it reaches 804 MiB for 32 scenarios of a 300-row feeder, because
+the validity check keeps a copy of the matrix beside its factorization.
+
+![Cost of reusing one factorization, of a low-rank correction and of solving each scenario alone](readme/solver_strategy_refactor.svg)
+
+On the linear algebra itself, a dense direct solve factorizes too: solving the assembled
+matrix and keeping an explicit factorization cost the same to within one percent at all 24
+measured points, so there is nothing to gain by not refactorizing. What pays is reuse. One
+factorization of a shared network answers 64 scenarios of a 900-row feeder in 26 ms against
+960 ms for one factorization each (37x), and where the change is structured, one factorization
+of the shunt-free network plus an exact Woodbury correction reaches each scenario's own matrix
+in 62 ms (15.6x) at 6.6e-13 relative agreement. Solving one scenario at a time instead of
+batching costs 4.1x to 12.6x. A Jacobi-preconditioned iterative solve that never factorizes is
+2x to 5x slower at complex128 and does not reach the tolerance at complex64.
+
+![Iterations and wall time of the fixed point against Newton](readme/solver_strategy_method.svg)
+
+The two fundamental methods converge to the same solution. The current-injection fixed point
+takes 3 to 8 iterations at nameplate loading and 32 to 36 near its convergence limit; Newton
+takes 2 to 5 throughout. Newton is nonetheless 2.0x to 26x slower per unbatched solve and 41x
+to 424x slower on a batch of 32, because every step rebuilds and factors the state Jacobian and
+a batch is solved one scenario at a time. Both carry the same implicit-function-theorem
+backward at the converged voltage, so the gradients are identical and equally conditioned.
+
+<sub>This section only: measured 2026-09-24, library 0.5.1, complex128 unless stated, one NVIDIA RTX A2000 12 GB and
+eight CPU threads of a 16-core workstation, medians of five to seven repeats after warm-up,
+every solution validated by the residual of the system it claims to have solved.</sub>
+
 ## Memory
 
 ![Host memory per tool and device memory for pgml, against batch size](readme/memory_footprint.svg)
