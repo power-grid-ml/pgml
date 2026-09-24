@@ -591,8 +591,10 @@ pgml loses
 - against power-grid-model from about a thousand node-phase rows upward, at
   every batch size measured. power-grid-model is the tool to beat in this
   comparison, and on larger grids it is not beaten.
-- on harmonic studies of anything but the smallest grid, where OpenDSS is five to
-  nineteen times faster.
+- on harmonic studies of anything but the smallest grid. In the model OpenDSS
+  itself solves, where every scenario carries its own admittance, pgml matches
+  OpenDSS on the 33-bus feeder and is 27 and 207 times slower on the two larger
+  ones.
 - on standing memory whenever it is run over worker processes: eight
   interpreters cost about 3 GB before any scenario is solved.
 
