@@ -110,6 +110,22 @@ Module: `pgml.assembly`
   term (consumer: `pgml.solver.lowrank.branch_state_terms`, the Woodbury switch-state
   sweep). Differentiable w.r.t. the branch parameters; device/dtype follow the arguments.
 - `node_phase_index(grid) -> NodePhaseIndex` (above).
+- `ybus_structure(grid, index, *, device=None) -> Tensor` — IMPLEMENTED (`_structure.py`).
+  Sorted int64 linear indices `row*N + col` of every entry the assembler can stamp, read
+  off the grid's INCIDENCE and not off an assembled matrix: every contribution is a
+  component-local block (a branch stamps the outer product of its two terminals' node
+  rows, every appliance and single-terminal branch its host node's rows, a node harmonic
+  source the diagonal), so the union over the grid is a SUPERSET of the nonzero positions
+  of `Y` at any frequency, operating point, branch state and scenario. Out-of-service and
+  open components are included, because `branch_states` may stamp them and a structurally
+  present zero costs one explicit entry. `index` is the layout of the matrix described —
+  the grid's own, or the REDUCED one of a `FusionMap`, whose many-to-one `(node, phase) ->
+  row` map yields the fused pattern of `PᵀYP` directly. Pure indexing bookkeeping (int64
+  tensors, no differentiable quantity), built once per grid. Consumer:
+  `pgml.solver.lu_factor_system(..., pattern=…)`, whose sparse backend then builds each
+  system's compressed-column form by gathering `nnz` values instead of scanning `N²`.
+  Regression: `tests/topology/test_ybus_structure.py` pins the superset property against
+  the stamp registry itself, so a builder that writes outside its components' nodes fails.
 
 `operating_point` format (linear/const-Z assembly): `{appliance_id: {"p_w": float, "q_var": float}}` or
 per-phase `{"p_per_phase_w": [...], "q_per_phase_var": [...]}`; default = nameplate.

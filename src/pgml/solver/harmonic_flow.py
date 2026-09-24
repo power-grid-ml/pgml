@@ -68,6 +68,7 @@ from pgml.assembly import (
     NodePhaseIndex,
     assemble_network_ybus,
     node_phase_index,
+    ybus_structure,
 )
 from pgml.assembly._fusion import NO_FUSION, resolve_fusion, zero_impedance_branches
 from pgml.assembly._incidence import build_incidence, group_appliances, used_rows
@@ -103,7 +104,7 @@ from pgml.schemas.grid_schema import (
 
 from .equilibration import resolve_equilibration
 from ._harmonic_cache import HarmonicFlowSystem, _requires_grad
-from .harmonic import lu_factor_system, solve_factored
+from .harmonic import _resolve_backend, lu_factor_system, solve_factored
 from .lowrank import LowRankOperator, low_rank_update, solve_factored_updated
 from .power_flow import (
     PowerFlowResult,
@@ -788,6 +789,26 @@ def _solve_harmonic_orders(
     leading axis the chunking narrows.
     """
 
+    # The sparsity pattern of Y(h) follows the topology, so ONE pattern serves every
+    # order, every scenario and every chunk of the study; the sparse backend then
+    # builds each system's compressed-column form by gathering its structural entries
+    # instead of scanning the dense matrix. Built on first use, and only where the
+    # sparse backend can be selected at all.
+    cached_pattern: list[Tensor] = []
+
+    def structure_of(yh: Tensor) -> Optional[Tensor]:
+        if _resolve_backend(backend, yh, block_rows) != "sparse":
+            return None
+        if not cached_pattern:
+            cached_pattern.append(
+                ybus_structure(
+                    grid,
+                    node_phase_index(grid) if fusion is None else fusion.index,
+                    device=yh.device,
+                )
+            )
+        return cached_pattern[0]
+
     def factor(yh: Tensor):
         def build():
             return lu_factor_system(
@@ -796,6 +817,7 @@ def _solve_harmonic_orders(
                 block_rows=block_rows,
                 precision=precision,
                 equilibrate=equilibrate,
+                pattern=structure_of(yh),
             )
 
         if system is None:

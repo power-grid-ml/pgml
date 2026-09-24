@@ -181,3 +181,35 @@ def test_gradcheck_const_z_fold_over_frequency():
         torch.tensor(-600.0, dtype=torch.float64, requires_grad=True),
     )
     assert torch.autograd.gradcheck(fn, args, eps=1e-4, atol=1e-8, rtol=1e-4)
+
+
+def test_gradcheck_sparse_backend_power_flow():
+    """The sparse backend's structural handoff preserves the IFT gradient.
+
+    The sparse factorization is built by gathering the entries the topology stamps
+    instead of scanning the dense matrix, so what reaches SuperLU is a different
+    object; the converged voltage and its gradient w.r.t. the grid parameters must
+    not move.
+    """
+    grid = single_phase_chain()
+
+    r1 = torch.tensor([[1.0e-3]], dtype=torch.float64, requires_grad=True)
+    l1 = torch.tensor([[1.0e-6]], dtype=torch.float64, requires_grad=True)
+    rs = torch.tensor([[0.1]], dtype=torch.float64, requires_grad=True)
+
+    def fn(r1, l1, rs):
+        overrides = {
+            ("line", 20, "series_resistance_ohm_per_m"): r1,
+            ("line", 20, "series_inductance_h_per_m"): l1,
+            ("source", 10, "resistance_ohm"): rs,
+        }
+        return solve_power_flow(
+            grid,
+            slack="ideal",
+            tol=1e-12,
+            dtype=torch.complex128,
+            linear_solver="sparse",
+            param_overrides=overrides,
+        ).v.reshape(-1)
+
+    assert torch.autograd.gradcheck(fn, (r1, l1, rs), eps=1e-6, atol=1e-5, rtol=1e-3)
