@@ -31,6 +31,14 @@ def threads():
     torch.set_num_threads(previous)
 
 
+@pytest.fixture(autouse=True)
+def forget_the_repair():
+    """The repair a build needs is latched for the process; keep it out of other tests."""
+    previous = _dense_lapack.repair_in_use()
+    yield
+    _dense_lapack._repair = previous
+
+
 def _stack(rows: int = ROWS, batch: int = BATCH):
     """A well-conditioned complex stack whose LU needs row interchanges."""
     generator = torch.Generator().manual_seed(0)
@@ -87,27 +95,107 @@ def test_a_corrupted_factorization_is_rejected_instead_of_returned(monkeypatch):
         lu_factor_system(y, backend="dense")
 
 
-def test_a_raising_batched_call_is_retried_before_it_is_reported(monkeypatch):
-    """A build that fails only on several threads must be repaired, not reported."""
+def test_a_batched_only_failure_keeps_the_threads_it_was_given(monkeypatch, threads):
+    """The defect is in the BATCHED factorization, so the repair need not serialize.
+
+    A stack factored one matrix at a time reaches the same routine the build gets
+    right, at the same thread count, which is both correct and faster than a
+    single-threaded batched call.
+    """
     y, i = _stack(rows=12, batch=3)
     truth = torch.linalg.solve
-    calls = []
+    widths = []
+
+    def fails_on_a_threaded_stack(a, b, *args, **kwargs):
+        widths.append((a.ndim, torch.get_num_threads()))
+        if a.ndim > 2 and torch.get_num_threads() > 1:
+            raise RuntimeError(
+                "Pivots given to lu_solve must all be greater or equal to 1."
+            )
+        return truth(a, b, *args, **kwargs)
+
+    monkeypatch.setattr(_dense_lapack, "_repair", _dense_lapack.AS_ASKED)
+    monkeypatch.setattr(torch.linalg, "solve", fails_on_a_threaded_stack)
+    v = solve_harmonic(y, i)
+
+    assert _backward_error(y, v, i) < 1e-10
+    assert _dense_lapack.repair_in_use() == _dense_lapack.PER_MATRIX
+    # The repair solved single matrices, and never gave up a thread to do it.
+    assert widths[0] == (3, threads)
+    assert all(count == threads for _, count in widths)
+    assert widths[-1][0] == 2
+    assert torch.get_num_threads() == threads
+
+
+def test_a_failure_the_per_matrix_repair_misses_falls_back_to_one_thread(
+    monkeypatch, threads
+):
+    """The repair leans on the same LAPACK, so one thread stays the last resort."""
+    y, i = _stack(rows=12, batch=3)
+    truth = torch.linalg.solve
+    counts = []
 
     def fails_when_threaded(a, b, *args, **kwargs):
-        calls.append(torch.get_num_threads())
+        counts.append(torch.get_num_threads())
         if torch.get_num_threads() > 1:
             raise RuntimeError(
                 "Pivots given to lu_solve must all be greater or equal to 1."
             )
         return truth(a, b, *args, **kwargs)
 
-    monkeypatch.setattr(_dense_lapack, "_single_thread_required", False)
+    monkeypatch.setattr(_dense_lapack, "_repair", _dense_lapack.AS_ASKED)
     monkeypatch.setattr(torch.linalg, "solve", fails_when_threaded)
-    torch.set_num_threads(max(2, torch.get_num_threads()))
     v = solve_harmonic(y, i)
+
     assert _backward_error(y, v, i) < 1e-10
-    assert calls[0] > 1 and calls[-1] == 1
-    assert _dense_lapack.single_thread_required()
+    assert counts[0] > 1 and counts[-1] == 1
+    assert _dense_lapack.repair_in_use() == _dense_lapack.ONE_THREAD
+    assert torch.get_num_threads() == threads
+
+
+def test_the_repair_hands_back_the_layout_the_back_substitution_expects(threads):
+    """Factors stacked as they come are row-major, and every later solve pays for it."""
+    y, i = _stack(rows=24, batch=4)
+    lu, piv = _dense_lapack._per_matrix_lu_factor(y)
+    reference, _ = torch.linalg.lu_factor(y[0])
+
+    assert lu.stride()[-2:] == reference.stride()
+    assert lu.shape == y.shape and piv.shape == y.shape[:-1]
+    v = torch.linalg.lu_solve(lu, piv, i.unsqueeze(-1)).squeeze(-1)
+    assert _backward_error(y, v, i) < 1e-12
+
+
+def test_the_repair_keeps_the_gradient_path(monkeypatch, threads):
+    """A loop over the batch still tapes: the repair must not cost a gradient."""
+    monkeypatch.setattr(_dense_lapack, "_repair", _dense_lapack.PER_MATRIX)
+    y, i = _stack(rows=16, batch=3)
+    batched = torch.linalg.solve(y, i.unsqueeze(-1))
+    y = y.clone().requires_grad_(True)
+
+    v = _dense_lapack.solve(y, i.unsqueeze(-1), where="gradient")
+    assert torch.allclose(v, batched, atol=1e-10)
+    v.abs().sum().backward()
+    assert y.grad is not None and bool(torch.isfinite(y.grad).all())
+    assert y.grad.shape == y.shape
+
+
+@pytest.mark.slow
+def test_the_repair_factors_a_stack_this_build_may_get_wrong(threads):
+    """A size and thread count at which an affected build corrupts its pivots.
+
+    Above roughly 145 rows the blocked kernel of an affected build rejects the pivot
+    array of a multi-threaded batched factorization and reports success anyway, so a
+    stack this size is what distinguishes the repair from no repair. An unaffected
+    build takes the same path and simply never escalates.
+    """
+    y, i = _stack()
+    lu, piv = _dense_lapack.lu_factor(y, where="regression")
+
+    assert int((piv < 1).sum()) == 0
+    v = _dense_lapack.lu_solve(lu, piv, i.unsqueeze(-1)).squeeze(-1)
+    assert _backward_error(y, v, i) < 1e-10
+    assert _dense_lapack.repair_in_use() != _dense_lapack.ONE_THREAD
+    assert torch.get_num_threads() == threads
 
 
 def test_an_ill_conditioned_system_still_factors(threads):

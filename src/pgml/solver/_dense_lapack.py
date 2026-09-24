@@ -9,24 +9,43 @@ a per-scenario admittance, a switch-state sweep and the implicit-function adjoin
 hand to LAPACK, so an affected install would otherwise lose those paths on any
 multi-core machine.
 
+The mechanism decides the repair. Setting the thread count also disables the math
+library's dynamic thread adjustment, which is what would otherwise make it fall back to
+one thread when it is entered from inside someone else's parallel region; the batched
+factorization then calls the per-matrix routine from several threads at once, each
+insisting on its full thread count, and above roughly 145 rows the blocked kernel
+rejects the pivot array it is handed, skips the interchange and still reports success.
+Factoring the same stack ONE MATRIX AT A TIME therefore repairs it without giving up a
+single thread, because a single-matrix factorization is exactly the case the math
+library threads correctly.
+
 The guard applies only on CPU and only to a stack of MORE THAN ONE matrix, so a single
 system, the CUDA path, the sparse backend and the per-iteration back-substitutions of
 the nonlinear solvers are untouched. For those calls it:
 
 1. runs the call as the caller asked, then measures the residual of the result against
    one probe right-hand side per matrix: one triangular solve and one matrix-vector
-   product per matrix, ``O(n²)`` against the factorization's ``O(n³)``: measured at
-   11 % of a batched factorization of sixteen 300-row systems, 6 % at 450 rows and
-   within run-to-run noise at 900;
-2. on a raised call or a residual above round-off, repeats the call in ONE thread and
-   remembers for the rest of the process that this build needs it, so the cost of the
-   discovery is paid once rather than per call;
-3. raises :class:`~pgml.errors.ComputationError` if even the single-threaded call is
-   wrong, rather than returning a wrong voltage.
+   product per matrix, ``O(n²)`` against the factorization's ``O(n³)``;
+2. on a raised call or a residual above round-off, repeats the factorization one matrix
+   at a time at the caller's thread count and remembers for the rest of the process that
+   this build needs it, so the cost of the discovery is paid once rather than per call;
+3. falls back to the batched call in ONE thread if even that is wrong, since the repair
+   leans on the same math library;
+4. raises :class:`~pgml.errors.ComputationError` if the single-threaded call is wrong
+   too, rather than returning a wrong voltage.
 
-A build without the defect therefore keeps its parallel factorization and pays only the
-check, and a build with it keeps working. The thread count is a process-global setting,
-so a caller that solves from several threads at once must serialize its solves.
+A build without the defect therefore keeps its parallel batched factorization and pays
+only the check. A build with it keeps working and keeps its threads.
+
+<sub>Sixteen systems, complex128, eight threads, 12-core machine. The check alone costs
+1.6 ms at 200 rows, 6.7 ms at 450 and 31.0 ms at 900, which is 12 % to 18 % of a correct
+threaded factorization of the same stack. The whole guarded call with the per-matrix
+repair takes 10.0 / 69.1 / 274.2 ms against 10.0 / 102.8 / 707.5 ms for the
+single-threaded batched repair: even at 200 rows, 1.5x at 450 and 2.6x at 900, at the
+same backward error.</sub>
+
+The thread count is a process-global setting, so a caller that reaches the last resort
+and solves from several threads at once must serialize its solves.
 """
 
 from __future__ import annotations
@@ -42,14 +61,37 @@ from pgml.errors import ComputationError
 
 _log = logging.getLogger("pgml")
 
-#: Set once a batched dense call on this build has needed the single-threaded retry.
-_single_thread_required = False
+#: The batched call as the caller asked for it.
+AS_ASKED = "none"
+#: One matrix at a time, at the caller's thread count.
+PER_MATRIX = "per_matrix"
+#: The batched call in one thread.
+ONE_THREAD = "one_thread"
+
+#: Escalation order. A stage is entered only once the previous one has been rejected,
+#: and the stage a batched dense CPU call ends up needing is latched for the process.
+_STAGES = (AS_ASKED, PER_MATRIX, ONE_THREAD)
+
+_repair = AS_ASKED
 
 _ADVICE = (
-    "The multi-threaded batched LU of this CPU LAPACK build is wrong and the "
-    "single-threaded one did not repair it. Solve with linear_solver='sparse', or on "
-    "one matrix at a time."
+    "The multi-threaded batched LU of this CPU LAPACK build is wrong and neither "
+    "factoring one matrix at a time nor a single thread repaired it. Solve with "
+    "linear_solver='sparse', or on one matrix at a time."
 )
+
+_ESCALATION_NOTE = {
+    PER_MATRIX: (
+        "this CPU LAPACK build factors a stack of matrices incorrectly on several "
+        "threads, so batched dense factorizations now factor one matrix at a time. "
+        "Results are unaffected and the caller's threads are kept."
+    ),
+    ONE_THREAD: (
+        "factoring one matrix at a time did not repair this CPU LAPACK build either, "
+        "so batched dense factorizations now run in one thread. Results are "
+        "unaffected; a batched factorization loses its parallelism."
+    ),
+}
 
 
 def is_batched_cpu(a: Tensor) -> bool:
@@ -57,9 +99,12 @@ def is_batched_cpu(a: Tensor) -> bool:
     return a.device.type == "cpu" and a.ndim > 2 and math.prod(a.shape[:-2]) > 1
 
 
-def single_thread_required() -> bool:
-    """Whether a batched dense CPU call on this build has already needed one thread."""
-    return _single_thread_required
+def repair_in_use() -> str:
+    """Which repair a batched dense CPU call on this build has been found to need.
+
+    One of :data:`AS_ASKED` (none), :data:`PER_MATRIX` or :data:`ONE_THREAD`.
+    """
+    return _repair
 
 
 @contextmanager
@@ -130,43 +175,82 @@ def _probe_rhs(a: Tensor) -> Tensor:
     return ramp.expand(*a.shape[:-1], 1)
 
 
-def _note_single_thread(where: str) -> None:
-    global _single_thread_required
-    if not _single_thread_required:
-        _single_thread_required = True
-        _log.warning(
-            "%s: this CPU LAPACK build factors a stack of matrices incorrectly on "
-            "several threads, so batched dense factorizations now run in one thread. "
-            "Results are unaffected; a batched factorization loses its parallelism.",
-            where,
-        )
+def _per_matrix_lu_factor(a: Tensor) -> tuple[Tensor, Tensor]:
+    """``torch.linalg.lu_factor`` matrix by matrix, keeping the caller's threads.
+
+    The loop over the batch is what the repair IS: it is the batched call that this
+    build gets wrong, and each single-matrix factorization inside the loop still uses
+    every thread the caller allocated. Gradients flow through ``stack``, so the loop
+    costs the tape one node per matrix and changes nothing else.
+
+    LAPACK returns its factors COLUMN-major, and every later back-substitution expects
+    them that way. Stacking the factors directly would hand back a row-major tensor
+    that each ``lu_solve`` then has to transpose, which costs more than the repair
+    saves (a factor of three to four on a 450-row stack), so the transposed views are
+    stacked and transposed back instead: one copy either way, the right layout.
+    """
+    flat = a.reshape(-1, *a.shape[-2:])
+    factored = [torch.linalg.lu_factor(flat[k]) for k in range(flat.shape[0])]
+    lu = torch.stack([f.mT for f, _ in factored]).mT
+    piv = torch.stack([p for _, p in factored])
+    batch = a.shape[:-2]
+    return lu.unflatten(0, batch), piv.unflatten(0, batch)
+
+
+def _per_matrix_solve(a: Tensor, b: Tensor) -> Tensor:
+    """``torch.linalg.solve`` matrix by matrix, keeping the caller's threads.
+
+    Reproduces the batched call's broadcasting and its vector / matrix right-hand-side
+    convention, so the result has the shape the caller would have got.
+    """
+    vector_rhs = b.ndim == a.ndim - 1
+    rhs = b.unsqueeze(-1) if vector_rhs else b
+    batch = torch.broadcast_shapes(a.shape[:-2], rhs.shape[:-2])
+    n, k = a.shape[-1], rhs.shape[-1]
+    a_flat = a.expand(*batch, n, n).reshape(-1, n, n)
+    b_flat = rhs.expand(*batch, n, k).reshape(-1, n, k)
+    x = torch.stack(
+        [torch.linalg.solve(a_flat[j], b_flat[j]) for j in range(a_flat.shape[0])]
+    ).reshape(*batch, n, k)
+    return x.squeeze(-1) if vector_rhs else x
+
+
+def _escalate(stage: str, where: str) -> None:
+    """Latch the next repair stage for the process and say so once."""
+    global _repair
+    following = _STAGES[_STAGES.index(stage) + 1]
+    if _STAGES.index(following) > _STAGES.index(_repair):
+        _repair = following
+        _log.warning("%s: %s", where, _ESCALATION_NOTE[following])
 
 
 def _attempt(run, *, where: str, limit: float):
-    """Run a batched call, and repeat it single-threaded if it is not right.
+    """Run a batched call, escalating through the repairs until one is right.
 
-    ``run()`` performs the LAPACK call AND measures the residual of its result,
-    returning both. It runs inside the thread context under test, because the defect
-    reaches the triangular solve the measurement itself needs: a raised measurement is
-    the same evidence as a raised factorization and counts as an infinite error.
+    ``run(per_matrix)`` performs the LAPACK call AND measures the residual of its
+    result, returning both. It runs inside the thread context under test, because the
+    defect reaches the triangular solve the measurement itself needs: a raised
+    measurement is the same evidence as a raised factorization and counts as an
+    infinite error.
     """
-    for single in (_single_thread_required, True):
+    for stage in _STAGES[_STAGES.index(_repair) :]:
+        last = stage == _STAGES[-1]
         try:
-            with single_thread(single):
-                result, error = run()
+            with single_thread(stage == ONE_THREAD):
+                result, error = run(stage == PER_MATRIX)
         except RuntimeError as exc:
-            if single:
+            if last:
                 raise ComputationError(f"{where}: {exc} {_ADVICE}") from exc
-            _note_single_thread(where)
+            _escalate(stage, where)
             continue
         if error <= limit:
             return result
-        if single:
+        if last:
             raise ComputationError(
                 f"{where}: the batched dense factorization has a relative "
                 f"residual of {error:.3e}, so its solutions would be wrong. {_ADVICE}"
             )
-        _note_single_thread(where)
+        _escalate(stage, where)
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -178,8 +262,8 @@ def lu_factor(a: Tensor, *, where: str) -> tuple[Tensor, Tensor]:
     b = _probe_rhs(a_d)
     limit = _limit(a.dtype)
 
-    def run():
-        lu, piv = torch.linalg.lu_factor(a)
+    def run(per_matrix: bool):
+        lu, piv = _per_matrix_lu_factor(a) if per_matrix else torch.linalg.lu_factor(a)
         with torch.no_grad():
             x = torch.linalg.lu_solve(lu.detach(), piv, b)
         return (lu, piv), _relative_residual(a_d, x, b, limit)
@@ -188,12 +272,17 @@ def lu_factor(a: Tensor, *, where: str) -> tuple[Tensor, Tensor]:
 
 
 def lu_solve(lu: Tensor, piv: Tensor, rhs: Tensor, *, adjoint: bool = False) -> Tensor:
-    """``torch.linalg.lu_solve``, in one thread when this build needs it.
+    """``torch.linalg.lu_solve``, in one thread when this build needs that.
 
     No residual check: this is the per-right-hand-side call of the nonlinear solvers,
-    and the factorization it uses was verified when it was built.
+    and the factorization it uses was verified when it was built — by a BATCHED
+    ``lu_solve`` against the probe right-hand side, so a build that also got the
+    back-substitution wrong would have been caught there. The defect itself is in the
+    factorization's row interchange, so the per-matrix repair leaves this call batched
+    and multi-threaded; only the last resort, where nothing about the build is trusted,
+    serializes it too.
     """
-    if not (_single_thread_required and is_batched_cpu(lu)):
+    if _repair != ONE_THREAD or not is_batched_cpu(lu):
         return torch.linalg.lu_solve(lu, piv, rhs, adjoint=adjoint)
     with single_thread(True):
         return torch.linalg.lu_solve(lu, piv, rhs, adjoint=adjoint)
@@ -206,18 +295,21 @@ def solve(a: Tensor, b: Tensor, *, where: str) -> Tensor:
     a_d, b_d = a.detach(), b.detach()
     limit = _limit(a.dtype)
 
-    def run():
-        x = torch.linalg.solve(a, b)
+    def run(per_matrix: bool):
+        x = _per_matrix_solve(a, b) if per_matrix else torch.linalg.solve(a, b)
         return x, _relative_residual(a_d, x.detach(), b_d, limit)
 
     return _attempt(run, where=where, limit=limit)
 
 
 __all__ = [
+    "AS_ASKED",
+    "ONE_THREAD",
+    "PER_MATRIX",
     "is_batched_cpu",
     "lu_factor",
     "lu_solve",
+    "repair_in_use",
     "single_thread",
-    "single_thread_required",
     "solve",
 ]
