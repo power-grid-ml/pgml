@@ -240,6 +240,16 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     so the reported mismatch and the convergence decision are still the nodal ones: one
     matrix-vector product per SOLVE instead of one per iteration. `precision="mixed"`
     keeps the explicit residual — there it IS the next right-hand side.
+    Three more passes over the scenarios-by-rows tensor carry no information and are
+    not made. Both criteria are read off the row MAXIMUM the test reports anyway
+    wherever their threshold is one number for every row (`max_i x_i <= t` and
+    `x_i <= t for all i` are the same statement, non-finite rows included); the
+    voltage-update threshold always is, the mismatch threshold is unless the per-row
+    precision floor binds (`_PuConvergence.uniform_mismatch`). The select that holds
+    a finished scenario is skipped until one has finished (`_BatchIterationState`
+    reads that back with the synchronisation the loop makes anyway). And the
+    per-iteration voltage-update NORM is formed once, after the loop, from the last
+    iterate — only the per-row update maximum is a history.
   - `method="newton"` forward = NEWTON on the real residual `R(x)=0` (`x=[Re V; Im V]`):
     per step solve `J·Δx = −R` with `J = dR/dx` (the SAME real `[2N,2N]` Jacobian the IFT
     backward builds, via `torch.autograd.functional.jacobian`), backtracking line search
