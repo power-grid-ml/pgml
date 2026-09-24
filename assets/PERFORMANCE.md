@@ -369,9 +369,64 @@ pgml's single call is the smallest of all on the two smaller grids. pgml on the
 GPU needs about 1.3 GB on the host, almost all of it the CUDA runtime, and then
 grows on the device instead.
 
-Device memory grows with the batch and with the square of the grid, because the
-dense factorisation is what the GPU runs. At 4,096 scenarios it is 43 MiB on the
-33-bus feeder, 242 MiB on Kerber and 988 MiB on the 1,176-row network.
+Device memory has two parts. The matrix and its factorisation do not depend on
+the batch and grow with the square of the grid, 8 MiB on the 33-bus feeder and 93
+MiB on the 1,176-row network. Everything the iteration carries has a scenario
+axis and grows with the batch and linearly with the grid, 9 KiB per scenario on
+the 33-bus feeder, 57 KiB on Kerber and 224 KiB on the 1,176-row network. At
+4,096 scenarios the second part is by far the larger, giving 43 MiB, 242 MiB and
+988 MiB in total.
+
+### What the memory is made of
+
+The three groups in the table are three different things, and what separates them
+is not the engine.
+
+A worker pool holds nine interpreters, one parent and eight workers, and each of
+them imports the library, builds its own model of the grid and keeps its own
+working arrays. The figure already splits a page shared between processes between
+them, so those three gigabytes are pages no other process holds. They are there
+before the first scenario is solved. Measured at rest, with the pool up and
+nothing solving, pgml over eight workers stands at 2.9 to 3.6 GB, OpenDSS at 3.3
+to 3.5 and pandapower at 4.3 to 4.9, and the grid and the batch barely move those
+numbers.
+
+One process holds the same things once. pgml in a single batched call stands at
+330 to 360 MiB with the grid loaded and its injection plan built,
+power-grid-model at 590 to 820 MiB with its model built, and pgml on the GPU at
+about 650 MiB on the host, most of which is the CUDA runtime. What a pgml process
+then adds for the work itself is one admittance matrix, one factorisation of it,
+and one tensor per quantity the iteration carries, each of them with a scenario
+axis.
+
+That is why the two kinds of tool grow differently with the batch. On the
+1,176-row network, measured between one scenario and 4,096:
+
+| Tool | standing | added per scenario |
+|---|---|---|
+| pgml CPU, one call | 356 MiB | 315 KiB |
+| pgml GPU | 672 MiB on the host | 224 KiB on the device |
+| power-grid-model, 8 threads | 817 MiB | 104 KiB |
+| OpenDSS, 8 workers | 3,480 MiB | 163 KiB |
+| pgml CPU, 8 workers | 3,620 MiB | 379 KiB |
+| pandapower, 8 workers | 4,614 MiB | 84 KiB |
+
+A per-scenario engine needs only the scenario it is solving, so what grows with
+the batch is the input matrix and the result array and nothing else. pgml keeps
+every scenario of the batch in flight, so it pays about three times as much per
+scenario, and a batched factorisation and a batched back-substitution are what it
+buys with that.
+
+The two costs cross. On the 1,176-row network one pgml process passes
+power-grid-model at about 2,000 scenarios per batch and the three-gigabyte pools
+at about 10,000. Below that pgml is the leanest way to solve the case, and above
+it the pool's standing cost has been amortised while pgml is carrying the batch.
+
+The lean end is worth something concrete. Eight worker processes need about 4 GB
+before they solve anything, so a 4 GB container cannot start pandapower's arm at
+all, while pgml solves the same grid there in one process with room for about
+twelve thousand scenarios in the batch. The other end is worth something too, and
+it is the next section.
 
 ### What fits on a 48 GB card
 
@@ -467,7 +522,7 @@ pgml loses
 - on standing memory whenever it is run over worker processes: eight
   interpreters cost about 3 GB before any scenario is solved.
 
-Two further things a reader should take from the numbers rather than from the
+One further thing a reader should take from the numbers rather than from the
 headline.
 
 Most of the batching gain is available without a GPU. pgml on the same eight
@@ -476,9 +531,62 @@ further factor that only pays above a few thousand scenarios per batch. The GPU
 instance also costs 2.6 times the CPU instance, so a speed-up below 2.6 times is
 not a saving.
 
-The dense factorisation pgml runs on the GPU is what makes it lose on large
-grids. The reference tools use sparse solvers that exploit the radial structure
-of a distribution feeder, and that advantage grows with the grid.
+### Why the large grids go the other way
+
+That pgml factorises a dense matrix while the reference tools exploit the radial
+structure is only part of the reason, and on the CPU it is not the reason at all.
+Timing the phases of one batched solve says where the time goes.
+
+Above 512 node-phase rows pgml's CPU path already factorises sparsely, and the
+factorisation is a good one. It keeps a fill-reducing ordering, and on a radial
+feeder that ordering comes within six per cent of the zero-fill optimum: the
+factors hold four nonzeros per row at 1,176 rows and again at 4,096, so the
+factorisation is linear in the grid. It is computed once per solve and reused by
+every iteration and every scenario, which is what power-grid-model does too. At
+4,096 scenarios per batch on the 1,176-row network, assembly and factorisation
+together are two and a half per cent of the wall time. Neither a better ordering
+nor a cheaper factorisation is where the gap lives.
+
+What costs is the work repeated for every scenario in every iteration. In that
+same solve the back-substitutions are 52 per cent of the wall time, the
+device-current evaluation 16, the per-unit convergence test 15 and the residual
+product 3, leaving 12 per cent of bookkeeping the phase timers do not attribute.
+Nor is the back-substitution all solving: handing a batch of right-hand sides to
+SuperLU means permuting a torch tensor into a Fortran-ordered numpy block and the
+answer back again, and that copying is 30 to 40 per cent of the call.
+
+On the GPU it is the simple story. The factorisation is dense, so one scenario's
+back-substitution costs the square of the row count where a sparse one costs a
+small multiple of it. A batch amortises the factorisation over every scenario in
+it; it does not amortise the back-substitution, which every scenario pays in
+full. That is why the GPU curve falls away with the grid at every batch size.
+
+Four changes would narrow it, in the order of what they are worth. A sparse
+back-substitution on the device would take the per-scenario cost from the square
+of the grid to a small multiple of it, which is the whole of the large-grid gap,
+and it needs a batched sparse triangular solve that torch does not have today.
+Keeping the right-hand sides in one array layout would remove the copying around
+SuperLU, about a fifth of a large CPU solve. Fusing the per-iteration passes,
+which today walk a scenarios-by-rows tensor once each for the device currents,
+the residual and the two convergence criteria, is worth about as much again.
+Keeping the assembly and the factorisation across calls, which the harmonic path
+already offers, is worth little inside one large batch and a great deal to a
+caller that solves the same grid again and again at a small batch.
+
+<sub>This subsection only: measured 2026-09-24, library 0.5.1, complex128, one NVIDIA
+RTX A2000 12 GB and sixteen CPUs of one workstation on an idle node, phases timed by
+wrapping the functions the solver calls, a CUDA configuration synchronising inside every
+wrapper.</sub>
+
+### What this means for choosing a tool
+
+The grid size at which pgml stops being the fastest is not a property of dense
+linear algebra alone, and it will not move by changing an ordering. Below about a
+thousand node-phase rows a batched call wins on throughput and, on the smallest
+grids, on price. Above it a per-scenario sparse engine wins at every batch size
+measured here, and the reasons to reach for pgml there are that it
+differentiates through the solve and that it holds a whole study in one process,
+not that it is faster.
 
 ## Reproduce
 
