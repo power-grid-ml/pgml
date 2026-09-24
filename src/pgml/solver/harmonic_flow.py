@@ -1090,6 +1090,10 @@ def assemble_harmonic_system(
         conductor at EVERY frequency, so one map serves the fundamental and every
         harmonic order. ``v1`` stays in the full layout; the returned ``Y`` / ``I`` and
         ``index`` are the reduced one.
+    system:
+        Optional reusable preparation; only the operating-point-independent
+        network/source/explicit-DER matrix is cached here. The returned matrix
+        owns its storage, so modifying it cannot corrupt that preparation.
 
     Returns
     -------
@@ -1103,10 +1107,6 @@ def assemble_harmonic_system(
         The compact :class:`NodePhaseIndex` describing the row layout of ``Y`` / ``I``
         (the REDUCED layout when ``fusion`` applies; ``fusion.prolong`` maps a solved
         ``V(h)`` back to the grid's full rows).
-    system:
-        Optional reusable preparation; only the operating-point-independent
-        network/source/explicit-DER matrix is cached here. The returned matrix
-        owns its storage, so modifying it cannot corrupt that preparation.
     """
     orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):

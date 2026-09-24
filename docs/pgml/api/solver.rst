@@ -481,8 +481,11 @@ shunt and their parameter values) at prepare time, and
 :func:`~pgml.solver.solve_power_flow` recomputes and compares it on each reuse —
 a same-size grid whose topology or impedances have since changed is REJECTED
 with :class:`~pgml.errors.InputError` instead of silently solving with the
-stale factorization. ``param_overrides`` / ``branch_states`` equality remains
-the caller's own contract (not fingerprinted). Reuse is a FORWARD-only optimization: the
+stale factorization. ``param_overrides`` and ``branch_states`` are recorded as detached
+value snapshots at prepare time and compared on every reuse, so a replaced, added,
+removed or in-place edited entry is REJECTED the same way; an equal-valued replacement
+tensor still reuses the factors and receives its own gradients.
+Reuse is a FORWARD-only optimization: the
 IFT backward always rebuilds its differentiable system from the parameter leaves. The
 autograd node retains an immutable snapshot of the resolved forward defaults, so a delayed
 backward keeps the same physical model after a preset context exits or
