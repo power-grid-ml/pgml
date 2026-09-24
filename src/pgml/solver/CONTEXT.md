@@ -774,6 +774,12 @@ by the modeled devices and its compact `C` is assembled from the same WYE/DELTA/
 blocks as the exact matrix. Explicit Generator/Storage harmonic impedances belong to the
 scenario-independent base. The automatic path uses the conservative selection rule
 `3k < N`; the actual performance crossover depends on the factorization backend and hardware.
+The rule is applied to the touched-row COUNT before `C` is built (`max_rank`), so a device
+population that covers most rows never materialises the `[*batch, H, k, k]` core it would
+then discard — on a scenario batch that core is the size of the assembled system, which is
+what the low-rank path exists to avoid. The helper returns `(U, C, k)`, `(None, None, k)`
+above `max_rank`, and `None` only when no device carries a modeled shunt at all (the
+shunt-free network is then the harmonic system).
 
 - `low_rank_update(fac, u, c, *, v=None) -> LowRankUpdate` — precompute
   `W = A⁻¹U` (`k` back-substitutions of the base factorization) and the LU of the

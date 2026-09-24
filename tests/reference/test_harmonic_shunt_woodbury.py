@@ -71,6 +71,21 @@ def _sparse_load_grid() -> Grid:
     )
 
 
+def _dense_load_grid() -> Grid:
+    """The same feeder with an emitting load on every non-source node.
+
+    The device shunt then touches too many rows for the low-rank path to pay, which
+    is the population the selection rule has to reject.
+    """
+    grid = _sparse_load_grid()
+    template = next(a for a in grid.appliances if isinstance(a, Load))
+    extra = [
+        template.model_copy(update={"id": 30 + node, "node": node})
+        for node in (2, 3, 4)
+    ]
+    return grid.model_copy(update={"appliances": [*grid.appliances, *extra]})
+
+
 def _operating_point(power: torch.Tensor) -> dict:
     return {30: {"p_w": power, "q_var": torch.full_like(power, 500.0)}}
 
@@ -116,7 +131,7 @@ def test_selector_is_built_without_a_full_identity(monkeypatch):
         return original(n, *args, **kwargs)
 
     monkeypatch.setattr(harmonic_flow.torch, "eye", reject_full_identity)
-    u, core = harmonic_flow._harmonic_shunt_lowrank_terms(
+    u, core, rank = harmonic_flow._harmonic_shunt_lowrank_terms(
         grid,
         v1,
         node_phase_index(grid),
@@ -131,6 +146,53 @@ def test_selector_is_built_without_a_full_identity(monkeypatch):
     )
     assert u.shape == (5, 1)
     assert core.shape == (3, 2, 1, 1)
+    assert rank == 1
+
+
+def test_high_rank_shunt_never_builds_the_update_core(monkeypatch):
+    """A device shunt on most rows must not allocate a scenario batch of N-by-N cores.
+
+    The selection rule rejects such a population, and rejecting it after building the
+    core would cost exactly the memory the low-rank path exists to save.
+    """
+    import pgml.solver.harmonic_flow as harmonic_flow
+
+    grid = _dense_load_grid()
+    power = torch.tensor([1_500.0, 2_000.0, 2_500.0], dtype=torch.float64)
+    operating_point = {
+        load.id: {"p_w": power, "q_var": torch.full_like(power, 500.0)}
+        for load in grid.appliances
+        if isinstance(load, Load)
+    }
+
+    result = solve_harmonic_flow(
+        grid, [1, 5, 7], operating_point=operating_point, dtype=torch.complex128
+    )
+    direct = _direct_harmonics(grid, result, operating_point)
+    assert torch.allclose(result.v[..., 1:, :], direct, rtol=2e-12, atol=2e-12)
+
+    n = node_phase_index(grid).size
+
+    def reject_core(*args, **kwargs):
+        raise AssertionError("the rejected low-rank core must never be built")
+
+    monkeypatch.setattr(harmonic_flow, "scatter_blocks_into", reject_core)
+    u, core, rank = harmonic_flow._harmonic_shunt_lowrank_terms(
+        grid,
+        result.v[..., 0, :],
+        node_phase_index(grid),
+        [5, 7],
+        operating_point,
+        "opendss",
+        None,
+        True,
+        torch.complex128,
+        torch.float64,
+        torch.device("cpu"),
+        max_rank=(n - 1) // 3,
+    )
+    assert (u, core) == (None, None)
+    assert rank * 3 >= n
 
 
 def test_bad_lowrank_residual_falls_back_to_exact_assembly(monkeypatch, caplog):

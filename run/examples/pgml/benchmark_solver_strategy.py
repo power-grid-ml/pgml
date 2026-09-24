@@ -251,33 +251,22 @@ def _lowrank_terms(y_scen, y_free, limit_ratio: float):
     return (u, c), k
 
 
-def _batched_dense_lu_works(n: int, device, cdt) -> bool:
-    """Whether this BLAS can factor a batch of ``n x n`` matrices in one call.
-
-    Some LAPACK builds reject the batched complex LU above a few hundred rows, which
-    takes the batched dense strategies off the table on that machine while the
-    single-matrix and sparse paths keep working. Probing once per size keeps the
-    comparison honest instead of aborting the whole sweep.
-    """
-    probe = torch.eye(n, dtype=cdt, device=device).expand(2, n, n).contiguous()
-    try:
-        torch.linalg.solve(probe, torch.ones(2, n, 1, dtype=cdt, device=device))
-    except RuntimeError:
-        return False
-    return True
-
-
 def _refactor_case(grid, name, batch, device, cdt, args, use_sparse):
     y_share, y_free, y_scen, i_rhs = _harmonic_systems(grid, batch, device, cdt)
     n = y_scen.shape[-1]
     diag = torch.diagonal(y_scen, dim1=-2, dim2=-1)
-    batched_dense = batch == 1 or _batched_dense_lu_works(n, device, cdt)
-    if batched_dense:
+    # Some LAPACK builds refuse the row interchange of a batched complex LU on
+    # matrices that need pivoting. That takes a strategy off the table on that
+    # machine without saying anything about the others, so each one is measured on
+    # its own and a refusal is recorded next to the strategy it belongs to.
+    try:
         reference = torch.linalg.solve(y_scen, i_rhs.unsqueeze(-1)).squeeze(-1)
-    else:
+        batched_dense = True
+    except RuntimeError:
         reference = torch.stack(
             [torch.linalg.solve(y_scen[b], i_rhs[b]) for b in range(batch)]
         )
+        batched_dense = False
     ref_scale = reference.abs().amax()
     terms, k_support = _lowrank_terms(y_scen, y_free, args.lowrank_limit)
 
@@ -313,28 +302,28 @@ def _refactor_case(grid, name, batch, device, cdt, args, use_sparse):
     def iterative():
         return _bicgstab(matvec, i_rhs, diag, rtol=1e-10, max_iter=args.bicg_iter)
 
-    plan = [("factor_reuse_shared", factor_reuse), ("direct_looped", direct_looped)]
-    if batched_dense:
-        plan[1:1] = [
-            ("factor_per_scenario", factor_per_scenario),
-            ("torch_lu_per_scenario", torch_lu_per_scenario),
-            ("direct_batched", direct_batched),
-        ]
+    plan = [
+        ("factor_reuse_shared", factor_reuse),
+        ("factor_per_scenario", factor_per_scenario),
+        ("torch_lu_per_scenario", torch_lu_per_scenario),
+        ("direct_batched", direct_batched),
+        ("direct_looped", direct_looped),
+    ]
     if use_sparse:
         plan.append(
             ("factor_per_scenario_sparse", lambda: factor_per_scenario("sparse"))
         )
-    # The Woodbury capacitance matrix is itself factored per scenario, so it needs the
-    # same batched dense LU once the low-rank support grows.
-    if terms is not None and (
-        batch == 1 or _batched_dense_lu_works(k_support, device, cdt)
-    ):
+    if terms is not None:
         plan.append(("woodbury_shared_factor", woodbury))
     plan.append(("iterative_no_factor", iterative))
 
     modes = {}
     for label, fn in plan:
-        seconds, out = _time(fn, repeats=args.repeats, device=device)
+        try:
+            seconds, out = _time(fn, repeats=args.repeats, device=device)
+        except RuntimeError as exc:
+            modes[label] = dict(unavailable=str(exc).splitlines()[0])
+            continue
         extra = {}
         if label == "iterative_no_factor":
             v, iters, residual = out
@@ -351,7 +340,8 @@ def _refactor_case(grid, name, batch, device, cdt, args, use_sparse):
         )
     # The shared-network strategy answers a DIFFERENT model (the nameplate-basis
     # shunt), so its difference from the reference is a modeling error, not round-off.
-    modes["factor_reuse_shared"]["difference_is_model_error"] = True
+    if "seconds" in modes["factor_reuse_shared"]:
+        modes["factor_reuse_shared"]["difference_is_model_error"] = True
     result = dict(
         grid=name,
         rows=n,
@@ -383,13 +373,13 @@ def run_refactor(args, device) -> list[dict]:
                     continue
                 row = _refactor_case(grid, name, batch, device, cdt, args, use_sparse)
                 rows.append(row)
-                best = min(row["modes"].items(), key=lambda kv: kv[1]["seconds"])
+                timed = {k: v for k, v in row["modes"].items() if "seconds" in v}
+                best = min(timed.items(), key=lambda kv: kv[1]["seconds"])
                 print(
                     f"{name} N={row['rows']} B={batch} {row['dtype']} {device.type} "
                     f"k={row['lowrank_support_rows']}: "
                     + "  ".join(
-                        f"{k}={v['seconds'] * 1e3:.2f}ms"
-                        for k, v in row["modes"].items()
+                        f"{k}={v['seconds'] * 1e3:.2f}ms" for k, v in timed.items()
                     )
                     + f"  -> best {best[0]}",
                     flush=True,

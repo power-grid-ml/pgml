@@ -853,6 +853,9 @@ def _solve_harmonic_orders(
     # add that exact block with Woodbury. Dense device populations retain the direct
     # path. The conservative ``3k < N`` selection rule avoids the high-rank regime;
     # it is a heuristic, because the actual crossover depends on backend and hardware.
+    # The rule is applied to the touched-row COUNT, before the update core is built:
+    # a dense device population would otherwise materialise a scenario batch of
+    # matrices the size of the assembled system just to discard it.
     if (
         scenario_matrix
         and branch_states is None
@@ -880,11 +883,12 @@ def _solve_harmonic_orders(
                 _cdtype(dtype),
                 _rdtype(dtype),
                 device,
+                max_rank=(n_rows - 1) // 3,
             )
             if terms is None:
                 return solve_chunk(y_base, ih)
-            u, c = terms
-            if 3 * u.shape[1] < n_rows:
+            u, c, _rank = terms
+            if u is not None:
                 fac = update = voltage = operator = None
                 try:
                     fac = factor(y_base)
@@ -912,7 +916,7 @@ def _solve_harmonic_orders(
                         exc,
                     )
                     del fac, update, voltage, operator
-            del u, c, terms
+            del u, c, _rank, terms
         del y_base, ih
 
     chunk = (
@@ -2233,13 +2237,20 @@ def _harmonic_shunt_lowrank_terms(
     cdt,
     rdt,
     device,
+    max_rank=None,
 ):
-    """Return ``U, C`` for the exact operating-point harmonic device shunt.
+    """Return ``U, C, rank`` for the exact operating-point harmonic device shunt.
 
     ``U`` selects the unique node-phase rows touched by any modeled device and
     ``C`` is the shunt restricted to those rows. Connection incidence is inherited
     directly from :func:`_stamp_harmonic_load_shunt`, so neutral-returning WYE and
     DELTA blocks retain their off-diagonal terms.
+
+    ``None`` means no device carries a modeled shunt, so the shunt-free network IS
+    the harmonic system. A touched-row count above ``max_rank`` instead returns
+    ``(None, None, rank)``: the core would then be a scenario batch of matrices the
+    size of the assembled system, which is exactly what the low-rank path exists to
+    avoid, so it is never built and the caller takes the assembled path.
     """
     blocks = _stamp_harmonic_load_shunt(
         grid,
@@ -2262,7 +2273,9 @@ def _harmonic_shunt_lowrank_terms(
 
     flat_rows = torch.cat([rows.reshape(-1) for _, rows in blocks])
     selected, inverse = torch.unique(flat_rows, sorted=True, return_inverse=True)
-    rank = selected.shape[0]
+    rank = int(selected.shape[0])
+    if max_rank is not None and rank > max_rank:
+        return None, None, rank
     # Build the N-by-k selector directly. ``eye(N).index_select`` transiently allocates
     # N² entries and defeats the memory purpose of a low-rank path on a large feeder.
     u = torch.zeros((index.size, rank), dtype=cdt, device=device)
@@ -2274,7 +2287,7 @@ def _harmonic_shunt_lowrank_terms(
         local_rows = inverse[offset : offset + count].reshape_as(rows)
         core = scatter_blocks_into(core, block, local_rows, local_rows)
         offset += count
-    return u, core
+    return u, core, rank
 
 
 def _lowrank_harmonic_residual_ok(
