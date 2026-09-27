@@ -1,0 +1,5453 @@
+{
+ "environment": {
+  "date": "2026-09-24 17:43:10+0200",
+  "platform": "Linux-5.14.0-687.48.1.el9_8.x86_64-x86_64-with-glibc2.34",
+  "cpu": "AMD EPYC 9334 32-Core Processor",
+  "cpu_count_logical": 128,
+  "ram_gb": 1511.1,
+  "torch_threads": 8,
+  "cuda_available": true,
+  "cuda_runtime": "13.0",
+  "versions": {
+   "python": "3.13.15",
+   "torch": "2.13.0",
+   "numpy": "2.4.6",
+   "scipy": "1.18.1",
+   "pgml": "0.5.1",
+   "pgml_git": "966df9debde4b28754805683dddae0462e48134d",
+   "pandapower": "3.5.4",
+   "power_grid_model": "1.13.172",
+   "power_grid_model_io": "present",
+   "numba": "0.67.0",
+   "opendssdirect": "0.9.4"
+  },
+  "pandapower_numba": {
+   "importable": true,
+   "version": "0.67.0",
+   "opt_out": false,
+   "requested": true
+  },
+  "kerber_seed": 20260912,
+  "pgml_source_digest": "e40a8c2e0fac",
+  "benchmark_source_digest": "cb0e998827d6",
+  "modeling_defaults": {
+   "converter": {
+    "pandapower": {
+     "open_switch_model": {
+      "value": "terminal",
+      "units": "enum{terminal, drop_element}",
+      "description": "An open bus-line or bus-transformer switch disconnects only its terminal. The connected end still draws line charging or transformer no-load current. terminal retains that circuit with an auxiliary open-end node; drop_element omits the complete element as a reduced approximation. Both-open and out-of-service elements are omitted in either mode. `terminal` is the default because it is what pandapower itself solves: a line that is open at one end stays energized from the other and its charging current loads the feeder. On the CIGRE MV network, which has three such lines, omitting them moves the bus voltages by 2.9e-4 pu against pandapower's own power flow, while keeping them agrees to 6e-13 pu. `drop_element` is kept for studies that want the smaller system and accept that error.\n"
+     }
+    }
+   },
+   "calculation": {
+    "symmetry": {
+     "value": "auto",
+     "units": "enum{auto, symmetric, asymmetric}",
+     "description": "Whether a calculation is SYMMETRIC (each appliance's total P/Q split equally over its connected phases \u2014 balanced) or ASYMMETRIC (per-phase values honored, falling back to an equal split where a given appliance has none). `auto` (default) selects asymmetric iff ANY appliance or operating point carries per-phase data (*_per_phase_* or a per-phase operating point), else symmetric \u2014 so an asymmetric load distribution in the simulation config promotes the whole calculation to asymmetric even on a symmetrically-defined grid. Mirrors power-grid-model's symmetric=True/False (a symmetric calc averages an asymmetric load). See docs/pgml/modeling/asymmetric.md \u00a71.\n"
+    }
+   },
+   "appliance": {
+    "load": {
+     "default_connection": {
+      "value": "wye",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "Connection for a MULTI-phase Load/Generator with no explicit `connection`. `wye` = each phase to neutral/ground; `delta` = phase-to-phase (line-to-line). LV distribution is predominantly wye; matches the OpenDSS `conn=wye` default. For wye, the return path is the node's Phase.N row if present, else ground. See docs/pgml/modeling/asymmetric.md \u00a72, \u00a74.\n"
+     },
+     "single_phase_connection": {
+      "value": "wye",
+      "units": "enum{wye, wye_grounded}",
+      "description": "Connection for a 1-phase Load/Generator with no explicit `connection`. `wye` = line-to-neutral (the European LV residential convention; the node's L-N voltage is the base). A line-to-line single-phase load is modeled as a 2-phase delta load instead. See docs/pgml/modeling/asymmetric.md \u00a73.\n"
+     }
+    },
+    "harmonic_shunt": {
+     "model": {
+      "value": "opendss",
+      "units": "enum{none, opendss, motor}",
+      "description": "Which harmonic shunt every injection appliance carries. `opendss` (the default, and OpenDSS's own: `NeglectLoadY=No` with `%SeriesRL=50`) splits the operating-point admittance Yeq = conj(S)/V_rated^2 into a PARALLEL R-L branch (1-s)Re(Yeq) + j(1-s)Im(Yeq)/h and a SERIES R-L branch 1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction` (for a leading device the reactive parts follow `reactive_element`). `motor` keeps the parallel branch and replaces the series branch by a fixed blocked-rotor reactance (`motor_x_harm_pu`, `motor_xr_harm`), OpenDSS's `puXharm`. `none` = a PURE current source with no shunt at any order, identical to OpenDSS `Set NeglectLoadY=Yes`; it reports MORE distortion, because the load conductance is the main damping of a feeder-end parallel resonance.\n"
+     },
+     "series_rl_fraction": {
+      "value": 0.5,
+      "units": "pu",
+      "description": "Fraction s of the shunt carried by the SERIES R-L branch; the rest is the PARALLEL R-L branch (OpenDSS `%SeriesRL`/100, whose own default is 50). Both splits are exact at the fundamental (Y_par(1) + Y_ser(1) = Yeq for any s); they differ only in how the shunt rolls off with frequency: the parallel branch keeps the full conductance at every order, while the series branch's admittance falls roughly as 1/h. So s = 0 damps the most and s = 1 the least. The value is an OpenDSS modeling convention, not a measured quantity.\n"
+     },
+     "motor_x_harm_pu": {
+      "value": 0.2,
+      "units": "pu of the device's rated kVA",
+      "description": "Blocked-rotor (subtransient) reactance of the `motor` model's series branch, in per unit of the device's own apparent power: X = V_rated^2/(S*s)*x_pu. Applies only where the resolved model is `motor` and the device carries no explicit `motor_x_harm_pu`. 0.2 pu is the value OpenDSS's documentation gives for a motor-dominated load.\n"
+     },
+     "motor_xr_harm": {
+      "value": 6.0,
+      "units": "ratio X/R",
+      "description": "X/R of the `motor` model's series reactance at the fundamental (OpenDSS `XRharm`, same default), i.e. Zs = X/xr + jX before the order scaling.\n"
+     },
+     "reactive_element": {
+      "value": "sign_aware",
+      "units": "enum{sign_aware, inductive}",
+      "description": "How the reactive part of the P,Q-derived shunt scales with the harmonic order. `sign_aware` (the default) scales it as the element it is at the operating point. A lagging device (Q > 0) is an inductance: the parallel susceptance goes as B/h and the series reactance as h*X. A leading device (Q < 0, common for electronic loads and compensated installations) is a capacitance: B*h and X/h. This is the law the const-Z fold of the fundamental assembly uses, so both load representations agree. `inductive` applies B/h and h*X whatever the sign of Q, which is what OpenDSS computes (checked on a live YPrim of a load with negative kvar); a leading device then becomes a negative inductance, with the susceptance sign of a capacitor and the frequency slope of an inductor. The two laws are identical for Q >= 0 and at h = 1. At order 5, s = 0.5 and power factor 0.89 leading, `inductive` gives 0.037 + j0.017 S where `sign_aware` gives 0.070 + j0.082 S (10 kW, 400 V). The `opendss` preset selects `inductive`.\n"
+     },
+     "basis": {
+      "value": "operating_point",
+      "units": "enum{operating_point, nameplate}",
+      "description": "Which power and terminal voltage the shunt admittance Yeq = conj(S)/V_rated^2 is built from. `operating_point` (the default) uses the power the device actually draws in THIS scenario at the solved fundamental terminal voltage, so the shunt follows a scenario batch exactly as OpenDSS's own YPrim follows its Load's specified kW/kvar. `nameplate` uses the device's stored (nameplate) P, Q at its rated terminal voltage, which makes Y(h) independent of the scenario: one factorisation per harmonic order serves the whole batch instead of one per scenario and order, and the assembled matrix stays [H, N, N] instead of [B, H, N, N]. The cost is a model error wherever a scenario's loading differs from nameplate: the shunt is then that of the nameplate load, i.e. the damping is too strong for a lightly loaded scenario and too weak for a heavily loaded one. Measured on IEEE-33 and three-phase CIGRE LV against a live OpenDSS that carries the scenario's own kW, the deviation of the harmonic voltages grows roughly linearly with the load deviation and with the sharpness of any resonance; the numbers are in the reference test that pins both bases (tests/reference/test_opendss_load_shunt.py).\n"
+     },
+     "generation_model": {
+      "value": "none",
+      "units": "enum{none, load_style}",
+      "description": "What a GENERATION-sign device (Generator, Storage) carries at orders h > 1. `none` (the default) adds no shunt derived from the device's P/Q, so a device without an explicit `harmonic_impedance` remains a PURE harmonic current source. The reason is physical: Yeq = conj(S)/V_rated^2 has a NEGATIVE conductance for a device that injects power, i.e. the load expression would make every inverter FEED harmonic energy into the network instead of damping it. OpenDSS instead derives a `PVSystem`'s or `Generator`'s harmonic shunt from its separate subtransient / filter impedance (`Xdpp`, `%R`/`%X`), which the optional `harmonic_impedance` schema block represents. That explicit physical impedance remains present under `none`. `load_style` applies the same expression a Load carries, which is what OpenDSS computes for the negative-kW `Load` idiom a matched-mode export writes; use it to reproduce such a comparison, knowing the sign. A device whose own `harmonic_model` names the `motor` model (`motor_x_harm_pu`) carries that model either way, and `neglect_shunt: true` always wins when no explicit impedance supersedes the derived model.\n"
+     }
+    },
+    "generator": {
+     "enforce_q_limits": {
+      "value": true,
+      "units": "bool",
+      "description": "Whether a regulating generator's `q_min_var`/`q_max_var` bound its reactive output. true (default) enforces them by PV-to-PQ switching: a unit whose required reactive power leaves the band is re-solved as a plain PQ injection pinned at the violated limit, and returns to regulation when the terminal voltage crosses its setpoint from the other side. false solves every regulating generator unbounded, which is pandapower `runpp`'s own default (`enforce_q_lims=False`). Overridable per call: `solve_power_flow(enforce_q_limits=...)`.\n"
+     },
+     "q_limit_switch_rounds_max": {
+      "value": 12,
+      "units": "count",
+      "description": "Maximum number of PV-to-PQ switching rounds (each round is one full Newton solve at a fixed active set, the first solve included). The loop normally settles in one to three rounds; hitting the cap logs a WARNING naming the generators that would still change their bus type, keeps the last solution and reports the scenarios concerned as not converged (`PowerFlowResult.converged_mask`, `regulation.settled`). When limits are reached one unit after another a feeder with n regulating units can need up to n rounds, so 12 covers the distribution feeders the library targets and bounds the cost of a genuinely oscillating case at 12 Newton solves.\n"
+     },
+     "q_limit_hysteresis_pu": {
+      "value": 1e-06,
+      "units": "pu",
+      "description": "Voltage band, in per unit of the terminal's nominal, a pinned generator must cross before it is released back to voltage regulation. Guards the switching loop against cycling on solver noise; far below any physical regulation deadband. 1e-6 pu is two decades above the voltage-update tolerance (`solver.convergence.update_pu` = 1e-8), so a converged voltage cannot cross the band by rounding, and four decades below a typical regulator deadband of 1e-2 pu, so it does not alter which units regulate.\n"
+     },
+     "q_limit_hysteresis_rel": {
+      "value": 1e-09,
+      "units": "pu",
+      "description": "Reactive band, relative to the widest of the generator's reactive limits, the required reactive power must exceed before the unit is pinned at that limit. Guards against switching on the converged solve's rounding noise: 1e-9 sits about three decades above the relative rounding of a double-precision power evaluation (machine epsilon times the cancellation in Y*V, of order 1e-12) and below the 1e-8 pu mismatch tolerance, so a unit exactly at its limit is not pinned by noise and a real violation of the size the solver can resolve still is.\n"
+     }
+    }
+   },
+   "line": {
+    "harmonic_model": {
+     "three_phase": {
+      "value": "sequence_aware",
+      "units": "enum{sequence_aware, positive_sequence, naive, none}",
+      "description": "Default model for a 3-phase R/X line. `sequence_aware` decomposes Z_abc into Z1 (earth-free, X\u221dh + skin) and Z0 (carries the Carson earth-return resistance), then recombines \u2014 the model a 4-wire UNBALANCED LV harmonic study needs. Earth return is excited only by zero-sequence / residual current, so it correctly vanishes for balanced operation. `positive_sequence` = Z1 only (no Z0 damping); `naive` = R const, X\u221dh; `none` = leave the line unresolved (no model written).\n"
+     },
+     "single_phase": {
+      "value": "positive_sequence",
+      "units": "enum{sequence_aware, positive_sequence, naive, none}",
+      "description": "Default model for a 1- or 2-phase R/X line: skin-corrected R, X\u221dh, no earth floor. A genuine single-wire-earth-return (SWER) line should instead carry an explicit `conductor_geometry` so the full Carson earth return applies.\n"
+     },
+     "skin_effect": {
+      "value": true,
+      "units": "bool",
+      "description": "Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and sequence-aware models. false \u2192 R constant (the naive X\u221dh, R-const model). Per-line override: `Line.harmonic_skin_effect`.\n"
+     }
+    },
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 4.0,
+      "units": "ratio",
+      "description": "Assumed series RESISTANCE ratio R0/R1 for sequence->phase line expansion when no explicit R0 is available. ~4 is a common overhead-line rule of thumb (the earth return dominates the zero-sequence resistance).\n"
+     },
+     "x0_over_x1": {
+      "value": 3.0,
+      "units": "ratio",
+      "description": "Assumed series REACTANCE ratio X0/X1 for sequence->phase line expansion when no explicit X0 is available (~3 typical for overhead lines).\n"
+     },
+     "c0_over_c1": {
+      "value": 0.5,
+      "units": "ratio",
+      "description": "Assumed shunt CAPACITANCE ratio C0/C1 for sequence->phase line expansion when no explicit C0 is available (~0.5 typical: less zero-sequence than positive-sequence capacitance).\n"
+     },
+     "r0_includes_earth_return": {
+      "value": false,
+      "units": "bool",
+      "description": "Whether a line's R0 already contains the Carson earth-return resistance at f0. true (real zero-sequence measurements / datasheet values): the harmonic model splits R0 into a conductor part R0 \u2212 3\u00b7Re(f0) that carries the skin-effect multiplier and an earth part 3\u00b7Re(f) that does not. false (the default, correct for an R0 synthesised from `r0_over_r1`): R0 is treated as conductor resistance and the earth return enters only as the increment 3\u00b7(Re(f) \u2212 Re(f0)). Both forms reproduce the stored R0 exactly at f0; they differ only in how much of R0 the skin multiplier scales. In the sequence_aware line model the skin multiplier scales the phase conductor's share R1 of R0, so the two settings give the same R0(h) whenever R0 \u2212 3\u00b7Re(f0) \u2265 R1 (every line with a real return path); they differ only for an R0 smaller than R1 + 3\u00b7Re(f0) = R1 + 0.148 \u03a9/km at 50 Hz. Per-line override: `Line.earth_return.r0_includes_earth_return`.\n"
+     }
+    },
+    "earth_return": {
+     "resistivity_ohm_m": {
+      "value": 100.0,
+      "units": "ohm*m",
+      "description": "Soil resistivity \u03c1 for the Carson/Deri earth-return path (Z0 and geometry lines). 100 \u03a9\u00b7m is the OpenDSS / IEEE standard default (average soil).\n"
+     },
+     "resistance_coeff_ohm_per_m_per_hz": {
+      "value": 9.869604401089357e-07,
+      "units": "ohm/(m*Hz)",
+      "description": "Carson earth-return resistance per unit length per Hz: Re(f) = coeff\u00b7f. The physical Carson value is \u03c0\u00b2\u00b71e-7 \u03a9/m/Hz (= \u03c9\u00b7\u03bc0/8 divided by f). Geometry- independent; the dominant frequency-dependent DAMPING of zero-sequence harmonics. Mirrors OpenDSS's user-settable per-LineCode Rg (whose default 0.01805 is this same physical value at 60 Hz in \u03a9 per 1000 ft, so on a metric line OpenDSS's default is \u22483.28\u00d7 smaller). Per-line override: `Line.earth_return.resistance_coeff_ohm_per_m_per_hz`; 0 removes the earth path.\n"
+     },
+     "reactance_coeff_ohm_per_m_per_hz": {
+      "value": 1.2566370614359173e-06,
+      "units": "ohm/(m*Hz) per ln-unit",
+      "description": "Carson/Deri earth-return reactance per unit length per Hz per ln-unit: Xg(f) = coeff\u00b7f\u00b7ln(658.5\u00b7sqrt(\u03c1/f)). The physical value is \u03bc0. Only its frequency DERIVATIVE enters the lumped zero-sequence model, where the \u03c1-dependent log cancels: X0(h) = h\u00b7X0(f0) \u2212 1.5\u00b7coeff\u00b7f0\u00b7h\u00b7ln(h). Mirrors OpenDSS's per-LineCode Xg (its default 0.155081 is this value at 60 Hz, \u03c1=100, in \u03a9 per 1000 ft). Used only by `x0_frequency: carson_sublinear`. Per-line override: `Line.earth_return.reactance_coeff_ohm_per_m_per_hz`.\n"
+     },
+     "x0_frequency": {
+      "value": "linear",
+      "units": "enum{linear, carson_sublinear}",
+      "description": "Frequency law of the zero-sequence REACTANCE in the lumped sequence_aware model. `linear` (default): X0(h) = X0\u00b7h, the scaling of a geometric inductance. It is exact for a return path that stays in metal at every order (the neutral core or sheath of a cable, a 4-wire LV line), and it is the only law that is safe for an X0 invented from `zero_sequence.x0_over_x1`, which carries no information about the return path. `carson_sublinear`: additionally subtract the Carson/Deri earth-return reactance decay 1.5\u00b7coeff\u00b7f0\u00b7h\u00b7ln(h) (geometry- and \u03c1-independent), the correction OpenDSS applies to an R/X line through its Xg. The derivation assumes that the stored X0 CONTAINS the deep-earth term 3\u00b7Xe(f0) = 3\u00b7coeff\u00b7f0\u00b7ln(658.5\u00b7sqrt(\u03c1/f0)), about 1.29 \u03a9/km at 50 Hz and 100 \u03a9\u00b7m. That holds for an overhead line whose measured or computed X0 closes through the earth. It does not hold for a cable or a ratio-derived X0 (typically 0.2 to 0.5 \u03a9/km): the subtracted 0.094\u00b7ln(h) \u03a9/km is then comparable with X0 itself, X0(h) falls below X1(h) within the first few orders and reaches zero near h = 13 for a 150 mm\u00b2 LV cable. Select it per line (`Line.earth_return.x0_frequency`) for overhead lines with real zero-sequence data, or grid-wide through the `opendss` preset. Exact at f0 either way.\n"
+     },
+     "x0_nonnegative": {
+      "value": true,
+      "units": "bool",
+      "description": "Guard of the `carson_sublinear` law: clamp the extrapolated X0(h) at zero. A negative series reactance is a series capacitance and can create a spurious series resonance, so the guard is on by default. Reaching the clamp means the stored X0 lacks the deep-earth term the law subtracts (see `x0_frequency`); assembly then logs one WARNING with the number of affected lines. The derivative is zero below the boundary. Disable for the unguarded OpenDSS law (the `opendss` preset does). No effect under `linear`. Per-line override: `Line.earth_return.x0_nonnegative`.\n"
+     },
+     "x0_exponent": {
+      "value": 1.0,
+      "units": "exponent",
+      "description": "Exponent p in X0(h) = X0\u00b7h^p for the lumped sequence_aware model. 1.0 (default) is the geometric scaling. p < 1 is an EMPIRICAL way to bend the zero-sequence reactance sub-linear (e.g. to match a measured Z0(h)); `x0_frequency: carson_sublinear` is the physically derived form for an overhead line. Per-line override: `Line.earth_return.x0_exponent`.\n"
+     }
+    },
+    "geometry": {
+     "internal_inductance": {
+      "value": "gmr",
+      "units": "enum{gmr, gmr_skin, gmr_power_frequency, bessel}",
+      "description": "Which internal-inductance model the conductor-geometry path uses. `gmr`: the published GMR carries the internal inductance at every frequency and the internal reactance is dropped (frozen at its power-frequency value). `gmr_skin`: the published GMR's internal reactance is scaled by the solid-round Bessel decay Im(Zint(f))/(f*mu0/4), so the internal inductance decays with skin effect (continuous in f). At power frequency the decay factor is 0.997 to 0.999 for LV/MV conductors and 0.989 for a very large one, so the published GMR's internal part, itself a few percent of X, is reproduced to within 1 %. `gmr_power_frequency`: `gmr` inside `power_frequency_band_hz` and `bessel` outside it, which is OpenDSS's rule (LineConstants/CNLineConstants/ TSLineConstants). Reproduces OpenDSS at every frequency; discontinuous at the band edges unless GMR = e^(-1/4)*radius. `bessel`: physical radius for the spacing term plus the full frequency-dependent Bessel internal impedance at every frequency, i.e. the first-principles solid round conductor; it discards the published GMR and so ignores stranding. `gmr`, `gmr_skin` and `bessel` are continuous in frequency; all four agree at power frequency for a solid round conductor. Needs a conductor radius for every option except `gmr`.\n"
+     },
+     "power_frequency_band_hz": {
+      "value": [
+       40.0,
+       1000.0
+      ],
+      "units": "Hz",
+      "description": "Exclusive frequency band (low, high) in which `internal_inductance: gmr_power_frequency` keeps the published GMR. OpenDSS hard-codes `(f < 1000.0) and (f > 40.0)` in LineConstants.pas, so (40, 1000) reproduces it; only change this to study the sensitivity of the threshold.\n"
+     }
+    },
+    "conductor": {
+     "gmr_over_radius": {
+      "value": 0.7788,
+      "units": "ratio",
+      "description": "Geometric-mean-radius / physical-radius for a solid round conductor (e^{-1/4}). Used to pick a PHYSICAL GMR when synthesizing a two-conductor go/return equivalent from positive-sequence R1/X1 (so the GMR never exceeds the radius).\n"
+     },
+     "radius_m": {
+      "value": 0.0102,
+      "units": "m",
+      "description": "Default conductor outer radius (~ACSR) for R/X\u2192geometry synthesis when no conductor data is supplied. Affects only the (tiny) synthesized capacitance.\n"
+     },
+     "phase_spacing_m": {
+      "value": 1.0,
+      "units": "m",
+      "description": "Initial phase-conductor spacing for the equilateral 3-phase R/X\u2192geometry synthesis (the Newton fit then adjusts the spacing + GMR to reproduce X1 and X0). ~1 m is a typical LV/MV phase separation; the value only seeds the solve and trades off against the fitted GMR, so the reproduced Z1/X0 are independent of it (within the physical range).\n"
+     },
+     "height_overhead_m": {
+      "value": 10.0,
+      "units": "m",
+      "description": "Default conductor height above ground for an overhead ('ol') line."
+     },
+     "height_cable_m": {
+      "value": 1.0,
+      "units": "m",
+      "description": "Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.\n"
+     }
+    }
+   },
+   "branch": {
+    "zero_impedance": {
+     "value": "fuse",
+     "units": "enum{fuse, error}",
+     "description": "How a solve treats an in-service branch whose series impedance is EXACTLY zero \u2014 a closed switch with no impedance data, a bus coupler or jumper modelled as a zero-impedance line, a zero-length line. `fuse` (default) collapses the branch's terminal node-phase rows into ONE row of the solved system (exact bus fusion: the two terminals share a voltage and their current balances are summed), solves the reduced system and reports the result on the original node ids; the current through the fused branch follows from Kirchhoff's law at the fused node. `error` refuses such a branch by name (`pgml.solver.check_branch_impedances`) and points at `near_ideal_series_resistance_ohm` instead. Fusion is exact and better conditioned than any small-impedance stand-in, which buys its finite voltage drop with an admittance of 1/R in that row. A branch under a `branch_states` sweep is never fused (a swept branch is reached by scaling a stamped admittance): a zero-impedance branch listed there raises under either policy.\n"
+    },
+    "near_ideal_series_resistance_ohm": {
+     "value": 0.0001,
+     "units": "ohm",
+     "description": "Series resistance that stands in for an IDEAL (zero-impedance) branch where the branch has to remain STAMPED \u2014 under `zero_impedance: error`, or for a switch whose state a `branch_states` sweep toggles. 1e-4 Ohm is small enough to be electrically negligible on a distribution feeder and large enough to keep the admittance matrix conditioned, but it is not exact: it adds a voltage drop and it raises that row's admittance scale, and with it the achievable mismatch floor. Prefer exact impedance data where it exists and fusion where the element really is an ideal conductor.\n"
+    },
+    "switch_model": {
+     "value": "ideal",
+     "units": "enum{ideal, near_ideal}",
+     "description": "What a CONVERTER writes for a closed switch whose source library gives no impedance (a pandapower bus-bus switch with `z_ohm = 0`, which pandapower itself solves by fusing the two buses). `ideal` (default) writes a `Switch` with R = L = 0, which the solve collapses exactly (see `zero_impedance`) and which therefore reproduces the source tool's own treatment. `near_ideal` writes `near_ideal_series_resistance_ohm` instead, keeping the switch a stamped branch \u2014 the choice to make when the switch's state has to be swept by `branch_states`.\n"
+    }
+   },
+   "transformer": {
+    "vector_group": {
+     "from": {
+      "value": "delta",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "HV-side winding connection assumed when none is given. `delta` (the D of Dyn) is the standard distribution-transformer HV winding: it blocks zero-sequence / triplen harmonics from propagating to the MV network.\n"
+     },
+     "to": {
+      "value": "wye_grounded",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "LV-side winding connection assumed when none is given. `wye_grounded` (the yn of Dyn) is the standard LV winding: the solidly grounded neutral provides the zero-sequence return path on the LV side.\n"
+     },
+     "clock": {
+      "value": 11,
+      "units": "integer 0..11 (IEC clock; HV->LV shift = +30*clock degrees, mod 360, positive = LV lags HV)",
+      "description": "IEC clock number assumed when no explicit tap.shift_deg is given. `11` (Dyn11, LV leads HV by 30 deg) is the IEC / European distribution-transformer default. For a transformer with explicit connections the clock is read from tap.shift_deg (rounded to the nearest 30 deg) instead.\n"
+     }
+    },
+    "harmonic_resistance": {
+     "law": {
+      "value": "element",
+      "units": "enum{element, constant, xr_constant}",
+      "description": "`element` = per-transformer `harmonic_xr_constant` (False = R constant, True = R scales with the order so X/R stays constant); `constant` = force R constant on every transformer (OpenDSS's `XRConst=No`, the conservative default of every reference tool: transformer damping at high orders is then UNDERSTATED because no eddy-current/stray-loss rise is modelled); `xr_constant` = force R proportional to the order on every transformer (OpenDSS's `XRConst=Yes`). A `Transformer.resistance_frequency` multiplier curve (skin effect / a measured frequency correction) multiplies on top of whichever law applies.\n"
+     }
+    },
+    "magnetizing_placement": {
+     "value": "split",
+     "units": "enum{from_terminal, to_terminal, split}",
+     "description": "Terminal the magnetizing shunt is stamped on: `from_terminal` = the HV/from phase diagonal, `to_terminal` = the LV/to diagonal with the branch referred through the squared rated-voltage ratio (OpenDSS's own placement), `split` (default) = half on each terminal, each referred to its own side (power-grid-model's placement). The VALUE is always `magnetizing_conductance_s`/`magnetizing_inductance_h` as stored, i.e. referred to the from side. Typical residual between the choices: ~2e-4 pu of the transformer admittance at a realistic 0.5 % magnetizing current.\n"
+    },
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed R0/R1 of the leakage impedance when a transformer carries no explicit `zero_sequence` override. 1.0 (Z0 = Z1) is what OpenDSS's and power-grid-model's two-winding transformer models imply -- neither has a zero-sequence leakage input, so their zero sequence sees the positive-sequence winding impedance through the winding topology.\n"
+     },
+     "x0_over_x1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed X0/X1 of the leakage impedance when a transformer carries no explicit `zero_sequence` override (1.0 = Z0 = Z1). A THREE-LIMB core YNyn unit has X0/X1 ~ 0.3-1.0 (the zero-sequence flux closes through tank and air, not the core); a five-limb or shell-type unit is close to 1.0. A zigzag grounding transformer has X0/X1 well below 1 by design.\n"
+     }
+    }
+   },
+   "source": {
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed R0/R1 of the source Thevenin when the dataset has no zero-sequence data. 1.0 (Z0 = Z1) is the value power-grid-model (`z01_ratio`) and pandapower (`x0x_max`) themselves default to, i.e. the assumption of a solidly grounded upstream network. A network whose zero-sequence path runs through an additional transformer or an impedance-earthed neutral has R0/R1 > 1 -- set the native field (or raise this ratio) for a study where triplen/residual current reaches the source.\n"
+     },
+     "x0_over_x1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed X0/X1 of the source Thevenin when the dataset has no zero-sequence data (1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). X0/X1 of a real feeding network ranges from ~1 (solidly grounded, close ground source) to >10 (remote or impedance-earthed ground source).\n"
+     }
+    },
+    "series_impedance_ohm": {
+     "value": 5.0,
+     "units": "ohm",
+     "description": "|Z| of the upstream-grid Thevenin/Norton series impedance at the source's rated voltage, used when the converted source is near-ideal. Larger = weaker grid = more harmonic voltage at the source bus and more cross-feeder coupling.\n"
+    },
+    "xr_ratio": {
+     "value": 10.0,
+     "units": "ratio X/R",
+     "description": "X/R ratio of the source series impedance (R = |Z|/sqrt(1+xr^2), X = xr*R). ~10 is typical for a stiff MV grid. NOT the same convention as the short-circuit-input converter's `rx_ratio` (`SourceShortCircuitInput.rx_ratio`, consumed by `pgml.convert._common.thevenin_from_sk`): that one is R/X (the reciprocal of this one), matching power-grid-model's own `rx_ratio` field. Converting a value between the two means inverting it, not copying it.\n"
+    }
+   },
+   "solver": {
+    "convergence": {
+     "mismatch_pu": {
+      "value": 1e-08,
+      "units": "per unit of s_base_va (apparent-power mismatch)",
+      "description": "PRIMARY convergence criterion of the nonlinear power flow: the largest nodal apparent-power mismatch |V_i * conj(F_i)| / s_base_va over the free (non-slack) rows, where F = Y*V + I_device(V) - I_slack. 1e-8 pu is pandapower's default (`tolerance_mva` on a 1 MVA base) and the same order as power-grid-model's `error_tolerance`, so iteration counts are comparable across the three tools. The achievable value is bounded below by the cancellation error of Y*V, which the solver estimates per row from the working precision and reports; a tolerance below that floor logs a warning and the floor governs. This is a power tolerance, 0.01 VA per row on the default 1 MVA base, and not a voltage tolerance: it leaves a voltage error of about mismatch_pu * s_base_va / S_k per unit at a node of short-circuit power S_k. Together with update_pu the default gives voltages good to about 1e-8 pu. Lower both for a tighter answer.\n"
+     },
+     "update_pu": {
+      "value": 1e-08,
+      "units": "per unit of each node's line-to-neutral rated voltage",
+      "description": "SECONDARY convergence criterion: the largest per-row voltage update |V_new - V_old| / V_LN(node) of the current-injection fixed point (or of the Newton step). Both criteria must hold. Per-row normalisation makes the measure independent of the voltage level and of the number of rows, so a multi-voltage grid or an ensemble of grids solved in one system is judged exactly like a single feeder. power-grid-model uses the same quantity (max voltage deviation in pu). The update is not the remaining error: the fixed point's error is rho / (1 - rho) times its last update (rho the contraction factor, roughly 0.1 to 0.5 on a distribution feeder), Newton's is far below its last update.\n"
+     },
+     "s_base_va": {
+      "value": 1000000.0,
+      "units": "VA",
+      "description": "Apparent-power base of the per-unit power mismatch. 1 MVA matches pandapower's default `sn_mva`, so the mismatch tolerance carries the same meaning there. A grid-specific base (e.g. the transformer rating) only rescales the criterion.\n"
+     },
+     "stall_patience": {
+      "value": 4,
+      "units": "iterations",
+      "description": "How many consecutive iterations a scenario may fail to reduce either convergence measure (voltage update or power mismatch) by the factor `stall_decay` before the solver calls it STALLED. A stalled iteration has stopped making progress: at a single-precision working dtype the fixed point reaches an exact fixed point of the rounded map or a small limit cycle whose amplitude is set by the rounding of one back-substitution, and no further iteration can improve it. Detecting that is what lets a solve stop at the precision it can actually reach instead of running to `max_iter` at a converged voltage. 4 iterations with a 10 % improvement requirement never fires on a contracting fixed point (the current-injection map contracts by about a decade per iteration on a distribution feeder, and even a contraction factor of 0.9 per iteration improves by 34 % over four), while a plateau is detected within five iterations of reaching it.\n"
+     },
+     "stall_decay": {
+      "value": 0.9,
+      "units": "factor",
+      "description": "The improvement that counts as progress inside the `stall_patience` window: an iteration is progress when the per-row voltage update or the power mismatch drops below `stall_decay` times the best value of that measure the scenario had reached. A value near 1 detects only a genuine plateau; a smaller value also calls a slowly contracting iteration stalled. With a patience of 4, the value 0.9 calls any iteration that contracts by 0.97 or better per step progress (0.97^4 = 0.885), far slower than the roughly one decade per step of the current-injection iteration on a distribution feeder, and still ends a true plateau after five iterations.\n"
+     },
+     "stall_tolerance_factor": {
+      "value": 100.0,
+      "units": "multiples of the precision floor",
+      "description": "How far above the working precision's voltage-update floor (1.2e-5 per unit for complex64 with the sparse backend, 1e-6 for complex64 dense, 16 eps for complex128) a STALLED scenario may sit and still count as converged at its precision floor rather than as a failure. The floor is a calibrated estimate of one back-substitution's rounding, while the plateau a scenario actually reaches is a limit cycle whose amplitude varies per scenario, per grid and (through the reduction order of a multithreaded matrix-vector product) from run to run, by up to about two orders of magnitude on the grids measured. Accepting a stall inside this band keeps a single-precision solve deterministic and honest \u2014 it converges at the accuracy it reached and the diagnostics report that the floor governed \u2014 while a stall above the band is reported as a failure, because at complex128 it means the iteration is stuck on the physics (a scenario past the loadability limit), not on the arithmetic.\n"
+     }
+    },
+    "precision": {
+     "complex64_cond_warn": {
+      "value": 1000.0,
+      "units": "condition number of the factored system",
+      "description": "Estimated 1-norm condition number above which a plain complex64 solve logs a one-time WARNING. The relative error of a single-precision solve grows like cond * eps_single (eps_single ~ 1.2e-7), so at cond = 1e3 about four of the seven single-precision digits are already gone. SI-unit power systems sit above this routinely \u2014 measured on the factored fundamental system: IEEE-33 cond ~2.8e3, CIGRE LV ~1.7e4 single-phase-equivalent and ~5.5e4 three-phase, and a stiff source or a near-ideal switch pushes it decades higher \u2014 which is the point of the warning. The recommended recipe: solve at complex128, or at complex128 with precision=\"mixed\" (single-precision factorization refined against double-precision residuals), and store complex64. The estimate itself costs a few back-substitutions and is taken ONCE per process.\n"
+     },
+     "refine_steps": {
+      "value": 2,
+      "units": "count",
+      "description": "Iterative-refinement steps applied by a mixed-precision solve: the solution of the single-precision factorization is corrected with residuals formed at the working precision, x <- x + A_single^-1 (b - A*x). Each step multiplies the relative error by about cond * eps_single, so two steps recover double-precision accuracy for cond up to ~1e5 and are the documented default; the nonlinear outer iteration (itself a residual correction) continues the refinement beyond that.\n"
+     }
+    },
+    "equilibration": {
+     "mode": {
+      "value": "symmetric",
+      "units": "name: off | symmetric",
+      "description": "Diagonal equilibration applied around the power-flow and harmonic factorization paths (the nodal admittance, the Newton state Jacobian, the implicit-function adjoint). `solve_anchored` and `AnchoredSystem` do not yet apply this setting. An SI-unit admittance matrix spans decades \u2014 a stiff source row near 1e5 S next to a low-voltage cable row near 1e-2 S \u2014 so it is badly SCALED rather than intrinsically ill-conditioned, and a rescaling removes most of the condition number. \"symmetric\" is van der Sluis scaling d_i = |Y_ii|^-1/2 applied as the congruence D Y D: it keeps symmetry and sparsity, reads only the diagonal, and is within sqrt(n) of the best condition number any diagonal scaling can reach. \"off\" factors the matrix as assembled. The scaling is undone on the solution, so results, reported quantities and gradients are unchanged; what changes is the conditioning of the factored system, the meaning of the condition estimate, and the robustness of a single-precision factorization.\n"
+     },
+     "power_of_two": {
+      "value": true,
+      "units": "boolean",
+      "description": "Round every equilibration scale factor to a power of two. The scaled matrix D Y D is then exact in binary floating point, so the equilibration introduces no rounding error of its own and cannot move a solution it was only meant to condition; the cost is at most a factor 2 per scale factor (4 in the condition number), which is negligible against the decades it removes. Set to false to use the unrounded scales.\n"
+     }
+    },
+    "harmonic": {
+     "system_budget_mb": {
+      "value": 1024.0,
+      "units": "MiB",
+      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted); it is charged the matrix AND its factorisation, which for a dense LU is a second copy of the same size. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
+     }
+    },
+    "ift": {
+     "jacobian_budget_mb": {
+      "value": 1024.0,
+      "units": "MiB",
+      "description": "Memory budget for building the block-diagonal real state Jacobian of the implicit-function (gradient) path and of the dense Newton direction. The vectorized build differentiates the batched residual in one call, which replicates the residual's [B, N, N] admittance once per output row and therefore peaks at B^2 * 2N^3 * itemsize bytes; the budget decides how many scenarios are built at a time (the solver falls back to a column-by-column build costing 2N Jacobian-vector products and O(B*(2N)^2) memory when a single scenario already exceeds it). 1 GiB keeps the fast whole-batch build for small systems and small batches, bounds the peak monotonically in the batch size, and fits alongside the forward solve on a 12 GB accelerator. Raise it on a larger card to keep the vectorized build at larger batches; lower it to leave more room for the forward.\n"
+     },
+     "adjoint_factor_cache_mb": {
+      "value": 256.0,
+      "units": "MiB",
+      "description": "Largest LU factorization of the state Jacobian that the gradient path keeps cached for REPEATED vector-Jacobian products of the same solve (building a full output Jacobian row by row, or any second backward pass with retain_graph). Caching turns every further product into one back-substitution instead of a complete Jacobian rebuild and factorization; above this size the factors are rebuilt per product instead, so a large batched solve does not hold a big factorization alive for the lifetime of the graph. The factors of B scenarios of an N-row grid take B*(2N)^2*8 bytes in double precision: 256 MiB holds a single grid of about 2900 rows or 90 scenarios of a 294-row three-phase LV feeder, the sizes for which a full output Jacobian is built row by row, and stays small next to the forward solve's own memory.\n"
+     }
+    },
+    "loadability": {
+     "ramp": {
+      "value": "load",
+      "units": "name: load | all",
+      "description": "What the loadability analysis' scaling factor lambda multiplies. \"load\" scales the loads only and holds generation at its nameplate value \u2014 the textbook continuation-power-flow ramp, and what a published loadability or P-V curve means. \"all\" scales every injecting device, loads and generation together, which is the joint ramp of a whole operating point; on a feeder with substantial generation the two limits differ materially, because ramping generation with the load offsets the voltage drop the ramp is meant to create.\n"
+     }
+    }
+   }
+  },
+  "pgml_tolerance_defaults": {
+   "solve_power_flow": null,
+   "solve_power_flow_unit": "per unit",
+   "solve_harmonic_flow": null,
+   "solve_harmonic_flow_unit": "per unit"
+  },
+  "tolerance_mode": "library",
+  "guard_tol_pu": 1e-06,
+  "cpu_allocation": {
+   "logical_cpus": 16,
+   "physical_cores": 8,
+   "threads_per_core": 2.0,
+   "cpu_workers": 8,
+   "blas_thread_env": {
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "OPENBLAS_NUM_THREADS": "8",
+    "NUMEXPR_NUM_THREADS": "8"
+   }
+  },
+  "allocation": {
+   "logical_cpus": "16",
+   "memory_mb": "196608"
+  },
+  "gpu": "NVIDIA L40S",
+  "gpu_memory": "46068 MiB",
+  "driver": "610.57.04",
+  "gpu_torch": "NVIDIA L40S",
+  "gpu_total_mib": 45486
+ },
+ "mode": "harmonic",
+ "harmonic_orders": [
+  1,
+  3,
+  5,
+  7,
+  9,
+  11,
+  13,
+  15,
+  17,
+  19,
+  21,
+  23,
+  25
+ ],
+ "load_shunt": null,
+ "load_shunt_basis": null,
+ "equilibrate": null,
+ "reps": 5,
+ "workers": 8,
+ "pgml_pool": true,
+ "pool_backends": [
+  "dense",
+  "sparse"
+ ],
+ "pandapower_pool": false,
+ "baseline_batches": [
+  1,
+  4,
+  16,
+  64,
+  256
+ ],
+ "call_budget_s": 120.0,
+ "guard_scenarios": 64,
+ "scenario_draw": "uniform(0.8, 1.2) per load, seed 0, prefixes shared",
+ "tol_volts": 1e-08,
+ "tol_relative": null,
+ "grids": {
+  "ieee33": {
+   "label": "IEEE 33-bus",
+   "rows": 33,
+   "n_bus": 33,
+   "n_loads": 32,
+   "three_phase": false,
+   "guard_scenarios": 64,
+   "guard_tol_pu": {
+    "c128": 1e-06,
+    "c128m": 1e-06,
+    "c64": 1e-06
+   },
+   "tol_volts_used": null,
+   "series": {
+    "cpu_dense_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.018000657088123262,
+       "min_s": 0.017952654976397753,
+       "max_s": 0.018106217961758375,
+       "p25_s": 0.01797078608069569,
+       "p75_s": 0.018059078021906316,
+       "mean_s": 0.01801787882577628,
+       "std_s": 5.704321541181219e-05,
+       "reps": 5,
+       "all_s": [
+        0.017952654976397753,
+        0.01797078608069569,
+        0.018000657088123262,
+        0.018059078021906316,
+        0.018106217961758375
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 1.4237297333623927e-09,
+      "max_dV_pu": 9.992007221626409e-16,
+      "verdict": "ok",
+      "throughput": 55.553527579823445
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 0.02978575404267758,
+       "min_s": 0.029709052061662078,
+       "max_s": 0.02992038696538657,
+       "p25_s": 0.02972183295059949,
+       "p75_s": 0.02980000397656113,
+       "mean_s": 0.02978740599937737,
+       "std_s": 7.521241864521876e-05,
+       "reps": 5,
+       "all_s": [
+        0.029709052061662078,
+        0.02972183295059949,
+        0.02978575404267758,
+        0.02980000397656113,
+        0.02992038696538657
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 1.4237262973054048e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 134.29238669830974
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 0.031288260011933744,
+       "min_s": 0.031088597024790943,
+       "max_s": 0.03191942092962563,
+       "p25_s": 0.031096146907657385,
+       "p75_s": 0.031332980026490986,
+       "mean_s": 0.031345080980099735,
+       "std_s": 0.00030364242947142464,
+       "reps": 5,
+       "all_s": [
+        0.031088597024790943,
+        0.031096146907657385,
+        0.031288260011933744,
+        0.031332980026490986,
+        0.03191942092962563
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 2.0997273804232634e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 511.37391449372365
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 0.0384235349483788,
+       "min_s": 0.03795592696405947,
+       "max_s": 0.039762619067914784,
+       "p25_s": 0.038299223058857024,
+       "p75_s": 0.03935991192702204,
+       "mean_s": 0.038760243193246426,
+       "std_s": 0.0006836953396642372,
+       "reps": 5,
+       "all_s": [
+        0.03795592696405947,
+        0.038299223058857024,
+        0.0384235349483788,
+        0.03935991192702204,
+        0.039762619067914784
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.022062926149353e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 1665.6458102041531
+     },
+     {
+      "batch": 256,
+      "timing": {
+       "median_s": 0.06497443199623376,
+       "min_s": 0.0642200990114361,
+       "max_s": 0.06516534590627998,
+       "p25_s": 0.06478081899695098,
+       "p75_s": 0.06508248497266322,
+       "mean_s": 0.06484463617671281,
+       "std_s": 0.00033775524818538074,
+       "reps": 5,
+       "all_s": [
+        0.0642200990114361,
+        0.06478081899695098,
+        0.06497443199623376,
+        0.06508248497266322,
+        0.06516534590627998
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.213154023039425e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 3940.0113573111194
+     },
+     {
+      "batch": 1024,
+      "timing": {
+       "median_s": 0.16004576405975968,
+       "min_s": 0.15502514503896236,
+       "max_s": 0.16144197806715965,
+       "p25_s": 0.15947105397935957,
+       "p75_s": 0.16079204704146832,
+       "mean_s": 0.1593551976373419,
+       "std_s": 0.002265340987705771,
+       "reps": 5,
+       "all_s": [
+        0.15502514503896236,
+        0.15947105397935957,
+        0.16004576405975968,
+        0.16079204704146832,
+        0.16144197806715965
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.7191238235648466e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 6398.169961047188
+     },
+     {
+      "batch": 4096,
+      "timing": {
+       "median_s": 0.4941442860290408,
+       "min_s": 0.4827334869187325,
+       "max_s": 0.5118000770453364,
+       "p25_s": 0.48691510292701423,
+       "p75_s": 0.504308121977374,
+       "mean_s": 0.49598021497949957,
+       "std_s": 0.010776314459948798,
+       "reps": 5,
+       "all_s": [
+        0.4827334869187325,
+        0.48691510292701423,
+        0.4941442860290408,
+        0.504308121977374,
+        0.5118000770453364
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.778249651352761e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 8289.076927137185
+     },
+     {
+      "batch": 16384,
+      "timing": {
+       "median_s": 1.8605309179984033,
+       "min_s": 1.8507879150565714,
+       "max_s": 1.8944309450453147,
+       "p25_s": 1.8576697279931977,
+       "p75_s": 1.8827361860312521,
+       "mean_s": 1.8692311384249478,
+       "std_s": 0.01653438296042585,
+       "reps": 5,
+       "all_s": [
+        1.8507879150565714,
+        1.8576697279931977,
+        1.8605309179984033,
+        1.8827361860312521,
+        1.8944309450453147
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 6.305644834952101e-09,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 8806.088542525398
+     }
+    ],
+    "cpu_sparse_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.019630350987426937,
+       "min_s": 0.01957632997073233,
+       "max_s": 0.01976694306358695,
+       "p25_s": 0.019583199988119304,
+       "p75_s": 0.019636992015875876,
+       "mean_s": 0.01963876320514828,
+       "std_s": 6.854073018874747e-05,
+       "reps": 5,
+       "all_s": [
+        0.01957632997073233,
+        0.019583199988119304,
+        0.019630350987426937,
+        0.019636992015875876,
+        0.01976694306358695
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 1.4237850849186532e-09,
+      "max_dV_pu": 1.2878587085651816e-14,
+      "verdict": "ok",
+      "throughput": 50.94152420608735
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 0.03423415299039334,
+       "min_s": 0.03410811105277389,
+       "max_s": 0.03430505399592221,
+       "p25_s": 0.03415826091077179,
+       "p75_s": 0.03426248289179057,
+       "mean_s": 0.03421361236833036,
+       "std_s": 7.122657918594569e-05,
+       "reps": 5,
+       "all_s": [
+        0.03410811105277389,
+        0.03415826091077179,
+        0.03423415299039334,
+        0.03426248289179057,
+        0.03430505399592221
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 1.423762754895346e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 116.84238255062029
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 0.04601930407807231,
+       "min_s": 0.04585690994281322,
+       "max_s": 0.046057883999310434,
+       "p25_s": 0.046016912907361984,
+       "p75_s": 0.04602703300770372,
+       "mean_s": 0.04599560878705233,
+       "std_s": 7.087790270217444e-05,
+       "reps": 5,
+       "all_s": [
+        0.04585690994281322,
+        0.046016912907361984,
+        0.04601930407807231,
+        0.04602703300770372,
+        0.046057883999310434
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 2.09972845296203e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 347.6801816223862
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 0.09422541595995426,
+       "min_s": 0.09370178601238877,
+       "max_s": 0.09443646890576929,
+       "p25_s": 0.09400124091189355,
+       "p75_s": 0.09439422900322825,
+       "mean_s": 0.09415182815864682,
+       "std_s": 0.00027217940450033204,
+       "reps": 5,
+       "all_s": [
+        0.09370178601238877,
+        0.09400124091189355,
+        0.09422541595995426,
+        0.09439422900322825,
+        0.09443646890576929
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.022062696450486e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 679.2222602360275
+     },
+     {
+      "batch": 256,
+      "timing": {
+       "median_s": 0.3719424040755257,
+       "min_s": 0.3300162850646302,
+       "max_s": 0.5693703880533576,
+       "p25_s": 0.335016923956573,
+       "p75_s": 0.3951224200427532,
+       "mean_s": 0.4002936842385679,
+       "std_s": 0.0878833739688075,
+       "reps": 5,
+       "all_s": [
+        0.3300162850646302,
+        0.335016923956573,
+        0.3719424040755257,
+        0.3951224200427532,
+        0.5693703880533576
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.213153990453426e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 688.2786076416747
+     },
+     {
+      "batch": 1024,
+      "timing": {
+       "median_s": 1.394739284995012,
+       "min_s": 1.2273794100619853,
+       "max_s": 1.5463826580671594,
+       "p25_s": 1.3918999639572576,
+       "p75_s": 1.5415396119933575,
+       "mean_s": 1.4203881858149543,
+       "std_s": 0.11770650578342494,
+       "reps": 5,
+       "all_s": [
+        1.2273794100619853,
+        1.3918999639572576,
+        1.394739284995012,
+        1.5415396119933575,
+        1.5463826580671594
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.7191239345069795e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 734.187393311763
+     },
+     {
+      "batch": 4096,
+      "timing": {
+       "median_s": 5.3614610800286755,
+       "min_s": 5.186349735013209,
+       "max_s": 5.575624320073985,
+       "p25_s": 5.259339037002064,
+       "p75_s": 5.432066043955274,
+       "mean_s": 5.362968043214641,
+       "std_s": 0.13559682478038806,
+       "reps": 5,
+       "all_s": [
+        5.186349735013209,
+        5.259339037002064,
+        5.3614610800286755,
+        5.432066043955274,
+        5.575624320073985
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.778250006439088e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 763.9708540005092
+     },
+     {
+      "batch": 16384,
+      "timing": {
+       "median_s": 21.362316885963082,
+       "min_s": 20.46007794898469,
+       "max_s": 22.02935649792198,
+       "p25_s": 20.946011502062902,
+       "p75_s": 21.425335366046056,
+       "mean_s": 21.244619640195744,
+       "std_s": 0.5228757474797112,
+       "reps": 5,
+       "all_s": [
+        20.46007794898469,
+        20.946011502062902,
+        21.362316885963082,
+        21.425335366046056,
+        22.02935649792198
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 6.305644990290194e-09,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "verdict": "ok",
+      "throughput": 766.9580077601847
+     }
+    ],
+    "gpu_dense_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.04123363096732646,
+       "min_s": 0.04112634900957346,
+       "max_s": 0.04141990398056805,
+       "p25_s": 0.04114847898017615,
+       "p75_s": 0.04124832106754184,
+       "mean_s": 0.04123533680103719,
+       "std_s": 0.00010359456022220426,
+       "reps": 5,
+       "all_s": [
+        0.04112634900957346,
+        0.04114847898017615,
+        0.04123363096732646,
+        0.04124832106754184,
+        0.04141990398056805
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 1.4237374537953105e-09,
+      "max_dV_pu": 1.0103029524088925e-14,
+      "verdict": "ok",
+      "throughput": 24.252048062233477
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 0.06752598704770207,
+       "min_s": 0.06742309499531984,
+       "max_s": 0.06770524999592453,
+       "p25_s": 0.06746998592279851,
+       "p75_s": 0.06754276703577489,
+       "mean_s": 0.06753341699950396,
+       "std_s": 9.577437248046143e-05,
+       "reps": 5,
+       "all_s": [
+        0.06742309499531984,
+        0.06746998592279851,
+        0.06752598704770207,
+        0.06754276703577489,
+        0.06770524999592453
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 1.4237131941962182e-09,
+      "max_dV_pu": 1.0658141036401503e-14,
+      "verdict": "ok",
+      "throughput": 59.236453621541266
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 0.0678206019802019,
+       "min_s": 0.06757156806997955,
+       "max_s": 0.06784447201061994,
+       "p25_s": 0.06778876099269837,
+       "p75_s": 0.06782253202982247,
+       "mean_s": 0.06776958701666444,
+       "std_s": 0.00010059086225486978,
+       "reps": 5,
+       "all_s": [
+        0.06757156806997955,
+        0.06778876099269837,
+        0.0678206019802019,
+        0.06782253202982247,
+        0.06784447201061994
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 2.0997057965498014e-09,
+      "max_dV_pu": 1.1657341758564144e-14,
+      "verdict": "ok",
+      "throughput": 235.91651405085875
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 0.06822879798710346,
+       "min_s": 0.06820494902785867,
+       "max_s": 0.06835072103422135,
+       "p25_s": 0.0682253489503637,
+       "p75_s": 0.06826240895316005,
+       "mean_s": 0.06825444519054144,
+       "std_s": 5.1549393688603185e-05,
+       "reps": 5,
+       "all_s": [
+        0.06820494902785867,
+        0.0682253489503637,
+        0.06822879798710346,
+        0.06826240895316005,
+        0.06835072103422135
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.022063046252593e-09,
+      "max_dV_pu": 1.1657341758564144e-14,
+      "verdict": "ok",
+      "throughput": 938.0203358132912
+     },
+     {
+      "batch": 256,
+      "timing": {
+       "median_s": 0.07020649395417422,
+       "min_s": 0.07013476197607815,
+       "max_s": 0.07034435705281794,
+       "p25_s": 0.0701552830869332,
+       "p75_s": 0.07026911503635347,
+       "mean_s": 0.0702220022212714,
+       "std_s": 7.680251527692867e-05,
+       "reps": 5,
+       "all_s": [
+        0.07013476197607815,
+        0.0701552830869332,
+        0.07020649395417422,
+        0.07026911503635347,
+        0.07034435705281794
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.213153880169579e-09,
+      "max_dV_pu": 1.1657341758564144e-14,
+      "verdict": "ok",
+      "throughput": 3646.386332396808
+     },
+     {
+      "batch": 1024,
+      "timing": {
+       "median_s": 0.07909839192871004,
+       "min_s": 0.07902934995945543,
+       "max_s": 0.07923767401371151,
+       "p25_s": 0.07903029001317918,
+       "p75_s": 0.07919665297959,
+       "mean_s": 0.07911847177892924,
+       "std_s": 8.537376156149068e-05,
+       "reps": 5,
+       "all_s": [
+        0.07902934995945543,
+        0.07903029001317918,
+        0.07909839192871004,
+        0.07919665297959,
+        0.07923767401371151
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.719124342741584e-09,
+      "max_dV_pu": 1.1657341758564144e-14,
+      "verdict": "ok",
+      "throughput": 12945.901617354153
+     },
+     {
+      "batch": 4096,
+      "timing": {
+       "median_s": 0.13986897899303585,
+       "min_s": 0.139603913994506,
+       "max_s": 0.14001724100671709,
+       "p25_s": 0.13972362608183175,
+       "p75_s": 0.13990354794077575,
+       "mean_s": 0.13982346160337328,
+       "std_s": 0.0001443637040819656,
+       "reps": 5,
+       "all_s": [
+        0.139603913994506,
+        0.13972362608183175,
+        0.13986897899303585,
+        0.13990354794077575,
+        0.14001724100671709
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 5.778249626969467e-09,
+      "max_dV_pu": 1.1657341758564144e-14,
+      "verdict": "ok",
+      "throughput": 29284.549222340014
+     },
+     {
+      "batch": 16384,
+      "timing": {
+       "median_s": 0.42042173899244517,
+       "min_s": 0.41988520009908825,
+       "max_s": 0.42074148496612906,
+       "p25_s": 0.42014030495192856,
+       "p75_s": 0.42054964206181467,
+       "mean_s": 0.42034767421428115,
+       "std_s": 0.00030273679302818154,
+       "reps": 5,
+       "all_s": [
+        0.41988520009908825,
+        0.42014030495192856,
+        0.42042173899244517,
+        0.42054964206181467,
+        0.42074148496612906
+       ]
+      },
+      "iterations": 8,
+      "converged": true,
+      "residual_v": 6.305644967965409e-09,
+      "max_dV_pu": 1.1657341758564144e-14,
+      "verdict": "ok",
+      "throughput": 38970.392062182145
+     }
+    ],
+    "cpu_pool_dense_c128": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 9.992007221626409e-16,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.019907364039681852,
+       "min_s": 0.019787312019616365,
+       "max_s": 0.02032405196223408,
+       "p25_s": 0.01978737104218453,
+       "p75_s": 0.020126727991737425,
+       "mean_s": 0.01998656541109085,
+       "std_s": 0.00020937807386027616,
+       "reps": 5,
+       "all_s": [
+        0.019787312019616365,
+        0.01978737104218453,
+        0.019907364039681852,
+        0.020126727991737425,
+        0.02032405196223408
+       ]
+      },
+      "throughput": 50.23266756998439,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 1,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.992007221626409e-16,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.4432899320127035e-15,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.02043373405467719,
+       "min_s": 0.019964844919741154,
+       "max_s": 0.02302785194478929,
+       "p25_s": 0.020127378054894507,
+       "p75_s": 0.022882919991388917,
+       "mean_s": 0.02128734579309821,
+       "std_s": 0.001371014616989861,
+       "reps": 5,
+       "all_s": [
+        0.019964844919741154,
+        0.020127378054894507,
+        0.02043373405467719,
+        0.022882919991388917,
+        0.02302785194478929
+       ]
+      },
+      "throughput": 195.75472546019645,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 4,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.4432899320127035e-15,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.0668549377257364e-16,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.03632769302930683,
+       "min_s": 0.03587704396340996,
+       "max_s": 0.04426349198911339,
+       "p25_s": 0.03597068495582789,
+       "p75_s": 0.03843081102240831,
+       "mean_s": 0.03817394499201328,
+       "std_s": 0.0031839383856949845,
+       "reps": 5,
+       "all_s": [
+        0.03587704396340996,
+        0.03597068495582789,
+        0.03632769302930683,
+        0.03843081102240831,
+        0.04426349198911339
+       ]
+      },
+      "throughput": 440.4353446581988,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.0668549377257364e-16,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.041325396043248475,
+       "min_s": 0.03956087294500321,
+       "max_s": 0.04169119300786406,
+       "p25_s": 0.040127604035660625,
+       "p75_s": 0.04142470797523856,
+       "mean_s": 0.04082595480140298,
+       "std_s": 0.0008300252967903031,
+       "reps": 5,
+       "all_s": [
+        0.03956087294500321,
+        0.040127604035660625,
+        0.041325396043248475,
+        0.04142470797523856,
+        0.04169119300786406
+       ]
+      },
+      "throughput": 1548.684492533883,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.05172493099234998,
+       "min_s": 0.051466037053614855,
+       "max_s": 0.052475425065495074,
+       "p25_s": 0.051482757087796926,
+       "p75_s": 0.0522037100745365,
+       "mean_s": 0.05187057205475867,
+       "std_s": 0.0004030107789198407,
+       "reps": 5,
+       "all_s": [
+        0.051466037053614855,
+        0.051482757087796926,
+        0.05172493099234998,
+        0.0522037100745365,
+        0.052475425065495074
+       ]
+      },
+      "throughput": 4949.257448750621,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.09754421189427376,
+       "min_s": 0.09716226498130709,
+       "max_s": 0.09812780295033008,
+       "p25_s": 0.0974220490315929,
+       "p75_s": 0.09788873791694641,
+       "mean_s": 0.09762901335489005,
+       "std_s": 0.00034179744637356096,
+       "reps": 5,
+       "all_s": [
+        0.09716226498130709,
+        0.0974220490315929,
+        0.09754421189427376,
+        0.09788873791694641,
+        0.09812780295033008
+       ]
+      },
+      "throughput": 10497.803817512959,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4096,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.29494643898215145,
+       "min_s": 0.29354714311193675,
+       "max_s": 0.29643605707678944,
+       "p25_s": 0.29461432294920087,
+       "p75_s": 0.2954162380192429,
+       "mean_s": 0.2949920400278643,
+       "std_s": 0.0009484309060777368,
+       "reps": 5,
+       "all_s": [
+        0.29354714311193675,
+        0.29461432294920087,
+        0.29494643898215145,
+        0.2954162380192429,
+        0.29643605707678944
+       ]
+      },
+      "throughput": 13887.267173440488,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16384,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 8,
+      "timing": {
+       "median_s": 1.093684149091132,
+       "min_s": 1.0898599280044436,
+       "max_s": 1.1085010080132633,
+       "p25_s": 1.0935316560789943,
+       "p75_s": 1.1003620739793405,
+       "mean_s": 1.0971877630334348,
+       "std_s": 0.006594017847807652,
+       "reps": 5,
+       "all_s": [
+        1.0898599280044436,
+        1.0935316560789943,
+        1.093684149091132,
+        1.1003620739793405,
+        1.1085010080132633
+       ]
+      },
+      "throughput": 14980.559070564706,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     }
+    ],
+    "cpu_pool_sparse_c128": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.2878587085651816e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.02330276696011424,
+       "min_s": 0.02114508708473295,
+       "max_s": 0.02393564907833934,
+       "p25_s": 0.021565426024608314,
+       "p75_s": 0.02384368795901537,
+       "mean_s": 0.02275852342136204,
+       "std_s": 0.0011735472829045906,
+       "reps": 5,
+       "all_s": [
+        0.02114508708473295,
+        0.021565426024608314,
+        0.02330276696011424,
+        0.02384368795901537,
+        0.02393564907833934
+       ]
+      },
+      "throughput": 42.913358817501454,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 1,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.2878587085651816e-14,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.2878587085651816e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.024055261979810894,
+       "min_s": 0.021602705935947597,
+       "max_s": 0.02697917609475553,
+       "p25_s": 0.023947899928316474,
+       "p75_s": 0.02448605897370726,
+       "mean_s": 0.02421422058250755,
+       "std_s": 0.0017108523240220196,
+       "reps": 5,
+       "all_s": [
+        0.021602705935947597,
+        0.023947899928316474,
+        0.024055261979810894,
+        0.02448605897370726,
+        0.02697917609475553
+       ]
+      },
+      "throughput": 166.2837845356713,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 4,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.2878587085651816e-14,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.03903792297933251,
+       "min_s": 0.03850991290528327,
+       "max_s": 0.06035255396272987,
+       "p25_s": 0.03881868894677609,
+       "p75_s": 0.041397226974368095,
+       "mean_s": 0.04362326115369797,
+       "std_s": 0.0084270995797161,
+       "reps": 5,
+       "all_s": [
+        0.03850991290528327,
+        0.03881868894677609,
+        0.03903792297933251,
+        0.041397226974368095,
+        0.06035255396272987
+       ]
+      },
+      "throughput": 409.8578709853681,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3100631690576847e-14,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.04995406896341592,
+       "min_s": 0.046649345895275474,
+       "max_s": 0.05308728606905788,
+       "p25_s": 0.04844367899931967,
+       "p75_s": 0.04997078899759799,
+       "mean_s": 0.04962103378493339,
+       "std_s": 0.002119681072276594,
+       "reps": 5,
+       "all_s": [
+        0.046649345895275474,
+        0.04844367899931967,
+        0.04995406896341592,
+        0.04997078899759799,
+        0.05308728606905788
+       ]
+      },
+      "throughput": 1281.1769156756916,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3100631690576847e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.07795089401770383,
+       "min_s": 0.07704946701414883,
+       "max_s": 0.08323750307317823,
+       "p25_s": 0.07775058003608137,
+       "p75_s": 0.08001659205183387,
+       "mean_s": 0.07920100723858922,
+       "std_s": 0.0022474040438889456,
+       "reps": 5,
+       "all_s": [
+        0.07704946701414883,
+        0.07775058003608137,
+        0.07795089401770383,
+        0.08001659205183387,
+        0.08323750307317823
+       ]
+      },
+      "throughput": 3284.1188446390174,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3100631690576847e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.21057990798726678,
+       "min_s": 0.2022311199689284,
+       "max_s": 0.2267744040582329,
+       "p25_s": 0.20335324993357062,
+       "p75_s": 0.22354738495778292,
+       "mean_s": 0.21329721338115631,
+       "std_s": 0.010153080980227625,
+       "reps": 5,
+       "all_s": [
+        0.2022311199689284,
+        0.20335324993357062,
+        0.21057990798726678,
+        0.22354738495778292,
+        0.2267744040582329
+       ]
+      },
+      "throughput": 4862.76212098031,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3100631690576847e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4096,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 0.9792442061007023,
+       "min_s": 0.8866199759067968,
+       "max_s": 1.309616115060635,
+       "p25_s": 0.9131118449149653,
+       "p75_s": 1.1568260790081695,
+       "mean_s": 1.0490836441982538,
+       "std_s": 0.1607768151576959,
+       "reps": 5,
+       "all_s": [
+        0.8866199759067968,
+        0.9131118449149653,
+        0.9792442061007023,
+        1.1568260790081695,
+        1.309616115060635
+       ]
+      },
+      "throughput": 4182.817702144036,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3100631690576847e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16384,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3100631690576847e-14,
+      "iterations": 8,
+      "timing": {
+       "median_s": 3.707807778962888,
+       "min_s": 3.6246103879529983,
+       "max_s": 3.9880381010007113,
+       "p25_s": 3.680111118941568,
+       "p75_s": 3.816196669009514,
+       "mean_s": 3.7633528111735357,
+       "std_s": 0.12848333954699442,
+       "reps": 5,
+       "all_s": [
+        3.6246103879529983,
+        3.680111118941568,
+        3.707807778962888,
+        3.816196669009514,
+        3.9880381010007113
+       ]
+      },
+      "throughput": 4418.783544540373,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 8,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3100631690576847e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     }
+    ]
+   },
+   "loads_with_spectrum": 8,
+   "baselines": {
+    "opendss": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.001217062002979219,
+       "min_s": 0.001136510050855577,
+       "max_s": 0.0012910040095448494,
+       "p25_s": 0.001176786026917398,
+       "p75_s": 0.0012540330062620342,
+       "mean_s": 0.001214858687793215,
+       "std_s": 6.309113390552489e-05,
+       "reps": 3,
+       "all_s": [
+        0.001136510050855577,
+        0.001217062002979219,
+        0.0012910040095448494
+       ]
+      },
+      "throughput": 821.6508259662386,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 1,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.118586720948172e-05,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.001206532004289329,
+       "min_s": 0.001183721935376525,
+       "max_s": 0.0013511539436876774,
+       "p25_s": 0.001195126969832927,
+       "p75_s": 0.0012788429739885032,
+       "mean_s": 0.0012471359611178439,
+       "std_s": 7.413897011412811e-05,
+       "reps": 3,
+       "all_s": [
+        0.001183721935376525,
+        0.001206532004289329,
+        0.0013511539436876774
+       ]
+      },
+      "throughput": 3315.287108654924,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 4,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.118586720948172e-05,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.004040164058096707,
+       "min_s": 0.004013392957858741,
+       "max_s": 0.004121665027923882,
+       "p25_s": 0.004026778507977724,
+       "p75_s": 0.0040809145430102944,
+       "mean_s": 0.004058407347959776,
+       "std_s": 4.604579972026892e-05,
+       "reps": 3,
+       "all_s": [
+        0.004013392957858741,
+        0.004040164058096707,
+        0.004121665027923882
+       ]
+      },
+      "throughput": 3960.235220630493,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.1932313991267156e-05,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.015103374025784433,
+       "min_s": 0.014988273032940924,
+       "max_s": 0.0151226349407807,
+       "p25_s": 0.015045823529362679,
+       "p75_s": 0.015113004483282566,
+       "mean_s": 0.015071427333168685,
+       "std_s": 5.9322418170535626e-05,
+       "reps": 3,
+       "all_s": [
+        0.014988273032940924,
+        0.015103374025784433,
+        0.0151226349407807
+       ]
+      },
+      "throughput": 4237.463754174359,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.202151612983345e-05,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.031028814031742513,
+       "min_s": 0.030696148052811623,
+       "max_s": 0.03135164000559598,
+       "p25_s": 0.030862481042277068,
+       "p75_s": 0.031190227018669248,
+       "mean_s": 0.03102553403005004,
+       "std_s": 0.0002676135196504967,
+       "reps": 3,
+       "all_s": [
+        0.030696148052811623,
+        0.031028814031742513,
+        0.03135164000559598
+       ]
+      },
+      "throughput": 8250.39589776495,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.202151612983345e-05,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.15739438100717962,
+       "min_s": 0.1417025150731206,
+       "max_s": 0.18747944792266935,
+       "p25_s": 0.1495484480401501,
+       "p75_s": 0.17243691446492448,
+       "mean_s": 0.1621921146676565,
+       "std_s": 0.018993781113576427,
+       "reps": 3,
+       "all_s": [
+        0.1417025150731206,
+        0.15739438100717962,
+        0.18747944792266935
+       ]
+      },
+      "throughput": 6505.950170821471,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.202151612983345e-05,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 4096,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.5142099059885368,
+       "min_s": 0.5001682220026851,
+       "max_s": 0.5339816160267219,
+       "p25_s": 0.5071890639956109,
+       "p75_s": 0.5240957610076293,
+       "mean_s": 0.516119914672648,
+       "std_s": 0.013870171922419882,
+       "reps": 3,
+       "all_s": [
+        0.5001682220026851,
+        0.5142099059885368,
+        0.5339816160267219
+       ]
+      },
+      "throughput": 7965.6186166341795,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.202151612983345e-05,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 16384,
+      "status": "ok",
+      "timing": {
+       "median_s": 2.0763888410292566,
+       "min_s": 2.0637917420826852,
+       "max_s": 2.198756675934419,
+       "p25_s": 2.070090291555971,
+       "p75_s": 2.137572758481838,
+       "mean_s": 2.112979086348787,
+       "std_s": 0.06087154716728378,
+       "reps": 3,
+       "all_s": [
+        2.0637917420826852,
+        2.0763888410292566,
+        2.198756675934419
+       ]
+      },
+      "throughput": 7890.622255453138,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 9,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 0,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 3.202151612983345e-05,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     }
+    ]
+   },
+   "summary": {
+    "peak_throughput": {
+     "cpu_dense_c128": 8806.088542525398,
+     "cpu_sparse_c128": 766.9580077601847,
+     "gpu_dense_c128": 38970.392062182145,
+     "cpu_pool_dense_c128": 14980.559070564706,
+     "cpu_pool_sparse_c128": 4862.76212098031
+    },
+    "gpu_crossover_batch": {
+     "c128": 1024
+    }
+   }
+  },
+  "kerber": {
+   "label": "Kerber Vorstadtnetz",
+   "rows": 294,
+   "n_bus": 294,
+   "n_loads": 146,
+   "three_phase": false,
+   "guard_scenarios": 64,
+   "guard_tol_pu": {
+    "c128": 1e-06,
+    "c128m": 1e-06,
+    "c64": 1e-06
+   },
+   "tol_volts_used": null,
+   "series": {
+    "cpu_dense_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.08589015994220972,
+       "min_s": 0.08519543905276805,
+       "max_s": 0.08674472605343908,
+       "p25_s": 0.08546099299564958,
+       "p75_s": 0.08634476910810918,
+       "mean_s": 0.08592721743043512,
+       "std_s": 0.0005651385365129461,
+       "reps": 5,
+       "all_s": [
+        0.08519543905276805,
+        0.08546099299564958,
+        0.08589015994220972,
+        0.08634476910810918,
+        0.08674472605343908
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 8.377985829518126e-13,
+      "max_dV_pu": 1.865174681370263e-14,
+      "verdict": "ok",
+      "throughput": 11.642777247973916
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 0.2114208519924432,
+       "min_s": 0.21069470990914851,
+       "max_s": 0.21297101001255214,
+       "p25_s": 0.21101006504613906,
+       "p75_s": 0.21250853198580444,
+       "mean_s": 0.21172103378921747,
+       "std_s": 0.00087538795286189,
+       "reps": 5,
+       "all_s": [
+        0.21069470990914851,
+        0.21101006504613906,
+        0.2114208519924432,
+        0.21250853198580444,
+        0.21297101001255214
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.018282320102606e-13,
+      "max_dV_pu": 1.9317880628477724e-14,
+      "verdict": "ok",
+      "throughput": 18.91960968988514
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 0.5698050919454545,
+       "min_s": 0.5673456330550835,
+       "max_s": 0.5739129000576213,
+       "p25_s": 0.5692505880724639,
+       "p75_s": 0.5711113499710336,
+       "mean_s": 0.5702851126203313,
+       "std_s": 0.002181041533433691,
+       "reps": 5,
+       "all_s": [
+        0.5673456330550835,
+        0.5692505880724639,
+        0.5698050919454545,
+        0.5711113499710336,
+        0.5739129000576213
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.018282320102606e-13,
+      "max_dV_pu": 1.9317880628477724e-14,
+      "verdict": "ok",
+      "throughput": 28.079777148659854
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 2.060770973097533,
+       "min_s": 2.036760643008165,
+       "max_s": 2.071398011990823,
+       "p25_s": 2.0415622380096465,
+       "p75_s": 2.062120796996169,
+       "mean_s": 2.0545225326204672,
+       "std_s": 0.013153040659076996,
+       "reps": 5,
+       "all_s": [
+        2.036760643008165,
+        2.0415622380096465,
+        2.060770973097533,
+        2.062120796996169,
+        2.071398011990823
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.110679403290315e-13,
+      "max_dV_pu": 1.942890293094024e-14,
+      "verdict": "ok",
+      "throughput": 31.056338057693996
+     },
+     {
+      "batch": 256,
+      "timing": {
+       "median_s": 8.085299005964771,
+       "min_s": 8.069133950979449,
+       "max_s": 8.21900025906507,
+       "p25_s": 8.071296996087767,
+       "p75_s": 8.117927265935577,
+       "mean_s": 8.112531495606527,
+       "std_s": 0.05601776727458009,
+       "reps": 5,
+       "all_s": [
+        8.069133950979449,
+        8.071296996087767,
+        8.085299005964771,
+        8.117927265935577,
+        8.21900025906507
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.374550525904006e-13,
+      "max_dV_pu": 1.942890293094024e-14,
+      "verdict": "ok",
+      "throughput": 31.662403556274295
+     },
+     {
+      "batch": 1024,
+      "timing": {
+       "median_s": 32.4192249890184,
+       "min_s": 32.07859594607726,
+       "max_s": 32.58262266195379,
+       "p25_s": 32.35028798307758,
+       "p75_s": 32.494788112002425,
+       "mean_s": 32.38510393842589,
+       "std_s": 0.17167865929765477,
+       "reps": 5,
+       "all_s": [
+        32.07859594607726,
+        32.35028798307758,
+        32.4192249890184,
+        32.494788112002425,
+        32.58262266195379
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.434286749230803e-13,
+      "max_dV_pu": 1.942890293094024e-14,
+      "verdict": "ok",
+      "throughput": 31.58619616437058
+     },
+     {
+      "batch": 4096,
+      "skipped": "the scenario-dependent [B, H, N, N] admittance would be 73.6 GB, over the 24 GB budget for this device"
+     }
+    ],
+    "cpu_sparse_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.06351928098592907,
+       "min_s": 0.06325082608964294,
+       "max_s": 0.06423520401585847,
+       "p25_s": 0.06351911008823663,
+       "p75_s": 0.06399930897168815,
+       "mean_s": 0.06370474603027106,
+       "std_s": 0.0003586235628280337,
+       "reps": 5,
+       "all_s": [
+        0.06325082608964294,
+        0.06351911008823663,
+        0.06351928098592907,
+        0.06399930897168815,
+        0.06423520401585847
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 8.387995889437345e-13,
+      "max_dV_pu": 5.762057497804562e-14,
+      "verdict": "ok",
+      "throughput": 15.743251253450463
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 0.12713734398130327,
+       "min_s": 0.12581889901775867,
+       "max_s": 0.3198477360419929,
+       "p25_s": 0.1264581410214305,
+       "p75_s": 0.12777747493237257,
+       "mean_s": 0.1654079189989716,
+       "std_s": 0.07722269100295188,
+       "reps": 5,
+       "all_s": [
+        0.12581889901775867,
+        0.1264581410214305,
+        0.12713734398130327,
+        0.12777747493237257,
+        0.3198477360419929
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.049488645475639e-13,
+      "max_dV_pu": 1.0047518372857667e-13,
+      "verdict": "ok",
+      "throughput": 31.46203841247649
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 0.23976025998126715,
+       "min_s": 0.23810821899678558,
+       "max_s": 0.2426874329103157,
+       "p25_s": 0.23900850606150925,
+       "p75_s": 0.24254671100061387,
+       "mean_s": 0.2404222257900983,
+       "std_s": 0.0018674062412739082,
+       "reps": 5,
+       "all_s": [
+        0.23810821899678558,
+        0.23900850606150925,
+        0.23976025998126715,
+        0.24254671100061387,
+        0.2426874329103157
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.049488645475639e-13,
+      "max_dV_pu": 1.0091927293842673e-13,
+      "verdict": "ok",
+      "throughput": 66.73332770514223
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 0.7324199581053108,
+       "min_s": 0.7277047210372984,
+       "max_s": 0.7429889239137992,
+       "p25_s": 0.731772506958805,
+       "p75_s": 0.7335484069772065,
+       "mean_s": 0.733686903398484,
+       "std_s": 0.005051798428929661,
+       "reps": 5,
+       "all_s": [
+        0.7277047210372984,
+        0.731772506958805,
+        0.7324199581053108,
+        0.7335484069772065,
+        0.7429889239137992
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.049488645475639e-13,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "verdict": "ok",
+      "throughput": 87.38156202837632
+     },
+     {
+      "batch": 256,
+      "timing": {
+       "median_s": 2.71283105306793,
+       "min_s": 2.7036916939541698,
+       "max_s": 2.7197009010706097,
+       "p25_s": 2.7054220270365477,
+       "p75_s": 2.7185315300012007,
+       "mean_s": 2.7120354410260914,
+       "std_s": 0.006556627303500725,
+       "reps": 5,
+       "all_s": [
+        2.7036916939541698,
+        2.7054220270365477,
+        2.71283105306793,
+        2.7185315300012007,
+        2.7197009010706097
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.383770519288351e-13,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "verdict": "ok",
+      "throughput": 94.36636303262992
+     },
+     {
+      "batch": 1024,
+      "timing": {
+       "median_s": 10.736197169986553,
+       "min_s": 10.673593697953038,
+       "max_s": 10.870257274946198,
+       "p25_s": 10.695149336010218,
+       "p75_s": 10.777784937992692,
+       "mean_s": 10.75059648337774,
+       "std_s": 0.06966932243625637,
+       "reps": 5,
+       "all_s": [
+        10.673593697953038,
+        10.695149336010218,
+        10.736197169986553,
+        10.777784937992692,
+        10.870257274946198
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.413593476873565e-13,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "verdict": "ok",
+      "throughput": 95.37827815445033
+     },
+     {
+      "batch": 4096,
+      "skipped": "the scenario-dependent [B, H, N, N] admittance would be 73.6 GB, over the 24 GB budget for this device"
+     }
+    ],
+    "gpu_dense_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.11917306506074965,
+       "min_s": 0.11908208299428225,
+       "max_s": 0.11929128703195602,
+       "p25_s": 0.11914399405941367,
+       "p75_s": 0.11919282504823059,
+       "mean_s": 0.11917665083892644,
+       "std_s": 6.844773494113015e-05,
+       "reps": 5,
+       "all_s": [
+        0.11908208299428225,
+        0.11914399405941367,
+        0.11917306506074965,
+        0.11919282504823059,
+        0.11929128703195602
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 8.421678078809046e-13,
+      "max_dV_pu": 4.574118861455645e-14,
+      "verdict": "ok",
+      "throughput": 8.391157846701686
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 0.1936732840258628,
+       "min_s": 0.1935649620136246,
+       "max_s": 0.19384389696642756,
+       "p25_s": 0.19357126206159592,
+       "p75_s": 0.19367773400153965,
+       "mean_s": 0.1936662278138101,
+       "std_s": 0.00010101659928667359,
+       "reps": 5,
+       "all_s": [
+        0.1935649620136246,
+        0.19357126206159592,
+        0.1936732840258628,
+        0.19367773400153965,
+        0.19384389696642756
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.032316694705199e-13,
+      "max_dV_pu": 5.540012892879531e-14,
+      "verdict": "ok",
+      "throughput": 20.653339050448725
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 0.2176757559645921,
+       "min_s": 0.21710008499212563,
+       "max_s": 0.21935018501244485,
+       "p25_s": 0.21759222401306033,
+       "p75_s": 0.21794567094184458,
+       "mean_s": 0.2179327841848135,
+       "std_s": 0.0007595556407208867,
+       "reps": 5,
+       "all_s": [
+        0.21710008499212563,
+        0.21759222401306033,
+        0.2176757559645921,
+        0.21794567094184458,
+        0.21935018501244485
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.084086056874882e-13,
+      "max_dV_pu": 5.739853037312059e-14,
+      "verdict": "ok",
+      "throughput": 73.5038219074917
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 0.35780698899179697,
+       "min_s": 0.3568999230628833,
+       "max_s": 0.3596123100724071,
+       "p25_s": 0.35751314309891313,
+       "p75_s": 0.3579107109690085,
+       "mean_s": 0.3579486152390018,
+       "std_s": 0.0009031906212230226,
+       "reps": 5,
+       "all_s": [
+        0.3568999230628833,
+        0.35751314309891313,
+        0.35780698899179697,
+        0.3579107109690085,
+        0.3596123100724071
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.076737043619877e-13,
+      "max_dV_pu": 5.129230373768223e-14,
+      "verdict": "ok",
+      "throughput": 178.86738372644604
+     },
+     {
+      "batch": 256,
+      "timing": {
+       "median_s": 1.0600514620309696,
+       "min_s": 1.059787406004034,
+       "max_s": 1.0630195739213377,
+       "p25_s": 1.0599430989241228,
+       "p75_s": 1.0607052219565958,
+       "mean_s": 1.060701352567412,
+       "std_s": 0.0012005640204170056,
+       "reps": 5,
+       "all_s": [
+        1.059787406004034,
+        1.0599430989241228,
+        1.0600514620309696,
+        1.0607052219565958,
+        1.0630195739213377
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.399808748070635e-13,
+      "max_dV_pu": 5.517808432387028e-14,
+      "verdict": "ok",
+      "throughput": 241.49770946924173
+     },
+     {
+      "batch": 1024,
+      "skipped": "the scenario-dependent [B, H, N, N] admittance would be 18.4 GB, over the 6 GB budget for this device"
+     }
+    ],
+    "cpu_pool_dense_c128": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.865174681370263e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.09662197798024863,
+       "min_s": 0.09203129797242582,
+       "max_s": 0.0989272790029645,
+       "p25_s": 0.09207665803842247,
+       "p75_s": 0.0977829679613933,
+       "mean_s": 0.09548803619109095,
+       "std_s": 0.0028971526346897596,
+       "reps": 5,
+       "all_s": [
+        0.09203129797242582,
+        0.09207665803842247,
+        0.09662197798024863,
+        0.0977829679613933,
+        0.0989272790029645
+       ]
+      },
+      "throughput": 10.349612178343307,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 1,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.865174681370263e-14,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.8984813721090177e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.10377905401401222,
+       "min_s": 0.10218468599487096,
+       "max_s": 0.10512453806586564,
+       "p25_s": 0.10368441208265722,
+       "p75_s": 0.10418105102144182,
+       "mean_s": 0.10379074823576957,
+       "std_s": 0.0009510217273325268,
+       "reps": 5,
+       "all_s": [
+        0.10218468599487096,
+        0.10368441208265722,
+        0.10377905401401222,
+        0.10418105102144182,
+        0.10512453806586564
+       ]
+      },
+      "throughput": 38.54342321775183,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 4,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.8984813721090177e-14,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.942890293094024e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.2021855729399249,
+       "min_s": 0.20111845491919667,
+       "max_s": 0.22270150401163846,
+       "p25_s": 0.2020866919774562,
+       "p75_s": 0.20330627402290702,
+       "mean_s": 0.20627969957422465,
+       "std_s": 0.008240128063121204,
+       "reps": 5,
+       "all_s": [
+        0.20111845491919667,
+        0.2020866919774562,
+        0.2021855729399249,
+        0.20330627402290702,
+        0.22270150401163846
+       ]
+      },
+      "throughput": 79.13522101180808,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.942890293094024e-14,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.942890293094024e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.4630490980343893,
+       "min_s": 0.4496965639991686,
+       "max_s": 0.4912627040175721,
+       "p25_s": 0.45653621410019696,
+       "p75_s": 0.4728655309882015,
+       "mean_s": 0.46668202222790567,
+       "std_s": 0.014471261519534389,
+       "reps": 5,
+       "all_s": [
+        0.4496965639991686,
+        0.45653621410019696,
+        0.4630490980343893,
+        0.4728655309882015,
+        0.4912627040175721
+       ]
+      },
+      "throughput": 138.21428498981095,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.942890293094024e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.942890293094024e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 1.5032340709585696,
+       "min_s": 1.4554883809760213,
+       "max_s": 1.5463086160598323,
+       "p25_s": 1.5028093530563638,
+       "p75_s": 1.5052360559348017,
+       "mean_s": 1.5026152953971177,
+       "std_s": 0.028765747898341142,
+       "reps": 5,
+       "all_s": [
+        1.4554883809760213,
+        1.5028093530563638,
+        1.5032340709585696,
+        1.5052360559348017,
+        1.5463086160598323
+       ]
+      },
+      "throughput": 170.29949290382706,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.942890293094024e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.942890293094024e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 5.742430986021645,
+       "min_s": 5.718815710977651,
+       "max_s": 6.277311053010635,
+       "p25_s": 5.7296081150416285,
+       "p75_s": 6.202032175031491,
+       "mean_s": 5.93403960801661,
+       "std_s": 0.25079183643928155,
+       "reps": 5,
+       "all_s": [
+        5.718815710977651,
+        5.7296081150416285,
+        5.742430986021645,
+        6.202032175031491,
+        6.277311053010635
+       ]
+      },
+      "throughput": 178.3216903246454,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.942890293094024e-14,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4096,
+      "status": "skipped_memory_budget",
+      "estimated_worker_bytes": 9205088256.0,
+      "budget_bytes": 8000000000.0
+     }
+    ],
+    "cpu_pool_sparse_c128": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 5.762057497804562e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.07792867592070252,
+       "min_s": 0.07273894199170172,
+       "max_s": 0.09249712794553488,
+       "p25_s": 0.07771769096143544,
+       "p75_s": 0.07793405500706285,
+       "mean_s": 0.07976329836528748,
+       "std_s": 0.00666916004711833,
+       "reps": 5,
+       "all_s": [
+        0.07273894199170172,
+        0.07771769096143544,
+        0.07792867592070252,
+        0.07793405500706285,
+        0.09249712794553488
+       ]
+      },
+      "throughput": 12.83224677161928,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 1,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 5.762057497804562e-14,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 9.947598300641403e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.08381213108077645,
+       "min_s": 0.08277110301423818,
+       "max_s": 0.09743529802653939,
+       "p25_s": 0.08344545506406575,
+       "p75_s": 0.08498858194798231,
+       "mean_s": 0.08649051382672042,
+       "std_s": 0.005519496976043682,
+       "reps": 5,
+       "all_s": [
+        0.08277110301423818,
+        0.08344545506406575,
+        0.08381213108077645,
+        0.08498858194798231,
+        0.09743529802653939
+       ]
+      },
+      "throughput": 47.72578800251338,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 4,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.947598300641403e-14,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.0091927293842673e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.15387601498514414,
+       "min_s": 0.1523174069589004,
+       "max_s": 0.15529729006811976,
+       "p25_s": 0.15382311400026083,
+       "p75_s": 0.1550831370986998,
+       "mean_s": 0.15407939262222498,
+       "std_s": 0.001067933690438932,
+       "reps": 5,
+       "all_s": [
+        0.1523174069589004,
+        0.15382311400026083,
+        0.15387601498514414,
+        0.1550831370986998,
+        0.15529729006811976
+       ]
+      },
+      "throughput": 103.97981778735763,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.0091927293842673e-13,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.2871660990640521,
+       "min_s": 0.2748548360541463,
+       "max_s": 0.2970075060147792,
+       "p25_s": 0.278043603990227,
+       "p75_s": 0.2922388999722898,
+       "mean_s": 0.2858621890190989,
+       "std_s": 0.008353116856225898,
+       "reps": 5,
+       "all_s": [
+        0.2748548360541463,
+        0.278043603990227,
+        0.2871660990640521,
+        0.2922388999722898,
+        0.2970075060147792
+       ]
+      },
+      "throughput": 222.86753279231914,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.1513012765362873e-13,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.8424120169365779,
+       "min_s": 0.814585932996124,
+       "max_s": 0.8916477179154754,
+       "p25_s": 0.8386570319999009,
+       "p75_s": 0.8604516870109364,
+       "mean_s": 0.8495508773718029,
+       "std_s": 0.025624824545908063,
+       "reps": 5,
+       "all_s": [
+        0.814585932996124,
+        0.8386570319999009,
+        0.8424120169365779,
+        0.8604516870109364,
+        0.8916477179154754
+       ]
+      },
+      "throughput": 303.8893022097919,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.1513012765362873e-13,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 2.8418034170754254,
+       "min_s": 2.728710508090444,
+       "max_s": 2.897137538995594,
+       "p25_s": 2.775223620934412,
+       "p75_s": 2.8793184550013393,
+       "mean_s": 2.824438708019443,
+       "std_s": 0.06353652938763406,
+       "reps": 5,
+       "all_s": [
+        2.728710508090444,
+        2.775223620934412,
+        2.8418034170754254,
+        2.8793184550013393,
+        2.897137538995594
+       ]
+      },
+      "throughput": 360.3345656659901,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.1513012765362873e-13,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4096,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.1513012765362873e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 10.700580012984574,
+       "min_s": 10.384262477979064,
+       "max_s": 10.83862474001944,
+       "p25_s": 10.552106094080955,
+       "p75_s": 10.835521874949336,
+       "mean_s": 10.662219040002674,
+       "std_s": 0.17436118781346835,
+       "reps": 5,
+       "all_s": [
+        10.384262477979064,
+        10.552106094080955,
+        10.700580012984574,
+        10.835521874949336,
+        10.83862474001944
+       ]
+      },
+      "throughput": 382.7829888688021,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.1513012765362873e-13,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     }
+    ]
+   },
+   "loads_with_spectrum": 37,
+   "baselines": {
+    "opendss": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.008280811016447842,
+       "min_s": 0.0052690450102090836,
+       "max_s": 0.009806738002225757,
+       "p25_s": 0.006774928013328463,
+       "p75_s": 0.0090437745093368,
+       "mean_s": 0.007785531342960894,
+       "std_s": 0.0018853188746515907,
+       "reps": 3,
+       "all_s": [
+        0.0052690450102090836,
+        0.008280811016447842,
+        0.009806738002225757
+       ]
+      },
+      "throughput": 120.76111844766656,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 1,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 7.303845846415649e-06,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.006559428991749883,
+       "min_s": 0.004380590049549937,
+       "max_s": 0.006566459080204368,
+       "p25_s": 0.00547000952064991,
+       "p75_s": 0.006562944035977125,
+       "mean_s": 0.005835492707168062,
+       "std_s": 0.0010287755384903396,
+       "reps": 3,
+       "all_s": [
+        0.004380590049549937,
+        0.006559428991749883,
+        0.006566459080204368
+       ]
+      },
+      "throughput": 609.8091777548011,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 4,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.49286922393385e-06,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.01574717601761222,
+       "min_s": 0.015634194016456604,
+       "max_s": 0.015756756998598576,
+       "p25_s": 0.01569068501703441,
+       "p75_s": 0.015751966508105397,
+       "mean_s": 0.01571270901088913,
+       "std_s": 5.565609916993378e-05,
+       "reps": 3,
+       "all_s": [
+        0.015634194016456604,
+        0.01574717601761222,
+        0.015756756998598576
+       ]
+      },
+      "throughput": 1016.055195046084,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.49286922393385e-06,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.06249773607123643,
+       "min_s": 0.06236184400040656,
+       "max_s": 0.06279841100331396,
+       "p25_s": 0.0624297900358215,
+       "p75_s": 0.0626480735372752,
+       "mean_s": 0.06255266369165231,
+       "std_s": 0.00018241065323476441,
+       "reps": 3,
+       "all_s": [
+        0.06236184400040656,
+        0.06249773607123643,
+        0.06279841100331396
+       ]
+      },
+      "throughput": 1024.0370935524968,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.972289990944772e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.24743033002596349,
+       "min_s": 0.24739275698084384,
+       "max_s": 0.24985605396796018,
+       "p25_s": 0.24741154350340366,
+       "p75_s": 0.24864319199696183,
+       "mean_s": 0.2482263803249225,
+       "std_s": 0.001152455370224421,
+       "reps": 3,
+       "all_s": [
+        0.24739275698084384,
+        0.24743033002596349,
+        0.24985605396796018
+       ]
+      },
+      "throughput": 1034.6346786715164,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.972289990944772e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.5989011819474399,
+       "min_s": 0.5975633779307827,
+       "max_s": 0.6740501499734819,
+       "p25_s": 0.5982322799391113,
+       "p75_s": 0.6364756659604609,
+       "mean_s": 0.6235049032839015,
+       "std_s": 0.03574505935165165,
+       "reps": 3,
+       "all_s": [
+        0.5975633779307827,
+        0.5989011819474399,
+        0.6740501499734819
+       ]
+      },
+      "throughput": 1709.7979280492839,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.972289990944772e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 4096,
+      "status": "ok",
+      "timing": {
+       "median_s": 2.135503110010177,
+       "min_s": 2.1310512889176607,
+       "max_s": 2.1358885469380766,
+       "p25_s": 2.133277199463919,
+       "p75_s": 2.1356958284741268,
+       "mean_s": 2.1341476486219713,
+       "std_s": 0.0021951040932351334,
+       "reps": 3,
+       "all_s": [
+        2.1310512889176607,
+        2.135503110010177,
+        2.1358885469380766
+       ]
+      },
+      "throughput": 1918.0491851311235,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.972289990944772e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 16384,
+      "status": "ok",
+      "timing": {
+       "median_s": 8.607984469039366,
+       "min_s": 8.600858228979632,
+       "max_s": 8.628842819016427,
+       "p25_s": 8.604421349009499,
+       "p75_s": 8.618413644027896,
+       "mean_s": 8.612561839011809,
+       "std_s": 0.011874301573294867,
+       "reps": 3,
+       "all_s": [
+        8.600858228979632,
+        8.607984469039366,
+        8.628842819016427
+       ]
+      },
+      "throughput": 1903.349159019617,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 1,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 8.972289990944772e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     }
+    ]
+   },
+   "summary": {
+    "peak_throughput": {
+     "cpu_dense_c128": 31.662403556274295,
+     "cpu_sparse_c128": 95.37827815445033,
+     "gpu_dense_c128": 241.49770946924173,
+     "cpu_pool_dense_c128": 178.3216903246454,
+     "cpu_pool_sparse_c128": 382.7829888688021
+    },
+    "gpu_crossover_batch": {
+     "c128": null
+    }
+   }
+  },
+  "kerber_x4": {
+   "label": "Kerber Vorstadtnetz x4",
+   "rows": 1176,
+   "n_bus": 1176,
+   "n_loads": 584,
+   "three_phase": false,
+   "guard_scenarios": 64,
+   "guard_tol_pu": {
+    "c128": 1e-06,
+    "c128m": 1e-06,
+    "c64": 1e-06
+   },
+   "tol_volts_used": null,
+   "series": {
+    "cpu_dense_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 1.502159390016459,
+       "min_s": 1.4987183380872011,
+       "max_s": 1.5106133200461045,
+       "p25_s": 1.5015366389416158,
+       "p75_s": 1.5033963919850066,
+       "mean_s": 1.5032848158152774,
+       "std_s": 0.003972275115199603,
+       "reps": 5,
+       "all_s": [
+        1.4987183380872011,
+        1.5015366389416158,
+        1.502159390016459,
+        1.5033963919850066,
+        1.5106133200461045
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.068478986813026e-13,
+      "max_dV_pu": 1.0513812043200232e-13,
+      "verdict": "ok",
+      "throughput": 0.6657083174036832
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 5.406683275941759,
+       "min_s": 5.371923647006042,
+       "max_s": 5.584718047059141,
+       "p25_s": 5.377916833036579,
+       "p75_s": 5.408742832019925,
+       "mean_s": 5.42999692701269,
+       "std_s": 0.07876386215509998,
+       "reps": 5,
+       "all_s": [
+        5.371923647006042,
+        5.377916833036579,
+        5.406683275941759,
+        5.408742832019925,
+        5.584718047059141
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.064592524993862e-13,
+      "max_dV_pu": 1.3344880755994382e-13,
+      "verdict": "ok",
+      "throughput": 0.7398251008707853
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 20.814365193946287,
+       "min_s": 20.410610052058473,
+       "max_s": 20.856247224961407,
+       "p25_s": 20.711826379993,
+       "p75_s": 20.827601503930055,
+       "mean_s": 20.724130070977843,
+       "std_s": 0.16416445431705587,
+       "reps": 5,
+       "all_s": [
+        20.410610052058473,
+        20.711826379993,
+        20.814365193946287,
+        20.827601503930055,
+        20.856247224961407
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.064592524993862e-13,
+      "max_dV_pu": 1.5709655798445965e-13,
+      "verdict": "ok",
+      "throughput": 0.7686998787094159
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 82.0146464590216,
+       "min_s": 81.60130131489132,
+       "max_s": 82.83056577609386,
+       "p25_s": 81.72746029100381,
+       "p75_s": 82.17946291400585,
+       "mean_s": 82.07068735100329,
+       "std_s": 0.43139679906358974,
+       "reps": 5,
+       "all_s": [
+        81.60130131489132,
+        81.72746029100381,
+        82.0146464590216,
+        82.17946291400585,
+        82.83056577609386
+       ],
+       "threads": 1
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.396190120187675e-13,
+      "max_dV_pu": 1.5709655798445965e-13,
+      "verdict": "ok",
+      "throughput": 0.7803484226683514
+     },
+     {
+      "batch": 256,
+      "skipped": "the scenario-dependent [B, H, N, N] admittance would be 73.6 GB, over the 24 GB budget for this device"
+     }
+    ],
+    "cpu_sparse_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.3339849830372259,
+       "min_s": 0.3320960820419714,
+       "max_s": 0.33737112802919,
+       "p25_s": 0.33214298298116773,
+       "p75_s": 0.33574154193047434,
+       "mean_s": 0.3342673436040059,
+       "std_s": 0.002054933126896543,
+       "reps": 5,
+       "all_s": [
+        0.3320960820419714,
+        0.33214298298116773,
+        0.3339849830372259,
+        0.33574154193047434,
+        0.33737112802919
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.052026535520159e-13,
+      "max_dV_pu": 2.786659791809143e-14,
+      "verdict": "ok",
+      "throughput": 2.994146595772362
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 1.002908820984885,
+       "min_s": 0.9687648770632222,
+       "max_s": 1.1836330669466406,
+       "p25_s": 0.9687692960724235,
+       "p75_s": 1.0260366220027208,
+       "mean_s": 1.0300225366139784,
+       "std_s": 0.07981440527882576,
+       "reps": 5,
+       "all_s": [
+        0.9687648770632222,
+        0.9687692960724235,
+        1.002908820984885,
+        1.0260366220027208,
+        1.1836330669466406
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.067118544269257e-13,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 3.9883984628551636
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 3.3165022779721767,
+       "min_s": 3.220206684083678,
+       "max_s": 3.6269262599525973,
+       "p25_s": 3.278017996926792,
+       "p75_s": 3.3188052179757506,
+       "mean_s": 3.352091687382199,
+       "std_s": 0.14197831038605055,
+       "reps": 5,
+       "all_s": [
+        3.220206684083678,
+        3.278017996926792,
+        3.3165022779721767,
+        3.3188052179757506,
+        3.6269262599525973
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.067118544269257e-13,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 4.824359719657105
+     },
+     {
+      "batch": 64,
+      "timing": {
+       "median_s": 12.409687704988755,
+       "min_s": 12.396780675044283,
+       "max_s": 12.507351029082201,
+       "p25_s": 12.407477779895999,
+       "p75_s": 12.43747181398794,
+       "mean_s": 12.431753800599836,
+       "std_s": 0.04011731271951415,
+       "reps": 5,
+       "all_s": [
+        12.396780675044283,
+        12.407477779895999,
+        12.409687704988755,
+        12.43747181398794,
+        12.507351029082201
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.370067469459387e-13,
+      "max_dV_pu": 0.0,
+      "verdict": "ok",
+      "throughput": 5.157261127068628
+     },
+     {
+      "batch": 256,
+      "skipped": "the scenario-dependent [B, H, N, N] admittance would be 73.6 GB, over the 24 GB budget for this device"
+     }
+    ],
+    "gpu_dense_c128": [
+     {
+      "batch": 1,
+      "timing": {
+       "median_s": 0.4696999159641564,
+       "min_s": 0.4675153460120782,
+       "max_s": 0.6485931290080771,
+       "p25_s": 0.46956801402848214,
+       "p75_s": 0.4704236900433898,
+       "mean_s": 0.5051600190112367,
+       "std_s": 0.0717230795846689,
+       "reps": 5,
+       "all_s": [
+        0.4675153460120782,
+        0.46956801402848214,
+        0.4696999159641564,
+        0.4704236900433898,
+        0.6485931290080771
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.07076247335177e-13,
+      "max_dV_pu": 1.48991929904696e-13,
+      "verdict": "ok",
+      "throughput": 2.1290189033721516
+     },
+     {
+      "batch": 4,
+      "timing": {
+       "median_s": 1.1292962699662894,
+       "min_s": 1.1272521320497617,
+       "max_s": 1.3231458610389382,
+       "p25_s": 1.1282403309596702,
+       "p75_s": 1.1311849950579926,
+       "mean_s": 1.1678239178145304,
+       "std_s": 0.07767190805551555,
+       "reps": 5,
+       "all_s": [
+        1.1272521320497617,
+        1.1282403309596702,
+        1.1292962699662894,
+        1.1311849950579926,
+        1.3231458610389382
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.052572756652817e-13,
+      "max_dV_pu": 1.701971896750365e-13,
+      "verdict": "ok",
+      "throughput": 3.5420288779661018
+     },
+     {
+      "batch": 16,
+      "timing": {
+       "median_s": 3.3613237659446895,
+       "min_s": 3.3508701430400833,
+       "max_s": 3.550963649060577,
+       "p25_s": 3.351734505034983,
+       "p75_s": 3.3620009110309184,
+       "mean_s": 3.39537859482225,
+       "std_s": 0.07793114794599361,
+       "reps": 5,
+       "all_s": [
+        3.3508701430400833,
+        3.351734505034983,
+        3.3613237659446895,
+        3.3620009110309184,
+        3.550963649060577
+       ]
+      },
+      "iterations": 7,
+      "converged": true,
+      "residual_v": 9.063839714667628e-13,
+      "max_dV_pu": 2.015054789694659e-13,
+      "verdict": "ok",
+      "throughput": 4.760029415227501
+     },
+     {
+      "batch": 64,
+      "skipped": "the scenario-dependent [B, H, N, N] admittance would be 18.4 GB, over the 6 GB budget for this device"
+     }
+    ],
+    "cpu_pool_dense_c128": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.0513812043200232e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 1.6633690929738805,
+       "min_s": 1.6604443070245907,
+       "max_s": 1.6694052369566634,
+       "p25_s": 1.6609358970308676,
+       "p75_s": 1.6647943899733946,
+       "mean_s": 1.6637897847918794,
+       "std_s": 0.0032266519191047533,
+       "reps": 5,
+       "all_s": [
+        1.6604443070245907,
+        1.6609358970308676,
+        1.6633690929738805,
+        1.6647943899733946,
+        1.6694052369566634
+       ]
+      },
+      "throughput": 0.6011894799681136,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 1,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.0513812043200232e-13,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.3344880755994382e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 1.7054800229379907,
+       "min_s": 1.6966003449633718,
+       "max_s": 1.722944415989332,
+       "p25_s": 1.7040120780002326,
+       "p75_s": 1.7134788460098207,
+       "mean_s": 1.7085031415801495,
+       "std_s": 0.008992146649566565,
+       "reps": 5,
+       "all_s": [
+        1.6966003449633718,
+        1.7040120780002326,
+        1.7054800229379907,
+        1.7134788460098207,
+        1.722944415989332
+       ]
+      },
+      "throughput": 2.345380741024039,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 4,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.3344880755994382e-13,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.5631940186722204e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 4.511228573974222,
+       "min_s": 4.132086274912581,
+       "max_s": 4.588421551976353,
+       "p25_s": 4.396433575078845,
+       "p75_s": 4.51456514489837,
+       "mean_s": 4.428547024168074,
+       "std_s": 0.16044654553824045,
+       "reps": 5,
+       "all_s": [
+        4.132086274912581,
+        4.396433575078845,
+        4.511228573974222,
+        4.51456514489837,
+        4.588421551976353
+       ]
+      },
+      "throughput": 3.5467056784277733,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.5631940186722204e-13,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 1.5709655798445965e-13,
+      "iterations": 7,
+      "timing": {
+       "median_s": 15.349351252079941,
+       "min_s": 14.244744102936238,
+       "max_s": 15.687233658973128,
+       "p25_s": 14.636128519079648,
+       "p75_s": 15.625778207089752,
+       "mean_s": 15.108647148031741,
+       "std_s": 0.570916399243091,
+       "reps": 5,
+       "all_s": [
+        14.244744102936238,
+        14.636128519079648,
+        15.349351252079941,
+        15.625778207089752,
+        15.687233658973128
+       ]
+      },
+      "throughput": 4.169557328445889,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "dense",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 1.5709655798445965e-13,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 256,
+      "status": "skipped_memory_budget",
+      "estimated_worker_bytes": 9205088256.0,
+      "budget_bytes": 8000000000.0
+     }
+    ],
+    "cpu_pool_sparse_c128": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 2.786659791809143e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.511211029952392,
+       "min_s": 0.505982045084238,
+       "max_s": 0.5138456670101732,
+       "p25_s": 0.5108933139126748,
+       "p75_s": 0.5121688370127231,
+       "mean_s": 0.5108201785944402,
+       "std_s": 0.0026282354956992295,
+       "reps": 5,
+       "all_s": [
+        0.505982045084238,
+        0.5108933139126748,
+        0.511211029952392,
+        0.5121688370127231,
+        0.5138456670101732
+       ]
+      },
+      "throughput": 1.9561393268316765,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 1,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 2.786659791809143e-14,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 4.951594689828198e-14,
+      "iterations": 7,
+      "timing": {
+       "median_s": 0.5545331169851124,
+       "min_s": 0.5504830939462408,
+       "max_s": 0.5559184829471633,
+       "p25_s": 0.551210988080129,
+       "p75_s": 0.5556588980834931,
+       "mean_s": 0.5535609160084277,
+       "std_s": 0.002275960250604735,
+       "reps": 5,
+       "all_s": [
+        0.5504830939462408,
+        0.551210988080129,
+        0.5545331169851124,
+        0.5556588980834931,
+        0.5559184829471633
+       ]
+      },
+      "throughput": 7.213275235475951,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 4,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 4.951594689828198e-14,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 7,
+      "timing": {
+       "median_s": 1.5668707429431379,
+       "min_s": 1.411247662967071,
+       "max_s": 1.5818658670177683,
+       "p25_s": 1.5654326470103115,
+       "p75_s": 1.5701008419273421,
+       "mean_s": 1.5391035523731262,
+       "std_s": 0.06418849439869098,
+       "reps": 5,
+       "all_s": [
+        1.411247662967071,
+        1.5654326470103115,
+        1.5668707429431379,
+        1.5701008419273421,
+        1.5818658670177683
+       ]
+      },
+      "throughput": 10.211435800981475,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 7,
+      "timing": {
+       "median_s": 4.090471351053566,
+       "min_s": 3.908001302042976,
+       "max_s": 4.195618613972329,
+       "p25_s": 4.074901617015712,
+       "p75_s": 4.1820271969772875,
+       "mean_s": 4.090204016212374,
+       "std_s": 0.10293279155494198,
+       "reps": 5,
+       "all_s": [
+        3.908001302042976,
+        4.074901617015712,
+        4.090471351053566,
+        4.1820271969772875,
+        4.195618613972329
+       ]
+      },
+      "throughput": 15.646118627261815,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 7,
+      "timing": {
+       "median_s": 13.545674758963287,
+       "min_s": 13.283598821959458,
+       "max_s": 14.127383808954619,
+       "p25_s": 13.4158093779115,
+       "p75_s": 13.679370177909732,
+       "mean_s": 13.61036738913972,
+       "std_s": 0.29013204436791207,
+       "reps": 5,
+       "all_s": [
+        13.283598821959458,
+        13.4158093779115,
+        13.545674758963287,
+        13.679370177909732,
+        14.127383808954619
+       ]
+      },
+      "throughput": 18.899021610614316,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "verdict": "ok",
+      "converged": true,
+      "max_dV_pu": 0.0,
+      "iterations": 7,
+      "timing": {
+       "median_s": 49.39424468297511,
+       "min_s": 48.814030618057586,
+       "max_s": 49.57192139502149,
+       "p25_s": 49.38170524791349,
+       "p75_s": 49.48761024698615,
+       "mean_s": 49.329902438190764,
+       "std_s": 0.26698019356763186,
+       "reps": 5,
+       "all_s": [
+        48.814030618057586,
+        49.38170524791349,
+        49.39424468297511,
+        49.48761024698615,
+        49.57192139502149
+       ]
+      },
+      "throughput": 20.73116021051225,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 7,
+       "workers": 8,
+       "threads_per_worker": [
+        1
+       ],
+       "linear_solver": "sparse",
+       "dtype": "c128",
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ]
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 0.0,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 1e-06
+     }
+    ]
+   },
+   "loads_with_spectrum": 146,
+   "baselines": {
+    "opendss": [
+     {
+      "batch": 1,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.017970938002690673,
+       "min_s": 0.017847895971499383,
+       "max_s": 0.01847567700315267,
+       "p25_s": 0.017909416987095028,
+       "p75_s": 0.01822330750292167,
+       "mean_s": 0.01809817032578091,
+       "std_s": 0.0002716226597753082,
+       "reps": 3,
+       "all_s": [
+        0.017847895971499383,
+        0.017970938002690673,
+        0.01847567700315267
+       ]
+      },
+      "throughput": 55.64539813393583,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 1,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.660005153356785e-06,
+      "comparison_scenarios": 1,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 4,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.016157104982994497,
+       "min_s": 0.016130974050611258,
+       "max_s": 0.025465584942139685,
+       "p25_s": 0.016144039516802877,
+       "p75_s": 0.02081134496256709,
+       "mean_s": 0.01925122132524848,
+       "std_s": 0.0043942316035618535,
+       "reps": 3,
+       "all_s": [
+        0.016130974050611258,
+        0.016157104982994497,
+        0.025465584942139685
+       ]
+      },
+      "throughput": 247.56910376023657,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 4,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.660005153356785e-06,
+      "comparison_scenarios": 4,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 16,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.06336903595365584,
+       "min_s": 0.06322902406100184,
+       "max_s": 0.06888671801425517,
+       "p25_s": 0.06329903000732884,
+       "p75_s": 0.0661278769839555,
+       "mean_s": 0.06516159267630428,
+       "std_s": 0.002634681501320911,
+       "reps": 3,
+       "all_s": [
+        0.06322902406100184,
+        0.06336903595365584,
+        0.06888671801425517
+       ]
+      },
+      "throughput": 252.4892443006613,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.660005153356785e-06,
+      "comparison_scenarios": 16,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 64,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.2588247440289706,
+       "min_s": 0.24799374595750123,
+       "max_s": 0.2591289390111342,
+       "p25_s": 0.2534092449932359,
+       "p75_s": 0.2589768415200524,
+       "mean_s": 0.2553158096658687,
+       "std_s": 0.00517897006227024,
+       "reps": 3,
+       "all_s": [
+        0.24799374595750123,
+        0.2588247440289706,
+        0.2591289390111342
+       ]
+      },
+      "throughput": 247.2715668670241,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.677055238648327e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 256,
+      "status": "ok",
+      "timing": {
+       "median_s": 0.6525691110873595,
+       "min_s": 0.6517984569072723,
+       "max_s": 0.7428131479537115,
+       "p25_s": 0.6521837839973159,
+       "p75_s": 0.6976911295205355,
+       "mean_s": 0.682393571982781,
+       "std_s": 0.042724250314051464,
+       "reps": 3,
+       "all_s": [
+        0.6517984569072723,
+        0.6525691110873595,
+        0.7428131479537115
+       ]
+      },
+      "throughput": 392.29561382921366,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.677055238648327e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 1024,
+      "status": "ok",
+      "timing": {
+       "median_s": 2.600732178078033,
+       "min_s": 2.59124564495869,
+       "max_s": 2.614273015060462,
+       "p25_s": 2.5959889115183614,
+       "p75_s": 2.6075025965692475,
+       "mean_s": 2.6020836126990616,
+       "std_s": 0.009449328903937558,
+       "reps": 3,
+       "all_s": [
+        2.59124564495869,
+        2.600732178078033,
+        2.614273015060462
+       ]
+      },
+      "throughput": 393.7352752549654,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.677055238648327e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 4096,
+      "status": "ok",
+      "timing": {
+       "median_s": 10.51512143900618,
+       "min_s": 10.501100618974306,
+       "max_s": 10.525071729905903,
+       "p25_s": 10.508111028990243,
+       "p75_s": 10.520096584456041,
+       "mean_s": 10.51376459596213,
+       "std_s": 0.009833083853616502,
+       "reps": 3,
+       "all_s": [
+        10.501100618974306,
+        10.51512143900618,
+        10.525071729905903
+       ]
+      },
+      "throughput": 389.53425538251577,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.677055238648327e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     },
+     {
+      "batch": 16384,
+      "status": "ok",
+      "timing": {
+       "median_s": 42.239796236041,
+       "min_s": 42.02841657900717,
+       "max_s": 42.4249519869918,
+       "p25_s": 42.13410640752409,
+       "p75_s": 42.3323741115164,
+       "mean_s": 42.23105493401332,
+       "std_s": 0.16200286050404256,
+       "reps": 3,
+       "all_s": [
+        42.02841657900717,
+        42.239796236041,
+        42.4249519869918
+       ]
+      },
+      "throughput": 387.88065899854865,
+      "workers": 8,
+      "diagnostics": {
+       "converged": true,
+       "finite": true,
+       "iterations_max": 5,
+       "configured_tolerance": 1e-08,
+       "workers": 8,
+       "threads_per_worker": 1,
+       "circuit": "pgml.convert.opendss.from_grid, mode=matched",
+       "transformer_clocks_removed": 4,
+       "harmonic_orders": [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+        13,
+        15,
+        17,
+        19,
+        21,
+        23,
+        25
+       ],
+       "load_shunt": null
+      },
+      "max_dV_vs_pgml_cpu_c128_pu": 9.677055238648327e-06,
+      "comparison_scenarios": 32,
+      "comparison_status": "ok",
+      "comparison_tolerance_pu": 0.0001
+     }
+    ]
+   },
+   "summary": {
+    "peak_throughput": {
+     "cpu_dense_c128": 0.7803484226683514,
+     "cpu_sparse_c128": 5.157261127068628,
+     "gpu_dense_c128": 4.760029415227501,
+     "cpu_pool_dense_c128": 4.169557328445889,
+     "cpu_pool_sparse_c128": 20.73116021051225
+    },
+    "gpu_crossover_batch": {
+     "c128": null
+    }
+   }
+  }
+ },
+ "validated_scenarios_per_batch": 32
+}

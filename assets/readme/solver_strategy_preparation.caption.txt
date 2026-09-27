@@ -1,0 +1,1 @@
+Speed-up of a harmonic study that reuses a preparation over one that does not, against the matrix row count, for an operating-point-independent harmonic network and orders 1 to 13. The preparation pays on CPU from 600 rows and on GPU at every size measured, from 99 rows.
