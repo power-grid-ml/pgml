@@ -1,35 +1,35 @@
 {
  "environment": {
-  "date": "2026-09-24 18:19:44+0200",
-  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
-  "cpu": "13th Gen Intel(R) Core(TM) i5-1345U",
-  "cpu_count_logical": 12,
-  "ram_gb": 15.3,
-  "torch_threads": 10,
+  "date": "2026-09-26 12:03:13+0200",
+  "platform": "Linux-5.14.0-687.48.1.el9_8.x86_64-x86_64-with-glibc2.34",
+  "cpu": "AMD EPYC 9334 32-Core Processor",
+  "cpu_count_logical": 128,
+  "ram_gb": 1511.1,
+  "torch_threads": 4,
   "cuda_available": false,
-  "cuda_runtime": null,
+  "cuda_runtime": "13.0",
   "versions": {
    "python": "3.13.15",
    "torch": "2.13.0",
    "numpy": "2.4.6",
-   "scipy": "1.18.0",
+   "scipy": "1.18.1",
    "pgml": "0.5.1",
-   "pgml_git": "966df9d-dirty",
+   "pgml_git": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
    "pandapower": "3.5.4",
-   "power_grid_model": "1.13.142",
+   "power_grid_model": "1.13.172",
    "power_grid_model_io": "present",
-   "numba": "0.65.1",
+   "numba": "0.67.0",
    "opendssdirect": "0.9.4"
   },
   "pandapower_numba": {
    "importable": true,
-   "version": "0.65.1",
+   "version": "0.67.0",
    "opt_out": false,
    "requested": true
   },
   "kerber_seed": 20260912,
-  "pgml_source_digest": "e40a8c2e0fac",
-  "benchmark_source_digest": "580573102c84",
+  "pgml_source_digest": "242967f7eefb",
+  "benchmark_source_digest": "6831bfbbc71b",
   "modeling_defaults": {
    "converter": {
     "pandapower": {
@@ -380,7 +380,7 @@
      "system_budget_mb": {
       "value": 1024.0,
       "units": "MiB",
-      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted); it is charged the matrix AND its factorisation, which for a dense LU is a second copy of the same size. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
+      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted). On the dense route (the dense and block backends, every CUDA solve, mixed precision) it is charged the dense matrix AND its factorisation, which for a dense LU is a second copy of the same size. Where the harmonic orders are factored by the sparse backend (CPU, full precision) the dense matrix is never formed: each system is assembled as its structural entries over the topology's sparsity pattern, and the budget is charged 384 KiB per system plus 48 numbers per pattern entry: three times what one system holds when measured in isolation (its entries, their scatter and factorization copies, and the L and U factors, which SuperLU sizes from a fill estimate), because the heap keeps a finished chunk's factors largely resident while the next chunk allocates. That is O(N) per system instead of O(N^2), so a chunk holds several times more scenarios for the same budget and one scenario of a large grid no longer exceeds it. On both routes the per-scenario injection and solution vectors and the fundamental solve grow with the batch outside the chunk and are not charged against the budget. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
      }
     },
     "ift": {
@@ -412,21 +412,24 @@
   },
   "tolerance_mode": "library",
   "guard_tol_pu": 1e-06,
+  "timed_region_host_result": true,
+  "pgm_isolated_process": true,
+  "pgml_single_call_isolated_process": true,
   "cpu_allocation": {
-   "logical_cpus": 12,
-   "physical_cores": 10,
-   "threads_per_core": 1.2,
+   "logical_cpus": 8,
+   "physical_cores": 4,
+   "threads_per_core": 2.0,
    "cpu_workers": 8,
    "blas_thread_env": {
-    "OMP_NUM_THREADS": null,
-    "MKL_NUM_THREADS": null,
-    "OPENBLAS_NUM_THREADS": null,
-    "NUMEXPR_NUM_THREADS": null
+    "OMP_NUM_THREADS": "4",
+    "MKL_NUM_THREADS": "4",
+    "OPENBLAS_NUM_THREADS": "4",
+    "NUMEXPR_NUM_THREADS": "4"
    }
   },
   "allocation": {
-   "logical_cpus": null,
-   "memory_mb": null
+   "logical_cpus": "8",
+   "memory_mb": "32768"
   }
  },
  "metric": "USD per 1e6 solved scenarios at the fastest measured batch",
@@ -577,520 +580,520 @@
   "cpu_dense_c128": [
    {
     "rows": 16,
-    "throughput": 279148.37992378214,
+    "throughput": 286658.98428739357,
     "at_batch": 4096,
-    "usd_per_million": 0.0007104943019461036,
+    "usd_per_million": 0.0006918790067800273,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 206098.87648850592,
+    "throughput": 217610.66357687203,
     "at_batch": 4096,
-    "usd_per_million": 0.0009623212737134659,
+    "usd_per_million": 0.0009114136691342385,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 94038.49221422225,
+    "throughput": 138877.33752110283,
     "at_batch": 4096,
-    "usd_per_million": 0.002109065433349618,
+    "usd_per_million": 0.001428118776421646,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 65846.75354044064,
+    "throughput": 70852.74951237898,
     "at_batch": 4096,
-    "usd_per_million": 0.0030120442188774628,
+    "usd_per_million": 0.0027992327001887434,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 5464.149891021848,
+    "throughput": 6102.505588952396,
     "at_batch": 4096,
-    "usd_per_million": 0.036297198519245434,
+    "usd_per_million": 0.032500311624848635,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 2079.2524260680752,
+    "throughput": 2238.719438222683,
     "at_batch": 4096,
-    "usd_per_million": 0.09538684714120413,
+    "usd_per_million": 0.08859231306393174,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 615.0349705005343,
+    "throughput": 594.6846097664624,
     "at_batch": 4096,
-    "usd_per_million": 0.3224748881708687,
+    "usd_per_million": 0.333510116246695,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 132.86205830066328,
+    "throughput": 137.8201406782066,
     "at_batch": 4096,
-    "usd_per_million": 1.4927763115374166,
+    "usd_per_million": 1.4390736532218302,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 30.154173001681404,
+    "throughput": 30.95874350129252,
     "at_batch": 4096,
-    "usd_per_million": 6.577309658675575,
+    "usd_per_million": 6.406375417821881,
     "priced_on": "AWS c7i.4xlarge"
    }
   ],
   "cpu_sparse_c128": [
    {
     "rows": 16,
-    "throughput": 253298.5705803272,
+    "throughput": 310166.3463555276,
     "at_batch": 4096,
-    "usd_per_million": 0.0007830021814925203,
+    "usd_per_million": 0.0006394418210220464,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 181105.4003538323,
+    "throughput": 40322.342881063254,
     "at_batch": 4096,
-    "usd_per_million": 0.0010951265558389878,
+    "usd_per_million": 0.004918695669999806,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 76667.53193935625,
+    "throughput": 24861.66962437512,
     "at_batch": 4096,
-    "usd_per_million": 0.0025869273252491585,
+    "usd_per_million": 0.007977474414625855,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 33942.09170224046,
-    "at_batch": 4096,
-    "usd_per_million": 0.005843285530933902,
+    "throughput": 12728.136957565344,
+    "at_batch": 256,
+    "usd_per_million": 0.015582275237496408,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 12380.199730352362,
-    "at_batch": 4096,
-    "usd_per_million": 0.016020204653652097,
+    "throughput": 7205.634812210396,
+    "at_batch": 256,
+    "usd_per_million": 0.02752475507046862,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 5152.635226705067,
+    "throughput": 3688.7798354196066,
     "at_batch": 4096,
-    "usd_per_million": 0.03849163090478669,
+    "usd_per_million": 0.053766649727625314,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 2380.1654065800917,
+    "throughput": 2187.098349490292,
     "at_batch": 4096,
-    "usd_per_million": 0.08332754218888756,
+    "usd_per_million": 0.09068331718121195,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 830.277813005736,
+    "throughput": 1153.414699690333,
     "at_batch": 4096,
-    "usd_per_million": 0.23887586808484684,
+    "usd_per_million": 0.17195318681700653,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 314.3883765459443,
+    "throughput": 519.7948250647318,
     "at_batch": 4096,
-    "usd_per_million": 0.6308545357571422,
+    "usd_per_million": 0.3815608077834061,
     "priced_on": "AWS c7i.4xlarge"
    }
   ],
   "cpu_pool_dense_c128": [
    {
     "rows": 16,
-    "throughput": 459561.1384983293,
+    "throughput": 372962.8188265663,
     "at_batch": 4096,
-    "usd_per_million": 0.00043157115934870183,
+    "usd_per_million": 0.0005317777626127432,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 239098.0266998943,
+    "throughput": 216655.7259606961,
     "at_batch": 4096,
-    "usd_per_million": 0.0008295063580021633,
+    "usd_per_million": 0.0009154308405830611,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 143974.2088254332,
+    "throughput": 149271.3163767086,
     "at_batch": 4096,
-    "usd_per_million": 0.0013775615434970707,
+    "usd_per_million": 0.0013286767890008377,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 76148.63695918507,
+    "throughput": 82985.47702722409,
     "at_batch": 4096,
-    "usd_per_million": 0.0026045552652457595,
+    "usd_per_million": 0.0023899764204315943,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 27676.05250093525,
+    "throughput": 32108.499877120397,
     "at_batch": 4096,
-    "usd_per_million": 0.007166243572006199,
+    "usd_per_million": 0.006176972891675328,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 10201.879554831648,
+    "throughput": 12092.810765344033,
     "at_batch": 4096,
-    "usd_per_million": 0.019440862075204752,
+    "usd_per_million": 0.016400929211736564,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 1043.4337530057323,
-    "at_batch": 256,
-    "usd_per_million": 0.1900775518925002,
+    "throughput": 3823.327893806301,
+    "at_batch": 4096,
+    "usd_per_million": 0.05187452890311306,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 235.51579060710853,
-    "at_batch": 256,
-    "usd_per_million": 0.8421232938227755,
+    "throughput": 865.1698673845362,
+    "at_batch": 4096,
+    "usd_per_million": 0.2292420723492228,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 2.7938976402356976,
-    "at_batch": 16,
-    "usd_per_million": 70.98804568824562,
+    "throughput": 180.58320365264998,
+    "at_batch": 4096,
+    "usd_per_million": 1.0982933590813104,
     "priced_on": "AWS c7i.4xlarge"
    }
   ],
   "cpu_pool_sparse_c128": [
    {
     "rows": 16,
-    "throughput": 379167.0318273109,
+    "throughput": 410650.40258383955,
     "at_batch": 4096,
-    "usd_per_million": 0.0005230764193224028,
+    "usd_per_million": 0.00048297367319113005,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 256718.26647914795,
+    "throughput": 214768.78251579875,
     "at_batch": 4096,
-    "usd_per_million": 0.0007725719562283,
+    "usd_per_million": 0.0009234737516787087,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 143667.97600949838,
+    "throughput": 172239.61684899588,
     "at_batch": 4096,
-    "usd_per_million": 0.00138049785931571,
+    "usd_per_million": 0.0011514966008500476,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 80381.94914399076,
+    "throughput": 90511.85222814251,
     "at_batch": 4096,
-    "usd_per_million": 0.0024673864648150357,
+    "usd_per_million": 0.0021912415716940363,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 32645.278569510454,
+    "throughput": 31710.803408963282,
     "at_batch": 4096,
-    "usd_per_million": 0.006075406368826936,
+    "usd_per_million": 0.006254440506457588,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 13015.773417869937,
+    "throughput": 15849.629727767198,
     "at_batch": 4096,
-    "usd_per_million": 0.01523792147925936,
+    "usd_per_million": 0.012513436385575004,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 5766.665443054958,
+    "throughput": 7729.517930970655,
     "at_batch": 4096,
-    "usd_per_million": 0.034393070881577614,
+    "usd_per_million": 0.025659211234720182,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 2439.5065391034914,
+    "throughput": 2954.0200391176545,
     "at_batch": 4096,
-    "usd_per_million": 0.08130059508109375,
+    "usd_per_million": 0.06714014485581288,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 839.3750190215293,
+    "throughput": 1041.4833470905457,
     "at_batch": 4096,
-    "usd_per_million": 0.2362869144765985,
+    "usd_per_million": 0.19043351378338494,
     "priced_on": "AWS c7i.4xlarge"
    }
   ],
   "gpu_dense_c128": [
    {
     "rows": 16,
-    "throughput": 486466.8694295473,
+    "throughput": 504573.99562107713,
     "at_batch": 4096,
-    "usd_per_million": 0.0010626508749725064,
+    "usd_per_million": 0.0010245166198233038,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 32,
-    "throughput": 382304.1354879177,
+    "throughput": 391112.4252785969,
     "at_batch": 4096,
-    "usd_per_million": 0.0013521811470459022,
+    "usd_per_million": 0.001321728513422234,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 64,
-    "throughput": 266545.8017937167,
+    "throughput": 263300.3301825758,
     "at_batch": 4096,
-    "usd_per_million": 0.0019394206960517601,
+    "usd_per_million": 0.0019633262293518154,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 128,
-    "throughput": 147340.82189342193,
+    "throughput": 145855.0877325698,
     "at_batch": 4096,
-    "usd_per_million": 0.0035084943724446776,
+    "usd_per_million": 0.0035442332007799373,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 256,
-    "throughput": 68269.53171991768,
+    "throughput": 68752.97716125446,
     "at_batch": 4096,
-    "usd_per_million": 0.007572110594888195,
+    "usd_per_million": 0.007518866320973907,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 512,
-    "throughput": 29519.12551706165,
+    "throughput": 29650.54502060545,
     "at_batch": 4096,
-    "usd_per_million": 0.017512186942857017,
+    "usd_per_million": 0.017434568035265365,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 11203.881492754686,
+    "throughput": 11228.916531544237,
     "at_batch": 4096,
-    "usd_per_million": 0.046139763686249405,
+    "usd_per_million": 0.04603689438711613,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 3369.210791892865,
+    "throughput": 3398.733509801592,
     "at_batch": 4096,
-    "usd_per_million": 0.15343190924365363,
+    "usd_per_million": 0.15209914015136247,
     "priced_on": "AWS g6e.xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 928.9214258072129,
+    "throughput": 936.656076268416,
     "at_batch": 4096,
-    "usd_per_million": 0.556499645807212,
+    "usd_per_million": 0.551904223483951,
     "priced_on": "AWS g6e.xlarge"
    }
   ],
   "pandapower": [
    {
     "rows": 16,
-    "throughput": 2148.7150747208034,
-    "at_batch": 4096,
-    "usd_per_million": 0.09230322608459572,
+    "throughput": 2316.1006177869226,
+    "at_batch": 256,
+    "usd_per_million": 0.08563243401871051,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 2283.1686049850296,
-    "at_batch": 4096,
-    "usd_per_million": 0.08686758082617983,
+    "throughput": 2282.8268970218323,
+    "at_batch": 256,
+    "usd_per_million": 0.08688058371490115,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 2123.25709943616,
-    "at_batch": 4096,
-    "usd_per_million": 0.09340994709778745,
+    "throughput": 2229.9253944235165,
+    "at_batch": 256,
+    "usd_per_million": 0.08894169008044626,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 2108.375737497947,
-    "at_batch": 4096,
-    "usd_per_million": 0.09406925426333144,
+    "throughput": 2124.3861619482127,
+    "at_batch": 256,
+    "usd_per_million": 0.09336030185371176,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 1995.0898326411154,
+    "throughput": 2043.1411212937583,
     "at_batch": 4096,
-    "usd_per_million": 0.09941072832333475,
+    "usd_per_million": 0.0970727529617458,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 1838.4047849354931,
+    "throughput": 1861.3219382053444,
     "at_batch": 4096,
-    "usd_per_million": 0.10788338616094961,
+    "usd_per_million": 0.10655509359362253,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 1299.5257896618546,
+    "throughput": 1411.6547682373043,
     "at_batch": 4096,
-    "usd_per_million": 0.15261977477564415,
+    "usd_per_million": 0.1404970519675904,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 1050.4091206314947,
+    "throughput": 1025.1491768406188,
     "at_batch": 4096,
-    "usd_per_million": 0.18881531913403174,
+    "usd_per_million": 0.19346777797215015,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 719.1182448306566,
+    "throughput": 700.4927925457586,
     "at_batch": 4096,
-    "usd_per_million": 0.2758007250671805,
+    "usd_per_million": 0.2831340100053599,
     "priced_on": "AWS c7i.4xlarge"
    }
   ],
   "power_grid_model": [
    {
     "rows": 16,
-    "throughput": 732906.8244733798,
+    "throughput": 731709.8966654126,
     "at_batch": 4096,
-    "usd_per_million": 0.00027061193416481427,
+    "usd_per_million": 0.0002710545999680865,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 410833.15892996284,
+    "throughput": 416400.6101798813,
     "at_batch": 4096,
-    "usd_per_million": 0.00048275882562620604,
+    "usd_per_million": 0.0004763041371328806,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 215823.70271036102,
+    "throughput": 214945.06235947643,
     "at_batch": 4096,
-    "usd_per_million": 0.0009189599235052507,
+    "usd_per_million": 0.0009227163962558886,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 107487.32980633163,
+    "throughput": 108063.27474210724,
     "at_batch": 4096,
-    "usd_per_million": 0.0018451787172561276,
+    "usd_per_million": 0.0018353444665327363,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 48757.28021313025,
+    "throughput": 49039.48641665193,
     "at_batch": 256,
-    "usd_per_million": 0.00406776859714834,
+    "usd_per_million": 0.004044359919438041,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 24905.875762333726,
+    "throughput": 25529.777692692318,
     "at_batch": 256,
-    "usd_per_million": 0.007963314971372407,
+    "usd_per_million": 0.00776870585089758,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 12289.794649885896,
+    "throughput": 12498.403574889833,
     "at_batch": 256,
-    "usd_per_million": 0.016138051040191687,
+    "usd_per_million": 0.015868693321105333,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 5954.629451638909,
+    "throughput": 5980.185024347879,
     "at_batch": 256,
-    "usd_per_million": 0.033307418193544436,
+    "usd_per_million": 0.03316508310793627,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 2820.650502970988,
+    "throughput": 2790.5452792324463,
     "at_batch": 256,
-    "usd_per_million": 0.07031474942550629,
+    "usd_per_million": 0.0710733256361588,
     "priced_on": "AWS c7i.4xlarge"
    }
   ],
   "opendss": [
    {
     "rows": 16,
-    "throughput": 145391.02469849368,
+    "throughput": 148069.97885922765,
     "at_batch": 4096,
-    "usd_per_million": 0.0013641373925565856,
+    "usd_per_million": 0.001339456754578805,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 32,
-    "throughput": 97761.13173882272,
+    "throughput": 131431.1626379971,
     "at_batch": 4096,
-    "usd_per_million": 0.002028754473334023,
+    "usd_per_million": 0.0015090282194307747,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 64,
-    "throughput": 50668.43112336297,
+    "throughput": 68584.9924162319,
     "at_batch": 4096,
-    "usd_per_million": 0.003914337368181957,
+    "usd_per_million": 0.002891789097674291,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 128,
-    "throughput": 18224.588203344876,
+    "throughput": 34939.1760093122,
     "at_batch": 4096,
-    "usd_per_million": 0.01088273332271683,
+    "usd_per_million": 0.005676531503790254,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 256,
-    "throughput": 9175.87254575343,
+    "throughput": 17024.475828618248,
     "at_batch": 4096,
-    "usd_per_million": 0.02161465651842794,
+    "usd_per_million": 0.011649893678367105,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 512,
-    "throughput": 7814.213636180954,
+    "throughput": 8077.9101809694475,
     "at_batch": 4096,
-    "usd_per_million": 0.02538109943846697,
+    "usd_per_million": 0.02455255491706036,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 1024,
-    "throughput": 3636.0128342922185,
-    "at_batch": 4096,
-    "usd_per_million": 0.054546928839963954,
+    "throughput": 3983.1548629578,
+    "at_batch": 256,
+    "usd_per_million": 0.04979302591967401,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 2048,
-    "throughput": 1698.0409180664024,
+    "throughput": 1667.484630404216,
     "at_batch": 4096,
-    "usd_per_million": 0.11680126858143089,
+    "usd_per_million": 0.11894162603780956,
     "priced_on": "AWS c7i.4xlarge"
    },
    {
     "rows": 4096,
-    "throughput": 632.1116877257062,
+    "throughput": 632.2149934764902,
     "at_batch": 4096,
-    "usd_per_million": 0.3137631168424093,
+    "usd_per_million": 0.31371184704544436,
     "priced_on": "AWS c7i.4xlarge"
    }
   ]
@@ -1102,531 +1105,431 @@
    "cpu_dense_c128": [
     {
      "batch": 1,
-     "throughput": 36.56573310347289,
-     "usd_per_million": 5.424021795818892
+     "throughput": 42.97231786748504,
+     "usd_per_million": 4.6153743427324425
     },
     {
      "batch": 4,
-     "throughput": 176.92927182540498,
-     "usd_per_million": 1.1209752421806722
+     "throughput": 161.2508489163919,
+     "usd_per_million": 1.2299676849215757
     },
     {
      "batch": 16,
-     "throughput": 615.9495353507352,
-     "usd_per_million": 0.32199607589670143
+     "throughput": 583.9570377020729,
+     "usd_per_million": 0.3396368577280858
     },
     {
      "batch": 64,
-     "throughput": 1510.2216278597289,
-     "usd_per_million": 0.1313273030094327
+     "throughput": 1604.5676433587296,
+     "usd_per_million": 0.1236054672760171
     },
     {
      "batch": 256,
-     "throughput": 2543.0139884238624,
-     "usd_per_million": 0.07799144410379692
+     "throughput": 2859.4346176208314,
+     "usd_per_million": 0.06936103106227165
     },
     {
      "batch": 1024,
-     "throughput": 3056.7362906663866,
-     "usd_per_million": 0.06488401827103492
+     "throughput": 3447.6806573390368,
+     "usd_per_million": 0.05752659629630823
     },
     {
      "batch": 4096,
-     "throughput": 3072.60178285206,
-     "usd_per_million": 0.0645489872590114
+     "throughput": 3485.544028457317,
+     "usd_per_million": 0.056901686426584774
     },
     {
      "batch": 16384,
-     "throughput": 2383.9862172348758,
-     "usd_per_million": 0.08319399327877619
+     "throughput": 2547.4721723008115,
+     "usd_per_million": 0.07785495578316906
     },
     {
      "batch": 65536,
-     "throughput": 2137.657688048623,
-     "usd_per_million": 0.09278067973286377
+     "throughput": 2401.1309751288923,
+     "usd_per_million": 0.08259996451159304
     }
    ],
    "cpu_sparse_c128": [
     {
      "batch": 1,
-     "throughput": 50.290581614712316,
-     "usd_per_million": 3.9437470588988313
+     "throughput": 46.27145963418152,
+     "usd_per_million": 4.28629947923279
     },
     {
      "batch": 4,
-     "throughput": 193.23957214160853,
-     "usd_per_million": 1.0263598244152186
+     "throughput": 181.23401464918945,
+     "usd_per_million": 1.0943493897502774
     },
     {
      "batch": 16,
-     "throughput": 704.2627945063272,
-     "usd_per_million": 0.2816183601923209
+     "throughput": 675.5455883030161,
+     "usd_per_million": 0.29358985798656545
     },
     {
      "batch": 64,
-     "throughput": 2069.7663237938764,
-     "usd_per_million": 0.09582402180058126
+     "throughput": 2152.3657010553475,
+     "usd_per_million": 0.09214667063133675
     },
     {
      "batch": 256,
-     "throughput": 5828.364757186637,
-     "usd_per_million": 0.03402898438859362
+     "throughput": 6399.710086455444,
+     "usd_per_million": 0.030990987193793746
     },
     {
      "batch": 1024,
-     "throughput": 10001.685637125374,
-     "usd_per_million": 0.01982999071647858
+     "throughput": 2601.6644198102963,
+     "usd_per_million": 0.07623324969320795
     },
     {
      "batch": 4096,
-     "throughput": 6800.0943898998,
-     "usd_per_million": 0.029166261813647527
+     "throughput": 4047.7398184003705,
+     "usd_per_million": 0.048998538006751836
     },
     {
      "batch": 16384,
-     "throughput": 7790.323959285321,
-     "usd_per_million": 0.02545893269264354
+     "throughput": 5892.878605899514,
+     "usd_per_million": 0.03365644307262272
     },
     {
      "batch": 65536,
-     "throughput": 7293.647302221449,
-     "usd_per_million": 0.02719261366983379
+     "throughput": 9600.489784836916,
+     "usd_per_million": 0.020658668232383565
     }
    ],
    "gpu_dense_c128": [
     {
      "batch": 1,
-     "throughput": 23.36580165946275,
-     "usd_per_million": 22.123976398434024
+     "throughput": 22.595681179076557,
+     "usd_per_million": 22.878019934319635
     },
     {
      "batch": 4,
-     "throughput": 92.9558649929686,
-     "usd_per_million": 5.561181583147522
+     "throughput": 89.83509181286885,
+     "usd_per_million": 5.7543709703248975
     },
     {
      "batch": 16,
-     "throughput": 319.7513674837622,
-     "usd_per_million": 1.6167075328323537
+     "throughput": 306.8419364666118,
+     "usd_per_million": 1.6847255313182863
     },
     {
      "batch": 64,
-     "throughput": 1274.626887704486,
-     "usd_per_million": 0.4055653065466281
+     "throughput": 1220.1307009893123,
+     "usd_per_million": 0.42367956484112157
     },
     {
      "batch": 256,
-     "throughput": 5039.301335075323,
-     "usd_per_million": 0.10258256255610831
+     "throughput": 4832.244114146094,
+     "usd_per_million": 0.10697813111947754
     },
     {
      "batch": 1024,
-     "throughput": 19366.231373625305,
-     "usd_per_million": 0.026693084187172644
+     "throughput": 18618.60800843818,
+     "usd_per_million": 0.02776493517722479
     },
     {
      "batch": 4096,
-     "throughput": 52480.191966932245,
-     "usd_per_million": 0.009850277315490215
+     "throughput": 51165.99128509753,
+     "usd_per_million": 0.010103282111041759
     },
     {
      "batch": 16384,
-     "throughput": 74123.09034074808,
-     "usd_per_million": 0.006974135078125066
+     "throughput": 73448.10385674583,
+     "usd_per_million": 0.007038227228475494
     },
     {
      "batch": 65536,
-     "throughput": 80792.09628592466,
-     "usd_per_million": 0.006398453168178343
+     "throughput": 83980.73050086793,
+     "usd_per_million": 0.006155512596298527
     }
    ],
    "cpu_pool_dense_c128": [
     {
      "batch": 1,
-     "throughput": 41.12503789552684,
-     "usd_per_million": 4.8226905914877225
+     "throughput": 38.96374355684915,
+     "usd_per_million": 5.090202204106997
     },
     {
      "batch": 4,
-     "throughput": 156.902752467858,
-     "usd_per_million": 1.2640526071966935
+     "throughput": 160.41224640298591,
+     "usd_per_million": 1.2363977051669885
     },
     {
      "batch": 16,
-     "throughput": 537.1940216135157,
-     "usd_per_million": 0.3692024210128389
+     "throughput": 598.8711587998534,
+     "usd_per_million": 0.3311786357032057
     },
     {
      "batch": 64,
-     "throughput": 2077.9048106130463,
-     "usd_per_million": 0.09544870983518193
+     "throughput": 2115.3456396396073,
+     "usd_per_million": 0.09375930326314119
     },
     {
      "batch": 256,
-     "throughput": 6246.06067562546,
-     "usd_per_million": 0.031753347210875894
+     "throughput": 4541.796917877503,
+     "usd_per_million": 0.043668472395287
     },
     {
      "batch": 1024,
-     "throughput": 12695.133122654757,
-     "usd_per_million": 0.015622784843382455
+     "throughput": 10543.483411349791,
+     "usd_per_million": 0.01881098737442244
     },
     {
      "batch": 4096,
-     "throughput": 16626.43362048778,
-     "usd_per_million": 0.011928795907797015
+     "throughput": 18071.053251844605,
+     "usd_per_million": 0.010975195002155639
     },
     {
      "batch": 16384,
-     "throughput": 14739.312609036211,
-     "usd_per_million": 0.01345607753863239
+     "throughput": 18978.019847592706,
+     "usd_per_million": 0.010450686369078236
     },
     {
      "batch": 65536,
-     "throughput": 13290.690464621179,
-     "usd_per_million": 0.014922726088707114
+     "throughput": 16570.41979964921,
+     "usd_per_million": 0.011969119414677229
     }
    ],
    "cpu_pool_sparse_c128": [
     {
      "batch": 1,
-     "throughput": 40.30890649902539,
-     "usd_per_million": 4.920335244969465
+     "throughput": 40.2485250173781,
+     "usd_per_million": 4.927716810683099
     },
     {
      "batch": 4,
-     "throughput": 156.39297150251207,
-     "usd_per_million": 1.2681729327596258
+     "throughput": 164.98001423323575,
+     "usd_per_million": 1.2021658153874641
     },
     {
      "batch": 16,
-     "throughput": 385.34625449013885,
-     "usd_per_million": 0.5146886236010081
+     "throughput": 626.5248797732269,
+     "usd_per_million": 0.3165609854234693
     },
     {
      "batch": 64,
-     "throughput": 2238.6191724345504,
-     "usd_per_million": 0.08859628103588571
+     "throughput": 2270.71636536696,
+     "usd_per_million": 0.08734394852581316
     },
     {
      "batch": 256,
-     "throughput": 5048.846013730723,
-     "usd_per_million": 0.03928290401290724
+     "throughput": 8438.63610960502,
+     "usd_per_million": 0.023503008158816854
     },
     {
      "batch": 1024,
-     "throughput": 16749.05764356108,
-     "usd_per_million": 0.011841462221582335
+     "throughput": 19755.945416481256,
+     "usd_per_million": 0.010039171963285298
     },
     {
      "batch": 4096,
-     "throughput": 19725.419275491677,
-     "usd_per_million": 0.010054708118663788
+     "throughput": 23818.14798638318,
+     "usd_per_million": 0.008326983837984397
     },
     {
      "batch": 16384,
-     "throughput": 19378.676691256296,
-     "usd_per_million": 0.010234616970663522
+     "throughput": 28616.43113319142,
+     "usd_per_million": 0.0069307501138145735
     },
     {
      "batch": 65536,
-     "throughput": 14339.817404168003,
-     "usd_per_million": 0.01383095249704406
+     "throughput": 26410.142350558574,
+     "usd_per_million": 0.007509741170673342
     }
    ],
    "power_grid_model": [
     {
      "batch": 1,
-     "throughput": 2582.13121294358,
-     "usd_per_million": 0.07680993604784209
+     "throughput": 2635.3445630341485,
+     "usd_per_million": 0.0752589760425811
     },
     {
      "batch": 4,
-     "throughput": 8545.748797840764,
-     "usd_per_million": 0.02320842070427413
+     "throughput": 8803.825739292548,
+     "usd_per_million": 0.022528084858398262
     },
     {
      "batch": 16,
-     "throughput": 20671.46269189194,
-     "usd_per_million": 0.009594547627784777
+     "throughput": 20704.87397890931,
+     "usd_per_million": 0.009579064984185
     },
     {
      "batch": 64,
-     "throughput": 41631.212461349074,
-     "usd_per_million": 0.004764053737744689
+     "throughput": 41916.1164934724,
+     "usd_per_million": 0.004731672443085699
     },
     {
      "batch": 256,
-     "throughput": 56288.81203864428,
-     "usd_per_million": 0.0035234947434522232
+     "throughput": 56442.26757715287,
+     "usd_per_million": 0.0035139150471271323
     },
     {
      "batch": 1024,
-     "throughput": 60354.974220396056,
-     "usd_per_million": 0.003286114125558015
+     "throughput": 60848.482172994474,
+     "usd_per_million": 0.0032594622947120415
     },
     {
      "batch": 4096,
-     "throughput": 56444.881700039994,
-     "usd_per_million": 0.0035137523077348
+     "throughput": 58145.37409545807,
+     "usd_per_million": 0.0034109907523808642
     },
     {
      "batch": 16384,
-     "throughput": 55628.10039716121,
-     "usd_per_million": 0.003565344347862265
+     "throughput": 57874.9359273478,
+     "usd_per_million": 0.00342692963984111
     },
     {
      "batch": 65536,
-     "throughput": 55290.549538701634,
-     "usd_per_million": 0.003587110907525097
+     "throughput": 58158.24158293276,
+     "usd_per_million": 0.003410236072053744
     }
    ],
    "pandapower": [
     {
      "batch": 1,
-     "throughput": 151.43725080096635,
-     "usd_per_million": 1.3096733616354563
+     "throughput": 161.1892145167249,
+     "usd_per_million": 1.2304379913257435
     },
     {
      "batch": 4,
-     "throughput": 675.8340111492612,
-     "usd_per_million": 0.2934645638742949
+     "throughput": 713.944289397485,
+     "usd_per_million": 0.27779945337291184
     },
     {
      "batch": 16,
-     "throughput": 749.2603885138773,
-     "usd_per_million": 0.26470548339905997
+     "throughput": 1256.7645425105397,
+     "usd_per_million": 0.15781264240407228
     },
     {
      "batch": 64,
-     "throughput": 785.616269873293,
-     "usd_per_million": 0.2524557356294584
+     "throughput": 1578.5734708262078,
+     "usd_per_million": 0.12564086309491054
     },
     {
      "batch": 256,
-     "throughput": 781.6156620675275,
-     "usd_per_million": 0.253747900609748
+     "throughput": 1603.9196595350595,
+     "usd_per_million": 0.12365540390646856
     },
     {
      "batch": 1024,
-     "throughput": 822.3155826759704,
-     "usd_per_million": 0.24118883006925293
+     "throughput": 1570.9009451670634,
+     "usd_per_million": 0.12625451270082522
     },
     {
      "batch": 4096,
-     "throughput": 1561.2980707844915,
-     "usd_per_million": 0.12703105002472623
+     "throughput": 1604.9622417098365,
+     "usd_per_million": 0.12357507745605291
     },
     {
      "batch": 16384,
-     "throughput": 1487.2073410839996,
-     "usd_per_million": 0.13335957122748707
+     "throughput": 1593.1614148326673,
+     "usd_per_million": 0.1244904197947605
     },
     {
      "batch": 65536,
-     "throughput": 1561.4028241698977,
-     "usd_per_million": 0.12702252760351898
+     "throughput": 1604.1757827885986,
+     "usd_per_million": 0.12363566104243459
     }
    ],
    "opendss": [
     {
      "batch": 1,
-     "throughput": 389.9111201047058,
-     "usd_per_million": 0.508662931388244
+     "throughput": 1246.0205140925414,
+     "usd_per_million": 0.1591734093381092
     },
     {
      "batch": 4,
-     "throughput": 6005.798605651296,
-     "usd_per_million": 0.033023640377602234
+     "throughput": 5774.90608865624,
+     "usd_per_million": 0.0343439928352988
     },
     {
      "batch": 16,
-     "throughput": 10645.538922273498,
-     "usd_per_million": 0.018630652217931733
+     "throughput": 11164.725427384623,
+     "usd_per_million": 0.01776428221395084
     },
     {
      "batch": 64,
-     "throughput": 12540.209254200185,
-     "usd_per_million": 0.015815791372612388
+     "throughput": 14052.650343696458,
+     "usd_per_million": 0.014113589143865585
     },
     {
      "batch": 256,
-     "throughput": 13167.78681522312,
-     "usd_per_million": 0.015062009745179237
+     "throughput": 24534.738368143862,
+     "usd_per_million": 0.008083776169011495
     },
     {
      "batch": 1024,
-     "throughput": 13268.554963311008,
-     "usd_per_million": 0.014947621190231073
+     "throughput": 25653.54596416156,
+     "usd_per_million": 0.00773122490007457
     },
     {
      "batch": 4096,
-     "throughput": 13262.683550417534,
-     "usd_per_million": 0.014954238527925174
+     "throughput": 25932.46342442086,
+     "usd_per_million": 0.0076480714572824135
     },
     {
      "batch": 16384,
-     "throughput": 24213.86468220389,
-     "usd_per_million": 0.008190899550169679
+     "throughput": 25201.93872740479,
+     "usd_per_million": 0.007869764920810004
     },
     {
      "batch": 65536,
-     "throughput": 24327.121221990215,
-     "usd_per_million": 0.008152766269526879
+     "throughput": 25940.42554679058,
+     "usd_per_million": 0.007645723967619016
     }
    ]
   }
  },
  "cost_named_grids": {
-  "ieee33": {
-   "rows": 33,
-   "series": {
-    "cpu_dense_c128": {
-     "throughput": 130097.22420724297,
-     "at_batch": 16384,
-     "usd_per_million": 0.0015245008841802132,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "cpu_sparse_c128": {
-     "throughput": 98182.92905678831,
-     "at_batch": 16384,
-     "usd_per_million": 0.0020200388727313148,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "gpu_dense_c128": {
-     "throughput": 1248684.2420882443,
-     "at_batch": 65536,
-     "usd_per_million": 0.0004139913254450376,
-     "priced_on": "AWS g6e.xlarge"
-    },
-    "cpu_pool_dense_c128": {
-     "throughput": 183292.5630408969,
-     "at_batch": 16384,
-     "usd_per_million": 0.0010820588137505638,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "cpu_pool_sparse_c128": {
-     "throughput": 180435.96825309278,
-     "at_batch": 16384,
-     "usd_per_million": 0.0010991895643286398,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "power_grid_model": {
-     "throughput": 295943.8241648648,
-     "at_batch": 16384,
-     "usd_per_million": 0.0006701722324938449,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "pandapower": {
-     "throughput": 2189.9542429271337,
-     "at_batch": 65536,
-     "usd_per_million": 0.09056505813940537,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "opendss": {
-     "throughput": 97663.02814065831,
-     "at_batch": 4096,
-     "usd_per_million": 0.0020307923797702188,
-     "priced_on": "AWS c7i.4xlarge"
-    }
-   }
-  },
-  "cigre_lv3": {
-   "rows": 132,
-   "series": {
-    "cpu_dense_c128": {
-     "throughput": 7063.595129318411,
-     "at_batch": 4096,
-     "usd_per_million": 0.028078241986169886,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "cpu_sparse_c128": {
-     "throughput": 18328.30868278131,
-     "at_batch": 16384,
-     "usd_per_million": 0.01082114759010248,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "gpu_dense_c128": {
-     "throughput": 213917.06219292374,
-     "at_batch": 16384,
-     "usd_per_million": 0.002416564808552914,
-     "priced_on": "AWS g6e.xlarge"
-    },
-    "cpu_pool_dense_c128": {
-     "throughput": 42818.27346859624,
-     "at_batch": 16384,
-     "usd_per_million": 0.004631978762030068,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "cpu_pool_sparse_c128": {
-     "throughput": 43087.93515896689,
-     "at_batch": 16384,
-     "usd_per_million": 0.004602989969271221,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "power_grid_model": {
-     "throughput": 67863.51187489535,
-     "at_batch": 16384,
-     "usd_per_million": 0.0029225327109353807,
-     "priced_on": "AWS c7i.4xlarge"
-    },
-    "opendss": {
-     "throughput": 57753.32217011591,
-     "at_batch": 4096,
-     "usd_per_million": 0.0034341458790739425,
-     "priced_on": "AWS c7i.4xlarge"
-    }
-   }
-  },
   "kerber": {
    "rows": 294,
    "series": {
     "cpu_dense_c128": {
-     "throughput": 3072.60178285206,
+     "throughput": 3485.544028457317,
      "at_batch": 4096,
-     "usd_per_million": 0.0645489872590114,
+     "usd_per_million": 0.056901686426584774,
      "priced_on": "AWS c7i.4xlarge"
     },
     "cpu_sparse_c128": {
-     "throughput": 10001.685637125374,
-     "at_batch": 1024,
-     "usd_per_million": 0.01982999071647858,
+     "throughput": 9600.489784836916,
+     "at_batch": 65536,
+     "usd_per_million": 0.020658668232383565,
      "priced_on": "AWS c7i.4xlarge"
     },
     "gpu_dense_c128": {
-     "throughput": 80792.09628592466,
+     "throughput": 83980.73050086793,
      "at_batch": 65536,
-     "usd_per_million": 0.006398453168178343,
+     "usd_per_million": 0.006155512596298527,
      "priced_on": "AWS g6e.xlarge"
     },
     "cpu_pool_dense_c128": {
-     "throughput": 16626.43362048778,
-     "at_batch": 4096,
-     "usd_per_million": 0.011928795907797015,
+     "throughput": 18978.019847592706,
+     "at_batch": 16384,
+     "usd_per_million": 0.010450686369078236,
      "priced_on": "AWS c7i.4xlarge"
     },
     "cpu_pool_sparse_c128": {
-     "throughput": 19725.419275491677,
-     "at_batch": 4096,
-     "usd_per_million": 0.010054708118663788,
+     "throughput": 28616.43113319142,
+     "at_batch": 16384,
+     "usd_per_million": 0.0069307501138145735,
      "priced_on": "AWS c7i.4xlarge"
     },
     "power_grid_model": {
-     "throughput": 60354.974220396056,
+     "throughput": 60848.482172994474,
      "at_batch": 1024,
-     "usd_per_million": 0.003286114125558015,
+     "usd_per_million": 0.0032594622947120415,
      "priced_on": "AWS c7i.4xlarge"
     },
     "pandapower": {
-     "throughput": 1561.4028241698977,
-     "at_batch": 65536,
-     "usd_per_million": 0.12702252760351898,
+     "throughput": 1604.9622417098365,
+     "at_batch": 4096,
+     "usd_per_million": 0.12357507745605291,
      "priced_on": "AWS c7i.4xlarge"
     },
     "opendss": {
-     "throughput": 24327.121221990215,
+     "throughput": 25940.42554679058,
      "at_batch": 65536,
-     "usd_per_million": 0.008152766269526879,
+     "usd_per_million": 0.007645723967619016,
      "priced_on": "AWS c7i.4xlarge"
     }
    }
@@ -1635,51 +1538,157 @@
    "rows": 1176,
    "series": {
     "cpu_dense_c128": {
-     "throughput": 388.04947879103344,
+     "throughput": 411.2416604266115,
      "at_batch": 1024,
-     "usd_per_million": 0.5111032076405309,
+     "usd_per_million": 0.48227928349376725,
      "priced_on": "AWS c7i.4xlarge"
     },
     "cpu_sparse_c128": {
-     "throughput": 2294.462517867713,
-     "at_batch": 1024,
-     "usd_per_million": 0.08643999707506585,
+     "throughput": 2760.051751643431,
+     "at_batch": 65536,
+     "usd_per_million": 0.07185855599092979,
      "priced_on": "AWS c7i.4xlarge"
     },
     "gpu_dense_c128": {
-     "throughput": 7178.629486183613,
-     "at_batch": 4096,
-     "usd_per_million": 0.07201157901231485,
+     "throughput": 10114.805071664063,
+     "at_batch": 65536,
+     "usd_per_million": 0.05110770210417886,
      "priced_on": "AWS g6e.xlarge"
     },
     "cpu_pool_dense_c128": {
-     "throughput": 1607.7288144454526,
-     "at_batch": 1024,
-     "usd_per_million": 0.12336243000144502,
+     "throughput": 2625.885384468365,
+     "at_batch": 16384,
+     "usd_per_million": 0.07553008006611368,
      "priced_on": "AWS c7i.4xlarge"
     },
     "cpu_pool_sparse_c128": {
-     "throughput": 4118.530876158862,
-     "at_batch": 4096,
-     "usd_per_million": 0.048156330326776235,
+     "throughput": 5732.04666833372,
+     "at_batch": 16384,
+     "usd_per_million": 0.0346007883063848,
      "priced_on": "AWS c7i.4xlarge"
     },
     "power_grid_model": {
-     "throughput": 14622.957255832329,
+     "throughput": 14960.43556376045,
      "at_batch": 1024,
-     "usd_per_million": 0.013563147991438504,
+     "usd_per_million": 0.013257189771517611,
      "priced_on": "AWS c7i.4xlarge"
     },
     "pandapower": {
-     "throughput": 892.1876116213834,
-     "at_batch": 4096,
-     "usd_per_million": 0.2223000305652078,
+     "throughput": 975.2322779716462,
+     "at_batch": 16384,
+     "usd_per_million": 0.20337035372315646,
      "priced_on": "AWS c7i.4xlarge"
     },
     "opendss": {
-     "throughput": 5917.143497089497,
+     "throughput": 6261.4998426582115,
+     "at_batch": 16384,
+     "usd_per_million": 0.03167505203499843,
+     "priced_on": "AWS c7i.4xlarge"
+    }
+   }
+  },
+  "ieee33": {
+   "rows": 33,
+   "series": {
+    "cpu_dense_c128": {
+     "throughput": 163679.7492930991,
+     "at_batch": 16384,
+     "usd_per_million": 0.0012117157692988674,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "cpu_sparse_c128": {
+     "throughput": 62021.52932519168,
+     "at_batch": 262144,
+     "usd_per_million": 0.003197814299183606,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "gpu_dense_c128": {
+     "throughput": 1335360.3076295427,
+     "at_batch": 65536,
+     "usd_per_million": 0.0003871198218869449,
+     "priced_on": "AWS g6e.xlarge"
+    },
+    "cpu_pool_dense_c128": {
+     "throughput": 217865.98044731747,
+     "at_batch": 262144,
+     "usd_per_million": 0.000910345584593427,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "cpu_pool_sparse_c128": {
+     "throughput": 248747.44589499888,
+     "at_batch": 16384,
+     "usd_per_million": 0.000797328119771142,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "power_grid_model": {
+     "throughput": 304148.9000659354,
      "at_batch": 4096,
-     "usd_per_million": 0.033518425475212624,
+     "usd_per_million": 0.0006520928837498257,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "pandapower": {
+     "throughput": 2194.9691878974013,
+     "at_batch": 16384,
+     "usd_per_million": 0.09035814007180677,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "opendss": {
+     "throughput": 98518.32682409864,
+     "at_batch": 65536,
+     "usd_per_million": 0.002013161811887561,
+     "priced_on": "AWS c7i.4xlarge"
+    }
+   }
+  },
+  "cigre_lv3": {
+   "rows": 132,
+   "series": {
+    "cpu_dense_c128": {
+     "throughput": 8549.405168831663,
+     "at_batch": 16384,
+     "usd_per_million": 0.023198495031723592,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "cpu_sparse_c128": {
+     "throughput": 15998.617902583484,
+     "at_batch": 262144,
+     "usd_per_million": 0.012396904191411817,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "gpu_dense_c128": {
+     "throughput": 220759.9479434047,
+     "at_batch": 16384,
+     "usd_per_million": 0.002341658662544038,
+     "priced_on": "AWS g6e.xlarge"
+    },
+    "cpu_pool_dense_c128": {
+     "throughput": 47722.80293751932,
+     "at_batch": 16384,
+     "usd_per_million": 0.004155944771161065,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "cpu_pool_sparse_c128": {
+     "throughput": 57466.540885620685,
+     "at_batch": 4096,
+     "usd_per_million": 0.003451283656138078,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "power_grid_model": {
+     "throughput": 67576.05633869016,
+     "at_batch": 4096,
+     "usd_per_million": 0.0029349646025404277,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "pandapower": {
+     "throughput": 300.8228317824155,
+     "at_batch": 4096,
+     "usd_per_million": 0.6593027934687731,
+     "priced_on": "AWS c7i.4xlarge"
+    },
+    "opendss": {
+     "throughput": 58460.78075586092,
+     "at_batch": 4096,
+     "usd_per_million": 0.003392587830148841,
      "priced_on": "AWS c7i.4xlarge"
     }
    }
@@ -1691,81 +1700,81 @@
    "per_hour": 1.861,
    "currency": "USD",
    "cost_per_million": {
-    "gpu_dense_c128": 0.556499645807212
+    "gpu_dense_c128": 0.551904223483951
    }
   },
   "RunPod L40S (Secure Cloud)": {
    "per_hour": 1.09,
    "currency": "USD",
    "cost_per_million": {
-    "gpu_dense_c128": 0.32594552065011345
+    "gpu_dense_c128": 0.32325395142262575
    }
   },
   "RunPod L40S (Community Cloud)": {
    "per_hour": 0.79,
    "currency": "USD",
    "cost_per_million": {
-    "gpu_dense_c128": 0.23623574432439418
+    "gpu_dense_c128": 0.2342849739668572
    }
   },
   "CoreWeave L40S node": {
    "per_hour": 2.25,
    "currency": "USD",
    "cost_per_million": {
-    "gpu_dense_c128": 0.6728233224428948
+    "gpu_dense_c128": 0.6672673309182642
    }
   },
   "AWS g6.xlarge": {
    "per_hour": 0.8048,
    "currency": "USD",
    "cost_per_million": {
-    "gpu_dense_c128": 0.24066142662312962
+    "gpu_dense_c128": 0.23867411018800844
    }
   },
   "AWS c7i.4xlarge": {
    "per_hour": 0.714,
    "currency": "USD",
    "cost_per_million": {
-    "cpu_dense_c128": 6.577309658675575,
-    "cpu_sparse_c128": 0.6308545357571422,
-    "cpu_pool_dense_c128": 70.98804568824562,
-    "cpu_pool_sparse_c128": 0.2362869144765985,
-    "pandapower": 0.2758007250671805,
-    "power_grid_model": 0.07031474942550629,
-    "opendss": 0.3137631168424093
+    "cpu_dense_c128": 6.406375417821881,
+    "cpu_sparse_c128": 0.3815608077834061,
+    "cpu_pool_dense_c128": 1.0982933590813104,
+    "cpu_pool_sparse_c128": 0.19043351378338494,
+    "pandapower": 0.2831340100053599,
+    "power_grid_model": 0.0710733256361588,
+    "opendss": 0.31371184704544436
    }
   },
   "AWS c7a.4xlarge": {
    "per_hour": 0.82112,
    "currency": "USD",
    "cost_per_million": {
-    "cpu_dense_c128": 7.5640903458427005,
-    "cpu_sparse_c128": 0.725500387116113,
-    "cpu_pool_dense_c128": 81.638241002146,
-    "cpu_pool_sparse_c128": 0.27173657032916604,
-    "pandapower": 0.3171785593377637,
-    "power_grid_model": 0.08086393144015648,
-    "opendss": 0.36083637325159545
+    "cpu_dense_c128": 7.367511180786979,
+    "cpu_sparse_c128": 0.43880561692872605,
+    "cpu_pool_dense_c128": 1.2630681274633693,
+    "cpu_pool_sparse_c128": 0.21900387512298744,
+    "pandapower": 0.32561204243081393,
+    "power_grid_model": 0.08173631533104021,
+    "opendss": 0.360777411548957
    }
   },
   "ULHPC CPU node (regular)": {
    "per_hour": 0.0776,
    "currency": "EUR",
    "cost_per_million": {
-    "cpu_dense_c128": 0.7148448592622194,
-    "cpu_sparse_c128": 0.06856346214951575,
-    "cpu_pool_dense_c128": 7.715227374520813,
-    "cpu_pool_sparse_c128": 0.025680482581770372,
-    "pandapower": 0.029974980763603935,
-    "power_grid_model": 0.007642051198066231,
-    "opendss": 0.034100865359903317
+    "cpu_dense_c128": 0.6962671322450672,
+    "cpu_sparse_c128": 0.0414693538991489,
+    "cpu_pool_dense_c128": 0.11936633706541974,
+    "cpu_pool_sparse_c128": 0.020696975727718028,
+    "pandapower": 0.03077198764203912,
+    "power_grid_model": 0.00772449589547048,
+    "opendss": 0.0340952931802892
    }
   },
   "ULHPC GPU (V100)": {
    "per_hour": 1.25,
    "currency": "EUR",
    "cost_per_million": {
-    "gpu_dense_c128": 0.37379073469049706
+    "gpu_dense_c128": 0.370704072732369
    }
   }
  }

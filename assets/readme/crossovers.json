@@ -1,35 +1,35 @@
 {
  "environment": {
-  "date": "2026-09-24 18:19:48+0200",
-  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
-  "cpu": "13th Gen Intel(R) Core(TM) i5-1345U",
-  "cpu_count_logical": 12,
-  "ram_gb": 15.3,
-  "torch_threads": 10,
+  "date": "2026-09-27 01:21:26+0200",
+  "platform": "Linux-5.14.0-687.48.1.el9_8.x86_64-x86_64-with-glibc2.34",
+  "cpu": "AMD EPYC 9334 32-Core Processor",
+  "cpu_count_logical": 128,
+  "ram_gb": 1511.1,
+  "torch_threads": 4,
   "cuda_available": false,
-  "cuda_runtime": null,
+  "cuda_runtime": "13.0",
   "versions": {
    "python": "3.13.15",
    "torch": "2.13.0",
    "numpy": "2.4.6",
-   "scipy": "1.18.0",
+   "scipy": "1.18.1",
    "pgml": "0.5.1",
-   "pgml_git": "966df9d-dirty",
+   "pgml_git": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
    "pandapower": "3.5.4",
-   "power_grid_model": "1.13.142",
+   "power_grid_model": "1.13.172",
    "power_grid_model_io": "present",
-   "numba": "0.65.1",
+   "numba": "0.67.0",
    "opendssdirect": "0.9.4"
   },
   "pandapower_numba": {
    "importable": true,
-   "version": "0.65.1",
+   "version": "0.67.0",
    "opt_out": false,
    "requested": true
   },
   "kerber_seed": 20260912,
-  "pgml_source_digest": "e40a8c2e0fac",
-  "benchmark_source_digest": "580573102c84",
+  "pgml_source_digest": "c3bc1b3d1049",
+  "benchmark_source_digest": "c2433bc30f7c",
   "modeling_defaults": {
    "converter": {
     "pandapower": {
@@ -380,7 +380,12 @@
      "system_budget_mb": {
       "value": 1024.0,
       "units": "MiB",
-      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted); it is charged the matrix AND its factorisation, which for a dense LU is a second copy of the same size. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
+      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted). On the dense route (the dense and block backends, every CUDA solve, mixed precision) it is charged the dense matrix AND its factorisation, which for a dense LU is a second copy of the same size. Where the harmonic orders are factored by the sparse backend (CPU, full precision) the dense matrix is never formed: each system is assembled as its structural entries over the topology's sparsity pattern, and the budget is charged 384 KiB per system plus 48 numbers per pattern entry: three times what one system holds when measured in isolation (its entries, their scatter and factorization copies, and the L and U factors, which SuperLU sizes from a fill estimate), because the heap keeps a finished chunk's factors largely resident while the next chunk allocates. That is O(N) per system instead of O(N^2), so a chunk holds several times more scenarios for the same budget and one scenario of a large grid no longer exceeds it. On both routes the per-scenario injection and solution vectors and the fundamental solve grow with the batch outside the chunk and are not charged against the budget. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
+     },
+     "preparation_min_rows": {
+      "value": 256,
+      "units": "rows of Y(h) (one per existing node-phase)",
+      "description": "Smallest system for which a CHUNKED harmonic scenario run prepares a reusable `HarmonicFlowSystem` on the CPU. The preparation hoists the network assembly and an operating-point-independent factorization out of the chunk loop and pays for that with a value snapshot of the grid and one key comparison per chunk. On one CPU thread at complex128 over orders 1..13 the trade is a LOSS up to about 200 rows (0.85 to 0.98 of the uncached call), crosses 1.0 between 201 and 255 rows, and then grows: 1.10 to 1.18 at 300 rows, 1.24 to 1.64 at 450 and 1.28 to 1.42 at 900. 256 rows sits on that crossing, so a grid just below the gate gives up at most a few percent and a grid just above it pays at most a few percent. Those figures are for a Y(h) that does not carry the scenario; a per-scenario Y(h) over a batch has no reusable factorization and stays within a percent of the uncached call at every size, so the gate neither helps nor hurts it. An ACCELERATOR is never gated, whatever this value: every size measured there, from 99 rows up, gains 1.1x to 2.5x, because the assembly and factorization the preparation removes are a larger share of a GPU call while its back-substitutions are relatively cheaper. Set to 0 to prepare at every size, or above the largest grid in use to keep the uncached path everywhere.\n"
      }
     },
     "ift": {
@@ -412,869 +417,106 @@
   },
   "tolerance_mode": "library",
   "guard_tol_pu": 1e-06,
+  "timed_region_host_result": true,
+  "pgm_isolated_process": true,
+  "pgml_single_call_isolated_process": true,
   "cpu_allocation": {
-   "logical_cpus": 12,
-   "physical_cores": 10,
-   "threads_per_core": 1.2,
+   "logical_cpus": 8,
+   "physical_cores": 4,
+   "threads_per_core": 2.0,
    "cpu_workers": 8,
    "blas_thread_env": {
-    "OMP_NUM_THREADS": null,
-    "MKL_NUM_THREADS": null,
-    "OPENBLAS_NUM_THREADS": null,
-    "NUMEXPR_NUM_THREADS": null
+    "OMP_NUM_THREADS": "4",
+    "MKL_NUM_THREADS": "4",
+    "OPENBLAS_NUM_THREADS": "4",
+    "NUMEXPR_NUM_THREADS": "4"
    }
   },
   "allocation": {
-   "logical_cpus": null,
-   "memory_mb": null
+   "logical_cpus": "8",
+   "memory_mb": "32768"
   }
  },
+ "pgml_dtypes": [
+  "c128"
+ ],
  "fundamental": {
   "mode": "fundamental",
   "source": "bench_batch_throughput_fair.json",
   "workers": 8,
+  "pgml_dtypes": [
+   "c128"
+  ],
   "grids": {
-   "ieee33": {
-    "label": "IEEE 33-bus",
-    "rows": 33,
-    "curves": {
-     "pgml_gpu": {
-      "1": 66.81283511869893,
-      "4": 264.8332071306653,
-      "16": 1053.397581203228,
-      "64": 4213.132335144845,
-      "256": 16827.615782563364,
-      "1024": 66461.86380010622,
-      "4096": 264440.7348337676,
-      "16384": 796294.8529981896,
-      "65536": 1248684.2420882443,
-      "262144": 1009010.9957514459
-     },
-     "pgml_cpu_pool": {
-      "1": 125.77053291693942,
-      "4": 511.34834936954405,
-      "16": 1249.9929716645518,
-      "64": 7952.099545260435,
-      "256": 28270.527387629056,
-      "1024": 78740.9690515994,
-      "4096": 140494.01896417598,
-      "16384": 183292.5630408969,
-      "65536": 176311.64770041616,
-      "262144": 162094.16408671258
-     },
-     "pgml_cpu_single": {
-      "1": 142.59871337463605,
-      "4": 586.1037756833449,
-      "16": 2229.7022460462717,
-      "64": 7699.501877089995,
-      "256": 19727.621710643383,
-      "1024": 44637.30506373154,
-      "4096": 95617.5060856309,
-      "16384": 130097.22420724297,
-      "65536": 97801.67106902644,
-      "262144": 82950.89655532665
-     },
-     "pandapower": {
-      "1": 184.42981001008468,
-      "4": 840.5153799707623,
-      "16": 1022.1304033545886,
-      "64": 1015.4446751592851,
-      "256": 1114.2196000374056,
-      "1024": 1119.6617171391056,
-      "4096": 2188.033135981581,
-      "16384": 2189.773652635509,
-      "65536": 2189.9542429271337
-     },
-     "power_grid_model": {
-      "1": 5738.451923565109,
-      "4": 12660.794742856047,
-      "16": 34351.13340908103,
-      "64": 96357.67694622921,
-      "256": 165852.84155572092,
-      "1024": 192145.85311120408,
-      "4096": 230456.91824844744,
-      "16384": 295943.8241648648,
-      "65536": 295500.4593654949
-     },
-     "opendss": {
-      "1": 4498.143960554276,
-      "4": 11885.765154725406,
-      "16": 21322.13335774186,
-      "64": 32609.055979622033,
-      "256": 46906.23094698754,
-      "1024": 96206.06094626695,
-      "4096": 97663.02814065831,
-      "16384": 79264.28157801168,
-      "65536": 93056.78264190034
-     }
-    },
-    "crossovers": {
-     "pgml_gpu": {
-      "pandapower": {
-       "crossover_batch": 16,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.36226700615830804,
-       "ratio_at_largest": 570.1873662982244,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "power_grid_model": {
-       "crossover_batch": 4096,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.011643006861193732,
-       "ratio_at_largest": 4.22565922492793,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": 4096,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.014853423035056892,
-       "ratio_at_largest": 13.41851938824719,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     },
-     "pgml_cpu_pool": {
-      "pandapower": {
-       "crossover_batch": 16,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.6819425390616747,
-       "ratio_at_largest": 80.50928382172712,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.02191715371883823,
-       "ratio_at_largest": 0.5966543946462771,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": 4096,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.02796053972924458,
-       "ratio_at_largest": 1.8946673492774395,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     },
-     "pgml_cpu_single": {
-      "pandapower": {
-       "crossover_batch": 16,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.7731869016556419,
-       "ratio_at_largest": 44.65923038570108,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.024849683376983706,
-       "ratio_at_largest": 0.3309696075567136,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": 16384,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.03170167843117777,
-       "ratio_at_largest": 1.050989173410232,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     }
-    },
-    "peak_throughput": {
-     "pgml_gpu": 1248684.2420882443,
-     "pgml_cpu_pool": 183292.5630408969,
-     "pgml_cpu_single": 130097.22420724297,
-     "pandapower": 2189.9542429271337,
-     "power_grid_model": 295943.8241648648,
-     "opendss": 97663.02814065831
-    },
-    "fastest_at_smallest_batch": {
-     "batch": 1,
-     "tool": "power_grid_model",
-     "throughput": 5738.451923565109,
-     "all": {
-      "pgml_gpu": 66.81283511869893,
-      "pgml_cpu_pool": 125.77053291693942,
-      "pgml_cpu_single": 142.59871337463605,
-      "pandapower": 184.42981001008468,
-      "power_grid_model": 5738.451923565109,
-      "opendss": 4498.143960554276
-     }
-    },
-    "fastest_at_largest_batch": {
-     "batch": 262144,
-     "tool": "pgml_gpu",
-     "throughput": 1009010.9957514459,
-     "all": {
-      "pgml_gpu": 1009010.9957514459,
-      "pgml_cpu_pool": 162094.16408671258,
-      "pgml_cpu_single": 82950.89655532665
-     }
-    }
-   },
-   "cigre_lv3": {
-    "label": "CIGRE LV, 3-phase",
-    "rows": 132,
-    "curves": {
-     "pgml_gpu": {
-      "1": 50.636416425859395,
-      "4": 197.30566252326406,
-      "16": 786.6352620217359,
-      "64": 3118.9542789228703,
-      "256": 12180.658557052016,
-      "1024": 48097.44793248231,
-      "4096": 140849.4292843483,
-      "16384": 213917.06219292374,
-      "65536": 206255.75437254706
-     },
-     "pgml_cpu_pool": {
-      "1": 92.52256643655551,
-      "4": 368.12907843733285,
-      "16": 987.6018908523741,
-      "64": 4998.942834913011,
-      "256": 15906.234725642667,
-      "1024": 32126.37607739599,
-      "4096": 41165.509767082556,
-      "16384": 43087.93515896689,
-      "65536": 39000.029091503224
-     },
-     "pgml_cpu_single": {
-      "1": 109.97214229515221,
-      "4": 406.4030827067678,
-      "16": 1392.0363094126083,
-      "64": 3623.025742137918,
-      "256": 6673.827289616383,
-      "1024": 15353.546156544637,
-      "4096": 13943.807475314392,
-      "16384": 18328.30868278131,
-      "65536": 13442.916938861816
-     },
-     "power_grid_model": {
-      "1": 2723.8529818489806,
-      "4": 8932.200899102016,
-      "16": 21867.69300160079,
-      "64": 42045.04748520122,
-      "256": 51266.76064506658,
-      "1024": 59668.2146041105,
-      "4096": 65364.62023971917,
-      "16384": 67863.51187489535,
-      "65536": 67595.14878678703
-     },
-     "opendss": {
-      "1": 2138.3608659556166,
-      "4": 8694.93242219735,
-      "16": 13465.39462969246,
-      "64": 26121.23354625576,
-      "256": 34366.96455928241,
-      "1024": 56682.021271668964,
-      "4096": 57753.32217011591,
-      "16384": 57371.19358846319,
-      "65536": 57159.00568198233
-     }
-    },
-    "crossovers": {
-     "pgml_gpu": {
-      "power_grid_model": {
-       "crossover_batch": 4096,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.018589996142701817,
-       "ratio_at_largest": 3.051339601649998,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": 4096,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.023680014553217322,
-       "ratio_at_largest": 3.6084559539068928,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     },
-     "pgml_cpu_pool": {
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.03396753314261117,
-       "ratio_at_largest": 0.576964912297473,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.043267985263660304,
-       "ratio_at_largest": 0.6823076893340154,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     },
-     "pgml_cpu_single": {
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.04037374374754321,
-       "ratio_at_largest": 0.1988739899258796,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.051428243027636274,
-       "ratio_at_largest": 0.23518458339976503,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     }
-    },
-    "peak_throughput": {
-     "pgml_gpu": 213917.06219292374,
-     "pgml_cpu_pool": 43087.93515896689,
-     "pgml_cpu_single": 18328.30868278131,
-     "power_grid_model": 67863.51187489535,
-     "opendss": 57753.32217011591
-    },
-    "fastest_at_smallest_batch": {
-     "batch": 1,
-     "tool": "power_grid_model",
-     "throughput": 2723.8529818489806,
-     "all": {
-      "pgml_gpu": 50.636416425859395,
-      "pgml_cpu_pool": 92.52256643655551,
-      "pgml_cpu_single": 109.97214229515221,
-      "power_grid_model": 2723.8529818489806,
-      "opendss": 2138.3608659556166
-     }
-    },
-    "fastest_at_largest_batch": {
-     "batch": 65536,
-     "tool": "pgml_gpu",
-     "throughput": 206255.75437254706,
-     "all": {
-      "pgml_gpu": 206255.75437254706,
-      "pgml_cpu_pool": 39000.029091503224,
-      "pgml_cpu_single": 13442.916938861816,
-      "power_grid_model": 67595.14878678703,
-      "opendss": 57159.00568198233
-     }
-    }
-   },
    "kerber": {
     "label": "Kerber Vorstadtnetz",
     "rows": 294,
     "curves": {
      "pgml_gpu": {
-      "1": 23.36580165946275,
-      "4": 92.9558649929686,
-      "16": 319.7513674837622,
-      "64": 1274.626887704486,
-      "256": 5039.301335075323,
-      "1024": 19366.231373625305,
-      "4096": 52480.191966932245,
-      "16384": 74123.09034074808,
-      "65536": 80792.09628592466
+      "1": 22.595681179076557,
+      "4": 89.83509181286885,
+      "16": 306.8419364666118,
+      "64": 1220.1307009893123,
+      "256": 4832.244114146094,
+      "1024": 18618.60800843818,
+      "4096": 51165.99128509753,
+      "16384": 73448.10385674583,
+      "65536": 83980.73050086793
      },
      "pgml_cpu_pool": {
-      "1": 41.12503789552684,
-      "4": 156.902752467858,
-      "16": 537.1940216135157,
-      "64": 2238.6191724345504,
-      "256": 6246.06067562546,
-      "1024": 16749.05764356108,
-      "4096": 19725.419275491677,
-      "16384": 19378.676691256296,
-      "65536": 14339.817404168003
+      "1": 40.2485250173781,
+      "4": 164.98001423323575,
+      "16": 626.5248797732269,
+      "64": 2270.71636536696,
+      "256": 8438.63610960502,
+      "1024": 19755.945416481256,
+      "4096": 23818.14798638318,
+      "16384": 28616.43113319142,
+      "65536": 26410.142350558574
      },
      "pgml_cpu_single": {
-      "1": 50.290581614712316,
-      "4": 193.23957214160853,
-      "16": 704.2627945063272,
-      "64": 2069.7663237938764,
-      "256": 5828.364757186637,
-      "1024": 10001.685637125374,
-      "4096": 6800.0943898998,
-      "16384": 7790.323959285321,
-      "65536": 7293.647302221449
+      "1": 46.27145963418152,
+      "4": 181.23401464918945,
+      "16": 675.5455883030161,
+      "64": 2152.3657010553475,
+      "256": 6399.710086455444,
+      "1024": 3447.6806573390368,
+      "4096": 4047.7398184003705,
+      "16384": 5892.878605899514,
+      "65536": 9600.489784836916
      },
      "pandapower": {
-      "1": 151.43725080096635,
-      "4": 675.8340111492612,
-      "16": 749.2603885138773,
-      "64": 785.616269873293,
-      "256": 781.6156620675275,
-      "1024": 822.3155826759704,
-      "4096": 1561.2980707844915,
-      "16384": 1487.2073410839996,
-      "65536": 1561.4028241698977
+      "1": 161.1892145167249,
+      "4": 713.944289397485,
+      "16": 1256.7645425105397,
+      "64": 1578.5734708262078,
+      "256": 1603.9196595350595,
+      "1024": 1570.9009451670634,
+      "4096": 1604.9622417098365,
+      "16384": 1593.1614148326673,
+      "65536": 1604.1757827885986
      },
      "power_grid_model": {
-      "1": 2582.13121294358,
-      "4": 8545.748797840764,
-      "16": 20671.46269189194,
-      "64": 41631.212461349074,
-      "256": 56288.81203864428,
-      "1024": 60354.974220396056,
-      "4096": 56444.881700039994,
-      "16384": 55628.10039716121,
-      "65536": 55290.549538701634
+      "1": 2635.3445630341485,
+      "4": 8803.825739292548,
+      "16": 20704.87397890931,
+      "64": 41916.1164934724,
+      "256": 56442.26757715287,
+      "1024": 60848.482172994474,
+      "4096": 58145.37409545807,
+      "16384": 57874.9359273478,
+      "65536": 58158.24158293276
      },
      "opendss": {
-      "1": 389.9111201047058,
-      "4": 6005.798605651296,
-      "16": 10645.538922273498,
-      "64": 12540.209254200185,
-      "256": 13167.78681522312,
-      "1024": 13268.554963311008,
-      "4096": 13262.683550417534,
-      "16384": 24213.86468220389,
-      "65536": 24327.121221990215
-     }
-    },
-    "crossovers": {
-     "pgml_gpu": {
-      "pandapower": {
-       "crossover_batch": 64,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.15429362020162643,
-       "ratio_at_largest": 51.74327536449594,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "power_grid_model": {
-       "crossover_batch": 16384,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.009049037300016285,
-       "ratio_at_largest": 1.4612279487179405,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": 1024,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.059925968905909004,
-       "ratio_at_largest": 3.3210709787105266,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     },
-     "pgml_cpu_pool": {
-      "pandapower": {
-       "crossover_batch": 64,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.27156487375472355,
-       "ratio_at_largest": 9.183932027144632,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.01592678082716218,
-       "ratio_at_largest": 0.25935385927265175,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": null,
-       "status": "crosses back and forth",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.10547285208096455,
-       "ratio_at_largest": 0.5894580486245817,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     },
-     "pgml_cpu_single": {
-      "pandapower": {
-       "crossover_batch": 64,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.3320885802450886,
-       "ratio_at_largest": 4.671214365260953,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.019476384996478167,
-       "ratio_at_largest": 0.1319148997988549,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      },
-      "opendss": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384,
-        65536
-       ],
-       "ratio_at_smallest": 0.12897960335475275,
-       "ratio_at_largest": 0.2998154707934962,
-       "smallest_batch": 1,
-       "largest_batch": 65536
-      }
-     }
-    },
-    "peak_throughput": {
-     "pgml_gpu": 80792.09628592466,
-     "pgml_cpu_pool": 19725.419275491677,
-     "pgml_cpu_single": 10001.685637125374,
-     "pandapower": 1561.4028241698977,
-     "power_grid_model": 60354.974220396056,
-     "opendss": 24327.121221990215
-    },
-    "fastest_at_smallest_batch": {
-     "batch": 1,
-     "tool": "power_grid_model",
-     "throughput": 2582.13121294358,
-     "all": {
-      "pgml_gpu": 23.36580165946275,
-      "pgml_cpu_pool": 41.12503789552684,
-      "pgml_cpu_single": 50.290581614712316,
-      "pandapower": 151.43725080096635,
-      "power_grid_model": 2582.13121294358,
-      "opendss": 389.9111201047058
-     }
-    },
-    "fastest_at_largest_batch": {
-     "batch": 65536,
-     "tool": "pgml_gpu",
-     "throughput": 80792.09628592466,
-     "all": {
-      "pgml_gpu": 80792.09628592466,
-      "pgml_cpu_pool": 14339.817404168003,
-      "pgml_cpu_single": 7293.647302221449,
-      "pandapower": 1561.4028241698977,
-      "power_grid_model": 55290.549538701634,
-      "opendss": 24327.121221990215
-     }
-    }
-   },
-   "kerber_x4": {
-    "label": "Kerber Vorstadtnetz x4",
-    "rows": 1176,
-    "curves": {
-     "pgml_gpu": {
-      "1": 6.273910618368037,
-      "4": 24.869296767545475,
-      "16": 79.39866938601939,
-      "64": 326.24129286582405,
-      "256": 1219.6921454991593,
-      "1024": 3933.9576861304363,
-      "4096": 7178.629486183613
-     },
-     "pgml_cpu_pool": {
-      "1": 10.558051281285573,
-      "4": 21.455350542902618,
-      "16": 107.38512536374772,
-      "64": 429.7246300288674,
-      "256": 1326.4069266338684,
-      "1024": 3267.582217773672,
-      "4096": 4118.530876158862
-     },
-     "pgml_cpu_single": {
-      "1": 12.456082808541446,
-      "4": 48.12233269663613,
-      "16": 174.12775989374822,
-      "64": 609.6378116555438,
-      "256": 1579.401757190773,
-      "1024": 2294.462517867713,
-      "4096": 1238.2249073522325
-     },
-     "pandapower": {
-      "1": 93.03692178317763,
-      "4": 391.24388123671946,
-      "16": 409.4899709708013,
-      "64": 429.3400355809986,
-      "256": 445.01392474865014,
-      "1024": 822.523568310361,
-      "4096": 892.1876116213834
-     },
-     "power_grid_model": {
-      "1": 921.2971954706154,
-      "4": 3311.153929355858,
-      "16": 8461.726739309353,
-      "64": 12084.256809645743,
-      "256": 14410.76549964489,
-      "1024": 14622.957255832329,
-      "4096": 13913.20155888641
-     },
-     "opendss": {
-      "1": 177.26693723159022,
-      "4": 1659.2326602830472,
-      "16": 2794.7691193229907,
-      "64": 3198.2128377168688,
-      "256": 3206.849430630197,
-      "1024": 3204.449238693773,
-      "4096": 5917.143497089497
+      "1": 1246.0205140925414,
+      "4": 5774.90608865624,
+      "16": 11164.725427384623,
+      "64": 14052.650343696458,
+      "256": 24534.738368143862,
+      "1024": 25653.54596416156,
+      "4096": 25932.46342442086,
+      "16384": 25201.93872740479,
+      "65536": 25940.42554679058
      }
     },
     "crossovers": {
@@ -1289,246 +531,17 @@
         64,
         256,
         1024,
-        4096
+        4096,
+        16384,
+        65536
        ],
-       "ratio_at_smallest": 0.06743463238164063,
-       "ratio_at_largest": 8.046098592579426,
+       "ratio_at_smallest": 0.14018109863505815,
+       "ratio_at_largest": 52.35132670740179,
        "smallest_batch": 1,
-       "largest_batch": 4096
+       "largest_batch": 65536
       },
       "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.006809866185648388,
-       "ratio_at_largest": 0.5159581319799538,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "opendss": {
-       "crossover_batch": 1024,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.035392446647687564,
-       "ratio_at_largest": 1.213191718219207,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      }
-     },
-     "pgml_cpu_pool": {
-      "pandapower": {
-       "crossover_batch": 64,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.1134823796717081,
-       "ratio_at_largest": 4.61621616632202,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.011459984175781984,
-       "ratio_at_largest": 0.29601604337632426,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "opendss": {
-       "crossover_batch": null,
-       "status": "crosses back and forth",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.059560183338035665,
-       "ratio_at_largest": 0.6960336314616453,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      }
-     },
-     "pgml_cpu_single": {
-      "pandapower": {
-       "crossover_batch": 64,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.13388322151898277,
-       "ratio_at_largest": 1.3878526121899308,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.013520157089134144,
-       "ratio_at_largest": 0.08899640403479772,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "opendss": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096
-       ],
-       "ratio_at_smallest": 0.07026737756668187,
-       "ratio_at_largest": 0.20926058459817412,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      }
-     }
-    },
-    "peak_throughput": {
-     "pgml_gpu": 7178.629486183613,
-     "pgml_cpu_pool": 4118.530876158862,
-     "pgml_cpu_single": 2294.462517867713,
-     "pandapower": 892.1876116213834,
-     "power_grid_model": 14622.957255832329,
-     "opendss": 5917.143497089497
-    },
-    "fastest_at_smallest_batch": {
-     "batch": 1,
-     "tool": "power_grid_model",
-     "throughput": 921.2971954706154,
-     "all": {
-      "pgml_gpu": 6.273910618368037,
-      "pgml_cpu_pool": 10.558051281285573,
-      "pgml_cpu_single": 12.456082808541446,
-      "pandapower": 93.03692178317763,
-      "power_grid_model": 921.2971954706154,
-      "opendss": 177.26693723159022
-     }
-    },
-    "fastest_at_largest_batch": {
-     "batch": 4096,
-     "tool": "power_grid_model",
-     "throughput": 13913.20155888641,
-     "all": {
-      "pgml_gpu": 7178.629486183613,
-      "pgml_cpu_pool": 4118.530876158862,
-      "pgml_cpu_single": 1238.2249073522325,
-      "pandapower": 892.1876116213834,
-      "power_grid_model": 13913.20155888641,
-      "opendss": 5917.143497089497
-     }
-    }
-   }
-  }
- },
- "harmonic": {
-  "mode": "harmonic",
-  "source": "bench_harmonic_batch_fair.json",
-  "workers": 8,
-  "grids": {
-   "ieee33": {
-    "label": "IEEE 33-bus",
-    "rows": 33,
-    "curves": {
-     "pgml_gpu": {
-      "1": 24.252048062233477,
-      "4": 59.236453621541266,
-      "16": 235.91651405085875,
-      "64": 938.0203358132912,
-      "256": 3646.386332396808,
-      "1024": 12945.901617354153,
-      "4096": 29284.549222340014,
-      "16384": 38970.392062182145
-     },
-     "pgml_cpu_pool": {
-      "1": 50.23266756998439,
-      "4": 195.75472546019645,
-      "16": 440.4353446581988,
-      "64": 1548.684492533883,
-      "256": 4949.257448750621,
-      "1024": 10497.803817512959,
-      "4096": 13887.267173440488,
-      "16384": 14980.559070564706
-     },
-     "pgml_cpu_single": {
-      "1": 55.553527579823445,
-      "4": 134.29238669830974,
-      "16": 511.37391449372365,
-      "64": 1665.6458102041531,
-      "256": 3940.0113573111194,
-      "1024": 6398.169961047188,
-      "4096": 8289.076927137185,
-      "16384": 8806.088542525398
-     },
-     "opendss": {
-      "1": 821.6508259662386,
-      "4": 3315.287108654924,
-      "16": 3960.235220630493,
-      "64": 4237.463754174359,
-      "256": 8250.39589776495,
-      "1024": 6505.950170821471,
-      "4096": 7965.6186166341795,
-      "16384": 7890.622255453138
-     }
-    },
-    "crossovers": {
-     "pgml_gpu": {
-      "opendss": {
-       "crossover_batch": 1024,
+       "crossover_batch": 16384,
        "status": "crosses",
        "shared_batches": [
         1,
@@ -1538,35 +551,14 @@
         256,
         1024,
         4096,
-        16384
+        16384,
+        65536
        ],
-       "ratio_at_smallest": 0.029516246190970163,
-       "ratio_at_largest": 4.93882368215638,
+       "ratio_at_smallest": 0.008574089891707177,
+       "ratio_at_largest": 1.4440039487973977,
        "smallest_batch": 1,
-       "largest_batch": 16384
-      }
-     },
-     "pgml_cpu_pool": {
-      "opendss": {
-       "crossover_batch": 1024,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        4,
-        16,
-        64,
-        256,
-        1024,
-        4096,
-        16384
-       ],
-       "ratio_at_smallest": 0.06113627100771446,
-       "ratio_at_largest": 1.8985269584045514,
-       "smallest_batch": 1,
-       "largest_batch": 16384
-      }
-     },
-     "pgml_cpu_single": {
+       "largest_batch": 65536
+      },
       "opendss": {
        "crossover_batch": 4096,
        "status": "crosses",
@@ -1578,86 +570,36 @@
         256,
         1024,
         4096,
-        16384
+        16384,
+        65536
        ],
-       "ratio_at_smallest": 0.06761208754886121,
-       "ratio_at_largest": 1.1160195302011309,
+       "ratio_at_smallest": 0.018134277023145694,
+       "ratio_at_largest": 3.237446137858685,
        "smallest_batch": 1,
-       "largest_batch": 16384
+       "largest_batch": 65536
       }
-     }
-    },
-    "peak_throughput": {
-     "pgml_gpu": 38970.392062182145,
-     "pgml_cpu_pool": 14980.559070564706,
-     "pgml_cpu_single": 8806.088542525398,
-     "opendss": 8250.39589776495
-    },
-    "fastest_at_smallest_batch": {
-     "batch": 1,
-     "tool": "opendss",
-     "throughput": 821.6508259662386,
-     "all": {
-      "pgml_gpu": 24.252048062233477,
-      "pgml_cpu_pool": 50.23266756998439,
-      "pgml_cpu_single": 55.553527579823445,
-      "opendss": 821.6508259662386
-     }
-    },
-    "fastest_at_largest_batch": {
-     "batch": 16384,
-     "tool": "pgml_gpu",
-     "throughput": 38970.392062182145,
-     "all": {
-      "pgml_gpu": 38970.392062182145,
-      "pgml_cpu_pool": 14980.559070564706,
-      "pgml_cpu_single": 8806.088542525398,
-      "opendss": 7890.622255453138
-     }
-    }
-   },
-   "kerber": {
-    "label": "Kerber Vorstadtnetz",
-    "rows": 294,
-    "curves": {
-     "pgml_gpu": {
-      "1": 8.391157846701686,
-      "4": 20.653339050448725,
-      "16": 73.5038219074917,
-      "64": 178.86738372644604,
-      "256": 241.49770946924173
      },
      "pgml_cpu_pool": {
-      "1": 12.83224677161928,
-      "4": 47.72578800251338,
-      "16": 103.97981778735763,
-      "64": 222.86753279231914,
-      "256": 303.8893022097919,
-      "1024": 360.3345656659901,
-      "4096": 382.7829888688021
-     },
-     "pgml_cpu_single": {
-      "1": 15.743251253450463,
-      "4": 31.46203841247649,
-      "16": 66.73332770514223,
-      "64": 87.38156202837632,
-      "256": 94.36636303262992,
-      "1024": 95.37827815445033
-     },
-     "opendss": {
-      "1": 120.76111844766656,
-      "4": 609.8091777548011,
-      "16": 1016.055195046084,
-      "64": 1024.0370935524968,
-      "256": 1034.6346786715164,
-      "1024": 1709.7979280492839,
-      "4096": 1918.0491851311235,
-      "16384": 1903.349159019617
-     }
-    },
-    "crossovers": {
-     "pgml_gpu": {
-      "opendss": {
+      "pandapower": {
+       "crossover_batch": 64,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.24969738290524357,
+       "ratio_at_largest": 16.46337180371146,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
        "crossover_batch": null,
        "status": "never ahead",
        "shared_batches": [
@@ -1665,15 +607,76 @@
         4,
         16,
         64,
-        256
+        256,
+        1024,
+        4096,
+        16384,
+        65536
        ],
-       "ratio_at_smallest": 0.06948559233772007,
-       "ratio_at_largest": 0.2334135076347216,
+       "ratio_at_smallest": 0.015272585445539921,
+       "ratio_at_largest": 0.45410833669890305,
        "smallest_batch": 1,
-       "largest_batch": 256
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.0323016551992248,
+       "ratio_at_largest": 1.0181075211322472,
+       "smallest_batch": 1,
+       "largest_batch": 65536
       }
      },
-     "pgml_cpu_pool": {
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 64,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.287063000914248,
+       "ratio_at_largest": 5.984686895190518,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.017558030279314917,
+       "ratio_at_largest": 0.1650753104552992,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
       "opendss": {
        "crossover_batch": null,
        "status": "never ahead",
@@ -1684,12 +687,997 @@
         64,
         256,
         1024,
-        4096
+        4096,
+        16384,
+        65536
        ],
-       "ratio_at_smallest": 0.10626141043220219,
-       "ratio_at_largest": 0.1995689119112104,
+       "ratio_at_smallest": 0.037135391521126236,
+       "ratio_at_largest": 0.3700976210864326,
        "smallest_batch": 1,
-       "largest_batch": 4096
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 83980.73050086793,
+     "pgml_cpu_pool": 28616.43113319142,
+     "pgml_cpu_single": 9600.489784836916,
+     "pandapower": 1604.9622417098365,
+     "power_grid_model": 60848.482172994474,
+     "opendss": 25940.42554679058
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 2635.3445630341485,
+     "all": {
+      "pgml_gpu": 22.595681179076557,
+      "pgml_cpu_pool": 40.2485250173781,
+      "pgml_cpu_single": 46.27145963418152,
+      "pandapower": 161.1892145167249,
+      "power_grid_model": 2635.3445630341485,
+      "opendss": 1246.0205140925414
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 65536,
+     "tool": "pgml_gpu",
+     "throughput": 83980.73050086793,
+     "all": {
+      "pgml_gpu": 83980.73050086793,
+      "pgml_cpu_pool": 26410.142350558574,
+      "pgml_cpu_single": 9600.489784836916,
+      "pandapower": 1604.1757827885986,
+      "power_grid_model": 58158.24158293276,
+      "opendss": 25940.42554679058
+     }
+    }
+   },
+   "kerber_x4": {
+    "label": "Kerber Vorstadtnetz x4",
+    "rows": 1176,
+    "curves": {
+     "pgml_gpu": {
+      "1": 6.5116347170522735,
+      "4": 25.51431696043905,
+      "16": 81.92788860136767,
+      "64": 332.32782357824357,
+      "256": 1243.668301125883,
+      "1024": 4024.1181121110835,
+      "4096": 7240.748555929581,
+      "16384": 9135.819436653159,
+      "65536": 10114.805071664063
+     },
+     "pgml_cpu_pool": {
+      "1": 11.838214944340349,
+      "4": 46.759368866464726,
+      "16": 125.66402842246457,
+      "64": 624.9107431584125,
+      "256": 2007.0601162134296,
+      "1024": 4457.418862321137,
+      "4096": 5610.207950902801,
+      "16384": 5732.04666833372,
+      "65536": 5298.060025890761
+     },
+     "pgml_cpu_single": {
+      "1": 14.35809569597226,
+      "4": 54.06369348242925,
+      "16": 198.11528980402448,
+      "64": 693.5901155913771,
+      "256": 928.41029670791,
+      "1024": 928.6982765434491,
+      "4096": 1464.953398021353,
+      "16384": 2330.9822643756825,
+      "65536": 2760.051751643431
+     },
+     "pandapower": {
+      "1": 100.09151384358907,
+      "4": 407.72001620070495,
+      "16": 820.3993510009127,
+      "64": 852.01218055658,
+      "256": 853.763758313081,
+      "1024": 869.742453295868,
+      "4096": 925.0835064274033,
+      "16384": 975.2322779716462,
+      "65536": 970.3784913051346
+     },
+     "power_grid_model": {
+      "1": 920.1249014259153,
+      "4": 3437.073012749477,
+      "16": 8749.657957452428,
+      "64": 13164.23618097275,
+      "256": 14727.007600756613,
+      "1024": 14960.43556376045,
+      "4096": 14555.310238433276,
+      "16384": 14589.758957638363,
+      "65536": 14471.739485368144
+     },
+     "opendss": {
+      "1": 514.942596471843,
+      "4": 1828.990257571803,
+      "16": 3414.912025392191,
+      "64": 6022.878148368054,
+      "256": 6232.601367964724,
+      "1024": 6256.7724682445305,
+      "4096": 6229.2831191155265,
+      "16384": 6261.4998426582115,
+      "65536": 6119.504444808718
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.06505681118209351,
+       "ratio_at_largest": 10.423566847673948,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.007076903045403086,
+       "ratio_at_largest": 0.6989349885610351,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.01264536039874559,
+       "ratio_at_largest": 1.652879765492225,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.11827391244016631,
+       "ratio_at_largest": 5.459787158683828,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.012865878236742312,
+       "ratio_at_largest": 0.366096973432077,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.022989387604464104,
+       "ratio_at_largest": 0.8657661864083124,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.14344968064334962,
+       "ratio_at_largest": 2.844304337301655,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.015604507250832528,
+       "ratio_at_largest": 0.19072011035259587,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.027882905384692444,
+       "ratio_at_largest": 0.4510253692167559,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 10114.805071664063,
+     "pgml_cpu_pool": 5732.04666833372,
+     "pgml_cpu_single": 2760.051751643431,
+     "pandapower": 975.2322779716462,
+     "power_grid_model": 14960.43556376045,
+     "opendss": 6261.4998426582115
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 920.1249014259153,
+     "all": {
+      "pgml_gpu": 6.5116347170522735,
+      "pgml_cpu_pool": 11.838214944340349,
+      "pgml_cpu_single": 14.35809569597226,
+      "pandapower": 100.09151384358907,
+      "power_grid_model": 920.1249014259153,
+      "opendss": 514.942596471843
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 65536,
+     "tool": "power_grid_model",
+     "throughput": 14471.739485368144,
+     "all": {
+      "pgml_gpu": 10114.805071664063,
+      "pgml_cpu_pool": 5298.060025890761,
+      "pgml_cpu_single": 2760.051751643431,
+      "pandapower": 970.3784913051346,
+      "power_grid_model": 14471.739485368144,
+      "opendss": 6119.504444808718
+     }
+    }
+   },
+   "ieee33": {
+    "label": "IEEE 33-bus",
+    "rows": 33,
+    "curves": {
+     "pgml_gpu": {
+      "1": 72.32122169002528,
+      "4": 285.0677115888266,
+      "16": 1140.159528081856,
+      "64": 4543.229705140609,
+      "256": 18068.484596792103,
+      "1024": 71290.13379708496,
+      "4096": 282456.03237773775,
+      "16384": 822963.620641711,
+      "65536": 1335360.3076295427,
+      "262144": 1151315.0895833948
+     },
+     "pgml_cpu_pool": {
+      "1": 128.04726819656838,
+      "4": 523.1936251264464,
+      "16": 2127.6366543562917,
+      "64": 8339.258817366504,
+      "256": 30333.457252982607,
+      "1024": 89722.57648616262,
+      "4096": 182706.33592498818,
+      "16384": 248747.44589499888,
+      "65536": 219143.8226449787,
+      "262144": 217865.98044731747
+     },
+     "pgml_cpu_single": {
+      "1": 160.0228383949464,
+      "4": 577.0357078494332,
+      "16": 2410.2030062951953,
+      "64": 8641.78421707945,
+      "256": 24437.10632729223,
+      "1024": 53953.57754843388,
+      "4096": 121866.77632909072,
+      "16384": 163679.7492930991,
+      "65536": 105061.21265600465,
+      "262144": 108484.59505934113
+     },
+     "pandapower": {
+      "1": 201.22133123518088,
+      "4": 680.7494452275743,
+      "16": 1195.0188642693865,
+      "64": 2157.440725744475,
+      "256": 2168.3347359737136,
+      "1024": 2107.7955109054765,
+      "4096": 2194.364341918427,
+      "16384": 2194.9691878974013,
+      "65536": 2193.8170808575514
+     },
+     "power_grid_model": {
+      "1": 5559.1697501202125,
+      "4": 15353.6109045428,
+      "16": 39649.40515977009,
+      "64": 106489.01327578048,
+      "256": 210891.90562001325,
+      "1024": 282215.4106082676,
+      "4096": 304148.9000659354,
+      "16384": 301924.22668776807,
+      "65536": 297152.25059098453
+     },
+     "opendss": {
+      "1": 2386.2533514752936,
+      "4": 9115.625900990708,
+      "16": 21861.146855567247,
+      "64": 42014.98399267055,
+      "256": 54782.8184550726,
+      "1024": 95400.38794237748,
+      "4096": 97668.51717133669,
+      "16384": 98298.20095704023,
+      "65536": 98518.32682409864
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 64,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.3594113071714977,
+       "ratio_at_largest": 608.692638634921,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.013009356601938877,
+       "ratio_at_largest": 4.4938589728791944,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.030307436402472906,
+       "ratio_at_largest": 13.55443551141288,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.6363503680775819,
+       "ratio_at_largest": 99.89156550796685,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.023033523700872683,
+       "ratio_at_largest": 0.7374799356529842,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.05366038275751549,
+       "ratio_at_largest": 2.2243965129072185,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.7952578258610016,
+       "ratio_at_largest": 47.8896866893464,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.028785384434696575,
+       "ratio_at_largest": 0.35356021180070496,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.06706028858839017,
+       "ratio_at_largest": 1.06641288014958,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 1335360.3076295427,
+     "pgml_cpu_pool": 248747.44589499888,
+     "pgml_cpu_single": 163679.7492930991,
+     "pandapower": 2194.9691878974013,
+     "power_grid_model": 304148.9000659354,
+     "opendss": 98518.32682409864
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 5559.1697501202125,
+     "all": {
+      "pgml_gpu": 72.32122169002528,
+      "pgml_cpu_pool": 128.04726819656838,
+      "pgml_cpu_single": 160.0228383949464,
+      "pandapower": 201.22133123518088,
+      "power_grid_model": 5559.1697501202125,
+      "opendss": 2386.2533514752936
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 262144,
+     "tool": "pgml_gpu",
+     "throughput": 1151315.0895833948,
+     "all": {
+      "pgml_gpu": 1151315.0895833948,
+      "pgml_cpu_pool": 217865.98044731747,
+      "pgml_cpu_single": 108484.59505934113
+     }
+    }
+   },
+   "cigre_lv3": {
+    "label": "CIGRE LV, 3-phase",
+    "rows": 132,
+    "curves": {
+     "pgml_gpu": {
+      "1": 53.81707558265479,
+      "4": 210.28912090448415,
+      "16": 802.8776364915665,
+      "64": 3188.102013639029,
+      "256": 12311.384504915364,
+      "1024": 48720.94213545353,
+      "4096": 141951.0757978856,
+      "16384": 220759.9479434047,
+      "65536": 211195.32443582395,
+      "262144": 215038.37272845415
+     },
+     "pgml_cpu_pool": {
+      "1": 93.51854695937317,
+      "4": 243.07915698855598,
+      "16": 927.7078458349769,
+      "64": 4738.752586357519,
+      "256": 12688.839442732376,
+      "1024": 41099.63682578788,
+      "4096": 57466.540885620685,
+      "16384": 56913.005956408226,
+      "65536": 56726.165451654255,
+      "262144": 47353.3226605976
+     },
+     "pgml_cpu_single": {
+      "1": 111.61418049340627,
+      "4": 425.7038730513632,
+      "16": 1501.3063722988513,
+      "64": 4223.70536800116,
+      "256": 8939.606569644546,
+      "1024": 8191.172492655955,
+      "4096": 8470.221763215612,
+      "16384": 8549.405168831663,
+      "65536": 12407.906164293057,
+      "262144": 15998.617902583484
+     },
+     "pandapower": {
+      "1": 36.22712982436229,
+      "4": 144.17903802518197,
+      "16": 294.03289638736675,
+      "64": 299.57802802790565,
+      "256": 299.97624550911183,
+      "1024": 299.8406822896681,
+      "4096": 300.8228317824155,
+      "16384": 299.12463499723333
+     },
+     "power_grid_model": {
+      "1": 3212.1799731954816,
+      "4": 9907.686637900708,
+      "16": 23630.816144867083,
+      "64": 46472.683597957846,
+      "256": 61065.49852626545,
+      "1024": 64634.97407613104,
+      "4096": 67576.05633869016,
+      "16384": 67569.8029335401,
+      "65536": 67210.22925324323
+     },
+     "opendss": {
+      "1": 994.1178319826229,
+      "4": 7965.286841296942,
+      "16": 17565.702024684957,
+      "64": 28573.481557734376,
+      "256": 42777.56760981419,
+      "1024": 57615.09187009805,
+      "4096": 58460.78075586092,
+      "16384": 58170.58915977694,
+      "65536": 58220.73587609886
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 1.48554621477254,
+       "ratio_at_largest": 738.019949261105,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      },
+      "power_grid_model": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.016754066095841284,
+       "ratio_at_largest": 3.14230924045885,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.05413550974669118,
+       "ratio_at_largest": 3.6274932162533036,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 2.5814506258920664,
+       "ratio_at_largest": 190.26519148760391,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.0291137320261482,
+       "ratio_at_largest": 0.8440108906326477,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.09407189364349705,
+       "ratio_at_largest": 0.974329241945254,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 3.080955654906648,
+       "ratio_at_largest": 28.58141446260599,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.03474717525941497,
+       "ratio_at_largest": 0.18461335874247614,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.11227459854613822,
+       "ratio_at_largest": 0.21311833279982345,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 220759.9479434047,
+     "pgml_cpu_pool": 57466.540885620685,
+     "pgml_cpu_single": 15998.617902583484,
+     "pandapower": 300.8228317824155,
+     "power_grid_model": 67576.05633869016,
+     "opendss": 58460.78075586092
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 3212.1799731954816,
+     "all": {
+      "pgml_gpu": 53.81707558265479,
+      "pgml_cpu_pool": 93.51854695937317,
+      "pgml_cpu_single": 111.61418049340627,
+      "pandapower": 36.22712982436229,
+      "power_grid_model": 3212.1799731954816,
+      "opendss": 994.1178319826229
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 262144,
+     "tool": "pgml_gpu",
+     "throughput": 215038.37272845415,
+     "all": {
+      "pgml_gpu": 215038.37272845415,
+      "pgml_cpu_pool": 47353.3226605976,
+      "pgml_cpu_single": 15998.617902583484
+     }
+    }
+   }
+  }
+ },
+ "harmonic": {
+  "mode": "harmonic",
+  "source": "bench_harmonic_batch_fair.json",
+  "workers": 8,
+  "pgml_dtypes": [
+   "c128"
+  ],
+  "grids": {
+   "ieee33": {
+    "label": "IEEE 33-bus",
+    "rows": 33,
+    "curves": {
+     "pgml_gpu": {
+      "1": 24.50581813348152,
+      "4": 59.221747726091635,
+      "16": 237.30924660211977,
+      "64": 942.9749043746938,
+      "256": 3655.742966502635,
+      "1024": 13047.058941906933,
+      "4096": 29547.27877632912,
+      "16384": 38771.77519574574
+     },
+     "pgml_cpu_pool": {
+      "1": 50.34395227825848,
+      "4": 204.68604122964658,
+      "16": 482.44295143953923,
+      "64": 1775.7884495277435,
+      "256": 5334.954824356876,
+      "1024": 10862.011572229676,
+      "4096": 13805.941540484953,
+      "16384": 14846.33609474448
+     },
+     "pgml_cpu_single": {
+      "1": 55.29820082489579,
+      "4": 133.66928397215352,
+      "16": 497.2324824628523,
+      "64": 1597.5392300283497,
+      "256": 3811.9840677392563,
+      "1024": 5970.671896148833,
+      "4096": 7364.416864588614,
+      "16384": 7618.74633398485
+     },
+     "opendss": {
+      "1": 689.4968041298845,
+      "4": 2046.160345396402,
+      "16": 4450.343530409542,
+      "64": 4979.3334160813265,
+      "256": 8136.521948241197,
+      "1024": 7839.693040767568,
+      "4096": 8042.704182811341,
+      "16384": 8010.25234451356
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "opendss": {
+       "crossover_batch": 1024,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.03554159785324432,
+       "ratio_at_largest": 4.840268886447951,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_pool": {
+      "opendss": {
+       "crossover_batch": 1024,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.07301549764511293,
+       "ratio_at_largest": 1.853416778425606,
+       "smallest_batch": 1,
+       "largest_batch": 16384
       }
      },
      "pgml_cpu_single": {
@@ -1702,73 +1690,89 @@
         16,
         64,
         256,
-        1024
+        1024,
+        4096,
+        16384
        ],
-       "ratio_at_smallest": 0.1303668884142789,
-       "ratio_at_largest": 0.05578336281133984,
+       "ratio_at_smallest": 0.08020080802938566,
+       "ratio_at_largest": 0.9511243848894644,
        "smallest_batch": 1,
-       "largest_batch": 1024
+       "largest_batch": 16384
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 241.49770946924173,
-     "pgml_cpu_pool": 382.7829888688021,
-     "pgml_cpu_single": 95.37827815445033,
-     "opendss": 1918.0491851311235
+     "pgml_gpu": 38771.77519574574,
+     "pgml_cpu_pool": 14846.33609474448,
+     "pgml_cpu_single": 7618.74633398485,
+     "opendss": 8136.521948241197
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "opendss",
-     "throughput": 120.76111844766656,
+     "throughput": 689.4968041298845,
      "all": {
-      "pgml_gpu": 8.391157846701686,
-      "pgml_cpu_pool": 12.83224677161928,
-      "pgml_cpu_single": 15.743251253450463,
-      "opendss": 120.76111844766656
+      "pgml_gpu": 24.50581813348152,
+      "pgml_cpu_pool": 50.34395227825848,
+      "pgml_cpu_single": 55.29820082489579,
+      "opendss": 689.4968041298845
      }
     },
     "fastest_at_largest_batch": {
      "batch": 16384,
-     "tool": "opendss",
-     "throughput": 1903.349159019617,
+     "tool": "pgml_gpu",
+     "throughput": 38771.77519574574,
      "all": {
-      "opendss": 1903.349159019617
+      "pgml_gpu": 38771.77519574574,
+      "pgml_cpu_pool": 14846.33609474448,
+      "pgml_cpu_single": 7618.74633398485,
+      "opendss": 8010.25234451356
      }
     }
    },
-   "kerber_x4": {
-    "label": "Kerber Vorstadtnetz x4",
-    "rows": 1176,
+   "kerber": {
+    "label": "Kerber Vorstadtnetz",
+    "rows": 294,
     "curves": {
      "pgml_gpu": {
-      "1": 2.1290189033721516,
-      "4": 3.5420288779661018,
-      "16": 4.760029415227501
+      "1": 8.423055797617566,
+      "4": 20.78038782961725,
+      "16": 73.54085690183915,
+      "64": 179.05437828846317,
+      "256": 241.05441556219517,
+      "1024": 263.9082171594132,
+      "4096": 269.31952312787996,
+      "16384": 270.4321434302045
      },
      "pgml_cpu_pool": {
-      "1": 1.9561393268316765,
-      "4": 7.213275235475951,
-      "16": 10.211435800981475,
-      "64": 15.646118627261815,
-      "256": 18.899021610614316,
-      "1024": 20.73116021051225
+      "1": 15.957253702808604,
+      "4": 65.94353205443925,
+      "16": 160.16105971008488,
+      "64": 525.9195590821231,
+      "256": 1177.261620583199,
+      "1024": 1631.1004654896024,
+      "4096": 1845.2322737357915,
+      "16384": 1982.8757197192413
      },
      "pgml_cpu_single": {
-      "1": 2.994146595772362,
-      "4": 3.9883984628551636,
-      "16": 4.824359719657105,
-      "64": 5.157261127068628
+      "1": 18.460026896012693,
+      "4": 43.69762438561496,
+      "16": 140.1647432612862,
+      "64": 305.83157546874435,
+      "256": 373.86801382560446,
+      "1024": 367.50267593832,
+      "4096": 428.3416994257701,
+      "16384": 441.7570880225794
      },
      "opendss": {
-      "1": 55.64539813393583,
-      "4": 247.56910376023657,
-      "16": 252.4892443006613,
-      "64": 247.2715668670241,
-      "256": 392.29561382921366,
-      "1024": 393.7352752549654,
-      "4096": 389.53425538251577,
-      "16384": 387.88065899854865
+      "1": 209.69350368484822,
+      "4": 915.7953449416341,
+      "16": 1218.9951424039568,
+      "64": 1992.4043928922795,
+      "256": 1697.6000009992497,
+      "1024": 1915.3526362851876,
+      "4096": 1937.6282765691794,
+      "16384": 1897.2002500660403
      }
     },
     "crossovers": {
@@ -1779,12 +1783,145 @@
        "shared_batches": [
         1,
         4,
-        16
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
        ],
-       "ratio_at_smallest": 0.03826046671905742,
-       "ratio_at_largest": 0.01885240469712568,
+       "ratio_at_smallest": 0.0401684155665438,
+       "ratio_at_largest": 0.14254275130987937,
        "smallest_batch": 1,
-       "largest_batch": 16
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_pool": {
+      "opendss": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.07609798788421705,
+       "ratio_at_largest": 1.0451588964581986,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_single": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.08803337524350095,
+       "ratio_at_largest": 0.23284684260778593,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 270.4321434302045,
+     "pgml_cpu_pool": 1982.8757197192413,
+     "pgml_cpu_single": 441.7570880225794,
+     "opendss": 1992.4043928922795
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "opendss",
+     "throughput": 209.69350368484822,
+     "all": {
+      "pgml_gpu": 8.423055797617566,
+      "pgml_cpu_pool": 15.957253702808604,
+      "pgml_cpu_single": 18.460026896012693,
+      "opendss": 209.69350368484822
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 16384,
+     "tool": "pgml_cpu_pool",
+     "throughput": 1982.8757197192413,
+     "all": {
+      "pgml_gpu": 270.4321434302045,
+      "pgml_cpu_pool": 1982.8757197192413,
+      "pgml_cpu_single": 441.7570880225794,
+      "opendss": 1897.2002500660403
+     }
+    }
+   },
+   "kerber_x4": {
+    "label": "Kerber Vorstadtnetz x4",
+    "rows": 1176,
+    "curves": {
+     "pgml_gpu": {
+      "1": 2.1528360904438903,
+      "4": 3.5848364907506634,
+      "16": 4.79497477826469,
+      "64": 5.249361728612219,
+      "256": 5.371837980382709,
+      "1024": 5.40042094934274
+     },
+     "pgml_cpu_pool": {
+      "1": 4.921466364096888,
+      "4": 13.725469634410787,
+      "16": 45.844427701323845,
+      "64": 141.4600627707974,
+      "256": 243.04030842083583,
+      "1024": 322.97480892301326
+     },
+     "pgml_cpu_single": {
+      "1": 5.515798901733533,
+      "4": 12.897698980091409,
+      "16": 38.55366987218365,
+      "64": 68.45969547652052,
+      "256": 78.72034468650403,
+      "1024": 93.5617013827505
+     },
+     "opendss": {
+      "1": 63.71398667057647,
+      "4": 160.79557148028286,
+      "16": 378.7063896101927,
+      "64": 383.80601992220437,
+      "256": 391.34798278228675,
+      "1024": 393.95179217271817,
+      "4096": 390.68226703837416,
+      "16384": 393.0886750778577
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024
+       ],
+       "ratio_at_smallest": 0.033789065838476,
+       "ratio_at_largest": 0.013708329436854199,
+       "smallest_batch": 1,
+       "largest_batch": 1024
       }
      },
      "pgml_cpu_pool": {
@@ -1799,8 +1936,8 @@
         256,
         1024
        ],
-       "ratio_at_smallest": 0.03515365856711712,
-       "ratio_at_largest": 0.052652534617549,
+       "ratio_at_smallest": 0.07724310816622708,
+       "ratio_at_largest": 0.8198333281890824,
        "smallest_batch": 1,
        "largest_batch": 1024
       }
@@ -1813,38 +1950,40 @@
         1,
         4,
         16,
-        64
+        64,
+        256,
+        1024
        ],
-       "ratio_at_smallest": 0.053807622843592445,
-       "ratio_at_largest": 0.020856668611001532,
+       "ratio_at_smallest": 0.08657124110365495,
+       "ratio_at_largest": 0.23749530587674225,
        "smallest_batch": 1,
-       "largest_batch": 64
+       "largest_batch": 1024
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 4.760029415227501,
-     "pgml_cpu_pool": 20.73116021051225,
-     "pgml_cpu_single": 5.157261127068628,
-     "opendss": 393.7352752549654
+     "pgml_gpu": 5.40042094934274,
+     "pgml_cpu_pool": 322.97480892301326,
+     "pgml_cpu_single": 93.5617013827505,
+     "opendss": 393.95179217271817
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "opendss",
-     "throughput": 55.64539813393583,
+     "throughput": 63.71398667057647,
      "all": {
-      "pgml_gpu": 2.1290189033721516,
-      "pgml_cpu_pool": 1.9561393268316765,
-      "pgml_cpu_single": 2.994146595772362,
-      "opendss": 55.64539813393583
+      "pgml_gpu": 2.1528360904438903,
+      "pgml_cpu_pool": 4.921466364096888,
+      "pgml_cpu_single": 5.515798901733533,
+      "opendss": 63.71398667057647
      }
     },
     "fastest_at_largest_batch": {
      "batch": 16384,
      "tool": "opendss",
-     "throughput": 387.88065899854865,
+     "throughput": 393.0886750778577,
      "all": {
-      "opendss": 387.88065899854865
+      "opendss": 393.0886750778577
      }
     }
    }
@@ -1858,46 +1997,49 @@
    256,
    4096
   ],
+  "pgml_dtypes": [
+   "c128"
+  ],
   "rungs": {
    "16": {
     "label": "radial MV feeder, 16 buses",
     "rows": 16,
     "curves": {
      "pgml_gpu": {
-      "1": 125.33781595748147,
-      "16": 1989.8792135567983,
-      "256": 31575.467880622156,
-      "4096": 486466.8694295473
+      "1": 131.5988592942402,
+      "16": 2092.646436683519,
+      "256": 33171.007126019365,
+      "4096": 504573.99562107713
      },
      "pgml_cpu_pool": {
-      "1": 241.72245790106822,
-      "16": 2352.673702419705,
-      "256": 55078.128602538636,
-      "4096": 459561.1384983293
+      "1": 207.39001164434973,
+      "16": 2385.480172003039,
+      "256": 49416.66159288688,
+      "4096": 410650.40258383955
      },
      "pgml_cpu_single": {
-      "1": 286.6826259661011,
-      "16": 4309.787578033965,
-      "256": 51694.43723788094,
-      "4096": 279148.37992378214
+      "1": 296.8523524639486,
+      "16": 4525.346313028003,
+      "256": 57406.34844721125,
+      "4096": 310166.3463555276
      },
      "pandapower": {
-      "1": 195.9025806222228,
-      "16": 1098.5718303351596,
-      "256": 1154.6012887946486,
-      "4096": 2148.7150747208034
+      "1": 207.5957618144578,
+      "16": 1373.4255685162254,
+      "256": 2316.1006177869226,
+      "4096": 2311.097844593161
      },
      "power_grid_model": {
-      "1": 6748.917605223812,
-      "16": 42265.98109148791,
-      "256": 353752.399032347,
-      "4096": 732906.8244733798
+      "1": 6566.329678125088,
+      "16": 41724.57426493424,
+      "256": 346896.14924926724,
+      "4096": 731709.8966654126
      },
      "opendss": {
-      "1": 4860.195932454644,
-      "16": 39707.64316470939,
-      "256": 104963.5018485839,
-      "4096": 145391.02469849368
+      "1": 1443.4138142643305,
+      "16": 28841.355904915974,
+      "256": 117463.68802871788,
+      "4096": 148069.97885922765
      }
     },
     "crossovers": {
@@ -1911,8 +2053,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.6397966558653051,
-       "ratio_at_largest": 226.3989652014505,
+       "ratio_at_smallest": 0.6339188148352417,
+       "ratio_at_largest": 218.3265398310736,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -1925,8 +2067,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.018571543362815277,
-       "ratio_at_largest": 0.6637499518156232,
+       "ratio_at_smallest": 0.02004146391440647,
+       "ratio_at_largest": 0.6895820296001854,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -1939,24 +2081,24 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.025788634388280628,
-       "ratio_at_largest": 3.345920908380442,
+       "ratio_at_smallest": 0.09117195498181693,
+       "ratio_at_largest": 3.407672503963705,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      },
      "pgml_cpu_pool": {
       "pandapower": {
-       "crossover_batch": 1,
-       "status": "always ahead",
+       "crossover_batch": 16,
+       "status": "crosses",
        "shared_batches": [
         1,
         16,
         256,
         4096
        ],
-       "ratio_at_smallest": 1.2338911367747838,
-       "ratio_at_largest": 213.87718823448154,
+       "ratio_at_smallest": 0.9990088903149575,
+       "ratio_at_largest": 177.68629032499024,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -1969,8 +2111,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.035816477847346914,
-       "ratio_at_largest": 0.6270389675093293,
+       "ratio_at_smallest": 0.03158385609775942,
+       "ratio_at_largest": 0.5612202383147713,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -1983,8 +2125,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.04973512616784282,
-       "ratio_at_largest": 3.1608631925619175,
+       "ratio_at_smallest": 0.14368021810159193,
+       "ratio_at_largest": 2.7733535572004846,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -1999,8 +2141,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 1.4633938208243307,
-       "ratio_at_largest": 129.91409759623608,
+       "ratio_at_smallest": 1.4299538192367596,
+       "ratio_at_largest": 134.20736256630812,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2013,8 +2155,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.04247831174353091,
-       "ratio_at_largest": 0.3808784017318442,
+       "ratio_at_smallest": 0.04520826199952697,
+       "ratio_at_largest": 0.4238925122771118,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2027,45 +2169,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.05898581661116529,
-       "ratio_at_largest": 1.9199835787846555,
+       "ratio_at_smallest": 0.20565990814993432,
+       "ratio_at_largest": 2.094728105893818,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 486466.8694295473,
-     "pgml_cpu_pool": 459561.1384983293,
-     "pgml_cpu_single": 279148.37992378214,
-     "pandapower": 2148.7150747208034,
-     "power_grid_model": 732906.8244733798,
-     "opendss": 145391.02469849368
+     "pgml_gpu": 504573.99562107713,
+     "pgml_cpu_pool": 410650.40258383955,
+     "pgml_cpu_single": 310166.3463555276,
+     "pandapower": 2316.1006177869226,
+     "power_grid_model": 731709.8966654126,
+     "opendss": 148069.97885922765
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 6748.917605223812,
+     "throughput": 6566.329678125088,
      "all": {
-      "pgml_gpu": 125.33781595748147,
-      "pgml_cpu_pool": 241.72245790106822,
-      "pgml_cpu_single": 286.6826259661011,
-      "pandapower": 195.9025806222228,
-      "power_grid_model": 6748.917605223812,
-      "opendss": 4860.195932454644
+      "pgml_gpu": 131.5988592942402,
+      "pgml_cpu_pool": 207.39001164434973,
+      "pgml_cpu_single": 296.8523524639486,
+      "pandapower": 207.5957618144578,
+      "power_grid_model": 6566.329678125088,
+      "opendss": 1443.4138142643305
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "power_grid_model",
-     "throughput": 732906.8244733798,
+     "throughput": 731709.8966654126,
      "all": {
-      "pgml_gpu": 486466.8694295473,
-      "pgml_cpu_pool": 459561.1384983293,
-      "pgml_cpu_single": 279148.37992378214,
-      "pandapower": 2148.7150747208034,
-      "power_grid_model": 732906.8244733798,
-      "opendss": 145391.02469849368
+      "pgml_gpu": 504573.99562107713,
+      "pgml_cpu_pool": 410650.40258383955,
+      "pgml_cpu_single": 310166.3463555276,
+      "pandapower": 2311.097844593161,
+      "power_grid_model": 731709.8966654126,
+      "opendss": 148069.97885922765
      }
     }
    },
@@ -2074,40 +2216,40 @@
     "rows": 32,
     "curves": {
      "pgml_gpu": {
-      "1": 97.51362643541663,
-      "16": 1544.4165973233992,
-      "256": 24408.124291469834,
-      "4096": 382304.1354879177
+      "1": 100.72356882620502,
+      "16": 1597.1293272653888,
+      "256": 25197.9987792793,
+      "4096": 391112.4252785969
      },
      "pgml_cpu_pool": {
-      "1": 178.6216680255048,
-      "16": 1666.6791588357576,
-      "256": 38798.52482391231,
-      "4096": 256718.26647914795
+      "1": 162.40919275550414,
+      "16": 1779.7145143699768,
+      "256": 26341.407692603934,
+      "4096": 216655.7259606961
      },
      "pgml_cpu_single": {
-      "1": 223.69563079262815,
-      "16": 3333.1077164383582,
-      "256": 33020.18331056256,
-      "4096": 206098.87648850592
+      "1": 204.18893805730454,
+      "16": 3125.861423076079,
+      "256": 36975.56612754485,
+      "4096": 217610.66357687203
      },
      "pandapower": {
-      "1": 200.7980929879907,
-      "16": 1031.6791294339373,
-      "256": 1132.0135094988823,
-      "4096": 2283.1686049850296
+      "1": 213.86156642864697,
+      "16": 1233.7106781192106,
+      "256": 2282.8268970218323,
+      "4096": 2269.298098425495
      },
      "power_grid_model": {
-      "1": 5907.998618934626,
-      "16": 39470.598709556616,
-      "256": 250206.9681905995,
-      "4096": 410833.15892996284
+      "1": 6002.330090140452,
+      "16": 39166.06019376861,
+      "256": 253187.60929201366,
+      "4096": 416400.6101798813
      },
      "opendss": {
-      "1": 4070.4513743208954,
-      "16": 16792.382850672868,
-      "256": 37987.769821770664,
-      "4096": 97761.13173882272
+      "1": 1249.0569609209415,
+      "16": 24079.631842331873,
+      "256": 68580.03209948172,
+      "4096": 131431.1626379971
      }
     },
     "crossovers": {
@@ -2121,8 +2263,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.4856302417237035,
-       "ratio_at_largest": 167.44454818325798,
+       "ratio_at_smallest": 0.4709755497830909,
+       "ratio_at_largest": 172.3495143938833,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2135,8 +2277,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.016505357012592023,
-       "ratio_at_largest": 0.9305581284715417,
+       "ratio_at_smallest": 0.016780744696406415,
+       "ratio_at_largest": 0.9392695777022033,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2149,8 +2291,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.023956465135684262,
-       "ratio_at_largest": 3.910594411992653,
+       "ratio_at_smallest": 0.08063969216579249,
+       "ratio_at_largest": 2.975796739741578,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -2165,8 +2307,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.8895585877709892,
-       "ratio_at_largest": 112.43946939294534,
+       "ratio_at_smallest": 0.7594127148118993,
+       "ratio_at_largest": 95.47257194240727,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2179,52 +2321,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.030233870985182314,
-       "ratio_at_largest": 0.6248723134904314,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "opendss": {
-       "crossover_batch": 256,
-       "status": "crosses",
-       "shared_batches": [
-        1,
-        16,
-        256,
-        4096
-       ],
-       "ratio_at_smallest": 0.043882521027611,
-       "ratio_at_largest": 2.6259747807031624,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      }
-     },
-     "pgml_cpu_single": {
-      "pandapower": {
-       "crossover_batch": 1,
-       "status": "always ahead",
-       "shared_batches": [
-        1,
-        16,
-        256,
-        4096
-       ],
-       "ratio_at_smallest": 1.1140326457483183,
-       "ratio_at_largest": 90.26879400781586,
-       "smallest_batch": 1,
-       "largest_batch": 4096
-      },
-      "power_grid_model": {
-       "crossover_batch": null,
-       "status": "never ahead",
-       "shared_batches": [
-        1,
-        16,
-        256,
-        4096
-       ],
-       "ratio_at_smallest": 0.03786318264796185,
-       "ratio_at_largest": 0.5016607642511174,
+       "ratio_at_smallest": 0.027057690982753638,
+       "ratio_at_largest": 0.5203059761778513,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2237,45 +2335,89 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.05495597667714407,
-       "ratio_at_largest": 2.1081883241605346,
+       "ratio_at_smallest": 0.13002544946850006,
+       "ratio_at_largest": 1.6484349800468123,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.9547715443552144,
+       "ratio_at_largest": 95.89337942329244,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03401827873357205,
+       "ratio_at_largest": 0.5225992908196417,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.1634744807048304,
+       "ratio_at_largest": 1.6557006664868397,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 382304.1354879177,
-     "pgml_cpu_pool": 256718.26647914795,
-     "pgml_cpu_single": 206098.87648850592,
-     "pandapower": 2283.1686049850296,
-     "power_grid_model": 410833.15892996284,
-     "opendss": 97761.13173882272
+     "pgml_gpu": 391112.4252785969,
+     "pgml_cpu_pool": 216655.7259606961,
+     "pgml_cpu_single": 217610.66357687203,
+     "pandapower": 2282.8268970218323,
+     "power_grid_model": 416400.6101798813,
+     "opendss": 131431.1626379971
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 5907.998618934626,
+     "throughput": 6002.330090140452,
      "all": {
-      "pgml_gpu": 97.51362643541663,
-      "pgml_cpu_pool": 178.6216680255048,
-      "pgml_cpu_single": 223.69563079262815,
-      "pandapower": 200.7980929879907,
-      "power_grid_model": 5907.998618934626,
-      "opendss": 4070.4513743208954
+      "pgml_gpu": 100.72356882620502,
+      "pgml_cpu_pool": 162.40919275550414,
+      "pgml_cpu_single": 204.18893805730454,
+      "pandapower": 213.86156642864697,
+      "power_grid_model": 6002.330090140452,
+      "opendss": 1249.0569609209415
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "power_grid_model",
-     "throughput": 410833.15892996284,
+     "throughput": 416400.6101798813,
      "all": {
-      "pgml_gpu": 382304.1354879177,
-      "pgml_cpu_pool": 256718.26647914795,
-      "pgml_cpu_single": 206098.87648850592,
-      "pandapower": 2283.1686049850296,
-      "power_grid_model": 410833.15892996284,
-      "opendss": 97761.13173882272
+      "pgml_gpu": 391112.4252785969,
+      "pgml_cpu_pool": 216655.7259606961,
+      "pgml_cpu_single": 217610.66357687203,
+      "pandapower": 2269.298098425495,
+      "power_grid_model": 416400.6101798813,
+      "opendss": 131431.1626379971
      }
     }
    },
@@ -2284,46 +2426,46 @@
     "rows": 64,
     "curves": {
      "pgml_gpu": {
-      "1": 67.48076366841327,
-      "16": 1075.0716540400583,
-      "256": 16900.208624697778,
-      "4096": 266545.8017937167
+      "1": 68.01561631438321,
+      "16": 1085.5828700416766,
+      "256": 16992.700823931726,
+      "4096": 263300.3301825758
      },
      "pgml_cpu_pool": {
-      "1": 116.38212229632211,
-      "16": 1150.4636856143188,
-      "256": 25982.483189156694,
-      "4096": 143974.2088254332
+      "1": 114.56273328330944,
+      "16": 1654.3524180740244,
+      "256": 24765.16620986361,
+      "4096": 172239.61684899588
      },
      "pgml_cpu_single": {
-      "1": 149.10042450029889,
-      "16": 2180.5887328515714,
-      "256": 16203.494578249418,
-      "4096": 94038.49221422225
+      "1": 143.99447110662723,
+      "16": 2097.160640035596,
+      "256": 23769.073147841045,
+      "4096": 138877.33752110283
      },
      "pandapower": {
-      "1": 200.58140543907592,
-      "16": 982.8481921197945,
-      "256": 1116.78888225927,
-      "4096": 2123.25709943616
+      "1": 208.10082835662107,
+      "16": 1368.5620606097177,
+      "256": 2229.9253944235165,
+      "4096": 2226.1669485307634
      },
      "power_grid_model": {
-      "1": 4932.109536154246,
-      "16": 35447.16889167434,
-      "256": 165749.32075169348,
-      "4096": 215823.70271036102
+      "1": 5044.543595700537,
+      "16": 34248.183472384575,
+      "256": 162516.1622463206,
+      "4096": 214945.06235947643
      },
      "opendss": {
-      "1": 3607.5821926035183,
-      "16": 16934.567736692083,
-      "256": 30886.014823472982,
-      "4096": 50668.43112336297
+      "1": 973.153624288468,
+      "16": 18337.164297119827,
+      "256": 37792.57170114253,
+      "4096": 68584.9924162319
      }
     },
     "crossovers": {
      "pgml_gpu": {
       "pandapower": {
-       "crossover_batch": 16,
+       "crossover_batch": 256,
        "status": "crosses",
        "shared_batches": [
         1,
@@ -2331,8 +2473,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.33642581933602866,
-       "ratio_at_largest": 125.53628190599201,
+       "ratio_at_smallest": 0.3268397192433337,
+       "ratio_at_largest": 118.27519510895175,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2345,8 +2487,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.013681927210609074,
-       "ratio_at_largest": 1.2350163510605021,
+       "ratio_at_smallest": 0.013483006940876258,
+       "ratio_at_largest": 1.2249657065498416,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2359,8 +2501,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.01870526021742939,
-       "ratio_at_largest": 5.260589204839494,
+       "ratio_at_smallest": 0.06989196219056737,
+       "ratio_at_largest": 3.8390370969883048,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -2375,8 +2517,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.5802238848688879,
-       "ratio_at_largest": 67.8081843520816,
+       "ratio_at_smallest": 0.5505155082178914,
+       "ratio_at_largest": 77.37048515731105,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2389,8 +2531,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.02359682432906178,
-       "ratio_at_largest": 0.6670917374568861,
+       "ratio_at_smallest": 0.022710227617212236,
+       "ratio_at_largest": 0.8013192532003387,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2403,8 +2545,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.03226042154630204,
-       "ratio_at_largest": 2.8414972722344145,
+       "ratio_at_smallest": 0.11772317383812166,
+       "ratio_at_largest": 2.5113309892009585,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -2419,8 +2561,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.7433412093903503,
-       "ratio_at_largest": 44.28973403135898,
+       "ratio_at_smallest": 0.6919456892303418,
+       "ratio_at_largest": 62.384062261260226,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2433,8 +2575,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.030230558224089682,
-       "ratio_at_largest": 0.43571901989107964,
+       "ratio_at_smallest": 0.028544598411113682,
+       "ratio_at_largest": 0.6461062003315196,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2447,45 +2589,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.04132973735317619,
-       "ratio_at_largest": 1.8559582392686627,
+       "ratio_at_smallest": 0.14796684460987378,
+       "ratio_at_largest": 2.024893969197771,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 266545.8017937167,
-     "pgml_cpu_pool": 143974.2088254332,
-     "pgml_cpu_single": 94038.49221422225,
-     "pandapower": 2123.25709943616,
-     "power_grid_model": 215823.70271036102,
-     "opendss": 50668.43112336297
+     "pgml_gpu": 263300.3301825758,
+     "pgml_cpu_pool": 172239.61684899588,
+     "pgml_cpu_single": 138877.33752110283,
+     "pandapower": 2229.9253944235165,
+     "power_grid_model": 214945.06235947643,
+     "opendss": 68584.9924162319
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 4932.109536154246,
+     "throughput": 5044.543595700537,
      "all": {
-      "pgml_gpu": 67.48076366841327,
-      "pgml_cpu_pool": 116.38212229632211,
-      "pgml_cpu_single": 149.10042450029889,
-      "pandapower": 200.58140543907592,
-      "power_grid_model": 4932.109536154246,
-      "opendss": 3607.5821926035183
+      "pgml_gpu": 68.01561631438321,
+      "pgml_cpu_pool": 114.56273328330944,
+      "pgml_cpu_single": 143.99447110662723,
+      "pandapower": 208.10082835662107,
+      "power_grid_model": 5044.543595700537,
+      "opendss": 973.153624288468
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "pgml_gpu",
-     "throughput": 266545.8017937167,
+     "throughput": 263300.3301825758,
      "all": {
-      "pgml_gpu": 266545.8017937167,
-      "pgml_cpu_pool": 143974.2088254332,
-      "pgml_cpu_single": 94038.49221422225,
-      "pandapower": 2123.25709943616,
-      "power_grid_model": 215823.70271036102,
-      "opendss": 50668.43112336297
+      "pgml_gpu": 263300.3301825758,
+      "pgml_cpu_pool": 172239.61684899588,
+      "pgml_cpu_single": 138877.33752110283,
+      "pandapower": 2226.1669485307634,
+      "power_grid_model": 214945.06235947643,
+      "opendss": 68584.9924162319
      }
     }
    },
@@ -2494,40 +2636,40 @@
     "rows": 128,
     "curves": {
      "pgml_gpu": {
-      "1": 41.46093055843139,
-      "16": 652.2514214884861,
-      "256": 10338.216782393763,
-      "4096": 147340.82189342193
+      "1": 41.44593246714567,
+      "16": 644.9674882196571,
+      "256": 10196.690151134588,
+      "4096": 145855.0877325698
      },
      "pgml_cpu_pool": {
-      "1": 71.4751175539574,
-      "16": 1060.0969680795306,
-      "256": 14853.226885153275,
-      "4096": 80381.94914399076
+      "1": 66.0351723379678,
+      "16": 1116.2940460463753,
+      "256": 15720.021525064154,
+      "4096": 90511.85222814251
      },
      "pgml_cpu_single": {
-      "1": 88.10936040661579,
-      "16": 1291.785630828165,
-      "256": 12435.058990170679,
-      "4096": 65846.75354044064
+      "1": 85.78813961250171,
+      "16": 1290.7103194531426,
+      "256": 13019.699618824645,
+      "4096": 70852.74951237898
      },
      "pandapower": {
-      "1": 200.68316414764936,
-      "16": 1014.4143177581834,
-      "256": 1080.8500948130452,
-      "4096": 2108.375737497947
+      "1": 203.47676917173192,
+      "16": 1145.632520100319,
+      "256": 2124.3861619482127,
+      "4096": 2114.6394808569876
      },
      "power_grid_model": {
-      "1": 3606.281187117879,
-      "16": 26466.450374449974,
-      "256": 95528.91007236358,
-      "4096": 107487.32980633163
+      "1": 3603.408368696504,
+      "16": 26482.126638863818,
+      "256": 95773.00806997741,
+      "4096": 108063.27474210724
      },
      "opendss": {
-      "1": 1445.0450712821432,
-      "16": 8913.083445942068,
-      "256": 17853.09300227289,
-      "4096": 18224.588203344876
+      "1": 1346.3969722608763,
+      "16": 13395.386243757535,
+      "256": 19743.53903829206,
+      "4096": 34939.1760093122
      }
     },
     "crossovers": {
@@ -2541,8 +2683,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.20659894782168767,
-       "ratio_at_largest": 69.88356926753214,
+       "ratio_at_smallest": 0.2036887681864351,
+       "ratio_at_largest": 68.97397360303704,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2555,8 +2697,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.011496865720436723,
-       "ratio_at_largest": 1.3707738591971488,
+       "ratio_at_smallest": 0.011501869404310205,
+       "ratio_at_largest": 1.3497193017762292,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2569,15 +2711,15 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.028691790576223626,
-       "ratio_at_largest": 8.084727086803504,
+       "ratio_at_smallest": 0.03078284734817062,
+       "ratio_at_largest": 4.17454285967407,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      },
      "pgml_cpu_pool": {
       "pandapower": {
-       "crossover_batch": 16,
+       "crossover_batch": 256,
        "status": "crosses",
        "shared_batches": [
         1,
@@ -2585,8 +2727,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.3561590124290185,
-       "ratio_at_largest": 38.12505888508359,
+       "ratio_at_smallest": 0.3245342090242985,
+       "ratio_at_largest": 42.80249803690476,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2599,8 +2741,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.019819618561435565,
-       "ratio_at_largest": 0.7478272024137285,
+       "ratio_at_smallest": 0.018325753170700256,
+       "ratio_at_largest": 0.8375819855926895,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2613,8 +2755,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.04946220638678057,
-       "ratio_at_largest": 4.410631847870107,
+       "ratio_at_smallest": 0.04904584138144727,
+       "ratio_at_largest": 2.5905548603670203,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -2629,8 +2771,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.43904709585798024,
-       "ratio_at_largest": 31.2310336195494,
+       "ratio_at_smallest": 0.4216114692685019,
+       "ratio_at_largest": 33.50582931690318,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2643,8 +2785,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.024432193674013624,
-       "ratio_at_largest": 0.6126001423524233,
+       "ratio_at_smallest": 0.023807498577668753,
+       "ratio_at_largest": 0.655659840787436,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2657,45 +2799,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.06097343408703448,
-       "ratio_at_largest": 3.613072229986264,
+       "ratio_at_smallest": 0.06371682451754615,
+       "ratio_at_largest": 2.0278883936328347,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 147340.82189342193,
-     "pgml_cpu_pool": 80381.94914399076,
-     "pgml_cpu_single": 65846.75354044064,
-     "pandapower": 2108.375737497947,
-     "power_grid_model": 107487.32980633163,
-     "opendss": 18224.588203344876
+     "pgml_gpu": 145855.0877325698,
+     "pgml_cpu_pool": 90511.85222814251,
+     "pgml_cpu_single": 70852.74951237898,
+     "pandapower": 2124.3861619482127,
+     "power_grid_model": 108063.27474210724,
+     "opendss": 34939.1760093122
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 3606.281187117879,
+     "throughput": 3603.408368696504,
      "all": {
-      "pgml_gpu": 41.46093055843139,
-      "pgml_cpu_pool": 71.4751175539574,
-      "pgml_cpu_single": 88.10936040661579,
-      "pandapower": 200.68316414764936,
-      "power_grid_model": 3606.281187117879,
-      "opendss": 1445.0450712821432
+      "pgml_gpu": 41.44593246714567,
+      "pgml_cpu_pool": 66.0351723379678,
+      "pgml_cpu_single": 85.78813961250171,
+      "pandapower": 203.47676917173192,
+      "power_grid_model": 3603.408368696504,
+      "opendss": 1346.3969722608763
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "pgml_gpu",
-     "throughput": 147340.82189342193,
+     "throughput": 145855.0877325698,
      "all": {
-      "pgml_gpu": 147340.82189342193,
-      "pgml_cpu_pool": 80381.94914399076,
-      "pgml_cpu_single": 65846.75354044064,
-      "pandapower": 2108.375737497947,
-      "power_grid_model": 107487.32980633163,
-      "opendss": 18224.588203344876
+      "pgml_gpu": 145855.0877325698,
+      "pgml_cpu_pool": 90511.85222814251,
+      "pgml_cpu_single": 70852.74951237898,
+      "pandapower": 2114.6394808569876,
+      "power_grid_model": 108063.27474210724,
+      "opendss": 34939.1760093122
      }
     }
    },
@@ -2704,40 +2846,40 @@
     "rows": 256,
     "curves": {
      "pgml_gpu": {
-      "1": 22.7690156007008,
-      "16": 341.23895839252424,
-      "256": 5410.354358426262,
-      "4096": 68269.53171991768
+      "1": 23.07049405084509,
+      "16": 344.16711189410506,
+      "256": 5426.102045221076,
+      "4096": 68752.97716125446
      },
      "pgml_cpu_pool": {
-      "1": 40.41039183296281,
-      "16": 570.7517005469599,
-      "256": 7226.978241875675,
-      "4096": 32645.278569510454
+      "1": 37.949905204700364,
+      "16": 621.0956868051261,
+      "256": 8222.379117552571,
+      "4096": 32108.499877120397
      },
      "pgml_cpu_single": {
-      "1": 45.44199940056309,
-      "16": 680.5010527793881,
-      "256": 6692.3980784481,
-      "4096": 12380.199730352362
+      "1": 46.84770257662581,
+      "16": 703.4720951239917,
+      "256": 7205.634812210396,
+      "4096": 7191.837804200576
      },
      "pandapower": {
-      "1": 188.92310113627664,
-      "16": 949.8615618203831,
-      "256": 1034.0954312311135,
-      "4096": 1995.0898326411154
+      "1": 198.2730812166886,
+      "16": 1082.5570948810941,
+      "256": 2035.979657124894,
+      "4096": 2043.1411212937583
      },
      "power_grid_model": {
-      "1": 2381.825504859349,
-      "16": 19573.49193982985,
-      "256": 48757.28021313025,
-      "4096": 47605.72162337225
+      "1": 2380.736945410866,
+      "16": 19585.904521408567,
+      "256": 49039.48641665193,
+      "4096": 47744.798987365015
      },
      "opendss": {
-      "1": 1072.934842881298,
-      "16": 7970.993428694066,
-      "256": 9083.397206145924,
-      "4096": 9175.87254575343
+      "1": 1004.139047313779,
+      "16": 7891.93533111526,
+      "256": 16892.9752572998,
+      "4096": 17024.475828618248
      }
     },
     "crossovers": {
@@ -2751,8 +2893,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.12052001827069701,
-       "ratio_at_largest": 34.218775818000104,
+       "ratio_at_smallest": 0.11635716714177563,
+       "ratio_at_largest": 33.6506257177765,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2765,8 +2907,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.009559480975515606,
-       "ratio_at_largest": 1.4340614823576256,
+       "ratio_at_smallest": 0.009690484324744916,
+       "ratio_at_largest": 1.440009773199568,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2779,8 +2921,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.02122124726563643,
-       "ratio_at_largest": 7.440113338487101,
+       "ratio_at_smallest": 0.022975397792329745,
+       "ratio_at_largest": 4.038478356301595,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -2795,8 +2937,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.2138986264247982,
-       "ratio_at_largest": 16.362811355864803,
+       "ratio_at_smallest": 0.1914022063500677,
+       "ratio_at_largest": 15.715262906944307,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2809,8 +2951,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.01696614288096185,
-       "ratio_at_largest": 0.6857427522636922,
+       "ratio_at_smallest": 0.015940402520258697,
+       "ratio_at_largest": 0.6725025669417407,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2823,8 +2965,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.037663416470326644,
-       "ratio_at_largest": 3.5577301675379753,
+       "ratio_at_smallest": 0.03779347621847989,
+       "ratio_at_largest": 1.8860198810436097,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -2839,8 +2981,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.24053172495715194,
-       "ratio_at_largest": 6.205334480584946,
+       "ratio_at_smallest": 0.23627868336512564,
+       "ratio_at_largest": 3.519990728612304,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2853,59 +2995,59 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.019078643379984512,
-       "ratio_at_largest": 0.2600569702166692,
+       "ratio_at_smallest": 0.01967781558854284,
+       "ratio_at_largest": 0.15063081124509067,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
       "opendss": {
-       "crossover_batch": 4096,
-       "status": "crosses",
+       "crossover_batch": null,
+       "status": "never ahead",
        "shared_batches": [
         1,
         16,
         256,
         4096
        ],
-       "ratio_at_smallest": 0.04235299067978024,
-       "ratio_at_largest": 1.3492122595013472,
+       "ratio_at_smallest": 0.046654596992269516,
+       "ratio_at_largest": 0.4224410711142749,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 68269.53171991768,
-     "pgml_cpu_pool": 32645.278569510454,
-     "pgml_cpu_single": 12380.199730352362,
-     "pandapower": 1995.0898326411154,
-     "power_grid_model": 48757.28021313025,
-     "opendss": 9175.87254575343
+     "pgml_gpu": 68752.97716125446,
+     "pgml_cpu_pool": 32108.499877120397,
+     "pgml_cpu_single": 7205.634812210396,
+     "pandapower": 2043.1411212937583,
+     "power_grid_model": 49039.48641665193,
+     "opendss": 17024.475828618248
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 2381.825504859349,
+     "throughput": 2380.736945410866,
      "all": {
-      "pgml_gpu": 22.7690156007008,
-      "pgml_cpu_pool": 40.41039183296281,
-      "pgml_cpu_single": 45.44199940056309,
-      "pandapower": 188.92310113627664,
-      "power_grid_model": 2381.825504859349,
-      "opendss": 1072.934842881298
+      "pgml_gpu": 23.07049405084509,
+      "pgml_cpu_pool": 37.949905204700364,
+      "pgml_cpu_single": 46.84770257662581,
+      "pandapower": 198.2730812166886,
+      "power_grid_model": 2380.736945410866,
+      "opendss": 1004.139047313779
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "pgml_gpu",
-     "throughput": 68269.53171991768,
+     "throughput": 68752.97716125446,
      "all": {
-      "pgml_gpu": 68269.53171991768,
-      "pgml_cpu_pool": 32645.278569510454,
-      "pgml_cpu_single": 12380.199730352362,
-      "pandapower": 1995.0898326411154,
-      "power_grid_model": 47605.72162337225,
-      "opendss": 9175.87254575343
+      "pgml_gpu": 68752.97716125446,
+      "pgml_cpu_pool": 32108.499877120397,
+      "pgml_cpu_single": 7191.837804200576,
+      "pandapower": 2043.1411212937583,
+      "power_grid_model": 47744.798987365015,
+      "opendss": 17024.475828618248
      }
     }
    },
@@ -2914,40 +3056,40 @@
     "rows": 512,
     "curves": {
      "pgml_gpu": {
-      "1": 10.457442198826833,
-      "16": 172.34199632113496,
-      "256": 2692.9775912760774,
-      "4096": 29519.12551706165
+      "1": 12.030094882570983,
+      "16": 173.32020557965748,
+      "256": 2701.052246052149,
+      "4096": 29650.54502060545
      },
      "pgml_cpu_pool": {
-      "1": 19.826618185884506,
-      "16": 247.51061159313127,
-      "256": 3176.142011130369,
-      "4096": 13015.773417869937
+      "1": 20.697306759196234,
+      "16": 305.2405975991023,
+      "256": 4459.050622139671,
+      "4096": 15849.629727767198
      },
      "pgml_cpu_single": {
-      "1": 25.087722318960935,
-      "16": 367.21911986648365,
-      "256": 3843.993849178439,
-      "4096": 5152.635226705067
+      "1": 25.212227720652766,
+      "16": 376.36562172134927,
+      "256": 1629.0433687643654,
+      "4096": 3688.7798354196066
      },
      "pandapower": {
-      "1": 171.48008527116787,
-      "16": 815.1000127561988,
-      "256": 959.000556897378,
-      "4096": 1838.4047849354931
+      "1": 175.22003115962153,
+      "16": 1062.5480217109343,
+      "256": 1509.7279949516878,
+      "4096": 1861.3219382053444
      },
      "power_grid_model": {
-      "1": 1432.826862488941,
-      "16": 12814.362028622938,
-      "256": 24905.875762333726,
-      "4096": 24169.72167886552
+      "1": 1466.4434705637827,
+      "16": 12893.742563174332,
+      "256": 25529.777692692318,
+      "4096": 24212.356699537246
      },
      "opendss": {
-      "1": 500.28591015833325,
-      "16": 3727.5280332095335,
-      "256": 4175.830175982092,
-      "4096": 7814.213636180954
+      "1": 662.2792906233183,
+      "16": 4167.038813757748,
+      "256": 8069.764388388199,
+      "4096": 8077.9101809694475
      }
     },
     "crossovers": {
@@ -2961,8 +3103,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.06098342079950619,
-       "ratio_at_largest": 16.05692378465901,
+       "ratio_at_smallest": 0.06865707535237131,
+       "ratio_at_largest": 15.929831595491756,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2975,8 +3117,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.007298468832906562,
-       "ratio_at_largest": 1.221326662725858,
+       "ratio_at_smallest": 0.008203585834744754,
+       "ratio_at_largest": 1.2246038412763074,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -2989,8 +3131,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.020902931676643068,
-       "ratio_at_largest": 3.7776194626140973,
+       "ratio_at_smallest": 0.018164685281414437,
+       "ratio_at_largest": 3.670571268600937,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -3005,8 +3147,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.11562052908086635,
-       "ratio_at_largest": 7.079927948689843,
+       "ratio_at_smallest": 0.11812180731974331,
+       "ratio_at_largest": 8.515254348234432,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3019,8 +3161,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.013837413790137908,
-       "ratio_at_largest": 0.5385156515580064,
+       "ratio_at_smallest": 0.014113947911840771,
+       "ratio_at_largest": 0.6546091289027689,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3033,8 +3175,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.03963057480393495,
-       "ratio_at_largest": 1.6656536439706484,
+       "ratio_at_smallest": 0.03125162911211752,
+       "ratio_at_largest": 1.9620953158289574,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -3049,8 +3191,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.1463010837631016,
-       "ratio_at_largest": 2.802775139037655,
+       "ratio_at_smallest": 0.14388895809340993,
+       "ratio_at_largest": 1.981806456854136,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3063,8 +3205,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.01750924900680704,
-       "ratio_at_largest": 0.21318554243885368,
+       "ratio_at_smallest": 0.017192771645646716,
+       "ratio_at_largest": 0.15235112720316513,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3077,45 +3219,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.05014676969619439,
-       "ratio_at_largest": 0.6593926742478106,
+       "ratio_at_smallest": 0.03806887528813371,
+       "ratio_at_largest": 0.4566502663163937,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 29519.12551706165,
-     "pgml_cpu_pool": 13015.773417869937,
-     "pgml_cpu_single": 5152.635226705067,
-     "pandapower": 1838.4047849354931,
-     "power_grid_model": 24905.875762333726,
-     "opendss": 7814.213636180954
+     "pgml_gpu": 29650.54502060545,
+     "pgml_cpu_pool": 15849.629727767198,
+     "pgml_cpu_single": 3688.7798354196066,
+     "pandapower": 1861.3219382053444,
+     "power_grid_model": 25529.777692692318,
+     "opendss": 8077.9101809694475
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 1432.826862488941,
+     "throughput": 1466.4434705637827,
      "all": {
-      "pgml_gpu": 10.457442198826833,
-      "pgml_cpu_pool": 19.826618185884506,
-      "pgml_cpu_single": 25.087722318960935,
-      "pandapower": 171.48008527116787,
-      "power_grid_model": 1432.826862488941,
-      "opendss": 500.28591015833325
+      "pgml_gpu": 12.030094882570983,
+      "pgml_cpu_pool": 20.697306759196234,
+      "pgml_cpu_single": 25.212227720652766,
+      "pandapower": 175.22003115962153,
+      "power_grid_model": 1466.4434705637827,
+      "opendss": 662.2792906233183
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "pgml_gpu",
-     "throughput": 29519.12551706165,
+     "throughput": 29650.54502060545,
      "all": {
-      "pgml_gpu": 29519.12551706165,
-      "pgml_cpu_pool": 13015.773417869937,
-      "pgml_cpu_single": 5152.635226705067,
-      "pandapower": 1838.4047849354931,
-      "power_grid_model": 24169.72167886552,
-      "opendss": 7814.213636180954
+      "pgml_gpu": 29650.54502060545,
+      "pgml_cpu_pool": 15849.629727767198,
+      "pgml_cpu_single": 3688.7798354196066,
+      "pandapower": 1861.3219382053444,
+      "power_grid_model": 24212.356699537246,
+      "opendss": 8077.9101809694475
      }
     }
    },
@@ -3124,40 +3266,40 @@
     "rows": 1024,
     "curves": {
      "pgml_gpu": {
-      "1": 6.057171020734556,
-      "16": 85.4626130055245,
-      "256": 1340.5869841431793,
-      "4096": 11203.881492754686
+      "1": 6.043837451981584,
+      "16": 85.31371933147926,
+      "256": 1330.7563720836995,
+      "4096": 11228.916531544237
      },
      "pgml_cpu_pool": {
-      "1": 9.896915024335714,
-      "16": 86.89251080896946,
-      "256": 1355.8440523306813,
-      "4096": 5766.665443054958
+      "1": 10.422806794059452,
+      "16": 149.2210696634455,
+      "256": 2130.307746381033,
+      "4096": 7729.517930970655
      },
      "pgml_cpu_single": {
-      "1": 11.535793523291007,
-      "16": 152.95039396906128,
-      "256": 1952.7751391929437,
-      "4096": 2380.1654065800917
+      "1": 12.501182461507304,
+      "16": 186.21062164691818,
+      "256": 896.9693338944116,
+      "4096": 2187.098349490292
      },
      "pandapower": {
-      "1": 146.31549803100253,
-      "16": 683.2999508073983,
-      "256": 748.4162386750667,
-      "4096": 1299.5257896618546
+      "1": 146.10548430246203,
+      "16": 836.2275966736263,
+      "256": 1213.179084556087,
+      "4096": 1411.6547682373043
      },
      "power_grid_model": {
-      "1": 810.6834540134657,
-      "16": 7688.726038322974,
-      "256": 12289.794649885896,
-      "4096": 11963.7943317162
+      "1": 850.903831384643,
+      "16": 7780.33747425475,
+      "256": 12498.403574889833,
+      "4096": 12139.05979102259
      },
      "opendss": {
-      "1": 354.8804821189278,
-      "16": 1997.143085289877,
-      "256": 2072.9898761835284,
-      "4096": 3636.0128342922185
+      "1": 368.4465224967482,
+      "16": 2227.5448466911866,
+      "256": 3983.1548629578,
+      "4096": 3953.705693438399
      }
     },
     "crossovers": {
@@ -3171,8 +3313,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.0413980138963209,
-       "ratio_at_largest": 8.621515311112073,
+       "ratio_at_smallest": 0.041366260006160074,
+       "ratio_at_largest": 7.954435308262718,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3185,8 +3327,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.0074716845283411245,
-       "ratio_at_largest": 0.9364822883199376,
+       "ratio_at_smallest": 0.007102844327480204,
+       "ratio_at_largest": 0.9250235788317439,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3199,8 +3341,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.017068199931898967,
-       "ratio_at_largest": 3.081364671512668,
+       "ratio_at_smallest": 0.01640356763588378,
+       "ratio_at_largest": 2.84009923909608,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -3215,8 +3357,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.06764092086976783,
-       "ratio_at_largest": 4.437515198952291,
+       "ratio_at_smallest": 0.07133754659395641,
+       "ratio_at_largest": 5.475501592094147,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3229,8 +3371,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.012208112766257745,
-       "ratio_at_largest": 0.4820097439963039,
+       "ratio_at_smallest": 0.012249100790977543,
+       "ratio_at_largest": 0.6367476611892957,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3243,15 +3385,15 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.02788802293449053,
-       "ratio_at_largest": 1.5859859978127633,
+       "ratio_at_smallest": 0.028288519928021418,
+       "ratio_at_largest": 1.9550058932809853,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      },
      "pgml_cpu_single": {
       "pandapower": {
-       "crossover_batch": 256,
+       "crossover_batch": 4096,
        "status": "crosses",
        "shared_batches": [
         1,
@@ -3259,8 +3401,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.07884191133906203,
-       "ratio_at_largest": 1.8315645795682338,
+       "ratio_at_smallest": 0.08556271875207525,
+       "ratio_at_largest": 1.5493153132768174,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3273,8 +3415,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.014229713788014962,
-       "ratio_at_largest": 0.19894736908592928,
+       "ratio_at_smallest": 0.014691651395157795,
+       "ratio_at_largest": 0.18017032514394196,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3287,45 +3429,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.03250613686729924,
-       "ratio_at_largest": 0.6546086372776546,
+       "ratio_at_smallest": 0.033929435340559186,
+       "ratio_at_largest": 0.5531768217143774,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 11203.881492754686,
-     "pgml_cpu_pool": 5766.665443054958,
-     "pgml_cpu_single": 2380.1654065800917,
-     "pandapower": 1299.5257896618546,
-     "power_grid_model": 12289.794649885896,
-     "opendss": 3636.0128342922185
+     "pgml_gpu": 11228.916531544237,
+     "pgml_cpu_pool": 7729.517930970655,
+     "pgml_cpu_single": 2187.098349490292,
+     "pandapower": 1411.6547682373043,
+     "power_grid_model": 12498.403574889833,
+     "opendss": 3983.1548629578
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 810.6834540134657,
+     "throughput": 850.903831384643,
      "all": {
-      "pgml_gpu": 6.057171020734556,
-      "pgml_cpu_pool": 9.896915024335714,
-      "pgml_cpu_single": 11.535793523291007,
-      "pandapower": 146.31549803100253,
-      "power_grid_model": 810.6834540134657,
-      "opendss": 354.8804821189278
+      "pgml_gpu": 6.043837451981584,
+      "pgml_cpu_pool": 10.422806794059452,
+      "pgml_cpu_single": 12.501182461507304,
+      "pandapower": 146.10548430246203,
+      "power_grid_model": 850.903831384643,
+      "opendss": 368.4465224967482
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "power_grid_model",
-     "throughput": 11963.7943317162,
+     "throughput": 12139.05979102259,
      "all": {
-      "pgml_gpu": 11203.881492754686,
-      "pgml_cpu_pool": 5766.665443054958,
-      "pgml_cpu_single": 2380.1654065800917,
-      "pandapower": 1299.5257896618546,
-      "power_grid_model": 11963.7943317162,
-      "opendss": 3636.0128342922185
+      "pgml_gpu": 11228.916531544237,
+      "pgml_cpu_pool": 7729.517930970655,
+      "pgml_cpu_single": 2187.098349490292,
+      "pandapower": 1411.6547682373043,
+      "power_grid_model": 12139.05979102259,
+      "opendss": 3953.705693438399
      }
     }
    },
@@ -3334,46 +3476,46 @@
     "rows": 2048,
     "curves": {
      "pgml_gpu": {
-      "1": 2.8630143593195503,
-      "16": 40.344054293682795,
-      "256": 593.1823091784327,
-      "4096": 3369.210791892865
+      "1": 2.84614610568364,
+      "16": 39.95217445054001,
+      "256": 588.2975859063106,
+      "4096": 3398.733509801592
      },
      "pgml_cpu_pool": {
-      "1": 3.867378897832221,
-      "16": 47.755401658208385,
-      "256": 645.640242195303,
-      "4096": 2439.5065391034914
+      "1": 3.5487273874195298,
+      "16": 61.37404941757216,
+      "256": 815.4228675109533,
+      "4096": 2954.0200391176545
      },
      "pgml_cpu_single": {
-      "1": 4.990022847949182,
-      "16": 71.56011649365482,
-      "256": 757.3892433872965,
-      "4096": 830.277813005736
+      "1": 6.049725941137624,
+      "16": 90.59009539781806,
+      "256": 578.6979294736797,
+      "4096": 1153.414699690333
      },
      "pandapower": {
-      "1": 110.15716266433195,
-      "16": 497.5805611635668,
-      "256": 534.8107915833557,
-      "4096": 1050.4091206314947
+      "1": 114.8184187950441,
+      "16": 914.6239154280541,
+      "256": 957.1255106444546,
+      "4096": 1025.1491768406188
      },
      "power_grid_model": {
-      "1": 422.42501798024716,
-      "16": 3974.003086873196,
-      "256": 5954.629451638909,
-      "4096": 5729.972304754477
+      "1": 442.2616388291994,
+      "16": 4003.1395487771442,
+      "256": 5980.185024347879,
+      "4096": 5745.207256424789
      },
      "opendss": {
-      "1": 194.55014448119434,
-      "16": 920.057472379238,
-      "256": 950.5570040236008,
-      "4096": 1698.0409180664024
+      "1": 200.50615683468254,
+      "16": 1013.1931033519829,
+      "256": 1435.6831153809762,
+      "4096": 1667.484630404216
      }
     },
     "crossovers": {
      "pgml_gpu": {
       "pandapower": {
-       "crossover_batch": 256,
+       "crossover_batch": 4096,
        "status": "crosses",
        "shared_batches": [
         1,
@@ -3381,8 +3523,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.02599026962997997,
-       "ratio_at_largest": 3.2075224079045808,
+       "ratio_at_smallest": 0.024788236378382247,
+       "ratio_at_largest": 3.315355059130089,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3395,8 +3537,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.006777568177681717,
-       "ratio_at_largest": 0.5879977446133978,
+       "ratio_at_smallest": 0.0064354351718549484,
+       "ratio_at_largest": 0.5915771804404155,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3409,15 +3551,15 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.014716074187219614,
-       "ratio_at_largest": 1.9841752669479022,
+       "ratio_at_smallest": 0.01419480653669049,
+       "ratio_at_largest": 2.038239782142821,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      },
      "pgml_cpu_pool": {
       "pandapower": {
-       "crossover_batch": 256,
+       "crossover_batch": 4096,
        "status": "crosses",
        "shared_batches": [
         1,
@@ -3425,8 +3567,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.03510782961628013,
-       "ratio_at_largest": 2.3224346506405866,
+       "ratio_at_smallest": 0.03090730062877946,
+       "ratio_at_largest": 2.881551393546034,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3439,8 +3581,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.009155184312528247,
-       "ratio_at_largest": 0.4257449092867861,
+       "ratio_at_smallest": 0.008024045216343173,
+       "ratio_at_largest": 0.5141711877868659,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3453,24 +3595,24 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.019878571193793437,
-       "ratio_at_largest": 1.4366594545209268,
+       "ratio_at_smallest": 0.017698844980333736,
+       "ratio_at_largest": 1.77154258891224,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      },
      "pgml_cpu_single": {
       "pandapower": {
-       "crossover_batch": null,
-       "status": "crosses back and forth",
+       "crossover_batch": 4096,
+       "status": "crosses",
        "shared_batches": [
         1,
         16,
         256,
         4096
        ],
-       "ratio_at_smallest": 0.04529912288277295,
-       "ratio_at_largest": 0.7904327910886587,
+       "ratio_at_smallest": 0.05268950752523992,
+       "ratio_at_largest": 1.1251188858630434,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3483,8 +3625,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.01181280140984102,
-       "ratio_at_largest": 0.14490084224609748,
+       "ratio_at_smallest": 0.013679065534946876,
+       "ratio_at_largest": 0.20076119941547532,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3497,45 +3639,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.025649031828046412,
-       "ratio_at_largest": 0.4889621941214421,
+       "ratio_at_smallest": 0.03017227020178551,
+       "ratio_at_largest": 0.6917093439180504,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 3369.210791892865,
-     "pgml_cpu_pool": 2439.5065391034914,
-     "pgml_cpu_single": 830.277813005736,
-     "pandapower": 1050.4091206314947,
-     "power_grid_model": 5954.629451638909,
-     "opendss": 1698.0409180664024
+     "pgml_gpu": 3398.733509801592,
+     "pgml_cpu_pool": 2954.0200391176545,
+     "pgml_cpu_single": 1153.414699690333,
+     "pandapower": 1025.1491768406188,
+     "power_grid_model": 5980.185024347879,
+     "opendss": 1667.484630404216
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 422.42501798024716,
+     "throughput": 442.2616388291994,
      "all": {
-      "pgml_gpu": 2.8630143593195503,
-      "pgml_cpu_pool": 3.867378897832221,
-      "pgml_cpu_single": 4.990022847949182,
-      "pandapower": 110.15716266433195,
-      "power_grid_model": 422.42501798024716,
-      "opendss": 194.55014448119434
+      "pgml_gpu": 2.84614610568364,
+      "pgml_cpu_pool": 3.5487273874195298,
+      "pgml_cpu_single": 6.049725941137624,
+      "pandapower": 114.8184187950441,
+      "power_grid_model": 442.2616388291994,
+      "opendss": 200.50615683468254
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "power_grid_model",
-     "throughput": 5729.972304754477,
+     "throughput": 5745.207256424789,
      "all": {
-      "pgml_gpu": 3369.210791892865,
-      "pgml_cpu_pool": 2439.5065391034914,
-      "pgml_cpu_single": 830.277813005736,
-      "pandapower": 1050.4091206314947,
-      "power_grid_model": 5729.972304754477,
-      "opendss": 1698.0409180664024
+      "pgml_gpu": 3398.733509801592,
+      "pgml_cpu_pool": 2954.0200391176545,
+      "pgml_cpu_single": 1153.414699690333,
+      "pandapower": 1025.1491768406188,
+      "power_grid_model": 5745.207256424789,
+      "opendss": 1667.484630404216
      }
     }
    },
@@ -3544,40 +3686,40 @@
     "rows": 4096,
     "curves": {
      "pgml_gpu": {
-      "1": 1.2162525654999021,
-      "16": 16.991587482452463,
-      "256": 228.42172995259443,
-      "4096": 928.9214258072129
+      "1": 1.2120900871450813,
+      "16": 16.97999578790355,
+      "256": 227.48076978411927,
+      "4096": 936.656076268416
      },
      "pgml_cpu_pool": {
-      "1": 1.464093229094374,
-      "16": 14.993811351825542,
-      "256": 205.2386796052757,
-      "4096": 839.3750190215293
+      "1": 2.2137599870174025,
+      "16": 22.58442249987207,
+      "256": 294.2427397854685,
+      "4096": 1041.4833470905457
      },
      "pgml_cpu_single": {
-      "1": 1.9538616402990803,
-      "16": 29.251549350894866,
-      "256": 286.6422975328634,
-      "4096": 314.3883765459443
+      "1": 2.8655386397147873,
+      "16": 42.9779778264167,
+      "256": 270.90320506204813,
+      "4096": 519.7948250647318
      },
      "pandapower": {
-      "1": 74.19369660064524,
-      "16": 334.6262594590524,
-      "256": 339.11430449654296,
-      "4096": 719.1182448306566
+      "1": 77.4215408682179,
+      "16": 630.1560795428637,
+      "256": 639.4747448821911,
+      "4096": 700.4927925457586
      },
      "power_grid_model": {
-      "1": 212.6719738837818,
-      "16": 1789.9237992745102,
-      "256": 2820.650502970988,
-      "4096": 2503.8404364630615
+      "1": 221.81113637241006,
+      "16": 1965.0573353450923,
+      "256": 2790.5452792324463,
+      "4096": 2701.6627625293686
      },
      "opendss": {
-      "1": 97.1002281612746,
-      "16": 359.1533383509959,
-      "256": 408.2756303120657,
-      "4096": 632.1116877257062
+      "1": 97.37023429576476,
+      "16": 581.0397984726916,
+      "256": 624.2902919452938,
+      "4096": 632.2149934764902
      }
     },
     "crossovers": {
@@ -3591,8 +3733,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.01639293661355761,
-       "ratio_at_largest": 1.2917506021919418,
+       "ratio_at_smallest": 0.015655721567311934,
+       "ratio_at_largest": 1.3371387774946026,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3605,8 +3747,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.005718913231907764,
-       "ratio_at_largest": 0.3709986516231092,
+       "ratio_at_smallest": 0.005464514122095481,
+       "ratio_at_largest": 0.3466961492231153,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3619,8 +3761,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.012525743641712333,
-       "ratio_at_largest": 1.4695526816620135,
+       "ratio_at_smallest": 0.012448260969192333,
+       "ratio_at_largest": 1.481546761676488,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -3635,8 +3777,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.019733391058474922,
-       "ratio_at_largest": 1.1672280950390734,
+       "ratio_at_smallest": 0.028593592457498696,
+       "ratio_at_largest": 1.4867866710027748,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3649,8 +3791,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.006884279119421972,
-       "ratio_at_largest": 0.3352350280784006,
+       "ratio_at_smallest": 0.009980382514702091,
+       "ratio_at_largest": 0.3854971692008966,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3663,8 +3805,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.015078164663657113,
-       "ratio_at_largest": 1.327890363871521,
+       "ratio_at_smallest": 0.022735489988583633,
+       "ratio_at_largest": 1.6473562915101518,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
@@ -3679,8 +3821,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.026334604283379085,
-       "ratio_at_largest": 0.43718592707932036,
+       "ratio_at_smallest": 0.03701216234629491,
+       "ratio_at_largest": 0.7420416463896408,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3693,8 +3835,8 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.009187207908112994,
-       "ratio_at_largest": 0.12556246475116883,
+       "ratio_at_smallest": 0.012918822231286386,
+       "ratio_at_largest": 0.19239811581001545,
        "smallest_batch": 1,
        "largest_batch": 4096
       },
@@ -3707,45 +3849,45 @@
         256,
         4096
        ],
-       "ratio_at_smallest": 0.020122111732362717,
-       "ratio_at_largest": 0.49736206852477566,
+       "ratio_at_smallest": 0.029429308252567565,
+       "ratio_at_largest": 0.8221804772557344,
        "smallest_batch": 1,
        "largest_batch": 4096
       }
      }
     },
     "peak_throughput": {
-     "pgml_gpu": 928.9214258072129,
-     "pgml_cpu_pool": 839.3750190215293,
-     "pgml_cpu_single": 314.3883765459443,
-     "pandapower": 719.1182448306566,
-     "power_grid_model": 2820.650502970988,
-     "opendss": 632.1116877257062
+     "pgml_gpu": 936.656076268416,
+     "pgml_cpu_pool": 1041.4833470905457,
+     "pgml_cpu_single": 519.7948250647318,
+     "pandapower": 700.4927925457586,
+     "power_grid_model": 2790.5452792324463,
+     "opendss": 632.2149934764902
     },
     "fastest_at_smallest_batch": {
      "batch": 1,
      "tool": "power_grid_model",
-     "throughput": 212.6719738837818,
+     "throughput": 221.81113637241006,
      "all": {
-      "pgml_gpu": 1.2162525654999021,
-      "pgml_cpu_pool": 1.464093229094374,
-      "pgml_cpu_single": 1.9538616402990803,
-      "pandapower": 74.19369660064524,
-      "power_grid_model": 212.6719738837818,
-      "opendss": 97.1002281612746
+      "pgml_gpu": 1.2120900871450813,
+      "pgml_cpu_pool": 2.2137599870174025,
+      "pgml_cpu_single": 2.8655386397147873,
+      "pandapower": 77.4215408682179,
+      "power_grid_model": 221.81113637241006,
+      "opendss": 97.37023429576476
      }
     },
     "fastest_at_largest_batch": {
      "batch": 4096,
      "tool": "power_grid_model",
-     "throughput": 2503.8404364630615,
+     "throughput": 2701.6627625293686,
      "all": {
-      "pgml_gpu": 928.9214258072129,
-      "pgml_cpu_pool": 839.3750190215293,
-      "pgml_cpu_single": 314.3883765459443,
-      "pandapower": 719.1182448306566,
-      "power_grid_model": 2503.8404364630615,
-      "opendss": 632.1116877257062
+      "pgml_gpu": 936.656076268416,
+      "pgml_cpu_pool": 1041.4833470905457,
+      "pgml_cpu_single": 519.7948250647318,
+      "pandapower": 700.4927925457586,
+      "power_grid_model": 2701.6627625293686,
+      "opendss": 632.2149934764902
      }
     }
    }

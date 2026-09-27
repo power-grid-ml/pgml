@@ -35,25 +35,33 @@ Each library has its own supported devices, assumptions and applications.
 
 pgml solves many operating points of one grid in a single batched call, so its
 throughput keeps growing with the batch size. Tools that solve one scenario at a
-time level off early. Most of that gain needs no GPU: the pgml CPU curve is the
-same engine on the same eight cores, split over the same eight worker processes
-the other tools get.
+time level off early. The pgml CPU curve, the same engine on the same eight cores
+split over the same eight worker processes the other tools get, peaks at 18.6 per
+cent of the GPU peak on the 33-bus feeder and 34.0 per cent on the Kerber
+network; at its peak it is 2.52 and 1.10 times OpenDSS's peak and 0.81 and 0.47
+times power-grid-model's.
 
-For a few scenarios pgml is the slowest tool here. At one scenario per batch
-power-grid-model solves 5,700 per second on the 33-bus feeder where pgml manages
-140. pgml passes it at about 4,096 scenarios per batch and reaches 1.2 million
-per second on one GPU. On grids of about a thousand buses and more it does not
-pass power-grid-model at any batch size.
+For a few scenarios pgml is the slowest tool on both grids shown (on the
+three-phase CIGRE LV grid in PERFORMANCE.md pandapower is slower still). At one scenario per batch
+power-grid-model solves 5,559 per second on the 33-bus
+feeder where pgml manages 160. pgml passes it at
+16,384 scenarios per batch, is 4.49 times faster at
+65,536, and reaches 1.33 million
+per second on one GPU. On grids of about a thousand buses and more it
+does not pass power-grid-model at any batch size measured.
+<!-- batch.ieee33.pgm_b1: bench_batch_throughput_fair.json grids.ieee33.baselines.power_grid_model at batch 1; batch.ieee33.pgml_b1: same file, grids.ieee33.series.* at batch 1, the fastest series; cross.ieee33.pgm_lo/cross.ieee33.pgm_hi: bench_fairness_tables.json fundamental.grids.ieee33.crossovers.pgml_gpu.power_grid_model, the crossing batch and the first batch at which the ratio reaches 1.5 (one number if they coincide); cross.ieee33.lead, cross.ieee33.lead_batch: ratio_at_largest and its batch; batch.ieee33.gpu_peak: the pgml_gpu peak (fairness_tables.py peak table); cross.kerber_x4.verdict: "does not pass power-grid-model at any batch size measured" if crossovers.pgml_gpu.power_grid_model on kerber_x4 says never ahead, else the batch and ratio -->
 
 All tools solve identical load scenarios in double precision on the same
-allocation. A point is shown only if the solution converged and matches a pgml
+allocation, and every tool's timed call ends with the voltages in host memory. A
+point is shown only if the solution converged and matches a pgml
 double-precision reference within 1e-6 pu in voltage magnitude. The plot covers
 the forward power flow, without gradients.
 [PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
 timed, how throughput changes with grid size, what each tool costs in memory and
 in money, and where pgml loses.
 
-<sub>One NVIDIA L40S 48 GB against eight physical cores of an AMD EPYC 9334, on which every CPU tool gets eight workers or eight threads. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for the per-scenario tools), the leading 32 scenarios of every batch re-solved and compared.</sub>
+<sub>One NVIDIA L40S 48 GB against eight physical cores of an AMD EPYC 9334, on which every CPU tool gets eight workers or eight threads; one node of an institutional cluster, driver 610.57.04, measured 2026-09-26. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions for every tool, power-grid-model and pgml's single call each timed in a fresh process, the leading 256 scenarios of every batch re-solved and compared.</sub>
+<!-- env.*: assets/readme/provenance.json performance_source.{driver,jobs.*.date,versions.{pgml,torch,pandapower,numba,power_grid_model,opendssdirect}}; guard.validated_scenarios_per_batch: performance_source.validated_scenarios_per_batch -->
 
 ## Conformance: the solvers agree
 

@@ -5,16 +5,16 @@
     "bench_batch_throughput_readme_ieee33.json": "19735550398079c81df8cf368c383cdd87cf8e52573b6b50b06658634543d8d9",
     "bench_batch_throughput_readme_kerber.json": "cde883b30b0c7de49266cc84eb29f7b2afbef993cc95fec3e4111da2a8ba0227",
     "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce",
-    "bench_batch_throughput_fair.json": "3c5a1b038eb34dba8b90837bda5e961503f9c102698eb8056b2e31822199df1d",
-    "bench_harmonic_batch_fair.json": "16b6a900b361963de4f9f11fedd6dd3114b049dc7e86120b057d39c4dfbcac26",
-    "bench_size_fair.json": "3bffc57a70e061e533096dbb72a0e762a74d8f34d4d1c83d32df60cfcaf4001c",
-    "bench_footprint.json": "d1022ab77c87b4786452fa8a39da42851d2dfa726eaca864182d5ad4aa99bc87",
-    "bench_footprint_harmonic.json": "aa86ee398ee9faaaae5c44ea4f76c4e48edd9db802474da814c89cd73985b553",
-    "bench_cost_fair.json": "fae7b8b2e386cc3691692ba951f313911c70d3e432702a5e8530078d60420dcc",
-    "bench_fairness_tables.json": "70b89b17975a69e444f5ac38a915d0e058e1d6185ba1102fe7647973b24de6fc"
+    "bench_batch_throughput_fair.json": "d96eb8a2d44d2f16f6e1f9c59ab82cf251a1880c53de5e071342fad5eb52a1ee",
+    "bench_harmonic_batch_fair.json": "1d94b37877ea957cb8d1704a74a7f5fc03dd405d5474dbe30aa40c51aef30d9a",
+    "bench_size_fair.json": "1362e0a05961eafe3fd70866fe8384a970b6832939dc70b6e6553dbabcd47967",
+    "bench_footprint.json": "148bea0655a4113353c328add2189cb2cbef39e3a1c0350fcb2336c51c9a6b0e",
+    "bench_footprint_harmonic.json": "cd95cb3f5fc2176955f43af3e8a68d5c2b4c0588febf66d10e909523080acdda",
+    "bench_cost_fair.json": "5657cfcb9f386001b38e7726cc11fd5f548b8e575d80f7ca66c015fc133ca866",
+    "bench_fairness_tables.json": "fc9024b0e0cbe3d6d3a21c4fbeac6bc3fc930ebe35f7703100df87d820c21f57"
   },
   "performance_source": {
-    "paper_commit": "ef7656523227095e38d4ccae9d4856ed1b099f21",
+    "paper_commit": "18460ced942dc59f169322420de14cd11550dabf",
     "published": [
       "batch_throughput.json",
       "harmonic_throughput.json",
@@ -28,55 +28,62 @@
       "batch_throughput.json": {
         "cpus": "16",
         "memory_mb": "196608",
-        "date": "2026-09-24 17:39:34+0200",
-        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
-        "benchmark_source_digest": "cb0e998827d6"
+        "date": "2026-09-26 08:01:25+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
       },
       "harmonic_throughput.json": {
         "cpus": "16",
         "memory_mb": "196608",
-        "date": "2026-09-24 17:43:10+0200",
-        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
-        "benchmark_source_digest": "cb0e998827d6"
+        "date": "2026-09-27 01:12:45+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "c3bc1b3d1049",
+        "benchmark_source_digest": "c2433bc30f7c"
       },
       "size_scaling.json": {
         "cpus": "16",
         "memory_mb": "196608",
-        "date": "2026-09-24 17:04:52+0200",
-        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
-        "benchmark_source_digest": "f3e94519c122"
+        "date": "2026-09-26 10:49:10+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
       },
       "footprint.json": {
         "cpus": "16",
         "memory_mb": "196608",
-        "date": "2026-09-24 17:20:59+0200",
-        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
-        "benchmark_source_digest": "95ce161bd89c"
+        "date": "2026-09-26 11:55:37+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
       },
       "footprint_harmonic.json": {
         "cpus": "16",
         "memory_mb": "196608",
-        "date": "2026-09-24 17:23:49+0200",
-        "pgml_revision": "966df9debde4b28754805683dddae0462e48134d",
-        "benchmark_source_digest": "ba6b5266560f"
+        "date": "2026-09-27 01:21:03+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "c3bc1b3d1049",
+        "benchmark_source_digest": "c2433bc30f7c"
       },
       "cost.json": {
-        "cpus": null,
-        "memory_mb": null,
-        "date": "2026-09-24 18:19:44+0200",
-        "pgml_revision": "966df9d-dirty",
-        "benchmark_source_digest": "580573102c84"
+        "cpus": "8",
+        "memory_mb": "32768",
+        "date": "2026-09-26 12:03:13+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
       },
       "crossovers.json": {
-        "cpus": null,
-        "memory_mb": null,
-        "date": "2026-09-24 18:19:48+0200",
-        "pgml_revision": "966df9d-dirty",
-        "benchmark_source_digest": "580573102c84"
+        "cpus": "8",
+        "memory_mb": "32768",
+        "date": "2026-09-27 01:21:26+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "c3bc1b3d1049",
+        "benchmark_source_digest": "c2433bc30f7c"
       }
     },
-    "validated_scenarios_per_batch": 32,
-    "validation_scope": "the leading 32 scenarios of every timed batch are re-solved outside the clock and compared with a pgml CPU complex128 reference; a smaller batch is checked in full",
+    "validated_scenarios_per_batch": 256,
+    "validation_scope": "the leading 256 scenarios of every timed batch are re-solved outside the clock and compared with a pgml CPU complex128 reference; a smaller batch is checked in full",
     "cpu_allocation": {
       "logical_cpus": 16,
       "physical_cores": 8,
@@ -101,7 +108,7 @@
       "numpy": "2.4.6",
       "scipy": "1.18.1",
       "pgml": "0.5.1",
-      "pgml_git": "966df9debde4b28754805683dddae0462e48134d",
+      "pgml_git": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
       "pandapower": "3.5.4",
       "power_grid_model": "1.13.172",
       "power_grid_model_io": "present",
