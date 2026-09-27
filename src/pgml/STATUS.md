@@ -79,7 +79,11 @@ decisions. One entry per capability:
   with the motor branch. Because the shunt follows the scenario, so does `Y(h)`: a batch of
   B scenarios costs B factorizations per order, and the system is assembled and factored in
   chunks bounded by `solver.harmonic.system_budget_mb` (1024 scenarios of a 294-row grid at
-  13 orders would otherwise ask for an 18 GB matrix). `load_shunt_basis="nameplate"` trades
+  13 orders would otherwise ask for an 18 GB matrix). Where the orders are factored by the
+  CPU sparse backend, each system is assembled as its structural entries over the
+  topology's pattern and factored from them, so that matrix never exists and a study's
+  host memory no longer grows with `B·N²` (`solver/CONTEXT.md`, "Structural harmonic
+  route"); CUDA and the dense backend still assemble it. `load_shunt_basis="nameplate"` trades
   that for the nameplate load's shunt, which is scenario-independent: measured on CPU,
   complex128, batch 256, 13 orders — 66-73 -> 1513-2008 studies/s on the 294-row Kerber
   feeder (sparse) and 282-322 -> 4038-4076 on three-phase CIGRE LV (dense), i.e. the
@@ -291,6 +295,33 @@ per-device `R + jX` or a frequency curve) with its stamp. **Where.**
 
 ### D. Smaller follow-ups (no decision needed)
 
+- **Harmonic memory that still grows with the batch on the structural route**: with the
+  dense `Y(h)` gone (CPU sparse backend), a harmonic study's host memory beyond one chunk
+  grows by about 300 KB per scenario on a 294-row feeder at 13 orders (some five `[H, N]`
+  complex128 vectors), on both routes, and that — not the chunk, which
+  `solver.harmonic.system_budget_mb` bounds — is what bounds the batch on a small grid.
+  Candidates, not yet measured one by one: the per-chunk solutions are concatenated and
+  then stacked into the `[B, H, N]` result (two full copies), plus the fundamental's batch
+  state. Writing each chunk into a preallocated output where no gradient is recorded would
+  remove one copy. WHERE:
+  `src/pgml/solver/harmonic_flow.py` (`_solve_harmonic_orders`, `solve_harmonic_flow`).
+- **SuperLU's per-factorization footprint and the symbolic analysis**: `splu` sizes its
+  L/U storage from a fill estimate (about 20x the matrix entries) and never shrinks it, so
+  one factorization of a 294-row system holds 275 KB for 1,246 stored entries, and the
+  freed memory of a chunk stays largely resident in the heap (hence the threefold charge in
+  `_pattern_harmonic_chunk`). The column ordering and symbolic analysis are also recomputed
+  for every (scenario, order) system although the pattern is shared. A factorization that
+  reuses one symbolic analysis and compact numeric storage per pattern would cut both.
+  WHERE: `src/pgml/solver/harmonic.py` (`_SciPySparseLU`, `_splu_from_values`).
+- **The right-hand side `I(h)` depends on the chunk size in its last bit**: the CPU complex
+  multiply rounds differently in its vectorized body and its scalar remainder, so a
+  scenario's `I(h)` (and voltages) can differ at ~1e-14 relative between two chunkings of
+  the same batch; this is why the structural and dense routes agree bit for bit only at
+  equal chunking. Harmless numerically; relevant only to a bit-exact regression test.
+- **The fused-branch shunt current is dense**: `_harmonic_shunt_currents` builds a dense
+  `[*batch, Hh, N, N]` device-shunt matrix to recover a fused branch's current; the
+  structural accumulator plus a sparse product would avoid it. WHERE:
+  `src/pgml/solver/harmonic_flow.py`.
 - **The mismatch floor's `|Y|` pass on the one-shot path**: the per-row precision floor of
   the power-mismatch criterion needs `Σ_j |Y_ij| V_base,j`, one read of the whole
   admittance matrix per solve (measured inside a solve, complex128, CPU: 0.07 ms at 33 rows,

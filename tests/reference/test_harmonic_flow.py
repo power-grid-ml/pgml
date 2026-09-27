@@ -285,17 +285,26 @@ class TestSolverOptions:
 
         Without this the option would be inert for the part of the study it is meant to
         control, which is invisible in the result and shows up only as identical timings.
+        On CPU the sparse backend factors the orders from their structural entries
+        (``lu_factor_values``, sparse by construction); any dense-matrix factorization
+        has to name the sparse backend too.
         """
         import pgml.solver.harmonic_flow as hf
 
         seen = []
         original = hf.lu_factor_system
+        original_values = hf.lu_factor_values
 
         def spy(y, **kw):
             seen.append(kw.get("backend"))
             return original(y, **kw)
 
+        def spy_values(values, pattern, n, **kw):
+            seen.append("sparse")
+            return original_values(values, pattern, n, **kw)
+
         hf.lu_factor_system = spy
+        hf.lu_factor_values = spy_values
         try:
             solve_harmonic_flow(
                 _grid(),
@@ -306,6 +315,7 @@ class TestSolverOptions:
             )
         finally:
             hf.lu_factor_system = original
+            hf.lu_factor_values = original_values
         assert seen and all(b == "sparse" for b in seen)
 
     def test_equilibration_option_reaches_the_orders(self):

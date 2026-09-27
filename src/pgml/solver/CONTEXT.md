@@ -22,6 +22,13 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
   evaluated matrix and numerical options govern exact factor reuse. Device admittances
   and RHS are always current. Harmonic matrix gradients bypass numerical caching;
   RHS-only gradients can reuse factors. No cached harmonic autograd graph.
+- On the structural harmonic route (below) the network entry holds the structural
+  entries `[Hh, nnz]` (key: the dense key plus the pattern) and the factors are keyed on
+  `("pattern", factored entries, pattern, equilibrate, defaults)`, all compared BY VALUE,
+  so a changed entry or topology rebuilds and stale factors are rejected exactly as on the
+  dense route; the retained snapshot of a scenario batch is `B·Hh·nnz` numbers instead of
+  `B·Hh·N²`. The two routes key different representations, so alternating them on one
+  preparation rebuilds rather than mixing.
 - Chunked harmonic `run_scenarios` shares a preparation with
   `cache_batched_factors=False`, and on CPU only from
   `solver.harmonic.preparation_min_rows` rows up (an accelerator is never gated);
@@ -548,8 +555,11 @@ verified empirically). New orchestration:
      operating-point basis. For a constant-power device the two bases are IDENTICAL at
      nameplate loading (`Y_eq` reads the RATED voltage on both).
    - The `"operating_point"` basis assembles and factors the batch in SCENARIO CHUNKS that
-     fit `solver.harmonic.system_budget_mb` (default 1 GiB, charged the matrix plus its
-     factorization): `_solve_harmonic_orders` / `_harmonic_chunk`. Without it, 1024
+     fit `solver.harmonic.system_budget_mb` (default 1 GiB; on the dense route charged the
+     matrix plus its factorization, `_harmonic_chunk`; on the structural route 384 KiB plus
+     48 numbers per pattern entry per system, three times the measured isolated SuperLU
+     footprint because the heap keeps a finished chunk's factors resident,
+     `_pattern_harmonic_chunk`): `_solve_harmonic_orders`. Without it, 1024
      scenarios of a 294-row grid at 13 orders ask for an 18 GB matrix. Inside a chunk
      there is no Python loop over orders or scenarios — one `lu_factor_system` call
      factors every `(scenario, order)` system of the chunk, so the batched dense/CUDA path
@@ -770,6 +780,49 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   need its VALUES (the mixed-precision residual, `estimate_condition`). A
   gradient-carrying or mixed-precision factorization builds it eagerly as before, so
   the adjoint is unchanged.
+- STRUCTURAL HARMONIC ROUTE (`solve_harmonic_flow`, internal to `_solve_harmonic_orders`):
+  the factorization backend is decided BEFORE assembly, from the row count, the device and
+  `linear_solver` — `harmonic._select_backend(backend, n_rows, device, block_rows=None) ->
+  str`, the one decision `lu_factor_system` also takes (via `_resolve_backend(backend,
+  y_bus, block_rows)`, which reads `n_rows`/device off the matrix and delegates), so the
+  two cannot diverge. Where it is `"sparse"` and `harmonic_flow._structural_route(resolved,
+  device, precision) -> bool` holds (CPU, `precision="full"`), every order is assembled as
+  its STRUCTURAL entries over `ybus_structure` — `harmonic_flow._assemble_harmonic(...,
+  pattern=…)`, the one assembly behind `assemble_harmonic_system`, run on a
+  `pgml.assembly._scatter.PatternAccumulator` — and factored from them by
+  `harmonic.lu_factor_values(values [*batch, nnz], pattern [nnz], n, *, equilibrate=None)
+  -> FactoredSystem` (the `(values, pattern)` entry point of `lu_factor_system`; internal,
+  not in `pgml.solver.__all__`; Norton, full precision, CPU only). The dense
+  `[*batch, Hh, N, N]` never exists. The same stamps run in the same order into the same
+  `index_add_`, the same diagonal gives the same equilibration, the same compressed-column
+  arrays reach SuperLU, so the solved voltages equal the dense-assembled route's BIT FOR BIT
+  at equal scenario chunking (`tests/reference/test_structural_harmonic_route.py`: IEEE-33,
+  294- and 1,176-row feeders with the per-scenario shunt, a grid with four-wire terminals,
+  delta loads, a Dyn transformer, bus fusion, a DER impedance and batched `branch_states`,
+  every shunt model/basis, a batched voltage `node_source`, a deeper-than-flat injection
+  batch). The right-hand side `I(h)` itself differs in its last bit between CHUNK SIZES
+  (the CPU complex multiply rounds differently in its vectorized body and its scalar
+  remainder, so a result depends on an element's position in the tensor), and the two
+  routes charge the budget differently, so at default settings a batch the dense route
+  splits and the structural route does not agrees to ~1e-14 relative instead of exactly.
+  Gradients: `FactoredSystem.sparse_values` holds the factored (scaled) entries and
+  `_SparseValuesSolveFn` differentiates the solve w.r.t. them with the structural part of
+  `-λ Vᴴ` (`_linear_solve_grad_values`, `O(batch·nnz)` memory); float64 gradcheck in
+  `tests/differentiability/test_gradcheck.py::test_gradcheck_structural_harmonic_route`.
+  `FactoredSystem.materialised_y()` densifies the scaled entries on demand
+  (`estimate_condition`). DENSE-ROUTE CASES (each commented at its site): the dense and
+  block backends and `"auto"` below `_SPARSE_MIN_ROWS` or on CUDA (the backend factors the
+  matrix itself); a forced `"sparse"` on CUDA (the dense route raises the backend's CPU-only
+  error); `precision="mixed"` (the refinement residual reads the dense scaled matrix); the
+  low-rank Woodbury device-shunt update (`LowRankOperator` reads the shared shunt-free
+  `[Hh, N, N]`; the structural route assembles that base structurally for the rank test and
+  densifies it only once the update is selected); and every caller that asks for the
+  matrix (`assemble_harmonic_system`, `assemble_harmonic_ybus`, the fused-branch shunt
+  current), which keep their dense return and residual. A voltage `node_source` and a
+  deeper-than-flat batch are served: `_add_to_diagonal` and `_align_y_batch_rank(...,
+  tail=1)` take the accumulator. What the budget bounds on this route:
+  `_pattern_harmonic_chunk` (above); the `[B, Hh, N]` injection/solution and the
+  fundamental solve are what then grow with the batch, on both routes, uncharged.
 - The same module reads LAPACK's own failure report on every CPU factorization it makes: a
   NEGATIVE LAPACK `info` reports a bad call rather than a singular matrix, leaves
   unusable factors behind and is not surfaced by `lu_factor`, so it raises

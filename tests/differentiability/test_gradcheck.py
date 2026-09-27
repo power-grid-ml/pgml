@@ -213,3 +213,47 @@ def test_gradcheck_sparse_backend_power_flow():
         ).v.reshape(-1)
 
     assert torch.autograd.gradcheck(fn, (r1, l1, rs), eps=1e-6, atol=1e-5, rtol=1e-3)
+
+
+def test_gradcheck_structural_harmonic_route(monkeypatch):
+    """Harmonic voltages through the structural sparse route are differentiable.
+
+    With ``linear_solver="sparse"`` every harmonic order is assembled as its structural
+    entries and factored from them (``lu_factor_values``), and the gradient is the
+    structural linear-solve adjoint instead of a dense ``N x N`` one. Checked w.r.t. a
+    line resistance (the network entries), a per-scenario load power (the device shunt
+    entries, through the fundamental's implicit-function gradient) and a harmonic
+    injection magnitude (the right-hand side).
+    """
+    import pgml.solver.harmonic_flow as hf
+    from pgml.solver import solve_harmonic_flow
+
+    calls = []
+    factor_values = hf.lu_factor_values
+    monkeypatch.setattr(
+        hf,
+        "lu_factor_values",
+        lambda *a, **k: calls.append(a[0].requires_grad) or factor_values(*a, **k),
+    )
+    grid = single_phase_chain()
+    r1 = torch.tensor([[1.0e-3]], dtype=torch.float64, requires_grad=True)
+    p = torch.tensor([1500.0, 2500.0], dtype=torch.float64, requires_grad=True)
+    mag = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+
+    def fn(r1, p, mag):
+        v = solve_harmonic_flow(
+            grid,
+            [1, 3, 5],
+            slack="ideal",
+            tol=1e-12,
+            dtype=torch.complex128,
+            linear_solver="sparse",
+            criticality="never",
+            param_overrides={("line", 20, "series_resistance_ohm_per_m"): r1},
+            operating_point={30: {"p_w": p, "q_var": 0.3 * p}},
+            harmonic_injection={30: {3: (mag, 20.0), 5: (0.5 * mag, -10.0)}},
+        ).v
+        return torch.view_as_real(v[..., 1:, :]).reshape(-1)
+
+    assert torch.autograd.gradcheck(fn, (r1, p, mag), eps=1e-6, atol=1e-6, rtol=1e-4)
+    assert calls and all(calls)

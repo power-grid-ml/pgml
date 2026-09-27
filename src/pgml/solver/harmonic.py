@@ -699,6 +699,9 @@ class _SparseStructure:
         order = torch.argsort(cols * m + rows)
         self.m = m
         self.nnz = int(lin.numel())
+        # Where each compressed-column entry sits in the pattern as handed in: the
+        # gather that turns values held in pattern order into one data array.
+        self.order = order
         self.gather = lin[order]
         # The row and column of every stored entry, in the same order: what a
         # diagonal equilibration has to multiply the values by.
@@ -709,6 +712,8 @@ class _SparseStructure:
         self.indptr = np.concatenate(
             ([np.int32(0)], counts.cumsum(0).to(torch.int32).numpy())
         )
+
+
 def _threaded_back_substitution(fb_numel: int, m: int, k: int) -> bool:
     """Is one batched back-substitution big enough to pay for the thread pool?"""
     return (
@@ -774,6 +779,7 @@ class _SciPySparseLU:
         y = y.detach()
         if structure is not None and structure.m != self.m:
             structure = None
+        self.structure = structure
         if structure is not None and y.is_contiguous():
             values = y.reshape(-1, self.m * self.m).index_select(1, structure.gather)
             self.lus = _splu_from_values(values, structure)
@@ -798,6 +804,7 @@ class _SciPySparseLU:
         self = cls.__new__(cls)
         self.fb = tuple(factor_batch)
         self.m = structure.m
+        self.structure = structure
         self.dtype = dtype
         self.device = torch.device("cpu")
         self.lus = _splu_from_values(values.reshape(-1, structure.nnz), structure)
@@ -924,6 +931,41 @@ class _SparseSolveFn(torch.autograd.Function):
             else None
         )
         return grad_y, grad_rhs, None
+
+
+class _SparseValuesSolveFn(torch.autograd.Function):
+    """``V = A⁻¹ RHS`` for a matrix given by its STRUCTURAL entries, with the adjoint.
+
+    The counterpart of :class:`_SparseSolveFn` for :func:`lu_factor_values`: the
+    differentiable input is the compressed-column data array ``values`` ``[*fb, nnz]``
+    that was factored (in the order of the handle's ``structure``), so the gradient is
+    the structural part of ``-λ Vᴴ`` and never an ``N x N`` matrix. Positions outside
+    the pattern are structural zeros and carry no gradient, exactly as the entries of a
+    dense ``Y`` that no stamp writes receive a gradient nobody reads.
+    """
+
+    @staticmethod
+    def forward(ctx, values: Tensor, rhs: Tensor, handle: _SciPySparseLU) -> Tensor:
+        v = handle.solve(rhs)
+        ctx.handle = handle
+        ctx.save_for_backward(v)
+        ctx.rhs_shape = tuple(rhs.shape)
+        return v
+
+    @staticmethod
+    def backward(ctx, grad_v: Tensor):
+        (v,) = ctx.saved_tensors
+        handle = ctx.handle
+        lam = handle.solve(grad_v, trans="H")  # [*batch, m]
+        grad_rhs = (
+            _sum_to_shape(lam, ctx.rhs_shape) if ctx.needs_input_grad[1] else None
+        )
+        grad_values = (
+            _linear_solve_grad_values(lam, v, handle.fb, handle.structure)
+            if ctx.needs_input_grad[0]
+            else None
+        )
+        return grad_values, grad_rhs, None
 
 
 # ---------------------------------------------------------------------------
@@ -1285,6 +1327,32 @@ def _linear_solve_grad_matrix(
     return _sum_to_shape(gy.reshape(*fb, m, m), y_shape)
 
 
+def _linear_solve_grad_values(
+    lam: Tensor, v: Tensor, fb: tuple, structure: "_SparseStructure"
+) -> Tensor:
+    """The structural entries of ``grad_A = -(λ vᴴ)``, ``[*fb, nnz]``.
+
+    Entry ``k`` is ``-Σ λ[row_k] conj(v[col_k])`` over the right-hand sides sharing a
+    factorization, in the compressed-column order of ``structure``. The scenario batch
+    is folded exactly as in :func:`_linear_solve_grad_matrix`; the memory is
+    ``O(batch·nnz)`` instead of the ``O(prod(fb)·m²)`` of the dense gradient.
+    """
+    m = v.shape[-1]
+    fb_numel = 1
+    for sz in fb:
+        fb_numel *= sz
+    batch = torch.broadcast_shapes(fb, v.shape[:-1], lam.shape[:-1])
+    nb = len(batch)
+    factor_axes, shared_axes, _, _ = _factor_batch_layout(fb, batch)
+    perm = [*factor_axes, *shared_axes, nb]  # [*factor, *shared, m]
+    lam_g = lam.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
+    v_g = v.broadcast_to(*batch, m).permute(*perm).reshape(fb_numel, -1, m)
+    rows = structure.row_of.to(lam.device)
+    cols = structure.col_of.to(lam.device)
+    gv = -(lam_g.index_select(-1, rows) * v_g.index_select(-1, cols).conj()).sum(1)
+    return gv.reshape(*fb, structure.nnz)
+
+
 class _MixedPrecisionSolveFn(torch.autograd.Function):
     """``V = A⁻¹ RHS`` through single-precision factors, with the exact linear adjoint.
 
@@ -1436,6 +1504,9 @@ class FactoredSystem:
     # Rebuilds the factored matrix when the sparse backend never formed it (see
     # _sparse_system). None means ``y_mat`` already holds it.
     y_rebuild: Optional[Callable[[], Tensor]] = None
+    # lu_factor_values: the factored structural entries [*fb, nnz] (scaled, in the
+    # compressed-column order of ``sparse.structure``), the autograd input of the solve.
+    sparse_values: Optional[Tensor] = None
 
     def materialised_y(self) -> Optional[Tensor]:
         """The factored matrix as a dense tensor, built now if it was never formed.
@@ -1465,7 +1536,24 @@ class FactoredSystem:
 def _resolve_backend(
     backend: str, y_bus: Tensor, block_rows: Optional[Sequence[Tensor]] = None
 ) -> str:
-    """Resolve ``"auto"`` by size and device (see ``_SPARSE_MIN_ROWS``).
+    """Resolve ``"auto"`` for an assembled system (see :func:`_select_backend`)."""
+    return _select_backend(backend, int(y_bus.shape[-1]), y_bus.device, block_rows)
+
+
+def _select_backend(
+    backend: str,
+    n_rows: int,
+    device,
+    block_rows: Optional[Sequence[Tensor]] = None,
+) -> str:
+    """The factorization backend for an ``n_rows`` system on ``device``.
+
+    Resolves ``"auto"`` by size and device (see ``_SPARSE_MIN_ROWS``) and validates an
+    explicit choice. It reads nothing but the row count and the device, so a caller can
+    take the decision BEFORE assembling the system — which is what lets the harmonic
+    orders assemble only the structural entries when the answer is ``"sparse"`` — and
+    :func:`lu_factor_system` takes the same decision from the assembled matrix, so the
+    two can never disagree.
 
     ``"block"`` is never auto-selected: it needs the caller's row partition and is
     only correct for a system that IS block diagonal, so it stays an explicit opt-in.
@@ -1483,7 +1571,7 @@ def _resolve_backend(
         )
     if backend != "auto":
         return backend
-    if y_bus.device.type == "cpu" and y_bus.shape[-1] >= _SPARSE_MIN_ROWS:
+    if torch.device(device).type == "cpu" and n_rows >= _SPARSE_MIN_ROWS:
         return "sparse"
     return "dense"
 
@@ -1827,6 +1915,93 @@ def lu_factor_system(
     )
 
 
+def lu_factor_values(
+    values: Tensor,
+    pattern: Tensor,
+    n: int,
+    *,
+    equilibrate: Optional[str] = None,
+) -> FactoredSystem:
+    """Factor Norton systems given as their structural entries over a sparsity pattern.
+
+    The entry point of :func:`lu_factor_system` for a matrix that was never formed:
+    ``values`` ``[*batch, nnz]`` holds, for every system, the entries at the linear
+    indices ``pattern`` ``[nnz]`` (strictly increasing ``row * n + col``, the layout of
+    :class:`pgml.assembly._scatter.PatternAccumulator` over
+    :func:`pgml.assembly.ybus_structure`), and every other entry is zero. The sparse
+    backend (scipy SuperLU, CPU) factors each system from exactly those entries, so the
+    cost and the memory are ``O(nnz)`` per system from the assembly to the factors.
+
+    The result is the factorization :func:`lu_factor_system` returns for the dense
+    matrix with the same entries, ``backend="sparse"`` and ``pattern=pattern``: the
+    same equilibration (``None`` -> ``solver.equilibration.mode``) from the same
+    diagonal, the same scaled entries, the same compressed-column arrays, so
+    :func:`solve_factored` answers bit for bit alike. Norton mode and full precision
+    only (the harmonic orders need nothing else); a CUDA tensor raises, as the sparse
+    backend does. Differentiable w.r.t. ``values`` through the structural linear-solve
+    adjoint (:class:`_SparseValuesSolveFn`); ``FactoredSystem.materialised_y()``
+    rebuilds the scaled dense matrix on demand for the consumers that read its values.
+    """
+    if values.device.type != "cpu":
+        raise InputError(
+            "The sparse solver backend runs on CPU only (scipy SuperLU); "
+            'move the system to CPU or use backend="dense" on CUDA.'
+        )
+    eq_mode = resolve_equilibration(equilibrate)
+    n = int(n)
+    fb = tuple(values.shape[:-1])
+    pattern = pattern.reshape(-1).to(device="cpu", dtype=torch.int64)
+    structure = _SparseStructure(pattern, n)
+    if values.shape[-1] != structure.nnz:
+        raise InputError(
+            f"lu_factor_values: {values.shape[-1]} values per system for a pattern of "
+            f"{structure.nnz} entries."
+        )
+    diag_lin = torch.arange(n, dtype=torch.int64) * (n + 1)
+    diag_pos = torch.searchsorted(pattern, diag_lin).clamp(max=structure.nnz - 1)
+    if not bool((pattern[diag_pos] == diag_lin).all()):
+        raise InputError(
+            "lu_factor_values: the sparsity pattern must list every diagonal entry "
+            "(pgml.assembly.ybus_structure always does)."
+        )
+    d_row, d_col = scales_from_diagonal(
+        values.detach().index_select(-1, diag_pos), mode=eq_mode
+    )
+    factored = values.index_select(-1, structure.order)  # compressed-column order
+    if d_row is not None:
+        scale = d_row.index_select(-1, structure.row_of) * d_col.index_select(
+            -1, structure.col_of
+        )
+        factored = factored * scale.to(factored.dtype)
+    sparse = _SciPySparseLU.from_values(
+        factored.detach(), structure, factor_batch=fb, dtype=values.dtype
+    )
+
+    def rebuild() -> Tensor:
+        dense = torch.zeros((*fb, n * n), dtype=values.dtype)
+        return dense.index_add(-1, structure.gather, factored).reshape(*fb, n, n)
+
+    # A zero-storage stand-in: the shape, dtype and device of the factored matrix,
+    # which is all a forward solve reads, without its N^2 numbers.
+    placeholder = torch.zeros((), dtype=values.dtype).expand(*fb, n, n)
+    return FactoredSystem(
+        "norton",
+        None,
+        None,
+        n,
+        backend="sparse",
+        sparse=sparse,
+        y_mat=placeholder,
+        y_rebuild=rebuild,
+        scale_row=d_row,
+        scale_col=d_col,
+        sparse_values=factored,
+        precision="full",
+        work_dtype=values.dtype,
+        equilibration=eq_mode,
+    )
+
+
 def _factor_batch_layout(
     factor_batch: tuple[int, ...], batch: tuple[int, ...]
 ) -> tuple[list[int], list[int], tuple[int, ...], tuple[int, ...]]:
@@ -1914,6 +2089,8 @@ def back_substitute(fac: FactoredSystem, rhs: Tensor) -> Tensor:
         rhs = rhs * fac.scale_row
     if fac.precision == "mixed":
         out = _MixedPrecisionSolveFn.apply(fac.y_mat, rhs, fac)
+    elif fac.sparse_values is not None:
+        out = _SparseValuesSolveFn.apply(fac.sparse_values, rhs, fac.sparse)
     elif fac.backend == "sparse":
         out = _SparseSolveFn.apply(fac.y_mat, rhs, fac.sparse)
     elif fac.backend == "block":

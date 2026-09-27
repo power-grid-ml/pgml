@@ -84,10 +84,15 @@ from pgml.assembly._params import (
     phase_voltage_magnitude,
     resolve_operating_power,
 )
-from pgml.assembly._scatter import scatter_blocks_into
+from pgml.assembly._scatter import PatternAccumulator, scatter_blocks_into
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
-from pgml.assembly.ybus import _override, _stamp_sources
+from pgml.assembly.ybus import (
+    _as_freq_tensor,
+    _override,
+    _stamp_network,
+    _stamp_sources,
+)
 from pgml.errors import InputError
 from pgml.assembly._control import resolve_injection_power
 from pgml.schemas.grid_schema import (
@@ -104,7 +109,12 @@ from pgml.schemas.grid_schema import (
 
 from .equilibration import resolve_equilibration
 from ._harmonic_cache import HarmonicFlowSystem, _requires_grad
-from .harmonic import _resolve_backend, lu_factor_system, solve_factored
+from .harmonic import (
+    _select_backend,
+    lu_factor_system,
+    lu_factor_values,
+    solve_factored,
+)
 from .lowrank import LowRankOperator, low_rank_update, solve_factored_updated
 from .power_flow import (
     PowerFlowResult,
@@ -369,8 +379,10 @@ def solve_harmonic_flow(
         its Load's specified kW/kvar; it makes ``Y(h)`` scenario-dependent. A sparse flat
         scenario batch uses an exact low-rank update when its shunt rows pass the
         documented selection rule. The direct path otherwise needs ``B`` factorisations
-        per order and a ``[B, Hh, N, N]`` matrix, chunked against
-        ``solver.harmonic.system_budget_mb``. ``"nameplate"`` uses the device's stored
+        per order, chunked against ``solver.harmonic.system_budget_mb``: on the dense
+        route a ``[B, Hh, N, N]`` matrix; where the orders are factored by the CPU sparse
+        backend only its ``nnz`` structural entries per system (see ``linear_solver``).
+        ``"nameplate"`` uses the device's stored
         P, Q at its rated terminal voltage, so ``Y(h)`` is the same for every scenario:
         one factorisation per order for the whole batch, at the price of a shunt that
         does not follow the loading. ``None`` (default) resolves the documented modeling
@@ -389,7 +401,15 @@ def solve_harmonic_flow(
         otherwise; ``"dense"`` / ``"sparse"`` force the choice, and ``"block"`` with
         ``block_rows`` factors a block-diagonal ensemble member by member.
         ``"matrix_free"`` is a Newton-only option of the fundamental solve and leaves the
-        harmonic orders on the automatic choice.
+        harmonic orders on the automatic choice. Where the orders resolve to the sparse
+        backend (CPU, ``precision="full"``), each ``Y(h)`` is assembled directly as its
+        structural entries over the topology's sparsity pattern
+        (:func:`pgml.assembly.ybus_structure`) and factored from them, so the dense
+        ``[*batch, Hh, N, N]`` matrix is never formed and the host memory of a
+        per-scenario device shunt grows with ``B·nnz`` instead of ``B·N²``; the solved
+        voltages are those of the dense assembly bit for bit (at equal scenario
+        chunking). The dense and block backends, CUDA, ``precision="mixed"`` and the
+        low-rank device-shunt update assemble the dense matrix.
     criticality:
         When the fundamental solve runs its Jacobian criticality analysis, as in
         :func:`solve_power_flow` (``"auto"`` / ``"always"`` / ``"never"``).
@@ -719,19 +739,55 @@ def _harmonic_system_budget_bytes() -> int:
 
 
 def _harmonic_chunk(b: int, n_orders: int, n: int, cdt: torch.dtype) -> int:
-    """How many scenarios' ``Y(h)`` fit the documented memory budget (at least one).
+    """How many scenarios' dense ``Y(h)`` fit the documented memory budget (at least one).
 
     A device shunt on the ``"operating_point"`` basis makes ``Y(h)`` scenario-dependent,
     so the assembled system is ``[B, Hh, N, N]``: 18 GB for 1024 scenarios of a 294-row
     grid at 13 orders in complex128, which no host or accelerator absorbs. The budget
     ``solver.harmonic.system_budget_mb`` decides how many scenarios are assembled and
     solved at a time; one scenario is always attempted, because below that there is
-    nothing left to split.
+    nothing left to split. This is the dense route's rule; the structural route charges
+    :func:`_pattern_harmonic_chunk` instead.
     """
     # A chunk costs its matrix AND its factorization, which for a dense LU is a second
     # copy of the same size (the sparse backend's SuperLU factors are smaller, so the
     # dense cost bounds both).
     per = 2 * _harmonic_system_bytes(1, n_orders, n, cdt)
+    return max(1, min(b, int(_harmonic_system_budget_bytes() // max(per, 1))))
+
+
+#: Resident bytes one system of the structural route is charged against the budget: a
+#: fixed part per SuperLU factorization plus a part per entry of the sparsity pattern, the
+#: latter in units of the working dtype's element size. One factorization measured in
+#: isolation holds 128 KiB + 16 words per entry or less (the accumulator and its scatter
+#: copy, the scaled compressed-column array, and the L and U arrays SuperLU sizes from a
+#: fill estimate and does not shrink; complex128, radial feeders of 33 / 294 / 1,176 /
+#: 4,096 rows: 121 KB / 275 KB / 733 KB / 1.61 MB). A chunk's factorizations are then
+#: freed into the process heap, which keeps much of that memory resident while the next
+#: chunk allocates its own, so a chunk's resident high-water measured 2 to 3.4 times the
+#: isolated sum once it held more than a few hundred factorizations. The charge is
+#: therefore three times the isolated footprint.
+_PATTERN_BYTES_PER_SYSTEM = 3 * 128 * 1024
+_PATTERN_WORDS_PER_ENTRY = 3 * 16
+
+
+def _pattern_harmonic_chunk(b: int, n_orders: int, nnz: int, cdt: torch.dtype) -> int:
+    """How many scenarios' STRUCTURAL systems fit the documented budget (at least one).
+
+    The structural route never forms ``[B, Hh, N, N]``: a scenario costs its ``Hh``
+    systems' pattern entries and their sparse factors,
+    ``Hh * (_PATTERN_BYTES_PER_SYSTEM + _PATTERN_WORDS_PER_ENTRY * nnz * itemsize)``
+    bytes, which the same budget ``solver.harmonic.system_budget_mb`` bounds. That is
+    ``O(nnz) = O(N)`` per system where the dense route charges ``O(N^2)``, so a chunk
+    holds several times more scenarios for the same budget, and a single scenario of a
+    large grid no longer exceeds it. What grows with the batch outside the chunk — the
+    ``[B, Hh, N]`` injection and solution and the fundamental solve — is charged on
+    neither route.
+    """
+    itemsize = int(torch.empty((), dtype=cdt).element_size())
+    per = n_orders * (
+        _PATTERN_BYTES_PER_SYSTEM + _PATTERN_WORDS_PER_ENTRY * nnz * itemsize
+    )
     return max(1, min(b, int(_harmonic_system_budget_bytes() // max(per, 1))))
 
 
@@ -758,6 +814,25 @@ def _slice_batch(obj, sl: slice, b: int):
     if isinstance(obj, (list, tuple)):
         return type(obj)(_slice_batch(e, sl, b) for e in obj)
     return obj
+
+
+def _structural_route(resolved: str, device: torch.device, precision: str) -> bool:
+    """Whether the harmonic orders assemble STRUCTURAL entries instead of a dense ``Y(h)``.
+
+    ``resolved`` is the factorization backend :func:`pgml.solver.harmonic._select_backend`
+    chose for the system before anything was assembled. Every ``False`` below is a case
+    the dense route serves and the structural one cannot.
+    """
+    return (
+        # The dense and block backends factor the assembled matrix itself; "auto" is
+        # dense on CUDA and below the sparse backend's row threshold.
+        resolved == "sparse"
+        # A forced "sparse" on CUDA keeps the dense route, whose factorization raises
+        # the sparse backend's CPU-only error.
+        and device.type == "cpu"
+        # Mixed precision refines against residuals of the dense scaled matrix.
+        and precision == "full"
+    )
 
 
 def _solve_harmonic_orders(
@@ -789,32 +864,45 @@ def _solve_harmonic_orders(
     scenario-independent — the usual case, where a batch varies the injections and not
     the network. A device shunt on the ``"operating_point"`` basis makes ``Y(h)``
     per-scenario, and then the system is assembled and factored in SCENARIO CHUNKS that
-    fit ``solver.harmonic.system_budget_mb`` (:func:`_harmonic_chunk`): the batched
-    factorization stays one call per chunk on the dense and CUDA paths and one SuperLU
-    factorization per (scenario, order) on the sparse path, with no Python loop over
-    orders or scenarios inside a chunk. Gradients flow through the concatenation.
+    fit ``solver.harmonic.system_budget_mb``: the batched factorization stays one call
+    per chunk on the dense and CUDA paths and one SuperLU factorization per (scenario,
+    order) on the sparse path, with no Python loop over orders or scenarios inside a
+    chunk. Gradients flow through the concatenation.
+
+    The factorization backend is decided FIRST, from the row count, the device and
+    ``linear_solver`` (:func:`pgml.solver.harmonic._select_backend`, the decision
+    :func:`lu_factor_system` takes from an assembled matrix). Where it is the sparse
+    backend, each system is assembled as its STRUCTURAL entries over the topology's
+    sparsity pattern (:func:`pgml.assembly.ybus_structure`) and factored from them
+    (:func:`lu_factor_values`), so no ``[*batch, Hh, N, N]`` tensor exists at any point;
+    the entries, and therefore the voltages at equal scenario chunking, are bit for bit
+    those of the dense route.
+    Chunks are then charged by :func:`_pattern_harmonic_chunk` instead of
+    :func:`_harmonic_chunk`. Everything else assembles the dense ``Y(h)``: the dense and
+    block backends, CUDA, mixed precision, and the low-rank device-shunt update.
 
     A deeper-than-flat scenario batch, a batched ``node_source`` or batched
     ``branch_states`` keep the whole-batch path: their scenario axis is not the flat
     leading axis the chunking narrows.
     """
+    device = torch.device(device)
+    cdt = _cdtype(dtype)
+    resolved = _select_backend(backend, n_rows, device, block_rows)
+    structural = _structural_route(resolved, device, precision)
 
     # The sparsity pattern of Y(h) follows the topology, so ONE pattern serves every
-    # order, every scenario and every chunk of the study; the sparse backend then
-    # builds each system's compressed-column form by gathering its structural entries
-    # instead of scanning the dense matrix. Built on first use, and only where the
-    # sparse backend can be selected at all.
+    # order, every scenario and every chunk of the study. The dense route hands it to
+    # the sparse backend as well, which then gathers each system's structural entries
+    # instead of scanning the matrix. Built on first use.
     cached_pattern: list[Tensor] = []
 
-    def structure_of(yh: Tensor) -> Optional[Tensor]:
-        if _resolve_backend(backend, yh, block_rows) != "sparse":
-            return None
+    def structure() -> Tensor:
         if not cached_pattern:
             cached_pattern.append(
                 ybus_structure(
                     grid,
                     node_phase_index(grid) if fusion is None else fusion.index,
-                    device=yh.device,
+                    device=device,
                 )
             )
         return cached_pattern[0]
@@ -827,7 +915,7 @@ def _solve_harmonic_orders(
                 block_rows=block_rows,
                 precision=precision,
                 equilibrate=equilibrate,
-                pattern=structure_of(yh),
+                pattern=structure() if resolved == "sparse" else None,
             )
 
         if system is None:
@@ -838,6 +926,25 @@ def _solve_harmonic_orders(
             build,
             cacheable=not yh.requires_grad
             and (system.cache_batched_factors or yh.ndim <= 3),
+        )
+
+    def factor_values(values: Tensor):
+        def build():
+            return lu_factor_values(
+                values, structure(), n_rows, equilibrate=equilibrate
+            )
+
+        if system is None:
+            return build()
+        # Keyed on the entries themselves plus the pattern they sit on, compared by
+        # value: a changed entry or a changed topology rebuilds, exactly as a changed
+        # dense matrix does on the dense route.
+        return system._get(
+            "harmonic_factors",
+            ("pattern", values, structure(), equilibrate, defaults.defaults()),
+            build,
+            cacheable=not values.requires_grad
+            and (system.cache_batched_factors or values.ndim <= 2),
         )
 
     def solve_chunk(yh: Tensor, ih: Tensor) -> Tensor:
@@ -853,8 +960,9 @@ def _solve_harmonic_orders(
         *,
         shunt_model=load_shunt,
         shunt_basis=load_shunt_basis,
+        pattern=None,
     ):
-        return assemble_harmonic_system(
+        return _assemble_harmonic(
             grid,
             harm,
             v1_in,
@@ -870,7 +978,15 @@ def _solve_harmonic_orders(
             param_overrides=param_overrides,
             fusion=NO_FUSION if fusion is None else fusion,
             system=system,
+            pattern=pattern,
         )
+
+    def solve_direct(v1_in, op_in, inj_in) -> Tensor:
+        if structural:
+            acc, ih, _ = assemble(v1_in, op_in, inj_in, pattern=structure())
+            return solve_factored(factor_values(acc.values), ih)
+        yh, ih, _ = assemble(v1_in, op_in, inj_in)
+        return solve_chunk(yh, ih)
 
     b_scen = int(v1.shape[0]) if v1.ndim == 2 else 1
     scenario_matrix = (
@@ -899,8 +1015,10 @@ def _solve_harmonic_orders(
             harmonic_injection,
             shunt_model="none",
             shunt_basis="nameplate",
+            pattern=structure() if structural else None,
         )
-        if y_base.ndim == 3:
+        base_ndim = y_base.values.ndim + 1 if structural else y_base.ndim
+        if base_ndim == 3:
             terms = _harmonic_shunt_lowrank_terms(
                 grid,
                 # The device shunt reads each terminal voltage through the row index it
@@ -918,9 +1036,18 @@ def _solve_harmonic_orders(
                 max_rank=(n_rows - 1) // 3,
             )
             if terms is None:
+                # No device carries a modeled shunt: the shunt-free network IS Y(h).
+                if structural:
+                    return solve_factored(factor_values(y_base.values), ih)
                 return solve_chunk(y_base, ih)
             u, c, _rank = terms
             if u is not None:
+                # The low-rank path keeps the dense route on every backend:
+                # LowRankOperator and its backward-error check read the shunt-free
+                # network as a matrix. It is one [Hh, N, N] shared by the whole batch,
+                # formed only now that the update is selected.
+                if structural:
+                    y_base = y_base.to_dense()
                 fac = update = voltage = operator = None
                 try:
                     fac = factor(y_base)
@@ -951,38 +1078,50 @@ def _solve_harmonic_orders(
             del u, c, _rank, terms
         del y_base, ih
 
-    chunk = (
-        _harmonic_chunk(b_scen, len(harm), n_rows, _cdtype(dtype))
-        if scenario_matrix
-        else b_scen
-    )
-    if not scenario_matrix or chunk >= b_scen:
-        yh, ih, _ = assemble(v1, operating_point, harmonic_injection)
-        return solve_chunk(yh, ih)
+    if not scenario_matrix:
+        chunk = b_scen
+    elif structural:
+        chunk = _pattern_harmonic_chunk(
+            b_scen, len(harm), int(structure().numel()), cdt
+        )
+    else:
+        chunk = _harmonic_chunk(b_scen, len(harm), n_rows, cdt)
+    if chunk >= b_scen:
+        return solve_direct(v1, operating_point, harmonic_injection)
 
+    if structural:
+        held = (
+            f"{b_scen}x{len(harm)} systems of {int(structure().numel())} structural "
+            "entries"
+        )
+        per_scenario = len(harm) * int(structure().numel())
+    else:
+        held = f"[{b_scen}, {len(harm)}, {n_rows}, {n_rows}]"
+        per_scenario = len(harm) * n_rows * n_rows
     _log.info(
-        "solve_harmonic_flow: the device shunt is built per scenario, so Y(h) is "
-        "[%d, %d, %d, %d] (%.1f MiB); assembling and factoring %d scenario(s) at a time "
-        "to stay inside the %.0f MiB budget (solver.harmonic.system_budget_mb). "
+        "solve_harmonic_flow: the device shunt is built per scenario, so Y(h) is %s "
+        "(%.1f MiB); assembling and factoring %d scenario(s) at a time to stay inside "
+        "the %.0f MiB budget (solver.harmonic.system_budget_mb). "
         "load_shunt_basis='nameplate' keeps one factorization per order for the whole "
         "batch instead.",
-        b_scen,
-        len(harm),
-        n_rows,
-        n_rows,
-        _harmonic_system_bytes(b_scen, len(harm), n_rows, _cdtype(dtype)) / 1024**2,
+        held,
+        b_scen
+        * per_scenario
+        * int(torch.empty((), dtype=cdt).element_size())
+        / 1024**2,
         chunk,
         _harmonic_system_budget_bytes() / 1024**2,
     )
     parts = []
     for start in range(0, b_scen, chunk):
         sl = slice(start, min(start + chunk, b_scen))
-        yh_c, ih_c = assemble(
-            v1[sl],
-            _slice_batch(operating_point, sl, b_scen),
-            _slice_batch(harmonic_injection, sl, b_scen),
-        )[:2]
-        parts.append(solve_chunk(yh_c, ih_c))
+        parts.append(
+            solve_direct(
+                v1[sl],
+                _slice_batch(operating_point, sl, b_scen),
+                _slice_batch(harmonic_injection, sl, b_scen),
+            )
+        )
     return torch.cat(parts, dim=0)
 
 
@@ -1041,10 +1180,13 @@ def assemble_harmonic_system(
 
     Returns EXACTLY the ``(Y, I)`` that :func:`solve_harmonic_flow` builds for the
     requested harmonic orders, so ``solve_harmonic(Y, I)`` reproduces the harmonic
-    slices of :func:`solve_harmonic_flow`. The harmonic network is LINEAR, so
-    ``V(h) = solve_harmonic(Y, I)`` and ``r(V) = Y(h)·V − I(h)`` is the
-    physics-consistency residual (``≈ 0`` at the true ``V``). This is the hook a
-    downstream package uses to form that residual without re-deriving the assembly.
+    slices of :func:`solve_harmonic_flow`. ``Y`` is always the dense matrix: where
+    :func:`solve_harmonic_flow` factors the orders with the sparse backend it assembles
+    only the structural entries of this same matrix, bit for bit, and never forms it.
+    The harmonic network is LINEAR, so ``V(h) = solve_harmonic(Y, I)`` and
+    ``r(V) = Y(h)·V − I(h)`` is the physics-consistency residual (``≈ 0`` at the true
+    ``V``). This is the hook a downstream package uses to form that residual without
+    re-deriving the assembly.
 
     ``Y(h)`` is the passive network admittance at ``h·f0``
     (:func:`pgml.assembly.assemble_network_ybus`) plus the source Norton shunt plus each
@@ -1094,13 +1236,14 @@ def assemble_harmonic_system(
         ``"operating_point"`` uses the power the device draws in THIS scenario at the
         solved fundamental terminal voltage, which is what OpenDSS's ``YPrim`` does with
         its Load's specified kW/kvar; it makes ``Y(h)`` scenario-dependent, so a batch of
-        ``B`` scenarios needs ``B`` factorisations per order (and a ``[B, Hh, N, N]``
-        matrix, chunked against the documented memory budget
-        ``solver.harmonic.system_budget_mb``). ``"nameplate"`` uses the device's stored
-        P, Q at its rated terminal voltage, so ``Y(h)`` is the same for every scenario:
-        one factorisation per order for the whole batch, at the price of a shunt that
-        does not follow the loading. ``None`` (default) resolves the documented modeling
-        default ``appliance.harmonic_shunt.basis``; an unknown name raises.
+        ``B`` scenarios needs ``B`` factorisations per order and this function returns a
+        ``[B, Hh, N, N]`` matrix (:func:`solve_harmonic_flow` chunks it against the
+        documented memory budget ``solver.harmonic.system_budget_mb``).
+        ``"nameplate"`` uses the device's stored P, Q at its rated terminal voltage, so
+        ``Y(h)`` is the same for every scenario: one factorisation per order for the
+        whole batch, at the price of a shunt that does not follow the loading. ``None``
+        (default) resolves the documented modeling default
+        ``appliance.harmonic_shunt.basis``; an unknown name raises.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
         ``"asymmetric"`` (``None`` -> config), governing per-phase vs balanced load
@@ -1144,6 +1287,54 @@ def assemble_harmonic_system(
         network/source/explicit-DER matrix is cached here. The returned matrix
         owns its storage, so modifying it cannot corrupt that preparation.
     """
+    return _assemble_harmonic(
+        grid,
+        harmonic_orders,
+        v1,
+        operating_point=operating_point,
+        harmonic_injection=harmonic_injection,
+        node_sources=node_sources,
+        load_shunt=load_shunt,
+        load_shunt_basis=load_shunt_basis,
+        symmetry=symmetry,
+        dtype=dtype,
+        device=device,
+        branch_states=branch_states,
+        param_overrides=param_overrides,
+        fusion=fusion,
+        system=system,
+    )
+
+
+def _assemble_harmonic(
+    grid: Grid,
+    harmonic_orders,
+    v1: Tensor,
+    *,
+    operating_point: Optional[dict],
+    harmonic_injection: Optional[dict],
+    node_sources: Optional[Sequence[NodeHarmonicSource]],
+    load_shunt: Optional[str],
+    load_shunt_basis: Optional[str],
+    symmetry: Optional[str],
+    dtype: torch.dtype,
+    device: Optional[torch.device],
+    branch_states: Optional[dict],
+    param_overrides: Optional[dict],
+    fusion: Optional[object],
+    system: Optional[HarmonicFlowSystem],
+    pattern: Optional[Tensor] = None,
+):
+    """The assembly behind :func:`assemble_harmonic_system`, on either accumulator.
+
+    ``pattern=None`` builds the dense ``Y(h)`` the public function returns. A sorted
+    sparsity pattern of the (reduced) row layout (:func:`pgml.assembly.ybus_structure`)
+    builds a :class:`~pgml.assembly._scatter.PatternAccumulator` instead, holding only
+    the structural entries ``[*batch, Hh, nnz]``: the SAME stamps run in the SAME order
+    through the same scatter, so its entries equal the dense matrix's at every pattern
+    position bit for bit, and ``Y(h)`` is never formed. Returns ``(Y, I, index)`` with
+    the scenario dims of ``Y`` aligned to the injection's batch rank.
+    """
     orders = _integer_orders(harmonic_orders)
     if any(h == 1 for h in orders):
         raise InputError(
@@ -1167,17 +1358,33 @@ def assemble_harmonic_system(
     fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
 
     def build_network():
-        network = assemble_network_ybus(
-            grid,
-            freqs,
-            dtype=dtype,
-            device=device,
-            branch_states=branch_states,
-            param_overrides=param_overrides,
-            fusion=NO_FUSION if fused is None else fused,
-        ).Y
-        if network.ndim == 2:
-            network = network.unsqueeze(0)
+        if pattern is None:
+            network = assemble_network_ybus(
+                grid,
+                freqs,
+                dtype=dtype,
+                device=device,
+                branch_states=branch_states,
+                param_overrides=param_overrides,
+                fusion=NO_FUSION if fused is None else fused,
+            ).Y
+            if network.ndim == 2:
+                network = network.unsqueeze(0)
+        else:
+            # The passive network exactly as assemble_network_ybus stamps it, into the
+            # structural entries alone.
+            network = _stamp_network(
+                grid,
+                _as_freq_tensor(freqs, dtype, device),
+                PatternAccumulator.zeros(pattern, index.size, len(orders), cdt, device),
+                index,
+                cdt,
+                rdt,
+                device,
+                param_overrides,
+                branch_states,
+                fused,
+            )
         network = _stamp_sources(
             grid, fvec, network, index, cdt, rdt, device, param_overrides
         )
@@ -1198,6 +1405,9 @@ def assemble_harmonic_system(
             branch_states,
             # Include the actual quotient layout, not just its row count.
             None if fused is None else fused.row_to_reduced,
+            # The representation: a dense matrix, or the structural entries over a
+            # pattern (a function of the grid and the layout above, compared anyway).
+            pattern,
         )
         yh = system._get(
             "harmonic_network",
@@ -1239,11 +1449,14 @@ def assemble_harmonic_system(
         yh, ih = _apply_node_sources(
             node_sources, grid, v1, index, orders, yh, ih, cdt, rdt, device
         )
+    if isinstance(yh, PatternAccumulator):
+        values = _align_y_batch_rank(yh.values, v1, harmonic_injection, tail=1)
+        return yh.with_values(values), ih, index
     return _align_y_batch_rank(yh, v1, harmonic_injection), ih, index
 
 
 def _align_y_batch_rank(
-    yh: Tensor, v1: Tensor, harmonic_injection: Optional[dict]
+    yh: Tensor, v1: Tensor, harmonic_injection: Optional[dict], *, tail: int = 2
 ) -> Tensor:
     """Right-pad a BATCHED ``Y(h)``'s scenario dims to the injection's batch rank.
 
@@ -1252,13 +1465,15 @@ def _align_y_batch_rank(
     N]``, while a node-coherent harmonic injection carries a deeper ``[B, T]`` batch in
     ``I(h)``. Inserting the missing singleton step axes just before the order axis lets
     one matrix per scenario serve every step of that scenario. A no-op for an unbatched
-    ``Y`` (which broadcasts anyway) and for the snapshot / nominal cases.
+    ``Y`` (which broadcasts anyway) and for the snapshot / nominal cases. ``tail`` is
+    the number of per-system trailing dims: 2 for a dense ``[..., N, N]``, 1 for the
+    structural entries ``[..., nnz]`` of a pattern accumulator.
     """
-    if yh.ndim <= 3:
+    if yh.ndim <= tail + 1:
         return yh
     extra = _injection_batch_rank(harmonic_injection) - (v1.ndim - 1)
     for _ in range(max(0, extra)):
-        yh = yh.unsqueeze(-4)
+        yh = yh.unsqueeze(-(tail + 2))
     return yh
 
 
@@ -2567,6 +2782,16 @@ def _add_to_diagonal(yh, y_diag, cdt, device):
     ``index_add`` on the flattened ``(N*N)`` last two dims of a FRESH zero tensor (no
     in-place op on the tracked ``yh``; GPU-safe for complex).
     """
+    if isinstance(yh, PatternAccumulator):
+        n = yh.n
+        bshape = torch.broadcast_shapes(yh.values.shape[:-1], y_diag.shape[:-1])
+        y_diag_b = y_diag.broadcast_to(*bshape, n).contiguous()
+        # The same "fresh zero plus the diagonal" the dense form adds, so every
+        # structural entry receives bit for bit the same sum.
+        diag_add = torch.zeros((*bshape, n), dtype=cdt, device=device)
+        diag_add = diag_add.index_add(-1, torch.arange(n, device=device), y_diag_b)
+        values = yh.values.broadcast_to(*bshape, yh.values.shape[-1])
+        return yh.with_values(values.index_add(-1, yh.diagonal_positions(), diag_add))
     n = yh.shape[-1]
     # Common batch shape over the leading dims of yh[...,N,N] and y_diag[...,N].
     bshape = torch.broadcast_shapes(yh.shape[:-2], y_diag.shape[:-1])

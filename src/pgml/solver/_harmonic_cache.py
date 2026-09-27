@@ -103,7 +103,12 @@ class HarmonicFlowSystem:
     edits; the fundamental-only network fingerprint is not a harmonic cache key.
 
     Stores at most one fundamental preparation, one harmonic network matrix and
-    one harmonic factorization, independent of the number of calls/chunks. Low-rank
+    one harmonic factorization, independent of the number of calls/chunks. Where the
+    orders are factored by the CPU sparse backend, the network entry holds the
+    structural entries ``[Hh, nnz]`` over the topology's sparsity pattern instead of the
+    dense matrix, and the factors are keyed on the factored entries plus that pattern,
+    both compared by value; a changed entry or topology rebuilds exactly as a changed
+    dense matrix does. Low-rank
     device-shunt updates are rebuilt on each call while their base can be reused.
     Differentiable harmonic matrices bypass numerical-factor caching; parameter
     gradients also bypass network caching. RHS-only gradients retain factor reuse.

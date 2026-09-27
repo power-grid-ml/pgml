@@ -121,9 +121,10 @@ Module: `pgml.assembly`
   present zero costs one explicit entry. `index` is the layout of the matrix described —
   the grid's own, or the REDUCED one of a `FusionMap`, whose many-to-one `(node, phase) ->
   row` map yields the fused pattern of `PᵀYP` directly. Pure indexing bookkeeping (int64
-  tensors, no differentiable quantity), built once per grid. Consumer:
+  tensors, no differentiable quantity), built once per grid. Consumers:
   `pgml.solver.lu_factor_system(..., pattern=…)`, whose sparse backend then builds each
-  system's compressed-column form by gathering `nnz` values instead of scanning `N²`.
+  system's compressed-column form by gathering `nnz` values instead of scanning `N²`, and
+  the `_scatter.PatternAccumulator` the harmonic orders assemble into on that backend.
   Regression: `tests/topology/test_ybus_structure.py` pins the superset property against
   the stamp registry itself, so a builder that writes outside its components' nodes fails.
 
@@ -260,6 +261,22 @@ dispatch. Keep `rows == cols` (the symmetric scatter every registered stamp uses
   accumulates duplicates; the scattered VALUES are differentiable, the indices are
   int64). Vectorized over branches of the same kind (grouped by phase count) and
   over phases — no python loop over individual branches on the tape.
+- `scatter_blocks_into(y, blocks, rows, cols)` takes EITHER accumulator and returns the
+  same kind: a dense `[*batch, H, N, N]` tensor, or a `_scatter.PatternAccumulator(values
+  [*batch, H, nnz], pattern [nnz] sorted int64 row*N+col, n)` holding only the structural
+  entries of such a matrix over `ybus_structure`. The pattern form maps each linear index
+  to its pattern position with `searchsorted` and runs the SAME `index_add_` along the
+  `nnz` axis, so every entry receives the same additions in the same order (bit-identical
+  to the dense accumulator at every pattern position, exact zeros elsewhere), and a target
+  NOT in the pattern raises `InputError` naming `Y[row, col]` instead of being dropped (one
+  host read per scatter; the check is bookkeeping, no differentiable quantity).
+  `PatternAccumulator.zeros(pattern, n, n_orders, dtype, device)`, `.with_values(v)`,
+  `.clone()`, `.positions(linear)`, `.diagonal_positions()`, `.to_dense()`. Every stamp
+  that only passes `y` through the scatter (`_stamp_network`, `_stamp_sources`,
+  `_stamp_shunt_appliances`, the harmonic device shunt, the DER harmonic impedance) takes
+  either form unchanged; the harmonic orders use the pattern form on the CPU sparse
+  backend (`solver/CONTEXT.md`, structural harmonic route).
+  Regression: `tests/topology/test_pattern_accumulator.py`.
 
 ## Implementation notes / linear-assembly simplifications
 - `ShuntReactor` (a `BranchBase`) is stamped as a single-terminal shunt at its

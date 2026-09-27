@@ -396,6 +396,8 @@ def test_dense_lu_still_raises_on_a_singular_matrix():
     y[3, 3] = 0.0
     with pytest.raises(RuntimeError, match="lu_factor"):
         lu_factor_system(y, backend="dense")
+
+
 class TestRightHandSideMarshalling:
     """One array layout from the torch right-hand side to SuperLU and back.
 
