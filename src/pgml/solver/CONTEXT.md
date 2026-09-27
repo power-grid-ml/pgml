@@ -5,11 +5,14 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
 
 ## Repeated harmonic preparation
 
-- `HarmonicFlowSystem(*, cache_batched_factors=True)` — lazy, bounded preparation;
+- `HarmonicFlowSystem(*, cache_batched_factors=False)` — lazy, bounded preparation;
   `stats` exposes entry hit/miss/bypass counts, `nbytes()` the tensor storage the entries
   currently hold (each storage counted once; a retained batched matrix is charged twice,
   once as the value and once as the key snapshot the validity check compares against),
   `clear()` releases retained state.
+  A per-scenario `Y(h)` is factored but not retained unless `cache_batched_factors=True`,
+  which only serves a replay of the same batch and retains a copy of the whole
+  `[B, H, N, N]` system beside its factors.
 - `prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs) -> HarmonicFlowSystem`
   warms the preparation with one complete solve (fundamental needed for device shunts).
 - `solve_harmonic_flow(..., system=None)` and
@@ -20,7 +23,9 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
   and RHS are always current. Harmonic matrix gradients bypass numerical caching;
   RHS-only gradients can reuse factors. No cached harmonic autograd graph.
 - Chunked harmonic `run_scenarios` shares a preparation with
-  `cache_batched_factors=False`; small Woodbury corrections remain per-call.
+  `cache_batched_factors=False`, and on CPU only from
+  `solver.harmonic.preparation_min_rows` rows up (an accelerator is never gated);
+  small Woodbury corrections remain per-call.
   No global or independent sparse-symbolic cache. Not thread-safe; CUDA comparisons
   can synchronize. Storage is bounded by entry count, not bytes.
 

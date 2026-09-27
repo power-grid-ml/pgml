@@ -825,6 +825,27 @@ solver:
         basis — where one factorization per order serves the whole batch. 1 GiB keeps a
         single chunk for a small grid or a small batch and fits alongside the fundamental
         solve on a 12 GB accelerator.
+    preparation_min_rows:
+      value: 256
+      units: "rows of Y(h) (one per existing node-phase)"
+      description: >
+        Smallest system for which a CHUNKED harmonic scenario run prepares a reusable
+        `HarmonicFlowSystem` on the CPU. The preparation hoists the network assembly and
+        an operating-point-independent factorization out of the chunk loop and pays for
+        that with a value snapshot of the grid and one key comparison per chunk. On one
+        CPU thread at complex128 over orders 1..13 the trade is a LOSS up to about 200
+        rows (0.85 to 0.98 of the uncached call), crosses 1.0 between 201 and 255 rows,
+        and then grows: 1.10 to 1.18 at 300 rows, 1.24 to 1.64 at 450 and 1.28 to 1.42 at
+        900. 256 rows sits on that crossing, so a grid just below the gate gives up at
+        most a few percent and a grid just above it pays at most a few percent. Those
+        figures are for a Y(h) that does not carry the scenario; a per-scenario Y(h) over
+        a batch has no reusable factorization and stays within a percent of the uncached
+        call at every size, so the gate neither helps nor hurts it. An ACCELERATOR is
+        never gated, whatever this value: every size measured there, from 99 rows up,
+        gains 1.1x to 2.5x, because the assembly and factorization the preparation
+        removes are a larger share of a GPU call while its back-substitutions are
+        relatively cheaper. Set to 0 to prepare at every size, or above the largest grid
+        in use to keep the uncached path everywhere.
   ift:
     jacobian_budget_mb:
       value: 1024.0
