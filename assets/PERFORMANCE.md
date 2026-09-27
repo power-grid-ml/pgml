@@ -381,13 +381,30 @@ both Kerber networks and a mixed grid with fusion, delta loads and batched switc
 states. At different chunkings the last bit of the injection vector differs, on
 either route, and the difference is at the 1e-14 level.
 
-It is a host-memory change. One study's working set above the interpreter falls
-by 5.5 times (from 1,401 to 255 MiB for 16 studies; a measurement on a separate development machine, not on the cluster, whose campaign measured the structural route only and records 150 MiB of proportional set size above the interpreter for the same case) at 1,176
-rows, and the batch a host holds grows where one scenario's dense system is large
-against the chunk budget, which on these grids is above a thousand rows; on a
-small grid the batch is bounded by the `[B, H, N]` injection and solution
-vectors, which grow on both routes.
-<!-- sparse.host_working_set_factor, sparse.host_working_set_rows: bench_footprint_harmonic.json, pgml_cpu_single tree_peak_pss_mib at the same grid and batch for the two engine revisions, or the pgml-paper sparse-harmonic report's memory table if the campaign measured one revision only; name the grid -->
+It is a host-memory change first. Measured on the workstation (Intel i7-12700,
+RTX A2000 12 GB, a 58 GB allocation), with the same harness for both engine
+revisions, one harmonic study on the 1,176-row network peaks at 1,058 instead of
+4,680 MiB of proportional set size at 64 studies per batch and at 1,525 instead of
+16,837 MiB at 256, eleven times less; the eight-worker pool peaks at 6,168 instead
+of 16,714 MiB at 256. On the 33-bus feeder and the 294-row network the library's
+automatic choice is the dense backend on both revisions, and their footprints
+agree within noise. On the same 58 GB allocation the previous revision's CPU
+sparse study was killed for memory on the 294-row network at 16,384 studies per
+batch, where the new one completes. The batch a host holds grows where one
+scenario's dense system is large against the chunk budget, which on these grids
+is above a thousand rows; on a small grid the batch is bounded by the
+`[B, H, N]` injection and solution vectors, which grow on both routes.
+
+The CPU sparse arms also run faster on that workstation. At the largest batch
+both revisions completed, one call solves 2.6, 5.7 and 20 times as many studies
+per second as the previous revision on the 33-bus feeder, the 294-row and the
+1,176-row network (at 16,384, 4,096 and 256 studies per batch), and eight
+workers 2.0, 6.5 and 17 times. The dense and GPU arms, which the change does
+not touch, give 0.94 to 1.00 times at the same batches and 0.68 to 1.02 times
+across all shared batches, which is the spread between two runs on that machine.
+The two runs also differ in the harness's memory rule, which only decides where
+a series stops. The figure above is from the cluster campaign and uses the new
+revision only.
 
 The route does not serve CUDA. A study on the GPU assembles the dense matrix
 exactly as before, so device-side capacity and the GPU numbers on this page are
