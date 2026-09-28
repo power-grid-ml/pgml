@@ -133,9 +133,17 @@ requires an env var to be set.
   `pgml.solver.power_flow._ift_jacobian_budget_bytes` / `_ift_adjoint_cache_bytes`.
 - `solver.harmonic.system_budget_mb` — the memory budget of one scenario chunk of the
   assembled harmonic system. A device shunt on the `operating_point` basis makes `Y(h)`
-  per-scenario, so the system is `[B, H, N, N]`; the budget (charged the matrix plus its
-  factorization) decides how many scenarios are assembled and factored at a time. Read by
-  `pgml.solver.harmonic_flow._harmonic_system_budget_bytes` / `_harmonic_chunk`.
+  per-scenario, so the system is `[B, H, N, N]`; the budget decides how many scenarios are
+  assembled and factored at a time. The dense route charges the matrix plus its
+  factorization (`_harmonic_chunk`); where the orders are factored by the CPU sparse
+  backend the matrix is assembled as its structural entries only and a system is charged
+  384 KiB plus 48 numbers per pattern entry (three times the measured isolated footprint of
+  one SuperLU factorization plus the entry copies, for the heap retention between chunks;
+  `_pattern_harmonic_chunk`), several times less than the dense charge. Read by `pgml.solver.harmonic_flow._harmonic_system_budget_bytes`.
+- `solver.harmonic.preparation_min_rows` — the smallest system (rows of `Y(h)`) for which a
+  CHUNKED harmonic `run_scenarios` builds a reusable `HarmonicFlowSystem` on the CPU
+  (shipped 256, the measured CPU break-even). An accelerator is never gated, whatever the
+  value; 0 prepares at every size. Read by `pgml.scenarios.run._preparation_pays`.
 - `solver.loadability.ramp` — what the loadability analysis' λ multiplies (`load`, the
   textbook continuation ramp, or `all`). Read by `pgml.solver.loadability_limit`.
 - `branch.near_ideal_series_resistance_ohm` — the stand-in an ideal (zero-impedance) branch

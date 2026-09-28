@@ -1,0 +1,66 @@
+{
+ "current_injection": {
+  "case": [
+   "cigre_lv / near_limit",
+   "cigre_lv / nominal",
+   "ieee33 / near_limit",
+   "ieee33 / nominal",
+   "synthetic100 / near_limit",
+   "synthetic100 / nominal",
+   "synthetic300 / near_limit",
+   "synthetic300 / nominal"
+  ],
+  "iterations": [
+   34,
+   7,
+   35,
+   8,
+   38,
+   3,
+   33,
+   3
+  ],
+  "ms_per_scenario": [
+   0.626951999947778,
+   0.3126255001006939,
+   0.7988327811290219,
+   0.39818912500777515,
+   8.35894665624437,
+   2.2707445941705373,
+   4.158043093411834,
+   2.467548218646698
+  ]
+ },
+ "newton": {
+  "case": [
+   "cigre_lv / near_limit",
+   "cigre_lv / nominal",
+   "ieee33 / near_limit",
+   "ieee33 / nominal",
+   "synthetic100 / near_limit",
+   "synthetic100 / nominal",
+   "synthetic300 / near_limit",
+   "synthetic300 / nominal"
+  ],
+  "iterations": [
+   5,
+   3,
+   5,
+   3,
+   5,
+   2,
+   5,
+   2
+  ],
+  "ms_per_scenario": [
+   25.692840062220057,
+   20.47540815647153,
+   44.49523281255097,
+   33.59435246875364,
+   487.4693231558922,
+   221.66476893744402,
+   1123.1607397812695,
+   1047.5682432497706
+  ]
+ }
+}

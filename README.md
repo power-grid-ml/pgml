@@ -35,17 +35,31 @@ Each library has its own supported devices, assumptions and applications.
 
 pgml solves many operating points of one grid in a single batched call, so its
 throughput keeps growing with the batch size. Tools that solve one scenario at a
-time level off early. On one GPU pgml overtakes every CPU tool at 4,096 scenarios
-per batch. For a few scenarios a dedicated CPU solver such as power-grid-model
-is faster.
+time level off early. The pgml CPU curve, the same engine on the same eight cores
+split over the same eight worker processes the other tools get, peaks at 18.6 per
+cent of the GPU peak on the 33-bus feeder and 34.0 per cent on the Kerber
+network; at its peak it is 2.52 and 1.10 times OpenDSS's peak and 0.81 and 0.47
+times power-grid-model's.
 
-All tools solve identical load scenarios in double precision. A point is shown
-only if every scenario converged and matches pgml within 1e-6 pu in voltage
-magnitude. The plot covers the forward power flow, without gradients.
+For a few scenarios pgml is the slowest tool on both grids shown (on the
+three-phase CIGRE LV grid in PERFORMANCE.md pandapower is slower still). At one scenario per batch
+power-grid-model solves 5,559 per second on the 33-bus
+feeder where pgml manages 160. pgml passes it at
+16,384 scenarios per batch, is 4.49 times faster at
+65,536, and reaches 1.33 million
+per second on one GPU. On grids of about a thousand buses and more it
+does not pass power-grid-model at any batch size measured.
+
+All tools solve identical load scenarios in double precision on the same
+allocation, and every tool's timed call ends with the voltages in host memory. A
+point is shown only if the solution converged and matches a pgml
+double-precision reference within 1e-6 pu in voltage magnitude. The plot covers
+the forward power flow, without gradients.
 [PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
-timed, and how throughput changes with grid size.
+timed, how throughput changes with grid size, what each tool costs in memory and
+in money, and where pgml loses.
 
-<sub>One NVIDIA L40S 48 GB and eight logical CPUs (four cores) of an AMD EPYC 9334. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions (three for pandapower and OpenDSS).</sub>
+<sub>One NVIDIA L40S 48 GB against eight physical cores of an AMD EPYC 9334, on which every CPU tool gets eight workers or eight threads; one node of an institutional cluster, driver 610.57.04, measured 2026-09-26. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions for every tool, power-grid-model and pgml's single call each timed in a fresh process, the leading 256 scenarios of every batch re-solved and compared.</sub>
 
 ## Conformance: the solvers agree
 

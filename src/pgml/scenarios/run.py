@@ -14,7 +14,8 @@ from typing import Optional, Protocol, Sequence, runtime_checkable
 import torch
 from torch import Tensor
 
-from pgml.assembly import NodePhaseIndex
+from pgml import defaults
+from pgml.assembly import NodePhaseIndex, node_phase_index
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 from pgml.solver import (
@@ -25,6 +26,34 @@ from pgml.solver import (
 )
 
 from .sampler import SampledScenarios
+
+
+def _solve_device(device, sampled: SampledScenarios) -> torch.device:
+    """Device this batch solves on: the requested one, else the samples' own."""
+    if device is not None:
+        return torch.device(device)
+    for entry in sampled.operating_point.values():
+        for value in entry.values():
+            if isinstance(value, Tensor):
+                return value.device
+    return torch.device("cpu")
+
+
+def _preparation_pays(grid: Grid, device: torch.device) -> bool:
+    """Is a reusable harmonic preparation worth its overhead for this grid?
+
+    Preparing hoists the network assembly and an operating-point-independent
+    factorization out of the chunk loop and pays for that with a value snapshot
+    of the grid and one key comparison per chunk. On an accelerator the trade
+    always pays, because the work it removes is a larger share of the call. On
+    CPU it pays from a few hundred rows up; below
+    ``solver.harmonic.preparation_min_rows`` the bookkeeping costs more than the
+    assembly it avoids, and the chunks are better off solving uncached.
+    """
+    if device.type != "cpu":
+        return True
+    min_rows = float(defaults.get("solver.harmonic.preparation_min_rows"))
+    return node_phase_index(grid).size >= min_rows
 
 
 def _slice_range(x, start: int, end: int):
@@ -219,7 +248,12 @@ def run_scenarios(
         differentiable (the concatenation preserves the graph). Applies to the node-coherent
         ``[B, T, H, N]`` path too — the slice is along the SCENARIO axis ``B`` (each
         scenario's full ``T``-step sequence solves together). ``None`` (default) solves the
-        whole batch.
+        whole batch. A chunked HARMONIC run additionally reuses the network assembly and
+        any operating-point-independent factorization across the chunks, on an
+        accelerator always and on CPU from
+        ``solver.harmonic.preparation_min_rows`` rows up — below that the reuse
+        bookkeeping costs more than the assembly it saves. Scenario-dependent factors are
+        never retained, since each chunk carries its own admittances.
     output_device:
         Where the RESULT voltages ``v`` are collected. ``None`` (default) keeps them on the
         solve ``device``. When generating a large dataset on the GPU, the full ``[B, ...]``
@@ -252,7 +286,9 @@ def run_scenarios(
 
     # The network side (assembly + slack + factorization) is operating-point
     # independent: prepare it ONCE and reuse it across every chunk. Harmonic
-    # preparation is lazy and validates the evaluated matrix on every chunk.
+    # preparation is lazy and validates the evaluated matrix on every chunk, so a
+    # small CPU system spends more on that validation than the assembly is worth
+    # and is left uncached (`solver.harmonic.preparation_min_rows`).
     system = (
         prepare_power_flow(grid, slack=slack, dtype=dtype, device=device)
         if calculation == "power_flow"
@@ -263,6 +299,7 @@ def run_scenarios(
         if calculation == "harmonic"
         and chunk_size is not None
         and chunk_size < sampled.n_samples
+        and _preparation_pays(grid, _solve_device(device, sampled))
         else None
     )
 

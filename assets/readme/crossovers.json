@@ -1,0 +1,3898 @@
+{
+ "environment": {
+  "date": "2026-09-27 01:21:26+0200",
+  "platform": "Linux-5.14.0-687.48.1.el9_8.x86_64-x86_64-with-glibc2.34",
+  "cpu": "AMD EPYC 9334 32-Core Processor",
+  "cpu_count_logical": 128,
+  "ram_gb": 1511.1,
+  "torch_threads": 4,
+  "cuda_available": false,
+  "cuda_runtime": "13.0",
+  "versions": {
+   "python": "3.13.15",
+   "torch": "2.13.0",
+   "numpy": "2.4.6",
+   "scipy": "1.18.1",
+   "pgml": "0.5.1",
+   "pgml_git": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+   "pandapower": "3.5.4",
+   "power_grid_model": "1.13.172",
+   "power_grid_model_io": "present",
+   "numba": "0.67.0",
+   "opendssdirect": "0.9.4"
+  },
+  "pandapower_numba": {
+   "importable": true,
+   "version": "0.67.0",
+   "opt_out": false,
+   "requested": true
+  },
+  "kerber_seed": 20260912,
+  "pgml_source_digest": "c3bc1b3d1049",
+  "benchmark_source_digest": "c2433bc30f7c",
+  "modeling_defaults": {
+   "converter": {
+    "pandapower": {
+     "open_switch_model": {
+      "value": "terminal",
+      "units": "enum{terminal, drop_element}",
+      "description": "An open bus-line or bus-transformer switch disconnects only its terminal. The connected end still draws line charging or transformer no-load current. terminal retains that circuit with an auxiliary open-end node; drop_element omits the complete element as a reduced approximation. Both-open and out-of-service elements are omitted in either mode. `terminal` is the default because it is what pandapower itself solves: a line that is open at one end stays energized from the other and its charging current loads the feeder. On the CIGRE MV network, which has three such lines, omitting them moves the bus voltages by 2.9e-4 pu against pandapower's own power flow, while keeping them agrees to 6e-13 pu. `drop_element` is kept for studies that want the smaller system and accept that error.\n"
+     }
+    }
+   },
+   "calculation": {
+    "symmetry": {
+     "value": "auto",
+     "units": "enum{auto, symmetric, asymmetric}",
+     "description": "Whether a calculation is SYMMETRIC (each appliance's total P/Q split equally over its connected phases \u2014 balanced) or ASYMMETRIC (per-phase values honored, falling back to an equal split where a given appliance has none). `auto` (default) selects asymmetric iff ANY appliance or operating point carries per-phase data (*_per_phase_* or a per-phase operating point), else symmetric \u2014 so an asymmetric load distribution in the simulation config promotes the whole calculation to asymmetric even on a symmetrically-defined grid. Mirrors power-grid-model's symmetric=True/False (a symmetric calc averages an asymmetric load). See docs/pgml/modeling/asymmetric.md \u00a71.\n"
+    }
+   },
+   "appliance": {
+    "load": {
+     "default_connection": {
+      "value": "wye",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "Connection for a MULTI-phase Load/Generator with no explicit `connection`. `wye` = each phase to neutral/ground; `delta` = phase-to-phase (line-to-line). LV distribution is predominantly wye; matches the OpenDSS `conn=wye` default. For wye, the return path is the node's Phase.N row if present, else ground. See docs/pgml/modeling/asymmetric.md \u00a72, \u00a74.\n"
+     },
+     "single_phase_connection": {
+      "value": "wye",
+      "units": "enum{wye, wye_grounded}",
+      "description": "Connection for a 1-phase Load/Generator with no explicit `connection`. `wye` = line-to-neutral (the European LV residential convention; the node's L-N voltage is the base). A line-to-line single-phase load is modeled as a 2-phase delta load instead. See docs/pgml/modeling/asymmetric.md \u00a73.\n"
+     }
+    },
+    "harmonic_shunt": {
+     "model": {
+      "value": "opendss",
+      "units": "enum{none, opendss, motor}",
+      "description": "Which harmonic shunt every injection appliance carries. `opendss` (the default, and OpenDSS's own: `NeglectLoadY=No` with `%SeriesRL=50`) splits the operating-point admittance Yeq = conj(S)/V_rated^2 into a PARALLEL R-L branch (1-s)Re(Yeq) + j(1-s)Im(Yeq)/h and a SERIES R-L branch 1/(Re(Zs) + j*h*Im(Zs)) with Zs = 1/(s*Yeq) and s = `series_rl_fraction` (for a leading device the reactive parts follow `reactive_element`). `motor` keeps the parallel branch and replaces the series branch by a fixed blocked-rotor reactance (`motor_x_harm_pu`, `motor_xr_harm`), OpenDSS's `puXharm`. `none` = a PURE current source with no shunt at any order, identical to OpenDSS `Set NeglectLoadY=Yes`; it reports MORE distortion, because the load conductance is the main damping of a feeder-end parallel resonance.\n"
+     },
+     "series_rl_fraction": {
+      "value": 0.5,
+      "units": "pu",
+      "description": "Fraction s of the shunt carried by the SERIES R-L branch; the rest is the PARALLEL R-L branch (OpenDSS `%SeriesRL`/100, whose own default is 50). Both splits are exact at the fundamental (Y_par(1) + Y_ser(1) = Yeq for any s); they differ only in how the shunt rolls off with frequency: the parallel branch keeps the full conductance at every order, while the series branch's admittance falls roughly as 1/h. So s = 0 damps the most and s = 1 the least. The value is an OpenDSS modeling convention, not a measured quantity.\n"
+     },
+     "motor_x_harm_pu": {
+      "value": 0.2,
+      "units": "pu of the device's rated kVA",
+      "description": "Blocked-rotor (subtransient) reactance of the `motor` model's series branch, in per unit of the device's own apparent power: X = V_rated^2/(S*s)*x_pu. Applies only where the resolved model is `motor` and the device carries no explicit `motor_x_harm_pu`. 0.2 pu is the value OpenDSS's documentation gives for a motor-dominated load.\n"
+     },
+     "motor_xr_harm": {
+      "value": 6.0,
+      "units": "ratio X/R",
+      "description": "X/R of the `motor` model's series reactance at the fundamental (OpenDSS `XRharm`, same default), i.e. Zs = X/xr + jX before the order scaling.\n"
+     },
+     "reactive_element": {
+      "value": "sign_aware",
+      "units": "enum{sign_aware, inductive}",
+      "description": "How the reactive part of the P,Q-derived shunt scales with the harmonic order. `sign_aware` (the default) scales it as the element it is at the operating point. A lagging device (Q > 0) is an inductance: the parallel susceptance goes as B/h and the series reactance as h*X. A leading device (Q < 0, common for electronic loads and compensated installations) is a capacitance: B*h and X/h. This is the law the const-Z fold of the fundamental assembly uses, so both load representations agree. `inductive` applies B/h and h*X whatever the sign of Q, which is what OpenDSS computes (checked on a live YPrim of a load with negative kvar); a leading device then becomes a negative inductance, with the susceptance sign of a capacitor and the frequency slope of an inductor. The two laws are identical for Q >= 0 and at h = 1. At order 5, s = 0.5 and power factor 0.89 leading, `inductive` gives 0.037 + j0.017 S where `sign_aware` gives 0.070 + j0.082 S (10 kW, 400 V). The `opendss` preset selects `inductive`.\n"
+     },
+     "basis": {
+      "value": "operating_point",
+      "units": "enum{operating_point, nameplate}",
+      "description": "Which power and terminal voltage the shunt admittance Yeq = conj(S)/V_rated^2 is built from. `operating_point` (the default) uses the power the device actually draws in THIS scenario at the solved fundamental terminal voltage, so the shunt follows a scenario batch exactly as OpenDSS's own YPrim follows its Load's specified kW/kvar. `nameplate` uses the device's stored (nameplate) P, Q at its rated terminal voltage, which makes Y(h) independent of the scenario: one factorisation per harmonic order serves the whole batch instead of one per scenario and order, and the assembled matrix stays [H, N, N] instead of [B, H, N, N]. The cost is a model error wherever a scenario's loading differs from nameplate: the shunt is then that of the nameplate load, i.e. the damping is too strong for a lightly loaded scenario and too weak for a heavily loaded one. Measured on IEEE-33 and three-phase CIGRE LV against a live OpenDSS that carries the scenario's own kW, the deviation of the harmonic voltages grows roughly linearly with the load deviation and with the sharpness of any resonance; the numbers are in the reference test that pins both bases (tests/reference/test_opendss_load_shunt.py).\n"
+     },
+     "generation_model": {
+      "value": "none",
+      "units": "enum{none, load_style}",
+      "description": "What a GENERATION-sign device (Generator, Storage) carries at orders h > 1. `none` (the default) adds no shunt derived from the device's P/Q, so a device without an explicit `harmonic_impedance` remains a PURE harmonic current source. The reason is physical: Yeq = conj(S)/V_rated^2 has a NEGATIVE conductance for a device that injects power, i.e. the load expression would make every inverter FEED harmonic energy into the network instead of damping it. OpenDSS instead derives a `PVSystem`'s or `Generator`'s harmonic shunt from its separate subtransient / filter impedance (`Xdpp`, `%R`/`%X`), which the optional `harmonic_impedance` schema block represents. That explicit physical impedance remains present under `none`. `load_style` applies the same expression a Load carries, which is what OpenDSS computes for the negative-kW `Load` idiom a matched-mode export writes; use it to reproduce such a comparison, knowing the sign. A device whose own `harmonic_model` names the `motor` model (`motor_x_harm_pu`) carries that model either way, and `neglect_shunt: true` always wins when no explicit impedance supersedes the derived model.\n"
+     }
+    },
+    "generator": {
+     "enforce_q_limits": {
+      "value": true,
+      "units": "bool",
+      "description": "Whether a regulating generator's `q_min_var`/`q_max_var` bound its reactive output. true (default) enforces them by PV-to-PQ switching: a unit whose required reactive power leaves the band is re-solved as a plain PQ injection pinned at the violated limit, and returns to regulation when the terminal voltage crosses its setpoint from the other side. false solves every regulating generator unbounded, which is pandapower `runpp`'s own default (`enforce_q_lims=False`). Overridable per call: `solve_power_flow(enforce_q_limits=...)`.\n"
+     },
+     "q_limit_switch_rounds_max": {
+      "value": 12,
+      "units": "count",
+      "description": "Maximum number of PV-to-PQ switching rounds (each round is one full Newton solve at a fixed active set, the first solve included). The loop normally settles in one to three rounds; hitting the cap logs a WARNING naming the generators that would still change their bus type, keeps the last solution and reports the scenarios concerned as not converged (`PowerFlowResult.converged_mask`, `regulation.settled`). When limits are reached one unit after another a feeder with n regulating units can need up to n rounds, so 12 covers the distribution feeders the library targets and bounds the cost of a genuinely oscillating case at 12 Newton solves.\n"
+     },
+     "q_limit_hysteresis_pu": {
+      "value": 1e-06,
+      "units": "pu",
+      "description": "Voltage band, in per unit of the terminal's nominal, a pinned generator must cross before it is released back to voltage regulation. Guards the switching loop against cycling on solver noise; far below any physical regulation deadband. 1e-6 pu is two decades above the voltage-update tolerance (`solver.convergence.update_pu` = 1e-8), so a converged voltage cannot cross the band by rounding, and four decades below a typical regulator deadband of 1e-2 pu, so it does not alter which units regulate.\n"
+     },
+     "q_limit_hysteresis_rel": {
+      "value": 1e-09,
+      "units": "pu",
+      "description": "Reactive band, relative to the widest of the generator's reactive limits, the required reactive power must exceed before the unit is pinned at that limit. Guards against switching on the converged solve's rounding noise: 1e-9 sits about three decades above the relative rounding of a double-precision power evaluation (machine epsilon times the cancellation in Y*V, of order 1e-12) and below the 1e-8 pu mismatch tolerance, so a unit exactly at its limit is not pinned by noise and a real violation of the size the solver can resolve still is.\n"
+     }
+    }
+   },
+   "line": {
+    "harmonic_model": {
+     "three_phase": {
+      "value": "sequence_aware",
+      "units": "enum{sequence_aware, positive_sequence, naive, none}",
+      "description": "Default model for a 3-phase R/X line. `sequence_aware` decomposes Z_abc into Z1 (earth-free, X\u221dh + skin) and Z0 (carries the Carson earth-return resistance), then recombines \u2014 the model a 4-wire UNBALANCED LV harmonic study needs. Earth return is excited only by zero-sequence / residual current, so it correctly vanishes for balanced operation. `positive_sequence` = Z1 only (no Z0 damping); `naive` = R const, X\u221dh; `none` = leave the line unresolved (no model written).\n"
+     },
+     "single_phase": {
+      "value": "positive_sequence",
+      "units": "enum{sequence_aware, positive_sequence, naive, none}",
+      "description": "Default model for a 1- or 2-phase R/X line: skin-corrected R, X\u221dh, no earth floor. A genuine single-wire-earth-return (SWER) line should instead carry an explicit `conductor_geometry` so the full Carson earth return applies.\n"
+     },
+     "skin_effect": {
+      "value": true,
+      "units": "bool",
+      "description": "Apply the Bessel I0/I1 skin-effect resistance rise (m(f0)=1) in the positive- and sequence-aware models. false \u2192 R constant (the naive X\u221dh, R-const model). Per-line override: `Line.harmonic_skin_effect`.\n"
+     }
+    },
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 4.0,
+      "units": "ratio",
+      "description": "Assumed series RESISTANCE ratio R0/R1 for sequence->phase line expansion when no explicit R0 is available. ~4 is a common overhead-line rule of thumb (the earth return dominates the zero-sequence resistance).\n"
+     },
+     "x0_over_x1": {
+      "value": 3.0,
+      "units": "ratio",
+      "description": "Assumed series REACTANCE ratio X0/X1 for sequence->phase line expansion when no explicit X0 is available (~3 typical for overhead lines).\n"
+     },
+     "c0_over_c1": {
+      "value": 0.5,
+      "units": "ratio",
+      "description": "Assumed shunt CAPACITANCE ratio C0/C1 for sequence->phase line expansion when no explicit C0 is available (~0.5 typical: less zero-sequence than positive-sequence capacitance).\n"
+     },
+     "r0_includes_earth_return": {
+      "value": false,
+      "units": "bool",
+      "description": "Whether a line's R0 already contains the Carson earth-return resistance at f0. true (real zero-sequence measurements / datasheet values): the harmonic model splits R0 into a conductor part R0 \u2212 3\u00b7Re(f0) that carries the skin-effect multiplier and an earth part 3\u00b7Re(f) that does not. false (the default, correct for an R0 synthesised from `r0_over_r1`): R0 is treated as conductor resistance and the earth return enters only as the increment 3\u00b7(Re(f) \u2212 Re(f0)). Both forms reproduce the stored R0 exactly at f0; they differ only in how much of R0 the skin multiplier scales. In the sequence_aware line model the skin multiplier scales the phase conductor's share R1 of R0, so the two settings give the same R0(h) whenever R0 \u2212 3\u00b7Re(f0) \u2265 R1 (every line with a real return path); they differ only for an R0 smaller than R1 + 3\u00b7Re(f0) = R1 + 0.148 \u03a9/km at 50 Hz. Per-line override: `Line.earth_return.r0_includes_earth_return`.\n"
+     }
+    },
+    "earth_return": {
+     "resistivity_ohm_m": {
+      "value": 100.0,
+      "units": "ohm*m",
+      "description": "Soil resistivity \u03c1 for the Carson/Deri earth-return path (Z0 and geometry lines). 100 \u03a9\u00b7m is the OpenDSS / IEEE standard default (average soil).\n"
+     },
+     "resistance_coeff_ohm_per_m_per_hz": {
+      "value": 9.869604401089357e-07,
+      "units": "ohm/(m*Hz)",
+      "description": "Carson earth-return resistance per unit length per Hz: Re(f) = coeff\u00b7f. The physical Carson value is \u03c0\u00b2\u00b71e-7 \u03a9/m/Hz (= \u03c9\u00b7\u03bc0/8 divided by f). Geometry- independent; the dominant frequency-dependent DAMPING of zero-sequence harmonics. Mirrors OpenDSS's user-settable per-LineCode Rg (whose default 0.01805 is this same physical value at 60 Hz in \u03a9 per 1000 ft, so on a metric line OpenDSS's default is \u22483.28\u00d7 smaller). Per-line override: `Line.earth_return.resistance_coeff_ohm_per_m_per_hz`; 0 removes the earth path.\n"
+     },
+     "reactance_coeff_ohm_per_m_per_hz": {
+      "value": 1.2566370614359173e-06,
+      "units": "ohm/(m*Hz) per ln-unit",
+      "description": "Carson/Deri earth-return reactance per unit length per Hz per ln-unit: Xg(f) = coeff\u00b7f\u00b7ln(658.5\u00b7sqrt(\u03c1/f)). The physical value is \u03bc0. Only its frequency DERIVATIVE enters the lumped zero-sequence model, where the \u03c1-dependent log cancels: X0(h) = h\u00b7X0(f0) \u2212 1.5\u00b7coeff\u00b7f0\u00b7h\u00b7ln(h). Mirrors OpenDSS's per-LineCode Xg (its default 0.155081 is this value at 60 Hz, \u03c1=100, in \u03a9 per 1000 ft). Used only by `x0_frequency: carson_sublinear`. Per-line override: `Line.earth_return.reactance_coeff_ohm_per_m_per_hz`.\n"
+     },
+     "x0_frequency": {
+      "value": "linear",
+      "units": "enum{linear, carson_sublinear}",
+      "description": "Frequency law of the zero-sequence REACTANCE in the lumped sequence_aware model. `linear` (default): X0(h) = X0\u00b7h, the scaling of a geometric inductance. It is exact for a return path that stays in metal at every order (the neutral core or sheath of a cable, a 4-wire LV line), and it is the only law that is safe for an X0 invented from `zero_sequence.x0_over_x1`, which carries no information about the return path. `carson_sublinear`: additionally subtract the Carson/Deri earth-return reactance decay 1.5\u00b7coeff\u00b7f0\u00b7h\u00b7ln(h) (geometry- and \u03c1-independent), the correction OpenDSS applies to an R/X line through its Xg. The derivation assumes that the stored X0 CONTAINS the deep-earth term 3\u00b7Xe(f0) = 3\u00b7coeff\u00b7f0\u00b7ln(658.5\u00b7sqrt(\u03c1/f0)), about 1.29 \u03a9/km at 50 Hz and 100 \u03a9\u00b7m. That holds for an overhead line whose measured or computed X0 closes through the earth. It does not hold for a cable or a ratio-derived X0 (typically 0.2 to 0.5 \u03a9/km): the subtracted 0.094\u00b7ln(h) \u03a9/km is then comparable with X0 itself, X0(h) falls below X1(h) within the first few orders and reaches zero near h = 13 for a 150 mm\u00b2 LV cable. Select it per line (`Line.earth_return.x0_frequency`) for overhead lines with real zero-sequence data, or grid-wide through the `opendss` preset. Exact at f0 either way.\n"
+     },
+     "x0_nonnegative": {
+      "value": true,
+      "units": "bool",
+      "description": "Guard of the `carson_sublinear` law: clamp the extrapolated X0(h) at zero. A negative series reactance is a series capacitance and can create a spurious series resonance, so the guard is on by default. Reaching the clamp means the stored X0 lacks the deep-earth term the law subtracts (see `x0_frequency`); assembly then logs one WARNING with the number of affected lines. The derivative is zero below the boundary. Disable for the unguarded OpenDSS law (the `opendss` preset does). No effect under `linear`. Per-line override: `Line.earth_return.x0_nonnegative`.\n"
+     },
+     "x0_exponent": {
+      "value": 1.0,
+      "units": "exponent",
+      "description": "Exponent p in X0(h) = X0\u00b7h^p for the lumped sequence_aware model. 1.0 (default) is the geometric scaling. p < 1 is an EMPIRICAL way to bend the zero-sequence reactance sub-linear (e.g. to match a measured Z0(h)); `x0_frequency: carson_sublinear` is the physically derived form for an overhead line. Per-line override: `Line.earth_return.x0_exponent`.\n"
+     }
+    },
+    "geometry": {
+     "internal_inductance": {
+      "value": "gmr",
+      "units": "enum{gmr, gmr_skin, gmr_power_frequency, bessel}",
+      "description": "Which internal-inductance model the conductor-geometry path uses. `gmr`: the published GMR carries the internal inductance at every frequency and the internal reactance is dropped (frozen at its power-frequency value). `gmr_skin`: the published GMR's internal reactance is scaled by the solid-round Bessel decay Im(Zint(f))/(f*mu0/4), so the internal inductance decays with skin effect (continuous in f). At power frequency the decay factor is 0.997 to 0.999 for LV/MV conductors and 0.989 for a very large one, so the published GMR's internal part, itself a few percent of X, is reproduced to within 1 %. `gmr_power_frequency`: `gmr` inside `power_frequency_band_hz` and `bessel` outside it, which is OpenDSS's rule (LineConstants/CNLineConstants/ TSLineConstants). Reproduces OpenDSS at every frequency; discontinuous at the band edges unless GMR = e^(-1/4)*radius. `bessel`: physical radius for the spacing term plus the full frequency-dependent Bessel internal impedance at every frequency, i.e. the first-principles solid round conductor; it discards the published GMR and so ignores stranding. `gmr`, `gmr_skin` and `bessel` are continuous in frequency; all four agree at power frequency for a solid round conductor. Needs a conductor radius for every option except `gmr`.\n"
+     },
+     "power_frequency_band_hz": {
+      "value": [
+       40.0,
+       1000.0
+      ],
+      "units": "Hz",
+      "description": "Exclusive frequency band (low, high) in which `internal_inductance: gmr_power_frequency` keeps the published GMR. OpenDSS hard-codes `(f < 1000.0) and (f > 40.0)` in LineConstants.pas, so (40, 1000) reproduces it; only change this to study the sensitivity of the threshold.\n"
+     }
+    },
+    "conductor": {
+     "gmr_over_radius": {
+      "value": 0.7788,
+      "units": "ratio",
+      "description": "Geometric-mean-radius / physical-radius for a solid round conductor (e^{-1/4}). Used to pick a PHYSICAL GMR when synthesizing a two-conductor go/return equivalent from positive-sequence R1/X1 (so the GMR never exceeds the radius).\n"
+     },
+     "radius_m": {
+      "value": 0.0102,
+      "units": "m",
+      "description": "Default conductor outer radius (~ACSR) for R/X\u2192geometry synthesis when no conductor data is supplied. Affects only the (tiny) synthesized capacitance.\n"
+     },
+     "phase_spacing_m": {
+      "value": 1.0,
+      "units": "m",
+      "description": "Initial phase-conductor spacing for the equilateral 3-phase R/X\u2192geometry synthesis (the Newton fit then adjusts the spacing + GMR to reproduce X1 and X0). ~1 m is a typical LV/MV phase separation; the value only seeds the solve and trades off against the fitted GMR, so the reproduced Z1/X0 are independent of it (within the physical range).\n"
+     },
+     "height_overhead_m": {
+      "value": 10.0,
+      "units": "m",
+      "description": "Default conductor height above ground for an overhead ('ol') line."
+     },
+     "height_cable_m": {
+      "value": 1.0,
+      "units": "m",
+      "description": "Default (virtual) height for a cable ('cs') line; the Deri earth model needs y>0.\n"
+     }
+    }
+   },
+   "branch": {
+    "zero_impedance": {
+     "value": "fuse",
+     "units": "enum{fuse, error}",
+     "description": "How a solve treats an in-service branch whose series impedance is EXACTLY zero \u2014 a closed switch with no impedance data, a bus coupler or jumper modelled as a zero-impedance line, a zero-length line. `fuse` (default) collapses the branch's terminal node-phase rows into ONE row of the solved system (exact bus fusion: the two terminals share a voltage and their current balances are summed), solves the reduced system and reports the result on the original node ids; the current through the fused branch follows from Kirchhoff's law at the fused node. `error` refuses such a branch by name (`pgml.solver.check_branch_impedances`) and points at `near_ideal_series_resistance_ohm` instead. Fusion is exact and better conditioned than any small-impedance stand-in, which buys its finite voltage drop with an admittance of 1/R in that row. A branch under a `branch_states` sweep is never fused (a swept branch is reached by scaling a stamped admittance): a zero-impedance branch listed there raises under either policy.\n"
+    },
+    "near_ideal_series_resistance_ohm": {
+     "value": 0.0001,
+     "units": "ohm",
+     "description": "Series resistance that stands in for an IDEAL (zero-impedance) branch where the branch has to remain STAMPED \u2014 under `zero_impedance: error`, or for a switch whose state a `branch_states` sweep toggles. 1e-4 Ohm is small enough to be electrically negligible on a distribution feeder and large enough to keep the admittance matrix conditioned, but it is not exact: it adds a voltage drop and it raises that row's admittance scale, and with it the achievable mismatch floor. Prefer exact impedance data where it exists and fusion where the element really is an ideal conductor.\n"
+    },
+    "switch_model": {
+     "value": "ideal",
+     "units": "enum{ideal, near_ideal}",
+     "description": "What a CONVERTER writes for a closed switch whose source library gives no impedance (a pandapower bus-bus switch with `z_ohm = 0`, which pandapower itself solves by fusing the two buses). `ideal` (default) writes a `Switch` with R = L = 0, which the solve collapses exactly (see `zero_impedance`) and which therefore reproduces the source tool's own treatment. `near_ideal` writes `near_ideal_series_resistance_ohm` instead, keeping the switch a stamped branch \u2014 the choice to make when the switch's state has to be swept by `branch_states`.\n"
+    }
+   },
+   "transformer": {
+    "vector_group": {
+     "from": {
+      "value": "delta",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "HV-side winding connection assumed when none is given. `delta` (the D of Dyn) is the standard distribution-transformer HV winding: it blocks zero-sequence / triplen harmonics from propagating to the MV network.\n"
+     },
+     "to": {
+      "value": "wye_grounded",
+      "units": "enum{wye, wye_grounded, delta}",
+      "description": "LV-side winding connection assumed when none is given. `wye_grounded` (the yn of Dyn) is the standard LV winding: the solidly grounded neutral provides the zero-sequence return path on the LV side.\n"
+     },
+     "clock": {
+      "value": 11,
+      "units": "integer 0..11 (IEC clock; HV->LV shift = +30*clock degrees, mod 360, positive = LV lags HV)",
+      "description": "IEC clock number assumed when no explicit tap.shift_deg is given. `11` (Dyn11, LV leads HV by 30 deg) is the IEC / European distribution-transformer default. For a transformer with explicit connections the clock is read from tap.shift_deg (rounded to the nearest 30 deg) instead.\n"
+     }
+    },
+    "harmonic_resistance": {
+     "law": {
+      "value": "element",
+      "units": "enum{element, constant, xr_constant}",
+      "description": "`element` = per-transformer `harmonic_xr_constant` (False = R constant, True = R scales with the order so X/R stays constant); `constant` = force R constant on every transformer (OpenDSS's `XRConst=No`, the conservative default of every reference tool: transformer damping at high orders is then UNDERSTATED because no eddy-current/stray-loss rise is modelled); `xr_constant` = force R proportional to the order on every transformer (OpenDSS's `XRConst=Yes`). A `Transformer.resistance_frequency` multiplier curve (skin effect / a measured frequency correction) multiplies on top of whichever law applies.\n"
+     }
+    },
+    "magnetizing_placement": {
+     "value": "split",
+     "units": "enum{from_terminal, to_terminal, split}",
+     "description": "Terminal the magnetizing shunt is stamped on: `from_terminal` = the HV/from phase diagonal, `to_terminal` = the LV/to diagonal with the branch referred through the squared rated-voltage ratio (OpenDSS's own placement), `split` (default) = half on each terminal, each referred to its own side (power-grid-model's placement). The VALUE is always `magnetizing_conductance_s`/`magnetizing_inductance_h` as stored, i.e. referred to the from side. Typical residual between the choices: ~2e-4 pu of the transformer admittance at a realistic 0.5 % magnetizing current.\n"
+    },
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed R0/R1 of the leakage impedance when a transformer carries no explicit `zero_sequence` override. 1.0 (Z0 = Z1) is what OpenDSS's and power-grid-model's two-winding transformer models imply -- neither has a zero-sequence leakage input, so their zero sequence sees the positive-sequence winding impedance through the winding topology.\n"
+     },
+     "x0_over_x1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed X0/X1 of the leakage impedance when a transformer carries no explicit `zero_sequence` override (1.0 = Z0 = Z1). A THREE-LIMB core YNyn unit has X0/X1 ~ 0.3-1.0 (the zero-sequence flux closes through tank and air, not the core); a five-limb or shell-type unit is close to 1.0. A zigzag grounding transformer has X0/X1 well below 1 by design.\n"
+     }
+    }
+   },
+   "source": {
+    "zero_sequence": {
+     "r0_over_r1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed R0/R1 of the source Thevenin when the dataset has no zero-sequence data. 1.0 (Z0 = Z1) is the value power-grid-model (`z01_ratio`) and pandapower (`x0x_max`) themselves default to, i.e. the assumption of a solidly grounded upstream network. A network whose zero-sequence path runs through an additional transformer or an impedance-earthed neutral has R0/R1 > 1 -- set the native field (or raise this ratio) for a study where triplen/residual current reaches the source.\n"
+     },
+     "x0_over_x1": {
+      "value": 1.0,
+      "units": "ratio",
+      "description": "Assumed X0/X1 of the source Thevenin when the dataset has no zero-sequence data (1.0 = Z0 = Z1, matching power-grid-model's and pandapower's own defaults). X0/X1 of a real feeding network ranges from ~1 (solidly grounded, close ground source) to >10 (remote or impedance-earthed ground source).\n"
+     }
+    },
+    "series_impedance_ohm": {
+     "value": 5.0,
+     "units": "ohm",
+     "description": "|Z| of the upstream-grid Thevenin/Norton series impedance at the source's rated voltage, used when the converted source is near-ideal. Larger = weaker grid = more harmonic voltage at the source bus and more cross-feeder coupling.\n"
+    },
+    "xr_ratio": {
+     "value": 10.0,
+     "units": "ratio X/R",
+     "description": "X/R ratio of the source series impedance (R = |Z|/sqrt(1+xr^2), X = xr*R). ~10 is typical for a stiff MV grid. NOT the same convention as the short-circuit-input converter's `rx_ratio` (`SourceShortCircuitInput.rx_ratio`, consumed by `pgml.convert._common.thevenin_from_sk`): that one is R/X (the reciprocal of this one), matching power-grid-model's own `rx_ratio` field. Converting a value between the two means inverting it, not copying it.\n"
+    }
+   },
+   "solver": {
+    "convergence": {
+     "mismatch_pu": {
+      "value": 1e-08,
+      "units": "per unit of s_base_va (apparent-power mismatch)",
+      "description": "PRIMARY convergence criterion of the nonlinear power flow: the largest nodal apparent-power mismatch |V_i * conj(F_i)| / s_base_va over the free (non-slack) rows, where F = Y*V + I_device(V) - I_slack. 1e-8 pu is pandapower's default (`tolerance_mva` on a 1 MVA base) and the same order as power-grid-model's `error_tolerance`, so iteration counts are comparable across the three tools. The achievable value is bounded below by the cancellation error of Y*V, which the solver estimates per row from the working precision and reports; a tolerance below that floor logs a warning and the floor governs. This is a power tolerance, 0.01 VA per row on the default 1 MVA base, and not a voltage tolerance: it leaves a voltage error of about mismatch_pu * s_base_va / S_k per unit at a node of short-circuit power S_k. Together with update_pu the default gives voltages good to about 1e-8 pu. Lower both for a tighter answer.\n"
+     },
+     "update_pu": {
+      "value": 1e-08,
+      "units": "per unit of each node's line-to-neutral rated voltage",
+      "description": "SECONDARY convergence criterion: the largest per-row voltage update |V_new - V_old| / V_LN(node) of the current-injection fixed point (or of the Newton step). Both criteria must hold. Per-row normalisation makes the measure independent of the voltage level and of the number of rows, so a multi-voltage grid or an ensemble of grids solved in one system is judged exactly like a single feeder. power-grid-model uses the same quantity (max voltage deviation in pu). The update is not the remaining error: the fixed point's error is rho / (1 - rho) times its last update (rho the contraction factor, roughly 0.1 to 0.5 on a distribution feeder), Newton's is far below its last update.\n"
+     },
+     "s_base_va": {
+      "value": 1000000.0,
+      "units": "VA",
+      "description": "Apparent-power base of the per-unit power mismatch. 1 MVA matches pandapower's default `sn_mva`, so the mismatch tolerance carries the same meaning there. A grid-specific base (e.g. the transformer rating) only rescales the criterion.\n"
+     },
+     "stall_patience": {
+      "value": 4,
+      "units": "iterations",
+      "description": "How many consecutive iterations a scenario may fail to reduce either convergence measure (voltage update or power mismatch) by the factor `stall_decay` before the solver calls it STALLED. A stalled iteration has stopped making progress: at a single-precision working dtype the fixed point reaches an exact fixed point of the rounded map or a small limit cycle whose amplitude is set by the rounding of one back-substitution, and no further iteration can improve it. Detecting that is what lets a solve stop at the precision it can actually reach instead of running to `max_iter` at a converged voltage. 4 iterations with a 10 % improvement requirement never fires on a contracting fixed point (the current-injection map contracts by about a decade per iteration on a distribution feeder, and even a contraction factor of 0.9 per iteration improves by 34 % over four), while a plateau is detected within five iterations of reaching it.\n"
+     },
+     "stall_decay": {
+      "value": 0.9,
+      "units": "factor",
+      "description": "The improvement that counts as progress inside the `stall_patience` window: an iteration is progress when the per-row voltage update or the power mismatch drops below `stall_decay` times the best value of that measure the scenario had reached. A value near 1 detects only a genuine plateau; a smaller value also calls a slowly contracting iteration stalled. With a patience of 4, the value 0.9 calls any iteration that contracts by 0.97 or better per step progress (0.97^4 = 0.885), far slower than the roughly one decade per step of the current-injection iteration on a distribution feeder, and still ends a true plateau after five iterations.\n"
+     },
+     "stall_tolerance_factor": {
+      "value": 100.0,
+      "units": "multiples of the precision floor",
+      "description": "How far above the working precision's voltage-update floor (1.2e-5 per unit for complex64 with the sparse backend, 1e-6 for complex64 dense, 16 eps for complex128) a STALLED scenario may sit and still count as converged at its precision floor rather than as a failure. The floor is a calibrated estimate of one back-substitution's rounding, while the plateau a scenario actually reaches is a limit cycle whose amplitude varies per scenario, per grid and (through the reduction order of a multithreaded matrix-vector product) from run to run, by up to about two orders of magnitude on the grids measured. Accepting a stall inside this band keeps a single-precision solve deterministic and honest \u2014 it converges at the accuracy it reached and the diagnostics report that the floor governed \u2014 while a stall above the band is reported as a failure, because at complex128 it means the iteration is stuck on the physics (a scenario past the loadability limit), not on the arithmetic.\n"
+     }
+    },
+    "precision": {
+     "complex64_cond_warn": {
+      "value": 1000.0,
+      "units": "condition number of the factored system",
+      "description": "Estimated 1-norm condition number above which a plain complex64 solve logs a one-time WARNING. The relative error of a single-precision solve grows like cond * eps_single (eps_single ~ 1.2e-7), so at cond = 1e3 about four of the seven single-precision digits are already gone. SI-unit power systems sit above this routinely \u2014 measured on the factored fundamental system: IEEE-33 cond ~2.8e3, CIGRE LV ~1.7e4 single-phase-equivalent and ~5.5e4 three-phase, and a stiff source or a near-ideal switch pushes it decades higher \u2014 which is the point of the warning. The recommended recipe: solve at complex128, or at complex128 with precision=\"mixed\" (single-precision factorization refined against double-precision residuals), and store complex64. The estimate itself costs a few back-substitutions and is taken ONCE per process.\n"
+     },
+     "refine_steps": {
+      "value": 2,
+      "units": "count",
+      "description": "Iterative-refinement steps applied by a mixed-precision solve: the solution of the single-precision factorization is corrected with residuals formed at the working precision, x <- x + A_single^-1 (b - A*x). Each step multiplies the relative error by about cond * eps_single, so two steps recover double-precision accuracy for cond up to ~1e5 and are the documented default; the nonlinear outer iteration (itself a residual correction) continues the refinement beyond that.\n"
+     }
+    },
+    "equilibration": {
+     "mode": {
+      "value": "symmetric",
+      "units": "name: off | symmetric",
+      "description": "Diagonal equilibration applied around the power-flow and harmonic factorization paths (the nodal admittance, the Newton state Jacobian, the implicit-function adjoint). `solve_anchored` and `AnchoredSystem` do not yet apply this setting. An SI-unit admittance matrix spans decades \u2014 a stiff source row near 1e5 S next to a low-voltage cable row near 1e-2 S \u2014 so it is badly SCALED rather than intrinsically ill-conditioned, and a rescaling removes most of the condition number. \"symmetric\" is van der Sluis scaling d_i = |Y_ii|^-1/2 applied as the congruence D Y D: it keeps symmetry and sparsity, reads only the diagonal, and is within sqrt(n) of the best condition number any diagonal scaling can reach. \"off\" factors the matrix as assembled. The scaling is undone on the solution, so results, reported quantities and gradients are unchanged; what changes is the conditioning of the factored system, the meaning of the condition estimate, and the robustness of a single-precision factorization.\n"
+     },
+     "power_of_two": {
+      "value": true,
+      "units": "boolean",
+      "description": "Round every equilibration scale factor to a power of two. The scaled matrix D Y D is then exact in binary floating point, so the equilibration introduces no rounding error of its own and cannot move a solution it was only meant to condition; the cost is at most a factor 2 per scale factor (4 in the condition number), which is negligible against the decades it removes. Set to false to use the unrounded scales.\n"
+     }
+    },
+    "harmonic": {
+     "system_budget_mb": {
+      "value": 1024.0,
+      "units": "MiB",
+      "description": "Memory budget for the assembled harmonic system Y(h) of one scenario chunk. The device harmonic shunt on the `operating_point` basis depends on the scenario, so the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a 294-row grid at 13 orders in complex128. The budget decides how many scenarios are assembled and factored at a time, which bounds the peak allocation independently of the batch size (at least one scenario is always attempted). On the dense route (the dense and block backends, every CUDA solve, mixed precision) it is charged the dense matrix AND its factorisation, which for a dense LU is a second copy of the same size. Where the harmonic orders are factored by the sparse backend (CPU, full precision) the dense matrix is never formed: each system is assembled as its structural entries over the topology's sparsity pattern, and the budget is charged 384 KiB per system plus 48 numbers per pattern entry: three times what one system holds when measured in isolation (its entries, their scatter and factorization copies, and the L and U factors, which SuperLU sizes from a fill estimate), because the heap keeps a finished chunk's factors largely resident while the next chunk allocates. That is O(N) per system instead of O(N^2), so a chunk holds several times more scenarios for the same budget and one scenario of a large grid no longer exceeds it. On both routes the per-scenario injection and solution vectors and the fundamental solve grow with the batch outside the chunk and are not charged against the budget. It has no effect when Y(h) is scenario-independent \u2014 no device shunt, or the `nameplate` shunt basis \u2014 where one factorization per order serves the whole batch. 1 GiB keeps a single chunk for a small grid or a small batch and fits alongside the fundamental solve on a 12 GB accelerator.\n"
+     },
+     "preparation_min_rows": {
+      "value": 256,
+      "units": "rows of Y(h) (one per existing node-phase)",
+      "description": "Smallest system for which a CHUNKED harmonic scenario run prepares a reusable `HarmonicFlowSystem` on the CPU. The preparation hoists the network assembly and an operating-point-independent factorization out of the chunk loop and pays for that with a value snapshot of the grid and one key comparison per chunk. On one CPU thread at complex128 over orders 1..13 the trade is a LOSS up to about 200 rows (0.85 to 0.98 of the uncached call), crosses 1.0 between 201 and 255 rows, and then grows: 1.10 to 1.18 at 300 rows, 1.24 to 1.64 at 450 and 1.28 to 1.42 at 900. 256 rows sits on that crossing, so a grid just below the gate gives up at most a few percent and a grid just above it pays at most a few percent. Those figures are for a Y(h) that does not carry the scenario; a per-scenario Y(h) over a batch has no reusable factorization and stays within a percent of the uncached call at every size, so the gate neither helps nor hurts it. An ACCELERATOR is never gated, whatever this value: every size measured there, from 99 rows up, gains 1.1x to 2.5x, because the assembly and factorization the preparation removes are a larger share of a GPU call while its back-substitutions are relatively cheaper. Set to 0 to prepare at every size, or above the largest grid in use to keep the uncached path everywhere.\n"
+     }
+    },
+    "ift": {
+     "jacobian_budget_mb": {
+      "value": 1024.0,
+      "units": "MiB",
+      "description": "Memory budget for building the block-diagonal real state Jacobian of the implicit-function (gradient) path and of the dense Newton direction. The vectorized build differentiates the batched residual in one call, which replicates the residual's [B, N, N] admittance once per output row and therefore peaks at B^2 * 2N^3 * itemsize bytes; the budget decides how many scenarios are built at a time (the solver falls back to a column-by-column build costing 2N Jacobian-vector products and O(B*(2N)^2) memory when a single scenario already exceeds it). 1 GiB keeps the fast whole-batch build for small systems and small batches, bounds the peak monotonically in the batch size, and fits alongside the forward solve on a 12 GB accelerator. Raise it on a larger card to keep the vectorized build at larger batches; lower it to leave more room for the forward.\n"
+     },
+     "adjoint_factor_cache_mb": {
+      "value": 256.0,
+      "units": "MiB",
+      "description": "Largest LU factorization of the state Jacobian that the gradient path keeps cached for REPEATED vector-Jacobian products of the same solve (building a full output Jacobian row by row, or any second backward pass with retain_graph). Caching turns every further product into one back-substitution instead of a complete Jacobian rebuild and factorization; above this size the factors are rebuilt per product instead, so a large batched solve does not hold a big factorization alive for the lifetime of the graph. The factors of B scenarios of an N-row grid take B*(2N)^2*8 bytes in double precision: 256 MiB holds a single grid of about 2900 rows or 90 scenarios of a 294-row three-phase LV feeder, the sizes for which a full output Jacobian is built row by row, and stays small next to the forward solve's own memory.\n"
+     }
+    },
+    "loadability": {
+     "ramp": {
+      "value": "load",
+      "units": "name: load | all",
+      "description": "What the loadability analysis' scaling factor lambda multiplies. \"load\" scales the loads only and holds generation at its nameplate value \u2014 the textbook continuation-power-flow ramp, and what a published loadability or P-V curve means. \"all\" scales every injecting device, loads and generation together, which is the joint ramp of a whole operating point; on a feeder with substantial generation the two limits differ materially, because ramping generation with the load offsets the voltage drop the ramp is meant to create.\n"
+     }
+    }
+   }
+  },
+  "pgml_tolerance_defaults": {
+   "solve_power_flow": null,
+   "solve_power_flow_unit": "per unit",
+   "solve_harmonic_flow": null,
+   "solve_harmonic_flow_unit": "per unit"
+  },
+  "tolerance_mode": "library",
+  "guard_tol_pu": 1e-06,
+  "timed_region_host_result": true,
+  "pgm_isolated_process": true,
+  "pgml_single_call_isolated_process": true,
+  "cpu_allocation": {
+   "logical_cpus": 8,
+   "physical_cores": 4,
+   "threads_per_core": 2.0,
+   "cpu_workers": 8,
+   "blas_thread_env": {
+    "OMP_NUM_THREADS": "4",
+    "MKL_NUM_THREADS": "4",
+    "OPENBLAS_NUM_THREADS": "4",
+    "NUMEXPR_NUM_THREADS": "4"
+   }
+  },
+  "allocation": {
+   "logical_cpus": "8",
+   "memory_mb": "32768"
+  }
+ },
+ "pgml_dtypes": [
+  "c128"
+ ],
+ "fundamental": {
+  "mode": "fundamental",
+  "source": "bench_batch_throughput_fair.json",
+  "workers": 8,
+  "pgml_dtypes": [
+   "c128"
+  ],
+  "grids": {
+   "kerber": {
+    "label": "Kerber Vorstadtnetz",
+    "rows": 294,
+    "curves": {
+     "pgml_gpu": {
+      "1": 22.595681179076557,
+      "4": 89.83509181286885,
+      "16": 306.8419364666118,
+      "64": 1220.1307009893123,
+      "256": 4832.244114146094,
+      "1024": 18618.60800843818,
+      "4096": 51165.99128509753,
+      "16384": 73448.10385674583,
+      "65536": 83980.73050086793
+     },
+     "pgml_cpu_pool": {
+      "1": 40.2485250173781,
+      "4": 164.98001423323575,
+      "16": 626.5248797732269,
+      "64": 2270.71636536696,
+      "256": 8438.63610960502,
+      "1024": 19755.945416481256,
+      "4096": 23818.14798638318,
+      "16384": 28616.43113319142,
+      "65536": 26410.142350558574
+     },
+     "pgml_cpu_single": {
+      "1": 46.27145963418152,
+      "4": 181.23401464918945,
+      "16": 675.5455883030161,
+      "64": 2152.3657010553475,
+      "256": 6399.710086455444,
+      "1024": 3447.6806573390368,
+      "4096": 4047.7398184003705,
+      "16384": 5892.878605899514,
+      "65536": 9600.489784836916
+     },
+     "pandapower": {
+      "1": 161.1892145167249,
+      "4": 713.944289397485,
+      "16": 1256.7645425105397,
+      "64": 1578.5734708262078,
+      "256": 1603.9196595350595,
+      "1024": 1570.9009451670634,
+      "4096": 1604.9622417098365,
+      "16384": 1593.1614148326673,
+      "65536": 1604.1757827885986
+     },
+     "power_grid_model": {
+      "1": 2635.3445630341485,
+      "4": 8803.825739292548,
+      "16": 20704.87397890931,
+      "64": 41916.1164934724,
+      "256": 56442.26757715287,
+      "1024": 60848.482172994474,
+      "4096": 58145.37409545807,
+      "16384": 57874.9359273478,
+      "65536": 58158.24158293276
+     },
+     "opendss": {
+      "1": 1246.0205140925414,
+      "4": 5774.90608865624,
+      "16": 11164.725427384623,
+      "64": 14052.650343696458,
+      "256": 24534.738368143862,
+      "1024": 25653.54596416156,
+      "4096": 25932.46342442086,
+      "16384": 25201.93872740479,
+      "65536": 25940.42554679058
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.14018109863505815,
+       "ratio_at_largest": 52.35132670740179,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.008574089891707177,
+       "ratio_at_largest": 1.4440039487973977,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.018134277023145694,
+       "ratio_at_largest": 3.237446137858685,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 64,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.24969738290524357,
+       "ratio_at_largest": 16.46337180371146,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.015272585445539921,
+       "ratio_at_largest": 0.45410833669890305,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.0323016551992248,
+       "ratio_at_largest": 1.0181075211322472,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 64,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.287063000914248,
+       "ratio_at_largest": 5.984686895190518,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.017558030279314917,
+       "ratio_at_largest": 0.1650753104552992,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.037135391521126236,
+       "ratio_at_largest": 0.3700976210864326,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 83980.73050086793,
+     "pgml_cpu_pool": 28616.43113319142,
+     "pgml_cpu_single": 9600.489784836916,
+     "pandapower": 1604.9622417098365,
+     "power_grid_model": 60848.482172994474,
+     "opendss": 25940.42554679058
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 2635.3445630341485,
+     "all": {
+      "pgml_gpu": 22.595681179076557,
+      "pgml_cpu_pool": 40.2485250173781,
+      "pgml_cpu_single": 46.27145963418152,
+      "pandapower": 161.1892145167249,
+      "power_grid_model": 2635.3445630341485,
+      "opendss": 1246.0205140925414
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 65536,
+     "tool": "pgml_gpu",
+     "throughput": 83980.73050086793,
+     "all": {
+      "pgml_gpu": 83980.73050086793,
+      "pgml_cpu_pool": 26410.142350558574,
+      "pgml_cpu_single": 9600.489784836916,
+      "pandapower": 1604.1757827885986,
+      "power_grid_model": 58158.24158293276,
+      "opendss": 25940.42554679058
+     }
+    }
+   },
+   "kerber_x4": {
+    "label": "Kerber Vorstadtnetz x4",
+    "rows": 1176,
+    "curves": {
+     "pgml_gpu": {
+      "1": 6.5116347170522735,
+      "4": 25.51431696043905,
+      "16": 81.92788860136767,
+      "64": 332.32782357824357,
+      "256": 1243.668301125883,
+      "1024": 4024.1181121110835,
+      "4096": 7240.748555929581,
+      "16384": 9135.819436653159,
+      "65536": 10114.805071664063
+     },
+     "pgml_cpu_pool": {
+      "1": 11.838214944340349,
+      "4": 46.759368866464726,
+      "16": 125.66402842246457,
+      "64": 624.9107431584125,
+      "256": 2007.0601162134296,
+      "1024": 4457.418862321137,
+      "4096": 5610.207950902801,
+      "16384": 5732.04666833372,
+      "65536": 5298.060025890761
+     },
+     "pgml_cpu_single": {
+      "1": 14.35809569597226,
+      "4": 54.06369348242925,
+      "16": 198.11528980402448,
+      "64": 693.5901155913771,
+      "256": 928.41029670791,
+      "1024": 928.6982765434491,
+      "4096": 1464.953398021353,
+      "16384": 2330.9822643756825,
+      "65536": 2760.051751643431
+     },
+     "pandapower": {
+      "1": 100.09151384358907,
+      "4": 407.72001620070495,
+      "16": 820.3993510009127,
+      "64": 852.01218055658,
+      "256": 853.763758313081,
+      "1024": 869.742453295868,
+      "4096": 925.0835064274033,
+      "16384": 975.2322779716462,
+      "65536": 970.3784913051346
+     },
+     "power_grid_model": {
+      "1": 920.1249014259153,
+      "4": 3437.073012749477,
+      "16": 8749.657957452428,
+      "64": 13164.23618097275,
+      "256": 14727.007600756613,
+      "1024": 14960.43556376045,
+      "4096": 14555.310238433276,
+      "16384": 14589.758957638363,
+      "65536": 14471.739485368144
+     },
+     "opendss": {
+      "1": 514.942596471843,
+      "4": 1828.990257571803,
+      "16": 3414.912025392191,
+      "64": 6022.878148368054,
+      "256": 6232.601367964724,
+      "1024": 6256.7724682445305,
+      "4096": 6229.2831191155265,
+      "16384": 6261.4998426582115,
+      "65536": 6119.504444808718
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.06505681118209351,
+       "ratio_at_largest": 10.423566847673948,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.007076903045403086,
+       "ratio_at_largest": 0.6989349885610351,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.01264536039874559,
+       "ratio_at_largest": 1.652879765492225,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.11827391244016631,
+       "ratio_at_largest": 5.459787158683828,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.012865878236742312,
+       "ratio_at_largest": 0.366096973432077,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.022989387604464104,
+       "ratio_at_largest": 0.8657661864083124,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.14344968064334962,
+       "ratio_at_largest": 2.844304337301655,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.015604507250832528,
+       "ratio_at_largest": 0.19072011035259587,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.027882905384692444,
+       "ratio_at_largest": 0.4510253692167559,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 10114.805071664063,
+     "pgml_cpu_pool": 5732.04666833372,
+     "pgml_cpu_single": 2760.051751643431,
+     "pandapower": 975.2322779716462,
+     "power_grid_model": 14960.43556376045,
+     "opendss": 6261.4998426582115
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 920.1249014259153,
+     "all": {
+      "pgml_gpu": 6.5116347170522735,
+      "pgml_cpu_pool": 11.838214944340349,
+      "pgml_cpu_single": 14.35809569597226,
+      "pandapower": 100.09151384358907,
+      "power_grid_model": 920.1249014259153,
+      "opendss": 514.942596471843
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 65536,
+     "tool": "power_grid_model",
+     "throughput": 14471.739485368144,
+     "all": {
+      "pgml_gpu": 10114.805071664063,
+      "pgml_cpu_pool": 5298.060025890761,
+      "pgml_cpu_single": 2760.051751643431,
+      "pandapower": 970.3784913051346,
+      "power_grid_model": 14471.739485368144,
+      "opendss": 6119.504444808718
+     }
+    }
+   },
+   "ieee33": {
+    "label": "IEEE 33-bus",
+    "rows": 33,
+    "curves": {
+     "pgml_gpu": {
+      "1": 72.32122169002528,
+      "4": 285.0677115888266,
+      "16": 1140.159528081856,
+      "64": 4543.229705140609,
+      "256": 18068.484596792103,
+      "1024": 71290.13379708496,
+      "4096": 282456.03237773775,
+      "16384": 822963.620641711,
+      "65536": 1335360.3076295427,
+      "262144": 1151315.0895833948
+     },
+     "pgml_cpu_pool": {
+      "1": 128.04726819656838,
+      "4": 523.1936251264464,
+      "16": 2127.6366543562917,
+      "64": 8339.258817366504,
+      "256": 30333.457252982607,
+      "1024": 89722.57648616262,
+      "4096": 182706.33592498818,
+      "16384": 248747.44589499888,
+      "65536": 219143.8226449787,
+      "262144": 217865.98044731747
+     },
+     "pgml_cpu_single": {
+      "1": 160.0228383949464,
+      "4": 577.0357078494332,
+      "16": 2410.2030062951953,
+      "64": 8641.78421707945,
+      "256": 24437.10632729223,
+      "1024": 53953.57754843388,
+      "4096": 121866.77632909072,
+      "16384": 163679.7492930991,
+      "65536": 105061.21265600465,
+      "262144": 108484.59505934113
+     },
+     "pandapower": {
+      "1": 201.22133123518088,
+      "4": 680.7494452275743,
+      "16": 1195.0188642693865,
+      "64": 2157.440725744475,
+      "256": 2168.3347359737136,
+      "1024": 2107.7955109054765,
+      "4096": 2194.364341918427,
+      "16384": 2194.9691878974013,
+      "65536": 2193.8170808575514
+     },
+     "power_grid_model": {
+      "1": 5559.1697501202125,
+      "4": 15353.6109045428,
+      "16": 39649.40515977009,
+      "64": 106489.01327578048,
+      "256": 210891.90562001325,
+      "1024": 282215.4106082676,
+      "4096": 304148.9000659354,
+      "16384": 301924.22668776807,
+      "65536": 297152.25059098453
+     },
+     "opendss": {
+      "1": 2386.2533514752936,
+      "4": 9115.625900990708,
+      "16": 21861.146855567247,
+      "64": 42014.98399267055,
+      "256": 54782.8184550726,
+      "1024": 95400.38794237748,
+      "4096": 97668.51717133669,
+      "16384": 98298.20095704023,
+      "65536": 98518.32682409864
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 64,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.3594113071714977,
+       "ratio_at_largest": 608.692638634921,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.013009356601938877,
+       "ratio_at_largest": 4.4938589728791944,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.030307436402472906,
+       "ratio_at_largest": 13.55443551141288,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.6363503680775819,
+       "ratio_at_largest": 99.89156550796685,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.023033523700872683,
+       "ratio_at_largest": 0.7374799356529842,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.05366038275751549,
+       "ratio_at_largest": 2.2243965129072185,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.7952578258610016,
+       "ratio_at_largest": 47.8896866893464,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.028785384434696575,
+       "ratio_at_largest": 0.35356021180070496,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.06706028858839017,
+       "ratio_at_largest": 1.06641288014958,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 1335360.3076295427,
+     "pgml_cpu_pool": 248747.44589499888,
+     "pgml_cpu_single": 163679.7492930991,
+     "pandapower": 2194.9691878974013,
+     "power_grid_model": 304148.9000659354,
+     "opendss": 98518.32682409864
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 5559.1697501202125,
+     "all": {
+      "pgml_gpu": 72.32122169002528,
+      "pgml_cpu_pool": 128.04726819656838,
+      "pgml_cpu_single": 160.0228383949464,
+      "pandapower": 201.22133123518088,
+      "power_grid_model": 5559.1697501202125,
+      "opendss": 2386.2533514752936
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 262144,
+     "tool": "pgml_gpu",
+     "throughput": 1151315.0895833948,
+     "all": {
+      "pgml_gpu": 1151315.0895833948,
+      "pgml_cpu_pool": 217865.98044731747,
+      "pgml_cpu_single": 108484.59505934113
+     }
+    }
+   },
+   "cigre_lv3": {
+    "label": "CIGRE LV, 3-phase",
+    "rows": 132,
+    "curves": {
+     "pgml_gpu": {
+      "1": 53.81707558265479,
+      "4": 210.28912090448415,
+      "16": 802.8776364915665,
+      "64": 3188.102013639029,
+      "256": 12311.384504915364,
+      "1024": 48720.94213545353,
+      "4096": 141951.0757978856,
+      "16384": 220759.9479434047,
+      "65536": 211195.32443582395,
+      "262144": 215038.37272845415
+     },
+     "pgml_cpu_pool": {
+      "1": 93.51854695937317,
+      "4": 243.07915698855598,
+      "16": 927.7078458349769,
+      "64": 4738.752586357519,
+      "256": 12688.839442732376,
+      "1024": 41099.63682578788,
+      "4096": 57466.540885620685,
+      "16384": 56913.005956408226,
+      "65536": 56726.165451654255,
+      "262144": 47353.3226605976
+     },
+     "pgml_cpu_single": {
+      "1": 111.61418049340627,
+      "4": 425.7038730513632,
+      "16": 1501.3063722988513,
+      "64": 4223.70536800116,
+      "256": 8939.606569644546,
+      "1024": 8191.172492655955,
+      "4096": 8470.221763215612,
+      "16384": 8549.405168831663,
+      "65536": 12407.906164293057,
+      "262144": 15998.617902583484
+     },
+     "pandapower": {
+      "1": 36.22712982436229,
+      "4": 144.17903802518197,
+      "16": 294.03289638736675,
+      "64": 299.57802802790565,
+      "256": 299.97624550911183,
+      "1024": 299.8406822896681,
+      "4096": 300.8228317824155,
+      "16384": 299.12463499723333
+     },
+     "power_grid_model": {
+      "1": 3212.1799731954816,
+      "4": 9907.686637900708,
+      "16": 23630.816144867083,
+      "64": 46472.683597957846,
+      "256": 61065.49852626545,
+      "1024": 64634.97407613104,
+      "4096": 67576.05633869016,
+      "16384": 67569.8029335401,
+      "65536": 67210.22925324323
+     },
+     "opendss": {
+      "1": 994.1178319826229,
+      "4": 7965.286841296942,
+      "16": 17565.702024684957,
+      "64": 28573.481557734376,
+      "256": 42777.56760981419,
+      "1024": 57615.09187009805,
+      "4096": 58460.78075586092,
+      "16384": 58170.58915977694,
+      "65536": 58220.73587609886
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 1.48554621477254,
+       "ratio_at_largest": 738.019949261105,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      },
+      "power_grid_model": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.016754066095841284,
+       "ratio_at_largest": 3.14230924045885,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.05413550974669118,
+       "ratio_at_largest": 3.6274932162533036,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 2.5814506258920664,
+       "ratio_at_largest": 190.26519148760391,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.0291137320261482,
+       "ratio_at_largest": 0.8440108906326477,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.09407189364349705,
+       "ratio_at_largest": 0.974329241945254,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 3.080955654906648,
+       "ratio_at_largest": 28.58141446260599,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.03474717525941497,
+       "ratio_at_largest": 0.18461335874247614,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536
+       ],
+       "ratio_at_smallest": 0.11227459854613822,
+       "ratio_at_largest": 0.21311833279982345,
+       "smallest_batch": 1,
+       "largest_batch": 65536
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 220759.9479434047,
+     "pgml_cpu_pool": 57466.540885620685,
+     "pgml_cpu_single": 15998.617902583484,
+     "pandapower": 300.8228317824155,
+     "power_grid_model": 67576.05633869016,
+     "opendss": 58460.78075586092
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 3212.1799731954816,
+     "all": {
+      "pgml_gpu": 53.81707558265479,
+      "pgml_cpu_pool": 93.51854695937317,
+      "pgml_cpu_single": 111.61418049340627,
+      "pandapower": 36.22712982436229,
+      "power_grid_model": 3212.1799731954816,
+      "opendss": 994.1178319826229
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 262144,
+     "tool": "pgml_gpu",
+     "throughput": 215038.37272845415,
+     "all": {
+      "pgml_gpu": 215038.37272845415,
+      "pgml_cpu_pool": 47353.3226605976,
+      "pgml_cpu_single": 15998.617902583484
+     }
+    }
+   }
+  }
+ },
+ "harmonic": {
+  "mode": "harmonic",
+  "source": "bench_harmonic_batch_fair.json",
+  "workers": 8,
+  "pgml_dtypes": [
+   "c128"
+  ],
+  "grids": {
+   "ieee33": {
+    "label": "IEEE 33-bus",
+    "rows": 33,
+    "curves": {
+     "pgml_gpu": {
+      "1": 24.50581813348152,
+      "4": 59.221747726091635,
+      "16": 237.30924660211977,
+      "64": 942.9749043746938,
+      "256": 3655.742966502635,
+      "1024": 13047.058941906933,
+      "4096": 29547.27877632912,
+      "16384": 38771.77519574574
+     },
+     "pgml_cpu_pool": {
+      "1": 50.34395227825848,
+      "4": 204.68604122964658,
+      "16": 482.44295143953923,
+      "64": 1775.7884495277435,
+      "256": 5334.954824356876,
+      "1024": 10862.011572229676,
+      "4096": 13805.941540484953,
+      "16384": 14846.33609474448
+     },
+     "pgml_cpu_single": {
+      "1": 55.29820082489579,
+      "4": 133.66928397215352,
+      "16": 497.2324824628523,
+      "64": 1597.5392300283497,
+      "256": 3811.9840677392563,
+      "1024": 5970.671896148833,
+      "4096": 7364.416864588614,
+      "16384": 7618.74633398485
+     },
+     "opendss": {
+      "1": 689.4968041298845,
+      "4": 2046.160345396402,
+      "16": 4450.343530409542,
+      "64": 4979.3334160813265,
+      "256": 8136.521948241197,
+      "1024": 7839.693040767568,
+      "4096": 8042.704182811341,
+      "16384": 8010.25234451356
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "opendss": {
+       "crossover_batch": 1024,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.03554159785324432,
+       "ratio_at_largest": 4.840268886447951,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_pool": {
+      "opendss": {
+       "crossover_batch": 1024,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.07301549764511293,
+       "ratio_at_largest": 1.853416778425606,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_single": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.08020080802938566,
+       "ratio_at_largest": 0.9511243848894644,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 38771.77519574574,
+     "pgml_cpu_pool": 14846.33609474448,
+     "pgml_cpu_single": 7618.74633398485,
+     "opendss": 8136.521948241197
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "opendss",
+     "throughput": 689.4968041298845,
+     "all": {
+      "pgml_gpu": 24.50581813348152,
+      "pgml_cpu_pool": 50.34395227825848,
+      "pgml_cpu_single": 55.29820082489579,
+      "opendss": 689.4968041298845
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 16384,
+     "tool": "pgml_gpu",
+     "throughput": 38771.77519574574,
+     "all": {
+      "pgml_gpu": 38771.77519574574,
+      "pgml_cpu_pool": 14846.33609474448,
+      "pgml_cpu_single": 7618.74633398485,
+      "opendss": 8010.25234451356
+     }
+    }
+   },
+   "kerber": {
+    "label": "Kerber Vorstadtnetz",
+    "rows": 294,
+    "curves": {
+     "pgml_gpu": {
+      "1": 8.423055797617566,
+      "4": 20.78038782961725,
+      "16": 73.54085690183915,
+      "64": 179.05437828846317,
+      "256": 241.05441556219517,
+      "1024": 263.9082171594132,
+      "4096": 269.31952312787996,
+      "16384": 270.4321434302045
+     },
+     "pgml_cpu_pool": {
+      "1": 15.957253702808604,
+      "4": 65.94353205443925,
+      "16": 160.16105971008488,
+      "64": 525.9195590821231,
+      "256": 1177.261620583199,
+      "1024": 1631.1004654896024,
+      "4096": 1845.2322737357915,
+      "16384": 1982.8757197192413
+     },
+     "pgml_cpu_single": {
+      "1": 18.460026896012693,
+      "4": 43.69762438561496,
+      "16": 140.1647432612862,
+      "64": 305.83157546874435,
+      "256": 373.86801382560446,
+      "1024": 367.50267593832,
+      "4096": 428.3416994257701,
+      "16384": 441.7570880225794
+     },
+     "opendss": {
+      "1": 209.69350368484822,
+      "4": 915.7953449416341,
+      "16": 1218.9951424039568,
+      "64": 1992.4043928922795,
+      "256": 1697.6000009992497,
+      "1024": 1915.3526362851876,
+      "4096": 1937.6282765691794,
+      "16384": 1897.2002500660403
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.0401684155665438,
+       "ratio_at_largest": 0.14254275130987937,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_pool": {
+      "opendss": {
+       "crossover_batch": 16384,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.07609798788421705,
+       "ratio_at_largest": 1.0451588964581986,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     },
+     "pgml_cpu_single": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384
+       ],
+       "ratio_at_smallest": 0.08803337524350095,
+       "ratio_at_largest": 0.23284684260778593,
+       "smallest_batch": 1,
+       "largest_batch": 16384
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 270.4321434302045,
+     "pgml_cpu_pool": 1982.8757197192413,
+     "pgml_cpu_single": 441.7570880225794,
+     "opendss": 1992.4043928922795
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "opendss",
+     "throughput": 209.69350368484822,
+     "all": {
+      "pgml_gpu": 8.423055797617566,
+      "pgml_cpu_pool": 15.957253702808604,
+      "pgml_cpu_single": 18.460026896012693,
+      "opendss": 209.69350368484822
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 16384,
+     "tool": "pgml_cpu_pool",
+     "throughput": 1982.8757197192413,
+     "all": {
+      "pgml_gpu": 270.4321434302045,
+      "pgml_cpu_pool": 1982.8757197192413,
+      "pgml_cpu_single": 441.7570880225794,
+      "opendss": 1897.2002500660403
+     }
+    }
+   },
+   "kerber_x4": {
+    "label": "Kerber Vorstadtnetz x4",
+    "rows": 1176,
+    "curves": {
+     "pgml_gpu": {
+      "1": 2.1528360904438903,
+      "4": 3.5848364907506634,
+      "16": 4.79497477826469,
+      "64": 5.249361728612219,
+      "256": 5.371837980382709,
+      "1024": 5.40042094934274
+     },
+     "pgml_cpu_pool": {
+      "1": 4.921466364096888,
+      "4": 13.725469634410787,
+      "16": 45.844427701323845,
+      "64": 141.4600627707974,
+      "256": 243.04030842083583,
+      "1024": 322.97480892301326
+     },
+     "pgml_cpu_single": {
+      "1": 5.515798901733533,
+      "4": 12.897698980091409,
+      "16": 38.55366987218365,
+      "64": 68.45969547652052,
+      "256": 78.72034468650403,
+      "1024": 93.5617013827505
+     },
+     "opendss": {
+      "1": 63.71398667057647,
+      "4": 160.79557148028286,
+      "16": 378.7063896101927,
+      "64": 383.80601992220437,
+      "256": 391.34798278228675,
+      "1024": 393.95179217271817,
+      "4096": 390.68226703837416,
+      "16384": 393.0886750778577
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024
+       ],
+       "ratio_at_smallest": 0.033789065838476,
+       "ratio_at_largest": 0.013708329436854199,
+       "smallest_batch": 1,
+       "largest_batch": 1024
+      }
+     },
+     "pgml_cpu_pool": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024
+       ],
+       "ratio_at_smallest": 0.07724310816622708,
+       "ratio_at_largest": 0.8198333281890824,
+       "smallest_batch": 1,
+       "largest_batch": 1024
+      }
+     },
+     "pgml_cpu_single": {
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024
+       ],
+       "ratio_at_smallest": 0.08657124110365495,
+       "ratio_at_largest": 0.23749530587674225,
+       "smallest_batch": 1,
+       "largest_batch": 1024
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 5.40042094934274,
+     "pgml_cpu_pool": 322.97480892301326,
+     "pgml_cpu_single": 93.5617013827505,
+     "opendss": 393.95179217271817
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "opendss",
+     "throughput": 63.71398667057647,
+     "all": {
+      "pgml_gpu": 2.1528360904438903,
+      "pgml_cpu_pool": 4.921466364096888,
+      "pgml_cpu_single": 5.515798901733533,
+      "opendss": 63.71398667057647
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 16384,
+     "tool": "opendss",
+     "throughput": 393.0886750778577,
+     "all": {
+      "opendss": 393.0886750778577
+     }
+    }
+   }
+  }
+ },
+ "size": {
+  "source": "bench_size_fair.json",
+  "batches": [
+   1,
+   16,
+   256,
+   4096
+  ],
+  "pgml_dtypes": [
+   "c128"
+  ],
+  "rungs": {
+   "16": {
+    "label": "radial MV feeder, 16 buses",
+    "rows": 16,
+    "curves": {
+     "pgml_gpu": {
+      "1": 131.5988592942402,
+      "16": 2092.646436683519,
+      "256": 33171.007126019365,
+      "4096": 504573.99562107713
+     },
+     "pgml_cpu_pool": {
+      "1": 207.39001164434973,
+      "16": 2385.480172003039,
+      "256": 49416.66159288688,
+      "4096": 410650.40258383955
+     },
+     "pgml_cpu_single": {
+      "1": 296.8523524639486,
+      "16": 4525.346313028003,
+      "256": 57406.34844721125,
+      "4096": 310166.3463555276
+     },
+     "pandapower": {
+      "1": 207.5957618144578,
+      "16": 1373.4255685162254,
+      "256": 2316.1006177869226,
+      "4096": 2311.097844593161
+     },
+     "power_grid_model": {
+      "1": 6566.329678125088,
+      "16": 41724.57426493424,
+      "256": 346896.14924926724,
+      "4096": 731709.8966654126
+     },
+     "opendss": {
+      "1": 1443.4138142643305,
+      "16": 28841.355904915974,
+      "256": 117463.68802871788,
+      "4096": 148069.97885922765
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.6339188148352417,
+       "ratio_at_largest": 218.3265398310736,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.02004146391440647,
+       "ratio_at_largest": 0.6895820296001854,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.09117195498181693,
+       "ratio_at_largest": 3.407672503963705,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.9990088903149575,
+       "ratio_at_largest": 177.68629032499024,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03158385609775942,
+       "ratio_at_largest": 0.5612202383147713,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.14368021810159193,
+       "ratio_at_largest": 2.7733535572004846,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 1,
+       "status": "always ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 1.4299538192367596,
+       "ratio_at_largest": 134.20736256630812,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.04520826199952697,
+       "ratio_at_largest": 0.4238925122771118,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.20565990814993432,
+       "ratio_at_largest": 2.094728105893818,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 504573.99562107713,
+     "pgml_cpu_pool": 410650.40258383955,
+     "pgml_cpu_single": 310166.3463555276,
+     "pandapower": 2316.1006177869226,
+     "power_grid_model": 731709.8966654126,
+     "opendss": 148069.97885922765
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 6566.329678125088,
+     "all": {
+      "pgml_gpu": 131.5988592942402,
+      "pgml_cpu_pool": 207.39001164434973,
+      "pgml_cpu_single": 296.8523524639486,
+      "pandapower": 207.5957618144578,
+      "power_grid_model": 6566.329678125088,
+      "opendss": 1443.4138142643305
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "power_grid_model",
+     "throughput": 731709.8966654126,
+     "all": {
+      "pgml_gpu": 504573.99562107713,
+      "pgml_cpu_pool": 410650.40258383955,
+      "pgml_cpu_single": 310166.3463555276,
+      "pandapower": 2311.097844593161,
+      "power_grid_model": 731709.8966654126,
+      "opendss": 148069.97885922765
+     }
+    }
+   },
+   "32": {
+    "label": "radial MV feeder, 32 buses",
+    "rows": 32,
+    "curves": {
+     "pgml_gpu": {
+      "1": 100.72356882620502,
+      "16": 1597.1293272653888,
+      "256": 25197.9987792793,
+      "4096": 391112.4252785969
+     },
+     "pgml_cpu_pool": {
+      "1": 162.40919275550414,
+      "16": 1779.7145143699768,
+      "256": 26341.407692603934,
+      "4096": 216655.7259606961
+     },
+     "pgml_cpu_single": {
+      "1": 204.18893805730454,
+      "16": 3125.861423076079,
+      "256": 36975.56612754485,
+      "4096": 217610.66357687203
+     },
+     "pandapower": {
+      "1": 213.86156642864697,
+      "16": 1233.7106781192106,
+      "256": 2282.8268970218323,
+      "4096": 2269.298098425495
+     },
+     "power_grid_model": {
+      "1": 6002.330090140452,
+      "16": 39166.06019376861,
+      "256": 253187.60929201366,
+      "4096": 416400.6101798813
+     },
+     "opendss": {
+      "1": 1249.0569609209415,
+      "16": 24079.631842331873,
+      "256": 68580.03209948172,
+      "4096": 131431.1626379971
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.4709755497830909,
+       "ratio_at_largest": 172.3495143938833,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.016780744696406415,
+       "ratio_at_largest": 0.9392695777022033,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.08063969216579249,
+       "ratio_at_largest": 2.975796739741578,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.7594127148118993,
+       "ratio_at_largest": 95.47257194240727,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.027057690982753638,
+       "ratio_at_largest": 0.5203059761778513,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.13002544946850006,
+       "ratio_at_largest": 1.6484349800468123,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.9547715443552144,
+       "ratio_at_largest": 95.89337942329244,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03401827873357205,
+       "ratio_at_largest": 0.5225992908196417,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.1634744807048304,
+       "ratio_at_largest": 1.6557006664868397,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 391112.4252785969,
+     "pgml_cpu_pool": 216655.7259606961,
+     "pgml_cpu_single": 217610.66357687203,
+     "pandapower": 2282.8268970218323,
+     "power_grid_model": 416400.6101798813,
+     "opendss": 131431.1626379971
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 6002.330090140452,
+     "all": {
+      "pgml_gpu": 100.72356882620502,
+      "pgml_cpu_pool": 162.40919275550414,
+      "pgml_cpu_single": 204.18893805730454,
+      "pandapower": 213.86156642864697,
+      "power_grid_model": 6002.330090140452,
+      "opendss": 1249.0569609209415
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "power_grid_model",
+     "throughput": 416400.6101798813,
+     "all": {
+      "pgml_gpu": 391112.4252785969,
+      "pgml_cpu_pool": 216655.7259606961,
+      "pgml_cpu_single": 217610.66357687203,
+      "pandapower": 2269.298098425495,
+      "power_grid_model": 416400.6101798813,
+      "opendss": 131431.1626379971
+     }
+    }
+   },
+   "64": {
+    "label": "radial MV feeder, 64 buses",
+    "rows": 64,
+    "curves": {
+     "pgml_gpu": {
+      "1": 68.01561631438321,
+      "16": 1085.5828700416766,
+      "256": 16992.700823931726,
+      "4096": 263300.3301825758
+     },
+     "pgml_cpu_pool": {
+      "1": 114.56273328330944,
+      "16": 1654.3524180740244,
+      "256": 24765.16620986361,
+      "4096": 172239.61684899588
+     },
+     "pgml_cpu_single": {
+      "1": 143.99447110662723,
+      "16": 2097.160640035596,
+      "256": 23769.073147841045,
+      "4096": 138877.33752110283
+     },
+     "pandapower": {
+      "1": 208.10082835662107,
+      "16": 1368.5620606097177,
+      "256": 2229.9253944235165,
+      "4096": 2226.1669485307634
+     },
+     "power_grid_model": {
+      "1": 5044.543595700537,
+      "16": 34248.183472384575,
+      "256": 162516.1622463206,
+      "4096": 214945.06235947643
+     },
+     "opendss": {
+      "1": 973.153624288468,
+      "16": 18337.164297119827,
+      "256": 37792.57170114253,
+      "4096": 68584.9924162319
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.3268397192433337,
+       "ratio_at_largest": 118.27519510895175,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.013483006940876258,
+       "ratio_at_largest": 1.2249657065498416,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.06989196219056737,
+       "ratio_at_largest": 3.8390370969883048,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.5505155082178914,
+       "ratio_at_largest": 77.37048515731105,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.022710227617212236,
+       "ratio_at_largest": 0.8013192532003387,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.11772317383812166,
+       "ratio_at_largest": 2.5113309892009585,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.6919456892303418,
+       "ratio_at_largest": 62.384062261260226,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.028544598411113682,
+       "ratio_at_largest": 0.6461062003315196,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.14796684460987378,
+       "ratio_at_largest": 2.024893969197771,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 263300.3301825758,
+     "pgml_cpu_pool": 172239.61684899588,
+     "pgml_cpu_single": 138877.33752110283,
+     "pandapower": 2229.9253944235165,
+     "power_grid_model": 214945.06235947643,
+     "opendss": 68584.9924162319
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 5044.543595700537,
+     "all": {
+      "pgml_gpu": 68.01561631438321,
+      "pgml_cpu_pool": 114.56273328330944,
+      "pgml_cpu_single": 143.99447110662723,
+      "pandapower": 208.10082835662107,
+      "power_grid_model": 5044.543595700537,
+      "opendss": 973.153624288468
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "pgml_gpu",
+     "throughput": 263300.3301825758,
+     "all": {
+      "pgml_gpu": 263300.3301825758,
+      "pgml_cpu_pool": 172239.61684899588,
+      "pgml_cpu_single": 138877.33752110283,
+      "pandapower": 2226.1669485307634,
+      "power_grid_model": 214945.06235947643,
+      "opendss": 68584.9924162319
+     }
+    }
+   },
+   "128": {
+    "label": "radial MV feeder, 128 buses",
+    "rows": 128,
+    "curves": {
+     "pgml_gpu": {
+      "1": 41.44593246714567,
+      "16": 644.9674882196571,
+      "256": 10196.690151134588,
+      "4096": 145855.0877325698
+     },
+     "pgml_cpu_pool": {
+      "1": 66.0351723379678,
+      "16": 1116.2940460463753,
+      "256": 15720.021525064154,
+      "4096": 90511.85222814251
+     },
+     "pgml_cpu_single": {
+      "1": 85.78813961250171,
+      "16": 1290.7103194531426,
+      "256": 13019.699618824645,
+      "4096": 70852.74951237898
+     },
+     "pandapower": {
+      "1": 203.47676917173192,
+      "16": 1145.632520100319,
+      "256": 2124.3861619482127,
+      "4096": 2114.6394808569876
+     },
+     "power_grid_model": {
+      "1": 3603.408368696504,
+      "16": 26482.126638863818,
+      "256": 95773.00806997741,
+      "4096": 108063.27474210724
+     },
+     "opendss": {
+      "1": 1346.3969722608763,
+      "16": 13395.386243757535,
+      "256": 19743.53903829206,
+      "4096": 34939.1760093122
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.2036887681864351,
+       "ratio_at_largest": 68.97397360303704,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.011501869404310205,
+       "ratio_at_largest": 1.3497193017762292,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03078284734817062,
+       "ratio_at_largest": 4.17454285967407,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.3245342090242985,
+       "ratio_at_largest": 42.80249803690476,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.018325753170700256,
+       "ratio_at_largest": 0.8375819855926895,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.04904584138144727,
+       "ratio_at_largest": 2.5905548603670203,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 16,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.4216114692685019,
+       "ratio_at_largest": 33.50582931690318,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.023807498577668753,
+       "ratio_at_largest": 0.655659840787436,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.06371682451754615,
+       "ratio_at_largest": 2.0278883936328347,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 145855.0877325698,
+     "pgml_cpu_pool": 90511.85222814251,
+     "pgml_cpu_single": 70852.74951237898,
+     "pandapower": 2124.3861619482127,
+     "power_grid_model": 108063.27474210724,
+     "opendss": 34939.1760093122
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 3603.408368696504,
+     "all": {
+      "pgml_gpu": 41.44593246714567,
+      "pgml_cpu_pool": 66.0351723379678,
+      "pgml_cpu_single": 85.78813961250171,
+      "pandapower": 203.47676917173192,
+      "power_grid_model": 3603.408368696504,
+      "opendss": 1346.3969722608763
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "pgml_gpu",
+     "throughput": 145855.0877325698,
+     "all": {
+      "pgml_gpu": 145855.0877325698,
+      "pgml_cpu_pool": 90511.85222814251,
+      "pgml_cpu_single": 70852.74951237898,
+      "pandapower": 2114.6394808569876,
+      "power_grid_model": 108063.27474210724,
+      "opendss": 34939.1760093122
+     }
+    }
+   },
+   "256": {
+    "label": "radial MV feeder, 256 buses",
+    "rows": 256,
+    "curves": {
+     "pgml_gpu": {
+      "1": 23.07049405084509,
+      "16": 344.16711189410506,
+      "256": 5426.102045221076,
+      "4096": 68752.97716125446
+     },
+     "pgml_cpu_pool": {
+      "1": 37.949905204700364,
+      "16": 621.0956868051261,
+      "256": 8222.379117552571,
+      "4096": 32108.499877120397
+     },
+     "pgml_cpu_single": {
+      "1": 46.84770257662581,
+      "16": 703.4720951239917,
+      "256": 7205.634812210396,
+      "4096": 7191.837804200576
+     },
+     "pandapower": {
+      "1": 198.2730812166886,
+      "16": 1082.5570948810941,
+      "256": 2035.979657124894,
+      "4096": 2043.1411212937583
+     },
+     "power_grid_model": {
+      "1": 2380.736945410866,
+      "16": 19585.904521408567,
+      "256": 49039.48641665193,
+      "4096": 47744.798987365015
+     },
+     "opendss": {
+      "1": 1004.139047313779,
+      "16": 7891.93533111526,
+      "256": 16892.9752572998,
+      "4096": 17024.475828618248
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.11635716714177563,
+       "ratio_at_largest": 33.6506257177765,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.009690484324744916,
+       "ratio_at_largest": 1.440009773199568,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.022975397792329745,
+       "ratio_at_largest": 4.038478356301595,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.1914022063500677,
+       "ratio_at_largest": 15.715262906944307,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.015940402520258697,
+       "ratio_at_largest": 0.6725025669417407,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03779347621847989,
+       "ratio_at_largest": 1.8860198810436097,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.23627868336512564,
+       "ratio_at_largest": 3.519990728612304,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.01967781558854284,
+       "ratio_at_largest": 0.15063081124509067,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.046654596992269516,
+       "ratio_at_largest": 0.4224410711142749,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 68752.97716125446,
+     "pgml_cpu_pool": 32108.499877120397,
+     "pgml_cpu_single": 7205.634812210396,
+     "pandapower": 2043.1411212937583,
+     "power_grid_model": 49039.48641665193,
+     "opendss": 17024.475828618248
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 2380.736945410866,
+     "all": {
+      "pgml_gpu": 23.07049405084509,
+      "pgml_cpu_pool": 37.949905204700364,
+      "pgml_cpu_single": 46.84770257662581,
+      "pandapower": 198.2730812166886,
+      "power_grid_model": 2380.736945410866,
+      "opendss": 1004.139047313779
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "pgml_gpu",
+     "throughput": 68752.97716125446,
+     "all": {
+      "pgml_gpu": 68752.97716125446,
+      "pgml_cpu_pool": 32108.499877120397,
+      "pgml_cpu_single": 7191.837804200576,
+      "pandapower": 2043.1411212937583,
+      "power_grid_model": 47744.798987365015,
+      "opendss": 17024.475828618248
+     }
+    }
+   },
+   "512": {
+    "label": "radial MV feeder, 512 buses",
+    "rows": 512,
+    "curves": {
+     "pgml_gpu": {
+      "1": 12.030094882570983,
+      "16": 173.32020557965748,
+      "256": 2701.052246052149,
+      "4096": 29650.54502060545
+     },
+     "pgml_cpu_pool": {
+      "1": 20.697306759196234,
+      "16": 305.2405975991023,
+      "256": 4459.050622139671,
+      "4096": 15849.629727767198
+     },
+     "pgml_cpu_single": {
+      "1": 25.212227720652766,
+      "16": 376.36562172134927,
+      "256": 1629.0433687643654,
+      "4096": 3688.7798354196066
+     },
+     "pandapower": {
+      "1": 175.22003115962153,
+      "16": 1062.5480217109343,
+      "256": 1509.7279949516878,
+      "4096": 1861.3219382053444
+     },
+     "power_grid_model": {
+      "1": 1466.4434705637827,
+      "16": 12893.742563174332,
+      "256": 25529.777692692318,
+      "4096": 24212.356699537246
+     },
+     "opendss": {
+      "1": 662.2792906233183,
+      "16": 4167.038813757748,
+      "256": 8069.764388388199,
+      "4096": 8077.9101809694475
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.06865707535237131,
+       "ratio_at_largest": 15.929831595491756,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.008203585834744754,
+       "ratio_at_largest": 1.2246038412763074,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.018164685281414437,
+       "ratio_at_largest": 3.670571268600937,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.11812180731974331,
+       "ratio_at_largest": 8.515254348234432,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.014113947911840771,
+       "ratio_at_largest": 0.6546091289027689,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03125162911211752,
+       "ratio_at_largest": 1.9620953158289574,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.14388895809340993,
+       "ratio_at_largest": 1.981806456854136,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.017192771645646716,
+       "ratio_at_largest": 0.15235112720316513,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03806887528813371,
+       "ratio_at_largest": 0.4566502663163937,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 29650.54502060545,
+     "pgml_cpu_pool": 15849.629727767198,
+     "pgml_cpu_single": 3688.7798354196066,
+     "pandapower": 1861.3219382053444,
+     "power_grid_model": 25529.777692692318,
+     "opendss": 8077.9101809694475
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 1466.4434705637827,
+     "all": {
+      "pgml_gpu": 12.030094882570983,
+      "pgml_cpu_pool": 20.697306759196234,
+      "pgml_cpu_single": 25.212227720652766,
+      "pandapower": 175.22003115962153,
+      "power_grid_model": 1466.4434705637827,
+      "opendss": 662.2792906233183
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "pgml_gpu",
+     "throughput": 29650.54502060545,
+     "all": {
+      "pgml_gpu": 29650.54502060545,
+      "pgml_cpu_pool": 15849.629727767198,
+      "pgml_cpu_single": 3688.7798354196066,
+      "pandapower": 1861.3219382053444,
+      "power_grid_model": 24212.356699537246,
+      "opendss": 8077.9101809694475
+     }
+    }
+   },
+   "1024": {
+    "label": "radial MV feeder, 1024 buses",
+    "rows": 1024,
+    "curves": {
+     "pgml_gpu": {
+      "1": 6.043837451981584,
+      "16": 85.31371933147926,
+      "256": 1330.7563720836995,
+      "4096": 11228.916531544237
+     },
+     "pgml_cpu_pool": {
+      "1": 10.422806794059452,
+      "16": 149.2210696634455,
+      "256": 2130.307746381033,
+      "4096": 7729.517930970655
+     },
+     "pgml_cpu_single": {
+      "1": 12.501182461507304,
+      "16": 186.21062164691818,
+      "256": 896.9693338944116,
+      "4096": 2187.098349490292
+     },
+     "pandapower": {
+      "1": 146.10548430246203,
+      "16": 836.2275966736263,
+      "256": 1213.179084556087,
+      "4096": 1411.6547682373043
+     },
+     "power_grid_model": {
+      "1": 850.903831384643,
+      "16": 7780.33747425475,
+      "256": 12498.403574889833,
+      "4096": 12139.05979102259
+     },
+     "opendss": {
+      "1": 368.4465224967482,
+      "16": 2227.5448466911866,
+      "256": 3983.1548629578,
+      "4096": 3953.705693438399
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.041366260006160074,
+       "ratio_at_largest": 7.954435308262718,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.007102844327480204,
+       "ratio_at_largest": 0.9250235788317439,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.01640356763588378,
+       "ratio_at_largest": 2.84009923909608,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 256,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.07133754659395641,
+       "ratio_at_largest": 5.475501592094147,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.012249100790977543,
+       "ratio_at_largest": 0.6367476611892957,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.028288519928021418,
+       "ratio_at_largest": 1.9550058932809853,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.08556271875207525,
+       "ratio_at_largest": 1.5493153132768174,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.014691651395157795,
+       "ratio_at_largest": 0.18017032514394196,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.033929435340559186,
+       "ratio_at_largest": 0.5531768217143774,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 11228.916531544237,
+     "pgml_cpu_pool": 7729.517930970655,
+     "pgml_cpu_single": 2187.098349490292,
+     "pandapower": 1411.6547682373043,
+     "power_grid_model": 12498.403574889833,
+     "opendss": 3983.1548629578
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 850.903831384643,
+     "all": {
+      "pgml_gpu": 6.043837451981584,
+      "pgml_cpu_pool": 10.422806794059452,
+      "pgml_cpu_single": 12.501182461507304,
+      "pandapower": 146.10548430246203,
+      "power_grid_model": 850.903831384643,
+      "opendss": 368.4465224967482
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "power_grid_model",
+     "throughput": 12139.05979102259,
+     "all": {
+      "pgml_gpu": 11228.916531544237,
+      "pgml_cpu_pool": 7729.517930970655,
+      "pgml_cpu_single": 2187.098349490292,
+      "pandapower": 1411.6547682373043,
+      "power_grid_model": 12139.05979102259,
+      "opendss": 3953.705693438399
+     }
+    }
+   },
+   "2048": {
+    "label": "radial MV feeder, 2048 buses",
+    "rows": 2048,
+    "curves": {
+     "pgml_gpu": {
+      "1": 2.84614610568364,
+      "16": 39.95217445054001,
+      "256": 588.2975859063106,
+      "4096": 3398.733509801592
+     },
+     "pgml_cpu_pool": {
+      "1": 3.5487273874195298,
+      "16": 61.37404941757216,
+      "256": 815.4228675109533,
+      "4096": 2954.0200391176545
+     },
+     "pgml_cpu_single": {
+      "1": 6.049725941137624,
+      "16": 90.59009539781806,
+      "256": 578.6979294736797,
+      "4096": 1153.414699690333
+     },
+     "pandapower": {
+      "1": 114.8184187950441,
+      "16": 914.6239154280541,
+      "256": 957.1255106444546,
+      "4096": 1025.1491768406188
+     },
+     "power_grid_model": {
+      "1": 442.2616388291994,
+      "16": 4003.1395487771442,
+      "256": 5980.185024347879,
+      "4096": 5745.207256424789
+     },
+     "opendss": {
+      "1": 200.50615683468254,
+      "16": 1013.1931033519829,
+      "256": 1435.6831153809762,
+      "4096": 1667.484630404216
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.024788236378382247,
+       "ratio_at_largest": 3.315355059130089,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.0064354351718549484,
+       "ratio_at_largest": 0.5915771804404155,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.01419480653669049,
+       "ratio_at_largest": 2.038239782142821,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03090730062877946,
+       "ratio_at_largest": 2.881551393546034,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.008024045216343173,
+       "ratio_at_largest": 0.5141711877868659,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.017698844980333736,
+       "ratio_at_largest": 1.77154258891224,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.05268950752523992,
+       "ratio_at_largest": 1.1251188858630434,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.013679065534946876,
+       "ratio_at_largest": 0.20076119941547532,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03017227020178551,
+       "ratio_at_largest": 0.6917093439180504,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 3398.733509801592,
+     "pgml_cpu_pool": 2954.0200391176545,
+     "pgml_cpu_single": 1153.414699690333,
+     "pandapower": 1025.1491768406188,
+     "power_grid_model": 5980.185024347879,
+     "opendss": 1667.484630404216
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 442.2616388291994,
+     "all": {
+      "pgml_gpu": 2.84614610568364,
+      "pgml_cpu_pool": 3.5487273874195298,
+      "pgml_cpu_single": 6.049725941137624,
+      "pandapower": 114.8184187950441,
+      "power_grid_model": 442.2616388291994,
+      "opendss": 200.50615683468254
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "power_grid_model",
+     "throughput": 5745.207256424789,
+     "all": {
+      "pgml_gpu": 3398.733509801592,
+      "pgml_cpu_pool": 2954.0200391176545,
+      "pgml_cpu_single": 1153.414699690333,
+      "pandapower": 1025.1491768406188,
+      "power_grid_model": 5745.207256424789,
+      "opendss": 1667.484630404216
+     }
+    }
+   },
+   "4096": {
+    "label": "radial MV feeder, 4096 buses",
+    "rows": 4096,
+    "curves": {
+     "pgml_gpu": {
+      "1": 1.2120900871450813,
+      "16": 16.97999578790355,
+      "256": 227.48076978411927,
+      "4096": 936.656076268416
+     },
+     "pgml_cpu_pool": {
+      "1": 2.2137599870174025,
+      "16": 22.58442249987207,
+      "256": 294.2427397854685,
+      "4096": 1041.4833470905457
+     },
+     "pgml_cpu_single": {
+      "1": 2.8655386397147873,
+      "16": 42.9779778264167,
+      "256": 270.90320506204813,
+      "4096": 519.7948250647318
+     },
+     "pandapower": {
+      "1": 77.4215408682179,
+      "16": 630.1560795428637,
+      "256": 639.4747448821911,
+      "4096": 700.4927925457586
+     },
+     "power_grid_model": {
+      "1": 221.81113637241006,
+      "16": 1965.0573353450923,
+      "256": 2790.5452792324463,
+      "4096": 2701.6627625293686
+     },
+     "opendss": {
+      "1": 97.37023429576476,
+      "16": 581.0397984726916,
+      "256": 624.2902919452938,
+      "4096": 632.2149934764902
+     }
+    },
+    "crossovers": {
+     "pgml_gpu": {
+      "pandapower": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.015655721567311934,
+       "ratio_at_largest": 1.3371387774946026,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.005464514122095481,
+       "ratio_at_largest": 0.3466961492231153,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.012448260969192333,
+       "ratio_at_largest": 1.481546761676488,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_pool": {
+      "pandapower": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.028593592457498696,
+       "ratio_at_largest": 1.4867866710027748,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.009980382514702091,
+       "ratio_at_largest": 0.3854971692008966,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": 4096,
+       "status": "crosses",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.022735489988583633,
+       "ratio_at_largest": 1.6473562915101518,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     },
+     "pgml_cpu_single": {
+      "pandapower": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.03701216234629491,
+       "ratio_at_largest": 0.7420416463896408,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "power_grid_model": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.012918822231286386,
+       "ratio_at_largest": 0.19239811581001545,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      },
+      "opendss": {
+       "crossover_batch": null,
+       "status": "never ahead",
+       "shared_batches": [
+        1,
+        16,
+        256,
+        4096
+       ],
+       "ratio_at_smallest": 0.029429308252567565,
+       "ratio_at_largest": 0.8221804772557344,
+       "smallest_batch": 1,
+       "largest_batch": 4096
+      }
+     }
+    },
+    "peak_throughput": {
+     "pgml_gpu": 936.656076268416,
+     "pgml_cpu_pool": 1041.4833470905457,
+     "pgml_cpu_single": 519.7948250647318,
+     "pandapower": 700.4927925457586,
+     "power_grid_model": 2790.5452792324463,
+     "opendss": 632.2149934764902
+    },
+    "fastest_at_smallest_batch": {
+     "batch": 1,
+     "tool": "power_grid_model",
+     "throughput": 221.81113637241006,
+     "all": {
+      "pgml_gpu": 1.2120900871450813,
+      "pgml_cpu_pool": 2.2137599870174025,
+      "pgml_cpu_single": 2.8655386397147873,
+      "pandapower": 77.4215408682179,
+      "power_grid_model": 221.81113637241006,
+      "opendss": 97.37023429576476
+     }
+    },
+    "fastest_at_largest_batch": {
+     "batch": 4096,
+     "tool": "power_grid_model",
+     "throughput": 2701.6627625293686,
+     "all": {
+      "pgml_gpu": 936.656076268416,
+      "pgml_cpu_pool": 1041.4833470905457,
+      "pgml_cpu_single": 519.7948250647318,
+      "pandapower": 700.4927925457586,
+      "power_grid_model": 2701.6627625293686,
+      "opendss": 632.2149934764902
+     }
+    }
+   }
+  }
+ },
+ "footprint_source": "bench_footprint.json",
+ "cost_source": "bench_cost_fair.json"
+}

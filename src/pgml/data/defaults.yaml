@@ -818,13 +818,46 @@ solver:
         the system is [B, H, N, N] rather than [H, N, N]: 18 GB for 1024 scenarios of a
         294-row grid at 13 orders in complex128. The budget decides how many scenarios are
         assembled and factored at a time, which bounds the peak allocation independently
-        of the batch size (at least one scenario is always attempted); it is charged the
-        matrix AND its factorisation, which for a dense LU is a second copy of the same
-        size. It has no effect
-        when Y(h) is scenario-independent — no device shunt, or the `nameplate` shunt
-        basis — where one factorization per order serves the whole batch. 1 GiB keeps a
-        single chunk for a small grid or a small batch and fits alongside the fundamental
-        solve on a 12 GB accelerator.
+        of the batch size (at least one scenario is always attempted). On the dense route
+        (the dense and block backends, every CUDA solve, mixed precision) it is charged
+        the dense matrix AND its factorisation, which for a dense LU is a second copy of
+        the same size. Where the harmonic orders are factored by the sparse backend (CPU,
+        full precision) the dense matrix is never formed: each system is assembled as its
+        structural entries over the topology's sparsity pattern, and the budget is charged
+        384 KiB per system plus 48 numbers per pattern entry: three times what one system
+        holds when measured in isolation (its entries, their scatter and factorization
+        copies, and the L and U factors, which SuperLU sizes from a fill estimate),
+        because the heap keeps a finished chunk's factors largely resident while the next
+        chunk allocates. That is O(N) per system instead of O(N^2), so a chunk holds
+        several times more scenarios for the same budget and one scenario of a large grid
+        no longer exceeds it. On both routes the
+        per-scenario injection and solution vectors and the fundamental solve grow with
+        the batch outside the chunk and are not charged against the budget. It has no
+        effect when Y(h) is scenario-independent — no device shunt, or the `nameplate`
+        shunt basis — where one factorization per order serves the whole batch. 1 GiB
+        keeps a single chunk for a small grid or a small batch and fits alongside the
+        fundamental solve on a 12 GB accelerator.
+    preparation_min_rows:
+      value: 256
+      units: "rows of Y(h) (one per existing node-phase)"
+      description: >
+        Smallest system for which a CHUNKED harmonic scenario run prepares a reusable
+        `HarmonicFlowSystem` on the CPU. The preparation hoists the network assembly and
+        an operating-point-independent factorization out of the chunk loop and pays for
+        that with a value snapshot of the grid and one key comparison per chunk. On one
+        CPU thread at complex128 over orders 1..13 the trade is a LOSS up to about 200
+        rows (0.85 to 0.98 of the uncached call), crosses 1.0 between 201 and 255 rows,
+        and then grows: 1.10 to 1.18 at 300 rows, 1.24 to 1.64 at 450 and 1.28 to 1.42 at
+        900. 256 rows sits on that crossing, so a grid just below the gate gives up at
+        most a few percent and a grid just above it pays at most a few percent. Those
+        figures are for a Y(h) that does not carry the scenario; a per-scenario Y(h) over
+        a batch has no reusable factorization and stays within a percent of the uncached
+        call at every size, so the gate neither helps nor hurts it. An ACCELERATOR is
+        never gated, whatever this value: every size measured there, from 99 rows up,
+        gains 1.1x to 2.5x, because the assembly and factorization the preparation
+        removes are a larger share of a GPU call while its back-substitutions are
+        relatively cheaper. Set to 0 to prepare at every size, or above the largest grid
+        in use to keep the uncached path everywhere.
   ift:
     jacobian_budget_mb:
       value: 1024.0

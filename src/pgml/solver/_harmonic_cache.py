@@ -46,6 +46,40 @@ def _equal(saved, current):
     return saved == current
 
 
+def _nbytes(value, seen: set, visited: set) -> int:
+    """Tensor storage reachable from ``value``, counting each storage once.
+
+    Walks containers and object attributes, so a factorization or a prepared system is
+    measured through whatever it happens to hold. ``visited`` carries object ids to
+    keep a cyclic object graph (a grid referencing its own components) finite.
+    """
+    if isinstance(value, Tensor):
+        storage = value.untyped_storage()
+        key = (storage.data_ptr(), storage.nbytes())
+        if key in seen or key[0] == 0:
+            return 0
+        seen.add(key)
+        return key[1]
+    if isinstance(value, (str, bytes, int, float, complex, bool, type(None))):
+        return 0
+    if id(value) in visited:
+        return 0
+    visited.add(id(value))
+    if isinstance(value, dict):
+        return sum(_nbytes(v, seen, visited) for v in value.values())
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return sum(_nbytes(v, seen, visited) for v in value)
+    fields = getattr(value, "__dict__", None)
+    if fields is not None:
+        return sum(_nbytes(v, seen, visited) for v in fields.values())
+    slots = getattr(type(value), "__slots__", ())
+    return sum(
+        _nbytes(getattr(value, name), seen, visited)
+        for name in slots
+        if hasattr(value, name)
+    )
+
+
 def _requires_grad(value):
     if isinstance(value, Tensor):
         return value.requires_grad
@@ -69,23 +103,33 @@ class HarmonicFlowSystem:
     edits; the fundamental-only network fingerprint is not a harmonic cache key.
 
     Stores at most one fundamental preparation, one harmonic network matrix and
-    one harmonic factorization, independent of the number of calls/chunks. Low-rank
+    one harmonic factorization, independent of the number of calls/chunks. Where the
+    orders are factored by the CPU sparse backend, the network entry holds the
+    structural entries ``[Hh, nnz]`` over the topology's sparsity pattern instead of the
+    dense matrix, and the factors are keyed on the factored entries plus that pattern,
+    both compared by value; a changed entry or topology rebuilds exactly as a changed
+    dense matrix does. Low-rank
     device-shunt updates are rebuilt on each call while their base can be reused.
     Differentiable harmonic matrices bypass numerical-factor caching; parameter
     gradients also bypass network caching. RHS-only gradients retain factor reuse.
     No autograd graph is retained by the harmonic entries.
 
-    ``cache_batched_factors=False`` retains only scenario-independent harmonic
-    factors. Use it for streams of different scenario chunks: snapshotting and
-    retaining a full scenario matrix is unnecessary when the next chunk changes
-    its admittances. The default also caches a repeated identical scenario batch.
-    Retention adds a matrix snapshot and factors to the live solve workspace;
-    one entry may still be large. This is bounded by entry count, not a byte cap.
+    By default only scenario-independent harmonic factors are retained. A device
+    shunt on the ``operating_point`` basis makes ``Y(h)`` one matrix PER SCENARIO,
+    and such a batched factorization is then neither validated nor kept: the
+    validity check alone is a second full copy of a ``[B, H, N, N]`` system, and
+    the next batch changes its admittances anyway. Set ``cache_batched_factors``
+    to ``True`` only to replay the SAME scenario batch at the same admittances,
+    which is the one case the entry can serve; it then costs a clone and an exact
+    comparison of the whole batched matrix on every call and retains hundreds of
+    MiB on a moderate grid. Retention is bounded by entry count, not by a byte cap.
 
     ``stats`` returns hit/miss/bypass counts for these three entries. Counts refer
-    to calls, not individual matrices in a frequency/scenario batch. ``clear()``
-    releases the entries and resets the counters. Cache lookup includes exact
-    tensor comparisons, which can synchronize a CUDA device.
+    to calls, not individual matrices in a frequency/scenario batch. ``nbytes()``
+    reports the tensor storage the entries currently hold, so a caller can size the
+    retention against its own memory budget. ``clear()`` releases the entries and
+    resets the counters. Cache lookup includes exact tensor comparisons, which can
+    synchronize a CUDA device.
 
     Give each worker thread its OWN instance, reused sequentially by that worker.
     A shared instance has no locking around lookup/build/publication, ``clear()``,
@@ -98,7 +142,7 @@ class HarmonicFlowSystem:
     independently owned while workers solve.
     """
 
-    def __init__(self, *, cache_batched_factors: bool = True):
+    def __init__(self, *, cache_batched_factors: bool = False):
         self.cache_batched_factors = cache_batched_factors
         self._entries = {}
         self._stats = {}
@@ -107,6 +151,17 @@ class HarmonicFlowSystem:
     def stats(self) -> dict[str, int]:
         """Copy of preparation hit/miss/bypass counters."""
         return dict(self._stats)
+
+    def nbytes(self) -> int:
+        """Bytes of tensor storage retained by the preparation, counting each once.
+
+        Covers both halves of every entry: the value (a matrix, a factorization, a
+        prepared fundamental system) and the key snapshot the validity check compares
+        against, which for a numerical factor is a copy of the matrix itself. Shared
+        storage is counted once, so a view of a retained tensor adds nothing. Python
+        object overhead and non-tensor keys are not included.
+        """
+        return _nbytes(self._entries, set(), set())
 
     def clear(self) -> None:
         """Release all retained preparations and reset counters."""

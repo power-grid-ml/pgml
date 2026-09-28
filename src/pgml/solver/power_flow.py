@@ -73,6 +73,7 @@ from pgml.assembly import (
     device_current_injections,
     injections_from_plan,
     node_phase_index,
+    ybus_structure,
 )
 from pgml.assembly._fusion import (
     NO_FUSION,
@@ -96,6 +97,7 @@ from .equilibration import (
     resolve_equilibration,
 )
 from .harmonic import (
+    _resolve_backend,
     estimate_condition,
     lu_factor_system,
     resolve_precision,
@@ -414,6 +416,10 @@ class _PuConvergence:
             # system seeds (:attr:`PowerFlowSystem.row_abs_scale`) and every convergence
             # test of one solve shares, so no solve reads the matrix for it twice.
             scale = _FloorRowScale() if scale is None else scale
+            #: Are both mismatch thresholds the same number on every row? Then the whole
+            #: mismatch test follows from the row maximum the criterion reports anyway,
+            #: and the two per-row comparisons and their reductions are not formed.
+            self.uniform_mismatch = True
             if self._floor_is_inert(scale, y_eff, band):
                 # The floor cannot reach the requested tolerance anywhere, so both
                 # thresholds ARE that tolerance and the exact row scale is never formed.
@@ -429,6 +435,7 @@ class _PuConvergence:
                 self.ceil_mismatch = torch.clamp(
                     self.floor_mismatch * band * s_scale_pu, min=self.tol_mismatch_pu
                 )
+                self.uniform_mismatch = False
             if warn:
                 self._warn_unreachable()
 
@@ -500,14 +507,26 @@ class _PuConvergence:
         the reported maxima are plain maxima — so a floor-limited row can leave
         ``mismatch_max_pu`` above the requested tolerance on a converged solve, which
         is the honest reading of what the precision allows.
+
+        Both criteria are read off the row MAXIMUM wherever their threshold is one
+        number for every row: ``max_i x_i <= t`` and ``x_i <= t for all i`` are the
+        same statement, including for a non-finite row, and the maximum is formed
+        anyway to report it. The voltage-update threshold is always uniform; the
+        mismatch threshold is uniform unless the per-row precision floor binds
+        somewhere. Each iteration then walks the two row tensors once instead of
+        five times.
         """
-        ok = (mism_rows <= self.thr_mismatch).all(dim=-1) & (
-            upd_rows <= self.thr_update
-        ).all(dim=-1)
-        in_band = (mism_rows <= self.ceil_mismatch).all(dim=-1) & (
-            upd_rows <= self.ceil_update
-        ).all(dim=-1)
-        return ok, in_band, mism_rows.amax(dim=-1), upd_rows.amax(dim=-1)
+        upd_max = upd_rows.amax(dim=-1)
+        mism_max = mism_rows.amax(dim=-1)
+        if self.uniform_mismatch:
+            ok_mismatch = mism_max <= self.thr_mismatch
+            band_mismatch = mism_max <= self.ceil_mismatch
+        else:
+            ok_mismatch = (mism_rows <= self.thr_mismatch).all(dim=-1)
+            band_mismatch = (mism_rows <= self.ceil_mismatch).all(dim=-1)
+        ok = ok_mismatch & (upd_max <= self.thr_update)
+        in_band = band_mismatch & (upd_max <= self.ceil_update)
+        return ok, in_band, mism_max, upd_max
 
     @property
     def mismatch_floor_pu(self) -> float:
@@ -614,6 +633,10 @@ class _BatchIterationState:
         self.since = torch.zeros(shape, dtype=torch.int32, device=device)
         self.upd_hold = torch.zeros(shape, dtype=rdt, device=device)
         self.mism_hold = torch.zeros(shape, dtype=rdt, device=device)
+        #: Has ANY scenario finished? Read back with the loop's own per-iteration
+        #: synchronisation in :meth:`step`, so :meth:`hold` costs nothing until
+        #: there is something to hold.
+        self.any_finished = False
 
     @property
     def finished_mask(self) -> Tensor:
@@ -649,7 +672,11 @@ class _BatchIterationState:
         self.upd_hold = torch.where(newly | failed, upd_vec, self.upd_hold)
         self.mism_hold = torch.where(newly | failed, mism_vec, self.mism_hold)
         fin = self.finished_mask
-        finished = bool(fin.all())
+        # Both verdicts come back in ONE host synchronisation: whether the loop is
+        # done, and whether anything has to be held at all from here on.
+        all_done, any_done = torch.stack((fin.all(), fin.any())).tolist()
+        finished = bool(all_done)
+        self.any_finished = bool(any_done)
         return (
             finished,
             self.done,
@@ -658,9 +685,14 @@ class _BatchIterationState:
         )
 
     def hold(self, v_new: Tensor, v_old: Tensor) -> Tensor:
-        """``v_new`` where a scenario is still iterating, ``v_old`` where it finished."""
-        # Unconditional: asking whether any scenario is held would cost a host
-        # synchronisation per iteration to save one elementwise select.
+        """``v_new`` where a scenario is still iterating, ``v_old`` where it finished.
+
+        While no scenario has finished the select is the identity on every row, so it
+        is skipped: ``any_finished`` was read back by :meth:`step`'s own
+        synchronisation, which the loop makes anyway, and never adds one here.
+        """
+        if not self.any_finished:
+            return v_new
         return torch.where(self.finished_mask.unsqueeze(-1), v_old, v_new)
 
     def report(self) -> _FloorReport:
@@ -1681,6 +1713,20 @@ def _woodbury_base_states(grid: Grid, branch_states: dict) -> dict:
     return base
 
 
+def _factor_pattern(grid, index, y, backend, block_rows=None):
+    """The sparsity pattern of ``y`` for :func:`lu_factor_system`, or ``None``.
+
+    Only the sparse backend consumes it, and it depends on the topology alone, so it
+    is built once per factorization and only where that backend can be selected.
+    """
+    if (
+        not isinstance(y, Tensor)
+        or _resolve_backend(backend, y, block_rows) != "sparse"
+    ):
+        return None
+    return ybus_structure(grid, index, device=y.device)
+
+
 def _woodbury_pieces(
     grid,
     f0,
@@ -1729,6 +1775,7 @@ def _woodbury_pieces(
         precision=precision,
         refine_steps=0,  # the nonlinear outer iteration IS the refinement loop
         equilibrate=equilibrate,
+        pattern=_factor_pattern(grid, index, y_base, factor_backend, block_rows),
     )
     return (
         LowRankOperator(y_base, u, c, u),
@@ -1988,6 +2035,7 @@ def prepare_power_flow(
                 # The nonlinear outer iteration IS the refinement loop.
                 refine_steps=0,
                 equilibrate=eq_mode,
+                pattern=_factor_pattern(grid, index, y_eff, factor_backend, block_rows),
             )
     with torch.no_grad():
         v_base = _node_voltage_bases(grid, index, _rdtype(dtype), device)
@@ -3245,6 +3293,9 @@ def _current_injection_forward(
                 # needs no refinement of its own.
                 refine_steps=0,
                 equilibrate=equilibrate,
+                pattern=_factor_pattern(
+                    grid, index, y_eff0, factor_backend, block_rows
+                ),
             )
         )
         mixed = precision == "mixed"
@@ -3330,15 +3381,19 @@ def _current_injection_forward(
             finished, converged_mask, update_vec, mismatch_vec = state.step(
                 ok, mism_ok, update_vec, mismatch_vec
             )
-            mismatch_max = mismatch_vec.max()
-            update_max = update_vec.max()
-            update_norm_v = torch.linalg.vector_norm(dv, dim=-1).max()
-            update_trace.append(update_max)
+            # Only the per-iteration voltage-update maximum is a HISTORY; everything
+            # else below is read once, after the loop, from the last iterate's own
+            # quantities — so the batch is not reduced again per iteration.
+            update_trace.append(update_vec.max())
             v = v_new
             iterations += 1
             if finished:
                 converged = bool(converged_mask.all())
                 break
+        if iterations:
+            mismatch_max = mismatch_vec.max()
+            update_max = update_vec.max()
+            update_norm_v = torch.linalg.vector_norm(dv, dim=-1).max()
         update_history = torch.stack(update_trace).tolist() if update_trace else []
         if not fc_exact:
             # The loop ran out of iterations on the identity above; the residual the

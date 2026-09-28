@@ -108,15 +108,27 @@ bypass assembly caching, so an equal-valued replacement tensor uses the current
 autograd graph. RHS-only gradients can reuse constant factors. Cached numerical
 entries own their storage; they do not retain the harmonic autograd graph.
 
-Preparation retains at most one entry at each level, but a scenario matrix and
-its factors can be large. ``HarmonicFlowSystem(cache_batched_factors=False)``
-avoids retaining scenario-dependent factors; chunked ``run_scenarios`` uses this
-mode automatically. Use ``system.clear()`` to release entries. Preparation is
-not thread-safe and exact tensor comparisons can synchronize CUDA. Benchmarks
-should distinguish uncached calls, the first prepared call, repeated identical
-batches and genuinely changed operating points. Preparation is not guaranteed
-to improve small-system latency. ``load_shunt_basis="nameplate"`` is a physical
-model choice, not a cache optimization interchangeable with operating-point shunts.
+Preparation retains at most one entry at each level. A device shunt on the
+``operating_point`` basis makes ``Y(h)`` one matrix per scenario, and by default
+those factors are rebuilt every call, because retaining them also retains a copy
+of the whole ``[B, H, N, N]`` system as the validity check and only a replay of
+the identical batch can use it.
+``HarmonicFlowSystem(cache_batched_factors=True)`` asks for that replay and is
+worth its memory nowhere else. Use ``system.clear()`` to release entries.
+Preparation is not thread-safe and exact tensor comparisons can synchronize CUDA.
+
+Whether preparation pays depends on the system size and on the device. What it
+removes is one network assembly and one operating-point-independent
+factorization per call. On an accelerator that is worth 1.1x to 2.5x at every
+size measured, from 99 rows up. On CPU it is a smaller share of the call, so
+preparation loses up to about 200 rows and gains from roughly 256 rows up,
+reaching 1.3x to 1.6x on a feeder of several hundred rows. A per-scenario
+``Y(h)`` has no reusable factorization and gains nothing at any size.
+A chunked harmonic ``run_scenarios`` therefore
+prepares on an accelerator always and on CPU from
+``solver.harmonic.preparation_min_rows`` rows up.
+``load_shunt_basis="nameplate"`` is a physical model choice, not a cache
+optimization interchangeable with operating-point shunts.
 
 For threaded execution, allocate one ``HarmonicFlowSystem`` per worker and reuse
 it sequentially within that worker. Shared-instance lookups, rebuilds, eviction,
@@ -481,8 +493,11 @@ shunt and their parameter values) at prepare time, and
 :func:`~pgml.solver.solve_power_flow` recomputes and compares it on each reuse —
 a same-size grid whose topology or impedances have since changed is REJECTED
 with :class:`~pgml.errors.InputError` instead of silently solving with the
-stale factorization. ``param_overrides`` / ``branch_states`` equality remains
-the caller's own contract (not fingerprinted). Reuse is a FORWARD-only optimization: the
+stale factorization. ``param_overrides`` and ``branch_states`` are recorded as detached
+value snapshots at prepare time and compared on every reuse, so a replaced, added,
+removed or in-place edited entry is REJECTED the same way; an equal-valued replacement
+tensor still reuses the factors and receives its own gradients.
+Reuse is a FORWARD-only optimization: the
 IFT backward always rebuilds its differentiable system from the parameter leaves. The
 autograd node retains an immutable snapshot of the resolved forward defaults, so a delayed
 backward keeps the same physical model after a preset context exits or

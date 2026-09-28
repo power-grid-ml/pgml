@@ -4,44 +4,98 @@
     "app_digital_twin.json": "73f4ca62a44d9a223b2ba4f545e612d587d84ed67bf9e1613599278356c8aa25",
     "bench_batch_throughput_readme_ieee33.json": "19735550398079c81df8cf368c383cdd87cf8e52573b6b50b06658634543d8d9",
     "bench_batch_throughput_readme_kerber.json": "cde883b30b0c7de49266cc84eb29f7b2afbef993cc95fec3e4111da2a8ba0227",
-    "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce"
+    "bench_size_readme.json": "d23aa592e39b4e48f6194cb594a0fd466847c2d258f0cd9a6670f2d0ad5ccdce",
+    "bench_batch_throughput_fair.json": "f81e921f557548643792555e1117aae05459379bd7a9f157029b303d98b3c647",
+    "bench_harmonic_batch_fair.json": "fa0475cd18d408fd9c396e747eb92931734d83775b7b57036bab6366c7c4c61b",
+    "bench_size_fair.json": "9c4cb89d60d7dd439be2718244af5321836f1db9ff05eb1856b7d6e644003f77",
+    "bench_footprint.json": "ec06a2a30bd81b240369afb2079f29d181eb98966365d45aaf0ab4fae3afa02e",
+    "bench_footprint_harmonic.json": "cf0bb3e110a44e3efb9693ac6764db22e2d400affe954a943e2f399591bed3ee",
+    "bench_cost_fair.json": "643adf5b1e1c24c640d59a1f6e8d4f14a133d9717787498b45ff7d1ddb644d68",
+    "bench_fairness_tables.json": "0ace8af392e53b2f622e35c4269e00e4d9593b8c09dc004d20c8626a5465a978"
   },
   "performance_source": {
-    "paper_commit": "5b79a213a9827cf1e5158999e364e4bdc23a1d9b",
+    "paper_commit": "c1146f516f488e322009257c24db1e5289b197ed",
+    "published": [
+      "batch_throughput.json",
+      "harmonic_throughput.json",
+      "size_scaling.json",
+      "footprint.json",
+      "footprint_harmonic.json",
+      "cost.json",
+      "crossovers.json"
+    ],
     "jobs": {
-      "ieee33": {
-        "cpus": "8",
-        "date": "2026-09-18 13:05:53+0200",
-        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
-        "benchmark_source_digest": "9716959de71a"
+      "batch_throughput.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-26 08:01:25+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
       },
-      "kerber": {
-        "cpus": "8",
-        "date": "2026-09-18 13:08:12+0200",
-        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
-        "benchmark_source_digest": "9716959de71a"
+      "harmonic_throughput.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-27 01:12:45+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "c3bc1b3d1049",
+        "benchmark_source_digest": "c2433bc30f7c"
       },
-      "size": {
+      "size_scaling.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-26 10:49:10+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
+      },
+      "footprint.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-26 11:55:37+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
+      },
+      "footprint_harmonic.json": {
+        "cpus": "16",
+        "memory_mb": "196608",
+        "date": "2026-09-27 01:21:03+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "c3bc1b3d1049",
+        "benchmark_source_digest": "c2433bc30f7c"
+      },
+      "cost.json": {
         "cpus": "8",
-        "date": "2026-09-18 13:09:44+0200",
-        "pgml_revision": "b70b5179341168e74acd5d68956fbcffc570ee1f",
-        "benchmark_source_digest": "9716959de71a"
+        "memory_mb": "32768",
+        "date": "2026-09-26 12:03:13+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "242967f7eefb",
+        "benchmark_source_digest": "6831bfbbc71b"
+      },
+      "crossovers.json": {
+        "cpus": "8",
+        "memory_mb": "32768",
+        "date": "2026-09-27 01:21:26+0200",
+        "pgml_revision": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
+        "pgml_source_digest": "c3bc1b3d1049",
+        "benchmark_source_digest": "c2433bc30f7c"
       }
     },
-    "batch_sizes": [
-      1,
-      4,
-      16,
-      64,
-      256,
-      1024,
-      4096
-    ],
-    "size_batches": [
-      1,
-      256
-    ],
-    "all_scenarios_validated": true,
+    "validated_scenarios_per_batch": 256,
+    "validation_scope": "the leading 256 scenarios of every timed batch are re-solved outside the clock and compared with a pgml CPU complex128 reference; a smaller batch is checked in full",
+    "cpu_allocation": {
+      "logical_cpus": 16,
+      "physical_cores": 8,
+      "threads_per_core": 2.0,
+      "cpu_workers": 8,
+      "blas_thread_env": {
+        "OMP_NUM_THREADS": "8",
+        "MKL_NUM_THREADS": "8",
+        "OPENBLAS_NUM_THREADS": "8",
+        "NUMEXPR_NUM_THREADS": "8"
+      }
+    },
     "pandapower_numba": {
       "importable": true,
       "version": "0.67.0",
@@ -54,7 +108,7 @@
       "numpy": "2.4.6",
       "scipy": "1.18.1",
       "pgml": "0.5.1",
-      "pgml_git": "b70b5179341168e74acd5d68956fbcffc570ee1f",
+      "pgml_git": "fae861b2ebe692a42d6d5b0dcecceba7ec63143d-dirty",
       "pandapower": "3.5.4",
       "power_grid_model": "1.13.172",
       "power_grid_model_io": "present",
@@ -97,6 +151,74 @@
       "solverconf_factor_dtype_vs_tools.caption.txt": "d713337dc8d5d2ec8bf09b74087ad20547aabcba1de5ca86c4c32e4318b1c543",
       "solverconf_factor_dtype_vs_tools.json": "d51dc1162e75928b75faabc7ddb06646c29f53f5467a079b9113d6a3db354c46",
       "solverconf_factor_dtype_vs_tools.svg": "c76519f69ae2f2a15b6f9c35b66f8aaed54a49d3808f07b0995aea05e2d70321"
+    }
+  },
+  "solver_strategy_source": {
+    "paper_commit": "6fbd73a341634080b9792a89a23ef1839da6ef87",
+    "pgml_version": "0.5.1",
+    "hardware": "one NVIDIA RTX A2000 12 GB and eight CPU threads of a 16-core workstation",
+    "sha256": {
+      "solver_strategy_preparation.svg": "fb74b53b4e9b8e384aebffd278504b83aeb2399cf773bdd1898d8ca88ce4c7cc",
+      "solver_strategy_preparation.json": "a61e71a56a5d5c142a2d1391e34a59a222db6ffd19258b85ba374468bc9d7729",
+      "solver_strategy_preparation.caption.txt": "6eebd2c50119b7de458c151b512380e1747fdb22930a92c969d118b39b0729b5",
+      "solver_strategy_refactor.svg": "41d9a3b48e9d9dfb7554fb0a2e063c6a3f20a71d9601e8fc54fa0aa83d2b251b",
+      "solver_strategy_refactor.json": "ce069d6a7f3c0bd75181cac7128f62824ae07909f22968b844b22d4cad634307",
+      "solver_strategy_refactor.caption.txt": "133e748fa69ae8461f73a8386b6c81f1d96fd67c91d0e31efd0fd9c064e60c8f",
+      "solver_strategy_method.svg": "5df1df0b059b9bc21dfb69cff138758b26012bc4462675ea98678996a449e925",
+      "solver_strategy_method.json": "91c299a2733530b05819732e12f13ec746fa1632eef5468c01f0e5d850087c0e",
+      "solver_strategy_method.caption.txt": "96cb3059af1d17287444f645286a585e31fcd4a2ecb3170036bb653c582c6c76"
+    }
+  },
+  "harmonic_basis_source": {
+    "pgml_version": "0.5.1",
+    "measured": "2026-09-24",
+    "hardware": "one NVIDIA RTX A2000 12 GB and the CPU of a 16-core workstation",
+    "driver": "scripts/bench/bench_harmonic_basis.py, drawn by scripts/fig_harmonic_basis.py",
+    "sha256": {
+      "harmonic_shunt_basis.svg": "47ecdb366c3b208a4c28e212934b47762eebeac5ac53a88a942f5a7c12bc7f24",
+      "harmonic_shunt_basis.json": "f7afdae2ce763e73305c733bde84ce2d5869a4d6a8831d1a4dd892f84adf6387",
+      "harmonic_shunt_basis.caption.txt": "8b389774eb2f4526d124360e8b0ccbf79dda8b7034054b757ece977f85b2dfad"
+    },
+    "paper_commit": "6fbd73a341634080b9792a89a23ef1839da6ef87"
+  },
+  "capacity_source": {
+    "paper_commit": "f1414719cfbc9c1d523e6b312027f3a6db975446",
+    "published": [
+      "capacity.json",
+      "largegrid.json"
+    ],
+    "pgml_version": "0.5.1",
+    "hardware": "one NVIDIA RTX A2000 12 GB and sixteen CPUs of one workstation, one engine at a time on an otherwise idle node",
+    "cpu_allocation": {
+      "logical_cpus": 8,
+      "physical_cores": 8,
+      "threads_per_core": 1.0,
+      "cpu_workers": 8,
+      "blas_thread_env": {
+        "OMP_NUM_THREADS": "8",
+        "MKL_NUM_THREADS": null,
+        "OPENBLAS_NUM_THREADS": null,
+        "NUMEXPR_NUM_THREADS": null
+      }
+    },
+    "gpu": "NVIDIA RTX A2000 12GB",
+    "versions": {
+      "python": "3.13.15",
+      "torch": "2.13.0",
+      "numpy": "2.4.6",
+      "scipy": "1.18.0",
+      "pgml": "0.5.1",
+      "pgml_git": "sha256:e40a8c2e0fac",
+      "pandapower": "3.5.4",
+      "power_grid_model": "1.13.142",
+      "power_grid_model_io": "present",
+      "numba": "0.65.1",
+      "opendssdirect": "0.9.4"
+    },
+    "sha256": {
+      "capacity.json": "338c6452e7ff33822ee0c38beba4c74f26347b2a7273b003700c8a20d8d1b146",
+      "largegrid.json": "75d360d621808a2116ca23483236b81835045ae103b50422a18b53c980688023",
+      "capacity.svg": "dbc39dfde883a1cfafd5787776f6ab3494c5c167103168fef138ffbec5aaf0f4"
     }
   }
 }

@@ -5,8 +5,14 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
 
 ## Repeated harmonic preparation
 
-- `HarmonicFlowSystem(*, cache_batched_factors=True)` — lazy, bounded preparation;
-  `stats` exposes entry hit/miss/bypass counts, `clear()` releases retained state.
+- `HarmonicFlowSystem(*, cache_batched_factors=False)` — lazy, bounded preparation;
+  `stats` exposes entry hit/miss/bypass counts, `nbytes()` the tensor storage the entries
+  currently hold (each storage counted once; a retained batched matrix is charged twice,
+  once as the value and once as the key snapshot the validity check compares against),
+  `clear()` releases retained state.
+  A per-scenario `Y(h)` is factored but not retained unless `cache_batched_factors=True`,
+  which only serves a replay of the same batch and retains a copy of the whole
+  `[B, H, N, N]` system beside its factors.
 - `prepare_harmonic_flow(grid, harmonic_orders, **solve_kwargs) -> HarmonicFlowSystem`
   warms the preparation with one complete solve (fundamental needed for device shunts).
 - `solve_harmonic_flow(..., system=None)` and
@@ -16,8 +22,17 @@ differentiable, GPU. Consumes the compact node-phase layout from `assembly/`.
   evaluated matrix and numerical options govern exact factor reuse. Device admittances
   and RHS are always current. Harmonic matrix gradients bypass numerical caching;
   RHS-only gradients can reuse factors. No cached harmonic autograd graph.
+- On the structural harmonic route (below) the network entry holds the structural
+  entries `[Hh, nnz]` (key: the dense key plus the pattern) and the factors are keyed on
+  `("pattern", factored entries, pattern, equilibrate, defaults)`, all compared BY VALUE,
+  so a changed entry or topology rebuilds and stale factors are rejected exactly as on the
+  dense route; the retained snapshot of a scenario batch is `B·Hh·nnz` numbers instead of
+  `B·Hh·N²`. The two routes key different representations, so alternating them on one
+  preparation rebuilds rather than mixing.
 - Chunked harmonic `run_scenarios` shares a preparation with
-  `cache_batched_factors=False`; small Woodbury corrections remain per-call.
+  `cache_batched_factors=False`, and on CPU only from
+  `solver.harmonic.preparation_min_rows` rows up (an accelerator is never gated);
+  small Woodbury corrections remain per-call.
   No global or independent sparse-symbolic cache. Not thread-safe; CUDA comparisons
   can synchronize. Storage is bounded by entry count, not bytes.
 
@@ -42,7 +57,7 @@ Module: `pgml.solver` (`from pgml.solver import solve_harmonic`).
     `"symmetric"` / `"off"` / a bool — the diagonal equilibration applied
     around the factorization (see EQUILIBRATION below). Invisible in the result.
 - `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
-  precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`,
+  precision="full", refine_steps=None, equilibrate=None, pattern=None) -> FactoredSystem`,
   `solve_factored(fac, i_inj, *, v_fixed=None) -> v`, `FactoredSystem` and
   `estimate_condition` are exported from `pgml.solver` (the factor-once, solve-many form
   of `solve_harmonic`; implemented in `pgml.solver.harmonic`).
@@ -240,6 +255,16 @@ and, later, by each harmonic). Add the nonlinear fundamental solver:
     so the reported mismatch and the convergence decision are still the nodal ones: one
     matrix-vector product per SOLVE instead of one per iteration. `precision="mixed"`
     keeps the explicit residual — there it IS the next right-hand side.
+    Three more passes over the scenarios-by-rows tensor carry no information and are
+    not made. Both criteria are read off the row MAXIMUM the test reports anyway
+    wherever their threshold is one number for every row (`max_i x_i <= t` and
+    `x_i <= t for all i` are the same statement, non-finite rows included); the
+    voltage-update threshold always is, the mismatch threshold is unless the per-row
+    precision floor binds (`_PuConvergence.uniform_mismatch`). The select that holds
+    a finished scenario is skipped until one has finished (`_BatchIterationState`
+    reads that back with the synchronisation the loop makes anyway). And the
+    per-iteration voltage-update NORM is formed once, after the loop, from the last
+    iterate — only the per-row update maximum is a history.
   - `method="newton"` forward = NEWTON on the real residual `R(x)=0` (`x=[Re V; Im V]`):
     per step solve `J·Δx = −R` with `J = dR/dx` (the SAME real `[2N,2N]` Jacobian the IFT
     backward builds, via `torch.autograd.functional.jacobian`), backtracking line search
@@ -530,8 +555,11 @@ verified empirically). New orchestration:
      operating-point basis. For a constant-power device the two bases are IDENTICAL at
      nameplate loading (`Y_eq` reads the RATED voltage on both).
    - The `"operating_point"` basis assembles and factors the batch in SCENARIO CHUNKS that
-     fit `solver.harmonic.system_budget_mb` (default 1 GiB, charged the matrix plus its
-     factorization): `_solve_harmonic_orders` / `_harmonic_chunk`. Without it, 1024
+     fit `solver.harmonic.system_budget_mb` (default 1 GiB; on the dense route charged the
+     matrix plus its factorization, `_harmonic_chunk`; on the structural route 384 KiB plus
+     48 numbers per pattern entry per system, three times the measured isolated SuperLU
+     footprint because the heap keeps a finished chunk's factors resident,
+     `_pattern_harmonic_chunk`): `_solve_harmonic_orders`. Without it, 1024
      scenarios of a 294-row grid at 13 orders ask for an 18 GB matrix. Inside a chunk
      there is no Python loop over orders or scenarios — one `lu_factor_system` call
      factors every `(scenario, order)` system of the chunk, so the batched dense/CUDA path
@@ -684,6 +712,136 @@ stated, and validated by `tests/topology`, `tests/reference/test_sparse_solver.p
   ALWAYS on CUDA. For `newton`: `"dense"` (auto) / `"matrix_free"`; `"sparse"` and
   `"block"` raise. The sparse backend is differentiable via the linear-solve adjoint
   (`_SparseSolveFn`: one trans='H' solve + batch-folded `-λ·conj(V)ᵀ`).
+- BATCHED DENSE ON CPU (`solver/_dense_lapack.py`): every dense `lu_factor` /
+  `lu_solve` / `solve` on a stack of MORE THAN ONE matrix goes through this module.
+  Some CPU LAPACK builds get the row interchange of a MULTI-THREADED batched LU
+  wrong (oneMKL `ZLASWP` parameter error, then a rejected factorization), which
+  without a guard removes every path that hands a stack of matrices to LAPACK: the
+  operating-point device shunt, a batched voltage node source, `branch_states` with
+  `branch_states_method="assemble"`, and the `[B,2N,2N]` IFT adjoint. Each such call
+  is measured against a probe right-hand side with DISTINCT entries (a constant one
+  is invariant under any row permutation and would hide the failure); a raised call
+  or a residual above round-off for the precision that was FACTORED (so the
+  single-precision factors of a mixed-precision solve are judged by their own)
+  escalates through two repairs and latches the one that works for the process, and a
+  call that is still wrong at the end raises `ComputationError` instead of returning a
+  wrong voltage. The residual is scaled by `max(‖b‖, ‖Ax‖)` first and, only when that
+  exceeds the threshold, by the sound `‖A‖‖x‖+‖b‖` — a badly scaled network (a
+  milliohm switch beside a line) cancels in `Ax` and would otherwise be rejected.
+  The MECHANISM sets the first repair: setting the thread count also disables the math
+  library's dynamic thread adjustment, which would otherwise drop it to one thread when
+  it is entered from inside another parallel region, so the batched factorization calls
+  the per-matrix routine from several threads at once and above roughly 145 rows the
+  blocked kernel rejects the pivot array it is handed and reports success anyway.
+  Factoring the stack ONE MATRIX AT A TIME (`_dense_lapack.PER_MATRIX`) therefore
+  repairs it at the caller's thread count; the batched call in ONE thread
+  (`ONE_THREAD`) stays the last resort, since the repair leans on the same library.
+  `repair_in_use()` reports which is latched. Cost on an unaffected build is the check
+  alone; on an affected one the per-matrix repair replaces the serialized factorization.
+  <sub>Sixteen systems, complex128, eight threads: the check costs 1.6 ms at 200 rows,
+  6.7 at 450, 31.0 at 900, which is 12 % to 18 % of a correct threaded factorization of
+  the same stack. The guarded call with the per-matrix repair takes 10.0 / 69.1 / 274.2
+  ms against 10.0 / 102.8 / 707.5 for the single-threaded batched repair: even at 200
+  rows, 1.5x at 450, 2.6x at 900, at the same backward error.</sub> The repair returns
+  its factors in LAPACK's COLUMN-major layout, which every later back-substitution
+  expects; stacking them as they come would cost each `lu_solve` a transpose and undo
+  the gain. `lu_solve` is left batched and multi-threaded under the
+  per-matrix repair — the defect is in the factorization's row interchange, and a build
+  that also got the back-substitution wrong is caught by the check, which uses it. A
+  SINGLE matrix, CUDA and the sparse backend are untouched, so the nonlinear solvers'
+  per-iteration back-substitutions pay nothing. The thread count is process-global, so
+  a caller that reaches the last resort must serialize concurrent solves.
+- STRUCTURAL HANDOFF to the sparse backend (`lu_factor_system(..., pattern=…)`): the
+  pattern is `pgml.assembly.ybus_structure`, the positions the topology can stamp, and
+  the backend builds each system's compressed-column form by GATHERING those `nnz`
+  values (`_SparseStructure`, one shared column structure per factorization) instead of
+  scanning the dense matrix for its nonzeros. Converting a dense `Y` was 96 per cent of
+  one factorization at 1,176 rows and 99 at 4,096, and allocated an `N x N` temporary per
+  system, which is why a harmonic study whose device shunt follows the operating point —
+  one matrix per (scenario, order) — spent nearly all its time there. `solve_power_flow`
+  and the harmonic orders pass it automatically wherever the backend resolves to sparse
+  (the pattern is topology-only, so ONE serves every order, scenario and chunk); an
+  omitted pattern keeps the dense scan, and the dense, block and CUDA paths are
+  untouched. Equilibration is diagonal and leaves the pattern intact; the ideal-slack
+  path restricts it to the free block with the same row selection it applies to `Y`. The
+  factorization is of the matrix as handed in either way, so results and gradients are
+  unchanged (`tests/reference/test_sparse_solver.py`,
+  `tests/differentiability/test_gradcheck.py`).
+- WITH a pattern the sparse backend forms NO dense matrix at all (`_sparse_system`).
+  The symmetric equilibration reads the diagonal alone (`equilibration.
+  scales_from_diagonal`) and then scales the stored entries; the ideal slack's free-row
+  block is a renumbering of the pattern (`_restrict_pattern`) plus a gather of the
+  entries it keeps. Both were full `O(N²)` copies ahead of the factorization, together
+  an order of magnitude more than it: one `lu_factor_system` call on a 4,096-row system
+  is 131 ms Norton and 258 ms ideal-slack before, 2.0 and 2.2 ms after, solving the
+  same system to the last bit. `FactoredSystem.y_mat` is then a zero-storage stand-in
+  carrying the shape, dtype and device a forward solve reads, and
+  `FactoredSystem.materialised_y()` rebuilds the scaled matrix for the consumers that
+  need its VALUES (the mixed-precision residual, `estimate_condition`). A
+  gradient-carrying or mixed-precision factorization builds it eagerly as before, so
+  the adjoint is unchanged.
+- STRUCTURAL HARMONIC ROUTE (`solve_harmonic_flow`, internal to `_solve_harmonic_orders`):
+  the factorization backend is decided BEFORE assembly, from the row count, the device and
+  `linear_solver` — `harmonic._select_backend(backend, n_rows, device, block_rows=None) ->
+  str`, the one decision `lu_factor_system` also takes (via `_resolve_backend(backend,
+  y_bus, block_rows)`, which reads `n_rows`/device off the matrix and delegates), so the
+  two cannot diverge. Where it is `"sparse"` and `harmonic_flow._structural_route(resolved,
+  device, precision) -> bool` holds (CPU, `precision="full"`), every order is assembled as
+  its STRUCTURAL entries over `ybus_structure` — `harmonic_flow._assemble_harmonic(...,
+  pattern=…)`, the one assembly behind `assemble_harmonic_system`, run on a
+  `pgml.assembly._scatter.PatternAccumulator` — and factored from them by
+  `harmonic.lu_factor_values(values [*batch, nnz], pattern [nnz], n, *, equilibrate=None)
+  -> FactoredSystem` (the `(values, pattern)` entry point of `lu_factor_system`; internal,
+  not in `pgml.solver.__all__`; Norton, full precision, CPU only). The dense
+  `[*batch, Hh, N, N]` never exists. The same stamps run in the same order into the same
+  `index_add_`, the same diagonal gives the same equilibration, the same compressed-column
+  arrays reach SuperLU, so the solved voltages equal the dense-assembled route's BIT FOR BIT
+  at equal scenario chunking (`tests/reference/test_structural_harmonic_route.py`: IEEE-33,
+  294- and 1,176-row feeders with the per-scenario shunt, a grid with four-wire terminals,
+  delta loads, a Dyn transformer, bus fusion, a DER impedance and batched `branch_states`,
+  every shunt model/basis, a batched voltage `node_source`, a deeper-than-flat injection
+  batch). The right-hand side `I(h)` itself differs in its last bit between CHUNK SIZES
+  (the CPU complex multiply rounds differently in its vectorized body and its scalar
+  remainder, so a result depends on an element's position in the tensor), and the two
+  routes charge the budget differently, so at default settings a batch the dense route
+  splits and the structural route does not agrees to ~1e-14 relative instead of exactly.
+  Gradients: `FactoredSystem.sparse_values` holds the factored (scaled) entries and
+  `_SparseValuesSolveFn` differentiates the solve w.r.t. them with the structural part of
+  `-λ Vᴴ` (`_linear_solve_grad_values`, `O(batch·nnz)` memory); float64 gradcheck in
+  `tests/differentiability/test_gradcheck.py::test_gradcheck_structural_harmonic_route`.
+  `FactoredSystem.materialised_y()` densifies the scaled entries on demand
+  (`estimate_condition`). DENSE-ROUTE CASES (each commented at its site): the dense and
+  block backends and `"auto"` below `_SPARSE_MIN_ROWS` or on CUDA (the backend factors the
+  matrix itself); a forced `"sparse"` on CUDA (the dense route raises the backend's CPU-only
+  error); `precision="mixed"` (the refinement residual reads the dense scaled matrix); the
+  low-rank Woodbury device-shunt update (`LowRankOperator` reads the shared shunt-free
+  `[Hh, N, N]`; the structural route assembles that base structurally for the rank test and
+  densifies it only once the update is selected); and every caller that asks for the
+  matrix (`assemble_harmonic_system`, `assemble_harmonic_ybus`, the fused-branch shunt
+  current), which keep their dense return and residual. A voltage `node_source` and a
+  deeper-than-flat batch are served: `_add_to_diagonal` and `_align_y_batch_rank(...,
+  tail=1)` take the accumulator. What the budget bounds on this route:
+  `_pattern_harmonic_chunk` (above); the `[B, Hh, N]` injection/solution and the
+  fundamental solve are what then grow with the batch, on both routes, uncharged.
+- The same module reads LAPACK's own failure report on every CPU factorization it makes: a
+  NEGATIVE LAPACK `info` reports a bad call rather than a singular matrix, leaves
+  unusable factors behind and is not surfaced by `lu_factor`, so it raises
+  `ComputationError` instead of reaching a back-substitution or a converged-looking
+  solve. A POSITIVE `info` is an exact zero pivot and keeps torch's own error, so the
+  batched harmonic path's per-scenario non-finite reporting is unchanged. CPU only —
+  reading `info` on CUDA would synchronise, and the failure is a CPU LAPACK one.
+  ONE array layout serves a back-substitution: the scenario-major `[k, m]` block the
+  caller already holds IS, transposed, the column-major block SuperLU reads, so a
+  contiguous right-hand side shares its memory with the array handed to SuperLU and a
+  single-factorization solve returns a torch view of SuperLU's own output — nothing is
+  transposed in either direction (measured at complex128 on 1176-row and 4096-row
+  feeders: the backend entry was 1.5 to 1.7x the bare back-substitution and is now
+  within one per cent of it).
+  A single factorization answering many right-hand sides splits those right-hand sides
+  by COLUMNS across `_SPARSE_SOLVE_MAX_THREADS` workers, in chunks no narrower than
+  `_SPARSE_SOLVE_MIN_COLS`, which is the width above which a chunk reproduces the
+  undivided call's blocking bit for bit (a further 3.2x and 5.0x at 4096 right-hand
+  sides on those two feeders).
 - `solve_power_flow(..., linear_solver="block", block_rows=[rows_0, …])` /
   `prepare_power_flow(..., linear_solver="block", block_rows=…)` /
   `lu_factor_system(..., backend="block", block_rows=…)` — BLOCK-DIAGONAL
@@ -774,6 +932,12 @@ by the modeled devices and its compact `C` is assembled from the same WYE/DELTA/
 blocks as the exact matrix. Explicit Generator/Storage harmonic impedances belong to the
 scenario-independent base. The automatic path uses the conservative selection rule
 `3k < N`; the actual performance crossover depends on the factorization backend and hardware.
+The rule is applied to the touched-row COUNT before `C` is built (`max_rank`), so a device
+population that covers most rows never materialises the `[*batch, H, k, k]` core it would
+then discard — on a scenario batch that core is the size of the assembled system, which is
+what the low-rank path exists to avoid. The helper returns `(U, C, k)`, `(None, None, k)`
+above `max_rank`, and `None` only when no device carries a modeled shunt at all (the
+shunt-free network is then the harmonic system).
 
 - `low_rank_update(fac, u, c, *, v=None) -> LowRankUpdate` — precompute
   `W = A⁻¹U` (`k` back-substitutions of the base factorization) and the LU of the
@@ -888,7 +1052,7 @@ converges in 9 iterations equilibrated (max |dV| 4.1e-5 -> 1.8e-5 pu).
 # MIXED PRECISION (complex64 factors, complex128 accuracy)
 # =====================================================================
 `lu_factor_system(y_bus, *, fixed_rows=None, backend="auto", block_rows=None,
-precision="full", refine_steps=None, equilibrate=None) -> FactoredSystem`
+precision="full", refine_steps=None, equilibrate=None, pattern=None) -> FactoredSystem`
 
 - `precision="mixed"` factors a complex64 copy of the system and keeps the
   full-precision matrix (`FactoredSystem.y_mat`, or the per-bucket blocks of the block

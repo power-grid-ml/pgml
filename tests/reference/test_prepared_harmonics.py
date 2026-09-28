@@ -214,6 +214,20 @@ def test_lowrank_updates_rebuilt_while_base_reused():
     assert cache.stats["harmonic_factors_misses"] == 1
 
 
+def test_retained_bytes_grow_with_entries_and_are_released():
+    grid, cache = _grid(), HarmonicFlowSystem()
+    assert cache.nbytes() == 0
+    _solve(grid, cache, orders=(1, 5, 7))
+    two_orders = cache.nbytes()
+    # A matrix, its factorization and the key snapshot the validity check keeps.
+    y, _, _ = assemble_harmonic_system(grid, [5, 7], _solve(grid).pf.v)
+    assert two_orders >= 2 * y.numel() * y.element_size()
+    _solve(grid, cache, orders=(1, 3, 5, 7, 9))
+    assert cache.nbytes() > two_orders
+    cache.clear()
+    assert cache.nbytes() == 0
+
+
 def test_assembly_result_cannot_mutate_cache():
     grid, cache = _grid(), HarmonicFlowSystem()
     result = _solve(grid, cache)
@@ -324,6 +338,34 @@ def test_prepared_parameter_gradcheck():
         atol=2e-5,
         rtol=2e-4,
     )
+
+
+def test_batched_scenario_factors_are_retained_only_on_request():
+    """A per-scenario Y(h) is factored but not kept unless a replay asks for it.
+
+    Retaining it also retains a full copy of the [B, H, N, N] system as the validity
+    check, and only the identical batch at the identical admittances can use either.
+    """
+    grid = _grid()
+    op = {2: {"p_w": torch.tensor([1800.0, 2000.0, 2200.0], dtype=torch.float64)}}
+    reference = _solve(grid, operating_point=op).v
+
+    default = HarmonicFlowSystem()
+    assert default.cache_batched_factors is False
+    for _ in range(2):
+        torch.testing.assert_close(
+            _solve(grid, default, operating_point=op).v, reference
+        )
+    assert default.stats["harmonic_factors_bypasses"] == 2
+    assert "harmonic_factors_misses" not in default.stats
+
+    replay = HarmonicFlowSystem(cache_batched_factors=True)
+    for _ in range(2):
+        torch.testing.assert_close(
+            _solve(grid, replay, operating_point=op).v, reference
+        )
+    assert replay.stats["harmonic_factors_misses"] == 1
+    assert replay.stats["harmonic_factors_hits"] == 1
 
 
 def test_streaming_batches_do_not_retain_scenario_factors(monkeypatch):

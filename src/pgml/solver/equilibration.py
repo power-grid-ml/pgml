@@ -63,6 +63,8 @@ from torch import Tensor
 from pgml import defaults
 from pgml.errors import InputError
 
+from . import _dense_lapack
+
 #: Accepted equilibration modes (``"off"`` disables it).
 EQUILIBRATION_MODES = ("off", "symmetric")
 
@@ -129,11 +131,33 @@ def equilibration_scales(
             f"Unsupported equilibration mode {mode!r} "
             f"(use one of {', '.join(repr(m) for m in EQUILIBRATION_MODES)})."
         )
+    return scales_from_diagonal(
+        a.diagonal(dim1=-2, dim2=-1), mode=mode, power_of_two=power_of_two
+    )
+
+
+def scales_from_diagonal(
+    diagonal: Tensor, *, mode: str = "symmetric", power_of_two: Optional[bool] = None
+) -> tuple[Optional[Tensor], Optional[Tensor]]:
+    """:func:`equilibration_scales` from the matrix DIAGONAL alone, ``[*batch, m]``.
+
+    The symmetric (van der Sluis) scaling reads nothing but the diagonal, so a caller
+    that already holds it — or that can gather it without materialising the matrix,
+    which is what the sparse backend does for the free-row block of an ideal-slack
+    system — builds the scales without an ``O(m^2)`` pass. ``mode`` is validated
+    exactly as in :func:`equilibration_scales`.
+    """
+    if mode == "off":
+        return None, None
+    if mode not in EQUILIBRATION_MODES:
+        raise InputError(
+            f"Unsupported equilibration mode {mode!r} "
+            f"(use one of {', '.join(repr(m) for m in EQUILIBRATION_MODES)})."
+        )
     if power_of_two is None:
         power_of_two = _power_of_two_default()
-    rdt = a.real.dtype if a.is_complex() else a.dtype
-    diag = a.diagonal(dim1=-2, dim2=-1).abs().to(rdt)  # [*batch, m]
-    d = _reciprocal(diag, sqrt=True, power_of_two=power_of_two)
+    rdt = diagonal.real.dtype if diagonal.is_complex() else diagonal.dtype
+    d = _reciprocal(diagonal.abs().to(rdt), sqrt=True, power_of_two=power_of_two)
     return d, d
 
 
@@ -210,7 +234,7 @@ class EquilibratedLU:
         """
         d_in, d_out = (self.d_col, self.d_row) if adjoint else (self.d_row, self.d_col)
         b = rhs if d_in is None else rhs * d_in
-        x = torch.linalg.lu_solve(
+        x = _dense_lapack.lu_solve(
             self.lu, self.piv, b.to(self.lu.dtype).unsqueeze(-1), adjoint=adjoint
         ).squeeze(-1)
         if d_out is not None:
@@ -233,8 +257,9 @@ def equilibrated_lu_factor(
     re-factoring, which is what makes a repeated vector-Jacobian product cheap.
     """
     a_hat, d_row, d_col = equilibrate_matrix(a, mode=mode, power_of_two=power_of_two)
-    lu, piv = torch.linalg.lu_factor(
-        a_hat if factor_dtype is None else a_hat.to(factor_dtype)
+    lu, piv = _dense_lapack.lu_factor(
+        a_hat if factor_dtype is None else a_hat.to(factor_dtype),
+        where="equilibrated_lu_factor",
     )
     return EquilibratedLU(
         lu=lu, piv=piv, d_row=d_row, d_col=d_col, mode=mode, out_dtype=a.dtype
@@ -247,6 +272,7 @@ __all__ = [
     "equilibrate_matrix",
     "equilibrated_lu_factor",
     "equilibration_scales",
+    "scales_from_diagonal",
     "resolve_equilibration",
     "scale_matrix",
 ]

@@ -1,0 +1,1 @@
+Iteration count (left) and wall time per scenario (right) of the two fundamental solvers on x86_64 at the largest measured batch. Newton needs up to 8 times fewer iterations, most of it near the fixed point's convergence limit, and is nonetheless slower per scenario because it rebuilds and factors the state Jacobian every step and solves a scenario batch one element at a time.
