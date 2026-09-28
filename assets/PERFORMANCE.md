@@ -22,7 +22,6 @@ digest 242967f7eefb; the harmonic sweep and the harmonic footprint are measured
 with the merged cache-defaults branch in addition, source digest c3bc1b3d1049,
 which touches no timed code path. The README figure is drawn from the fundamental
 sweep of this page and so from the first engine.
-<!-- env.driver, env.torch, env.date: bench_batch_throughput_fair.json environment.driver, environment.versions.torch, environment.date (also provenance.json performance_source.{driver,versions.torch,jobs.*.date}) -->
 
 ## Protocol changes 2026-09-25
 
@@ -204,7 +203,6 @@ tool reports convergence and the largest difference stays within the tolerance
 recorded with it. Points that fail are recorded without a throughput and cannot
 reach a figure. The renderer repeats the check on the recorded values and refuses
 to draw an invalid point.
-<!-- guard.validated_scenarios_per_batch: provenance.json performance_source.validated_scenarios_per_batch (max comparison_scenarios over bench_batch_throughput_fair.json reference rows; 256 expected) -->
 
 The pandapower runs fail at the start if numba cannot be imported, and every
 worker confirms that pandapower really used numba and the pi transformer model.
@@ -230,13 +228,10 @@ cost of a batched solver being paid by a batch of one, and it is the size of the
 loss: at one scenario pgml is 35 times slower on
 the feeder and 57 times slower on the Kerber
 network, and the gap closes only as the batch grows.
-<!-- batch.<grid>.pgm_b1: bench_batch_throughput_fair.json grids.<grid>.baselines.power_grid_model, batch 1 (fairness_tables.py markdown "fastest at the smallest batch"); batch.<grid>.pgml_b1: same file, grids.<grid>.series.* at batch 1, the fastest series; batch.<grid>.pgm_over_pgml_b1: the quotient of the two, hand-derived -->
 
 Where the curves cross, against each reference tool, taking the fastest pgml arm
 on the device:
 
-<!-- crossover table: bench_fairness_tables.json fundamental.grids.<grid>.crossovers.pgml_gpu.{pandapower,opendss,power_grid_model} (fairness_tables.py markdown "Crossovers"); a range is written by hand where the ratio at the crossing batch is below 1.5 -->
-<!-- lead column: bench_fairness_tables.json fundamental.grids.<grid>.crossovers.pgml_gpu.power_grid_model.ratio_at_largest and the batch it was taken at -->
 | Grid | against pandapower | against OpenDSS | against power-grid-model | lead over power-grid-model at the largest common batch |
 |---|---|---|---|---|
 | IEEE 33, 33 rows | 64 | 4,096 | 16,384 | 4.49x at 65,536 |
@@ -250,7 +245,6 @@ measurement on a shared node moves a tool by up to
 63 per cent between runs, and a ratio inside that
 band is not read as a difference. A lead below 1.5 in the last column is read the
 same way: as level, not as ahead.
-<!-- batch.repeat_spread_pct: bench_batch_throughput_fair.json timing.{iqr,median} of the reference rows, the largest relative spread over the run (hand-derived); drop the sentence if the run logs show the node was exclusive -->
 
 The batch at which pgml overtakes power-grid-model does not rise steadily with
 the grid: it is 16,384 scenarios on the 33-row feeder, 4,096 on the 132-row CIGRE
@@ -260,19 +254,16 @@ almost four and a half times on a 33-row feeder,
 just over three times at 132 rows,
 less than one and a half times at 294 rows, and on the 1,176-row network
 it does not overtake it at any batch measured.
-<!-- cross.<grid>.lead_words: the lead column of the table above, rounded in words; cross.kerber_x4.verdict: "it does not overtake it at any batch measured" if bench_fairness_tables.json says never ahead, else the batch and ratio -->
 
 pgml on eight CPU worker processes follows the same shape one level down. It
 overtakes pandapower at a batch of 1 on CIGRE LV, 16 on the 33-bus feeder, 64 on Kerber (level there, 5.2 times at 256) and 256 on the 1,176-row network, OpenDSS at
 4,096 on the 33-bus feeder only (on Kerber it draws level at 16,384, 1.13 times, and on CIGRE LV and the 1,176-row network it stays behind at every batch, at best 0.98 and 0.91 times), and power-grid-model
 at no batch on any of the four grids; at best it reaches 0.85 times power-grid-model's throughput, on CIGRE LV.
-<!-- cross_pool.*: bench_fairness_tables.json fundamental.grids.<grid>.crossovers.pgml_cpu_pool.{pandapower,opendss,power_grid_model}, summarised in words across the four grids -->
 
 pandapower's three-phase solver runs on the CIGRE LV grid in this campaign, on
 the zero-sequence data described above, and agrees with pgml to
 6.7e-10 per unit; its arm is measured,
 not absent.
-<!-- batch.cigre_lv3.pandapower_deviation_pu: bench_batch_throughput_fair.json grids.cigre_lv3.baselines.pandapower[*].reference_deviation_pu, the largest over the ladder -->
 
 ### Grid size
 
@@ -303,11 +294,9 @@ never 1.5 times as fast at any size: it is ahead only from 64 to 512 rows, by at
 4.03 times as fast at 256 rows and 1.48
 times at 4,096. Against pandapower pgml leads from 256 scenarios per batch at
 every size up to 1,024 rows; at 2,048 rows it passes pandapower only at 4,096 scenarios per batch, and at 4,096 rows it is level with it (1.33 times).
-<!-- size.<tool>.r<rows>: bench_fairness_tables.json size.rungs.<rows>.crossovers.pgml_gpu.<tool>.ratio_at_largest at batch 4,096 (fairness_tables.py markdown "Grid size"); size.pgm.verdict_words: the rung range where the ratio is at or above 1.5, in words; size.pandapower.lead_words: the rungs where the pandapower ratio is at or above 1.5 -->
 
 pgml on eight CPU worker processes never overtakes power-grid-model at
 the sizes and batches measured here.
-<!-- size.pool_pgm_words: bench_fairness_tables.json size.rungs.*.crossovers.pgml_cpu_pool.power_grid_model, "never overtakes" if every rung says never ahead -->
 
 ### Harmonic studies
 
@@ -352,7 +341,6 @@ reaches 38,772 on the GPU and
 14,846 on eight CPU workers at
 16,384 studies, so 4.84 and
 1.85 times OpenDSS.
-<!-- harm.ieee33.*: bench_fairness_tables.json harmonic.grids.ieee33 (fairness_tables.py markdown "Harmonic"): the OpenDSS peak, crossovers.pgml_gpu.opendss, the pgml_gpu and pgml_cpu_pool peaks with their batch, and ratio_at_largest of both -->
 
 On the two larger grids the picture is reversed on the GPU and at best level on eight CPU workers. On the
 294-row Kerber network OpenDSS reaches 1,992 studies
@@ -360,14 +348,12 @@ per second against 1,983 for pgml's best arm
 (eight CPU workers, at 16,384 studies per batch; the GPU peaks at 270), and on the 1,176-row network
 394 against 323
 (eight CPU workers, at 1,024; the GPU peaks at 5.4). pgml draws level with OpenDSS on Kerber only at 16,384 studies per batch on eight CPU workers, by 1.04 times, which the 1.5 rule reads as level, and passes it at no batch on the 1,176-row network; on the GPU it stays 7.4 and 73 times below OpenDSS's peak.
-<!-- harm.<grid>.*: bench_fairness_tables.json harmonic.grids.{kerber,kerber_x4}: the OpenDSS peak, the best pgml peak and which series it is, crossovers.*.opendss; harm.large.verdict_words: "the same" or "reversed", from the ratios; harm.large.crossover_words: "never overtakes OpenDSS on either" if both say never ahead, else the batches -->
 
 The harmonic figure measures pgml 0.5.1 at revision 966df9d of its main branch
 with the merged solver branch, the sparse harmonic assembly and the merged
 cache-defaults branch, source digest c3bc1b3d1049. That revision carries the
 structural route of the next subsection, which the CPU sparse backend takes at
 full precision; the GPU arm assembles the dense matrix either way.
-<!-- env.pgml_git: bench_harmonic_batch_fair.json environment.versions.pgml_git (provenance.json performance_source.versions.pgml_git); state after it whether that revision carries the structural route -->
 
 #### Assembling the harmonic matrices sparsely on the CPU
 
@@ -554,7 +540,6 @@ the pool is up but before the solve starts, is recorded beside the peak.
 Host memory at the largest measured batch (4,096 scenarios),
 in MiB:
 
-<!-- host table: bench_footprint.json tree_peak_pss_mib per engine and grid at the largest batch (fairness_tables.py markdown "Memory footprint"); mem.largest_batch: the batch of those rows -->
 | Tool | IEEE 33 | Kerber, 294 rows | Kerber x4, 1,176 rows |
 |---|---|---|---|
 | pgml CPU, one call | 632 | 978 | 1,717 |
@@ -570,7 +555,6 @@ A worker pool costs about 3.5 to 4.4 GB before it solves
 anything, because eight interpreters each hold their own copy of the library. That
 cost barely moves with the grid or the batch, so it dominates every small job.
 pgml's pooled arm and OpenDSS pay it; pandapower pays it and a little more.
-<!-- mem.pool_standing_gb: bench_footprint.json tree_baseline_pss_mib of the three pooled engines, rounded to GB -->
 
 A single process is far leaner. pgml in one batched call and power-grid-model in
 its native threaded batch both stay under 2 GB at
@@ -578,7 +562,6 @@ every point measured, and pgml's single call is the smallest of all on
 the 33-bus feeder at every batch measured, on Kerber up to 1,024 scenarios and on the 1,176-row network up to 64. pgml on the GPU needs about
 1.2 to 1.7 GB on the host, almost all of it the CUDA runtime, and
 then grows on the device instead.
-<!-- mem.single_process_cap_gb: the largest tree_peak_pss_mib of pgml_cpu_single and power_grid_model in bench_footprint.json, rounded up; mem.single_smallest_grids: the grids where pgml_cpu_single has the smallest peak; mem.gpu_host_gb: pgml_gpu tree_peak_pss_mib -->
 
 Device memory has two parts. The matrix and its factorisation do not depend on
 the batch and grow with the square of the grid, 8.3 MiB on
@@ -590,7 +573,6 @@ linearly with the grid, 7.7 KiB per scenario on the
 4,096 scenarios the second part is by far the larger, giving
 38.9 MiB, 223.2 MiB and
 915.1 MiB in total on the device.
-<!-- dev.fixed.<grid>: bench_footprint.json pgml_gpu device_peak_allocated_mib at batch 1; dev.per_scenario.<grid>: (device_peak_allocated_mib at the largest batch minus at batch 1) over the batch difference, hand-derived; dev.total.<grid>: device_peak_allocated_mib at the largest batch -->
 
 ### What the memory is made of
 
@@ -606,7 +588,6 @@ pool up and nothing solving, pgml over eight workers stands at
 3.5 to 3.9 GB, OpenDSS at 4.1 to 4.4 and
 pandapower at 5.3 to 5.6, and the grid and the batch barely
 move those numbers.
-<!-- rest.*_range_gb: bench_footprint.json tree_baseline_pss_mib, the range over grids and batches per pooled engine -->
 
 One process holds the same things once. pgml in a single batched call stands at
 529 to 687 MiB with the grid loaded and its injection plan
@@ -615,12 +596,10 @@ and pgml on the GPU at about 671 to 796 MiB on the host, most of
 which is the CUDA runtime. What a pgml process then adds for the work itself is
 one admittance matrix, one factorisation of it, and one tensor per quantity the
 iteration carries, each of them with a scenario axis.
-<!-- rest.single_range_mib, rest.pgm_range_mib, rest.gpu_host_mib: bench_footprint.json tree_baseline_pss_mib of pgml_cpu_single, power_grid_model and pgml_gpu -->
 
 That is why the two kinds of tool grow differently with the batch. On the
 1,176-row network, measured between one scenario and 4,096:
 
-<!-- standing column: bench_footprint.json tree_baseline_pss_mib at batch 1 (pgml_gpu: host); added per scenario: (tree_peak_pss_mib at the largest batch minus at batch 1) over the batch difference, for pgml_gpu the same on device_peak_allocated_mib; hand-derived, no script prints it -->
 | Tool | standing | added per scenario |
 |---|---|---|
 | pgml CPU, one call | 552 MiB | 273.7 KiB |
@@ -635,14 +614,12 @@ the batch is the input matrix and the result array and nothing else. pgml keeps
 every scenario of the batch in flight, so it pays about
 2.15 times as much per scenario, and a batched
 factorisation and a batched back-substitution are what it buys with that.
-<!-- slope.pgml_over_pgm_factor: the single-call per-scenario slope over power-grid-model's, from the table above -->
 
 The two costs cross. On the 1,176-row network one pgml process passes
 power-grid-model at about 600 (read off the measured points, where it is leaner at 64 and heavier at 1,024; the averaged slopes above would put it near 1,900, but the growth is steeper at small batches) scenarios per batch
 and the pools at about 15,700 for OpenDSS and 22,900 for pandapower, extrapolated from the table; pgml's own pool adds more per scenario than one process and is never passed. Below that pgml is the
 leanest way to solve the case, and above it the pool's standing cost has been
 amortised while pgml is carrying the batch.
-<!-- slope.cross_*_scenarios: linear extrapolation of the standing and per-scenario columns above, hand-derived -->
 
 The lean end is worth something concrete. Eight worker processes need about
 5.4 GB before they solve anything, so a container
@@ -650,13 +627,11 @@ of that size cannot start pandapower's arm at all, while pgml solves the same
 grid there in one process with room for about 17,000
 scenarios in the batch. The other end is worth something too, and it is the next
 section.
-<!-- mem.pandapower_standing_gb: bench_footprint.json pandapower tree_baseline_pss_mib on kerber_x4; mem.container_scenarios: (that size minus the single-call standing) over the single-call per-scenario slope, hand-derived -->
 
 ### What fits on a 48 GB card
 
 The capacity search doubles the batch until the device runs out of memory.
 
-<!-- frontier table: bench_footprint.json device_frontier per grid (fairness_tables.py "largest batch measured to fit"): largest_fit, device_peak_allocated_mib there, and how the search ended (oom batch or the cap) -->
 | Grid | largest batch measured to fit | device memory there | how the search ended |
 |---|---|---|---|
 | Kerber x4, 1,176 rows | 131,072 | 26.4 GiB | out of memory at 262,144 |
@@ -775,7 +750,6 @@ faster the card is.
 
 Cost per million solved scenarios, each tool at its own fastest measured batch:
 
-<!-- cost table: bench_cost_fair.json cost_named_grids.<grid>.series.<engine>.usd_per_million (fairness_tables.py markdown "Cost per million") -->
 | Tool | IEEE 33 | CIGRE LV, 132 rows | Kerber, 294 rows |
 |---|---|---|---|
 | pgml GPU | 0.000387 | 0.00234 | 0.00616 |
@@ -793,11 +767,9 @@ crossover comes at a smaller grid than the throughput crossover, and that is the
 point of pricing at all: where pgml is faster than power-grid-model at a large
 batch by less than the price ratio, it is already the more expensive way to get
 the answer, because the accelerator costs 2.6 times the eight cores.
-<!-- cost.cheapest.<grid>: the engine with the smallest usd_per_million in the table above; cost.gpu_over_pgm.kerber: cost.gpu.kerber over cost.pgm.kerber -->
 
 pandapower is 5.9 to 53 times more expensive per scenario
 than anything else here.
-<!-- cost.pandapower_factor_words: the pandapower row over the next most expensive row, in words ("two orders of magnitude" if the ratio is near 100) -->
 
 ## Where pgml wins and where it loses
 
@@ -820,7 +792,6 @@ pgml wins
   rows; at 4,096 rows it is level (1.48 times);
 - on cost per million scenarios on the 33-bus feeder and CIGRE LV, where it is
   the cheapest tool in this comparison.
-<!-- cost.cheapest_grids_words: the grids of the cost table where pgml GPU has the smallest usd_per_million -->
 
 pgml loses
 
@@ -831,19 +802,16 @@ pgml loses
   scenarios per batch on the 33-bus feeder and the 294-row network, until 4,096 on
   CIGRE LV, and at every batch on the 1,176-row network. A batched engine pays its
   fixed cost once whether the batch holds one scenario or a hundred thousand.
-<!-- batch.b1_loss_range_words: the range of pgm_over_pgml_b1 across the four grids, in words ("one to two orders of magnitude" if it spans 10 to 100) -->
 - against power-grid-model from about 1,024 node-phase
   rows upward, where it is never ahead at any batch size measured, and from 2,048
   rows by 1.69 times or more at 4,096 scenarios per batch. power-grid-model is the tool to beat
   in this comparison, and on larger grids it is not beaten.
-<!-- size.pgm_crossover_rows: the first rung of bench_fairness_tables.json size.rungs where pgml_gpu vs power_grid_model ratio_at_largest falls below 1 at batch 4,096 -->
 - on harmonic studies of anything but the smallest grid. In the model OpenDSS
   itself solves, where every scenario carries its own admittance, OpenDSS's peak
   on the two larger grids in this campaign is 1.01 and 1.22 times that of pgml's
   best arm, eight CPU workers, which the 1.5 rule reads as level, and 7.4 and 73
   times that of pgml on the GPU (27 and 207 times on the workstation card of the
   shunt-basis subsection).
-<!-- harm.<grid>.opendss_over_pgml: harm.<grid>.opendss_peak over harm.<grid>.pgml_peak from the harmonic subsection -->
 - on standing memory whenever it is run over worker processes: eight
   interpreters cost about 3.5 to 3.9 GB before any scenario is
   solved.
