@@ -423,37 +423,36 @@ from OpenDSS against 3.2e-5 for the default, five times further away and past th
 1e-4 this arm is accepted at; on the two Kerber networks, where the loads are
 smaller against the source, it is about twice as far and still inside.
 
-Measured on a workstation card (RTX A2000, 2026-09-24; not the cluster campaign),
-each basis at its own fastest batch, against OpenDSS on the same scenarios in the
-same job:
+Measured on the cluster allocation (one NVIDIA L40S 48 GB, eight physical cores,
+2026-09-28), each basis at its own fastest batch, against OpenDSS on eight workers
+over the same batch ladder and time budget. The pgml CPU columns are one process;
+the eight-worker pgml pool is in the harmonic comparison above.
 
-| Grid | OpenDSS, 8 workers | pgml GPU, per-scenario shunt | pgml GPU, shared shunt | agreement, per-scenario | agreement, shared |
-|---|---|---|---|---|---|
-| IEEE 33, 33 rows | 11,300 | 12,100 | 76,200 | 3.2e-5 | 1.6e-4 |
-| Kerber, 294 rows | 2,470 | 93 | 4,130 | 8.5e-6 | 1.6e-5 |
-| Kerber x4, 1,176 rows | 434 | 2.1 | 225 | 9.7e-6 | 1.6e-5 |
+| Grid | OpenDSS, 8 workers | pgml GPU, per-scenario | pgml GPU, shared | pgml CPU, per-scenario | pgml CPU, shared | agreement, per-scenario | agreement, shared |
+|---|---|---|---|---|---|---|---|
+| IEEE 33, 33 rows | 8,080 | 38,870 | 253,431 | 7,492 | 72,181 | 3.2e-5 | 1.6e-4 |
+| Kerber, 294 rows | 2,019 | 272 | 25,311 | 28.5 | 1,238 | 8.5e-6 | 1.6e-5 |
+| Kerber x4, 1,176 rows | 388 | 5.5 | 2,718 | 92 | 360 | 9.7e-6 | 1.6e-5 |
 
 Throughput is studies per second, agreement the largest difference in per-unit
-voltage magnitude. So the matched model is the one that costs, and on that card
-it costs a factor of six on the smallest grid and a hundred on the largest. With
-it, pgml matches OpenDSS on the 33-bus feeder and is 27 and 207 times slower on
-the two larger ones. Without it, pgml is seven times OpenDSS on the feeder and
-1.7 times on the 294-row network, and still half its speed at 1,176 rows. These
-are the workstation's factors; the cluster figure above carries its own.
+voltage magnitude. So the matched model is the one that costs: on the GPU the
+shared shunt is 7, 93 and 498 times faster from the smallest grid to the largest.
+With the matched model, pgml's GPU is 4.8 times OpenDSS on the 33-bus feeder and
+7.4 and 70 times slower on the two larger grids. With the shared shunt it is 31,
+12 and 7.0 times OpenDSS, but that is a different model from the one OpenDSS
+solves.
 
 The solver does not hold the whole `[B, H, N, N]` admittance on either route. It
 assembles and factors as many scenarios at a time as fit
 `solver.harmonic.system_budget_mb` and concatenates the results, so the peak is
-bounded by that budget and not by the batch. On the 294-row network the device
-peak holds at 1,540 and 1,552 MiB while the nominal admittance grows from 1.07 to
-4.29 GiB, and on the 1,176-row network at 1,534 MiB against a nominal 4.29 GiB.
-The shared shunt needs 114 and 998 MiB for the same batches, because there is one
-matrix per order rather than one per scenario. The harmonic curves in this
-workstation figure stop earlier than the fundamental ones because the harness of
-that date refused a batch whose nominal dense admittance exceeded a fixed cap,
-which was a harness guard rather than a capacity of the card; the cluster
-campaign admits batches by the memory rule described under "What is timed" and
-stops them by the time budget instead.
+bounded by that budget and not by the batch. On the 294-row network the GPU's
+device peak is 1,598 and 1,784 MiB at 1,024 and 4,096 studies per batch while the
+nominal admittance grows from 17 to 69 GiB, and on the 1,176-row network 1,778
+MiB against a nominal 274 GiB at 1,024. The shared shunt needs 283 and 965 MiB
+for the same Kerber batches, because there is one matrix per order rather than
+one per scenario. At 16,384 studies the per-scenario device peak on Kerber rises
+to 5,198 MiB, because the batch-shaped vectors outside the chunk grow with the
+batch.
 
 An exact alternative exists and does not apply here. The solver can factor the
 shunt-free network once and reach each scenario's own matrix through a low-rank
@@ -464,11 +463,14 @@ load on most buses, so that number is 32 of 33 rows on the IEEE feeder and 146 o
 correction costs more than a fresh factorization, so the per-scenario assembly is
 what runs.
 
-<sub>This subsection only: a workstation measurement, not the cluster campaign. Measured 2026-09-24, library 0.5.1, complex128, thirteen orders,
-one NVIDIA RTX A2000 12 GB and the CPU of a 16-core workstation, medians of three repeats
-after warm-up; the CPU arm runs on one thread wherever the dense backend is selected,
-for both bases alike. Agreement is the largest absolute difference in per-unit voltage
-magnitude against a live OpenDSS on the matched circuit over the same sixteen scenarios.</sub>
+<sub>Measured 2026-09-28 on the cluster allocation of this page (one NVIDIA L40S 48 GB,
+eight physical cores of an AMD EPYC 9334), pgml 0.5.1 at the revision of this page,
+complex128, thirteen orders, medians of five repeats after warm-up, one batch ladder
+from 1 to 16,384 studies for every engine and basis, and a series stopped at the first
+call over 120 s. The CPU arm follows the thread rule of the comparison above: one
+thread only for the dense backend above 128 rows. Agreement is the largest absolute
+difference in per-unit voltage magnitude against a live OpenDSS on the matched circuit
+over the same sixteen scenarios.</sub>
 
 ## Solver configuration
 
@@ -810,8 +812,7 @@ pgml loses
   itself solves, where every scenario carries its own admittance, OpenDSS's peak
   on the two larger grids in this campaign is 1.01 and 1.22 times that of pgml's
   best arm, eight CPU workers, which the 1.5 rule reads as level, and 7.4 and 73
-  times that of pgml on the GPU (27 and 207 times on the workstation card of the
-  shunt-basis subsection).
+  times that of pgml on the GPU.
 - on standing memory whenever it is run over worker processes: eight
   interpreters cost about 3.5 to 3.9 GB before any scenario is
   solved.
