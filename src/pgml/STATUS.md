@@ -257,6 +257,12 @@ The sampling layer and the dense scale wins are done (see Status +
   additive-Schwarz preconditioning, the shape GPU power-flow solvers built on iterative
   methods take) is the fork for networks too large to factor at all — secondary at LV
   sizes, where direct factorization wins.
+- **Benchmark the prepared fundamental path.** The recorded throughput campaign
+  (`assets/PERFORMANCE.md`) re-assembles and re-factorises the admittance in every timed
+  call because it passes no `prepare_power_flow` system, while power-grid-model and
+  OpenDSS keep theirs. Add a prepared arm (`solve_power_flow(..., system=...)`) to the
+  pgml-paper harness; an informal single-thread CPU check at a batch of one saved about a
+  quarter of the call on IEEE-33 and Kerber, far short of the gap to power-grid-model.
 - Resolved as won't-do (measured): a batch-native Newton forward — the block-diagonal
   Jacobian build was 4× slower than the per-scenario path at B=64/N=180; bulk batches
   belong to the current-injection method.
