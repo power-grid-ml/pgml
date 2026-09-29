@@ -2,8 +2,7 @@
 
 This file records how the measurements on [PERFORMANCE.md](PERFORMANCE.md) were
 taken: the machines, the software revisions, the exact configuration of every tool,
-what is inside the timed region, how a point is validated, and how the protocol has
-changed. PERFORMANCE.md presents the results; this file is where a figure's
+what is inside the timed region, and how a point is validated. PERFORMANCE.md presents the results; this file is where a figure's
 conditions are checked. The benchmark scripts live in the
 [pgml paper repository](https://github.com/power-grid-ml/pgml-paper) (to be
 published soon), and `assets/readme/provenance.json` lists the software versions and
@@ -103,8 +102,7 @@ to have the voltage magnitudes of the whole batch in host memory when the clock 
 for the process-based tools the hand-over of scenarios to the workers and of results
 back, for pgml on the GPU the copy of the result from the device. GPU timings
 synchronise the device before the clock starts and before it stops. pgml's admittance
-assembly and factorisation are inside as well, because no prepared system is passed
-(PERFORMANCE.md, [Does pgml rebuild its matrix on every call?](PERFORMANCE.md#does-pgml-rebuild-its-matrix-on-every-call)).
+assembly and factorisation are inside as well, because no prepared system is passed.
 
 Outside the timed region are grid conversion, building each tool's model, moving pgml's
 inputs to the GPU and all correctness checks. Each worker pool is created once and each
@@ -220,39 +218,6 @@ library selects for the grid, and each record names the backend it resolved to.
 1.09, and a community tier of the same listing at 0.79. At a price `p` per
 instance-hour and a throughput `T` scenarios per second, a million scenarios cost
 `1e6 / (T * 3600) * p`.
-
-## Protocol history
-
-The protocol of 2026-09-25, which every cluster measurement above uses, differs from
-the one of 2026-09-24 in these points.
-
-- pgml's single-call timed region ends with the voltage magnitudes in host memory, as
-  every other engine's always did; before, the result was left on the GPU.
-- power-grid-model and pgml's single call are timed in a fresh child process that has
-  never held a worker pool; before, they ran in the sweep's own process after its
-  pools.
-- Every worker pool, pandapower's and OpenDSS's as well as pgml's, solves once untimed
-  in every worker before the clock runs; before, only pgml's pool did.
-- Every engine gets five timed repetitions; before, pandapower and OpenDSS got three.
-- The validity guard re-solves the leading 256 scenarios of every timed batch; before,
-  32.
-- pandapower's three-phase solver solves the CIGRE LV grid, on zero-sequence data
-  written from pgml's own converter defaults; before, that arm was recorded as
-  unavailable.
-- Each grid's pgml arms and reference arms are measured in one job; before, the two
-  smaller grids paired pgml from one job with the reference engines from another.
-- OpenDSS and pgml run one harmonic ladder, 1 to 16,384 studies per batch, in one job
-  under the same per-call time budget; before, pgml's harmonic ladder was a shorter
-  per-grid table and OpenDSS ran in a separate job.
-- A harmonic batch is admitted by an engine-agnostic memory rule that plans the
-  batch-shaped vectors plus the system chunk the engine itself bounds; before, a
-  harness cap on the nominal dense `[B, H, N, N]` size cut pgml's harmonic curves short
-  of both the card and the host.
-- pgml's single call stops on the same per-call time budget as every other arm.
-- The crossover reduction takes pgml's double-precision series only.
-- The memory footprint requests the library's own backend choice for pgml's CPU arms
-  and records it, and the harmonic footprint gained the 1,176-row network.
-- A killed or hung worker is recorded as an error row instead of stopping the stage.
 
 ## Reproduce
 

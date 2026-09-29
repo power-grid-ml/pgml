@@ -176,7 +176,7 @@ cheapest tool on the 33-bus feeder and on CIGRE LV; on the 294-row network
 power-grid-model is. pandapower is the most expensive tool on every grid by a wide
 margin.
 
-## Questions an expert asks next
+## Frequently asked questions (FAQ)
 
 ### Why is pgml slow for a few scenarios?
 
@@ -184,23 +184,6 @@ A batched call does fixed work regardless of the batch size: assembling and
 factorising the admittance and launching every tensor operation of the iteration. A per-scenario engine has
 almost no such overhead. pgml recovers it only when the batch is large enough to share
 it, which is why every pgml curve starts low and climbs.
-
-### Does pgml rebuild its matrix on every call?
-
-In these measurements, yes, but not within a call. Inside one call the admittance is
-assembled and factorised once and reused by every iteration and every scenario of the
-batch. Across calls it is rebuilt, because the benchmark passes no prepared system,
-while power-grid-model reuses its factorisation across batches and OpenDSS keeps its
-compiled circuit.
-
-It is not necessary. `prepare_power_flow(grid)` assembles and factorises the
-operating-point-independent system once, and `solve_power_flow(grid, system=...)`
-reuses it for as long as the network is unchanged; load scenarios do not change it.
-At a large batch the gain is small: on the 1,176-row network at 4,096 scenarios,
-assembly and factorisation together are about two and a half per cent of the call. At
-a batch of one it removes part of the fixed cost, but not the gap to power-grid-model,
-which is dominated by the rest of the per-call overhead of the batched iteration. The
-prepared path is not a measured arm of this comparison.
 
 ### Why do large grids go the other way?
 
@@ -250,5 +233,5 @@ cases near the loadability limit.
 Every tool gets the same allocation, the same scenarios, a warm-up and five timed
 repetitions, and a correctness check on every plotted point. The remaining
 differences (worker hand-over costs for the pooled tools, a looser harmonic
-tolerance against OpenDSS, zero-sequence fills on CIGRE LV, the matrix rebuild above)
-are listed in [what is still not identical](PERFORMANCE_RECORD.md#what-is-still-not-identical).
+tolerance against OpenDSS, zero-sequence fills on CIGRE LV, pgml rebuilding its
+matrix in every call) are listed in [what is still not identical](PERFORMANCE_RECORD.md#what-is-still-not-identical).

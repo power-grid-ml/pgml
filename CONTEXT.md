@@ -70,8 +70,7 @@ belongs on the performance page, not in the README figure.
 `assets/PERFORMANCE.md` presents the results (grid-size, harmonic, memory and cost
 figures, the crossover table, where pgml loses) at the level of what a user and then
 an expert asks; `assets/PERFORMANCE_RECORD.md` holds the measurement record (machines,
-revisions, tool settings, timed region, validity guard, protocol history, how to
-reproduce). The README section stays qualitative and repeats no number its figure
+revisions, tool settings, timed region, validity guard, how to reproduce). The README section stays qualitative and repeats no number its figure
 shows; the full analysis belongs to the paper.
 Installation instructions target the GitHub repository.
 
