@@ -29,37 +29,23 @@ differentiation graph. The table describes power-flow capabilities, rather than 
 backends available to a separate optimization problem. SABLE's row describes its paper.
 Each library has its own supported devices, assumptions and applications.
 
-## Performance: solve scenarios in batches
+## Performance: many scenarios at once
 
 ![Batch throughput of pgml, pandapower, power-grid-model and OpenDSS on two distribution grids](assets/readme/batch_throughput.svg)
 
-pgml solves many operating points of one grid in a single batched call, so its
-throughput keeps growing with the batch size. Tools that solve one scenario at a
-time level off early. The pgml CPU curve, the same engine on the same eight cores
-split over the same eight worker processes the other tools get, peaks at 18.6 per
-cent of the GPU peak on the 33-bus feeder and 34.0 per cent on the Kerber
-network; at its peak it is 2.52 and 1.10 times OpenDSS's peak and 0.81 and 0.47
-times power-grid-model's.
+Speed is not the main reason to use pgml, but it has a clear sweet spot. pgml solves
+many operating points of one grid in a single batched call, so its throughput keeps
+growing with the batch while tools that solve one scenario at a time level off. With
+thousands of scenarios of a small grid, pgml on one GPU is the fastest tool
+in this comparison, and it runs the same batch on the CPU as well.
 
-For a few scenarios pgml is the slowest tool on both grids shown (on the
-three-phase CIGRE LV grid in PERFORMANCE.md pandapower is slower still). At one scenario per batch
-power-grid-model solves 5,559 per second on the 33-bus
-feeder where pgml manages 160. pgml passes it at
-16,384 scenarios per batch, is 4.49 times faster at
-65,536, and reaches 1.33 million
-per second on one GPU. On grids of about a thousand buses and more it
-does not pass power-grid-model at any batch size measured.
+For a few scenarios, or for grids of about a thousand buses and more, a dedicated
+solver such as power-grid-model is faster. Every plotted point is a converged solution
+that matches a double-precision reference, with all tools solving identical scenarios
+on the same allocation. [assets/PERFORMANCE.md](assets/PERFORMANCE.md) covers grid
+size, harmonic studies, memory and cost, and where pgml loses.
 
-All tools solve identical load scenarios in double precision on the same
-allocation, and every tool's timed call ends with the voltages in host memory. A
-point is shown only if the solution converged and matches a pgml
-double-precision reference within 1e-6 pu in voltage magnitude. The plot covers
-the forward power flow, without gradients.
-[PERFORMANCE.md](assets/PERFORMANCE.md) explains the setup of each tool, what is
-timed, how throughput changes with grid size, what each tool costs in memory and
-in money, and where pgml loses.
-
-<sub>One NVIDIA L40S 48 GB against eight physical cores of an AMD EPYC 9334, on which every CPU tool gets eight workers or eight threads; one node of an institutional cluster, driver 610.57.04, measured 2026-09-26. pgml 0.5.1, torch 2.13.0, pandapower 3.5.4 with numba 0.67.0, power-grid-model 1.13.172, OpenDSSDirect.py 0.9.4. complex128, median of five warm repetitions for every tool, power-grid-model and pgml's single call each timed in a fresh process, the leading 256 scenarios of every batch re-solved and compared.</sub>
+<sub>One NVIDIA L40S 48 GB against eight physical CPU cores, complex128, forward power flow without gradients.</sub>
 
 ## Conformance: the solvers agree
 
@@ -86,33 +72,39 @@ importer dropped, approximated or modelled differently.
 pandapower 3.5.4 with numba, power-grid-model 1.13.142, OpenDSSDirect.py 0.9.4, torch 2.13.0,
 Python 3.13.15. Six CPU threads and an NVIDIA RTX A2000 12 GB.</sub>
 
-## Accurate digital twin building
+## Benefit of algorithmic differentiability
 
-**Goal: recover line resistances from noisy measurements at 48% of buses using
-Levenberg–Marquardt optimization and pgml's automatically differentiated measurement
-Jacobian.**
+A grid model is only as good as its parameters, and the parameters of a real
+distribution grid are rarely known well. Cable records are incomplete, a line's
+resistance depends on the conductor that was actually laid and on its temperature,
+and the catalogue value can be tens of per cent off. Meters, on the other hand, are
+increasingly available. The question is how to turn a handful of noisy measurements
+back into the parameters that produced them.
+
+That is an inverse problem, and solving it needs to know how every measurement
+responds to every parameter. With a conventional power-flow tool that sensitivity is
+approximated by nudging one parameter at a time and solving again, so the cost grows
+with every parameter added and the result depends on the step size. pgml
+differentiates through the solve itself: the gradient of a fit with respect to all
+line parameters costs a few forward solves, whether there are two parameters or
+sixty-four, and it is exact at the fundamental and at every harmonic order. A standard
+optimiser can then fit the parameters directly.
 
 ![Recovered resistance of ten trunk lines, showing true values and estimates from three measurement sets](assets/readme/resistance_recovery.svg)
 
-This simulated IEEE 33-bus example jointly estimates **20 unknown parameters**:
-resistance and reactance on ten trunk lines. It uses **12 operating snapshots**,
-voltage magnitudes at **16 of 33 buses**, and four current measurement locations.
-The initial catalogue differs from the installed values by up to **43% in resistance**
-and **25% in reactance** in this realization. Topology and load injections are known.
+In this simulated IEEE 33-bus example, the resistance and reactance of ten trunk lines
+start from a catalogue that is wrong by up to 43 per cent. The fit sees noisy voltage
+magnitudes at about half of the buses, a few current measurements, and a dozen
+operating snapshots, and uses a Levenberg–Marquardt optimiser on pgml's differentiated
+measurement Jacobian. Each measurement set in the figure adds information, and adding
+harmonic voltages at orders 5 to 13 sharpens the estimate further, because a line's
+impedance changes with frequency in a way the fundamental alone does not reveal. Some
+lines stay hard to pin down: recovering both resistance and reactance from partial,
+magnitude-only measurements is ill-posed, and more measurements help some parameters
+more than others.
 
-Independent Gaussian measurement noise has standard deviations of **0.1% for
-fundamental voltage**, **1% for current**, and **5% for harmonic voltage**, relative
-to each measured magnitude. The last measurement set adds orders **5, 7, 11 and 13**.
-The fit uses a Gaussian catalogue prior with 50% standard deviation. Points show
-mean estimates and bars show one standard deviation across four noise draws.
-
-Adding harmonic measurements reduces the recorded median absolute resistance-scale
-error from **7.8% to 5.4% of catalogue resistance**, and reactance-scale error from
-**12.9% to 2.8%**. Some lines remain weakly identifiable: recovering both resistance
-and reactance from partial, magnitude-only measurements is an inverse problem,
-and additional measurements improve different parameters by different amounts.
-
-The plotted data and their source hashes are in [assets/readme](assets/readme).
+The recorded experiment, with its noise levels, prior and all estimates, is in
+[assets/readme](assets/readme).
 
 ## Install from GitHub
 

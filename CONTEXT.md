@@ -67,8 +67,11 @@ L40S against eight physical CPU cores, on which pgml, pandapower and OpenDSS eac
 get eight single-threaded worker processes and power-grid-model eight threads.
 pgml's single batched CPU call is a second configuration of the same engine and
 belongs on the performance page, not in the README figure.
-`assets/PERFORMANCE.md` documents the protocol and carries the grid-size,
-harmonic, memory and cost figures, the crossover table, and where pgml loses.
+`assets/PERFORMANCE.md` presents the results (grid-size, harmonic, memory and cost
+figures, the crossover table, where pgml loses) at the level of what a user and then
+an expert asks; `assets/PERFORMANCE_RECORD.md` holds the measurement record (machines,
+revisions, tool settings, timed region, validity guard, how to reproduce). The README section stays qualitative and repeats no number its figure
+shows; the full analysis belongs to the paper.
 Installation instructions target the GitHub repository.
 
 ## Where things live

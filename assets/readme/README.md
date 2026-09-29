@@ -38,7 +38,8 @@ the figure renderer.
   record carries, and a point validated on fewer scenarios than the run declares.
 - All files are assembled by `scripts/bench/readme_assets.py --fair` in
   pgml-paper, which also writes the jobs, versions and source hashes into
-  `provenance.json`. `../PERFORMANCE.md` describes the measurement protocol.
+  `provenance.json`. `../PERFORMANCE_RECORD.md` describes the measurement protocol and
+  `../PERFORMANCE.md` the results.
 - `solverconf_*` and `modelconf_*`: figures of the two conformance checks, copied
   unchanged from `figures/solverconf/` and `figures/modelconf/` of pgml-paper, each
   with the JSON of its numbers and its generated caption (`*.caption.txt`).
