@@ -53,17 +53,25 @@ def _signature(obj: object) -> str:
     except (TypeError, ValueError):
         return ""
     if inspect.isclass(obj):
-        return "(" + ", ".join(
-            p.name if p.default is p.empty else f"{p.name}=…"
-            for p in sig.parameters.values()
-            if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
-        ) + ")"
+        return (
+            "("
+            + ", ".join(
+                p.name if p.default is p.empty else f"{p.name}=…"
+                for p in sig.parameters.values()
+                if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+            )
+            + ")"
+        )
     parts = []
     for p in sig.parameters.values():
         params = p.replace(annotation=p.empty, default=p.empty)
         text = str(params)
         if p.annotation is not p.empty:
-            ann = p.annotation if isinstance(p.annotation, str) else inspect.formatannotation(p.annotation)
+            ann = (
+                p.annotation
+                if isinstance(p.annotation, str)
+                else inspect.formatannotation(p.annotation)
+            )
             text += ": " + _QUALIFIED.sub("", ann)
         if p.default is not p.empty:
             default = repr(p.default)
@@ -114,14 +122,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("package")
     parser.add_argument("--output", type=Path, default=Path("API_INDEX.md"))
-    parser.add_argument("--check", action="store_true", help="fail when the file is stale")
+    parser.add_argument(
+        "--check", action="store_true", help="fail when the file is stale"
+    )
     args = parser.parse_args(argv)
 
     text = build_index(args.package)
     if args.check:
-        current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
+        current = (
+            args.output.read_text(encoding="utf-8") if args.output.exists() else ""
+        )
         if current != text:
-            print(f"{args.output} is out of date; run tools/api_index.py {args.package}", file=sys.stderr)
+            print(
+                f"{args.output} is out of date; run tools/api_index.py {args.package}",
+                file=sys.stderr,
+            )
             return 1
         return 0
     args.output.write_text(text, encoding="utf-8")
