@@ -239,3 +239,4 @@ fabric.properties
 # Agent and IDE state (local only)
 .claude/
 .idea/
+/CLAUDE.md
