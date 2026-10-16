@@ -367,9 +367,9 @@ class TestDyn5RotatedOracle:
     (``conn_hv=delta``, ``conn_lv=wye``, ``leadlag=Lag``) with the LV winding's
     bus connection cyclically rotated by ``r=2`` (``bus_lv="lv.3.1.2.0"``):
     ``30 deg (Dyn1 base) + 120*2 deg (mod 360) = 150 deg = clock 5``, pinned
-    against a live OpenDSS solve (see ``pgml.convert.opendss.converter``'s
-    "Cyclic winding-bus rotation" CONTEXT.md section for the full derivation
-    and sign convention). The LV winding stays grounded-wye, so this isolates
+    against a live OpenDSS solve (see the "Cyclic winding-bus rotation"
+    paragraph of ``docs/pgml/modeling/conventions.md`` for the derivation and
+    sign convention). The LV winding stays grounded-wye, so this isolates
     the rotation fold from the delta-LV coil-referral factor (see
     ``TestYNd5RotatedOracle`` for that combination).
     """

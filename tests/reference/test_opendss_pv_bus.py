@@ -17,11 +17,11 @@ Two kinds of check:
   reactive limit. OpenDSS reaches ``model=3`` by its own iterative reactive update,
   which on this circuit is sensitive to the engine's warm state (a cold solve can hit
   ``MaxIter`` where a repeated one converges in ~100 iterations) and even to the
-  process floating-point flags, so the REGULATING configuration is measured in the
-  validation record rather than pinned here: ``agent-reports`` 13_pv_bus (agreement
-  6.6e-10 pu in voltage and 4.2e-4 kvar in reactive power, pgml 4 Newton iterations
-  against OpenDSS's 108). The two limit cases below converge in 8 iterations from
-  cold and agree to 1e-13 pu / 1e-8 kvar.
+  process floating-point flags, so the REGULATING configuration is not pinned here.
+  Measured once on a warm engine it agrees to 6.6e-10 pu in voltage and 4.2e-4 kvar in
+  reactive power, with pgml taking 4 Newton iterations against OpenDSS's 108
+  (``docs/pgml/modeling/der-pv-storage.md``, "Validation"). The two limit cases below
+  converge in 8 iterations from cold and agree to 1e-13 pu / 1e-8 kvar.
 """
 
 from __future__ import annotations

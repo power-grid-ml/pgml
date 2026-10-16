@@ -44,6 +44,15 @@ repair takes 10.0 / 69.1 / 274.2 ms against 10.0 / 102.8 / 707.5 ms for the
 single-threaded batched repair: even at 200 rows, 1.5x at 450 and 2.6x at 900, at the
 same backward error.</sub>
 
+On the oneMKL builds where the defect was measured it fires only in a process that has
+called ``torch.set_num_threads`` with more than one thread (the call that disables the
+dynamic adjustment); default threads or ``OMP_NUM_THREADS`` alone factor the same stack
+exactly. A benchmark of these paths must therefore time both configurations. Always
+factoring one matrix at a time was not adopted: on an unaffected configuration it is up
+to several times slower than the guarded batched call on small stacks. Math-library
+thread knobs are not a substitute for the residual check; one such workaround produced
+factors with valid pivots and a backward error near ``1e-2``.
+
 The thread count is a process-global setting, so a caller that reaches the last resort
 and solves from several threads at once must serialize its solves.
 """

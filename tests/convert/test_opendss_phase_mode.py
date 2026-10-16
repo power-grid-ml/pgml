@@ -381,8 +381,8 @@ def _build_four_wire_circuit() -> None:
     """
     dss.Text.Command("Clear")
     # DSS's own factory default base frequency is 60 Hz; without explicitly
-    # reasserting it here (a documented engine gotcha -- see
-    # `src/pgml/convert/opendss/CONTEXT.md` and `_dss_clear()` in
+    # reasserting it here (`DefaultBaseFrequency` persists across `Clear` in the
+    # process-global engine; see `_dss_clear()` in
     # `tests/reference/test_opendss_transformer.py`), a `frequency=50` circuit
     # solves to a degenerate ALL-ZERO voltage state (still reports
     # `Converged() == True`) on this opendssdirect version.

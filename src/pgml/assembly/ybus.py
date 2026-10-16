@@ -2,17 +2,20 @@
 
 Public API
 ----------
-- ``assemble_ybus`` — ``(grid, frequencies_hz, *, dtype, device, operating_point,
-  param_overrides=None) -> YBus``
-- ``build_injections`` — ``(grid, frequencies_hz, index, *, dtype, device,
-  operating_point, param_overrides=None) -> Tensor``
-- ``branch_currents`` — ``(grid, v, frequencies_hz, index, *, dtype, device,
-  param_overrides=None) -> list[BranchCurrent]`` (per-branch terminal currents).
+- ``assemble_ybus`` — the LINEAR (const-Z) ``Y`` ``[*batch, H, N, N]``.
+- ``assemble_network_ybus`` — the passive network ``Y_net`` (no devices, no source).
+- ``build_injections`` — the source Norton current ``I`` ``[*batch, H, N]``.
+- ``device_current_injections`` / ``build_injection_plan`` / ``injections_from_plan`` —
+  the voltage-dependent ZIP device current of the nonlinear power flow.
+- ``branch_currents`` / ``branch_stamp_blocks`` — per-branch terminal currents and the
+  primitive blocks of named branches.
 - ``node_phase_index`` / ``NodePhaseIndex`` (re-exported from ``.index``).
 
-See ``assembly/CONTEXT.md`` for the frozen layout and stamp definitions.
+The row layout, the stamps and the device models are described in the published
+modeling pages (``docs/pgml/modeling/``: conventions, asymmetric, transformer,
+der-pv-storage).
 
-Differentiability + GPU (CLAUDE.md): every Y / I entry is differentiable w.r.t.
+Differentiability and device: every Y / I entry is differentiable w.r.t.
 R, L, G, C, length, tap, source Z and operating P, Q. The tape starts where a
 python parameter is turned into a tensor (or, for gradcheck, where the caller
 supplies a leaf tensor via ``param_overrides``). All tensor math is autograd-safe
@@ -300,8 +303,7 @@ def assemble_ybus(
     :func:`assemble_network_ybus` (the passive network) PLUS the const-Z device
     shunts (loads/generators folded as constant impedance at nominal voltage) PLUS
     the source Norton (Thévenin) shunt. The nonlinear (const-P / ZIP) power flow
-    instead uses :func:`assemble_network_ybus` + :func:`device_current_injections`
-    (see ``assembly/CONTEXT.md``).
+    instead uses :func:`assemble_network_ybus` + :func:`device_current_injections`.
 
     The folded device shunt is the OPERATING POINT expressed as an admittance: its
     conductance ``P/|V0|^2`` is a resistance and stays flat with frequency, while its
@@ -333,7 +335,17 @@ def assemble_ybus(
     param_overrides:
         Optional differentiability hook (see :func:`_override`): map
         ``(kind, id, field) -> leaf tensor`` to inject gradient-bearing parameters
-        without editing the schema. Used by gradcheck tests.
+        without editing the schema. Used by gradcheck tests. Recognised keys:
+        ``("line", id, "series_resistance_ohm_per_m" | "series_inductance_h_per_m" |
+        "shunt_capacitance_f_per_m" | "shunt_conductance_s_per_m")``,
+        ``("source", id, "resistance_ohm" | "inductance_h")``,
+        ``("transformer", id, "series_resistance_ohm" | "series_inductance_h" |
+        "tap_magnitude" | "zero_sequence_resistance_ohm" |
+        "zero_sequence_inductance_h")``, ``("switch", id, "resistance_ohm" |
+        "inductance_h")`` and ``("generic_branch", id, "series_resistance_ohm" |
+        "series_inductance_h")``. The transformer phase shift is not a leaf: it selects
+        the discrete vector-group clock. An override also decides fusion: a finite leaf
+        keeps a nominally zero-impedance branch stamped, a zero leaf fuses it.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /
         ``"asymmetric"`` (``None`` -> config ``calculation.symmetry``). Resolved ONCE
@@ -1292,7 +1304,7 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
     Each per-phase element is ``y(h) = G + j·2π h f0 C + 1/(j·2π h f0 L)`` (the
     inductive term only where ``inductance_h`` is set — an inductive shunt's
     susceptance magnitude falls as ``1/h`` where a capacitive one rises as ``h``).
-    WYE (default): each element connects its phase to ground (the historical diagonal
+    WYE (default): each element connects its phase to ground (the plain diagonal
     stamp). DELTA: element ``k`` connects phase ``k`` to phase ``(k+1) % n`` cyclic,
     stamped ``M^T diag(y) M`` via the same :func:`cyclic_delta_incidence` convention the
     DELTA load uses (``+y`` on both leg diagonals, ``-y`` off-diagonal). Both are
@@ -1346,7 +1358,7 @@ def _stamp_shunt_appliances(grid, f, y, index, cdt, rdt, device, param_overrides
                 y_elem = y_elem + 1.0 / z_l
             # Y_block = M^T diag(y_elem) M  -> [H, K, p, p].
             block = torch.einsum("ei,hke,ej->hkij", m_c, y_elem, m_c)
-        else:  # WYE (phase-to-ground) — historical diagonal stamp
+        else:  # WYE (phase-to-ground) — plain diagonal stamp
             g_list, c_list = [], []
             for sh in group:
                 g_list.append(
@@ -1447,8 +1459,8 @@ def _stamp_const_z_loads(
     The internal per-ELEMENT admittance at the operating point is
     ``y_elem = conj(P_k + jQ_k)/|V0|^2`` and is mapped to a nodal block
     ``M^T diag(y_elem) M`` via the terminal incidence ``M`` (``_incidence``):
-    WYE-to-ground reduces to ``M = I`` (the historical diagonal stamp, reproduced
-    exactly);
+    WYE-to-ground reduces to ``M = I`` (the plain per-phase diagonal stamp,
+    reproduced exactly);
     WYE-with-neutral uses ``[I|-1]`` (the neutral row receives the phase return);
     DELTA-3 uses the circulant difference. ``asymmetric=False`` forces the equal split
     inside ``resolve_operating_power``. ``V0`` is L-N for WYE and L-L for DELTA
@@ -2637,6 +2649,11 @@ def flatten_plan_batch(
     while any BROADCAST (size-1) leading dims a group carries are preserved. A no-op
     for a group whose leading batch is scalar / already 1-D. The power tensors are
     detached constants of that differentiation, so the reshape is autograd-safe.
+
+    Only a leading batch EQUAL to ``batch_shape`` is collapsed, never one that merely
+    has the same number of elements: in a cartesian ``branch_states`` x
+    ``operating_point`` forward a group's power carries a size-1 placeholder for the
+    states axis, and collapsing it would destroy the cartesian layout.
     """
     bshape = tuple(int(s) for s in batch_shape)
     ndim = len(bshape)
@@ -2828,7 +2845,7 @@ def injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor:
 def _zip_coeffs(appliance, rdt, device) -> tuple[Tensor, Tensor]:
     """Per-power-component ZIP coefficient pairs ``(zip_p[3], zip_q[3])`` = (z, i, p).
 
-    Mapping per the frozen CONTEXT: const_power=(0,0,1), const_impedance=(1,0,0),
+    Mapping: const_power=(0,0,1), const_impedance=(1,0,0),
     const_current=(0,1,0); ``zip`` reads ``ZipCoefficients`` (z_*, i_*, p_*).
     Returned as real tensors ``[3]`` ordered (z, i, p) for P and for Q.
     """
@@ -2935,7 +2952,7 @@ def device_current_injections(
     Connection-aware: each Load/Generator's per-element current is
     ``i_elem = conj(S_eff(V_term)) / conj(V_term)`` with ``V_term = M @ V_used``
     (the WYE/DELTA/neutral incidence ``M``); the NODAL current is ``M^T @ i_elem``.
-    WYE-to-ground (``M = I``) reduces to the historical per-phase form exactly.
+    WYE-to-ground (``M = I``) reduces to the plain per-phase diagonal form exactly.
 
     Returns
     -------

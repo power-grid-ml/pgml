@@ -1,7 +1,7 @@
 """pgml.evaluation — comparison & evaluation plots (reference libraries vs our solve).
 
 Paper-ready (>=300 DPI / svg) and interactive (plotly HTML) figures comparing our
-differentiable solver to the reference implementations. See ``evaluation/CONTEXT.md``.
+differentiable solver to the reference implementations.
 
 Layout
 ------

@@ -14,9 +14,9 @@ Background
 - 3 closed bus-bus CB switches connecting the 4 MV buses
 
 Pandapower internally merges the 4 MV buses (pp indices 0, 1, 20, 23) into a
-single ppc bus (ppc index 0) via the CB switches.  pgml instead keeps them as
-separate nodes connected by near-ideal Switch elements (resistance_ohm=1e-4 Ω);
-the voltage difference is negligible (< 0.1 mV under full load).
+single ppc bus (ppc index 0) via the CB switches.  pgml converts them to ideal
+``Switch`` branches (R = L = 0, the default ``branch.switch_model: ideal``), whose
+node rows the solve fuses the same way.
 
 Transformer modelling convention (pgml assembly)
 -------------------------------------------------
@@ -40,6 +40,11 @@ network the per-unit conversion uses **per-bus base** voltages:
 - Diagonal (LV–LV):      y_base = S_base / V_base_lv²
 - Off-diagonal (HV–LV):  y_base = S_base / (V_base_hv · V_base_lv)
 
+A single global base taken from bus 0 (20 kV) is wrong for this network. The
+achieved agreement is below 1e-13 S on the LV diagonal and 1e-16 S on the HV–LV
+off-diagonal; the bus voltages agree to about 1e-7 pu / 2e-6 deg, and the LV angle
+is the HV angle minus 30° (Dyn, ``shift_degree=30``).
+
 Three-phase mode
 ----------------
 ``phase_mode=THREE_PHASE`` converges and produces a perfectly balanced symmetric
@@ -53,7 +58,8 @@ A direct comparison to ``pp.runpp_3ph`` is **not** used as the oracle because:
    symmetric-component identities and zero-sequence defaults from config, which
    introduces mutual coupling absent in pandapower's positive-sequence solver.
    The resulting ~1–2 % discrepancy on LV voltages is a modelling difference
-   (not a bug) and is documented in ``convert/CONTEXT.md``.
+   (not a bug); the zero-sequence fallback is described in
+   ``docs/pgml/modeling/conventions.md`` and :mod:`pgml.convert._common`.
 
 Instead the THREE_PHASE assertions verify:
 - ``solve_power_flow`` converges.

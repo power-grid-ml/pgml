@@ -34,8 +34,31 @@ The ceiling is conditioning, not steady-state fidelity: outside the
 that starts far from the setpoint sees no voltage-control feedback and can settle
 on the collapsed low-voltage branch. ``case118`` reaches that ceiling at a droop
 steepness of about 5, which is why its test asserts a percent-level tolerance
-while ``case9`` asserts a 1e-4 one. The full record, including the steepness
-sweep across five benchmarks, is ``src/pgml/convert/pandapower/CONTEXT.md``.
+while ``case9`` asserts a 1e-4 one.
+
+Steepness sweep (max / median per-bus ``|V|`` deviation in pu against
+``runpp(enforce_q_lims=True)``, ``SINGLE_PHASE_EQUIV``, complex128):
+
+=====  ===============  ===============  ===============  ===============
+slope  case9            case14           case57           case118
+=====  ===============  ===============  ===============  ===============
+5      6.6e-3 / 9.6e-4  9.4e-2 / 7.6e-2  4.3e-2 / 3.3e-2  4.4e-2 / 2.1e-2
+50     8.2e-4 / 2.1e-4  1.7e-2 / 1.5e-2  6.8e-3 / 4.7e-3  no convergence
+500    8.4e-5 / 2.3e-5  1.8e-3 / 1.5e-3  7.6e-4 / 5.8e-4  no convergence
+2000   no convergence   4.6e-4 / 3.9e-4  2.3e-4 / 1.6e-4  no convergence
+=====  ===============  ===============  ===============  ===============
+
+The ``1/slope`` law holds wherever the solve lands on the correct branch. The
+convergence failures are basin-of-attraction effects, not a monotone ceiling
+(``case9`` fails at 200 and 2000 but succeeds at 500). ``case_ieee30`` degenerates
+above a steepness of about 20: every generator is pinned at a reactive limit, the
+problem becomes the pure-PQ system ``enforce_q_lims`` solves, and the agreement is
+1.4e-10 pu at every steepness. ``case39`` converges at every steepness from 5
+upward, but onto the collapsed branch (4.9e-1 pu away, all nine generators at their
+maximum reactive limit): a converged but wrong answer. The network conversion
+itself is not the error source: freezing every generator at pandapower's own
+converged ``(P, Q)`` as an ``sgen`` reproduces ``runpp`` to 2.1e-13 pu on
+``case39`` and 9.8e-11 pu on ``case9``.
 """
 
 from __future__ import annotations

@@ -1,154 +1,119 @@
-# pgml navigation index (read this first)
+# pgml architecture
 
-Differentiable, GPU-ready, vectorized **harmonic power flow for power grids**. This is the
-top-level map for contributors: what the package does, where the contracts live, and which
-file to open next.
+Differentiable, GPU-ready, vectorized harmonic power flow. The harmonic system
+`Y(h)·V(h) = I(h)` is the core; the fundamental load flow is one differentiable output of it.
+This file is the map of the repository: where things are, the rules that hold everywhere, and
+which file to open next. The published documentation (concepts, modelling decisions, API
+reference) is under `docs/`.
 
-**Read order.** This file → `src/pgml/CONTEXT.md` (the subpackage map + interface ledgers)
-→ the subpackage `CONTEXT.md` you are touching → the code. How to *work* here (the hard
-constraints, code style, commands, delegation): `CLAUDE.md`. Current status + open work:
-`src/pgml/STATUS.md`. The published, human-facing documentation (concepts, modeling
-decisions, API reference): `docs/pgml/` (Sphinx; standalone landing `docs/index.md`).
+Signatures: docstrings / `API_INDEX.md` (generated from `__all__` by `tools/api_index.py`;
+never edit by hand).
 
-## Two hard constraints (every line of core code)
+## Two hard constraints
 
-1. **DIFFERENTIABLE** — gradients flow `grid params → Y-bus → solve → outputs`. No
-   `.item()/.detach()/.numpy()`, no in-place on tracked tensors, no Python control flow on
-   tensor values in the differentiable path. (The only sanctioned `.detach()` is the IFT
-   adjoint in `solver/power_flow.py`.)
-2. **GPU-READY** — every core op runs on CPU and CUDA unchanged; honor input device/dtype;
-   complex dtypes; vectorized/batched (no Python loop over nodes/branches/harmonics/
-   scenarios on the tape).
+1. **Differentiable.** Gradients flow `grid parameters → Y-bus → solve → outputs`. No
+   `.item()`, `.detach()`, `.numpy()`, no in-place ops on tracked tensors and no Python control
+   flow on tensor values in the differentiable path. The one sanctioned `.detach()` is the IFT
+   adjoint in `solver/power_flow.py`.
+2. **GPU-ready.** Every core op runs on CPU and CUDA unchanged, honours the input device and
+   dtype, supports complex64/complex128 and is batched: no Python loop over nodes, branches,
+   harmonics or scenarios on the tape.
 
-A change that breaks float64 `gradcheck` or the GPU device/dtype test is not done.
+A change that breaks the float64 gradcheck (`tests/differentiability`) or the device/dtype
+parity test (`tests/gpu`) is not done.
 
 ## Where pgml sits
 
-pgml is designed as the base layer of a larger power-grid ecosystem: this repository owns
-the physics engine and the data contracts (the `Grid` / result / scenario schemas).
-Downstream tools — state estimation, grid synthesis, dataset and dashboard applications —
-build on pgml's public API only, pin a `power-grid-ml` version range, and read
-`SCHEMA_VERSION` from persisted datasets; pgml imports none of them and knows nothing about
-their internals beyond that contract.
+pgml is the base layer: it owns the physics engine and the data contracts (the `Grid`, result
+and scenario schemas). It imports no other package of the suite, and knows nothing about its
+consumers beyond the public API, the `power-grid-ml` version range they pin, and the
+`SCHEMA_VERSION` stamped into persisted datasets. State estimation, the scenario recipes a
+learning task needs (device populations, calibrated emission ranges, load profiles) and grid
+synthesis are out of scope here; a downstream generator plugs into `run_scenarios` through the
+`ScenarioSpec` protocol (an object with `sample(grid)`).
 
 ## Why all-PyTorch
 
-Harmonic power flow decouples per harmonic into a LINEAR complex solve `Y(h)·V(h)=I(h)`. A
-linear solve has a clean, cheap adjoint, so end-to-end gradients flow without differentiating
-Newton iterations. PyTorch gives complex tensors and autograd, batched `torch.linalg.solve`,
-GPU, and native PyTorch-Geometric integration for the ML layer — one autograd tape end to
-end. (JAX is a fallback only if PyTorch complex/sparse autograd proves insufficient. Do not
-start there.)
+Per harmonic order the system is a linear complex solve, whose adjoint is cheap, and the
+nonlinear fundamental is differentiated through the implicit-function theorem instead of
+through the Newton iterations. PyTorch provides complex tensors, autograd, batched
+factorizations and CUDA, so one autograd tape runs from the grid parameters to a downstream
+loss.
 
-## The pgml pipeline (data flow, left → right; gradients flow end-to-end)
+## Pipeline
 
-1. **schemas** define the `Grid` (physical params, possibly tensors) + the result / scenario
-   contracts.
-2. **assembly** builds the per-frequency complex nodal admittance `Y(f)` — lines via explicit
-   R/L/C or the **geometry** (Carson/Deri) path.
-3. **solver** solves `Y(f)·V(f)=I(f)` (linear) or the nonlinear const-P/ZIP problem
-   (current-injection fixed point or Newton, IFT gradients) → phasor **result**.
-4. **convert** turns pandapower / OpenDSS / power-grid-model nets into a `Grid`; **scenarios**
-   declares and solves a BATCH of input deltas on one grid and persists it (ML training
-   data); **evaluation** compares results to those reference libraries.
+```
+grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀── evaluation (plots, oracles)
+      │              ▲   │         ▲                       ◀── scenarios (batched inputs)
+      │              │   └─ geometry (Carson Z(h), Yc(h))  ◀── convert (pandapower, OpenDSS, pgm)
+      └─ defaults (modelling defaults, shipped data/ tables) ┘
+```
 
-The subpackage-by-subpackage map, with each interface ledger, is `src/pgml/CONTEXT.md`.
+The subpackage map is `src/pgml/CONTEXT.md`; each subpackage has its own `CONTEXT.md`.
 
-## GitHub publication landing page
+## Codemap
 
-README leads with capabilities, a seven-library comparison, then ONE throughput
-figure, the conformance and resistance-recovery
-figures before installation. Figure inputs and provenance are in `assets/readme/`;
-`run/readme/render.py` redraws every recorded figure without running a solve. Each
-figure's measurement date, source hashes and validation
-scope accompany its data; the README caption identifies the measured hardware and
-precision. The throughput comparison gives every engine the SAME allocation: one
-L40S against eight physical CPU cores, on which pgml, pandapower and OpenDSS each
-get eight single-threaded worker processes and power-grid-model eight threads.
-pgml's single batched CPU call is a second configuration of the same engine and
-belongs on the performance page, not in the README figure.
-`assets/PERFORMANCE.md` presents the results (grid-size, harmonic, memory and cost
-figures, the crossover table, where pgml loses) at the level of what a user and then
-an expert asks; `assets/PERFORMANCE_RECORD.md` holds the measurement record (machines,
-revisions, tool settings, timed region, validity guard, how to reproduce). The README section stays qualitative and repeats no number its figure
-shows; the full analysis belongs to the paper.
-Installation instructions target the GitHub repository.
-
-## Where things live
-
-| Need… | Open |
-|---|---|
-| How to *work* here (constraints, style, commands, the frozen-schema rule) | `CLAUDE.md` |
-| The package map (subpackages + interface ledgers) | `src/pgml/CONTEXT.md` |
-| Status + open work | `src/pgml/STATUS.md` |
-| Published human docs (concepts, modeling decisions, API reference) | `docs/` (landing page `docs/index.md`, pages under `docs/pgml/`) |
-| Modeling decisions (conventions, transformer, line model, DER, asymmetric) | `docs/pgml/modeling/` |
-| Cross-tool conventions + reference-library briefs | `docs/pgml/modeling/conventions.md`, `docs/pgml/modeling/references/` |
-| Runnable studies + config templates | `run/examples/pgml/`, `run/configs/` |
-| **Configuration** (three buckets, see below) | `src/pgml/data/CONTEXT.md`, `run/configs/` |
-| Testing conventions + the gates | `tests/CONTEXT.md` |
+- `src/pgml/` — the library (`src/pgml/CONTEXT.md`).
+- `tests/` — tests and the gates (`tests/CONTEXT.md`).
+- `docs/` — standalone Sphinx site (`docs/index.md`, pages under `docs/pgml/`, API reference
+  from the docstrings via autodoc over `__all__`; `.readthedocs.yaml` builds it).
+  `docs/pgml/modeling/` holds the modelling decisions, `limitations.md` what is not modelled.
+- `run/examples/pgml/` — runnable studies and benchmarks (each self-documenting);
+  `run/configs/` — config templates; `run/readme/render.py` redraws the README figures from
+  `assets/readme/` without solving.
+- `assets/` — `PERFORMANCE.md` (results), `PERFORMANCE_RECORD.md` (measurement record),
+  `CONFORMANCE.md`, and the README figure data with its provenance.
+- `tools/api_index.py` — writes and checks `API_INDEX.md` (`pixi run -e cpu api-index`,
+  `api-index-check`).
+- `.githooks/pre-commit` — ruff on staged Python, API index check when `src/` changes
+  (`git config core.hooksPath .githooks`). `.github/workflows/ci.yml` — lint, API index,
+  tests, strict docs, package build.
 
 ## Configuration: three buckets
 
-Don't conflate "config". There are three kinds:
+1. **Shipped library data**: modelling defaults and standards tables, read-only, versioned with
+   the code and loaded through `importlib.resources`: `pgml.defaults` over `src/pgml/data/`.
+   Not user run-config.
+2. **Run-config schemas**: serializable pydantic contracts, one config plus `seed` reproduces a
+   run: `pgml.scenarios.config` (`python -m pgml.scenarios.config --json-schema|--example`;
+   templates in `run/configs/`).
+3. **Run-config instances and outputs**: the user's YAML, datasets and tracking. Never tracked;
+   they live under the experiments root (`PGML_EXPERIMENTS`, default `./data`,
+   `pgml.experiments_root()`), one folder per package.
 
-1. **Shipped library data** — modeling defaults + standards tables (physical constants),
-   read-only, versioned with the code, loaded via `importlib.resources` so they ship in the
-   wheel: `pgml.defaults` over `src/pgml/data/` (`defaults.yaml` + `standards/`). *Not*
-   user run-config.
-2. **Run-config schemas** — serializable pydantic contracts; one config + `seed` reproduces a
-   run: `pgml.scenarios.config` (data generation). Inspect with
-   `python -m pgml.scenarios.config --json-schema|--example`; templates in `run/configs/`.
-   (A downstream package that adds its own run-config schema follows the same convention.)
-3. **Run-config instances + outputs** — the user's own YAML + datasets/checkpoints/tracking.
-   Never tracked here; live under the **experiments root** (`PGML_EXPERIMENTS`, default
-   `./data`; `pgml.experiments_root()`), organised per package (`data/pgml/` for this one).
+## Frozen contract
 
-## Frozen-contract rule
+`src/pgml/schemas/` (grid, result, scenario) is the single source of truth for every package
+of the suite. Everything conforms to it. A schema change needs the maintainer's sign-off and a
+`SCHEMA_VERSION` bump, and a public API or schema change needs a search of all consumers.
 
-`src/pgml/schemas/` (grid/result/scenario) is the single source of truth. Import it; a
-schema change needs the maintainer's sign-off (a breaking change to a published data
-contract). Everything else — here and in every downstream consumer — conforms to it. The
-full behavioral rule is in `CLAUDE.md`.
+## Conventions (defined in the schemas; do not reinvent)
 
-## Key conventions (defined in the schemas; do not reinvent)
-
-- Phase-domain, SI base units; reactive elements store **L and C** (`X(h)=2πhf0·L`,
-  `B(h)=2πhf0·C`); reactances/susceptances are NEVER stored.
-- Every branch → pi-form primitive admittance stamp; transformers add a complex tap / use
-  the winding-incidence vector group.
-- Results store phasors as (real, imag); index by `frequency_hz`.
-- **Float/tensor duality**: physical schema fields accept python floats OR tensors, passed
-  through untouched, so autograd flows through one `assemble_ybus(grid)` call.
+- Phase domain, SI units. Reactive elements store `L` and `C` (`X(h) = 2πh·f0·L`,
+  `B(h) = 2πh·f0·C`); reactances and susceptances are never stored.
+- Every branch is a pi-form primitive admittance stamp; transformers use the
+  winding-incidence vector group with a complex tap.
+- Results store phasors as (real, imag) and index by `frequency_hz`.
+- Float/tensor duality: physical schema fields accept floats or tensors and pass them through
+  untouched, so autograd flows through one `assemble_ybus(grid)` call.
 - Compact node-phase indexing: one matrix row per existing `(node, phase)`
-  (`assembly.node_phase_index`), NOT a padded A/B/C/N grid.
-- Voltage base: `Node.u_rated_v` is line-to-line (≥3φ); the per-phase voltages the solver
-  uses are line-to-neutral via `assembly._params.phase_voltage_magnitude`. See
+  (`assembly.node_phase_index`), not a padded A/B/C/N layout.
+- `Node.u_rated_v` is line-to-line for three-phase nodes; the solver's per-phase voltages are
+  line-to-neutral (`assembly._params.phase_voltage_magnitude`). The cross-tool record is
   `docs/pgml/modeling/conventions.md`.
+- Reference-tool divergence: add an option and state the physics verdict; change a default
+  only when pgml lacks the option.
 
-## Roadmap
+## Version
 
-0. Schemas frozen (grid / result / scenario). **Done.**
-1. Differentiable load flow: Y-bus assembly + complex solve; validate vs OpenDSS &
-   pandapower; gradcheck + GPU. **Done** (linear + nonlinear const-P/ZIP).
-2. Geometry → impedance differentiable path (Carson/Deri, skin effect). **Done** — bit-exact
-   vs OpenDSS.
-3. Full harmonic range; validate harmonic results vs OpenDSS (IEEE-33 + CIGRE LV). **Done.**
-4. Batching/scale (`pgml.scenarios`): a declared batch of input deltas — reproducible
-   QMC/cartesian sampling, explicit values (`batch_from_values`), the excitation sweeps, the
-   standards-referenced emission, parquet persistence. **Done** — including cross-grid
-   batching (`pgml.multigrid.merge_grids` disjoint-union solves) and switch-state batching
-   (`branch_states`); the production GPU data-generation scale decision remains open
-   (`src/pgml/STATUS.md` §A).
-5. Harmonic state estimation and the inverse (parameter recovery) path build on this
-   package's public API. **Out of scope for this repository** — including the scenario
-   RECIPES a learning task needs (device populations, calibrated emission ranges, load
-   profiles). A downstream generator plugs into `run_scenarios` through the `ScenarioSpec`
-   protocol (an object with `sample(grid)`), so the engine stays free of them.
+`src/pgml/__init__.py` holds `__version__`; `pixi.toml` and `CITATION.cff` mirror it.
+Dependents pin `power-grid-ml>=X.Y,<X.Y+1`.
 
 ## Commands
 
-- Run / install: `pixi run -e cpu python ...` / `pixi add <pkg>`.
-- Tests: `pixi run -e cpu pytest -q`. Differentiability gate: `tests/differentiability`;
-  GPU gate: `tests/gpu`.
-- Lint/format: `ruff check src tests run && ruff format src tests run`. Docs: see `CLAUDE.md`.
+- Run: `pixi run -e cpu python …`; add a dependency with `pixi add`.
+- Tests: `pixi run -e cpu pytest -q` (quick: `-m "not slow"`); gates `tests/differentiability`
+  and `tests/gpu` (CUDA host).
+- Lint: `pixi run -e cpu ruff check src tests run` and `ruff format`.
+- Docs: `pixi run -e docs docs-strict`.
+- API index: `pixi run -e cpu api-index` (write), `api-index-check` (CI).

@@ -1,6 +1,7 @@
 """pgml.solver — complex batched differentiable solve of Y(f) V(f) = I(f).
 
-Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
+Public surface (full contracts in each function's docstring; the solver design is
+described in the published *Solver architecture, performance and structural checks* page):
 
 - ``solve_harmonic(y_bus, i_inj, *, fixed_rows=None, v_fixed=None) -> v``
   Norton mode (default) and ideal-slack Schur-partition mode, both differentiable.
@@ -75,11 +76,13 @@ Public surface (see ``solver/CONTEXT.md`` for the frozen contract):
   Raises :class:`~pgml.errors.ConnectivityError` when part of the grid has no
   galvanic path to an in-service source; the pre-solve gate every entry point
   above runs by default.
-- ``check_branch_impedances(grid) -> None``
-  Raises :class:`~pgml.errors.ModelingError` naming any branch with ZERO series
-  impedance (a bus coupler or jumper modelled as a zero-impedance line, a
-  zero-length line, an ideal closed switch): such a branch has no primitive
-  admittance. The second pre-solve gate, run by every entry point above.
+- ``check_branch_impedances(grid, *, fusion=None) -> None``
+  Raises :class:`~pgml.errors.ModelingError` naming any in-service branch with ZERO
+  series impedance that the solve cannot express: called without a fusion map, every
+  such branch; with the map a solve resolved (exact bus fusion, the default
+  ``branch.zero_impedance: fuse``), only a zero-impedance transformer, a zero-series
+  branch that carries a shunt, and a zero-impedance branch listed in
+  ``branch_states``. The second pre-solve gate, run by every entry point above.
 - ``prepare_power_flow(grid, *, slack, dtype, device, param_overrides,
   branch_states, branch_states_method="assemble", linear_solver="auto",
   block_rows=None) -> PowerFlowSystem``

@@ -77,7 +77,10 @@ on override). By the time assembly runs, every element carries materialised
 parameters; the solver core never resolves a type. A canonical element is
 "materialised" when it either has no ``type_ref`` or has had its ``type_ref``
 expanded; ``type_ref`` is retained afterwards as provenance and as an ML
-categorical feature.
+categorical feature. pgml itself ships no such resolver: the converters emit
+explicit parameters, and a hand-authored element that carries only a ``type_ref``
+passes validation but fails in assembly. Give such an element explicit
+parameters (or ``conductor_geometry``) as well.
 
 *Geo.* Nodes and lines may carry GeoJSON-shaped geometry. The CRS is grid-wide
 (``GridMetadata.crs``). ``Line.length_m`` is the ELECTRICAL length and is never

@@ -1,61 +1,64 @@
-# pgml — package map (interface ledger index)
+# pgml package map
 
-The differentiable, GPU-ready harmonic power-flow engine — the base of the suite. This file
-maps pgml's subpackages and points at each one's `CONTEXT.md` interface ledger. For the
-suite-level picture (the other packages, the rationale, the roadmap) see the root
-`CONTEXT.md`; for how to work here (the two hard constraints, style, commands) see `CLAUDE.md`;
-for status + open work see `STATUS.md`; for the published human docs see `docs/pgml/`.
+The subpackages and top-level modules of `pgml`, with what each owns. Rules that hold for the
+whole repository (the two hard constraints, the frozen schemas, the conventions) are in the
+root `CONTEXT.md`; each subpackage has its own `CONTEXT.md`.
 
-## The pipeline (gradients flow end-to-end, left → right)
+Signatures: docstrings / `API_INDEX.md`.
 
-```
-grid (schemas) ──▶ assembly ──▶ solver ──▶ result        ◀── evaluation (plots vs refs)
-      │              ▲   │         ▲                       ◀── scenarios (batched inputs)
-      │              │   └─ geometry (Carson Z(h)/Yc(h))   ◀── convert (pandapower/OpenDSS/pgm)
-      └─ defaults (modeling defaults; shipped `data/` tables) ┘
-```
+## Subpackages
 
-## Where things live (open the subpackage CONTEXT.md for the interface ledger)
+| Owns | Where |
+|---|---|
+| Input and output contracts (`Grid`, nodes, branches, appliances, results, scenario records), frozen | `schemas/` |
+| Shipped modelling defaults, standards tables and reference presets | `data/` (loaded by `defaults.py`) |
+| Y-bus assembly: per-phase, per-harmonic, batched stamps; device injections; node-phase index; branch currents; vector-group transformers; inverter control laws; exact bus fusion of zero-impedance branches | `assembly/` |
+| Solves: batched complex linear; nonlinear constant-power/ZIP by current injection or Newton with IFT gradients; harmonic flow; diagnostics and loadability; low-rank switch sweeps | `solver/` |
+| Geometry to impedance: differentiable Carson/Deri with skin effect; R/X to geometry synthesis; sequence-aware harmonic line models | `geometry/` |
+| Converters from pandapower, OpenDSS and power-grid-model to `Grid`, and back | `convert/` |
+| The batch contract: declared batches of solver-input deltas, sampling, sweeps, background distortion, batched solve, parquet persistence | `scenarios/` |
+| Plots and the optional reference oracles | `evaluation/` |
 
-| Need… | Subpackage | CONTEXT |
-|---|---|---|
-| Input/output **contracts** (Grid, Node, Branch, Appliance, Result, Scenario) — FROZEN | `schemas/` | `schemas/CONTEXT.md` |
-| **Modeling defaults** (documented values + model choices; explicit > defaults > converter) — internal, not user run-config | `defaults.py` (loader) + shipped `data/` | `data/CONTEXT.md` |
-| **Run-config schemas** (serializable; one config + seed reproduces a run) — user-facing | `scenarios/config.py` (data gen) | `scenarios/CONTEXT.md` |
-| **Experiments root** (where run outputs + config instances live; `PGML_EXPERIMENTS`, default `./data`) | `paths.py` | `data/README.md` |
-| **Y-bus assembly** (per-phase/per-harmonic/batched stamps; network + device injections; node-phase index; branch currents; vector-group transformer; control laws; exact bus fusion of zero-impedance branches) | `assembly/` | `assembly/CONTEXT.md` |
-| **Solve** (complex batched linear; nonlinear const-P/ZIP via IFT; Newton; harmonic flow; diagnostics + loadability) | `solver/` | `solver/CONTEXT.md` |
-| **Geometry → impedance** (differentiable Carson/Deri + skin; R/X → geometry synthesis; sequence-aware harmonic line models) | `geometry/` | `geometry/CONTEXT.md` |
-| **Converters** from pandapower / power-grid-model / OpenDSS → our `Grid` | `convert/` | `convert/CONTEXT.md` |
-| **The batch contract** (declare a batch of solver-input deltas — QMC/cartesian sampling, explicit values, the excitation sweeps, the upstream background, the standards tables; solve it batched; persist it as parquet) | `scenarios/` | `scenarios/CONTEXT.md` |
-| **Storage dispatch** (state-of-charge integration + the realized power sequence a `Storage` element's energy-state fields describe) | `dispatch.py` | `scenarios/CONTEXT.md` |
-| **Topology bookkeeping** (slack anchor, branch edges, distance-from-slack Dijkstra) — stdlib-only, safe for lean training imports | `topology.py` | — |
-| **Benchmark input grids** (IEEE-33 / CIGRE LV via pandapower; the canonical example/training feeders; `synthetic_feeder` for arbitrary-size scaling studies) | `grids.py` | — |
-| **Multi-grid batching** (disjoint-union merge of a grid ensemble into ONE solvable Grid — block-diagonal `Y` for free; per-member id maps, `operating_point`/`branch_states` translation, `split()` row views, `block_rows()` for the block-diagonal factorization backend) | `multigrid.py` | — |
-| **Evaluation plots** (Y-bus heatmaps, voltage/harmonic profiles, 3D, refs-vs-ours) + the optional reference oracles | `evaluation/` | `evaluation/CONTEXT.md` |
-| The **public API** — `simulate(grid, config, *, device, dtype, precision, param_overrides, harmonic_injection, node_sources, strict, on_disconnected, linear_solver, block_rows, equilibrate) -> SolvedState`, `simulate_serializable(grid, config, **simulate_kwargs) -> ResultBundle`, `SolvedState`, `SimulationConfig` | `simulation.py` | `docs/pgml/public-api.md` |
-| The **error hierarchy** (`PgmlError` → `InputError` / `ComputationError`, http_status hints; `PgmError` = deprecated alias) | `errors.py` | — |
-| **Code provenance** (`code_provenance()` / `git_state()` — the commit/dirty/version stamp every persisted artifact records; reads git or the cluster sync's `.git-provenance.json`) | `provenance.py` | — |
+## Top-level modules
 
-## Frozen-contract rule
+- `simulation.py` — the public entry points `simulate`, `simulate_serializable`,
+  `SimulationConfig`, `SolvedState` (eager voltages, lazy currents, flows, spectra and THD),
+  `ResultBundle`. User-facing description: `docs/pgml/public-api.md`.
+- `defaults.py` — `pgml.defaults`: the modelling-default loader (`get`, `describe`, `units`,
+  `resolve`) and `use_preset(name)`, a context manager that selects a reference tool's
+  modelling choices. Precedence: explicit value > modelling default > converter value.
+- `paths.py` — `experiments_root()`: where run outputs and config instances live
+  (`PGML_EXPERIMENTS`, default `./data`).
+- `provenance.py` — `code_provenance()` / `git_state()`: the commit, dirty flag and versions
+  every persisted artifact records. Reads git, or a `.git-provenance.json` written next to a
+  deployed copy without a `.git` directory.
+- `errors.py` — `PgmlError` → `InputError` (`ConfigurationError`, `ConversionError`,
+  `ConnectivityError`, `ModelingError`) / `ComputationError` (`ConvergenceError`), with HTTP
+  status hints. `PgmError` is a deprecated alias.
+- `topology.py` — slack anchor, branch edges, distance from the slack, connectivity report,
+  energized subgrid, layout and network fingerprints. Imports only the standard library and
+  the schemas (no torch), so a lean process can import it.
+- `multigrid.py` — `merge_grids`: disjoint-union merge of a grid ensemble into one solvable
+  `Grid` (block-diagonal `Y`), with per-member id maps, `operating_point` and `branch_states`
+  translation, `MergedGrid.split()` row views and `block_rows()` for the block-diagonal
+  factorization backend.
+- `dispatch.py` — storage state-of-charge integration and the realized power sequence of a
+  `Storage` element. Off the autograd tape.
+- `grids.py` — benchmark grids (IEEE 33-bus and CIGRE LV, built from the pandapower
+  networks, with conductor geometry and PV placement) and `synthetic_feeder` (no optional
+  dependency) for scaling studies.
 
-`schemas/` (grid/result/scenario) is the single source of truth — import and conform; a
-schema change needs the maintainer's sign-off first. `SCHEMA_VERSION` stamps the
-contract version into persisted datasets. Full rule: `CLAUDE.md`.
+## Dependency direction
 
-## Key conventions (do not reinvent)
-
-- Phase-domain, SI; store **L/C** not X/B (`X(h)=2πhf0·L`, `B(h)=2πhf0·C`); phasors as
-  (real, imag); index by `frequency_hz`.
-- **Float/tensor duality** — physical schema fields accept python floats OR tensors, passed
-  through untouched, so autograd flows through one `assemble_ybus(grid)` call.
-- Compact node-phase indexing (`assembly.node_phase_index`): one row per existing
-  `(node, phase)`, not a padded A/B/C/N grid.
-- `Node.u_rated_v` is line-to-line (≥3φ); the solver's per-phase voltages are line-to-neutral
-  via `assembly._params.phase_voltage_magnitude`. The full cross-tool convention record is
-  `docs/pgml/modeling/conventions.md`.
+`schemas` imports nothing else of pgml. `geometry` builds on `schemas` and `defaults`;
+`assembly` on those and `geometry`; `solver` on `assembly` and `topology`; `simulation` and
+`scenarios` on `solver`.
+`convert`, `evaluation` and `grids` (whose benchmark nets come from pandapower) sit on top
+and are the only places that import the optional reference tools (pandapower, OpenDSS,
+power-grid-model), always inside a function or behind an extra.
+pgml imports no other package of the suite.
 
 ## Tests
 
-Oracle comparisons (`tests/reference`), the differentiability gate (`tests/differentiability`,
-float64 gradcheck), and the GPU device/dtype gate (`tests/gpu`). See `tests/CONTEXT.md`.
+Oracle comparisons (`tests/reference`), the differentiability gate (`tests/differentiability`)
+and the device/dtype gate (`tests/gpu`); see `tests/CONTEXT.md`.

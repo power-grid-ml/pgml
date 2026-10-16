@@ -97,12 +97,12 @@ HV/from terminal (`magnetizing_conductance_s`, `magnetizing_inductance_h`). Wher
 stamped is the documented choice `transformer.magnetizing_placement`, because the three
 reference engines disagree. OpenDSS attaches the whole branch to its last winding's
 terminal, verified on a live `Yprim` difference; power-grid-model splits it half onto `Y_tt`
-and half through the tap onto `Y_ff`; pandapower keeps it on the LV base inside its pi
-shunt. These are different topologies rather than different referrals, since the magnetizing
+and half through the tap onto `Y_ff`; pandapower's default `trafo_model="t"` places it
+between two leakage half-impedances (see {doc}`transformer`). These are different topologies rather than different referrals, since the magnetizing
 current either does or does not see a winding's leakage drop. Measured deviations from a
-live OpenDSS solve on a 500 kVA 20/0.4 kV unit: `to_terminal` 3e-10 to 2e-9 pu, `split` half
-of `from_terminal`, and `from_terminal` (the shipped default) 9.2e-5, 2.2e-4 and 8.2e-4 pu
-at magnetizing currents of 0.1, 0.5 and 2 %.
+live OpenDSS solve on a 500 kVA 20/0.4 kV unit: `to_terminal` 3e-10 to 2e-9 pu, `split`
+(the default) about half as much as `from_terminal`, and `from_terminal` 9.2e-5, 2.2e-4 and
+8.2e-4 pu at magnetizing currents of 0.1, 0.5 and 2 %.
 
 The conversion of the percentages differs per tool as well. pandapower's `i0_percent` is the
 total no-load current, so `B=√(I0²−G²)`; OpenDSS's `%imag` is the susceptance itself, read
@@ -147,6 +147,28 @@ Per-tool notes:
   normalised back to canonical A/B/C. Together these reach every clock of a pairing's
   parity.
 
+Cyclic winding-bus rotation (OpenDSS). A winding bus string may list its three phase
+conductors in a cyclic rotation `r` of `(1, 2, 3)`: `bus=lv.2.3.1.0` is `r=1` and
+`bus=lv.3.1.2.0` is `r=2`, detected as `phase_nums[k] == ((k + r) mod 3) + 1`. The reader
+stores canonical `(A, B, C)` phases on both terminals, because the phase-domain stamp
+assumes winding position `k` is bus phase `k`, and folds the rotation into the clock:
+
+```
+shift_deg = (base_shift_deg + 120·r_from − 120·r_to) mod 360
+```
+
+`base_shift_deg` is the `LeadLag` baseline (30 or 330 for Dy/Yd, 0 for Yy/Dd). The sign is
+pinned against live OpenDSS solves of a 20/0.4 kV unit: rotating the HV winding by `r=1`
+on a Yy0 base makes the LV bus lag by 120° (clock 4, +4 clock steps per from-side step),
+rotating the LV winding by `r=1` makes it lag by 240° (clock 8, −4 steps per to-side
+step), and `r=2` doubles the effect. The same rule holds on a Dyn1 base (LV `r=2` gives
+clock 5, Dyn5) and a Dd0 base, so it does not depend on which winding is delta. A
+non-cyclic permutation such as `bus=lv.1.3.2.0` reverses the phase sequence, a different
+winding, and raises `ConversionError`. The reverse direction, the live-oracle transformer
+builder, rotates only the LV winding and picks the `LeadLag` baseline whose residual to
+the requested clock is a multiple of four steps; the polarity-flip clocks 2, 6 and 10 and
+zigzag windings raise `NotImplementedError` there.
+
 The OpenDSS transformer scope is narrower than the core model. Only two-winding units
 convert, and only solidly grounded wye windings (the shorthand bus, or an explicit `.0`) or
 delta windings. Three-winding units, and an explicit non-zero neutral node that is floating
@@ -159,8 +181,8 @@ tap-changer control and frequency-correction curves (`XfmrCode`, `FreqMultCurve`
 read. The magnetizing branch (`%noloadloss`, `%imag`) converts with the same closed form as
 the pandapower path. Where pgml stamps it is the documented choice
 `transformer.magnetizing_placement`, whose `to_terminal` setting reproduces OpenDSS's own
-placement to 3e-10 pu; the shipped `from_terminal` default deviates by up to 8.2e-4 pu at a
-2 % magnetizing current.
+placement to 3e-10 pu; `from_terminal` deviates by up to 8.2e-4 pu at a 2 % magnetizing
+current and the shipped `split` default by half of that.
 
 ## Power sign convention
 
@@ -206,6 +228,16 @@ per-phase line-to-neutral EMF and leaves a one-phase source unchanged, matching 
 own treatment. `id_map["slack_v_complex"]` keeps the same raw phasor as a convenience for
 the single-phase ideal-slack `v_fixed`. At harmonics the source EMF is zero, a short, and
 the source contributes only its Norton shunt `Y_s(h)=1/(R+j·2πh·f₀·L)`.
+
+Source impedance under the ideal slack. pgml's default `slack="ideal"` pins the source
+bus at `u_ref_v` and does not use the `Source`'s Thévenin impedance at the fundamental;
+only `slack="norton"` folds that impedance into the network, so the bus voltage sags under
+load as it does behind an OpenDSS `Vsource`, which is always a finite-impedance source.
+The OpenDSS reader therefore warns once per `Vsource` whose `R1` or `X1` exceeds 1e-4 Ω,
+which is above the near-zero placeholders of an "ideal source" and below OpenDSS's own
+default source impedance, and recommends `slack="norton"`. A comparison against OpenDSS
+must use `slack="norton"` for the same reason, or it reports two different slack models
+as a numeric discrepancy.
 
 Source zero sequence. A `Source`'s per-phase Thévenin is sequence-aware: each converter
 reads its tool's native zero-sequence data into `Z_self=(Z0+2·Z1)/3` and
@@ -361,7 +393,7 @@ read, a foreign network under-converts, and these are the current gaps.
 |---|---|---|
 | OpenDSS | `Transformer` (scope above), `Line`, `Load`, `Capacitor`, `Reactor`, `Generator` (including `model=3`), `PVSystem`, `Storage` | three-winding transformers, regulators and tap-changer control, frequency-correction curves, a coupled `Rmatrix`/`Xmatrix` reactor, a non-grounded or two-bus terminal-2 shunt reference, a neutral earthing impedance (`Rneut`/`Xneut`) |
 | pandapower | `trafo`, `line`, `load`, `sgen`, `gen`, `storage`, `shunt`, `asymmetric_load`, `switch`, `ext_grid` (including `x0x_max`/`r0x0_max`) | `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `motor`, `asymmetric_sgen`, `mag0_percent`/`mag0_rx`, `si0_hv_partial`, `xn_ohm`/`rn_ohm` |
-| pgm | `node`, `line`, `transformer`, `link`, `sym_load`, `asym_load`, `sym_gen`, `source` (including `z01_ratio`) | `asym_gen`, `voltage_regulator`, `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `uk_min`/`uk_max`/`pk_min`/`pk_max`, `i0_zero_sequence`/`p0_zero_sequence` |
+| pgm | `node`, `line`, `transformer`, `link`, `sym_load`, `asym_load`, `sym_gen` (with its `voltage_regulator`), `source` (including `z01_ratio`) | `asym_gen`, a `voltage_regulator` on anything other than a `sym_gen`, `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `uk_min`/`uk_max`/`pk_min`/`pk_max`, `i0_zero_sequence`/`p0_zero_sequence` |
 
 Details worth knowing before a conversion:
 
@@ -371,16 +403,18 @@ Details worth knowing before a conversion:
   resolved return conductor carries over as `InjectionAppliance.return_path`. `Capacitor`
   and `Reactor` become a `ShuntAppliance`, solidly grounded WYE or delta, with per-leg G
   and C from OpenDSS's own resolved values.
+- An `InvControl` in `VOLTVAR`, `VOLTWATT` or `CombiMode=VV_VW` mode becomes the matching
+  inverter control law on its DER; other modes are reported as dropped with the reason.
 - Anything else in a DSS file (`Isource`, `Monitor`, `EnergyMeter`, `CapControl`,
-  `InvControl`, `Relay`, `Sensor` and the rest) is enumerated generically and warns with
+  `RegControl`, `Relay`, `Sensor` and the rest) is enumerated generically and warns with
   its kind and count, so nothing vanishes silently. A non-negligible Vsource `R1`/`X1`
   warns under the default `slack="ideal"`, where it is ignored, and is used under
   `slack="norton"`.
 - pandapower `line` and `trafo` honour the `parallel` column, dividing the series impedance
-  and multiplying the shunt admittance and rated power; `parallel==1` stays byte-identical.
+  and multiplying the shunt admittance and rated power; `parallel==1` leaves the element unchanged.
   By default, an open bus-line or bus-transformer switch rewires only its open terminal to
   an auxiliary node, retaining the connected-end shunt like pandapower. The explicit
-  `open_switch_model="drop_element"` option selects the legacy whole-branch approximation;
+  `open_switch_model="drop_element"` option selects the whole-branch approximation;
   an element open at both ends is omitted in either mode.
 - pandapower `gen`, a PV bus with fixed P, regulated `vm_pu` and free Q within its reactive
   limits, converts exactly by default (`gen_mode=GenMode.VOLTAGE_REGULATING`): the row

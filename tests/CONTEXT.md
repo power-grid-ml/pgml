@@ -1,4 +1,7 @@
-# Testing conventions (read before writing or running tests)
+# Testing conventions
+
+Run the quick loop with `pixi run -e cpu pytest -q -m "not slow"`; CI runs the full CPU
+suite. `tests/gpu` needs a CUDA host.
 
 Layout (one directory per concern; mirrors the package layout where it maps 1:1):
 - `tests/reference/`        cross-library oracle comparisons (Y-bus + results).
@@ -42,3 +45,20 @@ Reference-model fixture: `tests/reference/conftest.py::opendss_model_defaults`, 
 by conformance modules. The default/preset restoration, schema round-trip, mixed-model
 assembly and CPU/CUDA checks are in `tests/defaults/test_reference_presets.py`.
 The IFT context-retention test is `tests/differentiability/test_modeling_presets.py`.
+
+Environment traps:
+- Run tests through `pixi run`. Calling the environment's python directly skips activation,
+  so `CONDA_PREFIX` is unset, `import power_grid_model` fails, and the guarded
+  power-grid-model modules skip silently (the only symptom is a lower collected count). To
+  change `PYTHONPATH`, use `pixi run -e cpu env PYTHONPATH=… python -m pytest …`; a
+  `PYTHONPATH` set before `pixi run` is overwritten by the activation.
+- `opendssdirect` wraps one process-global engine. `Clear` does not reset
+  `DefaultBaseFrequency`, so a module that sets 50 Hz leaks into the next DSS-driven module
+  even when that circuit says `frequency=60`. Reassert `set DefaultBaseFrequency=<f0>` right
+  after `Clear` (see `_dss_clear` in `tests/reference/test_opendss_transformer.py`).
+- Matplotlib runs on the `Agg` backend in tests (set in `tests/evaluation/conftest.py`); a
+  module that plots imports it through `pytest.importorskip`.
+- A numpy-oracle parity test is only as strict as the line model it exercises: branches
+  that carry no harmonic current hide line-model differences. When a parity test degrades
+  after adding a term that loads every bus, re-run it with `harmonic_line_model="naive"`
+  first.

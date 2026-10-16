@@ -47,8 +47,10 @@ three-phase mode and reduces a coupled multi-phase line to `Z1 = Z_self − Z_mu
 single-phase-equivalent mode. A phase-permuted terminal carries its own phase tuple.
 
 Other elements. `Capacitor` and `Reactor` become shunt appliances, grounded wye or delta, with
-per-leg values read from OpenDSS's own resolved numbers. A reactor's series R and X convert to
-the equivalent shunt admittance, which is exact at the fundamental only. `Generator`,
+per-leg values read from OpenDSS's own resolved numbers. A reactor's reactance converts to a shunt
+inductance, so its susceptance falls as `1/h` at harmonics; a reactor with both R and X in
+series converts to the equivalent parallel pair at the fundamental, with a warning, because
+its loss term then stays flat with frequency where the series one decays. `Generator`,
 `PVSystem` and `Storage` become injections, and the latter two are read at their present
 solved power, already derated. A `Generator` with `model=3` is a voltage-regulating bus, and
 it converts to a regulating terminal with its `Vpu` setpoint and its `Minkvar`/`Maxkvar`

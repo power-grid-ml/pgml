@@ -25,7 +25,10 @@ pandapower reference setup
 - Test 2 (Volt-VAr): ``pp.control.Characteristic`` (y-axis in MVAR) +
   ``pp.control.CharacteristicControl`` mapping ``res_bus.vm_pu → sgen.q_mvar``,
   converged via ``pp.control.run_control(tol=1e-9)``.  Tight controller
-  tolerance is needed to match pgml's continuous Newton evaluation of Q(V).
+  tolerance is needed to match pgml's continuous Newton evaluation of Q(V): the
+  controller's default ``tol=1e-3`` leaves a 4e-5 pu gap.  The pandapower curve's
+  y-axis is in MVAr (``y_frac * s_rated_mva``), pgml's in fractions of
+  ``s_rated_va`` (``QReference.RATED``): the same physical Q at the same voltage.
 - Test 3 (Storage snapshot): ``pp.create_storage`` with ``p_mw < 0``
   (negative = discharging = inject, the reverse of pgml convention); Q=0.
   Plain ``pp.runpp`` is sufficient.

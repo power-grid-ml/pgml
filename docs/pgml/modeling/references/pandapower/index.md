@@ -21,12 +21,31 @@ its internal bus admittance. Sequence domain at heart, and not differentiable.
 
 ## What the reader takes
 - `gen` is pandapower's PV bus, and it converts to a voltage-regulating terminal by default.
-- `shunt` converts to a fixed WYE shunt appliance. An inductive row becomes a negative
-  capacitance, exact at the fundamental only.
+- `shunt` converts to a fixed WYE shunt appliance. A capacitive row stores a capacitance
+  and an inductive row an inductance, so each susceptance keeps its physical frequency
+  trend at harmonic orders.
 - `ext_grid`'s `x0x_max` and `r0x0_max` are read into the source's zero-sequence impedance.
 - `trafo`'s `vk0_percent` and `vkr0_percent` are read into the transformer's zero-sequence
   leakage. `mag0_percent`, `mag0_rx` and `si0_hv_partial` are not modelled and are named in a
   warning.
+
+## Switches and zero-impedance branches
+- A closed bus-bus switch with `z_ohm = 0` is solved by merging its two buses into one
+  internal bus: `net._pd2ppc_lookups["bus"]` maps both to the same index, their `res_bus`
+  rows are identical, and `res_switch` reports `NaN` for the current. Every pandapower
+  built-in network with bus-bus switches uses `z_ohm = 0`. `switch_rx_ratio` only matters
+  for a switch that carries a `z_ohm`. pgml's default ideal switch and its node fusion
+  reproduce the merge.
+- CIGRE MV and `mv_oberrhein` carry bus-line (`et='l'`) switches only. An open one keeps
+  the connected end energized through an internal auxiliary bus.
+- A zero-impedance line makes `runpp` fail with a `FloatingPointError`. pandapower
+  handles it with
+  `pandapower.toolbox.grid_modification.replace_zero_branches_with_switches(net,
+  elements=("line",), zero_length=False, zero_impedance=True, drop_affected=True)`, which
+  turns the line into a merging switch. A purely resistive near-ideal branch (`x = 0`)
+  also breaks the DC-initialised Newton start, so such a comparison needs `init="flat"`.
+  `runpp` stops converging as that stand-in resistance shrinks: at `tolerance_mva = 1e-10`
+  it fails at 1e-6 Ω.
 
 ## Extracting ground truth
 ```python

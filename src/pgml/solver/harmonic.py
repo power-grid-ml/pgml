@@ -16,7 +16,7 @@ Two slack / reference modes, both differentiable:
    ``v_free = Y_ff^-1 (I_free - Y_fs v_fixed)`` and reassemble the full ``v`` with
    gather/scatter (no in-place on tracked tensors). Matches pandapower / pgm.
 
-Differentiability + GPU (CLAUDE.md): gradients flow w.r.t. ``Y``, ``I`` and
+Differentiability and device rules: gradients flow w.r.t. ``Y``, ``I`` and
 ``v_fixed``. No ``.item()/.detach()/.numpy()``, no in-place op on tracked tensors,
 no python control flow on tensor values, no hard-coded device. Runs unchanged on
 CPU and CUDA; honors the input complex dtype (complex128 for gradcheck).
@@ -172,6 +172,11 @@ def solve_anchored(
     does). Anchor weights are cast to the real dtype paired with ``y_bus``'s complex
     dtype (complex64 and complex128 both supported).
 
+    Unlike :func:`solve_harmonic` and :func:`lu_factor_system`, this solve applies no
+    diagonal equilibration (:mod:`pgml.solver.equilibration`): ``Y_ff`` is factored in
+    its SI scaling, so a badly scaled operator is solved at its unscaled condition
+    number.
+
     Parameters
     ----------
     y_bus:
@@ -307,6 +312,9 @@ class AnchoredSystem:
     tape (use :func:`solve_anchored` when gradients w.r.t. ``Y`` or ``op`` are needed —
     e.g. a learned-parameter calibration). Gradients still flow through :meth:`solve`
     w.r.t. the right-hand side, the anchor targets, the anchor weights and ``v_fixed``.
+
+    Like :func:`solve_anchored`, the construction factors the unscaled SI matrix: no
+    diagonal equilibration (:mod:`pgml.solver.equilibration`) is applied.
 
     Parameters
     ----------

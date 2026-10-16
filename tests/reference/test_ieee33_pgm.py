@@ -23,7 +23,7 @@ pgm ``sym_load.type = LoadGenType.const_impedance``:
     formula ``y = conj(P + jQ) / u_rated_v^2``.  Both sides solve the same
     linear system, so results should agree to numerical precision.
 
-Our schema stores the linear (const-Z) load shunt per the assembly CONTEXT.md:
+pgml's linear assembler (``assemble_ybus``) folds each load as the const-Z shunt:
     ``y = conj(P + jQ) / |U_nom|^2``
 where ``|U_nom|`` is ``u_rated_v`` (line-to-line) for a 1-phase node.  This is
 exactly pgm's constant-impedance admittance at the rated (nominal) voltage.

@@ -180,6 +180,16 @@ because a delta coil's own base is `3·u_LL²/S`.
   magnetizing current, 2.2e-4 pu at 0.5 %, and 8.2e-4 pu at 2 %. The split model's
   difference is about half as large. Reference agreement tests select the reference's
   model rather than treating a default mismatch as solver error.
+  pandapower's default `trafo_model="t"` places the magnetizing shunt inside a
+  T equivalent, between two leakage half-impedances, so it also enters the HV-LV
+  transfer admittance. None of pgml's terminal placements reproduces that. Every
+  pandapower unit with `pfe_kw > 0` or `i0_percent > 0` (the Kerber standard types,
+  `mv_oberrhein`) therefore shows a residual of about 1e-5 pu and 1e-2 deg against
+  `runpp`. Zeroing `pfe_kw` and `i0_percent` on the same unit removes it to machine
+  precision. The 6.7e-3 and 1.0e-2 pu residuals on MATPOWER `case118` and `case300` also
+  come from the magnetizing branch. There, MATPOWER's charging susceptance on ratio
+  branches is imported as a negative `i0_percent`. With it zeroed in both tools the cases
+  agree to 6.7e-16 and 3.0e-14 pu.
 - The winding resistance follows `R(f) = R · m(f) · (f/f₀ if the unit holds X/R constant
   else 1)`. Here `m(f)` is the `resistance_frequency` multiplier, a constant, the Carson skin
   law or a sampled curve, and the second factor is OpenDSS's `XRConst`, carried per

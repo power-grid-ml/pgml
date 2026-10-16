@@ -58,11 +58,20 @@ Public API
 - ``LowRankOperator`` — the updated matrix as a matrix-free operator (applies
   ``A·x + U C V^H x`` without materialising the per-state ``[B, N, N]`` matrix).
 
-Differentiability + GPU (CLAUDE.md): pure torch throughout, so gradients flow to
+Differentiability and devices: pure torch throughout, so gradients flow to
 the factored matrix, to ``U`` / ``C`` / ``V``, to the right-hand side and to
 ``v_fixed``; device and dtype follow the inputs; every backend of
 :func:`~pgml.solver.harmonic.lu_factor_system` (dense, sparse, block) is supported
 through its own back-substitution.
+
+GRADIENT PRECISION: a downdate spends digits in the derivative with respect to the
+state where it spends none in the solution. In a switch-state sweep
+(``branch_states_method="woodbury"``) the solved voltages agree with the assembling
+path to ``~1e-15`` relative, while ``dV/ds`` agrees only to ``~1e-6`` (float64,
+measured on a four-feeder grid with one swept tie; the assembling path itself
+reproduces across devices to ``~1e-7``). Assert switch-state gradient parity no
+tighter than ``~1e-5``, and use ``branch_states_method="assemble"`` when a study needs
+more digits in ``dV/ds``.
 """
 
 from __future__ import annotations
