@@ -11,10 +11,11 @@ Validates that:
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import torch
+
+plt = pytest.importorskip("matplotlib.pyplot", exc_type=ImportError)
 
 # ---------------------------------------------------------------------------
 # Optional pandapower guard (matches existing reference test conventions)
