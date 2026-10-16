@@ -130,7 +130,7 @@ def _mixed_grid() -> Grid:
                 to_node=4,
                 from_phases=ABC,
                 to_phases=ABC,
-                closed=True,
+                default_closed=True,
                 resistance_ohm=0.0,
             ),
             _line(13, 4, 5),

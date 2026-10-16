@@ -505,7 +505,7 @@ def _devices_grid() -> Grid:
         to_node=1,
         from_phases=_ABC,
         to_phases=_ABC,
-        closed=True,
+        default_closed=True,
         resistance_ohm=1.0e-4,
         inductance_h=0.0,
     )
@@ -515,7 +515,7 @@ def _devices_grid() -> Grid:
         to_node=2,
         from_phases=_ABC,
         to_phases=_ABC,
-        closed=True,
+        default_closed=True,
         resistance_ohm=2.0e-4,
         inductance_h=0.0,
     )

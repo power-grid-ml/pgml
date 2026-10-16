@@ -68,7 +68,7 @@ def _switch(bid, u, v, *, phases=A, closed=True, r=0.0):
         to_node=v,
         from_phases=phases,
         to_phases=phases,
-        closed=closed,
+        default_closed=closed,
         resistance_ohm=r,
     )
 
@@ -182,7 +182,7 @@ def test_phase_rotating_jumper_pairs_by_position():
         to_node=2,
         from_phases=ABC,
         to_phases=(Phase.B, Phase.C, Phase.A),
-        closed=True,
+        default_closed=True,
     )
     grid = _grid([sw, _line(11, 2, 3, phases=ABC)], phases=ABC)
     fm = fusion_map(grid)

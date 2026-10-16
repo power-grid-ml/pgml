@@ -35,7 +35,7 @@ def test_state_zero_equals_unstamped_and_one_equals_closed(grid):
     closed = grid.model_copy(
         update={
             "branches": [
-                b.model_copy(update={"closed": True}) if b.id == TIE else b
+                b.model_copy(update={"default_closed": True}) if b.id == TIE else b
                 for b in grid.branches
             ]
         }

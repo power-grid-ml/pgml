@@ -1093,10 +1093,24 @@ class Transformer(BranchBase):
 
 class Switch(BranchBase):
     """Switch/breaker as a degenerate pi-branch (consistent R/L/G/C convention,
-    replacing a single complex z). Closed + all-zero R/L = ideal (nodes fused)."""
+    replacing a single complex z). Closed + all-zero R/L = ideal (nodes fused).
+
+    The grid stores the switch's DEFAULT state (:attr:`default_closed`, e.g. the
+    normal operating state a DSO documents), because switch states determine the
+    topology. The state of a particular calculation is a calculation input: a solve
+    or assembly call takes it through ``branch_states``, which overrides
+    :attr:`default_closed` (and ``in_service``) without editing the grid.
+
+    Grids persisted before the field was named ``default_closed`` carry it as
+    ``closed``; that key is accepted on input (with a ``DeprecationWarning``) and
+    the grid always serialises the new name.
+    """
 
     component: Literal["switch"] = "switch"
-    closed: bool = Field(description="True = conducting, False = open.")
+    default_closed: bool = Field(
+        description="Default switch state: True = conducting, False = open. The state "
+        "of a calculation is passed per call (``branch_states``) and overrides it."
+    )
     resistance_ohm: NonNegNum = si_field(
         "Longitudinal resistance when closed (0 = ideal).",
         short="Ohm",
@@ -1120,6 +1134,34 @@ class Switch(BranchBase):
         long="farad",
         default=0.0,
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_closed_key(cls, data: Any) -> Any:
+        """Read the pre-rename ``closed`` key as :attr:`default_closed`.
+
+        The value is moved unchanged, so a persisted grid keeps its topology. Both
+        keys with different values are contradictory and raise.
+        """
+        if not isinstance(data, dict) or "closed" not in data:
+            return data
+        import warnings
+
+        data = dict(data)
+        legacy = data.pop("closed")
+        if "default_closed" in data and data["default_closed"] != legacy:
+            raise ValueError(
+                "Switch carries both `closed` and `default_closed` with different "
+                "values; `closed` is the pre-rename key of `default_closed`."
+            )
+        data.setdefault("default_closed", legacy)
+        warnings.warn(
+            "Switch: the key `closed` is read as `default_closed` (renamed in schema "
+            "0.3.0). Re-persist the grid to store the new key.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return data
 
 
 class ShuntReactor(BranchBase):

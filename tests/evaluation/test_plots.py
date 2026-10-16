@@ -270,7 +270,7 @@ def _switch_grid(switch_closed: bool) -> Grid:
                 to_node=3,
                 from_phases=ph,
                 to_phases=ph,
-                closed=switch_closed,
+                default_closed=switch_closed,
                 resistance_ohm=1e-6,
                 inductance_h=1e-9,
             ),

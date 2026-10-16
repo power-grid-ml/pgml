@@ -375,7 +375,7 @@ def to_grid(
                 to_node=id_map["node"][to_pgm],
                 from_phases=link_phases,
                 to_phases=link_phases,
-                closed=True,
+                default_closed=True,
                 provenance=_PROVENANCE,
             )
         )

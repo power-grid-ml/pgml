@@ -93,7 +93,7 @@ def switch_grid() -> Grid:
                 to_node=3,
                 from_phases=A,
                 to_phases=A,
-                closed=True,
+                default_closed=True,
                 resistance_ohm=0.05,
                 inductance_h=0.02 / OMEGA,
                 shunt_capacitance_f=2.0e-6,

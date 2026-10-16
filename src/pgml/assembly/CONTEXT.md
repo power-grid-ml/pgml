@@ -75,7 +75,7 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
   without editing the schema; the key list is in the `assemble_ybus` docstring. Discrete
   choices (vector-group clock, model names) are never leaves.
 - `branch_states` `{branch_id: float | 0-d | [*batch]}` stamps a listed branch ALWAYS and
-  scales its block by the state, overriding `in_service` / `closed`; `branch_currents` must
+  scales its block by the state, overriding `in_service` / `default_closed`; `branch_currents` must
   receive the same states as the assembly the voltages came from.
 
 ## Branch-stamp registry (the extension point)

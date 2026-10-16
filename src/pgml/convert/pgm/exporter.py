@@ -454,7 +454,7 @@ def _line_row(
 
 def _switch_row(br: Switch, out: PgmExport, w0: float, pid: int) -> dict:
     """A closed switch exports as a very short line carrying its contact impedance."""
-    status = int(bool(br.closed) and bool(br.in_service))
+    status = int(bool(br.default_closed) and bool(br.in_service))
     out.pgm_of_branch[br.id] = pid
     r = scalar(br.resistance_ohm)
     x = w0 * scalar(br.inductance_h)

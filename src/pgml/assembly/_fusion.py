@@ -219,7 +219,7 @@ def zero_impedance_branches(
                 detail += " while its shunt G/C is not"
             out.append(ZeroImpedanceBranch(bid, "line", detail, shunt_zero))
         elif isinstance(b, Switch):
-            if not b.closed:
+            if not b.default_closed:
                 continue
             r = _effective(
                 param_overrides, "switch", bid, "resistance_ohm", b.resistance_ohm

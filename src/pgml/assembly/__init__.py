@@ -8,7 +8,7 @@ Public surface (the modeling behind it: ``docs/pgml/modeling/``):
   const-Z ``Y`` ``[*batch, H, N, N]``.  ``symmetry`` selects per-phase vs
   balanced calculation (``None`` -> config ``calculation.symmetry``).
   ``branch_states`` masks/batches branch admittance by a differentiable
-  switch/topology state (overrides ``in_service``/``closed``).
+  switch/topology state (overrides ``in_service``/``default_closed``).
 - ``assemble_network_ybus(grid, frequencies_hz, *, dtype, device,
   param_overrides=None, branch_states=None) -> YBus`` — PASSIVE-network
   ``Y_net`` (no loads, no source Norton); the nonlinear power-flow assembler.

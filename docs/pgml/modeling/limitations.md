@@ -154,10 +154,12 @@ converters warn once per grid when they use them.
 angle difference from pandapower. Switches with `z_ohm = 0` (every pandapower built-in) are
 ideal in both tools and are fused exactly.
 
-**Switch state.** A switch's open or closed state is part of the grid. A branch whose state is
-swept per scenario (`branch_states`) is never fused, because its state scales a stamped
-admittance block, so an ideal zero-impedance switch cannot be swept: it raises
-`ModelingError`. Give a swept switch a finite impedance.
+**Switch state.** The grid stores each switch's default state (`Switch.default_closed`),
+because switch states determine the topology. The state of a calculation is an input of that
+calculation: `branch_states` overrides the default per solve without editing the grid. A
+branch whose state is swept per scenario (`branch_states`) is never fused, because its state
+scales a stamped admittance block, so an ideal zero-impedance switch cannot be swept: it
+raises `ModelingError`. Give a swept switch a finite impedance.
 
 **Shunt reactors with a series resistance.** The shunt primitive is the parallel form
 `G + 1/(jωL) + jωC`. A lossless reactor, or a pandapower inductive shunt, maps exactly at every

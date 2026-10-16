@@ -547,7 +547,7 @@ def _export_switch(dss, sw: Switch, busname: dict, f0: float, mode: str) -> None
     r = to_float(sw.resistance_ohm)
     x = 2.0 * math.pi * f0 * to_float(sw.inductance_h)
     r_eff = r if r > 0.0 else 1.0e-6
-    enabled = "yes" if sw.closed else "no"
+    enabled = "yes" if sw.default_closed else "no"
     earth = " Rg=0 Xg=0" if mode == "matched" else ""
     dss.Text.Command(
         f"New Line.sw{sw.id} Switch=yes phases={n} bus1={bus1} bus2={bus2} "

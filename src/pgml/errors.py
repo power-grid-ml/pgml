@@ -81,7 +81,7 @@ class ConnectivityError(InputError):
 
     Typical causes and fixes (the message lists the concrete elements):
 
-    - an OPEN :class:`Switch` on the only path — close it (``closed=True``) or
+    - an OPEN :class:`Switch` on the only path — close it (``default_closed=True``, or a per-solve ``branch_states`` entry) or
       accept the disconnection;
     - a :class:`Line` / :class:`Transformer` with ``in_service=False`` on the only
       path — set it in service;

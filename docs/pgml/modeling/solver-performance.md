@@ -148,7 +148,7 @@ branch listed in `branch_states` is refused by name with both ways out: give the
 the documented near-ideal resistance, or drop it from the sweep. A grid may contain both kinds
 at once.
 
-The state overrides the branch's static in-service and closed flags, so one superset grid
+The state overrides the branch's static `in_service` and `default_closed` flags, so one superset grid
 describes every configuration. Adding a branch that is absent from the superset still needs a
 new assembly. Because an open state can disconnect part of a grid, the per-scenario topologies
 are connectivity-checked up front, vectorised over the batch on a condensed component graph,

@@ -505,7 +505,7 @@ def _export_switch(net, out: PandapowerExport, br: Switch) -> None:
         bus=out.bus_of_node[br.from_node],
         element=out.bus_of_node[br.to_node],
         et="b",
-        closed=bool(br.closed) and bool(br.in_service),
+        closed=bool(br.default_closed) and bool(br.in_service),
         z_ohm=z_ohm,
         name=br.name or f"switch{br.id}",
     )

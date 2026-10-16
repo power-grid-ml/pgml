@@ -22,7 +22,7 @@ ABC = (Phase.A, Phase.B, Phase.C)
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == "0.2.0"
+    assert SCHEMA_VERSION == "0.3.0"
 
 
 def test_shunt_reactor_rejects_mis_sized_matrix():
@@ -273,3 +273,70 @@ def test_source_accepts_keyword_construction_with_the_legacy_argument():
         spectrum=None,
     )
     assert "spectrum" not in src.model_dump()
+
+
+def _grid_json_with_a_switch_key(key: str) -> str:
+    """The tiny chain plus a tie switch whose state is stored under ``key``."""
+    import json
+
+    from tests.fixtures.tiny_grids import single_phase_chain
+
+    data = single_phase_chain().model_dump(mode="json")
+    data["branches"].append(
+        {
+            "component": "switch",
+            "id": 30,
+            "from_node": 1,
+            "to_node": 3,
+            "from_phases": ["a"],
+            "to_phases": ["a"],
+            key: False,
+            "resistance_ohm": 1.0e-3,
+        }
+    )
+    return json.dumps(data)
+
+
+def test_switch_reads_the_pre_rename_closed_key_and_writes_default_closed():
+    """A grid persisted before the rename loads with its switch state unchanged and
+    re-serialises under the new key only."""
+    import json
+
+    from pgml.schemas.grid_schema import Grid, Switch
+
+    with pytest.warns(DeprecationWarning, match="default_closed"):
+        grid = Grid.model_validate_json(_grid_json_with_a_switch_key("closed"))
+    (switch,) = [b for b in grid.branches if isinstance(b, Switch)]
+    assert switch.default_closed is False
+    dumped = [
+        b for b in json.loads(grid.model_dump_json())["branches"] if b["id"] == 30
+    ]
+    assert dumped[0]["default_closed"] is False
+    assert "closed" not in dumped[0]
+    assert Grid.model_validate_json(grid.model_dump_json()) == grid
+
+
+def test_switch_new_key_loads_without_a_warning():
+    import warnings
+
+    from pgml.schemas.grid_schema import Grid
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        Grid.model_validate_json(_grid_json_with_a_switch_key("default_closed"))
+
+
+def test_switch_rejects_contradicting_legacy_and_new_keys():
+    from pgml.schemas.grid_schema import Switch
+
+    with pytest.raises(ValidationError, match="both `closed` and `default_closed`"):
+        Switch(
+            id=1,
+            from_node=1,
+            to_node=2,
+            from_phases=("a",),
+            to_phases=("a",),
+            closed=True,
+            default_closed=False,
+        )
+    assert "default_closed" in Switch.model_json_schema()["required"]

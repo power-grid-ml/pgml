@@ -89,7 +89,7 @@ def _is_ideal_branch(b) -> bool:
     if not getattr(b, "in_service", True):
         return False
     if isinstance(b, Switch):
-        if not b.closed:
+        if not b.default_closed:
             return False
         return to_float(b.resistance_ohm) == 0.0 and to_float(b.inductance_h) == 0.0
     if isinstance(b, Line):
@@ -521,7 +521,11 @@ def _build_numpy_ybus(grid: Grid, h: int, index) -> np.ndarray:
     for b in grid.branches:
         if _is_ideal_branch(b):
             continue  # an ideal conductor: no stamp, its rows are fused instead
-        if not (isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed):
+        if not (
+            isinstance(b, Switch)
+            and getattr(b, "in_service", True)
+            and b.default_closed
+        ):
             continue
         phases_b = b.from_phases
         p = len(phases_b)

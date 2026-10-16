@@ -1717,7 +1717,7 @@ def to_grid(
                     to_node=id_map["bus"][bus_to],
                     from_phases=sw_phases,
                     to_phases=sw_phases,
-                    closed=True,
+                    default_closed=True,
                     resistance_ohm=r_sw,
                     inductance_h=0.0,
                     provenance=_PROVENANCE,

@@ -612,7 +612,7 @@ def _fused_shunt_feeder(*, switch_ohm: float = 0.0):
                 to_node=3,
                 from_phases=abc,
                 to_phases=abc,
-                closed=True,
+                default_closed=True,
                 resistance_ohm=switch_ohm,
             ),
             line(12, 3, 4, 900.0),

@@ -119,7 +119,7 @@ def test_a_link_converts_to_a_fused_ideal_switch():
 
     switches = [b for b in grid.branches if isinstance(b, Switch)]
     assert len(switches) == 1
-    assert switches[0].resistance_ohm == 0.0 and switches[0].closed
+    assert switches[0].resistance_ohm == 0.0 and switches[0].default_closed
     assert id_map["link"][20] == switches[0].id
     assert res.fusion is not None
     assert res.fusion.fused_branch_ids == (switches[0].id,)

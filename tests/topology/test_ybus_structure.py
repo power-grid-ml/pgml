@@ -155,7 +155,7 @@ def _fused_grid() -> Grid:
                 to_node=3,
                 from_phases=ABC,
                 to_phases=ABC,
-                closed=True,
+                default_closed=True,
                 resistance_ohm=0.0,
             ),
             _line(12, 3, 4),
@@ -223,7 +223,7 @@ def test_pattern_covers_an_out_of_service_branch_reopened_by_a_state():
                     to_node=3,
                     from_phases=ABC,
                     to_phases=ABC,
-                    closed=False,
+                    default_closed=False,
                     resistance_ohm=1.0e-4,
                 ),
             ]
