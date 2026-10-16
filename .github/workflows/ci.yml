@@ -41,6 +41,8 @@ jobs:
       # tests import, not scratch files.
       - run: pixi run -e cpu ruff check src tests run
       - run: pixi run -e cpu ruff format --check src tests run
+      # API_INDEX.md is generated from `__all__`; fail when it no longer matches the code.
+      - run: pixi run -e cpu api-index-check
 
   test:
     name: Tests (CPU)
@@ -76,6 +78,12 @@ jobs:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip build
       - run: python -m build
+      # Contributor ledgers stay in the repository; the distributions ship only the library.
+      - run: |
+          if { unzip -l dist/*.whl; tar -tzf dist/*.tar.gz; } | grep -E 'CONTEXT\.md|STATUS\.md|API_INDEX\.md'; then
+            echo "contributor ledgers leaked into the distributions" >&2
+            exit 1
+          fi
       # A CPU torch keeps the clean-install check light; the wheel itself only requires
       # `torch` and lets the installer pick the build.
       - run: |

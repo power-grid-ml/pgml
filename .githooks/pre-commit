@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Keep staged Python in sync with the project's ruff rules before it reaches CI.
+# Keep staged Python in sync with the project's ruff rules before it reaches CI, and
+# refuse a commit that touches src/ while API_INDEX.md is stale.
 #
 # Auto-applies `ruff check --fix` and `ruff format` to the STAGED Python files,
 # re-stages whatever ruff changed, and aborts the commit only if a lint error
@@ -22,9 +23,21 @@ if [ -z "$PIXI" ] && [ -x "$HOME/.pixi/bin/pixi" ]; then
   PIXI="$HOME/.pixi/bin/pixi"
 fi
 if [ -z "$PIXI" ]; then
-  echo "pre-commit: pixi not found on PATH; skipping the ruff check." >&2
-  echo "            run 'pixi run -e cpu ruff format src tests && ruff check --fix src tests' manually." >&2
+  echo "pre-commit: pixi not found on PATH; skipping the ruff and API-index checks." >&2
+  echo "            run 'pixi run -e cpu ruff format src tests && ruff check --fix src tests'" >&2
+  echo "            and 'pixi run -e cpu api-index-check' manually." >&2
   exit 0
+fi
+
+# The public API index is generated from `__all__`; a staged change under src/ (including a
+# deletion) must leave it current. Checked against the working tree, like CI.
+if [ -n "$(git diff --cached --name-only -- src/)" ]; then
+  if ! "$PIXI" run -e cpu api-index-check; then
+    echo "" >&2
+    echo "pre-commit: API_INDEX.md is out of date. Run 'pixi run -e cpu api-index'," >&2
+    echo "            stage API_INDEX.md and commit again." >&2
+    exit 1
+  fi
 fi
 
 # Staged Python files (added / copied / modified / renamed; not deletions).
