@@ -41,4 +41,5 @@ pixi run -e cpu python run/examples/pgml/<script>.py [out_dir]
 
 Everything is `pgml.scenarios` — a serializable config (+ seed) deterministically defines a
 batch; one batched solve produces aligned results; persist reproducibly with `write_dataset`
-/ `read_dataset`. Full interface ledger: `src/pgml/scenarios/CONTEXT.md`.
+/ `read_dataset`. Full reference: the `pgml.scenarios` API documentation
+(`docs/pgml/api/scenarios.rst`).
