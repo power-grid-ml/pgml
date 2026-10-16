@@ -1822,12 +1822,11 @@ def compare_to_pgml(
     OpenDSS ``Vsource`` always behaves as a finite-impedance Thevenin source (its ``R1``/
     ``X1`` sag the bus voltage under load), whereas pgml's ``slack="ideal"`` pins the bus
     voltage exactly at ``u_ref_v`` and silently IGNORES the ``Source``'s own impedance (see
-    ``src/pgml/convert/opendss/CONTEXT.md``'s "Vsource impedance under the default ideal
-    slack"). For a grid whose ``Source`` carries a non-negligible impedance, comparing
+    "Source impedance under the ideal slack" on the modelling conventions page). For a grid whose ``Source`` carries a non-negligible impedance, comparing
     against pgml's default ``"ideal"`` solve would report a genuine several-hundred-pu-ppm
     "error" that is actually just two DIFFERENT slack models, not a numeric discrepancy —
-    measured empirically at ~1.3e-3 relative on ``pgml.grids.synthetic_feeder``'s ~0.16+j5e-3
-    Ohm source before this fix, ~3e-10 after switching to ``slack="norton"``.
+    measured at ~1.3e-3 relative on ``pgml.grids.synthetic_feeder``'s ~0.16+j5e-3 Ohm
+    source with ``slack="ideal"`` and ~3e-10 with ``slack="norton"``.
 
     Returns
     -------

@@ -1,11 +1,14 @@
-"""pgml.convert.opendss — converter from a live OpenDSS circuit to our Grid schema.
+"""pgml.convert.opendss — OpenDSS circuits to and from the pgml Grid schema.
 
 Public API
 ----------
-- ``to_grid(dss_handle, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV) -> (Grid, id_map)``
-  Convert the currently-loaded OpenDSS circuit (via opendssdirect) to a
-  :class:`~pgml.schemas.grid_schema.Grid` and an ``id_map`` that maps DSS
-  element names back to our schema ids.
+- :func:`to_grid` converts the currently-loaded OpenDSS circuit (via opendssdirect)
+  to a :class:`~pgml.schemas.grid_schema.Grid` and an ``id_map`` that maps DSS
+  element names back to our schema ids (plus a
+  :class:`~pgml.convert.ConversionReport` with ``return_report=True``).
+- :func:`from_grid` builds a live OpenDSS circuit from a ``Grid`` and returns an
+  :class:`OpenDSSExport` (the circuit plus its conversion report); a grid the
+  exporter cannot represent raises :class:`UnsupportedGridError`.
 
 Usage example::
 
@@ -28,11 +31,14 @@ Supported element types
 - Load: shunt injection (single-phase or balanced multi-phase) -> :class:`~pgml.schemas.grid_schema.Load`
 - Capacitor, Reactor: shunt elements -> :class:`~pgml.schemas.grid_schema.ShuntAppliance`
 - Generator, PVSystem: PQ injection -> :class:`~pgml.schemas.grid_schema.Generator`
+  (a ``model=3`` Generator becomes a voltage-regulating terminal)
 - Storage: PQ injection with energy-state fields -> :class:`~pgml.schemas.grid_schema.Storage`
+- InvControl (Volt-VAR, Volt-Watt, VV_VW): inverter control law on the controlled DER
 
-Every other non-empty element class present in the circuit (``Isource``, controls,
-monitors/meters, three-winding transformers, ...) is not converted; a WARNING names
-the kind and count so nothing is dropped silently.
+Every other non-empty element class present in the circuit (``Isource``, other
+controls, monitors/meters, ...) is not converted; a WARNING names the kind and count
+so nothing is dropped silently. A three-winding transformer raises
+:class:`~pgml.errors.ConversionError`.
 
 id_map format
 -------------

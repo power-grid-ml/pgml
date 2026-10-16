@@ -27,7 +27,7 @@ Connection cases (``n = len(appliance.phases)``):
 
 The WYE return conductor of a 4-wire (``Phase.N``-carrying) node is chosen by the
 appliance's ``return_path`` (``InjectionAppliance.return_path``): ``'auto'`` (default)
-returns through the neutral whenever the node has one (the historical node-level
+returns through the neutral whenever the node has one (the node-level
 rule), ``'ground'`` pins the return to ground even on a neutral-carrying node (the
 grounded-wye ``M = I_n`` case), and ``'neutral'`` requires ``Phase.N`` (a modeling
 error otherwise). Because a grounded and a neutral-returning WYE appliance on the
@@ -124,7 +124,7 @@ def _group_key(appliance, node_phases) -> tuple:
                 "the node or use return_path='auto'/'ground'."
             )
         has_neutral = True
-    else:  # 'auto' (default): the historical node-level rule
+    else:  # 'auto' (default): the node-level rule
         has_neutral = node_has_neutral
     return (conn, n, has_neutral)
 

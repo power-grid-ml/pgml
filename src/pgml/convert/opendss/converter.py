@@ -553,13 +553,14 @@ def to_grid(
     # from `LeadLag` (clock 0 baseline). On top of that baseline, a winding
     # whose bus connection cyclically rotates the phase-conductor order (e.g.
     # `bus=lv.2.3.1.0`) contributes a further +-4 clock steps (verified
-    # against a live solve, see `_cyclic_rotation_steps` and the module
-    # CONTEXT.md "Cyclic winding-bus rotation" section) -- this is how Dyn5,
+    # against a live solve, see `_cyclic_rotation_steps` and the "Cyclic
+    # winding-bus rotation" paragraph of docs/pgml/modeling/conventions.md) --
+    # this is how Dyn5,
     # YNd5, Yy4, etc. are converted even though OpenDSS has no explicit clock
     # field. The polarity-flip clocks {2, 6, 10} (e.g. Yy6/Dd6, the
     # 180-degree reversed-polarity group) need a genuinely reversed winding
-    # construction that no bus wiring can express and are still not detected
-    # here (see the module CONTEXT.md).
+    # construction that no bus wiring can express and are never produced
+    # here.
     #
     # Grounding: OpenDSS's shorthand bus notation (no explicit
     # (n_phases+1)-th conductor, or an explicit trailing `.0`) solidly grounds
@@ -737,8 +738,8 @@ def to_grid(
 
         # Fold any physical winding-bus rotation into the clock (see
         # `_cyclic_rotation_steps` and the "Cyclic winding-bus rotation"
-        # section of the module CONTEXT.md for the sign convention, pinned
-        # against a live OpenDSS solve): a cyclic rotation of the FROM/HV
+        # paragraph of docs/pgml/modeling/conventions.md for the sign
+        # convention, pinned against a live OpenDSS solve): a cyclic rotation of the FROM/HV
         # winding's bus conductor order contributes +120 deg per step, a
         # TO/LV winding rotation -120 deg per step, REGARDLESS of the Dy/Yd
         # `LeadLag` baseline above. This reaches every clock of the pairing's
@@ -1452,8 +1453,9 @@ def to_grid(
     #     `"ClassName.elementname"`) whose class is not one of the ones      #
     #     handled above triggers a WARNING naming the kind and count --      #
     #     e.g. `Isource`, `Monitor`, `EnergyMeter`, `RegControl`, `CapControl`,
-    #     `InvControl`, `StorageController`, `Fault`, `Relay`, `Recloser`,   #
-    #     `Fuse`, `Sensor`. A 3-winding `Transformer` is NOT counted here -- #
+    #     `StorageController`, `Fault`, `Relay`, `Recloser`, `Fuse`,         #
+    #     `Sensor` (`InvControl` is read in step 11; its unmapped modes are  #
+    #     reported there). A 3-winding `Transformer` is NOT counted here --  #
     #     it already raises `ConversionError` above (a hard scope boundary, #
     #     not a silent drop).                                               #
     # ---------------------------------------------------------------------- #
@@ -1874,7 +1876,7 @@ def _cyclic_rotation_steps(phase_nums: list[int], n_phases: int, bus_str: str) -
     Only a genuine cyclic rotation of a 3-phase winding is realisable as a
     constant vector-group clock shift -- each step contributes exactly +-4
     clock steps (+-120 deg), verified against a live OpenDSS solve (see the
-    module CONTEXT.md "Cyclic winding-bus rotation" section) and matching
+    "Cyclic winding-bus rotation" paragraph of the modelling conventions page) and matching
     :mod:`pgml.assembly._transformer`'s own internal cyclic-permutation clock
     mechanism (``_cyclic_power``). Any OTHER permutation (e.g. swapping two
     conductors) reverses the phase-rotation sequence (A->C->B->A instead of
@@ -1916,8 +1918,7 @@ def _parse_transformer_winding_bus(
     position ``k`` IS bus phase ``k``. Any physical rotation of the bus
     connection (e.g. ``bus=lv.2.3.1.0``) is reported separately via
     ``rotation`` so the caller folds it into the vector-group clock instead
-    of baking it into the row order (see :func:`_cyclic_rotation_steps` and
-    the module CONTEXT.md).
+    of baking it into the row order (see :func:`_cyclic_rotation_steps`).
 
     ``grounded`` applies only to a WYE winding (a DELTA winding has no neutral
     and the caller ignores it): ``True`` when the winding's neutral is

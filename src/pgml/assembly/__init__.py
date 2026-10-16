@@ -1,6 +1,6 @@
 """pgml.assembly — differentiable, batched, per-frequency Y-bus assembly.
 
-Public surface (see ``assembly/CONTEXT.md`` for the frozen contract):
+Public surface (the modeling behind it: ``docs/pgml/modeling/``):
 
 - ``node_phase_index(grid) -> NodePhaseIndex`` — the compact (node, phase) layout.
 - ``assemble_ybus(grid, frequencies_hz, *, dtype, device, operating_point,

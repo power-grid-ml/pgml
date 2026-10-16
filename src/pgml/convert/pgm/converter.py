@@ -33,9 +33,10 @@ Source convention
 -----------------
 pgm ``source`` carries ``u_ref`` (fraction of rated voltage), ``u_ref_angle``
 (radians), ``sk`` (short-circuit apparent power, VA) and ``rx_ratio`` (R/X). The
-Thevenin impedance is derived in :func:`pgml.convert._common.thevenin_from_sk`. The
-zero-sequence source impedance equals the positive-sequence impedance (no native
-zero-sequence source data is read).
+Thevenin impedance is derived in :func:`pgml.convert._common.thevenin_from_sk`. Under
+``THREE_PHASE`` the zero-sequence source impedance is ``z01_ratio * Z1`` (a complex
+scaling, so ``R0/R1 = X0/X1``); without a finite ``z01_ratio`` the documented
+``source.zero_sequence.*`` ratios apply.
 
 Voltage phasor stored in id_map
 --------------------------------
@@ -64,11 +65,15 @@ the installed ``power-grid-model`` source, not just its docs):
   ``z_coil = 3*z_LL``.
 - The magnetizing shunt is referred to the FROM/HV terminal by the square nameplate
   ratio ``(u2_eff/u1_eff)**2`` (a line-quantity referral, no delta/wye coil factor —
-  mirrors the pandapower/OpenDSS converters). pgm's OWN internal model instead splits
-  the (to-side) magnetizing admittance HALF onto its ``Y_tt`` and HALF (reflected
-  through the tap) onto ``Y_ff`` — a different topology from pgml's HV-only shunt;
-  the two agree only to the extent the magnetizing branch is small relative to the
-  leakage (quantified in ``tests/reference/test_pgm_transformer.py``).
+  mirrors the pandapower/OpenDSS converters). Where the shunt is stamped is the
+  modeling default ``transformer.magnetizing_placement``; its default ``split``
+  (half on each terminal) is power-grid-model's own pi equivalent. pgm additionally
+  reflects the from-side half through the off-nominal tap ratio, which pgml's
+  ``split`` refers through the rated ratio only; the conversion report names this
+  difference (``model.transformer.magnetizing_tap_reflection``).
+- A grounded zigzag winding carries power-grid-model's hardcoded zero-sequence series
+  impedance ``0.1*Z1`` (``transformer.hpp``) in ``Transformer.zero_sequence``, so the
+  zigzag-side zero sequence matches pgm's unbalanced solve.
 - Clock: ``tap.shift_deg = clock*30``, positive = TO LAGS FROM — pinned against a
   live ``PowerGridModel.calculate_power_flow`` solve; identical sign convention to
   pgml's own (pandapower/MATPOWER), no flip needed.
@@ -88,8 +93,13 @@ the installed ``power-grid-model`` source, not just its docs):
 
 Supported pgm component types
 ------------------------------
-``node``, ``line``, ``transformer``, ``sym_load``, ``asym_load``, ``source``.
-Unknown keys in ``input_data`` are silently ignored.
+``node``, ``line``, ``link`` (a perfect connection, converted to an ideal closed
+``Switch`` whose rows the solve fuses), ``transformer``, ``sym_load``, ``asym_load``,
+``sym_gen``, ``source`` and ``voltage_regulator`` (a regulated ``sym_gen`` becomes a
+``Generator`` with ``VoltageRegulation``: ``u_ref`` -> ``v_set_pu``, ``q_min``/``q_max``
+-> reactive limits; regulated generators on one node merge into one PV terminal).
+``three_winding_transformer``, ``shunt``, ``asym_gen`` and ``transformer_tap_regulator``
+are reported as dropped with a WARNING. Unknown keys in ``input_data`` are ignored.
 
 Only in-service elements are converted (``from_status``/``to_status`` for lines and
 transformers, ``status`` for loads and sources).
@@ -183,8 +193,9 @@ def to_grid(
     ----------
     input_data:
         Dict of numpy structured arrays, one key per pgm component type
-        (``"node"``, ``"line"``, ``"transformer"``, ``"sym_load"``,
-        ``"asym_load"``, ``"source"``). Unknown keys are ignored.
+        (``"node"``, ``"line"``, ``"link"``, ``"transformer"``, ``"sym_load"``,
+        ``"asym_load"``, ``"sym_gen"``, ``"source"``, ``"voltage_regulator"``).
+        Unknown keys are ignored.
     base_frequency_hz:
         System fundamental frequency in Hz.  pgm does not store f0 in the
         structured arrays; the caller must pass it explicitly (default 50 Hz).
@@ -225,7 +236,10 @@ def to_grid(
         - ``"link"``         : ``{pgm_id: Switch.id}`` (a perfect connection)
         - ``"transformer"``  : ``{pgm_id: Transformer.id}``
         - ``"sym_load"``     : ``{pgm_id: Load.id}``
-        - ``"asym_load"``    : ``{pgm_id: Load.id}`` (THREE_PHASE only)
+        - ``"asym_load"``    : ``{pgm_id: Load.id}`` (a balanced total under
+          ``SINGLE_PHASE_EQUIV``, per-phase under ``THREE_PHASE``)
+        - ``"sym_gen"``      : ``{pgm_id: Generator.id}`` (merged PV terminals share one id)
+        - ``"voltage_regulator"``: ``{pgm_id: Generator.id}`` of the regulated terminal
         - ``"source"``       : ``{pgm_id: Source.id}``
         - ``"slack_v_complex"``: complex slack voltage phasor (V, line-to-line).
         - ``"load_types"``   : ``{pgm_id: LoadGenType value}`` original pgm type.

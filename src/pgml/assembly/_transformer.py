@@ -20,7 +20,7 @@ Per-side building blocks (``P == 3``):
 
 - ``wye_grounded`` -> ``I_3``. The neutral is solidly grounded to the system
   reference, so each phase coil returns to ground; zero-sequence current has a
-  path. Reduces the self block to ``y·I`` — identical to the historical diagonal
+  path. Reduces the self block to ``y·I`` — identical to the plain diagonal
   stamp for the positive sequence.
 - ``delta`` -> the circulant difference matrix ``M`` (or its transpose, selecting
   the clock orientation). ``M·[1,1,1]ᵀ = 0``, so a delta winding BLOCKS the zero
@@ -99,8 +99,8 @@ off-nominal tap magnitude::
 
 For a Dyn 20 kV / 0.4 kV unit, ``τ = 20000 / (400/√3) = √3·(20000/400) = √3·n_LL``.
 The ``√3`` then cancels against ``M`` so the assembled positive-sequence block is
-identical to ``y/n_LL²`` (HV self) and ``y/n_LL`` (coupling) — the historical
-off-nominal-tap pi — while the zero sequence is now modelled correctly.
+identical to ``y/n_LL²`` (HV self) and ``y/n_LL`` (coupling) — the textbook
+off-nominal-tap pi — while the zero sequence follows the winding connections.
 
 The magnetizing (core-loss) shunt ``y_m`` is attached to a terminal phase diagonal
 directly (referred to the HV line voltage), outside the leakage incidence

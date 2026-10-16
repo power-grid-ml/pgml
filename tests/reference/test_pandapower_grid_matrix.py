@@ -27,15 +27,21 @@ Achieved tolerances split into three families, all explained and pinned here
   simplification), while pandapower's default ``trafo_model="t"`` places it
   inside an internal T-equivalent (leakage split either side of the shunt).
   This is the SAME phenomenon already documented for the OpenDSS oracle
-  (``src/pgml/convert/opendss/CONTEXT.md``, ``test_opendss_transformer.py``)
+  (``docs/pgml/modeling/conventions.md``, magnetizing branch;
+  ``test_opendss_transformer.py``)
   -- pandapower's magnetizing branch has the identical T-vs-pi placement gap.
 - **An open bus-line/bus-transformer switch is present** (``et='l'``/``'t'``,
   e.g. the tie/sectionalizing switches ``create_cigre_network_mv`` and
-  ``mv_oberrhein`` use to operate a meshed ring radially): the converter's
-  accepted approximation (``_open_switch_targets``) takes the WHOLE line/
-  trafo out of service, dropping the shunt admittance (line charging) at the
-  STILL-connected terminal too, unlike pandapower's own solver (which keeps
-  that terminal energized via an internal auxiliary bus). Root-caused by
+  ``mv_oberrhein`` use to operate a meshed ring radially). The tolerances of
+  this family were set for the ``open_switch_model="drop_element"``
+  approximation, which takes the WHOLE line/trafo out of service and drops the
+  shunt admittance (line charging) at the STILL-connected terminal too. The
+  default ``"terminal"`` model keeps that terminal energized through an
+  auxiliary node, as pandapower's own solver does, and agrees with it to 1e-10
+  pu on ``create_cigre_network_mv``
+  (``tests/convert/test_pandapower_open_terminals.py``), so these bounds are
+  looser than the default conversion needs. The drop approximation was
+  root-caused by
   comparing a live ``runpp`` on the untouched net against the SAME net with
   those lines forced ``in_service=False`` for pandapower itself: the two
   differ by ~2.9e-4 pu / ~6.9e-3 deg on ``create_cigre_network_mv`` and

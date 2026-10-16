@@ -5,7 +5,8 @@ These pages record how a power grid is modelled and why. They sit behind
 when you convert a network from another tool, or when you need to know what the model leaves
 out.
 
-Each page states its own limits. Nothing here is hidden behind a default.
+Each page states its own limits. Nothing here is hidden behind a default, and
+{doc}`limitations` collects what the model leaves out in one place.
 
 ## Conventions and representation
 
@@ -34,6 +35,11 @@ Each page states its own limits. Nothing here is hidden behind a default.
   criteria, diagonal equilibration in the power-flow and harmonic factorization paths, the
   working precision and what a gradient costs.
 
+## Limits of the model
+
+- {doc}`limitations` lists the physics pgml does not model or approximates, with the size of
+  the effect where it has been measured.
+
 ## Reference tools
 
 - {doc}`presets` selects reference model choices for conformance comparisons.
@@ -53,4 +59,5 @@ error-injection
 solver-performance
 references/index
 presets
+limitations
 ```

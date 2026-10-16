@@ -76,9 +76,9 @@ ATOL_VA_DEG = 1.0e-4
 def _dss_clear() -> None:
     """Reset the process-global OpenDSS engine and reassert the base frequency.
 
-    ``Clear`` does NOT reset ``DefaultBaseFrequency`` (it persists across
-    ``Clear`` within the same ``opendssdirect`` process) -- see
-    ``src/pgml/convert/opendss/CONTEXT.md``.
+    ``Clear`` does NOT reset ``DefaultBaseFrequency``: it persists across
+    ``Clear`` within the one process-global ``opendssdirect`` engine, so a
+    module that changes it would otherwise leak into the next DSS-driven test.
     """
     dss.Text.Command("Clear")
     dss.Text.Command(f"set DefaultBaseFrequency={int(_F0)}")

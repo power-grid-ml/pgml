@@ -300,6 +300,8 @@ def config_hash(config) -> str:
     Two configs producing the same fingerprint describe the same batch — which is what
     makes a previously generated dataset reusable — and any changed field, including the
     seed and the sample count, changes it. Recorded in ``meta.json`` as ``config_hash``.
+    The hash covers the serialized fields only, never the module or class name, so a
+    config class that moves between packages keeps its recorded hashes valid.
 
     Returns
     -------

@@ -42,7 +42,7 @@ evaluation to produce gradients at every parameter LEAF (network params, device
 P/Q, slack voltage), reached through any derived-parameter expression a Grid
 field holds (float/tensor duality: one leaf may feed several fields).
 
-Differentiability + GPU (CLAUDE.md): the differentiable path is the IFT backward
+Differentiability and device rules: the differentiable path is the IFT backward
 (no unrolling). ``no_grad`` in the forward iteration is expected. No
 ``.item()/.detach()/.numpy()`` on the autograd tape, no in-place on tracked
 tensors, no python control flow on tensor VALUES (the convergence test is a scalar
@@ -2772,7 +2772,7 @@ def solve_power_flow(
             # full const-P / ZIP residual. Newton's quadratic convergence and far larger
             # convergence region reach solutions the current-injection fixed point cannot
             # (e.g. near the loadability nose — see
-            # ``run/examples/current_injection_convergence.py``).
+            # ``run/examples/pgml/current_injection_convergence.py``).
             bsize = _operating_point_batch_size(op)
             if bsize > 1:
                 # A batched operating point solves SEQUENTIALLY per scenario: the
@@ -4297,6 +4297,10 @@ class _IFTPowerFlow(torch.autograd.Function):
     differentiating at the leaves (not the intermediates) keeps a leaf feeding
     several fields from being double counted, and the vjp keeps the shared graph
     alive (``retain_graph=True``) for the outer engine.
+
+    The state batch is flattened to one scenario axis for the Jacobian build, so a
+    multi-dimensional operating-point batch (a per-step ``[B, T]`` profile) is matched
+    by :func:`pgml.assembly.ybus.flatten_plan_batch` before the residual is evaluated.
     """
 
     @staticmethod

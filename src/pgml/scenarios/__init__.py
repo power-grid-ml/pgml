@@ -22,7 +22,9 @@ leading scenario dimension), and :func:`write_dataset` / :func:`read_dataset` pe
 result as a self-describing parquet dataset. A downstream generator plugs its own recipe
 in through the :class:`ScenarioSpec` protocol — an object with ``sample(grid)``.
 
-See ``scenarios/CONTEXT.md`` for the interface ledger and the deferred roadmap.
+The batch object, the declarations and the dataset format are documented on
+:class:`SampledScenarios`, :class:`ScenarioConfig`, :func:`run_scenarios` and
+:func:`write_dataset`.
 """
 
 from __future__ import annotations

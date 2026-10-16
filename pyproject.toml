@@ -78,9 +78,12 @@ path = "src/pgml/__init__.py"
 # (`pgml/data/*.yaml` — modeling defaults + the standards tables, read via
 # importlib.resources) is included.
 packages = ["src/pgml"]
+# Contributor ledgers (codemaps and the generated API index) are not part of the library.
+exclude = ["**/CONTEXT.md", "**/STATUS.md", "**/API_INDEX.md"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/pgml", "tests", "run", "docs", "README.md", "LICENSE", "CITATION.cff"]
+exclude = ["**/CONTEXT.md", "**/STATUS.md", "**/API_INDEX.md"]
 
 # ---------------------------------------------------------------------------
 # pytest

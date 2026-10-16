@@ -5,7 +5,10 @@ One subpackage per source:
 - ``pgm/``         — power-grid-model input_data -> Grid
 - ``opendss/``     — OpenDSS dss handle -> Grid
 
-See each subpackage for the public ``to_grid`` signature. The shared scaffold in
+See each subpackage for the public ``to_grid`` signature. Each subpackage also has a
+``from_grid`` exporter that returns the target tool's case with element maps and the
+reductions it applied: pandapower and power-grid-model receive a balanced
+fundamental-frequency case, OpenDSS a live multi-phase circuit. The shared scaffold in
 :mod:`pgml.convert._common` (id allocation, the :class:`~pgml.convert._common.PhaseMode`
 single-phase-equivalent / abc switch, sequence->phase line expansion, Thevenin
 helpers, and the schema emit helpers) is the single place the per-library plumbing

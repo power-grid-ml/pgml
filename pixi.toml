@@ -45,6 +45,12 @@ numpy = ">=2.2,<2.5"
 packaging = ">=26.0,<27"
 numba = ">=0.65.1,<0.66"
 
+# Public API index (API_INDEX.md), generated from every public module's `__all__`.
+# Any environment with torch imports the package; CI runs the check in `cpu`.
+[tasks]
+api-index = "python tools/api_index.py pgml --output API_INDEX.md"
+api-index-check = "python tools/api_index.py pgml --output API_INDEX.md --check"
+
 [feature.docs.dependencies]
 sphinx = ">=9.1.0,<10"
 furo = ">=2025.1.0"

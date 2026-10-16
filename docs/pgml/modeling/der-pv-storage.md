@@ -289,8 +289,10 @@ node's THD. The choice is about the sign of the term rather than its present siz
 
 What a real grid-following inverter presents is a filter impedance, and a synchronous machine
 its subtransient reactance (OpenDSS `%R`/`%X`, `Xdpp`), neither of which is the
-operating-point admittance the device shunt models and neither of which is a field of this
-schema. A measured filter impedance is open work. Modern PWM inverters also emit little at low
+operating-point admittance the device shunt models. A passive R-L block of that kind is
+carried by the optional `harmonic_impedance` field (see "Harmonic internal impedance"
+below); a controller-dependent or measured frequency-dependent impedance is not modelled.
+Modern PWM inverters also emit little at low
 orders while producing content between and above the integer orders, which the schema can carry
 as data but the integer-order solve does not represent.
 

@@ -14,7 +14,7 @@ Unit conversion (engineering -> SI):
 
 Phase mode
 ----------
-``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) keeps today's positive-sequence
+``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) is the positive-sequence
 single-phase equivalent: every node/branch is ``phases=(Phase.A,)`` and lines carry
 1x1 matrices. ``u_rated_v = vn_kv * 1000`` (line-to-line magnitude, retained as-is for
 the 1-phase node because ``phase_voltage_magnitude`` returns ``u_rated_v`` unchanged
@@ -35,8 +35,11 @@ The slack (ext_grid) is converted to a ``Source`` with a very small Thevenin
 impedance (1e-6 Ohm, 1e-12 H) so the Norton stamp is near-zero.  In the oracle
 test we use **ideal-slack mode** (``fixed_rows`` / ``v_fixed``) which makes the
 Thevenin impedance irrelevant; the Source is still required by the schema so the
-slack bus has an appliance. Its zero-sequence source impedance equals the
-positive-sequence impedance (no short-circuit data is read here).
+slack bus has an appliance. Its zero-sequence impedance comes from the ext_grid's
+short-circuit columns (``x0x_max``/``r0x0_max`` with ``s_sc_max_mva``/``rx_max``,
+see ``_ext_grid_zero_sequence``) when present, else from the
+``source.zero_sequence.*`` defaults; the negative-sequence impedance equals the
+positive-sequence one.
 
 Slack voltage phasor stored in id_map
 --------------------------------------
@@ -59,8 +62,8 @@ Bus-line / bus-transformer switches (``et='l'``/``'t'``)
 An OPEN ``et='l'``/``'t'`` switch disconnects that element terminal. The default
 ``open_switch_model='terminal'`` reproduces pandapower's auxiliary-bus treatment:
 the line/transformer remains connected at its other end, so line charging or
-transformer no-load admittance remains energized. ``'drop_element'`` retains the
-legacy reduced approximation that omits the whole element when either end is open.
+transformer no-load admittance remains energized. ``'drop_element'`` is the
+reduced approximation that omits the whole element when either end is open.
 An element open at both ends is omitted in either mode. Closed switches and bus-bus
 (``et='b'``) switches are unaffected.
 
@@ -744,7 +747,11 @@ def _der_controller_inverter_control(
       docstring) -> :class:`~pgml.schemas.grid_schema.PowerFactorWattControl` with
       the SAME breakpoints as ``y_values`` (already the signed power factor pgml's
       curve expects) and ``p_ref_w=p_ref_w`` so ``x = P/p_ref`` reproduces
-      ``p_pu = p_series_mw/sn_mva`` exactly.
+      ``p_pu = p_series_mw/sn_mva``. The two curves agree exactly at the breakpoints
+      and on every segment whose endpoints share a sign. They differ on a segment
+      that changes sign: pandapower interpolates such a segment through unity power
+      factor (``cosphi_to_pos`` maps negative values to ``2 + cosphi``), while pgml
+      interpolates the signed value linearly through zero.
 
     Everything else (``QModelCosphiP``, ``QModelCosphiSn``, ``QModelCosphiVCurve``, no
     Q-model) returns ``None``; the caller reports it as a dropped controller.
@@ -1286,7 +1293,8 @@ def to_grid(
         ``"trafo"`` -> ``{pp_trafo_idx: Transformer.id}``,
         ``"switch"`` -> ``{pp_switch_idx: Switch.id}`` for closed bus-bus switches,
         ``"load"`` -> ``{pp_load_idx: Load.id}``,
-        ``"asymmetric_load"`` -> ``{pp_asym_idx: Load.id}`` (THREE_PHASE only),
+        ``"asymmetric_load"`` -> ``{pp_asym_idx: Load.id}`` (per-phase under THREE_PHASE,
+        summed to a balanced total under SINGLE_PHASE_EQUIV),
         ``"sgen"`` -> ``{pp_sgen_idx: Generator.id}``,
         ``"gen"`` -> ``{pp_gen_idx: Generator.id}`` (empty under ``GenMode.DROP``;
         several rows on one bus share the merged generator's id),

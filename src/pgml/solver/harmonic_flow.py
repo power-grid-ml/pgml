@@ -44,7 +44,11 @@ Model (matches OpenDSS ``Solve mode=harmonics`` — see
    An internal-voltage spectrum instead initializes the voltage behind an explicit
    impedance and injects its positive Norton current. The source is a Norton shunt
    held at zero harmonic voltage (no ideal slack here), so
-   ``V(h) = solve_harmonic(Y(h), I(h))`` in Norton mode.
+   ``V(h) = solve_harmonic(Y(h), I(h))`` in Norton mode. A ``Source`` carries no
+   spectrum: upstream (background) distortion is an operating-point quantity,
+   supplied per solve as a voltage-kind :class:`NodeHarmonicSource` at the source's
+   node (a Thevenin EMF behind that same shunt), which
+   :class:`pgml.scenarios.BackgroundHarmonicConfig` realizes reproducibly.
 
 Differentiability + GPU: the fundamental carries IFT gradients (via
 :func:`solve_power_flow`); the harmonics are linear and differentiable. Gradients
@@ -385,7 +389,12 @@ def solve_harmonic_flow(
         ``"nameplate"`` uses the device's stored
         P, Q at its rated terminal voltage, so ``Y(h)`` is the same for every scenario:
         one factorisation per order for the whole batch, at the price of a shunt that
-        does not follow the loading. ``None`` (default) resolves the documented modeling
+        does not follow the loading. Measured against a live OpenDSS carrying each
+        scenario's own kW (IEEE-33, orders 3 to 25, per unit of nominal), that price is
+        2.1e-4 at half and 6.7e-4 at 1.5 times the nameplate loading, and 4.1e-3 / 1.0e-2
+        with a capacitor bank placing a parallel resonance at order 6.9, against 6e-13
+        to 3e-11 for ``"operating_point"``. For a constant-power device the two bases
+        are identical at nameplate loading. ``None`` (default) resolves the documented modeling
         default ``appliance.harmonic_shunt.basis``; an unknown name raises.
     symmetry:
         Calculation-symmetry mode ``None`` / ``"auto"`` / ``"symmetric"`` /

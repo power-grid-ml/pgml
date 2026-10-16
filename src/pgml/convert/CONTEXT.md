@@ -1,439 +1,108 @@
-# Interface ledger: convert (external formats -> our schema)
+# convert — external formats to and from the pgml schema
 
-One subpackage per external library: `pandapower/`, `pgm/`, `opendss/`. Each exposes a
-pure `to_grid` function producing a valid `grid_schema.Grid` and an id map. Pandapower and
-power-grid-model also expose `from_grid` for balanced fundamental-frequency interchange.
+Signatures: docstrings / API_INDEX.md. Cross-tool conventions (voltage bases, transformer
+reference side, vector-group sign, power signs, earth return, converter coverage):
+`docs/pgml/modeling/conventions.md`, the authoritative record; keep it in sync when a
+converter's convention handling changes.
 
-Public API (all three IMPLEMENTED; per-source detail in each subpackage CONTEXT.md):
-- [x] `convert.pandapower.to_grid(net, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-      gen_mode=GenMode.VOLTAGE_REGULATING,
-      gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
-      harmonic_line_model=None) -> (Grid, id_map)` — this file, below.
-- [x] `convert.pgm.to_grid(input_data, *, base_frequency_hz=50.0,
-      load_model=LoadModel.CONST_IMPEDANCE, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-      harmonic_line_model=None) -> (Grid, id_map)` — see `pgm/CONTEXT.md`.
-- [x] `convert.opendss.to_grid(dss_handle, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-      harmonic_line_model=None) -> (Grid, id_map)` — see `opendss/CONTEXT.md`.
-- [x] `convert.pandapower.from_grid(grid, *, name="pgml_export",
-      allow_approximation=False) -> PandapowerExport` — balanced fundamental export with
-      element maps and an explicit reduction ledger; see `pandapower/CONTEXT.md`.
-- [x] `convert.pgm.from_grid(grid, *, allow_approximation=False) -> PgmExport` — balanced
-      fundamental export to structured `input_data`, with element maps and an explicit
-      reduction ledger; see `pgm/CONTEXT.md`.
+## Codemap
 
-The outbound functions are intentionally fundamental-only. Populated spectrum, harmonic
-shunt/impedance and frequency-dependent line fields are named in `reductions`; no harmonic
-preservation is implied. They accept a consistent `(A,)` positive-sequence layout or a
-balanced `(A, B, C)` layout; partial-phase, mixed-layout and neutral-conductor grids raise
-`UnsupportedGridError`. Other unsupported elements raise the same error. A
-model-changing balanced reduction raises by default and is enabled only by
-`allow_approximation=True`, which also records it. Unavoidable reference representations
-(a finite PGM source for an ideal boundary and a 1 nOhm PGM line for an ideal switch) are
-always recorded.
+- `pandapower/`, `pgm/`, `opendss/` — one subpackage per reference tool. Each has
+  `converter.py` (`to_grid`, inbound) and `exporter.py` (`from_grid`, outbound) plus its
+  own `CONTEXT.md` for the tool-specific field mapping.
+- `_common.py` — the shared inbound scaffold: `IdCounter`, `PhaseMode`, `phases_for`, the
+  sequence-to-phase expansion, Thevenin helpers, zero-sequence fallbacks, and the emit
+  helpers `build_node`/`build_load`/`build_generator`/`build_source`/
+  `build_line_from_sequence`/`build_line_from_matrices`/`warn_dropped_elements`.
+  Unit-tested in `tests/convert/test_common.py`.
+- `_export.py` — shared outbound helpers: `UnsupportedGridError`, the balanced-layout
+  validation, `record_reduction` and the `REDUCTIONS` sentence table.
+- `_report.py` — `ConversionReport`, `ReportEntry`, `ModelMatch`, `ReportCategory`.
+- `_model_differences.py` — `add_model_differences` / `finalize_report`: derives the
+  `model.*` entries (where the two tools' default models differ) from grid content.
 
-`harmonic_line_model` (all three): the frequency-dependent line model written to every
-converted R/X line — `None` resolves the modeling default
-(`line.harmonic_model.three_phase` / `.single_phase`), `"sequence_aware"` /
-`"positive_sequence"` / `"naive"` force one, `"none"` leaves the lines unresolved (the
-stored parameters as given). The applied model is logged once per grid; an unknown name
-raises. Without this step a converted grid would reach a harmonic solve as the naive
-model, since no source library carries a harmonic line model.
-Conventions: convert engineering units -> SI; record source convention in
-Provenance; map sequence/nameplate inputs via the schema's input-convention DTOs;
-never invent fields (schema has extra="forbid").
+## Contract surface (used by pgg, pghub, pgl, pgd and the paper harness)
 
-## Conversion report (`convert._report`, `convert._model_differences`)
+- `convert.<tool>.to_grid(source, ...)` is pure: `(Grid, id_map)`, or
+  `(Grid, id_map, ConversionReport)` with `return_report=True`. The `id_map` is keyed by
+  the source tool's element kind and source index/id; `id_map["slack_v_complex"]` is the
+  line-to-line slack phasor in volts (a single-phase ideal-slack `v_fixed` convenience).
+- `convert.<tool>.from_grid(grid, ...)` returns `PandapowerExport` / `PgmExport` /
+  `OpenDSSExport` with element maps, `reductions` (strings) and `.report`.
+- `pgml.convert` exports `ConversionReport`, `ReportEntry`, `ModelMatch`,
+  `ReportCategory`, `PhaseMode`, `add_model_differences`.
+- Report keys are stable and shared across tools and directions: `dropped.<kind>`,
+  `approx.<topic>`, `model.<topic>`. `affects` is a subset of
+  `("fundamental", "unbalanced", "harmonic")` and empty for a stand-in below solver
+  tolerance. Serialised layout versioned by `REPORT_FORMAT_VERSION`.
 
-Every `to_grid(..., return_report=True)` returns `(Grid, id_map, ConversionReport)`; the
-default call is unchanged. `PandapowerExport.report`, `PgmExport.report` and
-`OpenDSSExport.report` carry the export side (the `reductions` string lists stay).
-`ConversionReport(tool, direction, options, comparable, entries)`; `ReportEntry(key,
-category, message, element_type, count, ids, affects, source_model, pgml_model, match,
-matched, values)`; `ModelMatch(preset, settings, arguments, reference)`. Keys are stable
-(`dropped.<kind>`, `approx.<topic>`, `model.<topic>`) and shared across tools and
-directions; `affects` is a subset of `("fundamental", "unbalanced", "harmonic")`, empty
-for a stand-in below solver tolerance. Queries: `keys()`, `get(key)`, `in`,
-`open_entries(affects)`, `is_exact(affects)`, `match_settings()`, `summary()`,
-`to_dict()/to_json()/from_dict()`, `log(logger)`. `add_model_differences(report, grid)`
-derives the `model.*` entries from the grid content (transformer magnetizing placement and
-tap reflection, source impedance and zero sequence, reactive-limit enforcement, earth-return
-law and parameters, skin effect, harmonic load shunt, harmonic scope) and marks an entry
-`matched` when the active defaults already equal its `match.settings`. Converters add
-`dropped.*`/`approx.*` entries through `warn_dropped_elements(..., report=, ids=)`,
-`ZeroSequenceDefaults.warn(..., report=)`, `build_source(..., report=)` and
-`report.dropped/approximated/model_difference/note` (`announced=True` when the converter
-already logged the detail). Exporters use `_export.record_reduction(out, key, text, ...)`
-with the sentences in `_export.REDUCTIONS`. Logging: dropped/approximated at WARNING, model
-differences at INFO, one closing WARNING line when an open entry touches a `comparable`
-result class.
+## Invariants
 
-New converter behaviour carried by the report: pandapower `net.controller` DERControllers
-(sgen Q-models) map to inverter control laws, `net.measurement` is reported dropped;
-power-grid-model `voltage_regulator` maps to `VoltageRegulation` (merged per node),
-`load_model="source"` keeps native load types, NaN source fields take pgm's defaults;
-OpenDSS `Rg/Xg/rho` are read (`earth_return="opendss"` writes them into
-`Line.earth_return`), `InvControl` VOLTVAR/VOLTWATT/VV_VW map to control laws, PVSystems
-are recorded as a snapshot. Exporters: PV terminals become pp `gen` / pgm
-`voltage_regulator`; `convert.opendss.from_grid(grid, mode, load_shunt,
-allow_approximation, circuit_name) -> OpenDSSExport(circuit, bus_of_node, line_of_branch,
-element_of_appliance, mode, reductions, report)` wraps the scenario oracle's exporter and
-adds the off-nominal tap and the matched-mode `Rg/Xg/rho` per line.
+- Converters are the only unit boundary: engineering units in, SI out. Never invent schema
+  fields (`extra="forbid"`); sequence and nameplate inputs go through the schema's
+  input-convention DTOs. Record the source convention in `Provenance`.
+- Nothing is dropped silently. Every non-empty source table the converter does not read
+  goes through `warn_dropped_elements` (one WARNING with kind and count) and a
+  `dropped.<kind>` report entry. Dropped/approximated entries log at WARNING, model
+  differences at INFO, plus one closing WARNING when an open entry touches a `comparable`
+  result class. `announced=True` marks an entry the converter already logged.
+- All converters stamp identical schema objects for the same physical input because the
+  phase decision and per-phase mapping live only in the `_common` emit helpers. Add new
+  plumbing there, not in a per-tool converter.
+- `phase_mode=PhaseMode.SINGLE_PHASE_EQUIV` (default): one positive-sequence equivalent,
+  `phases=(A,)`, 1x1 matrices. Its output must stay unchanged by edits made for
+  `THREE_PHASE`; the reference oracle suite calls `to_grid(net)` with no `phase_mode`.
+  Asymmetric loads collapse to a balanced total with an INFO log. A coupled multi-phase
+  OpenDSS line reduces to its positive sequence `Z1 = Z_self - Z_mutual`.
+- `THREE_PHASE`: genuine abc (OpenDSS keeps its native phases including `Phase.N`).
+  Sequence data expands with `self=(Z0+2*Z1)/3`, `mutual=(Z0-Z1)/3`; an explicit native
+  `r0/x0/c0` always wins over the `line.zero_sequence.*` ratios, and the use of those
+  ratios is warned once per grid (`ZeroSequenceDefaults`). Sources are balanced Thevenins
+  whose zero sequence comes from native data (OpenDSS `R0/X0`, pgm `z01_ratio`, pandapower
+  `x0x_max`/`r0x0_max`) or the `source.zero_sequence.*` ratios with a WARNING;
+  `Z0 == Z1` yields the plain diagonal.
+- Voltage base: `Node.u_rated_v` is line-to-line for a node with three or more phases;
+  every per-phase working voltage is line-to-neutral, derived only by
+  `assembly._params.phase_voltage_magnitude`. Under `THREE_PHASE` `build_source` divides
+  the L-L `u_ref_v` by sqrt(3); pinning the L-L magnitude per phase is the classic
+  sqrt(3) error. OpenDSS `Bus.kVBase()` is L-N and is recovered as `kVBase*sqrt(3)*1000`.
+- Transformer leakage is stored TO-coil-referred (x3 for a DELTA to-winding) in BOTH phase
+  modes; assembly undoes the factor for the single-phase scalar stamp. A
+  phase-mode-conditional factor is wrong (pinned by
+  `tests/reference/test_pandapower_grid_matrix.py`, `test_pgm_transformer.py`).
+- `Transformer.zero_sequence` is written only from native data: pandapower
+  `vk0_percent`/`vkr0_percent`, pgm grounded zigzag (`0.1*Z1`, power-grid-model's
+  hardcoded value). OpenDSS has no zero-sequence transformer input; the
+  `transformer.zero_sequence.*` ratios (1.0 = OpenDSS's own model) apply.
+- `harmonic_line_model` (every `to_grid`): `None` writes the modeling default
+  (`line.harmonic_model.three_phase` / `.single_phase`) onto every converted R/X line via
+  `resolve_converted_line_models`; `"none"` leaves lines unresolved. No source tool carries
+  a harmonic line model, so skipping this step would silently give the naive model.
+- `base_frequency_hz` comes from the source (`net.f_hz`, `Solution.Frequency()`); pgm has
+  none, so the caller passes it and a wrong value silently scales every L and C.
+- Ideal branches (pgm `link`, pandapower bus-bus `switch` under the default
+  `branch.switch_model: ideal`) convert to closed `Switch`es with R = L = 0 whose rows the
+  solve fuses; `near_ideal` writes `branch.near_ideal_series_resistance_ohm` instead.
 
-## `convert._common` — the shared scaffold (library-agnostic)
+## Outbound (`from_grid`)
 
-The duplicated plumbing of every `to_grid` lives in `convert/_common.py`; each
-per-library converter contains only the source-specific field reading and calls
-these helpers so all sources stamp identical schema objects for the same physical
-input. Designed to also serve the OpenDSS converter (native multi-phase + explicit
-n x n line matrices). Every helper is unit-tested in `tests/convert/test_common.py`.
+- pandapower and pgm exports are fundamental-only and balanced: a consistent `(A,)` or
+  `(A, B, C)` layout; partial-phase, mixed-layout and neutral-conductor grids raise
+  `UnsupportedGridError`, as do unsupported elements. Harmonic fields (spectra, harmonic
+  shunt/impedance, frequency-dependent lines) are named in `reductions`, never implied.
+- A model-changing reduction raises unless `allow_approximation=True`, which records it.
+  Unavoidable stand-ins (pgm finite source for an ideal boundary, 1 nOhm pgm line for an
+  ideal switch) are always recorded. The input `Grid` is never mutated.
+- The OpenDSS export builds a live multi-phase circuit through the scenario oracle's
+  `export_grid_to_opendss` and adds the off-nominal tap and, in `mode="matched"`, each
+  line's `Rg/Xg/rho`.
 
-API:
-- `IdCounter` — the single monotonic id allocator (one instance per conversion).
-- `PhaseMode(str, Enum)` — `SINGLE_PHASE_EQUIV` (today's positive-sequence 1-phase
-  equivalent, `phases=(Phase.A,)`, 1x1 line matrices) vs `THREE_PHASE` (genuine abc).
-  Re-exported from `convert`, `convert.pandapower`, `convert.pgm`.
-- `phases_for(mode, *, native=None) -> tuple[Phase, ...]` — the one place the phase
-  tuple is decided: `SINGLE_PHASE_EQUIV -> (A,)`; `THREE_PHASE -> native` if given
-  (OpenDSS passes real phases incl. `Phase.N`) else `(A, B, C)`.
-- `zero_sequence_ratios() -> (r0/r1, x0/x1, c0/c1)` — read from `pgml.defaults`
-  (`line.zero_sequence.*`).
-- `sequence_to_phase_matrices(r1, x1, c1, *, r0=None, x0=None, c0=None, two_pi_f0,
-  g0=0, g1=0) -> (R, L, C, G)` — sequence -> 3x3 phase matrices via
-  `self=(Z0+2*Z1)/3`, `mutual=(Z0-Z1)/3` (applied to R, X, C, G); `L=X/two_pi_f0`.
-  A balanced sequence input (Z0==Z1) yields a pure diagonal (decoupled) matrix; in
-  general a symmetric circulant (off-diagonal == mutual). `r0/x0/c0` default to
-  `r1*ratio` etc. from `zero_sequence_ratios()` when `None`.
-- `ZeroSequenceDefaults()` — tally of the lines whose zero-sequence data had to be
-  invented (`note(r0=, x0=, c0=)` per three-phase line, `warn(logger, tool=)` once per
-  grid, naming the ratios and the affected line count).
-- `resolve_converted_line_models(grid, logger, *, tool, requested=None)` — write the
-  harmonic line model onto every converted R/X line and log what was applied (wraps
-  `pgml.geometry.resolve_harmonic_line_models`).
-- `single_phase_matrix(value) -> [[value]]` — the exact 1x1 wrapper used by the
-  positive-sequence-equivalent line path (preserves `[[r1]]`/`[[l1]]`/`[[c1]]`).
-- `thevenin_from_z(r_ohm, x_ohm, two_pi_f0) -> (R, L)` and
-  `thevenin_from_sk(u_rated_v, sk_va, rx_ratio, two_pi_f0) -> (R, L)` — source
-  Thevenin from an explicit impedance / from short-circuit power + R/X ratio (the
-  latter moved verbatim from the pgm converter; same fallback floors).
-- `source_zero_sequence_ratios() -> (r0_over_r1, x0_over_x1)` — the documented
-  `source.zero_sequence.*` fallback ratios for a source's zero-sequence Thevenin.
-- `make_metadata(name, description) -> GridMetadata`.
-- Emit helpers (the single place the phase decision + per-phase mapping live):
-  `build_node`, `build_load`, `build_generator` (generation-positive PQ, for
-  pp `sgen` / pgm `sym_gen`), `warn_dropped_elements` (the loud-drop contract),
-  `build_source` (now `build_source(..., r0_ohm=None, x0_ohm=None, two_pi_f0=None,
-  element=None)` — see the source zero-sequence note below), `build_line_from_sequence`,
-  `build_line_from_matrices`. `build_line_from_matrices` takes explicit n x n
-  R/L/C(/G) matrices + a `phases` tuple — implemented and unit-tested for the
-  OpenDSS converter (pp/pgm route through `build_line_from_sequence`).
+## Decisions an edit must not undo
 
-**Transformer zero-sequence leakage.** `Transformer.zero_sequence` (the leakage VALUE on
-the topology-derived zero-sequence path) is emitted by the pandapower converter from
-`vk0_percent`/`vkr0_percent`, and by the pgm converter for a grounded-zigzag winding,
-where power-grid-model hardcodes `Z0 = 0.1·Z1` (`transformer.hpp`). OpenDSS has no
-zero-sequence transformer input, so an OpenDSS import leaves the field unset and the
-documented `transformer.zero_sequence.*` ratios apply (1.0 = Z0 = Z1, OpenDSS's own
-model).
-
-**Source zero-sequence Thevenin (THREE_PHASE).** `build_source` builds the per-phase
-Thevenin matrix from the positive- AND zero-sequence pair with the same symmetric-component
-identity the line path uses (`Z_self=(Z0+2*Z1)/3`, `Z_mutual=(Z0-Z1)/3`), applied to the
-A/B/C rows only (an explicit `Phase.N` conductor stays diagonal). Callers pass native
-`r0_ohm`/`x0_ohm` plus `two_pi_f0`; with either missing, the documented
-`source.zero_sequence.{r0_over_r1, x0_over_x1}` ratios apply and a WARNING names the
-element. `Z0 == Z1` returns the plain diagonal matrix unchanged, so a dataset without
-zero-sequence data converts exactly as before. Under `SINGLE_PHASE_EQUIV` the zero sequence
-does not exist and `r0_ohm`/`x0_ohm` are ignored. Native reads: OpenDSS `Vsource.R0/X0`
-(absolute Ohm; a DSS Vsource always carries them, derived from `MVAsc1`/`X0R0`),
-power-grid-model `source.z01_ratio` (`Z0 = z01_ratio * Z1`, complex scaling, so
-`R0/R1 = X0/X1`), pandapower `ext_grid.x0x_max`/`r0x0_max` together with
-`s_sc_max_mva`/`rx_max` (`X0 = x0x_max * X1`, `R0 = r0x0_max * X0`, physical `c = 1`; see
-the pandapower ledger for the `c = 1.1` difference).
-
-**Zero-sequence assumption (THREE_PHASE line expansion).** When a positive-sequence
-line is expanded to abc and the dataset has no native zero-sequence data, the
-zero-sequence quantity defaults to `r1*(R0/R1)` etc. from config. An explicit native
-`r0/x0/c0` always wins.
-
-## `phase_mode` + asymmetric capture (pandapower / pgm / opendss)
-
-`phase_mode=PhaseMode.SINGLE_PHASE_EQUIV` (the DEFAULT) reproduces the historical
-positive-sequence single-phase-equivalent output BYTE-FOR-BYTE (same phases, 1x1
-matrices, ids, id_map) — the byte-identical regression gate; the reference oracle suite
-calls `to_grid(net)` with no `phase_mode` and stays green.
-
-`phase_mode=PhaseMode.THREE_PHASE`:
-- nodes/branches become `(A, B, C)`; lines use `sequence_to_phase_matrices`
-  (pandapower: per-m `r1/x1/c1` from `r_ohm_per_km/x_ohm_per_km/c_nf_per_km`, with
-  `r0/x0/c0` from `net.line` columns `r0_ohm_per_km/x0_ohm_per_km/c0_nf_per_km` IF
-  present else config defaults; pgm: total `r1/x1/c1` and `r0/x0/c0` if present else
-  defaults);
-- sources become BALANCED 3-phase Thevenins (angles `u_angle / -120 / +120`,
-  diagonal R/L); zero-seq source impedance = positive-seq (no short-circuit data read);
-- standard balanced `net.load` / `sym_load`: `connection=None` (resolves to WYE from
-  config), no per-phase split (the symmetric/auto calc splits the total equally);
-- static generators: pandapower `sgen` and pgm `sym_gen` -> `Generator`
-  (generation-positive nameplate; id_map buckets `"sgen"` / `"sym_gen"`);
-- VOLTAGE-REGULATING generators (PV terminals) -> a `Generator` carrying a
-  `VoltageRegulation` block, which the solver holds exactly: pandapower `gen` under
-  the default `gen_mode=GenMode.VOLTAGE_REGULATING` (`vm_pu` -> setpoint,
-  `min/max_q_mvar` -> limits, rows on one bus merged) and OpenDSS
-  `Generator model=3` (`Vpu` -> setpoint re-referred to the bus base,
-  `Maxkvar`/`Minkvar` -> limits). power-grid-model's own `voltage_regulator`
-  component (1.13+: `regulated_object` + `u_ref`, with `q_min`/`q_max` declared but
-  not yet enforced by pgm) is NOT mapped yet. See the per-source CONTEXT files;
-- pgm `link` (a perfect connection) converts to an ideal closed `Switch` whose terminal
-  rows the solve collapses exactly (`pgml.assembly.fusion_map`);
-- every other non-empty pgm component (`three_winding_transformer`, `shunt`, `asym_gen`,
-  `transformer_tap_regulator`) triggers a `warn_dropped_elements` WARNING — nothing is
-  dropped silently;
-- ASYMMETRIC loads captured: pandapower `net.asymmetric_load` -> `connection=WYE`
-  (`type=="wye"`) or `DELTA`, `p_nom_per_phase_w=(p_a,p_b,p_c)*1e6`,
-  `q_nom_per_phase_var=(q_a,q_b,q_c)*1e6`; pgm `asym_load` -> `p_specified`/
-  `q_specified` shape (3,) per-phase, `connection=WYE` ALWAYS (pgm has no load
-  connection field). Both add an `"asymmetric_load"` / `"asym_load"` id_map bucket.
-- Under `SINGLE_PHASE_EQUIV` an asymmetric load cannot be represented; its phases are
-  summed to a balanced 1-phase total and an INFO is logged on `logging.getLogger("pgml")`.
-
-`phase_mode` for opendss (added with the scaffold migration):
-- `SINGLE_PHASE_EQUIV` (default): every node/branch `phases=(A,)`, 1×1 line matrices
-  (the `[0][0]` entry of the DSS matrix).  Load `connection=None`.
-- `THREE_PHASE`: nodes carry real DSS phases (incl. `Phase.N`); lines carry the full
-  n×n matrices from `RMatrix()/XMatrix()/CMatrix()`; loads get `IsDelta()` connection
-  (`WYE` or `DELTA`); sources become balanced Thevenins with per-phase angles.
-  Single-phase loads land on their real bus-suffix phase (`.1`→`(A,)`) with `WYE`.
-  A delta load under `SINGLE_PHASE_EQUIV` logs INFO on `logging.getLogger("pgml")`.
-OpenDSS provides native multi-phase matrices directly, so `build_line_from_matrices`
-is used (not `build_line_from_sequence`); no sequence assumption is made.
-
-## `convert.pandapower.to_grid` — final signature and id_map format
-
-```python
-from pgml.convert.pandapower import to_grid
-
-grid, id_map = to_grid(net)
-```
-
-### Signature
-```
-to_grid(net: pandapowerNet, *, phase_mode=PhaseMode.SINGLE_PHASE_EQUIV,
-        gen_mode=GenMode.VOLTAGE_REGULATING,
-        gen_volt_var_slope_pu=DEFAULT_GEN_VOLT_VAR_SLOPE_PU,
-        harmonic_line_model=None,
-        open_switch_model=None)
-    -> tuple[Grid, dict[str, Any]]
-```
-
-Pure function. Converts a (materialised) pandapower network to a schema `Grid`
-and an `id_map` dictionary.  Handles: `bus`, `line`, `load`, `asymmetric_load`,
-`ext_grid`, `trafo`, bus-bus `switch`, `sgen` (-> `Generator`,
-generation-positive), `storage`, `shunt` (-> a WYE `ShuntAppliance`: `G` from `p_mw`, `C` from
-`-q_mvar/(2*pi*f0)`, referred to the shunt's own `vn_kv`) and `gen` (a PV bus). `gen`
-converts by default as the EXACT PV terminal
-(`gen_mode=GenMode.VOLTAGE_REGULATING`: a `Generator` with a `VoltageRegulation`
-block; rows on one bus merge; a row on the `ext_grid` bus is skipped);
-`GenMode.VOLT_VAR_APPROX` keeps the earlier steep-Volt-VAr-droop approximation
-(steepness `gen_volt_var_slope_pu`, default 500) and `GenMode.DROP` leaves the table
-unread. Every OTHER non-empty element table (`trafo3w`, `impedance`, `ward`,
-`xward`, `dcline`, `motor`, `asymmetric_sgen`, and `gen` under
-`GenMode.DROP`) triggers a WARNING naming the kind and count — nothing is dropped
-silently.
-
-### id_map format
-```python
-{
-    "bus":      {pp_bus_index: Node.id, ...},
-    "line":     {pp_line_index: Line.id, ...},
-    "trafo":    {pp_trafo_index: Transformer.id, ...},
-    "switch":   {pp_switch_index: Switch.id, ...},       # closed et='b'
-    "load":     {pp_load_index: Load.id, ...},
-    "asymmetric_load": {pp_asym_index: Load.id, ...},
-    "sgen":     {pp_sgen_index: Generator.id, ...},
-    "gen":      {pp_gen_index: Generator.id, ...},   # empty under gen_mode=DROP
-    "shunt":    {pp_shunt_index: ShuntAppliance.id, ...},
-    "storage":  {pp_storage_index: Storage.id, ...},
-    "ext_grid": {pp_extgrid_index: Source.id, ...},
-    "open_terminal": {pp_switch_index: Node.id, ...}, # singly-open et='l'/'t'
-    "slack_v_complex": complex,   # phasor V (line-to-line, V) for ideal-slack solve
-}
-```
-- Keys are pandas integer indices (int) into the respective net.* DataFrames.
-- Only in-service elements whose buses are also in-service are included.
-- `open_switch_model=None` resolves the documented `terminal` default. `terminal`
-  retains a singly-open line/transformer on an auxiliary node so its connected-end
-  shunt remains energized; `drop_element` omits the whole element. Both-open elements
-  are omitted in either mode.
-- `slack_v_complex`: complex slack phasor = `vm_pu * vn_kv*1000 * exp(j*va_deg)`
-  ready to pass directly as `v_fixed` to `solve_harmonic(..., v_fixed=...)`.
-
-### Unit conversions (engineering -> SI)
-| pandapower field    | SI field                       | factor        |
-|---------------------|--------------------------------|---------------|
-| `vn_kv` [kV]        | `Node.u_rated_v` [V]           | × 1000        |
-| `length_km`         | `Line.length_m`                | × 1000        |
-| `r_ohm_per_km`      | `series_resistance_ohm_per_m`  | / 1000        |
-| `x_ohm_per_km`      | `series_inductance_h_per_m`    | / (1000 · 2πf₀) |
-| `c_nf_per_km`       | `shunt_capacitance_f_per_m`    | × 1e-9 / 1000 = 1e-12 |
-| `g_us_per_km`       | `shunt_conductance_s_per_m`    | × 1e-6 / 1000 = 1e-9  |
-| `p_mw` [MW]         | `Load.p_nom_w` [W]             | × 1e6         |
-| `q_mvar` [MVAr]     | `Load.q_nom_var` [VAr]         | × 1e6         |
-
-### Single-phase positive-sequence convention
-Every node: `phases=(Phase.A,)`, `u_rated_v = vn_kv * 1000` (line-to-line).
-The assembly's `phase_voltage_magnitude` returns `u_rated_v` unchanged for
-1-phase nodes, so const-Z shunt = `(P - jQ) / V_LL^2` — identical to
-pandapower's const-Z reference.
-
-### numpy 2.x compatibility
-### Validated on
-IEEE 33-bus Baran & Wu (`pandapower.networks.case33bw()`), 60 Hz, 33 buses,
-32 in-service lines + 5 tie-lines (out of service), 32 loads, 1 slack.
-Oracle test: `tests/reference/test_ieee33_pandapower.py`.
-
-## IEEE 33-bus oracle status (load-flow regression gate)
-All three reference oracles pass on the single-phase positive-sequence IEEE33:
-- pandapower (results): node V within <1e-4 pu. `test_ieee33_pandapower.py`.
-- OpenDSS (Y matrix, absolute siemens): off-diagonal ~2e-15 S, diagonal ~1e-10 S
-  after accounting for load shunts. `test_ieee33_opendss.py`.
-- power-grid-model (results, 2nd oracle): node V within ~2e-10 pu. `test_ieee33_pgm.py`.
-Comparison is apples-to-apples: loads set to CONSTANT IMPEDANCE on the reference
-side (pp `const_z_p_percent=const_z_q_percent=100`, pgm `const_impedance`) so both solve the same
-linear system; the source is an ideal slack (`solve_harmonic(fixed_rows, v_fixed)`).
-
-## NONLINEAR power-flow oracle status (`solve_power_flow`, const-power)
-- IEEE33, DEFAULT const-power `pp.runpp`: `solve_power_flow(slack="ideal")` matches
-  `res_bus` to ~3.2e-9 pu / 1.3e-7 deg. `tests/reference/test_ieee33_power_flow_pandapower.py`.
-- CIGRE LV (`create_cigre_network_lv`, 44 bus, 3 Dyn1 20/0.4 kV MV/LV trafos, bus-bus CBs):
-  matches to ~1.1e-7 pu / 2.1e-6 deg. `tests/reference/test_cigre_lv_pandapower.py`.
-
-## pandapower converter — element coverage (extended)
-`to_grid` handles `bus`, `line`, `load`, `sgen`, `asymmetric_load`, `ext_grid`,
-**`trafo`** (vector-group + tap-changer aware), and **bus-bus `switch`** (`et='b'`,
-modelled as near-ideal `Switch`, R=1e-4 Ω). `id_map` adds `"trafo"` and `"switch"`.
-Transformer connections come from `net.trafo['vector_group']` / the row's
-`std_types['trafo'][std_type]['vector_group']` (parsed, clock digit optional — a
-bare `'Dyn'`/`'Yzn'` is pandapower's own `runpp_3ph` form), cross-checked against
-`shift_degree` (a mismatch raises `ConversionError`); with no vector-group string
-anywhere the connection falls back on the shift parity (even clock ->
-WYE_GROUNDED/WYE_GROUNDED, odd -> DELTA/WYE_GROUNDED). `tap.ratio_magnitude` reads
-`tap_pos`/`tap_neutral`/`tap_step_percent`/`tap_side` (NaN-safe; 1.0 = no tap).
-Leakage `series_resistance_ohm`/`series_inductance_h` is the TO-side COIL value
-(`3×` the raw `vk_percent`-derived terminal quantity when `to_connection==DELTA`,
-applied THE SAME WAY REGARDLESS OF `phase_mode` — assembly's own
-`_transformer_block_groups` undoes the factor internally for the single-phase
-scalar stamp too; a phase-mode-conditional version of this factor is WRONG, see
-`src/pgml/convert/pandapower/CONTEXT.md` and the pinned oracle test
-`tests/reference/test_pandapower_grid_matrix.py`). A line/trafo's `parallel`
-count (identical parallel systems) divides the series impedance and multiplies
-the shunt admittance (line C/G, trafo magnetizing) and the rated power
-(`s_rated_va`); `parallel==1` is byte-identical to before. An OPEN bus-line/
-bus-transformer switch (`et='l'`/`'t'`) retains a singly-open element on an
-auxiliary terminal node by default, preserving the connected-end shunt like
-pandapower. `open_switch_model="drop_element"` selects the legacy whole-element
-approximation; both-open elements are always omitted. Bus-bus (`et='b'`) switches
-are unaffected. `load`/`sgen`/`asymmetric_load` P/Q are scaled by the
-per-element `scaling` column (NaN-safe, default 1.0 — pandapower's own `runpp`
-convention); `load` additionally maps `const_z_p_percent`/`const_i_p_percent`/
-`const_z_q_percent`/`const_i_q_percent` onto `ZipCoefficients` (all-zero, the
-pandapower default, stays byte-identical with no `zip_coefficients`/
-`load_model` set). See `docs/pgml/modeling/transformer.md` and
-`src/pgml/convert/pandapower/CONTEXT.md` for the full field-mapping table.
-
-## OpenDSS converter — transformer element coverage
-`convert.opendss.to_grid` converts two-winding DSS `Transformer` elements (winding 1 =
-HV/from, winding 2 = LV/to). Leakage: DSS's per-winding `%R` and inter-winding `XHL` are
-PERCENT (base-invariant) quantities, so `R_lv=(%R_wdg1+%R_wdg2)/100*Z_base_LV`,
-`X_lv=XHL%/100*Z_base_LV` with `Z_base_LV=kV_lv²*1000/kVA` recovers the LV-referred R/L
-directly (no HV/LV referral arithmetic needed) — requires both windings to share one kVA
-rating (`ConversionError` otherwise). Connections: `IsDelta()` per winding; a wye winding
-converts only when solidly grounded (OpenDSS's shorthand bus rule or an explicit `.0`
-neutral); an explicit non-zero neutral node raises. Vector group: `LeadLag` (`Lag`->clock
-1/shift 30, `Lead`->clock 11/shift 330) for a Dy/Yd pairing (verified against a live
-solve), clock 0 for a matching Yy/Dd pairing (OpenDSS has no explicit clock parameter
-beyond the binary `LeadLag` toggle, so `Yy6`/`Dd6` is not detected). Magnetizing:
-`%noloadloss`/`%imag` -> `magnetizing_conductance_s`/`magnetizing_inductance_h` via the
-same closed-form the pandapower converter uses (HV-referred). NOT read: 3-winding units,
-`RegControl` regulators, `XfmrCode`/frequency-correction curves. See
-`src/pgml/convert/opendss/CONTEXT.md` and `tests/reference/test_opendss_transformer.py`.
-
-## OpenDSS converter — element scope extension (Line/Load/Capacitor/Reactor/Generator/PVSystem/Storage)
-`convert.opendss.to_grid` also converts: **Line** — a phase-permuted terminal
-(`bus1=a.1.2.3 bus2=b.3.2.1`) carries an independent `to_phases` (the
-assembly's series-branch stamp already indexes the two terminals
-independently, matching Transformer); the `SINGLE_PHASE_EQUIV` reduction of a
-coupled multi-phase line now uses the POSITIVE-SEQUENCE `Z1 = Z_self -
-Z_mutual` (and `C1 = C_self - C_mutual`) rather than the bare self entry (a
-genuinely 1-phase line is unaffected — byte-identical). **Load/Generator/
-Storage/PVSystem** bus parsing now reads `CktElement.NodeOrder()` (DSS's own
-resolved conductor/return assignment) instead of re-parsing the bus string,
-fixing a bug where every bus-string suffix (including an explicit neutral
-tie) was read as a phase conductor; each WYE appliance's return conductor sets
-its `InjectionAppliance.return_path` (`_resolve_wye_return_path`: explicit
-`.4` neutral tie → `"neutral"`, solidly grounded on a `Phase.N`-carrying bus →
-`"ground"`, else `"auto"`), so pgml reproduces OpenDSS's per-element return
-routing even on a shared 4-wire bus (the previously-inexpressible
-grounded-despite-neutral case is now exact, no warning). **Load** also
-maps `Loads.Model()` (1/2/5/8) to `LoadModel`/`ZipCoefficients` (models
-3/4/6/7 fall back to `CONST_POWER` with a warning; the ZIPV low-voltage
-cutoff is not modeled). **Capacitor/Reactor** convert to `ShuntAppliance`
-(WYE solidly-grounded, or DELTA phase-to-phase bank via `? conn`; a
-non-grounded 2-bus terminal-2 reference and an explicitly coupled Reactor
-Rmatrix/Xmatrix are out of scope and warned/skipped); a Reactor's series
-R+X converts to the equivalent shunt admittance `Y=1/(R+jX)` (exact at
-the fundamental only — the schema's `ShuntReactor`/`ShuntAppliance` have no
-inductance field, so a genuinely inductive reactor's harmonic frequency
-trend is not modeled). **Generator/PVSystem** convert via
-`build_generator` (generation-positive; PVSystem's present `kW`/`kvar`
-already reflect OpenDSS's own Pmpp/irradiance/pf derating).
-**Storage** converts directly to `Storage` (signed, discharge-positive —
-DSS's own `kW` sign under `state=CHARGING`/`DISCHARGING` already matches)
-plus its inert energy-state fields. Every other unhandled DSS element class
-(`Isource`, `Monitor`, `EnergyMeter`, `RegControl`, ...) is enumerated
-generically from `Circuit.AllElementNames()` and triggers a
-`warn_dropped_elements` WARNING; a non-negligible Vsource `R1`/`X1` warns
-that the default `slack="ideal"` ignores it (`slack="norton"` reproduces it).
-See `src/pgml/convert/opendss/CONTEXT.md` for the full field-mapping tables
-and `tests/reference/test_opendss_line_phase_permutation.py`,
-`tests/reference/test_opendss_load_model.py`,
-`tests/convert/test_opendss_shunt_and_der_elements.py`, and the strengthened
-`tests/convert/test_opendss_phase_mode.py` for the oracle/coverage tests.
-
-## Cross-converter conventions (voltage base, slack, frequency)
-
-> The authoritative cross-tool convention record (base voltage L-L/L-N, transformer
-> reference side, vector-group/clock, power signs, SI/phase-domain, harmonic earth-return)
-> for pgml vs pandapower / OpenDSS / power-grid-model is `docs/pgml/modeling/conventions.md`. Keep
-> it in sync when a converter's convention handling changes.
-
-- CANONICAL `u_rated_v` for any node is LINE-TO-LINE (`vn_kv*1000` / `u_rated*1`
-  for nodes that are already L-L), validated against pandapower's const-Z reference
-  (`y = conj(P+jQ)/V_LL^2`). All three converters follow this convention.
-  OpenDSS `Bus.kVBase()` returns L-N (= `BasekV_LL/sqrt(3)`); the OpenDSS converter
-  recovers L-L via `kVBase * sqrt(3) * 1000`. The old converter stored `kVBase * 1000`
-  (L-N), which was a factor-of-sqrt(3) error in the const-Z shunt on the load-flow
-  path. The Y-bus oracle test (passive, load-free) was unaffected; the fix was applied
-  together with the phase_mode scaffold migration.
-- VOLTAGE BASE vs WORKING VOLTAGE: `u_rated_v` is stored L-L, but every per-phase voltage
-  the solver touches is LINE-TO-NEUTRAL. `assembly._params.phase_voltage_magnitude(u_rated_v,
-  n)` is the single base helper — `u_rated_v/sqrt(3)` for a WYE element on a >=3-phase node,
-  `u_rated_v` for DELTA / 1-phase — and feeds the const-Z/ZIP load, the harmonic source
-  admittance, and the per-unit reporting in `pgml.evaluation`. Accordingly the slack/source
-  EMF is L-N: under `THREE_PHASE` `build_source` divides the L-L `u_ref_v` by sqrt(3) for the
-  balanced wye expansion (1-phase keeps it). `id_map["slack_v_complex"]` stays the L-L phasor
-  (a single-phase ideal-slack `v_fixed` convenience). Pinning the L-L magnitude on each phase
-  makes every 3-phase voltage sqrt(3) too high (~1.73 pu on the L-N base).
-- `base_frequency_hz` is read from the source (`net.f_hz`,
-  `dss.Solution.Frequency()`); pgm has no f0 field so the caller passes it. For
-  IEEE33 (no line charging) the absolute f0 cancels in `X=2πf·L`; it matters once
-  C≠0 / for harmonics. `dss.Solution.Frequency()` reflects OpenDSS's process-global
-  `DefaultBaseFrequency`, which `Clear` does NOT reset — a prior test/circuit that
-  changed it silently leaks into the next one unless it is reasserted explicitly
-  (`set DefaultBaseFrequency=<f0>`), a shared gotcha for any test file that drives a live
-  `opendssdirect` engine (see `tests/reference/test_opendss_transformer.py`'s `_dss_clear`).
-- OpenDSS `Vsource.basekv` IS the L-L nominal for a `phases>=3` source, but is used
-  DIRECTLY (no sqrt(3) anywhere) as the solved single-conductor EMF for a `phases=1`
-  source — undocumented by OpenDSS's general docs, verified empirically
-  (`tests/convert/test_opendss_vsource_basekv.py`). The converter's `u_ref_v =
-  basekv*pu*1000` and `u_rated_v = kVBase()*sqrt(3)*1000` need no phase-count branch:
-  both simply mirror whatever OpenDSS itself solves for at that phase count. See
-  `docs/pgml/modeling/conventions.md` sec. 1/6.
+- Reference-tool divergence is an option plus a report entry (`ModelMatch` names the
+  preset/setting that closes it), not a changed default; flip a default only when pgml
+  lacks the option.
+- Converters never mode-switch stored transformer leakage or base voltages.
+- OpenDSS `Vsource.basekv` is used as-is for both phase counts (L-L for `phases>=3`, the
+  solved conductor EMF for `phases=1`); no phase-count branch
+  (`tests/convert/test_opendss_vsource_basekv.py`).

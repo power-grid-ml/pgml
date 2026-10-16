@@ -18,10 +18,16 @@ not differentiable.
 
 ## What the reader takes
 - `link`, power-grid-model's perfect connection, converts to an ideal closed switch that the
-  solve collapses exactly.
+  solve collapses exactly. power-grid-model itself does not merge the two nodes: it uses a
+  stand-in admittance of 1e6 per unit, which leaves about 7e-5 V across the link. It does
+  report the link current, so it is the only reference for a fused branch's current. A
+  symmetric calculation reports three-phase quantities, so that current is the pgml
+  single-phase equivalent's divided by √3.
 - `source.z01_ratio` is read into the source's zero-sequence impedance.
-- `voltage_regulator`, added in 1.13, makes an existing generator or load a PV terminal. pgml
-  has the matching schema field but the reader does not map it yet.
+- `voltage_regulator`, added in 1.13, makes an existing generator or load a PV terminal. The
+  reader maps a regulator on a `sym_gen` to that generator's `VoltageRegulation` block. A
+  regulator on any other object is reported as dropped, and the object stays a plain P/Q
+  injection.
 
 ## Output (per component)
 - node: u, u_pu, u_angle, p, q (+ per-phase in asym).
@@ -37,4 +43,6 @@ out = model.calculate_power_flow(symmetric=False)  # asym -> per-phase output
 # compare out["node"]["u"], out["line"]["i_from"], ... against the pgml result
 ```
 Map the schema ids onto power-grid-model ids explicitly, and mind the SI units and the
-per-phase array layout of an asymmetric result.
+per-phase array layout of an asymmetric result. `initialize_array` leaves optional fields
+`NaN`: set `source.u_ref_angle`, `rx_ratio` and `z01_ratio`, and a line's `r0`/`x0`/`c0`/
+`tan0`, or every derived pgml value becomes `NaN`.

@@ -8,13 +8,22 @@ pandapower / power-grid-model oracle tests.
 
 This module provides two harmonic oracles that operate without a live OpenDSS process:
 
-- :func:`numpy_harmonic_profiles` — single-phase feeder oracle (lines + source Norton,
-  R const / X∝h), returns :class:`~pgml.evaluation.data.HarmonicProfile` objects.
+- :func:`numpy_harmonic_profiles` — single-phase feeder oracle (lines + source Norton),
+  returns :class:`~pgml.evaluation.data.HarmonicProfile` objects.
 
 - :func:`numpy_harmonic_voltages` — full multi-element oracle (lines, switches,
   transformers, source Norton) for both single-phase and three-phase grids.  Reimplements
-  pgml's EXACT Y-bus formulas (R const / X∝h) giving machine-precision parity (~1e-13 V)
-  vs :func:`pgml.solver.solve_harmonic_flow`.
+  pgml's Y-bus formulas, including each line's harmonic model
+  (:func:`_numpy_line_series_z`), giving machine-precision parity vs
+  :func:`pgml.solver.solve_harmonic_flow`.
+
+Reading a parity result: a branch that carries no harmonic current contributes no
+engine-vs-oracle difference, whatever its line model. With pure current-source devices
+only the paths between the injecting devices and the source are excited; a term that
+loads every bus (the device shunt, shunt capacitors, a background source at every node)
+excites every branch and can expose a line-model difference that was masked before.
+When a parity test degrades after adding such a term, rebuild the grid with
+``harmonic_line_model="naive"`` and compare again before suspecting the new term.
 
 The two functions share the private helpers :func:`_build_numpy_ybus` (stamps all passive
 network elements) and :func:`_stamp_transformer_numpy` (mirrors ``pgml.assembly._transformer``
@@ -750,7 +759,7 @@ def numpy_harmonic_profiles(
 
     Single-phase only. ``v1`` is the converged fundamental node-voltage vector (numpy
     or tensor, aligned to ``index`` rows) — the SHARED operating point. For each order
-    ``h > 1`` this builds ``Y(h)`` (line series/shunt with R const & X∝h, the source
+    ``h > 1`` this builds ``Y(h)`` (line series/shunt per the line's harmonic model, the source
     Norton shunt and each device's harmonic shunt), injects each device's harmonic
     current per the OpenDSS convention, and solves ``Y(h) V(h) = I(h)``. Order 1 returns
     ``v1``. ``load_shunt`` selects the device shunt model (``None`` = the documented
@@ -887,28 +896,33 @@ def numpy_harmonic_voltages(
     node_sources: Optional[Sequence] = None,
     load_shunt: Optional[str] = None,
 ) -> np.ndarray:
-    """Pure-numpy harmonic voltage oracle — exact pgml parity (R const / X∝h).
+    """Pure-numpy harmonic voltage oracle — a regression mirror of pgml's harmonic solve.
 
     Returns complex node voltages ``[len(orders), N]`` aligned to
     :func:`pgml.assembly.node_phase_index` rows, solving the same linear harmonic
     system as :func:`pgml.solver.solve_harmonic_flow`.
 
-    This is the **regression oracle**: it reimplements pgml's EXACT Y-bus formulas
-    (R const / X∝h for all elements including transformers and source Norton) in
-    pure numpy, giving machine-precision parity (~1e-13 V absolute) vs
+    This is the **regression oracle**: it reimplements pgml's Y-bus formulas for all
+    elements including transformers and source Norton in pure numpy, giving
+    machine-precision parity vs
     ``solve_harmonic_flow``.  No live OpenDSS circuit is built; the
     ``import opendssdirect`` dependency is not required.
 
-    **Model (exact pgml parity, R const / X∝h)**
+    **Model**
 
-    - Lines: series pi (``R`` fixed, ``X(h) = h·X(f0)``), shunt capacitance
+    - Lines: series pi with ``Z(h)`` per the line's harmonic model
+      (:func:`_numpy_line_series_z`: ``naive`` R const / X∝h, ``positive_sequence``,
+      ``sequence_aware``, or a ``resistance_frequency`` law), shunt capacitance
       (``B(h) = h·B(f0)``).  Conductor-geometry lines are skipped (the Carson
       path lives in :func:`opendss_harmonic_voltages`).
     - Switches: series RL (identical scaling).
-    - Transformers: per-phase diagonal off-nominal-tap leakage-pi stamp —
+    - Transformers: single-phase equivalent as an off-nominal-tap leakage pi —
       ``Y_ff = y_se/|t|² + y_m``, ``Y_ft = −y_se/t*``, ``Y_tf = −y_se/t``,
       ``Y_tt = y_se`` — where ``y_se = (R + j·h·2πf₀·L)⁻¹`` and
-      ``t = ratio_magnitude · exp(j·shift_deg)``.
+      ``t = ratio_magnitude · exp(j·shift_deg)``. The three-phase stamp calls
+      ``pgml.assembly._transformer``'s incidence builder, so it is not an independent
+      check of the vector-group incidence (that lives in the live-OpenDSS tests and
+      ``tests/asymmetric/test_transformer_vector_group.py``).
     - Sources (Norton mode): shunt ``Y_s(h) = Z_s(h)⁻¹`` on the source diagonal.
     - Harmonic injection: OpenDSS convention (``docs/pgml/modeling/references/opendss/harmonics.md``).
 

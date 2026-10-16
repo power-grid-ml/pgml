@@ -1179,8 +1179,8 @@ def _dss_leadlag_and_rotation(clock: int, shifting_pairing: bool) -> tuple[str, 
     a Dy/Yd pairing; a matching Yy/Dd pairing baselines at clock 0
     regardless) and a cyclic rotation of one winding's bus-conductor order
     (+-4 clock steps per step, verified against a live OpenDSS solve -- see
-    :mod:`pgml.convert.opendss.converter`'s ``_cyclic_rotation_steps`` and its
-    CONTEXT.md). This function always rotates the TO/LV side only
+    :mod:`pgml.convert.opendss.converter`'s ``_cyclic_rotation_steps`` and the
+    "Cyclic winding-bus rotation" paragraph of the modelling conventions page). This function always rotates the TO/LV side only
     (``r_from=0``) and searches the reachable baseline(s) for one whose
     residual to ``clock`` is a multiple of 4 clock steps -- true for every
     clock of the pairing's correct parity except {2, 6, 10} (the
@@ -1395,8 +1395,9 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
         l_t = to_float(t.series_inductance_h)
         x_t = w0 * l_t
         # pgml stores the leakage referred to the ACTUAL TO-side coil, 3x the
-        # standard line-to-line base for a delta LV winding (see the module
-        # CONTEXT.md and pgml.convert.opendss.converter); undo that factor
+        # standard line-to-line base for a delta LV winding (see
+        # docs/pgml/modeling/conventions.md, "Transformer impedance and the side
+        # it is referred to", and pgml.convert.opendss.converter); undo that factor
         # before recovering OpenDSS's %R/XHL, which are on the standard base.
         _lv_coil_factor = 3.0 if is_delta_to else 1.0
         r_ll = r_t / _lv_coil_factor
