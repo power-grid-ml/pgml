@@ -185,7 +185,7 @@ def test_ideal_closed_switch_is_reported():
         to_node=2,
         from_phases=A,
         to_phases=A,
-        closed=True,
+        default_closed=True,
     )
     with pytest.raises(ModelingError, match="switch 10"):
         check_branch_impedances(_grid([sw, _line(11, 2, 3)]))
@@ -199,7 +199,7 @@ def test_open_ideal_switch_is_accepted():
         to_node=2,
         from_phases=A,
         to_phases=A,
-        closed=False,
+        default_closed=False,
     )
     check_branch_impedances(_grid([sw, _line(11, 1, 3)]))  # no raise
 

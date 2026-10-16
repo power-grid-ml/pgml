@@ -109,7 +109,7 @@ Every public assembler — :func:`~pgml.assembly.assemble_ybus`,
 :func:`~pgml.assembly.assemble_network_ybus`, and
 :func:`~pgml.assembly.branch_currents` — accepts an optional
 ``branch_states={branch_id: state}``. A branch listed there is ALWAYS stamped
-(overriding its static ``in_service`` / ``closed`` flags) and its primitive
+(overriding its static ``in_service`` / ``default_closed`` flags) and its primitive
 admittance block is multiplied by ``state``: a python float, a 0-d tensor, or
 a ``[*batch]`` scenario tensor in ``[0, 1]`` (``0`` = open, ``1`` = in
 service, intermediate values scale the admittance continuously and stay on
@@ -208,7 +208,7 @@ re-derived here. Because a branch only ever enters ``Y`` as ``Y[rows, rows] += b
 this pair is the *complete* description of what scaling that branch's admittance by
 ``s`` changes: ``(s − 1) × block`` on ``rows``, a rank-``≤ M`` modification (``M = 2P``
 for a two-terminal branch, ``P`` for a single-terminal shunt). Every requested branch is
-stamped regardless of its ``in_service`` / ``closed`` flags, and the returned block is
+stamped regardless of its ``in_service`` / ``default_closed`` flags, and the returned block is
 always the UNSCALED (state-1) primitive; the block is differentiable w.r.t. the branch's
 parameters, and device/dtype follow the arguments.
 

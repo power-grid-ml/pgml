@@ -277,7 +277,7 @@ def synthetic_feeder(
                 to_node=tails[k + 1],
                 from_phases=abc,
                 to_phases=abc,
-                closed=False,
+                default_closed=False,
                 resistance_ohm=1.0e-3,
             )
         )

@@ -53,7 +53,7 @@ def _grid() -> Grid:
                 to_node=2,
                 from_phases=A,
                 to_phases=A,
-                closed=True,
+                default_closed=True,
             ),
             Line(
                 id=11,

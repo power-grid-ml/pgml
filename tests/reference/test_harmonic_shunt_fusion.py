@@ -42,7 +42,7 @@ def _grid(load_model: LoadModel, *, fused: bool):
             to_node=3,
             from_phases=phases,
             to_phases=phases,
-            closed=True,
+            default_closed=True,
         )
     load = base.appliances[1].model_copy(update={"load_model": load_model})
     return base.model_copy(

@@ -42,7 +42,7 @@ def near_ideal_switch_grid():
     return g.model_copy(
         update={
             "branches": [
-                b.model_copy(update={"closed": True, "resistance_ohm": 1.0e-6})
+                b.model_copy(update={"default_closed": True, "resistance_ohm": 1.0e-6})
                 if isinstance(b, Switch)
                 else b
                 for b in g.branches

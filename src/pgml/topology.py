@@ -78,7 +78,7 @@ def _is_drawable(b, *, include_open_switches: bool) -> bool:
     """An in-service branch that connects two distinct nodes; open switches excluded."""
     if not getattr(b, "in_service", True):
         return False
-    if isinstance(b, Switch) and not b.closed and not include_open_switches:
+    if isinstance(b, Switch) and not b.default_closed and not include_open_switches:
         return False
     return int(b.from_node) != int(b.to_node)
 
@@ -196,7 +196,7 @@ class ReconnectHint:
     kind: str  # schema class name, lowercased (e.g. "switch", "line")
     from_node: int
     to_node: int
-    reason: str  # "open" (a Switch with closed=False) or "not in service"
+    reason: str  # "open" (a Switch with default_closed=False) or "not in service"
 
 
 @dataclass(frozen=True)
@@ -309,7 +309,7 @@ def _conducting(branch) -> bool:
     """An in-service branch that carries current (open switches do not)."""
     if not getattr(branch, "in_service", True):
         return False
-    if isinstance(branch, Switch) and not branch.closed:
+    if isinstance(branch, Switch) and not branch.default_closed:
         return False
     return True
 

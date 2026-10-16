@@ -619,7 +619,7 @@ def _build_seq_aware_circuit_stub(grid: Grid, busname: dict) -> None:
     # An IDEAL switch has no impedance to write: its two terminals are one electrical
     # node, which the dense bus fusion of the comparison expresses instead.
     for b in grid.branches:
-        if not (isinstance(b, Switch) and b.in_service and b.closed):
+        if not (isinstance(b, Switch) and b.in_service and b.default_closed):
             continue
         if _is_ideal_branch(b):
             continue
@@ -667,7 +667,11 @@ def _stamp_non_line_elements_no_source(
     for b in grid.branches:
         if _is_ideal_branch(b):
             continue  # an ideal conductor: no stamp, its rows are fused instead
-        if isinstance(b, Switch) and getattr(b, "in_service", True) and b.closed:
+        if (
+            isinstance(b, Switch)
+            and getattr(b, "in_service", True)
+            and b.default_closed
+        ):
             p = len(b.from_phases)
             fr_rows = index.rows(b.from_node)
             to_rows = index.rows(b.to_node)
@@ -1338,7 +1342,7 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     # Switches: pure-R Lines (no Carson correction at X=0). An IDEAL switch is not a
     # DSS element: its terminals are one electrical node (see `fusion_prolongation`).
     for b in grid.branches:
-        if not (isinstance(b, Switch) and b.in_service and b.closed):
+        if not (isinstance(b, Switch) and b.in_service and b.default_closed):
             continue
         if _is_ideal_branch(b):
             continue

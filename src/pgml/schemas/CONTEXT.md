@@ -57,6 +57,9 @@ Signatures: docstrings / API_INDEX.md.
   plain floats, never on the autograd tape, never read by assembly or the solver.
   `Grid.attach_measurement_devices` is atomic (a rejected attach restores the list).
 - Slack designation is Source-based (`pgml.topology.slack_node_ids`).
+- `Switch.default_closed` is the DEFAULT switch state (grid data, it fixes the topology);
+  the state of a calculation is a per-call input (`branch_states`) that overrides it. The
+  pre-rename key `closed` is migrated on input and never written.
 - `extra="forbid"`: an older reader rejects a grid that uses a newer field (one-way
   compatibility); legacy keys are migrated by `mode="before"` validators with a warning.
 

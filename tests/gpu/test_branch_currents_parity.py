@@ -76,7 +76,7 @@ def _grid() -> Grid:
         to_node=4,
         from_phases=ABC,
         to_phases=ABC,
-        closed=True,
+        default_closed=True,
         resistance_ohm=1.0e-3,
         inductance_h=1.0e-7,
     )

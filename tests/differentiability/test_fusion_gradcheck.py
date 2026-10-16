@@ -45,7 +45,7 @@ def _grid(*, switch_r: float = 0.0, load_node: int = 3) -> Grid:
                 to_node=2,
                 from_phases=A,
                 to_phases=A,
-                closed=True,
+                default_closed=True,
                 resistance_ohm=switch_r,
             ),
             Line(

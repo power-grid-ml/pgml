@@ -361,7 +361,7 @@ admittance block scaled by ``state`` — a python float, a 0-d tensor, or a
 ``[*batch]`` scenario tensor in ``[0, 1]``: ``0`` opens the branch, ``1`` puts
 it fully in service, and intermediate values scale the admittance
 continuously. The state OVERRIDES the branch's static ``in_service`` /
-``closed`` flags.
+``default_closed`` flags.
 
 Two things follow from this:
 

@@ -60,6 +60,11 @@ Schema0.2.0 adds optional `Generator.harmonic_impedance` and
 OpenDSS import selects its admittance-frequency and source-reference conventions;
 these fields are never inferred from signed P/Q.
 
+Schema 0.3.0 renames `Switch.closed` to `Switch.default_closed`. The stored value is the
+switch's default state; the state of a calculation is passed per solve (`branch_states`).
+A grid JSON written with the `closed` key still loads (with a `DeprecationWarning`) and is
+written back with `default_closed`. A schema 0.2.0 reader rejects the new key.
+
 `TransformerZeroSeq` values are referred to the to-side winding coil, like the
 positive-sequence leakage. Earlier schema text named the HV side while nothing consumed
 the field. A stored grid with HV-referred values loads unchanged and must be converted

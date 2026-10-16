@@ -42,7 +42,7 @@ def _switch(bid, u, v, *, closed, in_service=True):
         to_node=v,
         from_phases=A,
         to_phases=A,
-        closed=closed,
+        default_closed=closed,
         in_service=in_service,
         resistance_ohm=1.0e-3,
     )

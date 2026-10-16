@@ -88,7 +88,7 @@ from pgml.assembly._symmetry import log_modeling_summary, resolve_asymmetric
 from pgml.assembly._params import _SolvedPVOperatingPoint
 from pgml.assembly.ybus import _stamp_sources, flatten_plan_batch, select_plan_batch
 from pgml.errors import ConnectivityError, InputError, ModelingError
-from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source
+from pgml.schemas.grid_schema import Grid, InjectionAppliance, Load, Source, Switch
 from pgml.topology import connectivity_report, energized_subgrid, network_fingerprint
 
 from ._pv_bus import PVTerminals, active_power_mismatch, collect_pv_terminals
@@ -989,8 +989,8 @@ def _apply_scalar_states(grid: Grid, branch_states: dict) -> Grid:
         if int(b.id) in conducting:
             on = conducting[int(b.id)]
             update = {"in_service": on}
-            if hasattr(b, "closed"):  # a Switch: the state replaces closed too
-                update = {"in_service": True, "closed": on} if on else update
+            if isinstance(b, Switch):  # the state replaces default_closed too
+                update = {"in_service": True, "default_closed": on} if on else update
             b = b.model_copy(update=update)
         branches.append(b)
     return grid.model_copy(update={"branches": branches})
@@ -2233,7 +2233,7 @@ def solve_power_flow(
         0-d tensor, or ``[*batch]`` scenario tensor: ``0`` = open, ``1`` = in
         service, intermediate = continuous (differentiable — gradients flow to
         state leaves through the IFT, enabling gradient-based topology search).
-        The state OVERRIDES the branch's static ``in_service`` / ``closed`` flags.
+        The state OVERRIDES the branch's static ``in_service`` / ``default_closed`` flags.
         A batched state solves every switch configuration in ONE batched call
         (one assembly, per-scenario ``Y``); it broadcasts against a batched
         ``operating_point`` by the usual rules (align, or use extra leading dims

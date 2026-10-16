@@ -185,13 +185,13 @@ def _branch_active(b, branch_states: Optional[dict]) -> bool:
     A branch listed in ``branch_states`` is ALWAYS stamped — its (possibly
     batched, possibly zero) state scales the primitive block, so "open" is the
     state value 0, not an omitted stamp. Unlisted branches keep the static
-    semantics: in service, and (for a :class:`Switch`) closed.
+    semantics: in service, and (for a :class:`Switch`) ``default_closed``.
     """
     if branch_states and b.id in branch_states:
         return True
     if not b.in_service:
         return False
-    if isinstance(b, Switch) and not b.closed:
+    if isinstance(b, Switch) and not b.default_closed:
         return False
     return True
 
@@ -353,7 +353,7 @@ def assemble_ybus(
         splits each total equally over the phases (ignoring per-phase data).
     branch_states:
         Optional topology / switch-state mask ``{branch_id: state}``. A listed
-        branch is ALWAYS stamped (overriding ``in_service`` / ``closed``) and its
+        branch is ALWAYS stamped (overriding ``in_service`` / ``default_closed``) and its
         primitive block is multiplied by the state — a python float, a 0-d tensor,
         or a ``[*batch]`` scenario tensor in ``[0, 1]`` (0 = open, 1 = in service;
         intermediate values scale the admittance continuously and stay
@@ -2187,7 +2187,7 @@ def branch_stamp_blocks(
     Walks the SAME branch-stamp registry as the Y-bus assembly and
     :func:`branch_currents` (no stamp physics is re-derived) and returns, per
     requested branch, the primitive block and the global rows it scatters into. A
-    branch is stamped regardless of its ``in_service`` / ``closed`` flags — the
+    branch is stamped regardless of its ``in_service`` / ``default_closed`` flags — the
     caller decides what a state of 0 means — and the returned block is the
     UNSCALED (state 1) primitive.
 
@@ -2248,8 +2248,8 @@ def branch_stamp_blocks(
             "branches": [
                 b.model_copy(
                     update=(
-                        {"in_service": True, "closed": True}
-                        if hasattr(b, "closed")
+                        {"in_service": True, "default_closed": True}
+                        if isinstance(b, Switch)
                         else {"in_service": True}
                     )
                 )
