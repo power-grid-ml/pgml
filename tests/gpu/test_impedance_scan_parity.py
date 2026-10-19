@@ -16,14 +16,16 @@ pytestmark = [
 ]
 
 
+@pytest.mark.parametrize("load_shunt", [None, "const_z"])
 @pytest.mark.parametrize(
     ("dtype", "rtol"), [(torch.complex128, 1e-10), (torch.complex64, 1e-4)]
 )
-def test_impedance_scan_cpu_cuda_parity(dtype, rtol):
+def test_impedance_scan_cpu_cuda_parity(dtype, rtol, load_shunt):
     grid = three_phase_two_bus()
     f = torch.linspace(50.0, 2500.0, 50, dtype=torch.float64)
-    cpu = impedance_scan(grid, frequencies_hz=f, transfer=True, dtype=dtype)
-    gpu = impedance_scan(grid, frequencies_hz=f.cuda(), transfer=True, dtype=dtype)
+    kw = dict(transfer=True, dtype=dtype, load_shunt=load_shunt)
+    cpu = impedance_scan(grid, frequencies_hz=f, **kw)
+    gpu = impedance_scan(grid, frequencies_hz=f.cuda(), **kw)
     assert gpu.z_transfer_ohm.device.type == "cpu"  # results are host tensors
     assert gpu.z_transfer_ohm.dtype == dtype
     torch.testing.assert_close(

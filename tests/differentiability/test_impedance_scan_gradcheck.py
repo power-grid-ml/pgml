@@ -3,12 +3,13 @@
 The scanned impedances are differentiable with respect to tensor-valued grid parameters
 through ``assemble_ybus`` and the linear-solve adjoint of the factored column solve. Checked
 on the phase-domain driving-point matrix and both sequence impedances, w.r.t. line R/L/C,
-source R/L and the operating-point power of the folded load, plus a finite-difference
-spot check of one parameter.
+source R/L and the operating-point power of the load, under the default harmonic device
+shunt and the const-Z fold, plus a finite-difference spot check of one parameter.
 """
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from pgml.schemas.grid_schema import Grid, Line, Load, Node, Phase, Source
@@ -69,8 +70,10 @@ def _leaves():
     return tuple(torch.tensor(v, dtype=RDT, requires_grad=True) for v in VALUES)
 
 
-def _outputs(*leaves) -> torch.Tensor:
-    scan = impedance_scan(_grid(*leaves), frequencies_hz=FREQUENCIES_HZ)
+def _outputs(*leaves, load_shunt=None) -> torch.Tensor:
+    scan = impedance_scan(
+        _grid(*leaves), frequencies_hz=FREQUENCIES_HZ, load_shunt=load_shunt
+    )
     return torch.cat(
         [
             torch.view_as_real(scan.driving_point(2)).reshape(-1),
@@ -80,11 +83,12 @@ def _outputs(*leaves) -> torch.Tensor:
     )
 
 
-def test_gradcheck_impedance_scan():
+@pytest.mark.parametrize("load_shunt", [None, "const_z"])
+def test_gradcheck_impedance_scan(load_shunt):
     """Every output w.r.t. line R/L/C, source R/L and load P (relative step scaling)."""
 
     def fn(*unit):
-        return _outputs(*(u * s for u, s in zip(unit, VALUES)))
+        return _outputs(*(u * s for u, s in zip(unit, VALUES)), load_shunt=load_shunt)
 
     unit = tuple(torch.ones((), dtype=RDT, requires_grad=True) for _ in VALUES)
     assert torch.autograd.gradcheck(fn, unit, eps=1e-6, atol=1e-8, rtol=1e-5)

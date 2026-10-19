@@ -38,7 +38,9 @@ pages `differentiability.md` and `modeling/solver-performance.md`.
   `NodeHarmonicSource`, `prepare_harmonic_flow`; per-order chunked solve
   (`_solve_harmonic_orders`), structural route (`_structural_route`), device-shunt
   low-rank terms (`_harmonic_shunt_lowrank_terms`), fused-branch shunt current
-  (`_harmonic_shunt_currents`).
+  (`_harmonic_shunt_currents`), the harmonic system matrix at arbitrary (non-integer)
+  frequencies (`_harmonic_admittance`, shared by `assemble_harmonic_ybus` and the
+  impedance scan).
 - `_harmonic_cache.py` — `HarmonicFlowSystem`, the lazy, bounded harmonic preparation.
 - `_continuation.py` — `ContinuationProblem` / `build_continuation_problem`: the
   fundamental residual `R(x, λ)` with a loading parameter scaling a set of appliances

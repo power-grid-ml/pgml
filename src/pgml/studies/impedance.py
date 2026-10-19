@@ -9,19 +9,37 @@ magnitude are parallel resonances, dips are series resonances
 
 Network model
 -------------
-``Y(f)`` is :func:`pgml.assembly.assemble_ybus`: the passive network with its
-frequency-dependent branch models, the source represented by its Norton (short-circuit)
-impedance, and every load folded as a constant impedance at its operating point
-(conductance flat with frequency, susceptance as the equivalent L or C). The source is
-always a Norton impedance, whatever ``SimulationConfig.slack`` says: an ideal slack is a
-short circuit and would make every scan zero at the source bus. This is the source model
-the harmonic power flow uses at every order above the fundamental.
+By default ``Y(f)`` is the matrix the harmonic power flow solves at its harmonic orders
+(:func:`pgml.solver.assemble_harmonic_ybus`), evaluated at every scan frequency: the
+passive network with its frequency-dependent branch models, the source as its Norton
+(short-circuit) impedance, every explicit Generator / Storage ``harmonic_impedance``, and
+each load's harmonic Norton shunt selected by ``load_shunt`` (``config.load_shunt``, else
+the modeling default ``appliance.harmonic_shunt.model``, shipped as ``"opendss"``: the
+operating-point admittance split into a parallel and a series R-L branch, with each
+device's own ``harmonic_model`` overriding it). At an integer order the scan's ``Y`` is
+the harmonic flow's ``Y(h)`` for the same options, so the impedance a harmonic current
+source sees in :func:`pgml.simulate` is the scanned one (exactly so for constant-power
+devices, see below). Generation-sign devices follow
+``appliance.harmonic_shunt.generation_model`` (shipped ``"none"``: a pure current source,
+open in the scan) unless they carry an explicit ``harmonic_impedance``.
 
-Generators and storage are left out of the fold by default (``fold_generation=False``):
-the constant-impedance image of an injecting device has a negative conductance, which is
-an artefact of the load expression and not an impedance of the inverter or machine. The
-harmonic power flow makes the same choice for its device Norton shunt
-(``appliance.harmonic_shunt.generation_model: none``).
+The scan has no fundamental solution, so the shunt of a device is built from its power at
+its RATED terminal voltage (``load_shunt_basis="operating_point"`` takes the powers of
+``operating_point`` / ``config.operating_point``, ``"nameplate"`` the stored ones). For a
+constant-power device that is exactly the harmonic flow's shunt; for a voltage-dependent
+(ZIP) or inverter-controlled device the flow uses the power at the solved voltage
+instead, and a WARNING names such devices.
+
+``load_shunt="const_z"`` selects the simpler model of :func:`pgml.assembly.assemble_ybus`
+instead: every load folded as a constant impedance at its operating point, conductance
+flat with frequency and susceptance as the equivalent L or C (the parallel R-L / R-C
+branch, the ``series_rl_fraction = 0`` limit of the ``"opendss"`` shunt and the most
+heavily damped of the models). ``"none"`` removes every derived device shunt (explicit
+harmonic impedances stay).
+
+The source is always a Norton impedance, whatever ``SimulationConfig.slack`` says: an
+ideal slack is a short circuit and would make every scan zero at the source bus. This is
+the source model the harmonic power flow uses at every order above the fundamental.
 
 Numerics
 --------
@@ -30,22 +48,36 @@ with :func:`pgml.solver.lu_factor_system` and solved for the unit-current column
 requested rows only (``Y X = E``), never inverted in full. The chunk size follows the
 memory budget ``solver.harmonic.system_budget_mb``. Grids with zero-impedance branches are
 scanned on the fused system; fused node-phases share one row and therefore one impedance.
+A frequency at which ``Y`` is numerically singular is named in a WARNING: a lower bound
+of the 1-norm condition number of the equilibrated system, read from the solved columns
+at no measurable extra cost, times the unit roundoff exceeds 1, so no digit of the
+impedances there is guaranteed, finite as they are. The typical cause is a part of the
+network without a path to the source that is held to ground only by a very small shunt.
+The bound sees the conditioning through the requested columns only, so a singular part
+that no requested bus couples to (and that therefore does not affect the scanned
+impedances) is not reported. A regular feeder stays far below the thresholds 4.5e15
+(complex128) and 8.4e6 (complex64): the bound on a 200-node three-phase feeder measures
+3.5e4 at orders 1 to 50, the full condition estimate
+(:func:`pgml.solver.estimate_condition`) 1.6e5.
 
 Differentiability
 -----------------
 Every impedance tensor of an :class:`ImpedanceScan` (``z_phase_ohm``,
 ``z_positive_ohm``, ``z_zero_ohm``, ``z_transfer_ohm``) is differentiable with respect to
 the tensor-valued grid parameters it was assembled from (line and transformer R/L/C,
-source impedance, operating-point power), through ``assemble_ybus`` and the linear-solve
+source impedance, operating-point power), through the assembly and the linear-solve
 adjoint. :meth:`ImpedanceScan.resonances` and :meth:`ImpedanceScan.to_dict` read values
-off the tape.
+off the tape. A scan whose grid carries tracked parameters keeps every frequency chunk's
+``Y`` and factorization alive on the autograd graph, so the memory budget bounds only the
+working set of an untracked scan.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence, Union
+from typing import Any, Literal, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -53,6 +85,7 @@ from torch import Tensor
 
 from pgml import defaults
 from pgml.assembly import assemble_ybus, node_phase_index
+from pgml.assembly._load_shunt import resolve_shunt_basis, resolve_shunt_model_name
 from pgml.errors import ComputationError, InputError
 from pgml.geometry import phase_to_sequence
 from pgml.schemas.grid_schema import (
@@ -64,16 +97,27 @@ from pgml.schemas.grid_schema import (
 )
 from pgml.simulation import SimulationConfig
 from pgml.solver import lu_factor_system, solve_factored
+from pgml.solver.harmonic_flow import _harmonic_admittance
 
 from ._common import check_study, resolve_complex_dtype
+
+_log = logging.getLogger("pgml")
 
 #: Highest harmonic order of the default frequency grid.
 DEFAULT_MAX_ORDER = 50
 #: Order step of the default frequency grid (``base_frequency_hz / 10``: 5 Hz at 50 Hz).
 DEFAULT_ORDER_STEP = 0.1
 
+#: Default relative prominence a resonance must have (:meth:`ImpedanceScan.resonances`).
+DEFAULT_MIN_PROMINENCE = 0.05
+#: Load models of the scan: the harmonic flow's device shunts plus the const-Z fold.
+_LOAD_SHUNT_MODELS = ("opendss", "motor", "none", "const_z")
+
 _ABC = (Phase.A, Phase.B, Phase.C)
 _COMPONENTS = ("positive", "zero", "a", "b", "c", "n")
+#: Estimated condition number times unit roundoff above which a frequency is reported as
+#: numerically singular (no digit of the solution guaranteed).
+_SINGULAR_ERROR_BOUND = 1.0
 
 
 @dataclass(frozen=True)
@@ -95,20 +139,27 @@ class Resonance:
     z_ohm:
         ``|Z|`` at the refined frequency [Ω] (the interpolating parabola's vertex
         value).
+    prominence:
+        Relative prominence of the extremum, in ``(0, 1]``: how far it stands out of the
+        surrounding curve as a fraction of the local level (see
+        :meth:`ImpedanceScan.resonances`). ``1`` for a lossless series resonance
+        (``|Z| = 0`` at the dip).
     """
 
     kind: str
     frequency_hz: float
     order: float
     z_ohm: float
+    prominence: float
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-ready ``{"kind", "frequency_hz", "order", "z_ohm"}``."""
+        """JSON-ready ``{"kind", "frequency_hz", "order", "z_ohm", "prominence"}``."""
         return {
             "kind": self.kind,
             "frequency_hz": self.frequency_hz,
             "order": self.order,
             "z_ohm": self.z_ohm,
+            "prominence": self.prominence,
         }
 
 
@@ -218,52 +269,70 @@ class ImpedanceScan:
         return self.z_phase_ohm[k][:, p, p]
 
     def resonances(
-        self, node_id: int, component: Optional[str] = None
+        self,
+        node_id: int,
+        component: Optional[str] = None,
+        *,
+        min_prominence: float = DEFAULT_MIN_PROMINENCE,
     ) -> list[Resonance]:
         """Parallel (peaks of ``|Z|``) and series (dips) resonances of one curve.
 
-        Every strict interior local extremum of ``|Z(f)|`` of
-        :meth:`impedance` ``(node_id, component)`` is reported, sorted by frequency.
-        The scan's end points are never extrema. The frequency of an extremum is refined
-        between the scan points by the vertex of the parabola through the extremum and
-        its two neighbours (clamped to that interval), fitted to ``1/|Z|^2`` at a peak
-        and to ``|Z|^2`` at a dip: near a resonance of a lightly damped circuit those
-        quantities are quadratic in frequency (the Lorentzian shape), so the estimate is
-        not limited to the scan step. A resonance narrower than the scan step can be
-        missed or misplaced: scan finer around it.
+        The interior local extrema of ``|Z(f)|`` of :meth:`impedance`
+        ``(node_id, component)`` whose relative prominence reaches ``min_prominence``,
+        sorted by frequency. The scan's end points are never extrema. A run of equal
+        samples (a plateau) is one extremum, placed at the middle sample of the run.
+
+        Prominence is measured against the surrounding curve, not against the next
+        sample, so noise on the flank of a resonance neither creates a resonance nor
+        hides one. For a peak of height ``|Z|_p``: on each side, the lowest ``|Z|``
+        between the peak and the nearest higher sample (or the scan's end); the higher
+        of the two is the peak's base, and the relative prominence is
+        ``(|Z|_p - base) / |Z|_p``. For a dip of depth ``|Z|_d`` the roles swap: on each
+        side the highest ``|Z|`` up to the nearest lower sample, the lower of the two is
+        the base, and the relative prominence is ``(base - |Z|_d) / base``. Both lie in
+        ``[0, 1]``; a lossless series resonance (``|Z|_d = 0``) has prominence ``1``.
+        The default ``0.05`` keeps resonances that rise or fall at least 5 % out of their
+        surroundings and rejects the rounding noise of a flat curve (about ``1e-15``
+        relative in complex128, ``1e-7`` in complex64) by many orders of magnitude.
+
+        The frequency of an extremum is refined between the scan points by the vertex of
+        the parabola through the extremum and its two neighbours (clamped to that
+        interval), fitted to ``1/|Z|^2`` at a peak and to ``|Z|^2`` at a dip: near a
+        resonance of a lightly damped circuit those quantities are quadratic in frequency
+        (the Lorentzian shape), so the estimate is not limited to the scan step. A
+        resonance narrower than the scan step can be missed or misplaced: scan finer
+        around it.
 
         Parameters
         ----------
         node_id, component:
             As :meth:`impedance`.
+        min_prominence:
+            Smallest relative prominence reported, in ``[0, 1]``. ``0`` reports every
+            strict extremum, including those of rounding noise.
 
         Returns
         -------
         list of Resonance
-            Empty when the curve is monotonic.
+            Empty when the curve has no extremum of the required prominence.
         """
+        if not (0.0 <= float(min_prominence) <= 1.0):
+            raise InputError(
+                f"min_prominence must lie in [0, 1], got {min_prominence!r}."
+            )
         z = self.impedance(node_id, component)
         with torch.no_grad():
             mag = z.abs().to(torch.float64).numpy()
             f = self.frequencies_hz.to(torch.float64).numpy()
-        if mag.size < 3:
+        apex, is_peak = _extrema(mag)
+        if apex.size == 0:
             return []
-        d = np.diff(mag)
-        peak = (d[:-1] > 0) & (d[1:] < 0)
-        dip = (d[:-1] < 0) & (d[1:] > 0)
-        idx = np.nonzero(peak | dip)[0] + 1
-        if idx.size == 0:
+        prominence = _relative_prominence(mag, apex, is_peak)
+        keep = prominence >= float(min_prominence)
+        apex, is_peak, prominence = apex[keep], is_peak[keep], prominence[keep]
+        if apex.size == 0:
             return []
-        is_peak = peak[idx - 1]
-        # Near a resonance 1/|Z|^2 (parallel) and |Z|^2 (series) are quadratic in f.
-        f_par, y_par = _parabolic_vertex(f, 1.0 / mag**2, idx)
-        f_ser, y_ser = _parabolic_vertex(f, mag**2, idx)
-        f_ref = np.where(is_peak, f_par, f_ser)
-        z_ref = np.where(
-            is_peak,
-            1.0 / np.sqrt(np.maximum(y_par, np.finfo(float).tiny)),
-            np.sqrt(np.maximum(y_ser, 0.0)),
-        )
+        f_ref, z_ref = _refine(f, mag, apex, is_peak)
         base = float(self.base_frequency_hz)
         return [
             Resonance(
@@ -271,8 +340,9 @@ class ImpedanceScan:
                 frequency_hz=float(fr),
                 order=float(fr) / base,
                 z_ohm=float(zr),
+                prominence=float(pr),
             )
-            for pk, fr, zr in zip(is_peak.tolist(), f_ref, z_ref)
+            for pk, fr, zr, pr in zip(is_peak.tolist(), f_ref, z_ref, prominence)
         ]
 
     # -- serialization -----------------------------------------------------------
@@ -392,6 +462,8 @@ def impedance_scan(
     frequencies_hz=None,
     config: Optional[SimulationConfig] = None,
     operating_point: Optional[dict] = None,
+    load_shunt: Optional[Literal["opendss", "motor", "none", "const_z"]] = None,
+    load_shunt_basis: Optional[Literal["operating_point", "nameplate"]] = None,
     transfer: bool = False,
     fold_generation: bool = False,
     dtype: Union[str, torch.dtype] = torch.complex128,
@@ -399,10 +471,10 @@ def impedance_scan(
 ) -> ImpedanceScan:
     """Driving-point (and optionally transfer) impedance seen from buses vs frequency.
 
-    Computes ``Z(f) = Y(f)^-1`` restricted to the requested buses' node-phase rows, where
-    ``Y(f)`` is the linear network model of :func:`pgml.assembly.assemble_ybus`: branches
-    with their frequency-dependent models, the source as its Norton impedance, loads as
-    constant impedances at the operating point (module docstring).
+    Computes ``Z(f) = Y(f)^-1`` restricted to the requested buses' node-phase rows. By
+    default ``Y(f)`` is the harmonic power flow's system matrix with the same device
+    shunt (``load_shunt``) the flow uses, so a scan agrees with :func:`pgml.simulate`
+    for the same :class:`~pgml.SimulationConfig` out of the box (module docstring).
 
     Parameters
     ----------
@@ -415,27 +487,46 @@ def impedance_scan(
         right-hand side per row).
     frequencies_hz:
         1-D sequence or real tensor of strictly increasing positive frequencies [Hz].
-        ``None`` uses orders 1 to :data:`~pgml.studies.impedance.DEFAULT_MAX_ORDER` in steps of
-        :data:`~pgml.studies.impedance.DEFAULT_ORDER_STEP` (491 points: 50 to 2500 Hz in 5 Hz steps on a 50 Hz
-        grid), which resolves the resonances of distribution feeders and capacitor
-        banks; :meth:`ImpedanceScan.resonances` refines extrema between the points.
+        ``None`` uses orders 1 to :data:`~pgml.studies.impedance.DEFAULT_MAX_ORDER` in
+        steps of :data:`~pgml.studies.impedance.DEFAULT_ORDER_STEP` (491 points: 50 to
+        2500 Hz in 5 Hz steps on a 50 Hz grid), which resolves the resonances of
+        distribution feeders and capacitor banks; :meth:`ImpedanceScan.resonances`
+        refines extrema between the points.
     config:
-        Optional :class:`~pgml.SimulationConfig`. Only ``symmetry`` and
-        ``operating_point`` are read; ``slack`` is ignored (the source is always its
-        Norton impedance) and so are the harmonic and convergence settings.
+        Optional :class:`~pgml.SimulationConfig`. ``symmetry``, ``operating_point``,
+        ``load_shunt`` and ``load_shunt_basis`` are read; ``slack`` is ignored (the
+        source is always its Norton impedance) and so are the harmonic orders and the
+        convergence settings.
     operating_point:
         ``{appliance_id: {"p_w", "q_var"} | {"p_per_phase_w", "q_per_phase_var"}}``
-        powers of the constant-impedance load fold. Replaces ``config.operating_point``
+        powers the device shunts are built from. Replaces ``config.operating_point``
         when given; ``None`` falls back to it, then to the nameplate. Not modified. A
         batched (scenario) operating point is not supported.
+    load_shunt:
+        Load model in ``Y(f)``: ``"opendss"`` (the operating-point admittance split
+        into a parallel and a series R-L branch), ``"motor"`` (fixed blocked-rotor
+        series reactance) or ``"none"`` (no derived device shunt), exactly as the
+        harmonic power flow's option of the same name, with each device's own
+        ``harmonic_model`` overriding it; or ``"const_z"``, the constant-impedance fold
+        of :func:`pgml.assembly.assemble_ybus` (parallel R-L / R-C branch). ``None``
+        takes ``config.load_shunt``, else the modeling default
+        ``appliance.harmonic_shunt.model`` (``"opendss"``), the flow's own default.
+    load_shunt_basis:
+        Which powers the shunts are built from: ``"operating_point"`` (the powers of
+        ``operating_point``, else the nameplate) or ``"nameplate"`` (the stored powers,
+        ``operating_point`` ignored); both at the device's rated terminal voltage.
+        ``None`` takes ``config.load_shunt_basis``, else the modeling default
+        ``appliance.harmonic_shunt.basis``.
     transfer:
         Also return the transfer matrix between every pair of requested node-phases
         (``z_transfer_ohm``, ``[F, R, R]``). The solve is the same; only the stored
         result grows.
     fold_generation:
-        Fold generators and storage as constant impedances like loads. ``False``
-        (default) leaves them out of the scan (open circuit), because their folded
-        image has a negative conductance.
+        ``load_shunt="const_z"`` only: fold generators and storage as constant
+        impedances like loads. ``False`` (default) leaves them out of the scan (open
+        circuit), because their folded image has a negative conductance. The harmonic
+        shunt models apply the policy ``appliance.harmonic_shunt.generation_model``
+        instead, so ``True`` with another model raises.
     dtype:
         Complex working dtype, ``torch.complex128`` (default) or ``torch.complex64``,
         or their names (``"complex128"``, ``"complex64"``).
@@ -452,8 +543,10 @@ def impedance_scan(
     Raises
     ------
     InputError
-        Unknown or repeated node ids, an unknown ``dtype``, invalid frequencies, no
-        in-service source, a source with zero impedance, or a batched operating point.
+        Unknown or repeated node ids, an unknown ``dtype``, ``load_shunt`` or
+        ``load_shunt_basis``, ``fold_generation`` with a harmonic shunt model, invalid
+        frequencies, no in-service source, a source with zero impedance, or a batched
+        operating point.
     ComputationError
         The scanned impedance is not finite (a part of the network without a path to
         the source or to a shunt, which leaves ``Y`` singular).
@@ -480,15 +573,26 @@ def impedance_scan(
     device = torch.device(device) if device is not None else torch.device("cpu")
     dtype = resolve_complex_dtype(dtype)
     rdt = torch.float64 if dtype == torch.complex128 else torch.float32
+    model = _resolve_load_model(
+        load_shunt if load_shunt is not None else cfg.load_shunt
+    )
+    basis = resolve_shunt_basis(
+        load_shunt_basis if load_shunt_basis is not None else cfg.load_shunt_basis
+    )
+    if fold_generation and model != "const_z":
+        raise InputError(
+            "fold_generation applies to load_shunt='const_z' only; the harmonic shunt "
+            f"model {model!r} follows appliance.harmonic_shunt.generation_model."
+        )
 
     freqs = _frequency_grid(frequencies_hz, f0, rdt, device)
     node_ids = _resolve_nodes(grid, nodes)
     _check_sources(grid)
-    op = _fold_operating_point(
-        grid,
-        operating_point if operating_point is not None else cfg.operating_point,
-        fold_generation,
-    )
+    op = operating_point if operating_point is not None else cfg.operating_point
+    if basis == "nameplate":
+        op = None
+    if model == "const_z":
+        op = _fold_operating_point(grid, op, fold_generation)
 
     full = node_phase_index(grid)
     node_by_id = {int(n.id): n for n in grid.nodes}
@@ -500,36 +604,54 @@ def impedance_scan(
 
     itemsize = torch.empty((), dtype=dtype).element_size()
     budget = float(defaults.get("solver.harmonic.system_budget_mb")) * 1024.0**2
-    # Charged per frequency: the dense Y and its factorization, the R solution
-    # columns and their unit right-hand sides, and the kept [R, R] block.
+    # Charged per frequency: the dense Y and its factorization, the R solution columns
+    # and their unit right-hand sides, and the kept [R, R] block.
     per_freq = itemsize * (2 * full.size**2 + 2 * full.size * n_req + n_req**2)
     chunk = max(1, int(budget // per_freq))
 
     fusion = None
-    block_parts, transfer_parts = [], []
+    block_parts, transfer_parts, cond_parts = [], [], []
     for start in range(0, freqs.shape[0], chunk):
         f_chunk = freqs[start : start + chunk]
-        ybus = assemble_ybus(
-            grid,
-            f_chunk,
-            dtype=dtype,
-            device=device,
-            operating_point=op,
-            symmetry=cfg.symmetry,
-            fusion=fusion,
-        )
-        if ybus.Y.ndim != 3:
+        if model == "const_z":
+            ybus = assemble_ybus(
+                grid,
+                f_chunk,
+                dtype=dtype,
+                device=device,
+                operating_point=op,
+                symmetry=cfg.symmetry,
+                fusion=fusion,
+            )
+            y, fusion = ybus.Y, ybus.fusion
+        else:
+            orders = [float(x) / f0 for x in f_chunk.tolist()]
+            y, _, fusion = _harmonic_admittance(
+                grid,
+                f_chunk,
+                orders,
+                v1=None,
+                operating_point=op,
+                load_shunt=model,
+                load_shunt_basis=basis,
+                symmetry=cfg.symmetry,
+                dtype=dtype,
+                device=device,
+                fusion=fusion,
+                warn=start == 0,
+            )
+        if y.ndim != 3:
             raise InputError(
                 "impedance_scan takes one operating point; a batched operating point "
-                f"promotes Y to {tuple(ybus.Y.shape)}. Scan each scenario separately."
+                f"promotes Y to {tuple(y.shape)}. Scan each scenario separately."
             )
-        fusion = ybus.fusion
         rows = (
             fusion.row_to_reduced.to(device)[rows_full_t]
             if fusion is not None
             else rows_full_t
         )
-        z_rows = _solve_columns(ybus.Y, rows)  # [F_chunk, R, R]
+        z_rows, cond = _solve_columns(y, rows)  # [F_chunk, R, R], [F_chunk]
+        cond_parts.append(cond)
         # Driving-point blocks [F_chunk, n, P_max, P_max]; padding is dropped later.
         block_parts.append(z_rows[:, block[:, :, None], block[:, None, :]])
         if transfer:
@@ -544,6 +666,7 @@ def impedance_scan(
             "the scanned impedance is not finite: Y(f) is singular at some frequency. "
             "Every part of the network needs a path to the source or to a shunt."
         )
+    _warn_ill_conditioned(torch.cat(cond_parts), freqs, dtype)
 
     return _build_result(node_ids, phases, freqs, blocks, z_transfer, f0)
 
@@ -635,11 +758,31 @@ def _fold_operating_point(
     return op
 
 
-def _solve_columns(y: Tensor, rows: Tensor) -> Tensor:
+def _resolve_load_model(name: Optional[str]) -> str:
+    """Validated scan load model (``None`` -> ``appliance.harmonic_shunt.model``)."""
+    if name == "const_z":
+        return "const_z"
+    if name is not None and name not in _LOAD_SHUNT_MODELS:
+        raise InputError(
+            f"load_shunt must be one of {list(_LOAD_SHUNT_MODELS)}, got {name!r}."
+        )
+    return resolve_shunt_model_name(name)
+
+
+def _solve_columns(y: Tensor, rows: Tensor) -> tuple[Tensor, Tensor]:
     """``Z[f, i, j] = (Y(f)^-1)[rows[i], rows[j]]`` for ``Y`` ``[F, M, M]`` -> ``[F, R, R]``.
 
     One factorization per frequency, ``R`` unit-current right-hand sides solved as
     multiple columns of that factorization; the inverse is never formed.
+
+    Also returns, real ``[F]`` and off the tape, a lower bound of the 1-norm condition
+    number of the equilibrated matrix ``A = D Y D``, ``D = diag(|Y_ii|^-1/2)`` (the van
+    der Sluis scaling the factorization applies), read from the solved columns
+    themselves: ``max_j ||A^-1 e_j||_1`` over the requested columns ``j``, with
+    ``A^-1 e_j = D^-1 (Y^-1 e_j) / d_j``, times ``||A||_1 >= max |A_jj| = 1``. It costs
+    no extra solve and no pass over ``Y``; dropping ``||A||_1`` (about 2 for a network
+    admittance, whose off-diagonal magnitudes sum to about its diagonal) only weakens the
+    bound by that factor.
     """
     n_f, m = y.shape[0], y.shape[-1]
     n_r = rows.shape[0]
@@ -647,7 +790,34 @@ def _solve_columns(y: Tensor, rows: Tensor) -> Tensor:
     e = torch.zeros((n_r, 1, m), dtype=y.dtype, device=y.device)
     e[torch.arange(n_r, device=y.device), 0, rows] = 1.0
     x = solve_factored(fac, e.expand(n_r, n_f, m))  # [R (column j), F, M]
-    return x[:, :, rows].permute(1, 2, 0)  # [F, R (row i), R (column j)]
+    with torch.no_grad():
+        diag = y.diagonal(dim1=-2, dim2=-1).abs()  # [F, M]
+        d = diag.clamp_min(torch.finfo(diag.dtype).tiny).rsqrt()
+        col = (x.abs() / d).sum(dim=-1) / d[:, rows].transpose(0, 1)  # [R, F]
+        cond = col.amax(dim=0)
+        cond = torch.where(torch.isfinite(cond), cond, torch.full_like(cond, math.inf))
+    return x[:, :, rows].permute(1, 2, 0), cond  # [F, R (row i), R (column j)]
+
+
+def _warn_ill_conditioned(cond: Tensor, freqs: Tensor, dtype: torch.dtype) -> None:
+    """WARNING naming the frequencies at which ``Y`` is numerically singular."""
+    eps = torch.finfo(torch.float64 if dtype == torch.complex128 else torch.float32).eps
+    with torch.no_grad():
+        bad = (cond.to(torch.float64) * eps > _SINGULAR_ERROR_BOUND).cpu()
+        if not bool(bad.any()):
+            return
+        f_bad = freqs.cpu()[bad].tolist()
+        worst = float(cond.to(torch.float64).max().cpu())
+    _log.warning(
+        "impedance_scan: Y(f) is numerically singular at %d frequency(ies) %s Hz "
+        "(estimated condition number up to %.3g at %s): no digit of the impedances "
+        "there is guaranteed. A part of the network without a path to the source is "
+        "held only by a very small shunt.",
+        len(f_bad),
+        [round(x, 6) for x in f_bad[:10]],
+        worst,
+        dtype,
+    )
 
 
 def _block_index(phases: tuple[tuple[Phase, ...], ...], device) -> Tensor:
@@ -705,6 +875,91 @@ def _build_result(node_ids, phases, freqs, blocks, z_transfer, f0) -> ImpedanceS
     )
 
 
+def _extrema(mag: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Interior extrema of a sampled curve ``[F]``: apex indices and a peak mask.
+
+    Runs of equal samples are collapsed first, so a plateau whose neighbours both lie
+    below (above) it is one peak (dip), placed at the middle sample of the run. The
+    scan's end points are never extrema.
+    """
+    if mag.size < 3:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=bool)
+    # Start index of every run of equal values, and the run lengths.
+    starts = np.flatnonzero(np.r_[True, mag[1:] != mag[:-1]])
+    lengths = np.diff(np.r_[starts, mag.size])
+    level = mag[starts]
+    if level.size < 3:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=bool)
+    d = np.diff(level)
+    peak = (d[:-1] > 0) & (d[1:] < 0)
+    dip = (d[:-1] < 0) & (d[1:] > 0)
+    run = np.flatnonzero(peak | dip) + 1
+    apex = starts[run] + (lengths[run] - 1) // 2
+    return apex.astype(np.int64), peak[run - 1]
+
+
+def _relative_prominence(
+    mag: np.ndarray, apex: np.ndarray, is_peak: np.ndarray
+) -> np.ndarray:
+    """Relative prominence ``[K]`` of each extremum (method of ``resonances``).
+
+    A dip is a peak of ``-|Z|``: its base is the lower of the two side maxima up to the
+    nearest lower sample, and the prominence is normalised by that base instead of by
+    the apex.
+    """
+    out = np.zeros(apex.size)
+    n = mag.size
+    for k, (i, pk) in enumerate(zip(apex.tolist(), is_peak.tolist())):
+        y = mag if pk else -mag
+        top = y[i]
+        sides = []
+        for step in (-1, 1):
+            j, lowest = i + step, top
+            while 0 <= j < n and y[j] <= top:
+                lowest = min(lowest, y[j])
+                j += step
+            sides.append(lowest)
+        base = max(sides)  # the higher base of y (for a dip: the lower side maximum)
+        if pk:
+            out[k] = (top - base) / top if top > 0.0 else 0.0
+        else:
+            level = -base  # the lower of the two shoulders of |Z|
+            out[k] = (level - mag[i]) / level if level > 0.0 else 0.0
+    return out
+
+
+def _refine(
+    f: np.ndarray, mag: np.ndarray, apex: np.ndarray, is_peak: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Refined frequency and ``|Z|`` of each extremum (parabolic vertex, see above).
+
+    ``1/|Z|^2`` is formed only around peaks, whose samples are positive; a degenerate
+    fit (a non-finite vertex) falls back to the apex sample.
+    """
+    f_ref = f[apex].copy()
+    z_ref = mag[apex].copy()
+    pk = np.flatnonzero(is_peak)
+    if pk.size:
+        idx = apex[pk]
+        window = np.stack([mag[idx - 1], mag[idx], mag[idx + 1]])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv = np.zeros_like(mag)
+            sel = np.r_[idx - 1, idx, idx + 1]
+            inv[sel] = 1.0 / np.square(mag[sel])
+            xv, yv = _parabolic_vertex(f, inv, idx)
+            zv = 1.0 / np.sqrt(yv)
+        good = np.isfinite(xv) & np.isfinite(zv) & (window > 0.0).all(axis=0)
+        f_ref[pk] = np.where(good, xv, f[idx])
+        z_ref[pk] = np.where(good, zv, mag[idx])
+    dp = np.flatnonzero(~is_peak)
+    if dp.size:
+        idx = apex[dp]
+        xv, yv = _parabolic_vertex(f, np.square(mag), idx)
+        f_ref[dp] = xv
+        z_ref[dp] = np.sqrt(np.maximum(yv, 0.0))
+    return f_ref, z_ref
+
+
 def _parabolic_vertex(
     x: np.ndarray, y: np.ndarray, idx: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -738,6 +993,7 @@ def _complex(re, im) -> Tensor:
 
 __all__ = [
     "DEFAULT_MAX_ORDER",
+    "DEFAULT_MIN_PROMINENCE",
     "DEFAULT_ORDER_STEP",
     "ImpedanceScan",
     "Resonance",

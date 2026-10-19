@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -244,10 +246,12 @@ def test_sequence_impedances_of_a_capacitor_bank():
 
 
 def test_constant_impedance_load_fold():
-    """A load P + jQ (Q > 0) at the source bus folds to ``P/V² - jQ/(V² h)``.
+    """``load_shunt="const_z"``: a load P + jQ (Q > 0) at the source bus folds to
+    ``P/V² - jQ/(V² h)``.
 
-    Measured: rounding-level agreement (tolerance 1e-12 relative). The operating point overrides the nameplate, and the
-    explicit argument wins over ``config.operating_point``.
+    Measured: rounding-level agreement (tolerance 1e-12 relative). The operating point
+    overrides the nameplate, and the explicit argument wins over
+    ``config.operating_point``.
     """
     p, q, v = 4.0e3, 1.5e3, 230.0
     grid = Grid(
@@ -265,10 +269,15 @@ def test_constant_impedance_load_fold():
     y_load = p / v**2 - 1j * q / (v**2 * h)
     expected = 1 / (1 / (R_S + 2j * np.pi * f * L_S) + y_load)
 
-    scan = impedance_scan(grid, frequencies_hz=f, operating_point=op)
+    scan = impedance_scan(
+        grid, frequencies_hz=f, operating_point=op, load_shunt="const_z"
+    )
     np.testing.assert_allclose(scan.impedance(1).numpy(), expected, rtol=RTOL)
     via_cfg = impedance_scan(
-        grid, frequencies_hz=f, config=SimulationConfig(operating_point=op)
+        grid,
+        frequencies_hz=f,
+        config=SimulationConfig(operating_point=op),
+        load_shunt="const_z",
     )
     np.testing.assert_allclose(via_cfg.impedance(1).numpy(), expected, rtol=RTOL)
     wins = impedance_scan(
@@ -276,8 +285,71 @@ def test_constant_impedance_load_fold():
         frequencies_hz=f,
         operating_point=op,
         config=SimulationConfig(operating_point={300: {"p_w": 1.0, "q_var": 0.0}}),
+        load_shunt="const_z",
     )
     np.testing.assert_allclose(wins.impedance(1).numpy(), expected, rtol=RTOL)
+
+
+def _single_load_grid(p: float, q: float) -> Grid:
+    return Grid(
+        base_frequency_hz=F0,
+        nodes=[_node(1)],
+        branches=[],
+        appliances=[
+            _source(1, [[R_S]], [[L_S]]),
+            Load(id=300, node=1, phases=(Phase.A,), p_nom_w=p, q_nom_var=q),
+        ],
+    )
+
+
+def test_default_load_model_is_the_harmonic_flow_shunt():
+    """The default load model is ``appliance.harmonic_shunt.model`` (``"opendss"``): the
+    admittance ``Y = (P - jQ)/V²`` split into a parallel branch ``(1-s)(G + jB/h)`` and a
+    series branch ``1/(R + jhX)`` with ``R + jX = 1/(s Y)``, ``s = 0.5``. Equal to the
+    const-Z fold at the fundamental only. ``config.load_shunt`` is honoured and the
+    explicit argument wins over it.
+
+    Measured: rounding-level agreement (tolerance 1e-12 relative). At 1234.5 Hz the
+    const-Z fold differs from the default model by 24.9 % (``|Z_cz - Z| / |Z|``) on
+    this bus, 7.4 % in ``|Z|``.
+    """
+    p, q, v, s = 4.0e3, 1.5e3, 230.0, 0.5
+    grid = _single_load_grid(p, q)
+    f = np.array([50.0, 150.0, 1234.5])
+    h = f / F0
+    y_eq = (p - 1j * q) / v**2
+    g, b = y_eq.real, y_eq.imag
+    y_par = (1 - s) * (g + 1j * b / h)
+    z_ser = 1.0 / (s * y_eq)
+    y_ser = 1.0 / (z_ser.real + 1j * h * z_ser.imag)
+    z_src = R_S + 2j * np.pi * f * L_S
+    expected = 1 / (1 / z_src + y_par + y_ser)
+
+    scan = impedance_scan(grid, frequencies_hz=f)
+    np.testing.assert_allclose(scan.impedance(1).numpy(), expected, rtol=RTOL)
+    const_z = impedance_scan(grid, frequencies_hz=f, load_shunt="const_z")
+    np.testing.assert_allclose(const_z.impedance(1).numpy()[0], expected[0], rtol=RTOL)
+    rel = np.abs(const_z.impedance(1).numpy() - expected) / np.abs(expected)
+    assert rel[2] == pytest.approx(0.249, abs=1e-3)
+
+    none_cfg = SimulationConfig(load_shunt="none")
+    bare = impedance_scan(grid, frequencies_hz=f, config=none_cfg)
+    np.testing.assert_allclose(bare.impedance(1).numpy(), z_src, rtol=RTOL)
+    wins = impedance_scan(grid, frequencies_hz=f, config=none_cfg, load_shunt="opendss")
+    np.testing.assert_allclose(wins.impedance(1).numpy(), expected, rtol=RTOL)
+
+
+def test_nameplate_basis_ignores_the_operating_point():
+    grid = _single_load_grid(4.0e3, 1.5e3)
+    f = [150.0, 650.0]
+    op = {300: {"p_w": 1.0e3, "q_var": 0.0}}
+    plate = impedance_scan(grid, frequencies_hz=f)
+    with_op = impedance_scan(grid, frequencies_hz=f, operating_point=op)
+    ignored = impedance_scan(
+        grid, frequencies_hz=f, operating_point=op, load_shunt_basis="nameplate"
+    )
+    torch.testing.assert_close(ignored.z_phase_ohm, plate.z_phase_ohm, rtol=0, atol=0)
+    assert (with_op.z_phase_ohm[0] - plate.z_phase_ohm[0]).abs().max() > 1e-3
 
 
 # --------------------------------------------------------------------------- behaviour
@@ -302,11 +374,20 @@ def test_generation_is_open_unless_folded():
     f = [50.0, 350.0, 1100.0]
     z_base = impedance_scan(base, frequencies_hz=f).z_positive_ohm
     z_open = impedance_scan(with_gen, frequencies_hz=f).z_positive_ohm
-    z_fold = impedance_scan(
-        with_gen, frequencies_hz=f, fold_generation=True
-    ).z_positive_ohm
     torch.testing.assert_close(z_open, z_base, rtol=0, atol=0)
-    assert (z_fold - z_base).abs().max() > 1e-6
+    z_base_cz = impedance_scan(
+        base, frequencies_hz=f, load_shunt="const_z"
+    ).z_positive_ohm
+    z_open_cz = impedance_scan(
+        with_gen, frequencies_hz=f, load_shunt="const_z"
+    ).z_positive_ohm
+    z_fold = impedance_scan(
+        with_gen, frequencies_hz=f, load_shunt="const_z", fold_generation=True
+    ).z_positive_ohm
+    torch.testing.assert_close(z_open_cz, z_base_cz, rtol=0, atol=0)
+    assert (z_fold - z_base_cz).abs().max() > 1e-6
+    with pytest.raises(InputError, match="fold_generation"):
+        impedance_scan(with_gen, frequencies_hz=f, fold_generation=True)
 
 
 def test_inputs_are_not_mutated():
@@ -324,12 +405,13 @@ def test_inputs_are_not_mutated():
 
 
 def test_matches_dense_inverse_of_the_assembled_admittance():
-    """The column solve equals the dense inverse of ``assemble_ybus`` (with generation
-    left at the nameplate on this load-only grid). Measured: identical (0 difference)
-    on this 6-row grid; reciprocity ``Z = Z^T`` holds to 3e-15 relative."""
+    """With ``load_shunt="const_z"`` the column solve equals the dense inverse of
+    ``assemble_ybus`` (with generation left at the nameplate on this load-only grid).
+    Measured: identical (0 difference) on this 6-row grid; reciprocity ``Z = Z^T``
+    holds to 3e-15 relative."""
     grid = three_phase_two_bus()
     f = [50.0, 450.0, 2500.0]
-    scan = impedance_scan(grid, frequencies_hz=f, transfer=True)
+    scan = impedance_scan(grid, frequencies_hz=f, transfer=True, load_shunt="const_z")
     y = assemble_ybus(grid, f, dtype=torch.complex128).Y
     z_inv = _inverse_per_frequency(y)
     torch.testing.assert_close(scan.z_transfer_ohm, z_inv, rtol=1e-12, atol=0)
@@ -398,7 +480,9 @@ def test_sparse_backend_on_a_larger_feeder():
     grid = apply_default_harmonic_model(synthetic_feeder(200))
     f = [50.0, 650.0]
     nodes = [0, 57, 199]
-    scan = impedance_scan(grid, nodes=nodes, frequencies_hz=f, transfer=True)
+    scan = impedance_scan(
+        grid, nodes=nodes, frequencies_hz=f, transfer=True, load_shunt="const_z"
+    )
     y = assemble_ybus(grid, f, dtype=torch.complex128)
     z_inv = _inverse_per_frequency(y.Y)
     rows = [r for n in nodes for r in y.index.rows(n)]
@@ -542,3 +626,137 @@ def test_invalid_inputs_raise():
     ]
     with pytest.raises(InputError, match="Source"):
         impedance_scan(no_source)
+
+
+# --------------------------------------------------------------------------- resonances
+def _curve_scan(f: np.ndarray, z: np.ndarray) -> ImpedanceScan:
+    """A one-node, one-phase scan holding the curve ``z(f)``."""
+    zt = torch.as_tensor(z, dtype=torch.complex128)
+    nan = torch.full((1, f.size), complex(math.nan, math.nan), dtype=torch.complex128)
+    return ImpedanceScan(
+        frequencies_hz=torch.as_tensor(f, dtype=torch.float64),
+        base_frequency_hz=F0,
+        node_ids=(1,),
+        phases=((Phase.A,),),
+        z_phase_ohm=(zt.reshape(-1, 1, 1),),
+        z_positive_ohm=nan,
+        z_zero_ohm=nan,
+    )
+
+
+def test_flat_noisy_curve_has_no_resonance():
+    """Rounding noise on a flat curve (1e-15 relative, as complex128 leaves it, and
+    1e-7, as complex64 does) is not a resonance; ``min_prominence=0`` reports every
+    strict extremum of the noise."""
+    rng = np.random.default_rng(0)
+    f = np.linspace(50.0, 2500.0, 100)
+    for noise in (1e-15, 1e-7):
+        z = 3.0 * (1.0 + noise * rng.standard_normal(f.size)) + 0j
+        scan = _curve_scan(f, z)
+        assert scan.resonances(1) == []
+        assert len(scan.resonances(1, min_prominence=0.0)) > 10
+
+
+def test_noise_on_the_flank_neither_hides_nor_splits_a_resonance():
+    """Prominence is measured against the surrounding curve, so a resonance with noisy
+    flanks is still one resonance at the right place."""
+    rng = np.random.default_rng(1)
+    f = np.linspace(400.0, 600.0, 201)
+    z = _z_parallel(f) * (1.0 + 1e-7 * rng.standard_normal(f.size))
+    res = _curve_scan(f, z).resonances(1)
+    assert [r.kind for r in res] == ["parallel"]
+    assert abs(res[0].frequency_hz - 503.29) < 1.0
+    assert 0.9 < res[0].prominence <= 1.0
+
+
+def test_plateau_is_one_extremum_at_its_middle():
+    f = np.arange(10, dtype=float) * 10.0 + 50.0
+    mag = np.array([1.0, 2.0, 3.0, 5.0, 5.0, 5.0, 3.0, 2.0, 1.0, 0.5])
+    res = _curve_scan(f, mag + 0j).resonances(1)
+    assert [r.kind for r in res] == ["parallel"]
+    assert res[0].frequency_hz == f[4]
+    assert res[0].z_ohm == 5.0
+    assert res[0].prominence == pytest.approx(0.8)  # base: the higher side minimum, 1
+
+
+def test_prominence_threshold_and_values():
+    """The peak (10) stands over its base, the higher of the two side minima (8 on the
+    left, 1 on the right): 0.2. The dip (1) stands under its base, the lower of the two
+    side maxima (10 on the left, 2.5 at the right end): 0.6."""
+    f = np.arange(7, dtype=float) * 10.0 + 50.0
+    mag = np.array([8.0, 9.0, 10.0, 9.0, 1.0, 2.0, 2.5])
+    res = _curve_scan(f, mag + 0j).resonances(1)
+    assert [r.kind for r in res] == ["parallel", "series"]
+    assert res[0].prominence == pytest.approx(0.2)
+    assert res[1].prominence == pytest.approx(0.6)
+    assert [
+        r.kind for r in _curve_scan(f, mag + 0j).resonances(1, min_prominence=0.3)
+    ] == ["series"]
+    with pytest.raises(InputError, match="min_prominence"):
+        _curve_scan(f, mag + 0j).resonances(1, min_prominence=1.5)
+
+
+def test_lossless_series_dip_is_reported_without_a_warning():
+    """``|Z| = 0`` at a sample: prominence 1, no divide-by-zero warning."""
+    f = np.arange(5, dtype=float) * 10.0 + 50.0
+    mag = np.array([4.0, 2.0, 0.0, 2.0, 4.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        res = _curve_scan(f, mag + 0j).resonances(1)
+    assert [r.kind for r in res] == ["series"]
+    assert res[0].prominence == 1.0
+    assert res[0].z_ohm == pytest.approx(0.0, abs=1e-12)
+    assert res[0].frequency_hz == pytest.approx(70.0)
+
+
+def test_complex64_scan_finds_the_same_resonances():
+    """The tuned branch scanned in complex64: the same two resonances as complex128,
+    no spurious ones from single-precision noise. Measured: frequencies agree to
+    0.01 Hz (tolerance 0.1 Hz)."""
+    grid = _series_branch_grid()
+    r128 = impedance_scan(grid).resonances(1)
+    r64 = impedance_scan(grid, dtype=torch.complex64).resonances(1)
+    assert [r.kind for r in r64] == [r.kind for r in r128] == ["parallel", "series"]
+    for a, b in zip(r64, r128):
+        assert abs(a.frequency_hz - b.frequency_hz) < 0.1
+
+
+def test_nearly_singular_admittance_is_reported(caplog):
+    """Two buses joined by a line and held to ground only by a 1e-20 S shunt, with no
+    path to the source: ``Y`` is singular to working precision, the solve stays finite,
+    and the scan names the frequencies in a WARNING."""
+    line = Line(
+        id=10,
+        from_node=2,
+        to_node=3,
+        from_phases=(Phase.A,),
+        to_phases=(Phase.A,),
+        length_m=1.0,
+        series_resistance_ohm_per_m=[[R_L]],
+        series_inductance_h_per_m=[[L_L]],
+        shunt_capacitance_f_per_m=[[0.0]],
+        harmonic_line_model="naive",
+    )
+    grid = Grid(
+        base_frequency_hz=F0,
+        nodes=[_node(1), _node(2), _node(3)],
+        branches=[line],
+        appliances=[
+            _source(1, [[R_S]], [[L_S]]),
+            ShuntAppliance(
+                id=200,
+                node=3,
+                phases=(Phase.A,),
+                conductance_s=(1.0e-20,),
+                capacitance_f=(0.0,),
+            ),
+        ],
+    )
+    with caplog.at_level(logging.WARNING, logger="pgml"):
+        scan = impedance_scan(grid, frequencies_hz=[50.0, 250.0])
+    assert torch.isfinite(torch.view_as_real(scan.z_phase_ohm[1])).all()
+    assert "numerically singular" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="pgml"):
+        impedance_scan(_series_branch_grid(), frequencies_hz=[50.0, 250.0])
+    assert "numerically singular" not in caplog.text

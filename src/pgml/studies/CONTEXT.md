@@ -50,17 +50,36 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 
 ## Impedance scan decisions an edit must not undo
 
-- The network is `assemble_ybus` (linear model). The source is ALWAYS its Norton impedance
-  (an ideal slack shorts the scan); a zero-impedance source is refused, not regularised.
-- Generation-sign devices are open circuits by default (`fold_generation=False`), matching
-  the harmonic device-shunt default `appliance.harmonic_shunt.generation_model: none`:
-  their const-Z image has a negative conductance.
+- The default network is the harmonic power flow's own system matrix at every scan
+  frequency (`pgml.solver.harmonic_flow._harmonic_admittance`, the helper behind
+  `assemble_harmonic_ybus`, which accepts non-integer orders): passive network, source
+  Norton shunt, explicit DER `harmonic_impedance`, device harmonic shunt. `load_shunt` /
+  `load_shunt_basis` resolve explicit > `config` > `appliance.harmonic_shunt.*`, so a scan
+  matches `simulate` for the same config. `"const_z"` keeps the `assemble_ybus` fold as an
+  explicit option. Pinned by `tests/studies/test_impedance_scan_flow_consistency.py`
+  (scan == block of `assemble_harmonic_system`'s `Y(h)^-1`).
+- The scan has no fundamental solution: device shunts are evaluated at the rated terminal
+  voltage (`v1=None`), exact for constant-power devices.
+- The source is ALWAYS its Norton impedance (an ideal slack shorts the scan); a
+  zero-impedance source is refused, not regularised.
+- Generation: the harmonic shunt models follow `appliance.harmonic_shunt.generation_model`;
+  `fold_generation` belongs to `"const_z"` only (open by default, matching that policy:
+  the const-Z image of an injecting device has a negative conductance) and raises with any
+  other model.
 - Solve the requested columns (`lu_factor_system` + `solve_factored`, R right-hand sides per
   frequency), never a full inverse. Frequencies chunk against
   `solver.harmonic.system_budget_mb`; only the per-bus diagonal blocks are kept unless
   `transfer=True` (the full `[F, R, R]` block is as large as `Y` when every bus is scanned).
+  A tracked scan keeps every chunk on the graph (the budget bounds untracked scans only).
+- Numerical singularity is a WARNING from a conditioning lower bound read off the solved
+  columns (`max_j ||A^-1 e_j||_1` of the equilibrated `A`), not `estimate_condition`: that
+  costs a rebuilt dense equilibrated matrix and measured 27 % of a single-bus sparse scan.
 - Under bus fusion the requested rows map through `FusionMap.row_to_reduced`; fused buses
   report identical impedances.
+- Resonances need a relative topographic prominence (`min_prominence`, default 0.05):
+  neighbour-only extremum tests report rounding noise (54 spurious resonances on a flat
+  100-point curve at 1e-15 noise). Plateaus collapse to one extremum; `1/|Z|^2` is formed
+  only around peaks (no divide-by-zero on a lossless dip).
 - Resonance refinement interpolates `1/|Z|^2` (peaks) and `|Z|^2` (dips), which are
   quadratic near a lightly damped resonance; `ln|Z|` was measured 20x less accurate.
 
@@ -100,7 +119,9 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 ## Tests
 
 - Impedance scan: `tests/studies/test_impedance_scan.py` (closed forms, fusion, chunking,
-  sparse backend, contracts), `tests/studies/test_impedance_scan_opendss.py`
+  sparse backend, resonance prominence, contracts),
+  `tests/studies/test_impedance_scan_flow_consistency.py`,
+  `tests/studies/test_impedance_scan_opendss.py`
   (`-m opendss`, SystemY inverse), `tests/differentiability/test_impedance_scan_gradcheck.py`,
   `tests/gpu/test_impedance_scan_parity.py`.
 - Continuation: `tests/studies/test_continuation.py` (closed forms on a two-bus feeder,
