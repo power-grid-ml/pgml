@@ -820,6 +820,20 @@ Full documentation: the docstrings (published as the API reference).
 - `prepare_power_flow` — re-exported from `pgml.solver`
 - `solve_power_flow` — re-exported from `pgml.solver`
 
+## `pgml.studies`
+
+- class `ImpedanceScan(frequencies_hz, base_frequency_hz, node_ids, phases, z_phase_ohm, z_positive_ohm, z_zero_ohm, transfer_rows=…, z_transfer_ohm=…)` — Result of :func:`impedance_scan`: impedances seen from each requested bus vs frequency.
+- class `Resonance(kind, frequency_hz, order, z_ohm)` — One resonance of a driving-point impedance magnitude.
+- def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, transfer: bool = False, fold_generation: bool = False, dtype: dtype = torch.complex128, device: Optional[device] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
+
+## `pgml.studies.impedance`
+
+- `DEFAULT_MAX_ORDER` — int
+- `DEFAULT_ORDER_STEP` — float
+- `ImpedanceScan` — re-exported from `pgml.studies`
+- `Resonance` — re-exported from `pgml.studies`
+- `impedance_scan` — re-exported from `pgml.studies`
+
 ## `pgml.topology`
 
 - class `ConnectivityReport(connected, has_source, unenergized=…, islands=…, reconnectable=…)` — Which (node, phase) rows can reach an in-service :class:`Source`.

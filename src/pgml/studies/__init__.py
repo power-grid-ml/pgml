@@ -9,4 +9,11 @@ result object with a JSON-ready ``to_dict()``.
 
 from __future__ import annotations
 
+from .impedance import ImpedanceScan, Resonance, impedance_scan
+
 __all__: list[str] = []
+__all__ += [
+    "impedance_scan",
+    "ImpedanceScan",
+    "Resonance",
+]
