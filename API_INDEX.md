@@ -820,6 +820,23 @@ Full documentation: the docstrings (published as the API reference).
 - `prepare_power_flow` — re-exported from `pgml.solver`
 - `solve_power_flow` — re-exported from `pgml.solver`
 
+## `pgml.studies`
+
+- class `BranchRating(i_max_a, s_rated_va)` — Thermal rating of one branch; either field is ``None`` when the grid declares none.
+- class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
+- def `branch_ratings(grid: Grid) -> dict[int, BranchRating]` — Thermal rating of every branch of ``grid``, keyed by branch id (pure, no solve).
+
+## `pgml.studies.hosting`
+
+- class `HostingCapacity(node_ids, kind, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
+- def `hosting_capacity(grid: Grid, candidates: Optional[Sequence[int]] = None, kind: str = 'generation', limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = None, phases: Union[str, Phase] = 'balanced', power_factor: float = 1.0, p_max_w: Optional[float] = None, tol_w: Optional[float] = None, harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None, config: Optional[SimulationConfig] = None, dtype: dtype = torch.complex128, device: Optional[device] = None) -> HostingCapacity` — Largest new generation or demand each candidate bus can take within the limits.
+
+## `pgml.studies.limits`
+
+- `BranchRating` — re-exported from `pgml.studies`
+- `HostingLimits` — re-exported from `pgml.studies`
+- `branch_ratings` — re-exported from `pgml.studies`
+
 ## `pgml.topology`
 
 - class `ConnectivityReport(connected, has_source, unenergized=…, islands=…, reconnectable=…)` — Which (node, phase) rows can reach an in-service :class:`Source`.

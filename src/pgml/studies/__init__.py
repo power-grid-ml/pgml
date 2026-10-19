@@ -10,3 +10,11 @@ result object with a JSON-ready ``to_dict()``.
 from __future__ import annotations
 
 __all__: list[str] = []
+
+from .limits import BranchRating, HostingLimits, branch_ratings  # noqa: E402
+
+__all__ += [
+    "BranchRating",
+    "HostingLimits",
+    "branch_ratings",
+]
