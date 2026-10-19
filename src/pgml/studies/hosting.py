@@ -177,12 +177,13 @@ class HostingCapacity:
     def to_dict(self) -> dict:
         """JSON-ready dict: plain lists and ids, units in the key names, ``NaN`` as ``None``.
 
-        Keys: ``kind``, ``node_ids``, ``p_max_w``, ``binding``, ``margins`` (``{key:
+        Keys: ``study`` (``"hosting_capacity"``), ``kind``, ``node_ids``, ``p_max_w``, ``binding``, ``margins`` (``{key:
         list}``), ``iterations``, ``p_cap_w``, ``tol_w``, ``base_case_feasible``,
         ``base_operating_point``, ``phases``, ``power_factor``, ``limits``
         (:meth:`HostingLimits.to_dict`).
         """
         return {
+            "study": "hosting_capacity",
             "kind": self.kind,
             "node_ids": [int(i) for i in self.node_ids],
             "p_max_w": [float(x) for x in self.p_max_w],

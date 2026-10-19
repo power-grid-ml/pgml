@@ -394,7 +394,8 @@ def test_qv_on_a_three_phase_bus_holds_every_phase():
 # ---------------------------------------------------------------------------
 def test_pv_round_trip_through_json():
     curve = pv_curve(_regulated(20_000.0, 30_000.0))
-    data = json.loads(json.dumps(curve.to_dict()))
+    data = json.loads(json.dumps(curve.to_dict(), allow_nan=False))
+    assert data["study"] == "pv_curve"
     back = PVCurve.from_dict(data)
     np.testing.assert_array_equal(back.v_pu, curve.v_pu)
     np.testing.assert_array_equal(back.lambdas, curve.lambdas)
@@ -403,7 +404,8 @@ def test_pv_round_trip_through_json():
 
 def test_qv_round_trip_through_json_keeps_missing_points():
     curve = qv_curve(_two_bus(0.8 * E**2, x=0.5), 2, v_range_pu=(0.3, 1.0), steps=8)
-    data = json.loads(json.dumps(curve.to_dict()))
+    data = json.loads(json.dumps(curve.to_dict(), allow_nan=False))
+    assert data["study"] == "qv_curve"
     assert data["q_var"][0] is None
     back = QVCurve.from_dict(data)
     np.testing.assert_array_equal(back.converged, curve.converged)

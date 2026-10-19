@@ -310,7 +310,8 @@ def test_round_trip_and_input_is_not_mutated():
     before = grid.model_dump()
     res = hosting_capacity(grid, limits=HostingLimits(v_max_pu=1.03, vuf_max=0.02))
     assert grid.model_dump() == before
-    data = json.loads(json.dumps(res.to_dict()))
+    data = json.loads(json.dumps(res.to_dict(), allow_nan=False))
+    assert data["study"] == "hosting_capacity"
     back = HostingCapacity.from_dict(data)
     assert back.node_ids == res.node_ids and back.binding == res.binding
     np.testing.assert_array_equal(back.p_max_w, res.p_max_w)

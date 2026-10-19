@@ -451,6 +451,7 @@ def test_to_dict_is_json_ready_and_round_trips():
     scan = impedance_scan(grid, frequencies_hz=[50.0, 300.0, 900.0], transfer=True)
     d = scan.to_dict()
     text = json.dumps(d, allow_nan=False)
+    assert d["study"] == "impedance_scan"
     back = ImpedanceScan.from_dict(json.loads(text))
     assert back.node_ids == scan.node_ids == (1, 2, 5)
     assert back.phases == scan.phases
