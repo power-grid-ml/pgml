@@ -102,6 +102,7 @@ pgml/concepts
 pgml/differentiability
 pgml/public-api
 pgml/examples
+pgml/studies/index
 pgml/modeling/index
 pgml/api/index
 ```
