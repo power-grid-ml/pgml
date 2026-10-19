@@ -902,3 +902,22 @@ solver:
         joint ramp of a whole operating point; on a feeder with substantial generation the
         two limits differ materially, because ramping generation with the load offsets the
         voltage drop the ramp is meant to create.
+
+# Grid-planning studies (pgml.studies).
+studies:
+  hosting:
+    batch_budget_mb:
+      value: 1024.0
+      units: "MiB"
+      description: >
+        Memory budget for one batched solve of the hosting-capacity search, which carries
+        one scenario per open candidate. The dense Newton step of the fundamental power
+        flow holds a real [2N, 2N] Jacobian per scenario, its factorization and the
+        directional derivatives it is built from, charged as 3 * (2N)^2 real numbers per
+        scenario (N node-phase rows of the grid with the candidate devices). The open
+        candidates of a bisection step are solved in slices of as many scenarios as fit
+        the budget (at least one), so the peak allocation stays bounded however many
+        candidates a study has; the result does not depend on the slicing. A harmonic
+        study additionally chunks its per-scenario harmonic systems against
+        solver.harmonic.system_budget_mb. 1 GiB is about 11 scenarios of a 1000-row grid
+        and 1100 of a 100-row grid in double precision.

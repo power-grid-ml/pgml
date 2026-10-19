@@ -122,6 +122,11 @@ reference comparisons:
     diagonal equilibration, the gradient Jacobian's memory budget and adjoint cache, and
     what the loadability λ multiplies.  See :doc:`/pgml/modeling/solver-performance`.
 
+``studies.hosting.batch_budget_mb``
+    Memory budget of one batched solve of the hosting-capacity search; the open candidates
+    are solved in slices that fit it, without changing the result. See
+    :doc:`/pgml/studies/hosting-capacity`.
+
 .. automodule:: pgml.defaults
    :members:
    :show-inheritance:

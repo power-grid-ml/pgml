@@ -16,24 +16,49 @@ Method
    (``base_operating_point``) and the trial powers reach the solver as one batched
    operating point through :func:`~pgml.scenarios.batch_from_values`; a scenario sets
    the power of its own candidate device only.
-2. The base case (every candidate at zero) is solved first. If it already violates a
-   limit, every candidate reports ``p_max_w = 0`` with that limit as binding and
-   ``base_case_feasible = False``.
+2. The base case (every candidate at zero) is solved first. A limit element (a node
+   phase, a line, a transformer) that the base case already violates is reported in
+   ``base_violations`` and, from then on, is binding only where a candidate makes its
+   violation WORSE: its relative excess over the limit may not grow by more than the
+   working-precision tolerance (``1e-7`` of the limit in complex128, ``100`` float32
+   epsilons, about ``1.2e-5``, in complex64). A limit the base case satisfies stays a
+   hard limit. So one overloaded line elsewhere in the grid does not block the study,
+   while new generation at a bus that is already above the voltage band reports
+   ``p_max_w = 0`` with that voltage as binding. ``base_case_feasible`` is ``False``
+   whenever ``base_violations`` is not empty. A base case that does not converge has no
+   operating point to compare against: every candidate then reports ``p_max_w = 0``
+   with binding ``{"kind": "convergence"}``.
 3. Bracketing. With ``p_max_w`` given, every candidate is evaluated at that cap; a
    candidate that keeps every limit there reports the cap with binding ``{"kind":
    "none"}``. Without a cap, the trial power starts at 1 kW and doubles, per candidate,
-   until a limit is violated (or 1 TW is passed, reported as ``"none"`` with that cap).
+   until a limit is violated; the last trial is clipped to the 1 TW ceiling, so a
+   candidate that keeps every limit up to it reports exactly ``p_cap_w`` with binding
+   ``"none"``.
 4. Bisection between the largest feasible and the smallest violating power, all open
    candidates in lockstep, until the bracket is narrower than the tolerance (by default
    0.1 % of the candidate's upper bracket). The reported ``p_max_w`` is the lower end, a
    power at which every limit was verified; the binding limit is the one exceeded most
-   (relative to its limit) at the upper end.
+   (relative to its limit, or for a limit violated in the base case relative to its base
+   excess) at the upper end.
+
+Each batched solve carries one scenario per open candidate. The open candidates are
+solved in slices that fit the memory budget ``studies.hosting.batch_budget_mb`` (at least
+one scenario per slice); a scenario depends only on its own candidate, so the result does
+not depend on the slicing.
 
 A scenario whose power flow does not converge counts as a violation (binding
 ``{"kind": "convergence"}``): beyond the loadability nose there is no operating point.
 The bisection assumes the feasible powers form one interval starting at zero, which holds
-when every limit tightens monotonically with the added power (voltage rise or drop, line
-and transformer current); it reports the end of the first feasible interval found.
+when every limit tightens monotonically with the added power. With the default
+``"worst_case"`` base that is the usual situation: no load offsets new generation (and no
+generation offsets new demand), so voltage rise or drop and the line and transformer
+currents grow with the added power from the start. With a ``"nameplate"`` or custom base
+it need not hold: new generation first REDUCES the current of a line that feeds local
+load (reverse flow overtakes it only beyond that load), and a single-phase device can
+first reduce an existing unbalance (VUF) or harmonic distortion (THD). Such a limit can
+be violated at a small power, satisfied over a middle range and violated again; the
+doubling bracket can step over that structure, and the search reports the end of the
+first feasible interval it brackets, which need not be the first one.
 
 The fundamental power flow is the default calculation. A harmonic
 :class:`~pgml.SimulationConfig` solves every scenario at its harmonic orders (order 1
@@ -58,6 +83,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from pgml import defaults
 from pgml.assembly import base_voltage_per_row, node_phase_index
 from pgml.errors import InputError
 from pgml.geometry.sequence import fortescue_matrix
@@ -82,7 +108,7 @@ from .limits import HostingLimits, branch_ratings
 _DIRECTIONS = ("generation", "load")
 #: First trial power of the doubling bracket when no search cap is given (W).
 _P_START_W = 1.0e3
-#: Largest power the doubling bracket tries before it reports "no limit found" (W).
+#: Largest power the doubling bracket tries; a candidate feasible there reports it (W).
 _P_CEILING_W = 1.0e12
 #: Default bisection tolerance, relative to the candidate's upper bracket.
 _REL_TOL = 1.0e-3
@@ -94,12 +120,13 @@ _MARGIN_KEYS = (
     "transformer_loading",
     "vuf",
     "thd",
+    "neutral_loading",
 )
 
 BaseOperatingPoint = Union[None, str, Mapping[int, Mapping[str, Any]]]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class HostingCapacity:
     """Result of :func:`hosting_capacity`: one entry per candidate bus.
 
@@ -111,22 +138,27 @@ class HostingCapacity:
         ``"generation"`` or ``"load"``.
     p_max_w:
         ``[n]`` float64, W: the largest added active power (total over the device's
-        phases) at which every limit was verified. ``0`` when the base case already
-        violates a limit.
+        phases) at which every limit was verified (a limit already violated in the base
+        case: not made worse, see :mod:`pgml.studies.hosting`). ``0`` when even a small
+        addition violates a limit, and when the base case does not converge. Exactly
+        :attr:`p_cap_w` for a candidate that reached no limit.
     binding:
         ``n`` dicts naming what stops the candidate at ``p_max_w``:
         ``{"kind": "voltage", "limit": "v_max_pu" | "v_min_pu", "node_id", "phase"}``,
-        ``{"kind": "line", "branch_id"}``, ``{"kind": "transformer", "branch_id"}``,
-        ``{"kind": "vuf", "node_id"}``, ``{"kind": "thd", "node_id", "phase"}``,
-        ``{"kind": "convergence"}`` (no operating point beyond), or ``{"kind": "none"}``
-        when no limit was reached up to :attr:`p_cap_w`.
+        ``{"kind": "line", "branch_id"}``, ``{"kind": "line_neutral", "branch_id"}``,
+        ``{"kind": "transformer", "branch_id"}``, ``{"kind": "vuf", "node_id"}``,
+        ``{"kind": "thd", "node_id", "phase"}``, ``{"kind": "convergence"}`` (no
+        operating point beyond), or ``{"kind": "none"}`` when no limit was reached up to
+        :attr:`p_cap_w`.
     margins:
         ``{key: [n] float64}`` for the keys ``v_min_pu``, ``v_max_pu``,
-        ``line_loading``, ``transformer_loading``, ``vuf`` and ``thd``, evaluated at
-        ``p_max_w``: how far the tightest element of each limit is from it, in that
-        limit's unit (pu for the voltage band, a fraction for loading, unbalance and
-        THD); positive is inside the limit. ``NaN`` where the limit is disabled or has no
-        element to check (no rated line, no three-phase node).
+        ``line_loading``, ``transformer_loading``, ``vuf``, ``thd`` and
+        ``neutral_loading``, evaluated at ``p_max_w``: how far the tightest element of
+        each limit is from it, in that limit's unit (pu for the voltage band, a fraction
+        for loading, unbalance and THD); positive is inside the limit. An element
+        violated in the base case counts too, so the margin of its limit is negative.
+        ``NaN`` where the limit is disabled or has no element to check (no rated line,
+        no line with a neutral conductor, no three-phase node).
     iterations:
         ``[n]`` int64: power flows solved for that candidate (base case excluded); one
         batched solve serves every open candidate.
@@ -134,9 +166,10 @@ class HostingCapacity:
         Search cap in W: ``p_max_w`` as given, else the doubling ceiling (1 TW).
     tol_w:
         ``[n]`` float64, W: bisection tolerance per candidate; ``p_max_w`` is within it
-        of the limit. ``NaN`` where no bisection ran (base case infeasible).
+        of the limit. ``NaN`` where no bisection ran (base case not converged).
     base_case_feasible:
-        Whether the base operating point (no new device) keeps every limit.
+        Whether the base operating point (no new device) converges and keeps every
+        limit, i.e. ``base_violations`` is empty.
     base_operating_point:
         ``"worst_case"``, ``"nameplate"`` or ``"custom"``: which base the search used.
     phases:
@@ -145,6 +178,11 @@ class HostingCapacity:
         Power factor of the new device (sign convention of :func:`hosting_capacity`).
     limits:
         The :class:`~pgml.studies.HostingLimits` that were checked.
+    base_violations:
+        The limit elements the base case violates, in row / branch order: the element
+        dict of ``binding`` plus ``"excess"``, its relative excess over the limit
+        (``0.05`` = 5 % beyond it). ``({"kind": "convergence"},)`` when the base case
+        does not converge.
     """
 
     node_ids: tuple[int, ...]
@@ -160,6 +198,7 @@ class HostingCapacity:
     phases: str
     power_factor: float
     limits: HostingLimits = field(default_factory=HostingLimits)
+    base_violations: tuple[dict, ...] = ()
 
     def result_for(self, node_id: int) -> dict:
         """The JSON-ready entry of one candidate (``p_max_w``, ``binding``, margins)."""
@@ -180,7 +219,8 @@ class HostingCapacity:
         """JSON-ready dict: plain lists and ids, units in the key names, ``NaN`` as ``None``.
 
         Keys: ``study`` (``"hosting_capacity"``), ``direction``, ``node_ids``,
-        ``p_max_w``, ``binding``, ``margins`` (``{key: list}``), ``iterations``, ``p_cap_w``, ``tol_w``, ``base_case_feasible``,
+        ``p_max_w``, ``binding``, ``margins`` (``{key: list}``), ``iterations``,
+        ``p_cap_w``, ``tol_w``, ``base_case_feasible``, ``base_violations``,
         ``base_operating_point``, ``phases``, ``power_factor``, ``limits``
         (:meth:`HostingLimits.to_dict`).
         """
@@ -197,6 +237,7 @@ class HostingCapacity:
             "p_cap_w": float(self.p_cap_w),
             "tol_w": [_json_float(x) for x in self.tol_w],
             "base_case_feasible": bool(self.base_case_feasible),
+            "base_violations": [dict(v) for v in self.base_violations],
             "base_operating_point": self.base_operating_point,
             "phases": self.phases,
             "power_factor": float(self.power_factor),
@@ -231,6 +272,7 @@ class HostingCapacity:
             phases=str(data["phases"]),
             power_factor=float(data["power_factor"]),
             limits=HostingLimits.from_dict(data["limits"]),
+            base_violations=tuple(dict(v) for v in data["base_violations"]),
         )
 
 
@@ -242,11 +284,34 @@ def _json_float(x) -> Optional[float]:
 
 @dataclass
 class _Evaluation:
-    """Verdict of one batched solve: per scenario feasibility, binding limit, margins."""
+    """Verdict of one batched solve: per scenario feasibility, binding limit, margins.
+
+    ``converged`` is the solve's own verdict (finite limit quantities included);
+    ``excess`` the raw relative excess of every limit element, ``(value - limit) /
+    limit`` (``> 0`` violates), before the base-case comparison.
+    """
 
     feasible: np.ndarray  # [B] bool
     binding: list  # [B] dict | None (None where feasible)
     margins: dict  # key -> [B] float64
+    converged: np.ndarray  # [B] bool
+    excess: np.ndarray  # [B, E] float64
+
+    @staticmethod
+    def concat(parts: list["_Evaluation"]) -> "_Evaluation":
+        """The evaluations of consecutive scenario slices as one."""
+        if len(parts) == 1:
+            return parts[0]
+        return _Evaluation(
+            feasible=np.concatenate([e.feasible for e in parts]),
+            binding=[b for e in parts for b in e.binding],
+            margins={
+                key: np.concatenate([e.margins[key] for e in parts])
+                for key in _MARGIN_KEYS
+            },
+            converged=np.concatenate([e.converged for e in parts]),
+            excess=np.concatenate([e.excess for e in parts], axis=0),
+        )
 
 
 def _live_phases(phases: Sequence[Phase]) -> tuple[Phase, ...]:
@@ -414,6 +479,16 @@ class _Study:
             )
         )
         self._build_tables()
+        # Base-case comparison (set by set_base): elements the base case violates are
+        # binding only where their relative excess grows beyond the tie tolerance.
+        self.base_excess: Optional[np.ndarray] = None
+        self.base_violated: Optional[np.ndarray] = None
+        # Scenarios per batched solve: the dense Newton step holds a real [2N, 2N]
+        # Jacobian, its factorization and the directional derivatives it is built from.
+        real_size = torch.empty((), dtype=self.real).element_size()
+        per_scenario = 3 * (2 * self.n_rows) ** 2 * real_size
+        budget = float(defaults.get("studies.hosting.batch_budget_mb")) * 1024.0**2
+        self.batch_size = max(1, int(budget // per_scenario))
 
     # -- static tables ------------------------------------------------------ #
     def _build_tables(self) -> None:
@@ -447,10 +522,16 @@ class _Study:
         ]
 
         ratings = branch_ratings(grid)
-        self.lines = [
-            (b.id, ratings[b.id].i_max_a)
-            for b in grid.branches
-            if isinstance(b, Line) and b.in_service and ratings[b.id].i_max_a
+        # Per rated line: (id, ampacity, live-conductor masks at the from / to terminal).
+        self.lines = []
+        for b in grid.branches:
+            if not (isinstance(b, Line) and b.in_service and ratings[b.id].i_max_a):
+                continue
+            live_from = torch.tensor([p != Phase.N for p in b.from_phases])
+            live_to = torch.tensor([p != Phase.N for p in b.to_phases])
+            self.lines.append((b.id, ratings[b.id].i_max_a, live_from, live_to))
+        self.neutral_lines = [
+            entry for entry in self.lines if not (entry[2].all() and entry[3].all())
         ]
         self.transformers = []
         for b in grid.branches:
@@ -472,7 +553,23 @@ class _Study:
             self.transformers.append((b.id, terminals))
 
     # -- one batched evaluation -------------------------------------------- #
+    def set_base(self, base: _Evaluation) -> None:
+        """Compare later evaluations against this converged base case (scenario 0)."""
+        self.base_excess = base.excess[0]
+        self.base_violated = base.excess[0] > 0.0
+
     def evaluate(self, trial_w: np.ndarray, cand: np.ndarray) -> _Evaluation:
+        """Scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W, in budget slices."""
+        n = int(trial_w.shape[0])
+        step = self.batch_size
+        return _Evaluation.concat(
+            [
+                self._evaluate_slice(trial_w[i : i + step], cand[i : i + step])
+                for i in range(0, n, step)
+            ]
+        )
+
+    def _evaluate_slice(self, trial_w: np.ndarray, cand: np.ndarray) -> _Evaluation:
         """Solve one batch, scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W."""
         b = int(trial_w.shape[0])
         p = torch.as_tensor(trial_w, dtype=self.real, device=self.device)
@@ -610,29 +707,43 @@ class _Study:
             margins["thd"] = lim.thd_max - thd.max(axis=1)
 
         need_lines = lim.line_loading is not None and self.lines
+        need_neutral = lim.neutral_loading is not None and self.neutral_lines
         need_trafos = lim.transformer_loading is not None and self.transformers
-        if need_lines or need_trafos:
+        if need_lines or need_neutral or need_trafos:
             currents = {bc.branch_id: bc for bc in state.branch_currents()}
 
             def _rms(i: Tensor) -> Tensor:  # [B, H, P] -> [B, P]
                 return i.abs().pow(2).sum(dim=-2).sqrt()
 
+            def _line_loading(entries, live: bool) -> np.ndarray:
+                """Largest conductor loading [B, L]: phase (``live``) or neutral ones."""
+                cols = []
+                for bid, i_max, m_from, m_to in entries:
+                    bc = currents[bid]
+                    sel_from = (m_from if live else ~m_from).to(v.device)
+                    sel_to = (m_to if live else ~m_to).to(v.device)
+                    i_cond = torch.cat(
+                        [_rms(bc.i_from)[..., sel_from], _rms(bc.i_to)[..., sel_to]],
+                        dim=-1,
+                    )
+                    cols.append(i_cond.amax(dim=-1) / i_max)
+                out = torch.stack(cols, dim=-1).reshape(b, -1)
+                return out.to(torch.float64).cpu().numpy()
+
             if need_lines:
-                loading = torch.stack(
-                    [
-                        torch.cat(
-                            [_rms(currents[bid].i_from), _rms(currents[bid].i_to)],
-                            dim=-1,
-                        ).amax(dim=-1)
-                        / i_max
-                        for bid, i_max in self.lines
-                    ],
-                    dim=-1,
-                )
-                loading = loading.reshape(b, -1).to(torch.float64).cpu().numpy()
+                loading = _line_loading(self.lines, live=True)
                 parts.append((loading - lim.line_loading) / lim.line_loading)
-                descs += [{"kind": "line", "branch_id": bid} for bid, _ in self.lines]
+                descs += [{"kind": "line", "branch_id": e[0]} for e in self.lines]
                 margins["line_loading"] = lim.line_loading - loading.max(axis=1)
+            if need_neutral:
+                loading = _line_loading(self.neutral_lines, live=False)
+                lim_n = lim.neutral_loading
+                parts.append((loading - lim_n) / lim_n)
+                descs += [
+                    {"kind": "line_neutral", "branch_id": e[0]}
+                    for e in self.neutral_lines
+                ]
+                margins["neutral_loading"] = lim_n - loading.max(axis=1)
             if need_trafos:
                 cols = []
                 for bid, ((m_from, k_from), (m_to, k_to)) in self.transformers:
@@ -650,11 +761,16 @@ class _Study:
                 ]
                 margins["transformer_loading"] = lim_t - loading.max(axis=1)
 
-        excess = (
-            np.concatenate(parts, axis=1) if parts else np.zeros((b, 0), np.float64)
-        )
-        finite = np.isfinite(excess).all(axis=1)
+        raw = np.concatenate(parts, axis=1) if parts else np.zeros((b, 0), np.float64)
+        self.descs = descs
+        finite = np.isfinite(raw).all(axis=1)
         ok = ok & finite
+        excess = raw
+        if self.base_violated is not None:
+            # An element the base case violates binds only where the candidate makes its
+            # violation worse than the base by more than the working precision.
+            grown = raw - self.base_excess - self.tie_tol
+            excess = np.where(self.base_violated, grown, raw)
         violated = (excess > 0.0).any(axis=1)
         feasible = ok & ~violated
         # Binding element: the largest relative excess; elements within the working
@@ -676,7 +792,13 @@ class _Study:
         ]
         for key in _MARGIN_KEYS:
             margins[key] = np.where(ok, margins[key], np.nan)
-        return _Evaluation(feasible=feasible, binding=binding, margins=margins)
+        return _Evaluation(
+            feasible=feasible,
+            binding=binding,
+            margins=margins,
+            converged=ok,
+            excess=raw,
+        )
 
 
 def hosting_capacity(
@@ -735,7 +857,7 @@ def hosting_capacity(
         capacitive). ``Q = sign(pf) * P * tan(arccos|pf|)``.
     p_max_w:
         Search cap in W (total over the device's phases). ``None``: no cap, the bracket
-        doubles from 1 kW until a limit is violated.
+        doubles from 1 kW until a limit is violated, up to 1 TW (``p_cap_w``).
     tol_w:
         Bisection tolerance in W. ``None``: 0.1 % of each candidate's upper bracket.
     harmonic_emission:
@@ -765,6 +887,10 @@ def hosting_capacity(
     precision on that device. Only the feasibility verdicts and margins move to the
     host, once per batched solve. At complex64 the voltage resolves to about 1e-6 pu,
     which moves ``p_max_w`` by less than the default tolerance on the tested grids.
+
+    Memory: a batched solve carries one scenario per open candidate; the candidates are
+    solved in slices that fit ``studies.hosting.batch_budget_mb`` (dense Newton step,
+    ``3 * (2N)^2`` real numbers per scenario for ``N`` node-phase rows).
 
     Raises
     ------
@@ -839,13 +965,14 @@ def hosting_capacity(
         base = study.evaluate(np.zeros(1), np.zeros(1, dtype=np.int64))
         cap = float(p_max_w) if p_max_w is not None else _P_CEILING_W
         iterations = np.zeros(n, dtype=np.int64)
-        if not base.feasible[0]:
+        if not base.converged[0]:
+            no_solution = {"kind": "convergence"}
             return HostingCapacity(
                 node_ids=tuple(node_ids),
                 direction=direction,
                 p_max_w=np.zeros(n),
-                binding=tuple(dict(base.binding[0]) for _ in range(n)),
-                margins={k: np.full(n, base.margins[k][0]) for k in _MARGIN_KEYS},
+                binding=tuple(dict(no_solution) for _ in range(n)),
+                margins={k: np.full(n, np.nan) for k in _MARGIN_KEYS},
                 iterations=iterations,
                 p_cap_w=cap,
                 tol_w=np.full(n, np.nan),
@@ -854,7 +981,13 @@ def hosting_capacity(
                 phases=phase_label,
                 power_factor=pf,
                 limits=limits,
+                base_violations=(dict(no_solution),),
             )
+        base_violations = tuple(
+            {**study.descs[j], "excess": float(base.excess[0, j])}
+            for j in np.flatnonzero(base.excess[0] > 0.0)
+        )
+        study.set_base(base)
 
         lo = np.zeros(n)
         hi = np.full(n, np.nan)
@@ -876,15 +1009,17 @@ def hosting_capacity(
             trial = np.full(n, cap)
             _record(study.evaluate(trial, everyone), everyone, trial)
         else:
+            # Double per candidate; the last trial is the cap itself, so a candidate that
+            # never violates reports exactly the cap.
             trial_all = np.full(n, _P_START_W)
             active = everyone
             while active.size:
                 trial = trial_all[active]
                 ev = study.evaluate(trial, active)
                 _record(ev, active, trial)
-                grown = active[ev.feasible]
-                trial_all[grown] *= 2.0
-                active = grown[trial_all[grown] <= cap]
+                grown = active[ev.feasible & (trial < cap)]
+                trial_all[grown] = np.minimum(2.0 * trial_all[grown], cap)
+                active = grown
 
         bracketed = ~np.isnan(hi)
         if tol_w is not None:
@@ -910,11 +1045,12 @@ def hosting_capacity(
         iterations=iterations,
         p_cap_w=cap,
         tol_w=tol,
-        base_case_feasible=True,
+        base_case_feasible=not base_violations,
         base_operating_point=base_label,
         phases=phase_label,
         power_factor=pf,
         limits=limits,
+        base_violations=base_violations,
     )
 
 

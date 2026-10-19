@@ -18,7 +18,8 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   and event location (nose, reactive-limit switch, `λ` cap) live here.
 - `limits.py` — `branch_ratings` (line ampacity from the catalog type's `max_i_a`,
   transformer `s_rated_va` from the component, else its type; every branch listed) and
-  `HostingLimits` (voltage band, line / transformer loading, optional VUF and THD).
+  `HostingLimits` (voltage band, line phase-conductor / transformer loading, optional
+  VUF, THD and neutral loading).
 - `hosting.py` — `hosting_capacity` and `HostingCapacity`.
 - `_common.py` — private helpers every study uses: `resolve_complex_dtype` (the `dtype`
   argument) and `check_study` (the `"study"` key check of `from_dict`).
@@ -114,6 +115,20 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Non-convergence counts as a violation. The reported power is the largest VERIFIED
   feasible one; the binding limit is the largest relative excess at the smallest violating
   power, ties within working precision resolved to the first element in row / branch order.
+- Base case "no worse than base": an element the converged base case violates is listed
+  in `base_violations` and binds only where its relative excess grows by more than the
+  tie tolerance (`max(1e-7, 100 eps)`); elements satisfied in the base stay hard. A
+  non-converged base reports zero / `convergence` for every candidate. Do not go back to
+  "any base violation blocks every candidate": one overloaded cable anywhere made the
+  study return nothing.
+- The doubling bracket clips its last trial to the cap, so a never-binding candidate
+  reports exactly `p_cap_w`.
+- Every batched solve is sliced into chunks of `batch_size` scenarios from
+  `studies.hosting.batch_budget_mb` (`3 * (2N)^2` real numbers per scenario for the dense
+  Newton step); results are identical for any slicing (pinned by a test).
+- Line loading checks the PHASE conductors against `max_i_a`; the neutral has its own
+  optional limit `HostingLimits.neutral_loading` (fraction of the phase ampacity), binding
+  kind `line_neutral`, margin key `neutral_loading`.
 - Not differentiable (feasibility is boolean); the search runs under `torch.no_grad()`.
 
 ## Tests
@@ -128,5 +143,5 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   plain Newton solves on an unbalanced feeder, serialization, inputs),
   `tests/gpu/test_studies_continuation_parity.py`.
 - Hosting capacity: `tests/studies/test_hosting.py` (closed forms, serial `simulate`
-  reference, every limit kind, round trip), `tests/studies/test_limits.py`, shared test
+  reference, every limit kind, base-case violations, slicing, round trip), `tests/studies/test_limits.py`, shared test
   grids in `tests/studies/grids.py`, `tests/gpu/test_hosting_parity.py`.

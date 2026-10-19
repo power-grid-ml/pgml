@@ -237,15 +237,37 @@ def mv_lv_transformer(*, s_rated_va: float = 100.0e3) -> Grid:
     )
 
 
-def four_wire_two_bus(*, r_ohm_per_m: float = 0.2e-3, length_m: float = 200.0) -> Grid:
+def four_wire_two_bus(
+    *,
+    r_ohm_per_m: float = 0.2e-3,
+    length_m: float = 200.0,
+    i_max_a: float | None = None,
+) -> Grid:
     """400 V four-wire line between an ideal source bus 1 and bus 2.
 
     Phase and neutral conductors are equal and uncoupled; the neutral of bus 1 is
     grounded through 0.01 ohm. A single-phase device at bus 2 then sees the loop
     impedance ``2 Z + 0.01 ohm`` between its phase-to-neutral terminals and the source.
+    With ``i_max_a`` the line carries the catalog type ``"cable4"`` of that ampacity.
     """
     abcn = (Phase.A, Phase.B, Phase.C, Phase.N)
     u_ln = 230.0
+    rated = {}
+    if i_max_a is not None:
+        rated = {
+            "types": TypeLibrary(
+                lines={
+                    "cable4": LineType(
+                        id="cable4",
+                        n_phases=4,
+                        series_resistance_ohm_per_m=_diag(r_ohm_per_m, 4),
+                        series_inductance_h_per_m=_diag(0.25e-6, 4),
+                        shunt_capacitance_f_per_m=_diag(0.0, 4),
+                        max_i_a=i_max_a,
+                    )
+                }
+            )
+        }
     return Grid(
         base_frequency_hz=F0,
         nodes=[Node(id=i, u_rated_v=400.0, phases=abcn) for i in (1, 2)],
@@ -257,6 +279,7 @@ def four_wire_two_bus(*, r_ohm_per_m: float = 0.2e-3, length_m: float = 200.0) -
                 from_phases=abcn,
                 to_phases=abcn,
                 length_m=length_m,
+                type_ref="cable4" if i_max_a is not None else None,
                 series_resistance_ohm_per_m=_diag(r_ohm_per_m, 4),
                 series_inductance_h_per_m=_diag(0.25e-6, 4),
                 shunt_capacitance_f_per_m=_diag(0.0, 4),
@@ -281,4 +304,5 @@ def four_wire_two_bus(*, r_ohm_per_m: float = 0.2e-3, length_m: float = 200.0) -
                 capacitance_f=(0.0,),
             ),
         ],
+        **rated,
     )

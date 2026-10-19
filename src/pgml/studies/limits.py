@@ -105,7 +105,9 @@ class HostingLimits:
     line_loading:
         Largest allowed conductor current of a line as a fraction of its ampacity
         (:func:`branch_ratings`), RMS over the solved orders, checked at both terminals
-        and on every conductor including a neutral.
+        on every PHASE conductor. A neutral conductor is not held to the phase ampacity:
+        a low-voltage cable's neutral often has a reduced section, so its limit is
+        :attr:`neutral_loading`.
     transformer_loading:
         Largest allowed transformer loading as a fraction of its rated power: the
         per-phase current times the terminal node's nominal line-to-neutral voltage,
@@ -117,6 +119,13 @@ class HostingLimits:
     thd_max:
         Largest voltage total harmonic distortion (fraction, e.g. 0.08) at every phase
         conductor, over the solved orders. Needs a harmonic calculation.
+    neutral_loading:
+        Largest allowed neutral-conductor current of a line as a fraction of the line's
+        (phase) ampacity, RMS over the solved orders, at both terminals; ``None``
+        (default) does not check the neutral. A reduced neutral of half the phase
+        section, for example, is ``neutral_loading=0.5`` with ``line_loading=1.0``;
+        ``1.0`` holds the neutral to the phase ampacity. Unbalance and triplen harmonics
+        load the neutral of a four-wire line even when every phase is within its rating.
     """
 
     v_min_pu: Optional[float] = 0.90
@@ -125,6 +134,7 @@ class HostingLimits:
     transformer_loading: Optional[float] = 1.0
     vuf_max: Optional[float] = None
     thd_max: Optional[float] = None
+    neutral_loading: Optional[float] = None
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():

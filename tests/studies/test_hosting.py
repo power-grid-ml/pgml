@@ -15,10 +15,11 @@ import numpy as np
 import pytest
 import torch
 
-from pgml import SimulationConfig, simulate
+from pgml import SimulationConfig, defaults, simulate
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Generator, Load, Phase, WindingConnection
 from pgml.studies import HostingCapacity, HostingLimits, hosting_capacity
+from pgml.studies import hosting as hosting_module
 from pgml.studies.hosting import _MARGIN_KEYS
 
 from .grids import (
@@ -276,12 +277,116 @@ def test_harmonic_calculation_keeps_the_fundamental_answer():
     assert harmonic.binding == fundamental.binding
 
 
-def test_base_case_violation_reports_zero():
+def test_base_case_violation_made_worse_reports_zero():
+    """Bus 2 sits at 1.0 pu above a 0.99 pu band: new generation there raises it further,
+    so the violated element binds at once; the base violations are reported."""
     res = hosting_capacity(two_bus(), limits=HostingLimits(v_max_pu=0.99))
     assert not res.base_case_feasible
     assert res.p_max_w[0] == 0.0
     assert res.binding[0]["limit"] == "v_max_pu"
     assert res.margins["v_max_pu"][0] < 0.0
+    by_node = {v["node_id"]: v for v in res.base_violations}
+    assert set(by_node) == {1, 2}
+    assert by_node[2]["kind"] == "voltage" and by_node[2]["limit"] == "v_max_pu"
+    assert by_node[2]["excess"] == pytest.approx((1.0 - 0.99) / 0.99, rel=1e-6)
+    data = json.loads(json.dumps(res.to_dict(), allow_nan=False))
+    assert data["base_violations"] == [dict(v) for v in res.base_violations]
+    assert HostingCapacity.from_dict(data).base_violations == res.base_violations
+
+
+def test_base_case_violation_that_the_candidate_relieves_does_not_bind():
+    """The same 0.99 pu overvoltage does not stop new DEMAND, which lowers the voltage:
+    the search runs to the lower band exactly as without the upper limit."""
+    res = hosting_capacity(
+        two_bus(), direction="load", limits=HostingLimits(v_max_pu=0.99), tol_w=1.0
+    )
+    free = hosting_capacity(
+        two_bus(), direction="load", limits=HostingLimits(v_max_pu=None), tol_w=1.0
+    )
+    assert not res.base_case_feasible and res.base_violations
+    assert res.binding[0]["limit"] == "v_min_pu"
+    np.testing.assert_array_equal(res.p_max_w, free.p_max_w)
+    exact = _voltage_limit_power(0.90, 0.0, sign=-1.0)
+    assert abs(res.p_max_w[0] - exact) <= 1.0 + 1e-3
+
+
+def test_overloaded_line_binds_only_where_the_candidate_adds_to_it():
+    """Line 21 and 22 carry the nameplate loads above a 40 A rating. New demand at bus 4
+    adds to both currents and stops at once; the same demand at the source-fused bus 2
+    leaves the cable currents unchanged and runs to its cap."""
+    grid = lv_feeder_with_switch(i_max_a=40.0)
+    res = hosting_capacity(
+        grid,
+        [2, 4],
+        direction="load",
+        base_operating_point="nameplate",
+        p_max_w=100.0e3,
+        tol_w=50.0,
+    )
+    assert {v["branch_id"] for v in res.base_violations if v["kind"] == "line"} == {
+        21,
+        22,
+    }
+    assert res.binding[0] == {"kind": "none"} and res.p_max_w[0] == 100.0e3
+    assert res.binding[1]["kind"] == "line" and res.p_max_w[1] == 0.0
+
+
+def test_candidate_without_a_limit_reports_exactly_the_cap():
+    """No cap given: the doubling ends ON the 1 TW ceiling, which is reported."""
+    res = hosting_capacity(lv_feeder_with_switch(), [2])
+    assert res.binding[0] == {"kind": "none"}
+    assert res.p_max_w[0] == res.p_cap_w == 1.0e12
+
+
+def test_candidate_slices_do_not_change_the_result(monkeypatch):
+    """A budget of one scenario per solve slices every batch into single candidates;
+    powers, bindings, margins and iteration counts are identical."""
+    grid = lv_feeder_with_switch(i_max_a=150.0)
+    kw = dict(limits=HostingLimits(v_max_pu=1.03), tol_w=50.0)
+    whole = hosting_capacity(grid, **kw)
+    real_get = defaults.get
+
+    def tiny_budget(key, *args, **kwargs):
+        if key == "studies.hosting.batch_budget_mb":
+            return 1.0e-6
+        return real_get(key, *args, **kwargs)
+
+    monkeypatch.setattr(hosting_module.defaults, "get", tiny_budget)
+    sliced = hosting_capacity(grid, **kw)
+    np.testing.assert_array_equal(sliced.p_max_w, whole.p_max_w)
+    np.testing.assert_array_equal(sliced.iterations, whole.iterations)
+    assert sliced.binding == whole.binding
+    for key in _MARGIN_KEYS:
+        np.testing.assert_array_equal(sliced.margins[key], whole.margins[key])
+
+
+def test_neutral_is_excluded_from_line_loading_unless_limited():
+    """A generator on phase a at bus 2 with a load on phase b: the neutral returns both
+    currents, ``|I_n| = |I_a + I_b| > |I_a|`` (60 degrees apart). By default only the
+    phase conductors are held to the ampacity; ``neutral_loading`` adds the neutral."""
+    grid = four_wire_two_bus(i_max_a=50.0)
+    grid.appliances.append(
+        Load(id=7, node=2, phases=(Phase.B,), p_nom_w=6.0e3, q_nom_var=0.0)
+    )
+    kw = dict(phases="a", base_operating_point="nameplate", tol_w=10.0)
+    phase_only = hosting_capacity(grid, [2], **kw)
+    assert phase_only.binding[0] == {"kind": "line", "branch_id": 10}
+    assert np.isnan(phase_only.margins["neutral_loading"][0])
+    with_neutral = hosting_capacity(
+        grid, [2], limits=HostingLimits(neutral_loading=1.0), **kw
+    )
+    assert with_neutral.binding[0] == {"kind": "line_neutral", "branch_id": 10}
+    assert with_neutral.p_max_w[0] < phase_only.p_max_w[0] - 1.0e3
+    assert 0.0 <= with_neutral.margins["neutral_loading"][0] < 1e-3
+    half = hosting_capacity(grid, [2], limits=HostingLimits(neutral_loading=0.5), **kw)
+    assert half.p_max_w[0] < with_neutral.p_max_w[0]
+
+
+def test_result_is_not_compared_by_value():
+    res = hosting_capacity(two_bus(), p_max_w=1.0e3)
+    assert res == res
+    assert res != HostingCapacity.from_dict(res.to_dict())
+    assert isinstance(hash(res), int)
 
 
 def test_base_operating_point_options():
