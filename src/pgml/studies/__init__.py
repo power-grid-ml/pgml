@@ -10,3 +10,7 @@ result object with a JSON-ready ``to_dict()``.
 from __future__ import annotations
 
 __all__: list[str] = []
+
+from .continuation import PVCurve, QVCurve, pv_curve, qv_curve  # noqa: E402
+
+__all__ += ["PVCurve", "QVCurve", "pv_curve", "qv_curve"]

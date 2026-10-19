@@ -18,6 +18,7 @@ Signatures: docstrings / `API_INDEX.md`.
 | Converters from pandapower, OpenDSS and power-grid-model to `Grid`, and back | `convert/` |
 | The batch contract: declared batches of solver-input deltas, sampling, sweeps, background distortion, batched solve, parquet persistence | `scenarios/` |
 | Plots and the optional reference oracles | `evaluation/` |
+| Planning studies on one grid: P-V curves through the nose by continuation power flow, Q-V curves and reactive margins | `studies/` |
 
 ## Top-level modules
 
@@ -52,7 +53,7 @@ Signatures: docstrings / `API_INDEX.md`.
 
 `schemas` imports nothing else of pgml. `geometry` builds on `schemas` and `defaults`;
 `assembly` on those and `geometry`; `solver` on `assembly` and `topology`; `simulation` and
-`scenarios` on `solver`.
+`scenarios` on `solver`; `studies` on `simulation` and `solver`.
 `convert`, `evaluation` and `grids` (whose benchmark nets come from pandapower) sit on top
 and are the only places that import the optional reference tools (pandapower, OpenDSS,
 power-grid-model), always inside a function or behind an extra.

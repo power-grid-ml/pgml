@@ -820,6 +820,20 @@ Full documentation: the docstrings (published as the API reference).
 - `prepare_power_flow` — re-exported from `pgml.solver`
 - `solve_power_flow` — re-exported from `pgml.solver`
 
+## `pgml.studies`
+
+- class `PVCurve(lambdas, p_total_w, v_pu, node_ids, phases, appliance_ids, direction, nose_index, lambda_max, nose_kind, critical_node, critical_phase, converged, stop_reason, events=…)` — A traced P-V curve (:func:`pv_curve`).
+- class `QVCurve(node_id, phases, v_pu, q_var, q_var_phase, converged, q_margin_var, v_at_min_pu, minimum_in_range)` — A Q-V curve at one bus (:func:`qv_curve`).
+- def `pv_curve(grid: Grid, selector: Optional[Union[Iterable[int], Callable[[ApplianceBase], bool]]] = None, direction: str = 'load', config: Optional[SimulationConfig] = None, lambda_start: float = 1.0, lambda_max: Optional[float] = None, step: float = 0.05, step_min: float = 0.0001, step_max: Optional[float] = None, max_steps: int = 500, v_stop_pu: float = 0.3, stop_at_nose: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> PVCurve` — Trace the P-V curve through its nose by predictor-corrector continuation.
+- def `qv_curve(grid: Grid, node_id: int, v_range_pu: tuple[float, float] = (0.8, 1.1), steps: int = 31, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> QVCurve` — Q-V curve of one bus: the reactive power that holds it at each voltage.
+
+## `pgml.studies.continuation`
+
+- `PVCurve` — re-exported from `pgml.studies`
+- `QVCurve` — re-exported from `pgml.studies`
+- `pv_curve` — re-exported from `pgml.studies`
+- `qv_curve` — re-exported from `pgml.studies`
+
 ## `pgml.topology`
 
 - class `ConnectivityReport(connected, has_source, unenergized=…, islands=…, reconnectable=…)` — Which (node, phase) rows can reach an in-service :class:`Source`.
