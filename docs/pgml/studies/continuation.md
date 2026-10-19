@@ -23,7 +23,7 @@ print(f"reactive margin {qv.q_margin_var / 1e6:.2f} Mvar at {qv.v_at_min_pu:.2f}
 ```
 
 ```text
-λ* = 3.623 at node 18 phase A
+λ* = 3.623 at node 18 phase a
 P at the nose = 13.46 MW
 reactive margin 2.72 Mvar at 0.51 pu
 ```
@@ -73,6 +73,8 @@ switched off. The trace ends at the first of these:
   (`"switch_failed"`). These two stops, and `max_steps`, report `converged=False`.
 
 `critical_node` and `critical_phase` name the row with the lowest voltage at the nose.
+Phases are reported as the schema value of {class}`~pgml.schemas.grid_schema.Phase`
+(`"a"`, `"b"`, `"c"`, `"n"`) in `phases`, `critical_phase` and `QVCurve.phases`.
 {func}`pgml.solver.loadability_limit` gives a quicker estimate of the same limit: it bisects
 on whether a plain Newton solve converges, which gives a lower bound on `λ*`, and it
 localizes the collapse through the singular vectors of the Jacobian.
@@ -100,9 +102,10 @@ through a resistive line.
 
 {class}`~pgml.studies.PVCurve` and {class}`~pgml.studies.QVCurve` hold host numpy arrays.
 `to_dict()` returns plain lists with the units in the key names (`lambdas`, `p_total_w`,
-`v_pu` with its row index `node_ids` and `phases`, `q_var`, `q_margin_var`), with `None` in
-place of a missing value, and `from_dict()` restores the object. `PVCurve.voltage_pu(node_id,
-phase)` returns one node's voltage along the curve.
+`v_pu` with its row index `node_ids` and `phases`, `q_var`, `q_phase_var`, `q_margin_var`),
+with `None` in place of a missing value, and `from_dict()` restores the object; it refuses a
+dict whose `"study"` key names another study. `PVCurve.voltage_pu(node_id, phase)` returns
+one node's voltage along the curve; `phase` is a `Phase` or its letter, in either case.
 
 ## Validation
 

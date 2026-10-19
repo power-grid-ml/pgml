@@ -418,6 +418,10 @@ def test_complex64_agrees_with_complex128():
     assert s64.frequencies_hz.dtype == torch.float32
     rel = (s64.z_positive_ohm.to(torch.complex128) - z128).abs() / z128.abs()
     assert rel.max() < 1e-5
+    by_name = impedance_scan(grid, dtype="complex64")
+    torch.testing.assert_close(
+        by_name.z_positive_ohm, s64.z_positive_ohm, rtol=0.0, atol=0.0
+    )
 
 
 def test_default_frequency_grid():
@@ -474,6 +478,11 @@ def test_to_dict_is_json_ready_and_round_trips():
     assert back.to_dict() == d
     without = impedance_scan(grid, frequencies_hz=[50.0]).to_dict()
     assert without["transfer"] is None
+    d["study"] = "hosting_capacity"
+    with pytest.raises(
+        InputError, match="expected a 'impedance_scan'.*found.*'hosting_capacity'"
+    ):
+        ImpedanceScan.from_dict(d)
 
 
 def test_impedance_component_selection_and_errors():
@@ -519,6 +528,8 @@ def test_invalid_inputs_raise():
         impedance_scan(grid, frequencies_hz=[0.0, 50.0])
     with pytest.raises(InputError, match="dtype"):
         impedance_scan(grid, dtype=torch.float64)
+    with pytest.raises(InputError, match="dtype"):
+        impedance_scan(grid, dtype="float32")
     ideal = copy.deepcopy(grid)
     ideal.appliances[0] = ideal.appliances[0].model_copy(
         update={"resistance_ohm": _sym(0.0, 0.0), "inductance_h": _sym(0.0, 0.0)}

@@ -39,7 +39,7 @@ loadability nose there is no operating point.
 | Option | Default | Meaning |
 |---|---|---|
 | `candidates` | every bus without a source | Bus ids to test |
-| `kind` | `"generation"` | `"generation"` or `"load"` |
+| `direction` | `"generation"` | `"generation"` or `"load"` |
 | `base_operating_point` | worst case | What the other devices do, see below |
 | `phases` | `"balanced"` | All phase conductors with an equal split, or `"a"`, `"b"`, `"c"` for a single-phase device |
 | `power_factor` | `1.0` | Positive: reactive power flows with the active power; negative: against it (an under-excited generator) |

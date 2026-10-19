@@ -25,6 +25,7 @@ import math
 
 import numpy as np
 import pytest
+import torch
 
 from pgml.errors import ConvergenceError, InputError
 from pgml.schemas.grid_schema import (
@@ -139,7 +140,7 @@ def test_nose_matches_closed_form(tan_phi, r, x):
     assert curve.lambda_max == pytest.approx(2.0, rel=1e-6)
     assert curve.lambdas[curve.nose_index] == curve.lambda_max
     assert curve.lambdas[0] == 1.0  # starts at the base operating point
-    assert curve.critical_node == 2 and curve.critical_phase == "A"
+    assert curve.critical_node == 2 and curve.critical_phase == "a"
     # λ rises to the nose and falls after it
     lam = curve.lambdas
     assert np.all(np.diff(lam[: curve.nose_index + 1]) > 0)
@@ -151,7 +152,7 @@ def test_every_point_lies_on_the_closed_form_curve(tan_phi, r):
     x = 0.5
     p0 = 0.5 * _nose_power(tan_phi, r, x)
     curve = pv_curve(_two_bus(p0, p0 * tan_phi, r=r, x=x), lambda_start=0.0)
-    v2 = curve.voltage_pu(2, "A")
+    v2 = curve.voltage_pu(2, "a")
     for k, lam in enumerate(curve.lambdas):
         # the load the solved voltage carries (well conditioned at the nose too)
         assert _p_closed_form(v2[k] * E, tan_phi, r, x) == pytest.approx(
@@ -176,7 +177,7 @@ def test_generation_direction_reverse_flow_nose():
     assert curve.nose_index == len(curve.lambdas) - 1
     assert curve.lambda_max * 10_000.0 == pytest.approx(p_max, rel=1e-6)
     assert curve.p_total_w[-1] == pytest.approx(p_max, rel=1e-6)  # generation positive
-    assert curve.voltage_pu(2, "A")[-1] > 1.0  # reverse flow raises the voltage
+    assert curve.voltage_pu(2, "a")[-1] > 1.0  # reverse flow raises the voltage
 
 
 def test_balanced_three_phase_nose_is_three_times_the_phase_nose():
@@ -221,7 +222,7 @@ def test_reactive_limit_switch_then_saddle_node():
     assert event["generator_ids"] == [40]
     assert event["lambda"] * p0 == pytest.approx(p_switch, rel=1e-5)
     # held at the setpoint until the switch
-    v2 = curve.voltage_pu(2, "A")
+    v2 = curve.voltage_pu(2, "a")
     np.testing.assert_allclose(v2[: event["index"]], 1.0, atol=1e-9)
     assert curve.nose_kind == "saddle_node"
     assert curve.lambda_max * p0 == pytest.approx(p_nose, rel=1e-6)
@@ -245,7 +246,7 @@ def test_without_limit_enforcement_the_terminal_keeps_regulating():
         lambda_max=2.5,
     )
     assert curve.events == () and curve.stop_reason == "lambda_max"
-    np.testing.assert_allclose(curve.voltage_pu(2, "A"), 1.0, atol=1e-9)
+    np.testing.assert_allclose(curve.voltage_pu(2, "a"), 1.0, atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +339,7 @@ def test_lambda_cap_lands_exactly_on_the_cap():
     assert curve.nose_index is None and curve.lambda_max is None
     assert curve.lambdas[-1] == pytest.approx(2.5, abs=1e-12)
     hi, _ = _v_closed_form(25_000.0, 0.0, 0.0, 0.5)
-    assert curve.voltage_pu(2, "A")[-1] == pytest.approx(hi / E, abs=1e-9)
+    assert curve.voltage_pu(2, "a")[-1] == pytest.approx(hi / E, abs=1e-9)
 
 
 def test_selectors_choose_the_scaled_appliances():
@@ -360,7 +361,7 @@ def test_qv_curve_matches_closed_form():
     x = 0.5
     p, q_l = 0.8 * E**2 / (2 * x), 3_000.0
     curve = qv_curve(_two_bus(p, q_l, x=x), 2, v_range_pu=(0.5, 1.1), steps=61)
-    assert curve.converged.all() and curve.phases == ("A",)
+    assert curve.converged.all() and curve.phases == ("a",)
     v = curve.v_pu * E
     q_exact = q_l + v**2 / x - np.sqrt((E * v / x) ** 2 - p**2)
     np.testing.assert_allclose(curve.q_var, q_exact, rtol=1e-8, atol=1e-6)
@@ -383,8 +384,8 @@ def test_qv_curve_reports_non_convergence_below_the_feasible_voltage():
 def test_qv_on_a_three_phase_bus_holds_every_phase():
     grid = _unbalanced_feeder()
     curve = qv_curve(grid, 3, v_range_pu=(0.9, 1.05), steps=7)
-    assert curve.phases == ("A", "B", "C") and curve.converged.all()
-    np.testing.assert_allclose(curve.q_var, curve.q_var_phase.sum(axis=1))
+    assert curve.phases == ("a", "b", "c") and curve.converged.all()
+    np.testing.assert_allclose(curve.q_var, curve.q_phase_var.sum(axis=1))
     # more support is needed to hold a higher voltage
     assert np.all(np.diff(curve.q_var) > 0)
 
@@ -407,9 +408,35 @@ def test_qv_round_trip_through_json_keeps_missing_points():
     data = json.loads(json.dumps(curve.to_dict(), allow_nan=False))
     assert data["study"] == "qv_curve"
     assert data["q_var"][0] is None
+    assert data["q_phase_var"][0] == [None] and "q_var_phase" not in data
     back = QVCurve.from_dict(data)
     np.testing.assert_array_equal(back.converged, curve.converged)
     assert back.to_dict() == curve.to_dict()
+
+
+def test_from_dict_refuses_another_study():
+    pv = pv_curve(_two_bus(10_000.0), stop_at_nose=True).to_dict()
+    qv = qv_curve(_two_bus(10_000.0), 2, steps=5).to_dict()
+    with pytest.raises(InputError, match="expected a 'pv_curve'.*found.*'qv_curve'"):
+        PVCurve.from_dict(qv)
+    with pytest.raises(InputError, match="expected a 'qv_curve'.*found.*'pv_curve'"):
+        QVCurve.from_dict(pv)
+    with pytest.raises(InputError, match='found "study": None'):
+        QVCurve.from_dict({k: v for k, v in qv.items() if k != "study"})
+
+
+def test_phases_are_schema_values():
+    grid = _unbalanced_feeder()
+    curve = pv_curve(grid, stop_at_nose=True)
+    assert set(curve.phases) == {"a", "b", "c"}
+    assert curve.critical_phase in ("a", "b", "c")
+    assert curve.to_dict()["phases"] == list(curve.phases)
+    # a Phase, its letter and the upper-case letter select the same row
+    v_a = curve.voltage_pu(3, Phase.A)
+    np.testing.assert_array_equal(curve.voltage_pu(3, "a"), v_a)
+    np.testing.assert_array_equal(curve.voltage_pu(3, "A"), v_a)
+    with pytest.raises(InputError, match="phase must be"):
+        curve.voltage_pu(3, "x")
 
 
 def test_inputs_are_not_mutated():
@@ -428,9 +455,26 @@ def test_operating_point_is_the_base():
     assert curve.lambda_max * 2e4 == pytest.approx(E**2, rel=1e-6)
 
 
-def test_complex64():
-    curve = pv_curve(_two_bus(26_450.0), dtype="complex64", stop_at_nose=True)
+@pytest.mark.parametrize("dtype", ["complex64", torch.complex64])
+def test_complex64(dtype):
+    curve = pv_curve(_two_bus(26_450.0), dtype=dtype, stop_at_nose=True)
     assert curve.lambda_max == pytest.approx(2.0, rel=1e-3)
+
+
+def test_qv_accepts_a_dtype_name():
+    grid = _two_bus(10_000.0)
+    by_name = qv_curve(grid, 2, steps=5, dtype="complex128")
+    by_dtype = qv_curve(grid, 2, steps=5, dtype=torch.complex128)
+    np.testing.assert_array_equal(by_name.q_var, by_dtype.q_var)
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, "float32", "complex256"])
+def test_unknown_dtype_raises(dtype):
+    grid = _two_bus(10_000.0)
+    with pytest.raises(InputError, match="dtype"):
+        pv_curve(grid, dtype=dtype)
+    with pytest.raises(InputError, match="dtype"):
+        qv_curve(grid, 2, dtype=dtype)
 
 
 def test_norton_slack():

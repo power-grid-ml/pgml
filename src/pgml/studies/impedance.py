@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -64,6 +64,8 @@ from pgml.schemas.grid_schema import (
 )
 from pgml.simulation import SimulationConfig
 from pgml.solver import lu_factor_system, solve_factored
+
+from ._common import check_study, resolve_complex_dtype
 
 #: Highest harmonic order of the default frequency grid.
 DEFAULT_MAX_ORDER = 50
@@ -337,7 +339,12 @@ class ImpedanceScan:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ImpedanceScan":
-        """Rebuild a scan from :meth:`to_dict` output (float64 / complex128, CPU)."""
+        """Rebuild a scan from :meth:`to_dict` output (float64 / complex128, CPU).
+
+        Raises :class:`~pgml.errors.InputError` unless ``data["study"]`` is
+        ``"impedance_scan"``.
+        """
+        check_study(data, "impedance_scan")
         f = torch.as_tensor(data["frequencies_hz"], dtype=torch.float64)
         n_f = f.shape[0]
         node_ids, phases, z_phase, z_pos, z_zero = [], [], [], [], []
@@ -387,8 +394,8 @@ def impedance_scan(
     operating_point: Optional[dict] = None,
     transfer: bool = False,
     fold_generation: bool = False,
-    dtype: torch.dtype = torch.complex128,
-    device: Optional[torch.device] = None,
+    dtype: Union[str, torch.dtype] = torch.complex128,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> ImpedanceScan:
     """Driving-point (and optionally transfer) impedance seen from buses vs frequency.
 
@@ -430,7 +437,8 @@ def impedance_scan(
         (default) leaves them out of the scan (open circuit), because their folded
         image has a negative conductance.
     dtype:
-        Complex working dtype, ``torch.complex128`` (default) or ``torch.complex64``.
+        Complex working dtype, ``torch.complex128`` (default) or ``torch.complex64``,
+        or their names (``"complex128"``, ``"complex64"``).
     device:
         Device to assemble and solve on; ``None`` uses the device of a tensor
         ``frequencies_hz``, else the CPU. The result is moved to the CPU.
@@ -444,8 +452,8 @@ def impedance_scan(
     Raises
     ------
     InputError
-        Unknown or repeated node ids, invalid frequencies, no in-service source, a source
-        with zero impedance, or a batched operating point.
+        Unknown or repeated node ids, an unknown ``dtype``, invalid frequencies, no
+        in-service source, a source with zero impedance, or a batched operating point.
     ComputationError
         The scanned impedance is not finite (a part of the network without a path to
         the source or to a shunt, which leaves ``Y`` singular).
@@ -470,8 +478,7 @@ def impedance_scan(
     if device is None and isinstance(frequencies_hz, Tensor):
         device = frequencies_hz.device
     device = torch.device(device) if device is not None else torch.device("cpu")
-    if dtype not in (torch.complex64, torch.complex128):
-        raise InputError(f"dtype must be torch.complex64 or complex128, got {dtype}.")
+    dtype = resolve_complex_dtype(dtype)
     rdt = torch.float64 if dtype == torch.complex128 else torch.float32
 
     freqs = _frequency_grid(frequencies_hz, f0, rdt, device)

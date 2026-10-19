@@ -20,16 +20,27 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   transformer `s_rated_va` from the component, else its type; every branch listed) and
   `HostingLimits` (voltage band, line / transformer loading, optional VUF and THD).
 - `hosting.py` — `hosting_capacity` and `HostingCapacity`.
+- `_common.py` — private helpers every study uses: `resolve_complex_dtype` (the `dtype`
+  argument) and `check_study` (the `"study"` key check of `from_dict`).
 
 ## Shared conventions
 
 - Inputs are never modified: operating-point adjustments and added devices are made on a
-  copy. `device` / `dtype` (complex64 or complex128) apply to every tensor operation.
+  copy. `device` / `dtype` apply to every tensor operation; every study takes `dtype` as
+  `str | torch.dtype` (complex64 or complex128) through `_common.resolve_complex_dtype`.
+- Phases in results and phase arguments are the schema value `Phase.value` (`"a"`, `"b"`,
+  `"c"`, `"n"`); an argument also accepts a `Phase`, letters case-insensitively.
+- The load / generation side is ONE keyword in every study that has one:
+  `direction: Literal["load", "generation"]` (`pv_curve`, `hosting_capacity`), echoed by
+  the result field and the `to_dict` key `direction`. (The `"kind"` key of a hosting
+  `binding` entry names the limit kind, not the side.)
+- Per-phase arrays name the quantity first, the unit last: `q_phase_var`.
 - Every result has `to_dict()` (JSON-ready: plain lists, ids, units in the key names,
   `None` where JSON would need `NaN`) and `from_dict()`, its inverse. Every top-level
   `to_dict()` carries a `"study"` key naming the entry function (`"impedance_scan"`,
   `"pv_curve"`, `"qv_curve"`, `"hosting_capacity"`); nested records (`Resonance`,
-  `HostingLimits`) do not.
+  `HostingLimits`) do not. Every top-level `from_dict()` checks that key first
+  (`_common.check_study`) and raises `InputError` naming expected and found.
 - Complex values serialize as `*_re_<unit>` / `*_im_<unit>` lists.
 - Containers follow differentiability: `ImpedanceScan` holds CPU tensors so impedances stay
   on the autograd tape (`to_dict` and resonance detection read values off it); the

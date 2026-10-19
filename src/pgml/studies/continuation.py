@@ -48,7 +48,7 @@ import logging
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Iterator, Optional, Union
+from typing import Callable, Iterable, Iterator, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -63,10 +63,12 @@ from pgml.schemas.grid_schema import (
     Load,
     Phase,
 )
-from pgml.simulation import SimulationConfig, _resolve_dtype
+from pgml.simulation import SimulationConfig
 from pgml.solver._continuation import ContinuationProblem, build_continuation_problem
 
-_PHASE_NAMES = ("A", "B", "C", "N")
+from ._common import check_study, resolve_complex_dtype
+
+_PHASE_VALUES = tuple(p.value for p in (Phase.A, Phase.B, Phase.C, Phase.N))
 _CORRECTOR_MAX_ITER = 10
 _CORRECTOR_TARGET_ITER = 4
 _LOCATE_TOL = 1.0e-6
@@ -98,8 +100,8 @@ class PVCurve:
         Voltage magnitude of every node-phase row ``[K, R]`` [pu of the node's
         line-to-neutral rated voltage], in the grid's row layout.
     node_ids, phases:
-        Row index of ``v_pu``: node id ``[R]`` and phase name (``"A"``, ``"B"``,
-        ``"C"``, ``"N"``) of each row.
+        Row index of ``v_pu``: node id ``[R]`` and phase of each row, as the schema
+        value of :class:`~pgml.schemas.Phase` (``"a"``, ``"b"``, ``"c"``, ``"n"``).
     appliance_ids:
         Ids of the appliances ``λ`` scaled.
     direction:
@@ -112,7 +114,8 @@ class PVCurve:
         ``"saddle_node"`` (the Jacobian fold) or ``"limit_induced"`` (a reactive limit
         reached at which ``λ`` can only decrease); ``None`` without a nose.
     critical_node, critical_phase:
-        The row with the lowest voltage at the nose (neutral rows excluded).
+        The row with the lowest voltage at the nose (neutral rows excluded); the phase
+        as its schema value (``"a"``, ``"b"``, ``"c"``).
     converged:
         ``True`` when the trace ended on a regular stop (``stop_reason`` one of
         ``"nose"``, ``"lambda_max"``, ``"v_stop"``, ``"lambda_start"``). Every recorded
@@ -150,13 +153,12 @@ class PVCurve:
     ) -> np.ndarray:
         """Voltage of one node along the curve: ``[K]`` for a phase, else ``[K, P]``.
 
-        ``phase`` is a :class:`~pgml.schemas.Phase` or its name (``"A"``); without it
-        the node's rows are returned in layout order.
+        ``phase`` is a :class:`~pgml.schemas.Phase` or its letter (``"a"``; case is
+        ignored); without it the node's rows are returned in layout order.
         """
         mask = self.node_ids == int(node_id)
         if phase is not None:
-            name = phase.name if isinstance(phase, Phase) else str(phase).upper()
-            mask &= np.asarray(self.phases) == name
+            mask &= np.asarray(self.phases) == _phase_value(phase)
         if not mask.any():
             raise InputError(
                 f"node {node_id} phase {phase} is not in the curve's rows."
@@ -187,7 +189,12 @@ class PVCurve:
 
     @classmethod
     def from_dict(cls, data: dict) -> "PVCurve":
-        """Inverse of :meth:`to_dict`."""
+        """Inverse of :meth:`to_dict`.
+
+        Raises :class:`~pgml.errors.InputError` unless ``data["study"]`` is
+        ``"pv_curve"``.
+        """
+        check_study(data, "pv_curve")
         n_rows = len(data["node_ids"])
         return cls(
             lambdas=np.asarray(data["lambdas"], dtype=np.float64),
@@ -222,7 +229,8 @@ class QVCurve:
     Attributes
     ----------
     node_id, phases:
-        The bus and the phases the fictitious source holds (its non-neutral phases).
+        The bus and the phases the fictitious source holds (its non-neutral phases),
+        each as its schema value (``"a"``, ``"b"``, ``"c"``).
     v_pu:
         Voltage setpoints ``[K]`` [pu of the node's line-to-neutral rated voltage],
         ascending; every held phase is at this magnitude.
@@ -230,7 +238,7 @@ class QVCurve:
         Total reactive power the fictitious source injects ``[K]`` [var] (positive =
         injected into the grid, i.e. capacitive support); ``NaN`` where the power flow
         did not converge.
-    q_var_phase:
+    q_phase_var:
         The same per held phase ``[K, P]`` [var].
     converged:
         Per setpoint ``[K]`` (bool).
@@ -250,7 +258,7 @@ class QVCurve:
     phases: tuple[str, ...]
     v_pu: np.ndarray
     q_var: np.ndarray
-    q_var_phase: np.ndarray
+    q_phase_var: np.ndarray
     converged: np.ndarray
     q_margin_var: Optional[float]
     v_at_min_pu: Optional[float]
@@ -264,7 +272,7 @@ class QVCurve:
             "phases": list(self.phases),
             "v_pu": self.v_pu.tolist(),
             "q_var": _nan_to_none(self.q_var),
-            "q_var_phase": _nan_to_none(self.q_var_phase),
+            "q_phase_var": _nan_to_none(self.q_phase_var),
             "converged": [bool(c) for c in self.converged],
             "q_margin_var": self.q_margin_var,
             "v_at_min_pu": self.v_at_min_pu,
@@ -273,19 +281,36 @@ class QVCurve:
 
     @classmethod
     def from_dict(cls, data: dict) -> "QVCurve":
-        """Inverse of :meth:`to_dict`."""
+        """Inverse of :meth:`to_dict`.
+
+        Raises :class:`~pgml.errors.InputError` unless ``data["study"]`` is
+        ``"qv_curve"``.
+        """
+        check_study(data, "qv_curve")
         n_ph = len(data["phases"])
         return cls(
             node_id=int(data["node_id"]),
             phases=tuple(data["phases"]),
             v_pu=np.asarray(data["v_pu"], dtype=np.float64),
             q_var=_none_to_nan(data["q_var"]),
-            q_var_phase=_none_to_nan(data["q_var_phase"]).reshape(-1, n_ph),
+            q_phase_var=_none_to_nan(data["q_phase_var"]).reshape(-1, n_ph),
             converged=np.asarray(data["converged"], dtype=bool),
             q_margin_var=data["q_margin_var"],
             v_at_min_pu=data["v_at_min_pu"],
             minimum_in_range=bool(data["minimum_in_range"]),
         )
+
+
+def _phase_value(phase: Union[str, Phase]) -> str:
+    """Schema value (``"a"`` ...) of a :class:`Phase` or a phase letter (any case)."""
+    if isinstance(phase, Phase):
+        return phase.value
+    value = str(phase).lower()
+    if value not in _PHASE_VALUES:
+        raise InputError(
+            f"phase must be a Phase or one of {list(_PHASE_VALUES)}, got {phase!r}."
+        )
+    return value
 
 
 def _nan_to_none(a: np.ndarray) -> list:
@@ -310,7 +335,7 @@ def pv_curve(
     grid: Grid,
     *,
     selector: Optional[Union[Iterable[int], Callable[[ApplianceBase], bool]]] = None,
-    direction: str = "load",
+    direction: Literal["load", "generation"] = "load",
     config: Optional[SimulationConfig] = None,
     lambda_start: float = 1.0,
     lambda_max: Optional[float] = None,
@@ -372,7 +397,8 @@ def pv_curve(
     stop_at_nose:
         Stop right after the nose is located instead of tracing the lower branch.
     dtype:
-        ``torch.complex128`` (default) or ``torch.complex64`` (or their names).
+        ``torch.complex128`` (default) or ``torch.complex64``, or their names
+        (``"complex128"``, ``"complex64"``).
     device:
         Device of the computation (default CPU).
 
@@ -384,7 +410,8 @@ def pv_curve(
     Raises
     ------
     InputError
-        Bad options, an empty selection, or an appliance that cannot be scaled.
+        Bad options (including an unknown ``direction`` or ``dtype``), an empty
+        selection, or an appliance that cannot be scaled.
     ConvergenceError
         The power flow at ``lambda_start`` does not solve.
 
@@ -408,10 +435,11 @@ def pv_curve(
         raise InputError("lambda_max must exceed lambda_start.")
     if max_steps < 2:
         raise InputError("max_steps must be at least 2.")
+    cdt = resolve_complex_dtype(dtype)
     cfg = config or SimulationConfig(calculation="power_flow")
     ids = _select(grid, selector, direction)
     with _quiet_pgml():
-        problem = _problem(grid, cfg, dtype, device, scaled_ids=ids)
+        problem = _problem(grid, cfg, cdt, device, scaled_ids=ids)
         return _Tracer(problem).trace(
             ids=ids,
             direction=direction,
@@ -474,7 +502,8 @@ def qv_curve(
     Raises
     ------
     InputError
-        Bad options, an unknown node, or a node whose voltage is already held.
+        Bad options (including an unknown ``dtype``), an unknown node, or a node
+        whose voltage is already held.
     ConvergenceError
         The base power flow (without the fictitious source) does not solve.
 
@@ -488,9 +517,10 @@ def qv_curve(
         raise InputError("v_range_pu must be (low, high) with 0 < low < high.")
     if steps < 3:
         raise InputError("steps must be at least 3.")
+    cdt = resolve_complex_dtype(dtype)
     cfg = config or SimulationConfig(calculation="power_flow")
     with _quiet_pgml():
-        problem = _problem(grid, cfg, dtype, device, scaled_ids=())
+        problem = _problem(grid, cfg, cdt, device, scaled_ids=())
         problem.max_iter = int(cfg.max_iter)
         v_base, ok = problem.solve_with_switching(0.0)
         if not ok:
@@ -518,10 +548,10 @@ def qv_curve(
     q_min, v_min, inside = _curve_minimum(setpoints, q, conv)
     return QVCurve(
         node_id=int(node_id),
-        phases=tuple(ph.name for ph in phases),
+        phases=tuple(ph.value for ph in phases),
         v_pu=setpoints,
         q_var=q,
-        q_var_phase=q_phase,
+        q_phase_var=q_phase,
         converged=conv,
         q_margin_var=None if q_min is None else -q_min,
         v_at_min_pu=v_min,
@@ -544,12 +574,12 @@ def _quiet_pgml() -> Iterator[None]:
         log.setLevel(prev)
 
 
-def _problem(grid, cfg: SimulationConfig, dtype, device, *, scaled_ids):
+def _problem(grid, cfg: SimulationConfig, dtype: torch.dtype, device, *, scaled_ids):
     return build_continuation_problem(
         grid,
         scaled_ids=scaled_ids,
         slack=cfg.slack,
-        dtype=_resolve_dtype(dtype),
+        dtype=dtype,
         device=torch.device(device) if device is not None else None,
         operating_point=cfg.operating_point,
         symmetry=cfg.symmetry,
@@ -928,7 +958,7 @@ class _Tracer:
             v_full = prob.prolong(v_red)  # [K, N]
             v_pu = (v_full.abs() / prob.full_v_base).cpu().numpy().astype(np.float64)
         phase_codes = full.phase_codes.tolist()
-        phases = tuple(_PHASE_NAMES[c] for c in phase_codes)
+        phases = tuple(_PHASE_VALUES[c] for c in phase_codes)
         node_ids = np.asarray(full.node_ids.tolist(), dtype=np.int64)
         sign = 1.0 if direction == "load" else -1.0
         crit_node = crit_phase = None

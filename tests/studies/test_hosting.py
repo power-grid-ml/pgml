@@ -106,7 +106,8 @@ def test_four_wire_bus_uses_phase_to_neutral_voltage():
 
 
 def test_new_demand_hits_the_lower_band_and_the_nose():
-    res = hosting_capacity(two_bus(), kind="load", tol_w=1.0)
+    res = hosting_capacity(two_bus(), direction="load", tol_w=1.0)
+    assert res.direction == "load" and res.to_dict()["direction"] == "load"
     exact = _voltage_limit_power(0.90, 0.0, sign=-1.0)
     assert res.binding[0]["limit"] == "v_min_pu"
     assert abs(res.p_max_w[0] - exact) <= 1.0 + 1e-3
@@ -115,7 +116,7 @@ def test_new_demand_hits_the_lower_band_and_the_nose():
         v_min_pu=None, v_max_pu=None, line_loading=None, transformer_loading=None
     )
     nose = V1**2 / (2.0 * (math.hypot(R, X) + R))  # max transfer to a resistive load
-    res = hosting_capacity(two_bus(), kind="load", limits=unbounded, tol_w=10.0)
+    res = hosting_capacity(two_bus(), direction="load", limits=unbounded, tol_w=10.0)
     assert res.binding[0] == {"kind": "convergence"}
     # beyond the nose no operating point exists; the fixed-point solve may stop earlier
     assert 0.5 * nose < res.p_max_w[0] <= nose
@@ -268,7 +269,7 @@ def test_harmonic_calculation_keeps_the_fundamental_answer():
     cfg = SimulationConfig(
         calculation="harmonic", harmonic_orders=[1, 5], load_shunt="opendss"
     )
-    kw = dict(kind="load", p_max_w=400.0e3, tol_w=100.0)
+    kw = dict(direction="load", p_max_w=400.0e3, tol_w=100.0)
     harmonic = hosting_capacity(grid, [3, 4], config=cfg, **kw)
     fundamental = hosting_capacity(grid, [3, 4], **kw)
     np.testing.assert_array_equal(harmonic.p_max_w, fundamental.p_max_w)
@@ -312,6 +313,7 @@ def test_round_trip_and_input_is_not_mutated():
     assert grid.model_dump() == before
     data = json.loads(json.dumps(res.to_dict(), allow_nan=False))
     assert data["study"] == "hosting_capacity"
+    assert data["direction"] == "generation" and "kind" not in data
     back = HostingCapacity.from_dict(data)
     assert back.node_ids == res.node_ids and back.binding == res.binding
     np.testing.assert_array_equal(back.p_max_w, res.p_max_w)
@@ -321,6 +323,15 @@ def test_round_trip_and_input_is_not_mutated():
     entry = res.result_for(res.node_ids[-1])
     assert entry["p_max_w"] == float(res.p_max_w[-1])
     assert data["margins"]["thd"] == [None] * len(res.node_ids)
+
+
+def test_from_dict_refuses_another_study():
+    data = hosting_capacity(two_bus(), p_max_w=1.0e3).to_dict()
+    data["study"] = "pv_curve"
+    with pytest.raises(
+        InputError, match="expected a 'hosting_capacity'.*found.*'pv_curve'"
+    ):
+        HostingCapacity.from_dict(data)
 
 
 def test_default_candidates_skip_source_buses():
@@ -336,12 +347,16 @@ def test_complex64_agrees_with_complex128():
     # single precision resolves the voltage to ~1e-6 pu; the limit then moves by far
     # less than one bisection tolerance, so the two land within one step of each other
     assert np.all(np.abs(r64.p_max_w - r128.p_max_w) <= 100.0)
+    by_name = hosting_capacity(grid, [3, 4], dtype="complex64", **kw)
+    np.testing.assert_array_equal(by_name.p_max_w, r64.p_max_w)
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"kind": "storage"},
+        {"direction": "storage"},
+        {"dtype": torch.float64},
+        {"dtype": "float32"},
         {"power_factor": 0.0},
         {"power_factor": 1.2},
         {"p_max_w": -1.0},

@@ -1,7 +1,8 @@
 """Hosting capacity: how much new generation or demand each bus can take.
 
 For every candidate bus, :func:`hosting_capacity` finds the largest additional active power
-a new device at that bus can inject (``kind="generation"``) or draw (``kind="load"``)
+a new device at that bus can inject (``direction="generation"``) or draw
+(``direction="load"``)
 while every limit of :class:`~pgml.studies.HostingLimits` holds, with every other bus
 left at the base operating point. The search is a bisection on the device's power, run
 for all candidates at once: each step solves ONE scenario batch in which scenario ``k``
@@ -51,7 +52,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence, Union
+from typing import Any, Literal, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -74,10 +75,11 @@ from pgml.schemas.grid_schema import (
 from pgml.simulation import SimulationConfig, SolvedState
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
+from ._common import check_study, resolve_complex_dtype
 from .limits import HostingLimits, branch_ratings
 
-#: Kinds of new device a hosting-capacity study can place.
-_KINDS = ("generation", "load")
+#: Sides a hosting-capacity study can add: new generation or new demand.
+_DIRECTIONS = ("generation", "load")
 #: First trial power of the doubling bracket when no search cap is given (W).
 _P_START_W = 1.0e3
 #: Largest power the doubling bracket tries before it reports "no limit found" (W).
@@ -105,7 +107,7 @@ class HostingCapacity:
     ----------
     node_ids:
         Candidate bus ids, in the order of every per-candidate array ``[n]``.
-    kind:
+    direction:
         ``"generation"`` or ``"load"``.
     p_max_w:
         ``[n]`` float64, W: the largest added active power (total over the device's
@@ -146,7 +148,7 @@ class HostingCapacity:
     """
 
     node_ids: tuple[int, ...]
-    kind: str
+    direction: str
     p_max_w: np.ndarray
     binding: tuple[dict, ...]
     margins: dict[str, np.ndarray]
@@ -177,14 +179,14 @@ class HostingCapacity:
     def to_dict(self) -> dict:
         """JSON-ready dict: plain lists and ids, units in the key names, ``NaN`` as ``None``.
 
-        Keys: ``study`` (``"hosting_capacity"``), ``kind``, ``node_ids``, ``p_max_w``, ``binding``, ``margins`` (``{key:
-        list}``), ``iterations``, ``p_cap_w``, ``tol_w``, ``base_case_feasible``,
+        Keys: ``study`` (``"hosting_capacity"``), ``direction``, ``node_ids``,
+        ``p_max_w``, ``binding``, ``margins`` (``{key: list}``), ``iterations``, ``p_cap_w``, ``tol_w``, ``base_case_feasible``,
         ``base_operating_point``, ``phases``, ``power_factor``, ``limits``
         (:meth:`HostingLimits.to_dict`).
         """
         return {
             "study": "hosting_capacity",
-            "kind": self.kind,
+            "direction": self.direction,
             "node_ids": [int(i) for i in self.node_ids],
             "p_max_w": [float(x) for x in self.p_max_w],
             "binding": [dict(b) for b in self.binding],
@@ -203,7 +205,12 @@ class HostingCapacity:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "HostingCapacity":
-        """Rebuild a result from :meth:`to_dict` output."""
+        """Rebuild a result from :meth:`to_dict` output.
+
+        Raises :class:`~pgml.errors.InputError` unless ``data["study"]`` is
+        ``"hosting_capacity"``.
+        """
+        check_study(data, "hosting_capacity")
 
         def _arr(values) -> np.ndarray:
             return np.array(
@@ -212,7 +219,7 @@ class HostingCapacity:
 
         return cls(
             node_ids=tuple(int(i) for i in data["node_ids"]),
-            kind=str(data["kind"]),
+            direction=str(data["direction"]),
             p_max_w=_arr(data["p_max_w"]),
             binding=tuple(dict(b) for b in data["binding"]),
             margins={key: _arr(data["margins"][key]) for key in _MARGIN_KEYS},
@@ -296,7 +303,7 @@ def _resolve_candidates(grid: Grid, candidates) -> list[int]:
 
 
 def _base_values(
-    grid: Grid, kind: str, base_operating_point: BaseOperatingPoint, real, device
+    grid: Grid, direction: str, base_operating_point: BaseOperatingPoint, real, device
 ) -> tuple[str, dict]:
     """The base operating point as ``batch_from_values`` mappings, plus its label.
 
@@ -312,7 +319,7 @@ def _base_values(
         return torch.as_tensor(x, dtype=real, device=device)
 
     if base_operating_point is None or base_operating_point == "worst_case":
-        zeroed = Load if kind == "generation" else Generator
+        zeroed = Load if direction == "generation" else Generator
         for a in grid.appliances:
             if a.in_service and isinstance(a, zeroed):
                 values["p_w"][a.id] = _t(0.0)
@@ -349,7 +356,7 @@ class _Study:
         node_ids: list[int],
         cand_phases: list,
         *,
-        kind: str,
+        direction: str,
         limits: HostingLimits,
         base_values: dict,
         power_factor: float,
@@ -384,7 +391,7 @@ class _Study:
         # The extended grid: one inert device per candidate, fresh ids above the grid's.
         first_id = max((int(a.id) for a in grid.appliances), default=0) + 1
         self.device_ids = [first_id + k for k in range(len(node_ids))]
-        cls = Generator if kind == "generation" else Load
+        cls = Generator if direction == "generation" else Load
         added = [
             cls(
                 id=did,
@@ -676,7 +683,7 @@ def hosting_capacity(
     grid: Grid,
     candidates: Optional[Sequence[int]] = None,
     *,
-    kind: str = "generation",
+    direction: Literal["load", "generation"] = "generation",
     limits: Optional[HostingLimits] = None,
     base_operating_point: BaseOperatingPoint = None,
     phases: Union[str, Phase] = "balanced",
@@ -685,8 +692,8 @@ def hosting_capacity(
     tol_w: Optional[float] = None,
     harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None,
     config: Optional[SimulationConfig] = None,
-    dtype: torch.dtype = torch.complex128,
-    device: Optional[torch.device] = None,
+    dtype: Union[str, torch.dtype] = torch.complex128,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> HostingCapacity:
     """Largest new generation or demand each candidate bus can take within the limits.
 
@@ -701,7 +708,7 @@ def hosting_capacity(
     candidates:
         Bus ids to place the new device at. ``None``: every bus with a phase conductor
         that carries no in-service :class:`~pgml.schemas.grid_schema.Source`.
-    kind:
+    direction:
         ``"generation"`` (default; a new injecting device, e.g. PV) or ``"load"`` (new
         demand, e.g. an EV charger or a heat pump).
     limits:
@@ -709,7 +716,7 @@ def hosting_capacity(
         100 % line and transformer loading).
     base_operating_point:
         What every other device does. ``None`` or ``"worst_case"`` (default): the worst
-        case for ``kind`` -- for generation every in-service load draws nothing and
+        case for ``direction`` -- for generation every in-service load draws nothing and
         existing generators run at nameplate, for load every in-service generator injects
         nothing and the loads draw nameplate; storage keeps its nameplate setpoint.
         ``"nameplate"``: every device at nameplate. A mapping ``{appliance_id: {"p_w",
@@ -743,7 +750,8 @@ def hosting_capacity(
         defaults. Its ``operating_point`` must be unset: the base case is
         ``base_operating_point``.
     dtype, device:
-        Complex working dtype (complex64 / complex128) and device of every solve.
+        Complex working dtype (``torch.complex64`` / ``torch.complex128`` or their
+        names) and device of every solve.
 
     Returns
     -------
@@ -761,9 +769,10 @@ def hosting_capacity(
     Raises
     ------
     InputError
-        Unknown or repeated candidate, an unknown ``kind`` / ``phases`` value, an
-        invalid power factor, cap or tolerance, ``thd_max`` or ``harmonic_emission``
-        without a harmonic calculation, or a set ``config.operating_point``.
+        Unknown or repeated candidate, an unknown ``direction`` / ``phases`` /
+        ``dtype`` value, an invalid power factor, cap or tolerance, ``thd_max`` or
+        ``harmonic_emission`` without a harmonic calculation, or a set
+        ``config.operating_point``.
 
     Examples
     --------
@@ -773,8 +782,9 @@ def hosting_capacity(
         for node_id, p, why in zip(result.node_ids, result.p_max_w, result.binding):
             print(node_id, p / 1e3, "kW", why["kind"])
     """
-    if kind not in _KINDS:
-        raise InputError(f"kind must be one of {_KINDS}, got {kind!r}")
+    if direction not in _DIRECTIONS:
+        raise InputError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
+    dtype = resolve_complex_dtype(dtype)
     limits = HostingLimits() if limits is None else limits
     config = SimulationConfig(calculation="power_flow") if config is None else config
     if config.operating_point is not None:
@@ -808,7 +818,7 @@ def hosting_capacity(
     phase_label = "balanced" if phases == "balanced" else cand_phases[0][0].value
     real = torch.empty((), dtype=dtype).real.dtype
     base_label, base_values = _base_values(
-        grid, kind, base_operating_point, real, device
+        grid, direction, base_operating_point, real, device
     )
 
     with torch.no_grad():
@@ -816,7 +826,7 @@ def hosting_capacity(
             grid,
             node_ids,
             cand_phases,
-            kind=kind,
+            direction=direction,
             limits=limits,
             base_values=base_values,
             power_factor=pf,
@@ -832,7 +842,7 @@ def hosting_capacity(
         if not base.feasible[0]:
             return HostingCapacity(
                 node_ids=tuple(node_ids),
-                kind=kind,
+                direction=direction,
                 p_max_w=np.zeros(n),
                 binding=tuple(dict(base.binding[0]) for _ in range(n)),
                 margins={k: np.full(n, base.margins[k][0]) for k in _MARGIN_KEYS},
@@ -893,7 +903,7 @@ def hosting_capacity(
     )
     return HostingCapacity(
         node_ids=tuple(node_ids),
-        kind=kind,
+        direction=direction,
         p_max_w=lo,
         binding=binding,
         margins=lo_margins,
