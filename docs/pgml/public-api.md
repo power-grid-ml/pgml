@@ -130,7 +130,9 @@ state = pgml.simulate(grid, cfg, device="cuda", dtype="complex64")
 - {mod}`pgml.studies`. Planning studies on one grid: `impedance_scan` gives the
   driving-point and transfer impedance of buses over frequency and their resonances,
   `pv_curve` traces the P-V curve through its nose by continuation power flow, and
-  `qv_curve` gives the Q-V curve and reactive margin of a bus. See {doc}`studies/index`.
+  `qv_curve` gives the Q-V curve and reactive margin of a bus, and `hosting_capacity`
+  finds how much new generation or demand each bus can take within voltage, loading,
+  unbalance and distortion limits. See {doc}`studies/index`.
 - {mod}`pgml.scenarios`. Reproducible batched sampling of operating points, parameter and
   injection sweeps, a batched solve through `run_scenarios`, and parquet persistence with
   `write_dataset` and `read_dataset`.

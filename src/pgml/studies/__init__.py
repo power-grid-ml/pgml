@@ -10,13 +10,20 @@ result object with a JSON-ready ``to_dict()``.
 from __future__ import annotations
 
 from .continuation import PVCurve, QVCurve, pv_curve, qv_curve
+from .hosting import HostingCapacity, hosting_capacity
 from .impedance import ImpedanceScan, Resonance, impedance_scan
+from .limits import BranchRating, HostingLimits, branch_ratings
 
 __all__: list[str] = [
+    "BranchRating",
+    "HostingCapacity",
+    "HostingLimits",
     "ImpedanceScan",
     "PVCurve",
     "QVCurve",
     "Resonance",
+    "branch_ratings",
+    "hosting_capacity",
     "impedance_scan",
     "pv_curve",
     "qv_curve",

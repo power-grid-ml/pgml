@@ -19,6 +19,17 @@ Voltage stability
 flow; :func:`~pgml.studies.qv_curve` gives the Q-V curve and the reactive power margin of a
 bus. User guide: :doc:`../studies/continuation`.
 
+Hosting capacity
+----------------
+
+:func:`~pgml.studies.hosting_capacity` searches, for every candidate bus at once, the
+largest new generation or demand that keeps the :class:`~pgml.studies.HostingLimits`;
+:func:`~pgml.studies.branch_ratings` resolves the line ampacities and transformer ratings
+those limits are checked against. User guide: :doc:`../studies/hosting-capacity`.
+
+Reference
+---------
+
 .. automodule:: pgml.studies
    :members:
    :show-inheritance:

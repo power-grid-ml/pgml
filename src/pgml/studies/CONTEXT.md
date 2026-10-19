@@ -16,6 +16,10 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   setpoint range). The residual, Jacobian inputs, fixed-`λ` solves and reactive-limit
   switching come from `pgml.solver._continuation`; the predictor, corrector, step control
   and event location (nose, reactive-limit switch, `λ` cap) live here.
+- `limits.py` — `branch_ratings` (line ampacity from the catalog type's `max_i_a`,
+  transformer `s_rated_va` from the component, else its type; every branch listed) and
+  `HostingLimits` (voltage band, line / transformer loading, optional VUF and THD).
+- `hosting.py` — `hosting_capacity` and `HostingCapacity`.
 
 ## Shared conventions
 
@@ -24,12 +28,14 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Every result has `to_dict()` (JSON-ready: plain lists, ids, units in the key names,
   `None` where JSON would need `NaN`) and `from_dict()`, its inverse. Every top-level
   `to_dict()` carries a `"study"` key naming the entry function (`"impedance_scan"`,
-  `"pv_curve"`, `"qv_curve"`).
+  `"pv_curve"`, `"qv_curve"`, `"hosting_capacity"`); nested records (`Resonance`,
+  `HostingLimits`) do not.
 - Complex values serialize as `*_re_<unit>` / `*_im_<unit>` lists.
 - Containers follow differentiability: `ImpedanceScan` holds CPU tensors so impedances stay
   on the autograd tape (`to_dict` and resonance detection read values off it); the
-  voltage-stability results are host numpy arrays because the continuation is not
-  differentiable (it runs detached).
+  voltage-stability and hosting-capacity results are host numpy arrays because those
+  studies are not differentiable (continuation events and feasibility verdicts; they run
+  detached).
 
 ## Impedance scan decisions an edit must not undo
 
@@ -61,6 +67,25 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   direction that would switch straight back is reversed, which is what turns a switch on
   the lower branch of the limited curve into a limit-induced nose.
 
+## Hosting capacity decisions an edit must not undo
+
+- `branch_ratings` is the same rule pgd applies when it reports loading; a change here is a
+  cross-package contract change.
+- Hosting capacity is a lockstep bisection: each step is ONE batched solve, scenario `k` =
+  candidate `k` at its trial power. The candidates are inert zero-nameplate devices added
+  to a COPY of the grid; the base case and trial powers reach the solver through
+  `batch_from_values` (the grid is never mutated).
+- The solve goes through the solver directly (`prepare_power_flow` once +
+  `solve_power_flow(system=...)`, or `solve_harmonic_flow`) so every `SimulationConfig`
+  field applies; `criticality="never"` because non-convergence is an expected verdict.
+- Branch currents come from `SolvedState.branch_currents()` built on the batch, which passes
+  the solve's fusion map and nodal injection to `assembly.branch_currents`: grids with ideal
+  switches must work (test grid `tests/studies/grids.py::lv_feeder_with_switch`).
+- Non-convergence counts as a violation. The reported power is the largest VERIFIED
+  feasible one; the binding limit is the largest relative excess at the smallest violating
+  power, ties within working precision resolved to the first element in row / branch order.
+- Not differentiable (feasibility is boolean); the search runs under `torch.no_grad()`.
+
 ## Tests
 
 - Impedance scan: `tests/studies/test_impedance_scan.py` (closed forms, fusion, chunking,
@@ -70,3 +95,6 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Continuation: `tests/studies/test_continuation.py` (closed forms on a two-bus feeder,
   plain Newton solves on an unbalanced feeder, serialization, inputs),
   `tests/gpu/test_studies_continuation_parity.py`.
+- Hosting capacity: `tests/studies/test_hosting.py` (closed forms, serial `simulate`
+  reference, every limit kind, round trip), `tests/studies/test_limits.py`, shared test
+  grids in `tests/studies/grids.py`, `tests/gpu/test_hosting_parity.py`.
