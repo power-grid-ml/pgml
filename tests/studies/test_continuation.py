@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 import torch
 
+from pgml.assembly import node_phase_index
 from pgml.errors import ConvergenceError, InputError
 from pgml.schemas.grid_schema import (
     Generator,
@@ -36,6 +37,7 @@ from pgml.schemas.grid_schema import (
     LoadModel,
     Node,
     Phase,
+    ShuntAppliance,
     Source,
     Switch,
     VoltageRegulation,
@@ -44,6 +46,9 @@ from pgml.schemas.grid_schema import (
 from pgml.simulation import SimulationConfig
 from pgml.solver import solve_power_flow
 from pgml.studies import PVCurve, QVCurve, pv_curve, qv_curve
+from pgml.studies import continuation as continuation_module
+
+from .grids import four_wire_two_bus
 
 E = 230.0  # source EMF, line-to-neutral [V]
 F0 = 50.0
@@ -388,6 +393,64 @@ def test_qv_on_a_three_phase_bus_holds_every_phase():
     np.testing.assert_allclose(curve.q_var, curve.q_phase_var.sum(axis=1))
     # more support is needed to hold a higher voltage
     assert np.all(np.diff(curve.q_var) > 0)
+
+
+def test_qv_on_a_four_wire_bus_holds_the_phase_to_ground_voltage():
+    """On a four-wire bus with a single-phase load the neutral point is displaced, so the
+    phase-to-ground and phase-to-neutral voltages differ. The setpoint is the
+    phase-to-ground magnitude: replacing the fictitious source by the per-phase
+    capacitors to ground that inject the recorded reactive power at the setpoint
+    (``B = Q / V²``) reproduces it in a plain power flow.
+
+    Measured: phase-to-ground magnitudes equal to the setpoint within 5e-12 relative
+    (tolerance 1e-8, the solver's convergence); the phase-to-neutral magnitude of phase a
+    differs from it by 0.8 %.
+    """
+    grid = four_wire_two_bus()
+    grid.appliances.append(
+        Load(id=7, node=2, phases=(Phase.A,), p_nom_w=8.0e3, q_nom_var=2.0e3)
+    )
+    curve = qv_curve(grid, 2, v_range_pu=(1.0, 1.03), steps=4)
+    assert curve.phases == ("a", "b", "c") and curve.converged.all()
+    base = 400.0 / math.sqrt(3.0)
+    index = node_phase_index(grid)
+    rows = [index.row(2, ph) for ph in ABC]
+    row_n = index.row(2, Phase.N)
+    w = 2.0 * math.pi * F0
+    for k in (0, len(curve.v_pu) - 1):
+        u = curve.v_pu[k] * base
+        q = curve.q_phase_var[k]
+        assert np.all(q > 0.0)
+        bank = ShuntAppliance(
+            id=8,
+            node=2,
+            phases=ABC,
+            conductance_s=(0.0,) * 3,
+            capacitance_f=tuple(float(qi) / (w * u * u) for qi in q),
+        )
+        held = grid.model_copy(update={"appliances": [*grid.appliances, bank]})
+        v = solve_power_flow(held).v
+        v_pg = v[rows].abs().numpy()
+        np.testing.assert_allclose(v_pg, u, rtol=1e-8)
+        v_pn_a = float((v[rows[0]] - v[row_n]).abs())
+        assert abs(v_pn_a / u - 1.0) > 5e-3
+
+
+def test_failed_nose_bisection_is_not_reported_as_converged(monkeypatch):
+    """When the bisection of the fold never succeeds, the trace halves its step down to
+    ``step_min`` and then stops with ``nose_unresolved``, ``converged=False``, the nose at
+    the best corrected point."""
+
+    def failing_locate(self, z0, t0, h, flag):
+        return None, [], False
+
+    monkeypatch.setattr(continuation_module._Tracer, "locate", failing_locate)
+    curve = pv_curve(_two_bus(0.5 * _nose_power(0.0, 0.0, 0.5)), step_min=1e-3)
+    assert curve.stop_reason == "nose_unresolved"
+    assert not curve.converged
+    assert curve.nose_kind == "saddle_node"
+    assert curve.lambda_max == curve.lambdas[curve.nose_index]
+    assert 1.9 < curve.lambda_max <= 2.0 + 1e-9
 
 
 # ---------------------------------------------------------------------------

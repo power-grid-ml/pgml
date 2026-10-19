@@ -32,10 +32,27 @@ Continuation method (:func:`pv_curve`)
   factor clipped to ``[0.5, 2]``); a failed or over-long correction, or a tangent that
   turns by more than 0.25 rad within the step, halves it.
 - Nose: the sign change of the tangent's ``λ`` component; the fold is then located by
-  bisection on the arc length to ``1e-6`` and inserted as a curve point.
+  bisection on the arc length to ``1e-6`` and inserted as a curve point. When a corrector
+  inside that bisection fails, the step is halved and retaken (the fold then lies in a
+  shorter step); if the bisection still fails at ``step_min`` the trace stops with
+  ``stop_reason="nose_unresolved"`` and ``converged=False``, the nose point being the best
+  corrected point, up to one ``step_min`` of arc length from the fold.
 - Reactive limits: a PV-to-PQ (or release) switch of a regulating generator is located by
   bisection on the arc length, the active set switched there, and the point re-solved. A
-  switch after which ``λ`` can only decrease is a limit-induced nose.
+  switch after which ``λ`` can only decrease is a limit-induced nose. The switch condition
+  is tested at the corrected end point of each step only: a reactive limit crossed and
+  re-entered within one step (a large step near the nose, where the reactive demand turns
+  quickly) is not seen. The curvature guard (at most 0.25 rad of tangent rotation per step)
+  and the step control make that rare; ``step_max`` bounds the step where it matters.
+
+Voltage convention
+------------------
+Voltages are magnitudes of the node-phase row voltages, i.e. phase-to-GROUND, in per unit
+of the node's line-to-neutral rated voltage; on a four-wire node they include the neutral
+point's displacement. The fictitious source of :func:`qv_curve` holds the phase-to-ground
+magnitude as well and injects into the phase rows only (no neutral return): the solver's
+regulating terminals are wye-to-ground, and holding a phase-to-neutral voltage would need a
+terminal that returns through the neutral row, which they do not support.
 
 Outputs are host numpy arrays; neither study is differentiable (both run detached), and
 neither mutates its inputs. Every tensor operation honours ``device`` and ``dtype``
@@ -98,7 +115,9 @@ class PVCurve:
         ``direction="generation"``.
     v_pu:
         Voltage magnitude of every node-phase row ``[K, R]`` [pu of the node's
-        line-to-neutral rated voltage], in the grid's row layout.
+        line-to-neutral rated voltage], in the grid's row layout: phase-to-ground,
+        including a neutral row's own voltage on a four-wire node (module documentation,
+        "Voltage convention").
     node_ids, phases:
         Row index of ``v_pu``: node id ``[R]`` and phase of each row, as the schema
         value of :class:`~pgml.schemas.Phase` (``"a"``, ``"b"``, ``"c"``, ``"n"``).
@@ -124,8 +143,12 @@ class PVCurve:
         Why the trace ended: ``"nose"`` (``stop_at_nose``), ``"lambda_max"`` (the cap
         was reached before a nose), ``"v_stop"`` (a voltage fell below ``v_stop_pu``),
         ``"lambda_start"`` (the lower branch returned below the starting ``λ``),
-        ``"max_steps"``, ``"step_min"`` (the corrector failed at the smallest step), or
-        ``"switch_failed"`` (no solution after a reactive-limit switch).
+        ``"max_steps"``, ``"step_min"`` (the corrector failed at the smallest step),
+        ``"switch_failed"`` (no solution after a reactive-limit switch), or
+        ``"nose_unresolved"`` (the fold was bracketed but its bisection failed even at
+        ``step_min``; ``nose_index`` then marks the best corrected point, up to one
+        ``step_min`` of arc length from the fold, and ``lambda_max`` may lie below the
+        true ``λ*`` by up to that much).
     events:
         Reactive-limit switches of regulating generators:
         ``{"index", "lambda", "generator_ids"}`` per event, ``index`` the curve point
@@ -233,7 +256,10 @@ class QVCurve:
         each as its schema value (``"a"``, ``"b"``, ``"c"``).
     v_pu:
         Voltage setpoints ``[K]`` [pu of the node's line-to-neutral rated voltage],
-        ascending; every held phase is at this magnitude.
+        ascending; every held phase's phase-to-GROUND magnitude is at this value. On a
+        four-wire node whose neutral point is displaced (unbalanced load, a neutral
+        grounded elsewhere) the phase-to-neutral voltages differ from it (module
+        documentation, "Voltage convention").
     q_var:
         Total reactive power the fictitious source injects ``[K]`` [var] (positive =
         injected into the grid, i.e. capacitive support); ``NaN`` where the power flow
@@ -469,7 +495,9 @@ def qv_curve(
 
     A fictitious voltage-controlled reactive source at ``node_id`` holds every
     non-neutral phase at the setpoint (phase-to-ground magnitude, each phase with its own
-    reactive power, zero active power, no reactive limit); the setpoint sweeps
+    reactive power injected into the phase row, zero active power, no reactive limit;
+    on a four-wire node the phase-to-neutral voltage is not what is held); the setpoint
+    sweeps
     ``steps`` equally spaced values over ``v_range_pu`` and the source's reactive
     injection is recorded. Fixing the voltage removes the fold, so each point is a
     regular power flow even on the unstable side of the curve. The sweep starts at the
@@ -486,7 +514,8 @@ def qv_curve(
     node_id:
         The bus; not a slack bus and not the terminal of a regulating generator.
     v_range_pu:
-        ``(low, high)`` setpoint range [pu of the node's line-to-neutral rated voltage].
+        ``(low, high)`` setpoint range of the phase-to-ground magnitude [pu of the node's
+        line-to-neutral rated voltage].
     steps:
         Number of setpoints (at least 3).
     config:
@@ -759,12 +788,13 @@ class _Tracer:
 
     def locate(
         self, z0: Tensor, t0: Tensor, h: float, flag
-    ) -> tuple[Optional[tuple[Tensor, Tensor]], list[tuple[Tensor, Tensor]]]:
+    ) -> tuple[Optional[tuple[Tensor, Tensor]], list[tuple[Tensor, Tensor]], bool]:
         """Bisect ``s ∈ (0, h]`` for the first arc point where ``flag(ẑ, t)`` holds.
 
         ``flag`` is false at ``s = 0`` and true at ``s = h``. Returns the closest
-        point found on the true side (``None`` if no bisection point landed there)
-        and every corrected point evaluated.
+        point found on the true side (``None`` if no bisection point landed there),
+        every corrected point evaluated, and whether the bracket shrank to
+        :data:`_LOCATE_TOL` (``False`` when a corrector failed first).
         """
         lo, hi = 0.0, h
         hit = None
@@ -782,7 +812,7 @@ class _Tracer:
                 hi, hit = s, (zs, ts)
             else:
                 lo = s
-        return hit, seen
+        return hit, seen, hi - lo <= _LOCATE_TOL
 
     def branch_direction(self, zh: Tensor, t_prev: Tensor, h: float) -> Tensor:
         """Continuation direction after a reactive-limit switch at ``ẑ``.
@@ -862,7 +892,7 @@ class _Tracer:
             v_new, lam_new = self.voltage(z_new)
 
             if prob.would_switch(v_new, lam_new):
-                hit, _ = self.locate(
+                hit, _, _ = self.locate(
                     zh, t, h, lambda zs, ts: prob.would_switch(*self.voltage(zs))
                 )
                 z_sw = hit[0] if hit is not None else z_new
@@ -893,7 +923,14 @@ class _Tracer:
             if nose_index is None and float(t[-1]) > 0 and float(t_new[-1]) <= 0:
                 # The fold lies between the last point and this one: the corrected
                 # point of largest λ among the bisection points is the nose.
-                _, seen = self.locate(zh, t, h, lambda zs, ts: float(ts[-1]) <= 0)
+                _, seen, located = self.locate(
+                    zh, t, h, lambda zs, ts: float(ts[-1]) <= 0
+                )
+                if not located and h > step_min:
+                    # A corrector inside the bisection failed: retake a shorter step,
+                    # which brackets the fold more tightly or passes short of it.
+                    h = max(step_min, 0.5 * h)
+                    continue
                 best = max(
                     (zs for zs, _ in seen),
                     key=lambda zs: self.voltage(zs)[1],
@@ -908,6 +945,9 @@ class _Tracer:
                     points.append(self.point(z_new))
                     nose_is_new = True
                 nose_index, nose_kind = len(points) - 1, "saddle_node"
+                if not located:
+                    stop = "nose_unresolved"
+                    break
                 if stop_at_nose:
                     stop = "nose"
                     break
@@ -918,7 +958,7 @@ class _Tracer:
                 continue
 
             if nose_index is None and lambda_cap is not None and lam_new >= lambda_cap:
-                hit, _ = self.locate(
+                hit, _, _ = self.locate(
                     zh, t, h, lambda zs, ts: float(self.split(zs)[1]) >= lambda_cap
                 )
                 z_cap = hit[0] if hit is not None else z_new

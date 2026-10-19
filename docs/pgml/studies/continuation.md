@@ -54,11 +54,18 @@ onto its lower branch:
   correction, an over-long one, or a tangent that turns by more than 0.25 rad within the
   step halves it.
 - **Nose.** The sign change of the tangent's `λ` component. The fold is located by bisection
-  on the arc length and inserted as a curve point (`nose_index`, `lambda_max`).
+  on the arc length to 1e-6 and inserted as a curve point (`nose_index`, `lambda_max`). If
+  a corrector fails inside that bisection, the step is halved and retaken; if it still
+  fails at `step_min`, the trace stops with `stop_reason="nose_unresolved"` and
+  `converged=False`, the nose being the best corrected point, up to one `step_min` of arc
+  length from the fold.
 - **Reactive limits.** When a regulating generator reaches a reactive limit, the switch is
   located on the arc, the generator becomes a fixed-Q injection and the point is solved
   again (`events`). If `λ` can only decrease after the switch, the nose is limit-induced
-  (`nose_kind="limit_induced"`) rather than a fold of the Jacobian.
+  (`nose_kind="limit_induced"`) rather than a fold of the Jacobian. The limits are tested at
+  the end point of each step: a limit crossed and re-entered within a single step is not
+  seen. The curvature guard and the step control make that rare; set `step_max` to bound
+  the step where the reactive demand turns quickly, near the nose.
 
 The trace starts with an ordinary power flow at `lambda_start`, which defaults to 1. When
 the base itself does not solve, start at `lambda_start=0`, with the selected appliances
@@ -69,8 +76,9 @@ switched off. The trace ends at the first of these:
 - the lowest phase voltage falling below `v_stop_pu`, 0.3 pu by default, on either branch;
 - `λ` returning below `lambda_start` on the lower branch;
 - `max_steps`;
-- a corrector failure at `step_min`, or no solution right after a reactive-limit switch
-  (`"switch_failed"`). These two stops, and `max_steps`, report `converged=False`.
+- a corrector failure at `step_min`, no solution right after a reactive-limit switch
+  (`"switch_failed"`), or a fold that could not be bisected (`"nose_unresolved"`). These
+  three stops, and `max_steps`, report `converged=False`.
 
 `critical_node` and `critical_phase` name the row with the lowest voltage at the nose.
 Phases are reported as the schema value of {class}`~pgml.schemas.grid_schema.Phase`
@@ -83,7 +91,12 @@ localizes the collapse through the singular vectors of the Jacobian.
 
 A fictitious source at the bus holds every non-neutral phase at a voltage setpoint (the
 phase-to-ground magnitude) with its own free reactive power and zero active power. It is
-the per-phase regulating terminal of the solver with unbounded reactive limits. The
+the per-phase regulating terminal of the solver with unbounded reactive limits, which
+injects into the phase rows (wye to ground). On a four-wire bus whose neutral point is
+displaced, by an unbalanced load or a neutral grounded elsewhere, the phase-to-neutral
+voltages therefore differ from the setpoint: by 0.8 % on phase a of the four-wire test
+feeder with one single-phase load. `PVCurve.v_pu` follows the same convention: every row's
+voltage to ground. The
 setpoint sweeps `steps` values over `v_range_pu`, starting at the one nearest the bus's base
 voltage and walking outward, each solve warm-started from its neighbour. Fixing the voltage
 removes the fold, so each point is a regular power flow, even on the unstable side of the
@@ -122,6 +135,7 @@ All measurements are at complex128 (`tests/studies/test_continuation.py`).
 | Unbalanced, mutually coupled three-phase feeder with single-phase, ZIP and generating appliances and a fused switch, 9 points on the upper branch below `0.97 λ*` | `solve_power_flow(method="newton")` at the same `λ` | ≤ 2.9e-15 pu | 1e-8 pu |
 | Q-V curve of the lossless two-bus feeder, 61 setpoints | `Q(V) = Q_L + V²/X − √((EV/X)² − P²)` | relative error ≤ 2.3e-14 | 1e-8 |
 | Q-V minimum | `V² = X²P²/E² + E²/4` | `V` within 5.0e-5 pu, margin within 9.0e-7 relative | 2e-3 pu, 1e-4 |
+| Q-V on a four-wire bus with a single-phase load | plain power flow with the recorded reactive power as capacitors to ground | phase-to-ground magnitudes at the setpoint within 5e-12 relative | 1e-8 |
 | complex64, two-bus nose | closed form | 1.2e-7 | 1e-3 |
 
 The accuracy of the Q-V minimum follows the setpoint spacing. With the parabola refinement it
@@ -139,4 +153,7 @@ lower bound should.
 - One grid and one operating point per call. The studies are not batched over scenarios.
 - Not differentiable: the studies run detached and return numpy arrays.
 - The Q-V source holds phase-to-ground magnitudes. On a node with a neutral conductor these
-  differ from the line-to-neutral magnitudes by the neutral-point voltage.
+  differ from the line-to-neutral magnitudes by the neutral-point voltage. Holding the
+  phase-to-neutral voltage would need a regulating terminal that returns through the
+  neutral row, which the solver's PV terminals do not support.
+- Reactive-limit switches are detected at the end of each step (see above).

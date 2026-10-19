@@ -97,6 +97,13 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - After a reactive-limit switch the continuation direction is checked by a trial step: a
   direction that would switch straight back is reversed, which is what turns a switch on
   the lower branch of the limited curve into a limit-induced nose.
+- A fold whose bisection fails (a corrector failure inside `locate`) is retaken with a
+  halved step; at `step_min` the trace stops with `"nose_unresolved"` and
+  `converged=False`, never a silent coarse nose.
+- Voltages are phase-to-ground row magnitudes; the QV source is a per-phase wye-to-ground
+  regulating terminal. Holding phase-to-neutral needs a neutral-return PV terminal in
+  `solver/_pv_bus.py`, which it refuses today.
+- Reactive-limit switching is tested at step end points only (documented limitation).
 
 ## Hosting capacity decisions an edit must not undo
 
@@ -140,7 +147,8 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   (`-m opendss`, SystemY inverse), `tests/differentiability/test_impedance_scan_gradcheck.py`,
   `tests/gpu/test_impedance_scan_parity.py`.
 - Continuation: `tests/studies/test_continuation.py` (closed forms on a two-bus feeder,
-  plain Newton solves on an unbalanced feeder, serialization, inputs),
+  plain Newton solves on an unbalanced feeder, four-wire QV convention, unresolved nose,
+  serialization, inputs),
   `tests/gpu/test_studies_continuation_parity.py`.
 - Hosting capacity: `tests/studies/test_hosting.py` (closed forms, serial `simulate`
   reference, every limit kind, base-case violations, slicing, round trip), `tests/studies/test_limits.py`, shared test
