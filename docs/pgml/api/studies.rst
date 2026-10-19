@@ -39,3 +39,7 @@ Default frequency grid of :func:`~pgml.studies.impedance_scan`:
 .. autodata:: pgml.studies.impedance.DEFAULT_MAX_ORDER
 
 .. autodata:: pgml.studies.impedance.DEFAULT_ORDER_STEP
+
+Default relative prominence of :meth:`~pgml.studies.ImpedanceScan.resonances`:
+
+.. autodata:: pgml.studies.impedance.DEFAULT_MIN_PROMINENCE

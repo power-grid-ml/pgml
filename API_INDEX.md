@@ -823,15 +823,15 @@ Full documentation: the docstrings (published as the API reference).
 ## `pgml.studies`
 
 - class `BranchRating(i_max_a, s_rated_va)` — Thermal rating of one branch; either field is ``None`` when the grid declares none.
-- class `HostingCapacity(node_ids, direction, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
-- class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
+- class `HostingCapacity(node_ids, direction, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…, base_violations=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
+- class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…, neutral_loading=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
 - class `ImpedanceScan(frequencies_hz, base_frequency_hz, node_ids, phases, z_phase_ohm, z_positive_ohm, z_zero_ohm, transfer_rows=…, z_transfer_ohm=…)` — Result of :func:`impedance_scan`: impedances seen from each requested bus vs frequency.
 - class `PVCurve(lambdas, p_total_w, v_pu, node_ids, phases, appliance_ids, direction, nose_index, lambda_max, nose_kind, critical_node, critical_phase, converged, stop_reason, events=…)` — A traced P-V curve (:func:`pv_curve`).
 - class `QVCurve(node_id, phases, v_pu, q_var, q_phase_var, converged, q_margin_var, v_at_min_pu, minimum_in_range)` — A Q-V curve at one bus (:func:`qv_curve`).
-- class `Resonance(kind, frequency_hz, order, z_ohm)` — One resonance of a driving-point impedance magnitude.
+- class `Resonance(kind, frequency_hz, order, z_ohm, prominence)` — One resonance of a driving-point impedance magnitude.
 - def `branch_ratings(grid: Grid) -> dict[int, BranchRating]` — Thermal rating of every branch of ``grid``, keyed by branch id (pure, no solve).
 - def `hosting_capacity(grid: Grid, candidates: Optional[Sequence[int]] = None, direction: Literal['load', 'generation'] = 'generation', limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = None, phases: Union[str, Phase] = 'balanced', power_factor: float = 1.0, p_max_w: Optional[float] = None, tol_w: Optional[float] = None, harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> HostingCapacity` — Largest new generation or demand each candidate bus can take within the limits.
-- def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, transfer: bool = False, fold_generation: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
+- def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, load_shunt: Optional[Literal['opendss', 'motor', 'none', 'const_z']] = None, load_shunt_basis: Optional[Literal['operating_point', 'nameplate']] = None, transfer: bool = False, fold_generation: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
 - def `pv_curve(grid: Grid, selector: Optional[Union[Iterable[int], Callable[[ApplianceBase], bool]]] = None, direction: Literal['load', 'generation'] = 'load', config: Optional[SimulationConfig] = None, lambda_start: float = 1.0, lambda_max: Optional[float] = None, step: float = 0.05, step_min: float = 0.0001, step_max: Optional[float] = None, max_steps: int = 500, v_stop_pu: float = 0.3, stop_at_nose: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> PVCurve` — Trace the P-V curve through its nose by predictor-corrector continuation.
 - def `qv_curve(grid: Grid, node_id: int, v_range_pu: tuple[float, float] = (0.8, 1.1), steps: int = 31, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> QVCurve` — Q-V curve of one bus: the reactive power that holds it at each voltage.
 
@@ -850,6 +850,7 @@ Full documentation: the docstrings (published as the API reference).
 ## `pgml.studies.impedance`
 
 - `DEFAULT_MAX_ORDER` — int
+- `DEFAULT_MIN_PROMINENCE` — float
 - `DEFAULT_ORDER_STEP` — float
 - `ImpedanceScan` — re-exported from `pgml.studies`
 - `Resonance` — re-exported from `pgml.studies`
