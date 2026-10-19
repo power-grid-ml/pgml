@@ -40,6 +40,11 @@ pages `differentiability.md` and `modeling/solver-performance.md`.
   low-rank terms (`_harmonic_shunt_lowrank_terms`), fused-branch shunt current
   (`_harmonic_shunt_currents`).
 - `_harmonic_cache.py` — `HarmonicFlowSystem`, the lazy, bounded harmonic preparation.
+- `_continuation.py` — `ContinuationProblem` / `build_continuation_problem`: the
+  fundamental residual `R(x, λ)` with a loading parameter scaling a set of appliances
+  (scaled and unscaled injection plans), fixed-`λ` solves through `_newton_forward`, PV-to-PQ
+  switching between solves, and the fictitious voltage-controlled source of a Q-V study.
+  Detached, single grid; consumed by `pgml.studies.continuation`.
 
 ## Differentiability
 

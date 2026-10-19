@@ -11,7 +11,7 @@ what you see here is the public surface.
 | {mod}`pgml.assembly` | `assemble_ybus`, device injections, branch currents, the node-phase row layout, the bus-fusion map |
 | {mod}`pgml.geometry` | Carson/Deri line constants from conductor geometry, and the analytic harmonic line models |
 | {mod}`pgml.topology` | Slack anchors, branch edges, distance from the slack, connectivity reports, grid fingerprints |
-| {mod}`pgml.studies` | Planning studies on a grid: the impedance scan (driving-point and transfer impedance vs frequency, resonances) |
+| {mod}`pgml.studies` | Planning studies on a grid: the impedance scan (driving-point and transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins |
 | {mod}`pgml.scenarios` | Batched sampling of operating points, sweeps, the batched solve, parquet datasets |
 | {mod}`pgml.convert` | Readers for pandapower, power-grid-model and OpenDSS networks |
 | {mod}`pgml.grids` | Benchmark builders and the synthetic feeder |
@@ -32,8 +32,8 @@ solver
 assembly
 geometry
 topology
-scenarios
 studies
+scenarios
 convert
 grids
 multigrid

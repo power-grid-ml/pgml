@@ -1327,8 +1327,9 @@ class LoadabilityResult:
     tolerance and iteration budget (~4 % on a two-bus feeder whose nose is known in
     closed form). The Jacobian figures (``min_singular_value``, ``condition_number``,
     ``critical_nodes``, ``limiting_loads``, ``nose_voltage_min_pu``) describe that last
-    converged point — close to the nose, not the singular point itself. An arc-length
-    predictor-corrector continuation, which can turn the nose, is open work.
+    converged point — close to the nose, not the singular point itself. The
+    predictor-corrector continuation that passes the nose and reports the nose itself
+    is :func:`pgml.studies.pv_curve`.
 
     ``ramp`` records WHAT ``λ`` multiplied: ``"all"`` (loads and generators / storage
     together, the default) or ``"load"`` (loads only, generation at nameplate — the
@@ -4959,7 +4960,9 @@ def loadability_limit(
     P-V nose, with a gap that depends on ``tol``, ``max_iter`` and ``bisect_tol``
     (measured at ~4 % on a two-bus feeder whose nose is known in closed form). The
     Jacobian figures reported at that ``λ`` describe the last converged point, which is
-    near the nose, not the singular point itself.
+    near the nose, not the singular point itself. :func:`pgml.studies.pv_curve` traces
+    the curve through the nose by pseudo-arc-length continuation and reports ``λ*``
+    itself.
 
     ``ramp`` chooses WHAT ``λ`` multiplies (``None`` resolves the documented default
     ``solver.loadability.ramp``):

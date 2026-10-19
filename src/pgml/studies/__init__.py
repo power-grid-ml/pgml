@@ -9,11 +9,15 @@ result object with a JSON-ready ``to_dict()``.
 
 from __future__ import annotations
 
+from .continuation import PVCurve, QVCurve, pv_curve, qv_curve
 from .impedance import ImpedanceScan, Resonance, impedance_scan
 
-__all__: list[str] = []
-__all__ += [
-    "impedance_scan",
+__all__: list[str] = [
     "ImpedanceScan",
+    "PVCurve",
+    "QVCurve",
     "Resonance",
+    "impedance_scan",
+    "pv_curve",
+    "qv_curve",
 ]
