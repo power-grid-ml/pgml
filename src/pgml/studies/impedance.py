@@ -115,6 +115,12 @@ _LOAD_SHUNT_MODELS = ("opendss", "motor", "none", "const_z")
 
 _ABC = (Phase.A, Phase.B, Phase.C)
 _COMPONENTS = ("positive", "zero", "a", "b", "c", "n")
+#: Why a scan fails when ``Y(f)`` is singular (a zero pivot or a non-finite solve).
+_SINGULAR_MESSAGE = (
+    "the scanned impedance is not finite: Y(f) is singular at some frequency. "
+    "Every part of the network needs a path to the source or to a shunt."
+)
+
 #: Estimated condition number times unit roundoff above which a frequency is reported as
 #: numerically singular (no digit of the solution guaranteed).
 _SINGULAR_ERROR_BOUND = 1.0
@@ -548,8 +554,11 @@ def impedance_scan(
         frequencies, no in-service source, a source with zero impedance, or a batched
         operating point.
     ComputationError
-        The scanned impedance is not finite (a part of the network without a path to
-        the source or to a shunt, which leaves ``Y`` singular).
+        ``Y(f)`` is singular at some frequency: a zero pivot in the factorization or a
+        non-finite impedance (a part of the network without a path to the source or to
+        a shunt). Which of the two a matrix singular only to working precision produces
+        depends on the factorization backend; a nearly singular but factorizable ``Y``
+        is reported by a WARNING instead.
 
     Notes
     -----
@@ -650,7 +659,15 @@ def impedance_scan(
             if fusion is not None
             else rows_full_t
         )
-        z_rows, cond = _solve_columns(y, rows)  # [F_chunk, R, R], [F_chunk]
+        try:
+            z_rows, cond = _solve_columns(y, rows)  # [F_chunk, R, R], [F_chunk]
+        except (ComputationError, RuntimeError) as exc:
+            # An exactly zero pivot: whether rounding leaves a tiny pivot (a finite,
+            # ill-conditioned solve reported below) or none at all depends on the
+            # factorization backend, so both end in the same diagnosis. A single
+            # matrix's zero pivot arrives as torch's RuntimeError, a stack's as a
+            # ComputationError.
+            raise ComputationError(_SINGULAR_MESSAGE) from exc
         cond_parts.append(cond)
         # Driving-point blocks [F_chunk, n, P_max, P_max]; padding is dropped later.
         block_parts.append(z_rows[:, block[:, :, None], block[:, None, :]])
@@ -662,10 +679,7 @@ def impedance_scan(
     with torch.no_grad():
         finite = bool(torch.isfinite(torch.view_as_real(blocks)).all())
     if not finite:
-        raise ComputationError(
-            "the scanned impedance is not finite: Y(f) is singular at some frequency. "
-            "Every part of the network needs a path to the source or to a shunt."
-        )
+        raise ComputationError(_SINGULAR_MESSAGE)
     _warn_ill_conditioned(torch.cat(cond_parts), freqs, dtype)
 
     return _build_result(node_ids, phases, freqs, blocks, z_transfer, f0)

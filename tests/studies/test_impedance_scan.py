@@ -19,7 +19,7 @@ import torch
 
 from pgml import defaults
 from pgml.assembly import assemble_ybus
-from pgml.errors import InputError
+from pgml.errors import ComputationError, InputError
 from pgml.geometry import apply_default_harmonic_model
 from pgml.grids import synthetic_feeder
 from pgml.schemas.grid_schema import (
@@ -721,10 +721,27 @@ def test_complex64_scan_finds_the_same_resonances():
         assert abs(a.frequency_hz - b.frequency_hz) < 0.1
 
 
+def test_isolated_bus_is_a_singular_admittance():
+    """A bus with no branch and no shunt has an all-zero row in ``Y``: the scan refuses
+    with a ComputationError on every factorization backend."""
+    grid = Grid(
+        base_frequency_hz=F0,
+        nodes=[_node(1), _node(2)],
+        branches=[],
+        appliances=[_source(1, [[R_S]], [[L_S]])],
+    )
+    for frequencies in ([50.0], [50.0, 250.0]):  # a single matrix and a stack
+        with pytest.raises(ComputationError, match="singular"):
+            impedance_scan(grid, frequencies_hz=frequencies)
+
+
 def test_nearly_singular_admittance_is_reported(caplog):
     """Two buses joined by a line and held to ground only by a 1e-20 S shunt, with no
-    path to the source: ``Y`` is singular to working precision, the solve stays finite,
-    and the scan names the frequencies in a WARNING."""
+    path to the source: ``Y`` is singular to working precision. Rounding in the
+    factorization decides whether a tiny pivot survives (a finite solve the scan reports in
+    a WARNING) or a zero pivot is found (a ComputationError naming the singular ``Y``);
+    the outcome depends on the BLAS backend, so either is accepted, never a silent
+    result."""
     line = Line(
         id=10,
         from_node=2,
@@ -753,9 +770,13 @@ def test_nearly_singular_admittance_is_reported(caplog):
         ],
     )
     with caplog.at_level(logging.WARNING, logger="pgml"):
-        scan = impedance_scan(grid, frequencies_hz=[50.0, 250.0])
-    assert torch.isfinite(torch.view_as_real(scan.z_phase_ohm[1])).all()
-    assert "numerically singular" in caplog.text
+        try:
+            scan = impedance_scan(grid, frequencies_hz=[50.0, 250.0])
+        except ComputationError as exc:
+            assert "singular" in str(exc)
+        else:
+            assert torch.isfinite(torch.view_as_real(scan.z_phase_ohm[1])).all()
+            assert "numerically singular" in caplog.text
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="pgml"):
         impedance_scan(_series_branch_grid(), frequencies_hz=[50.0, 250.0])
