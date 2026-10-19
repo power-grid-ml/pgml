@@ -12,6 +12,7 @@ what you see here is the public surface.
 | {mod}`pgml.geometry` | Carson/Deri line constants from conductor geometry, and the analytic harmonic line models |
 | {mod}`pgml.topology` | Slack anchors, branch edges, distance from the slack, connectivity reports, grid fingerprints |
 | {mod}`pgml.scenarios` | Batched sampling of operating points, sweeps, the batched solve, parquet datasets |
+| {mod}`pgml.studies` | Grid-planning studies: hosting capacity and the branch ratings it checks |
 | {mod}`pgml.convert` | Readers for pandapower, power-grid-model and OpenDSS networks |
 | {mod}`pgml.grids` | Benchmark builders and the synthetic feeder |
 | {mod}`pgml.multigrid` | Merge a grid ensemble into one solvable grid, then split the result per member |
@@ -32,6 +33,7 @@ assembly
 geometry
 topology
 scenarios
+studies
 convert
 grids
 multigrid

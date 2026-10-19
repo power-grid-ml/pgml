@@ -11,10 +11,13 @@ from __future__ import annotations
 
 __all__: list[str] = []
 
+from .hosting import HostingCapacity, hosting_capacity  # noqa: E402
 from .limits import BranchRating, HostingLimits, branch_ratings  # noqa: E402
 
 __all__ += [
     "BranchRating",
+    "HostingCapacity",
     "HostingLimits",
     "branch_ratings",
+    "hosting_capacity",
 ]
