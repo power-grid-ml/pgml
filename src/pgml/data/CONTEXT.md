@@ -20,7 +20,7 @@ Signatures: docstrings / `API_INDEX.md`.
   default emission table of the scenario sampler. Loaded by `pgml.scenarios.iec61000_3_2`.
 
 Top-level sections of `defaults.yaml`: `converter`, `calculation`, `appliance`, `line`,
-`branch`, `transformer`, `source`, `solver`. The meaning of each key is its `description`
+`branch`, `transformer`, `source`, `solver`, `studies`. The meaning of each key is its `description`
 field; read it in the file or with `pgml.defaults.describe(key)` (`units(key)`, `get(key)`).
 `docs/pgml/modeling/presets.md` is the published view.
 

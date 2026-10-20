@@ -312,9 +312,13 @@ def assemble_ybus(
     parallel R-L / R-C branch of the classical harmonic load model. The fold is exact
     at ``f0``; it is a MODEL of the device at other frequencies, derived from P and Q
     and not from a measured harmonic impedance. The harmonic power flow
-    (:func:`pgml.solver.solve_harmonic_flow`) does not fold devices at all: it
-    assembles :func:`assemble_network_ybus` and treats every device as a current
-    source, so use that function for a harmonic network matrix.
+    (:func:`pgml.solver.solve_harmonic_flow`) does not use this fold: at its harmonic
+    orders it assembles :func:`assemble_network_ybus` plus the source Norton shunt,
+    every explicit Generator/Storage ``harmonic_impedance`` and each device's harmonic
+    Norton shunt (``load_shunt``, default ``appliance.harmonic_shunt.model``: the
+    operating-point admittance split into a parallel and a series R-L branch, of which
+    this fold is the ``series_rl_fraction = 0`` limit). Use
+    :func:`pgml.solver.assemble_harmonic_ybus` for that matrix.
 
     Parameters
     ----------

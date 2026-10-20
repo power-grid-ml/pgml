@@ -1639,21 +1639,74 @@ def assemble_harmonic_ybus(
             "the fundamental (assemble_network_ybus at f0 with an ideal slack)."
         )
     harmonic_shunt = resolve_shunt_model_name(load_shunt)
+    shunt_basis = resolve_shunt_basis(load_shunt_basis)
+    rdt = _rdtype(dtype)
+    if device is None:
+        device = torch.device("cpu")
+    f0 = float(grid.base_frequency_hz)
+    fvec = torch.as_tensor([h * f0 for h in orders], dtype=rdt, device=device)
+    yh, index, _ = _harmonic_admittance(
+        grid,
+        fvec,
+        [float(h) for h in orders],
+        v1=v1,
+        operating_point=operating_point,
+        load_shunt=harmonic_shunt,
+        load_shunt_basis=shunt_basis,
+        symmetry=symmetry,
+        dtype=dtype,
+        device=device,
+        branch_states=branch_states,
+        param_overrides=param_overrides,
+        fusion=fusion,
+    )
+    return yh, index
+
+
+def _harmonic_admittance(
+    grid: Grid,
+    frequencies_hz: Tensor,
+    orders: Sequence[float],
+    *,
+    v1: Optional[Tensor],
+    operating_point: Optional[dict],
+    load_shunt: str,
+    load_shunt_basis: str,
+    symmetry: Optional[str],
+    dtype: torch.dtype,
+    device: torch.device,
+    branch_states: Optional[dict] = None,
+    param_overrides: Optional[dict] = None,
+    fusion: Optional[object] = None,
+    warn: bool = True,
+) -> tuple[Tensor, NodePhaseIndex, Optional[FusionMap]]:
+    """The harmonic system matrix ``Y(f)`` at arbitrary frequencies.
+
+    The matrix of :func:`assemble_harmonic_ybus` (passive network, source Norton shunt,
+    explicit Generator/Storage harmonic impedances, each device's harmonic shunt
+    ``load_shunt`` on the basis ``load_shunt_basis``), evaluated at the real
+    ``frequencies_hz`` ``[F]`` with ``orders = frequencies_hz / f0`` given as python
+    floats. The orders need not be integers: ``Y(f)`` is a property of the network and
+    of the device models, which are defined at any frequency; only the harmonic
+    INJECTION is keyed by integer order. ``load_shunt`` and ``load_shunt_basis`` are
+    already-validated names. ``warn=False`` suppresses the device-shunt warnings (a
+    caller assembling several frequency chunks logs them once).
+
+    Returns ``(Y, index, fusion)``: ``Y`` complex ``[F, N, N]`` (``[*batch, F, N, N]``
+    when a per-scenario operating point or batched ``branch_states`` promotes it), the
+    row layout, and the fusion map applied (``None`` without one), which a later call
+    can pass back as ``fusion`` to skip the branch walk.
+    """
     cdt = _cdtype(dtype)
     rdt = _rdtype(dtype)
-    f0 = float(grid.base_frequency_hz)
     fused = resolve_fusion(
         grid, fusion, param_overrides=param_overrides, branch_states=branch_states
     )
     index = fused.index if fused is not None else node_phase_index(grid)
-    if device is None:
-        device = torch.device("cpu")
     v1 = _fundamental_on_rows(v1, fused)
-    freqs = [h * f0 for h in orders]
-    fvec = torch.as_tensor(freqs, dtype=rdt, device=device)
     yh = assemble_network_ybus(
         grid,
-        freqs,
+        frequencies_hz,
         dtype=dtype,
         device=device,
         branch_states=branch_states,
@@ -1662,13 +1715,13 @@ def assemble_harmonic_ybus(
         # assembler does not walk the branch list again.
         fusion=NO_FUSION if fused is None else fused,
     ).Y
-    if yh.ndim == 2:  # single harmonic returned [N, N] -> [1, N, N]
+    if yh.ndim == 2:  # a single frequency returned [N, N] -> [1, N, N]
         yh = yh.unsqueeze(0)
     yh = _stamp_sources(
-        grid, fvec, yh, index, cdt, rdt, device, param_overrides
-    )  # [Hh, N, N]
+        grid, frequencies_hz, yh, index, cdt, rdt, device, param_overrides
+    )  # [F, N, N]
     yh = _stamp_der_harmonic_impedance(grid, yh, index, orders, cdt, rdt, device)
-    if harmonic_shunt != "none":
+    if load_shunt != "none":
         yh = _stamp_harmonic_load_shunt(
             grid,
             yh,
@@ -1676,15 +1729,16 @@ def assemble_harmonic_ybus(
             index,
             orders,
             operating_point,
-            harmonic_shunt,
+            load_shunt,
             param_overrides,
             resolve_asymmetric(grid, operating_point, mode=symmetry),
             cdt,
             rdt,
             device,
-            resolve_shunt_basis(load_shunt_basis),
+            load_shunt_basis,
+            warn=warn,
         )
-    return yh, index
+    return yh, index, fused
 
 
 # ---------------------------------------------------------------------------

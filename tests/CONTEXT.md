@@ -15,6 +15,7 @@ Layout (one directory per concern; mirrors the package layout where it maps 1:1)
 - `tests/evaluation/`       plotting + evaluation data containers.
 - `tests/scenarios/`        batched scenario sampling, presets, persistence.
 - `tests/topology/`         slack/connectivity/fingerprint/multigrid bookkeeping.
+- `tests/studies/`          planning studies (`pgml.studies`): closed forms, contracts, OpenDSS cross-checks.
 - `tests/fixtures/`         shared tiny-grid builders used across the suite.
 
 Markers (registered in `pyproject.toml`): `gpu` (requires CUDA), `opendss` (drives a live

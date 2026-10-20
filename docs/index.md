@@ -71,6 +71,9 @@ the assembled admittance to that one load parameter.
 - {doc}`pgml/public-api` is the stable front door, `simulate` and what it returns.
 - {doc}`pgml/modeling/index` records the modelling decisions and their limits, from
   transformer vector groups to the frequency dependence of a line.
+- {doc}`pgml/studies/index` collects the planning studies: the impedance a bus sees over
+  frequency and its resonances, the P-V and Q-V voltage-stability curves, and the hosting
+  capacity of every bus for new generation or demand.
 - {doc}`pgml/examples` lists the runnable example scripts and the validation figures.
 - {doc}`pgml/api/index` is the generated API reference.
 
@@ -102,6 +105,7 @@ pgml/concepts
 pgml/differentiability
 pgml/public-api
 pgml/examples
+pgml/studies/index
 pgml/modeling/index
 pgml/api/index
 ```
