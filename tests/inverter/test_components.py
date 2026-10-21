@@ -429,3 +429,30 @@ def test_mppt_lower_sidebands_below_zero_fold():
     at_5 = [j for j, f in enumerate(freqs) if f == 5.0]
     assert len(at_5) == 2
     torch.testing.assert_close(lines[at_5[-1], 0], torch.conj(unfolded))
+
+
+@pytest.mark.parametrize("topology", ["single_phase_unipolar", "three_phase"])
+def test_dead_zone_tends_to_the_hard_sign_at_large_current(topology):
+    three = topology == "three_phase"
+    u = torch.tensor(700.0 if three else 400.0, dtype=RDT)
+    shift = torch.tensor(
+        [0.0, -2 * math.pi / 3, 2 * math.pi / 3] if three else [0.0], dtype=RDT
+    )
+    i1 = torch.polar(torch.full_like(shift, 300.0), 0.2 + shift)
+    kw = dict(full_bridge=not three, three_phase=three)
+    hard = dead_time_voltage(i1, u, 2e-6, 16000.0, [5, 7], **kw)
+    soft = dead_time_voltage(
+        i1,
+        u,
+        2e-6,
+        16000.0,
+        [5, 7],
+        **kw,
+        ripple="local",
+        l1_h=1.5e-3,
+        modulation_index=torch.tensor(0.8, dtype=RDT),
+        bridge_angle=0.25 + shift,
+        topology=topology,
+        n_samples=1 << 14,
+    )
+    torch.testing.assert_close(soft, hard, rtol=3e-2, atol=2e-3)
