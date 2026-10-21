@@ -75,7 +75,10 @@ largest line 450.0 Hz, 269.8 mV
 smallest stability margin 0.90
 ```
 
-The inverter dictionary is keyed by the id of an in-service `Generator` or `Storage`; the
+Instead of the `inverters` argument, the model can be stored in the grid as the
+device's `inverter_model` block (see {doc}`../modeling/inverter-emission`); `emission_flow`
+then finds it there, and an argument entry overrides a stored block. The inverter dictionary
+is keyed by the id of an in-service `Generator` or `Storage`; the
 device's own `spectrum` is ignored for it. `states` carries one
 {class}`~pgml.inverter.InverterState` per modelled unit (DC-link voltage, whether the bridge
 switches and the relay is closed, the carrier phase). `f_max_hz` caps the frequency grid;

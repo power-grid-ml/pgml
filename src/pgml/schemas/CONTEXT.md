@@ -21,7 +21,10 @@ Signatures: docstrings / API_INDEX.md.
   `Storage`, `ShuntAppliance`; the first three share `InjectionAppliance`), spectra,
   `TypeLibrary`, conductor geometry (`ConductorPlacement`, `LineGeometry`,
   `EarthReturnModel`), inverter control (`InverterControl` union, `Characteristic`),
-  `VoltageRegulation`, `HarmonicShuntModel`, `HarmonicImpedance`, measurement metadata
+  `VoltageRegulation`, `HarmonicShuntModel`, `HarmonicImpedance`, the optional detailed
+  inverter harmonic model (`InverterModel` and its blocks `InverterLCLFilter`,
+  `InverterSeriesStage`, `InverterShuntStage`, `InverterCurrentControl`, `InverterPLL`,
+  `InverterPWM`, `InverterDCLink`, `InverterMPPT`), measurement metadata
   (`MeasurementDevice`, `CurrentChannel`), the helper value types (`Num`, `PosNum`,
   `NonNegNum`, `Vec`, `PerPhaseMatrix`) and `si_field`. Its module docstring holds the
   conventions (read it first).
@@ -49,6 +52,9 @@ Signatures: docstrings / API_INDEX.md.
   coil.
 - `type_ref` is an authoring layer: assembly consumes materialised parameters and pgml
   ships no resolver (see the module docstring "Standard types").
+- `inverter_model` (Generator / Storage) is read only by `pgml.studies.emission_flow`;
+  every other solver keeps the simple injection mode. It is mutually exclusive with
+  `harmonic_impedance` (the two are alternative harmonic models of the device).
 - `Generator.voltage_regulation` and `control` are mutually exclusive; `spectrum` and
   `spectrum_per_phase` are mutually exclusive.
 - Upstream background distortion is an operating-point quantity

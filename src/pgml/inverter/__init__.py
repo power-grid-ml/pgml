@@ -6,8 +6,10 @@ evaluates to a frequency-domain Norton equivalent ``i = I_N - Y v`` at its termi
 (:meth:`GridFollowingInverter.norton`). The harmonic network solve with these
 equivalents is :func:`pgml.studies.emission_flow`.
 
-The models are per-solve inputs, not grid data: they are keyed by device id and leave
-the :class:`~pgml.schemas.grid_schema.Grid` contract unchanged. Every function is
+A unit is given either as grid data, the optional ``inverter_model`` block of a
+:class:`~pgml.schemas.grid_schema.Generator` or :class:`~pgml.schemas.grid_schema.Storage`
+(:class:`~pgml.schemas.grid_schema.InverterModel`, converted by :func:`from_schema`), or as
+a per-solve input keyed by device id, which takes precedence. Every function is
 written in torch and differentiable in its tensor-valued parameters.
 """
 
@@ -33,7 +35,7 @@ from .filters import (
     inner_port_state,
     propagate_norton,
 )
-from .model import MECHANISMS, GridFollowingInverter, NortonEquivalent
+from .model import MECHANISMS, GridFollowingInverter, NortonEquivalent, from_schema
 from .operating import InverterState, PVArray
 from .pwm import PWMModulator, bessel_j
 
@@ -55,6 +57,7 @@ __all__: list[str] = [
     "bessel_j",
     "closed_loop",
     "dead_time_voltage",
+    "from_schema",
     "inner_port_state",
     "mppt_current_lines",
     "propagate_norton",

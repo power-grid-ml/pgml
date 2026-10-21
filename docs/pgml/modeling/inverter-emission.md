@@ -17,6 +17,46 @@ in the supraharmonic range the emission divides between the grid and the neighbo
 devices. A model that explains this has two terms at every frequency: a source and an
 admittance, both following the operating state.
 
+## Simple and detailed mode
+
+A device's harmonic behaviour can be described in two ways.
+
+- **Simple injection mode** (default): a current spectrum scaled to the fundamental and an
+  optional passive `harmonic_impedance`. Every solver uses it, including
+  {func}`pgml.solve_harmonic_flow`.
+- **Detailed mode**: the optional `inverter_model` block of a `Generator` or `Storage`
+  ({class}`~pgml.schemas.grid_schema.InverterModel`) holds the physical description of the
+  unit below. Only {func}`pgml.studies.emission_flow` reads it; the same model can also be
+  passed per solve as a {class}`~pgml.inverter.GridFollowingInverter`, which takes
+  precedence. The two harmonic descriptions are alternatives: `inverter_model` and
+  `harmonic_impedance` are mutually exclusive.
+
+```python
+from pgml.schemas import (
+    Generator, InverterDCLink, InverterLCLFilter, InverterModel, InverterMPPT, InverterPLL,
+    InverterPWM, InverterSeriesStage, InverterShuntStage, InverterCurrentControl, Phase,
+)
+
+pv = Generator(
+    id=7, node=2, phases=(Phase.A,), p_nom_w=4600.0,
+    inverter_model=InverterModel(
+        filter=InverterLCLFilter(l1_h=1.5e-3, c_f=4.7e-6, r_d_ohm=1.0, l2_h=0.5e-3),
+        control=InverterCurrentControl(kind="pr", kp=6.0, resonant={1: 500.0, 3: 150.0},
+                                       sampling_hz=32000.0),
+        pwm=InverterPWM(topology="single_phase_unipolar", carrier_hz=16000.0),
+        pll=InverterPLL(kp=0.5, ki=40.0),
+        emc=[InverterSeriesStage(l_h=20e-6), InverterShuntStage(c_f=1e-6)],
+        dead_time_s=1e-6,
+        dc_link=InverterDCLink(c_dc_f=1100e-6, kp=0.05, ki=2.0),
+        mppt=InverterMPPT(v_step_v=4.0, rate_hz=5.0),
+        u_dc_v=400.0,
+    ),
+)
+```
+
+`u_dc_v` is the DC-link voltage of the default operating state; a per-scenario state
+({class}`~pgml.inverter.InverterState`) passed to the study overrides it.
+
 ## The Norton equivalent
 
 At each frequency a unit is

@@ -24,6 +24,7 @@ Signatures: docstrings / API_INDEX.md.
 - `operating.py` — `InverterState` (DC-link voltage, bridge and relay state, carrier phase),
   `PVArray` (MPP power and voltage from irradiance and temperature).
 - `model.py` — `GridFollowingInverter` (`emission_frequencies`, `norton`), `NortonEquivalent`,
+  `from_schema` (schema `InverterModel` block to the model),
   `_place_lines` (lines onto the frequency grid).
 
 ## Invariants an edit must not undo
@@ -45,11 +46,15 @@ Signatures: docstrings / API_INDEX.md.
   values off the tape.
 - MPPT lower sidebands below 0 Hz are folded (conjugate phasor); lines sharing a frequency
   are summed by `_place_lines`, never merged earlier.
-- No schema coupling: models are per-solve inputs keyed by device id.
+- Two sources of a model: the optional schema block `Generator/Storage.inverter_model`
+  (`pgml.schemas.InverterModel`, converted by `from_schema`) and a per-solve
+  `{device_id: GridFollowingInverter}`, which overrides it. `from_schema` must stay a
+  one-to-one mapping of the schema fields (pinned by `tests/inverter/test_schema_block.py`).
 
 ## Tests
 
 `tests/inverter/test_components.py` (closed forms per block, published values),
-`tests/inverter/test_emission_flow.py` (study), shared builders `tests/inverter/grids.py`;
+`tests/inverter/test_emission_flow.py` (study), `tests/inverter/test_schema_block.py`
+(schema block), shared builders `tests/inverter/grids.py`;
 gates `tests/differentiability/test_inverter_emission_gradcheck.py`,
 `tests/gpu/test_inverter_emission_parity.py`.

@@ -489,3 +489,75 @@ class GridFollowingInverter:
             y_mirror=cl_p.y_mirror,
             loop_gain=cl_p.loop_gain,
         )
+
+
+def from_schema(spec) -> GridFollowingInverter:
+    """The :class:`GridFollowingInverter` described by a schema
+    :class:`~pgml.schemas.grid_schema.InverterModel` block (tensor values pass through)."""
+    from .control import CurrentController, PhaseLockedLoop
+    from .dc_link import DCLinkControl, PerturbObserveMPPT
+    from .filters import LCLFilter, SeriesStage, ShuntStage
+    from .pwm import PWMModulator
+
+    f = spec.filter
+    c = spec.control
+    emc = tuple(
+        SeriesStage(l_h=st.l_h, r_ohm=st.r_ohm)
+        if st.kind == "series"
+        else ShuntStage(c_f=st.c_f, c_ground_f=st.c_ground_f, r_ohm=st.r_ohm)
+        for st in spec.emc
+    )
+    dc = spec.dc_link
+    mp = spec.mppt
+    return GridFollowingInverter(
+        filter=LCLFilter(
+            l1_h=f.l1_h,
+            c_f=f.c_f,
+            l2_h=f.l2_h,
+            r1_ohm=f.r1_ohm,
+            r_d_ohm=f.r_d_ohm,
+            r2_ohm=f.r2_ohm,
+        ),
+        control=CurrentController(
+            c.kind,
+            kp=c.kp,
+            ki=c.ki,
+            resonant=dict(c.resonant),
+            resonant_bandwidth_rad_s=c.resonant_bandwidth_rad_s,
+            sampling_hz=c.sampling_hz,
+            delay_samples=c.delay_samples,
+            feedback=c.feedback,
+            active_damping_kc=c.active_damping_kc,
+            feedforward_gain=c.feedforward_gain,
+            feedforward_cutoff_hz=c.feedforward_cutoff_hz,
+        ),
+        pwm=PWMModulator(
+            spec.pwm.topology,
+            carrier_hz=spec.pwm.carrier_hz,
+            carrier_groups=spec.pwm.carrier_groups,
+            sidebands=spec.pwm.sidebands,
+        ),
+        pll=None
+        if spec.pll is None
+        else PhaseLockedLoop(kp=spec.pll.kp, ki=spec.pll.ki),
+        emc=emc,
+        emc_on_grid_side=spec.emc_on_grid_side,
+        dead_time_s=float(spec.dead_time_s),
+        dead_time_ripple=spec.dead_time_ripple,
+        dc_link=None
+        if dc is None
+        else DCLinkControl(
+            c_dc_f=dc.c_dc_f,
+            kp=dc.kp,
+            ki=dc.ki,
+            sampling_hz=dc.sampling_hz,
+            notch_quality_rad_s=dc.notch_quality_rad_s,
+        ),
+        mppt=None
+        if mp is None
+        else PerturbObserveMPPT(
+            v_step_v=mp.v_step_v, rate_hz=mp.rate_hz, max_line_hz=mp.max_line_hz
+        ),
+        harmonic_orders=tuple(range(2, int(spec.max_harmonic_order) + 1)),
+        mechanisms=tuple(spec.mechanisms),
+    )

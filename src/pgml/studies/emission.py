@@ -5,6 +5,10 @@ modelled inverter as its Norton equivalent ``i = I_N - Y v``
 (:class:`pgml.inverter.GridFollowingInverter`), on top of the solved fundamental
 operating point:
 
+A modelled inverter is a Generator or Storage with an ``inverter_model`` block in the grid
+(:class:`~pgml.schemas.grid_schema.InverterModel`) or an entry of the ``inverters``
+argument, which overrides the block. Every other device keeps the simple injection mode.
+
 1. the fundamental power flow gives every device's operating point and terminal state;
 2. each inverter evaluates ``I_N(f)`` and ``Y(f)`` at that state (control admittance,
    filter, PWM residues, dead time, MPPT lines, DC-link ripple);
@@ -72,7 +76,12 @@ from pgml.assembly._scatter import scatter_blocks_into
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.errors import InputError
-from pgml.inverter import GridFollowingInverter, InverterState, NortonEquivalent
+from pgml.inverter import (
+    GridFollowingInverter,
+    InverterState,
+    NortonEquivalent,
+    from_schema,
+)
 from pgml.assembly._symmetry import resolve_connection
 from pgml.schemas.grid_schema import Generator, Grid, Phase, Storage, WindingConnection
 from pgml.solver import lu_factor_system, solve_factored, solve_power_flow
@@ -235,7 +244,7 @@ class _Device:
 
 def emission_frequencies(
     grid: Grid,
-    inverters: Mapping[int, GridFollowingInverter],
+    inverters: Optional[Mapping[int, GridFollowingInverter]] = None,
     *,
     harmonic_orders: Optional[Sequence[int]] = None,
     frequencies_hz: Optional[Sequence[float]] = None,
@@ -243,13 +252,13 @@ def emission_frequencies(
 ) -> list[float]:
     """The frequency grid :func:`emission_flow` solves: every model line plus extras.
 
-    The union of each inverter's emission lines (:meth:`GridFollowingInverter
-    .emission_frequencies`), the integer ``harmonic_orders`` and any explicit
+    The union of each inverter's emission lines (the grid's ``inverter_model`` blocks and
+    ``inverters``, :meth:`GridFollowingInverter.emission_frequencies`), the integer ``harmonic_orders`` and any explicit
     ``frequencies_hz``, without the fundamental, ascending, at most ``f_max_hz``.
     """
     f0 = float(grid.base_frequency_hz)
     lines: set = set()
-    for model in inverters.values():
+    for model in _collect_models(grid, inverters).values():
         lines.update(model.emission_frequencies(f0, f_max_hz))
     for h in harmonic_orders or ():
         lines.add(round(float(h) * f0, 6))
@@ -263,9 +272,23 @@ def emission_frequencies(
     return out
 
 
+def _collect_models(grid: Grid, inverters) -> dict:
+    """Inverter models of the study: the grid's ``inverter_model`` blocks, overridden by
+    the explicit ``inverters`` mapping."""
+    models = {
+        int(a.id): from_schema(a.inverter_model)
+        for a in grid.appliances
+        if isinstance(a, (Generator, Storage))
+        and a.in_service
+        and getattr(a, "inverter_model", None) is not None
+    }
+    models.update({int(k): v for k, v in (inverters or {}).items()})
+    return models
+
+
 def emission_flow(
     grid: Grid,
-    inverters: Mapping[int, GridFollowingInverter],
+    inverters: Optional[Mapping[int, GridFollowingInverter]] = None,
     *,
     states: Optional[Mapping[int, InverterState]] = None,
     harmonic_orders: Optional[Sequence[int]] = None,
@@ -292,12 +315,14 @@ def emission_flow(
         id whose number of phases matches the model (1, or 3 as phases ``a, b, c``) and
         that carries no ``harmonic_impedance`` (the model replaces it).
     inverters:
-        ``{device_id: GridFollowingInverter}``. The device's ``spectrum`` is ignored: its
-        emission comes from the model.
+        ``{device_id: GridFollowingInverter}``, added to (and overriding) the devices
+        whose ``inverter_model`` block is set in the grid. The device's ``spectrum`` is
+        ignored: its emission comes from the model.
     states:
-        ``{device_id: InverterState}``; a missing entry raises. ``u_dc_v``,
-        ``bridge_on`` and ``connected`` may carry the scenario batch of
-        ``operating_point``.
+        ``{device_id: InverterState}``. A missing entry takes the ``u_dc_v`` of the
+        device's ``inverter_model`` block (bridge switching, relay closed) and raises
+        without one. ``u_dc_v``, ``bridge_on`` and ``connected`` may carry the scenario
+        batch of ``operating_point``.
     harmonic_orders, frequencies_hz, f_max_hz:
         Extend / cap the frequency grid (:func:`emission_frequencies`). The other
         devices' spectra and ``node_sources`` act at the integer orders of the grid; a
@@ -347,6 +372,11 @@ def emission_flow(
     basis = resolve_shunt_basis(load_shunt_basis)
     states = dict(states or {})
     by_id = {int(a.id): a for a in grid.appliances}
+    inverters = _collect_models(grid, inverters)
+    for dev_id in inverters:
+        spec = getattr(by_id.get(int(dev_id)), "inverter_model", None)
+        if int(dev_id) not in states and spec is not None and spec.u_dc_v is not None:
+            states[int(dev_id)] = InverterState(u_dc_v=spec.u_dc_v)
     node_map = {n.id: n for n in grid.nodes}
 
     for dev_id in inverters:
