@@ -51,7 +51,7 @@ inverter = GridFollowingInverter(
         resonant_bandwidth_rad_s=5.0, sampling_hz=32000.0,
         feedforward_gain=1.0, feedforward_cutoff_hz=1000.0),
     pwm=PWMModulator("single_phase_unipolar", carrier_hz=16000.0,
-                     carrier_groups=3, sidebands=10),
+                     carrier_groups=4, sidebands=10),
     pll=PhaseLockedLoop(kp=0.5, ki=40.0),
     emc=(SeriesStage(l_h=20e-6, r_ohm=0.01), ShuntStage(c_f=1.0e-6, c_ground_f=4.7e-9)),
     dead_time_s=1.0e-6,

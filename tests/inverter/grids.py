@@ -114,7 +114,7 @@ def lv_feeder(
 
 
 def single_phase_inverter(**overrides) -> GridFollowingInverter:
-    """A 4.6 kW single-phase unit: unipolar PWM at 16 kHz carrier, PR control, SOGI-like PLL."""
+    """A 4.6 kW single-phase unit: unipolar PWM at 16 kHz carrier, PR control, PLL (SRF form)."""
     kw = dict(
         filter=LCLFilter(
             l1_h=1.5e-3, r1_ohm=0.05, c_f=4.7e-6, r_d_ohm=1.0, l2_h=0.5e-3, r2_ohm=0.05
@@ -129,7 +129,7 @@ def single_phase_inverter(**overrides) -> GridFollowingInverter:
             feedforward_cutoff_hz=1000.0,
         ),
         pwm=PWMModulator(
-            "single_phase_unipolar", carrier_hz=16000.0, carrier_groups=3, sidebands=10
+            "single_phase_unipolar", carrier_hz=16000.0, carrier_groups=4, sidebands=10
         ),
         pll=PhaseLockedLoop(kp=0.5, ki=40.0),
         emc=(

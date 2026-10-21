@@ -305,7 +305,13 @@ def emission_flow(
         spectra, background distortion).
     load_shunt, load_shunt_basis, slack, method:
         As in :func:`pgml.solve_harmonic_flow` (load harmonic shunts, slack model,
-        fundamental solver).
+        fundamental solver). The inverter sources follow the fundamental terminal
+        voltage (the modulation index sets the PWM residues), so where the source's
+        Thevenin impedance matters use ``slack="norton"``: the default ``"ideal"`` pins
+        the source bus and ignores that impedance at the fundamental (at the harmonics
+        the source is always its Norton impedance). On a weak single-phase supply the
+        ideal slack put the modulation index 1.7 % low and single carrier lines 3 to 9 %
+        off against a switching simulation.
     stability:
         Compute the per-device stability indicator (one extra right-hand side per
         element).

@@ -175,6 +175,9 @@ over the stated range, at complex128.
 | same | averaged three-phase time-domain simulation with an SRF-PLL | 0.4 to 0.7 % direct term (continuous); a digital controller adds 12 to 20 % |
 | network solve with the Norton models, 168 frequencies, three feeder variants | OpenDSS (compensation theorem for the non-symmetric admittance) and ngspice AC analysis | 2.3e-9 (OpenDSS, set by its own fundamental solve), 4e-13 (ngspice) |
 | random-phase aggregation | 2000-draw Monte Carlo | within 2.8 standard errors |
+| complete single-phase unit (4.6 kW and 0.5 kW, stiff and weak supply): supraharmonic groups at 32 and 64 kHz | switched time-domain simulation (exact edges, 1 µs dead time, regularly sampled unipolar PWM, digital PR control, SOGI-PLL) | group RMS ratio 0.999 to 1.010 |
+| same: admittance 425 Hz to 25 kHz, dead time off | small-signal injection in the same simulation | 0.3 to 3.9 % magnitude, 0.6° |
+| same: dead-time harmonics, orders 5 to 21, rated power | same | 0.4 to 5 % magnitude; THD_I 1.86 % against 1.82 % |
 
 Wang et al.'s Table II gains reproduce the paper's stability trends (dq control stable at a
 20 Hz PLL bandwidth, lightly damped at 175 Hz, unstable at 330 Hz; stationary-frame control
@@ -183,10 +186,25 @@ intersection frequencies; the 330 Hz instability appears only in the coupled mod
 mirror term, not in the decoupled admittance alone. The model's controllers are continuous:
 the sampled-data effects of a digital controller (the 0.6 to 20 % above) are not modelled.
 
+The switched simulation of the complete unit also shows where the model is not yet good
+enough. At 0.5 kW the measured THD_I is 6.25 %; the ripple dead zone predicts 8.9 % and the
+hard sign 17 % (at 1 kW: 4.2 % measured, 7.5 % with the dead zone). The dead-time harmonics
+are locked to the fundamental current, while the distorted current crosses zero 1.7° (4.6 kW)
+to 3.4° (0.5 kW) earlier, so their phase drifts by about 2° per order (18° at the 9th, 78° at
+the 39th); magnitudes are unaffected, a phasor sum of many units is. The single-phase unit's
+PLL is the SRF form averaged over the two space-vector evaluations; against a SOGI-PLL it
+overstates |Y| at 175 Hz by 31 % at rated power, and the mirror coupling it neglects measures
+10 to 19 % there. With the dead time on, the small-signal response at low power depends on
+the injection amplitude (the blanking error is nonlinear in the current).
+
 The tests under `tests/inverter/` pin the closed forms of every block.
 
 ## Limits
 
+- **Dead time at low power and in phase.** See the end-to-end comparison above: low-order
+  emission at a few hundred watts is overstated by about 1.4 to 1.8 times, and the phase of
+  higher dead-time orders drifts.
+- **Single-phase PLL.** No SOGI model; the SRF form stands in for it.
 - **Decoupled.** The solve keeps the same-frequency admittance. Mirror-frequency coupling from
   the PLL (`f` and `2 f_1 - f`), the coupling of background harmonics into the switching
   sidebands, and measured frequency coupling matrices are not solved; `y_mirror` reports the
