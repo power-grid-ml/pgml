@@ -126,23 +126,30 @@ class PerturbObserveMPPT:
     rate_hz:
         MPPT sampling rate ``f_MPPT``.
     n_terms:
-        Number of odd Fourier orders ``n = 1, 3, ..`` kept.
+        Number of odd Fourier orders ``n = 1, 3, ..`` kept. The reference amplitudes
+        fall only as ``1 / n`` and the closed loop shapes which lines dominate, so the
+        series needs many terms: with 8 terms the dominant lines were 4 to 45 % low at
+        2 to 20 Hz MPPT rates against a time-domain reference.
     """
 
     v_step_v: Scalar
     rate_hz: float
-    n_terms: int = 8
+    n_terms: int = 50
 
     def orders(self) -> list[int]:
         return [2 * k + 1 for k in range(self.n_terms)]
 
     def line_frequencies(self, f1_hz: float) -> list[float]:
-        """``f_1 -+ n f_MPPT / 4`` for the kept orders (lower lines with ``f > 0`` only)."""
+        """``|f_1 - n f_MPPT / 4|`` and ``f_1 + n f_MPPT / 4`` for the kept orders.
+
+        A lower sideband below 0 Hz is the same real signal at ``n f_MPPT / 4 - f_1``
+        (folded); one exactly at 0 Hz is a DC offset and dropped.
+        """
         out = []
         for n in self.orders():
             fn = n * self.rate_hz / 4.0
-            if f1_hz - fn > 0:
-                out.append(f1_hz - fn)
+            if abs(f1_hz - fn) > 1e-9:
+                out.append(abs(f1_hz - fn))
             out.append(f1_hz + fn)
         return out
 
@@ -182,13 +189,17 @@ def mppt_current_lines(
     -------
     (frequencies_hz, phasors):
         Line frequencies ``[L]`` and RMS current phasors ``[*batch, L, E]`` leaving the
-        device. Lines whose lower frequency would be negative are dropped.
+        device. A lower sideband below 0 Hz is folded to ``f_n - f_1`` with the conjugate
+        phasor (``cos(-w t + p) = cos(w t - p)``; for a three-phase unit the folded line
+        is negative sequence). Lines may share a frequency; the caller sums them.
     """
     rdt = u_dc.dtype
     dev = u_dc.device
     fn, a_n, phi_n = mppt.reference_lines(rdt, dev)
     s = laplace(fn, cdt)
-    g = dc.reference_to_amplitude(s, f1_hz, v_g, u_dc, n_phases)  # [*batch, Nn]
+    # A higher DC-link reference means less exported power: |i_g| = -G_cl v*_dc, the
+    # loop convention of the ripple path below (|i_g| = G_cc G_PI (G_notch v_dc - v*)).
+    g = -dc.reference_to_amplitude(s, f1_hz, v_g, u_dc, n_phases)  # [*batch, Nn]
     a_p = a_n * g.abs()
     p = phi_n + torch.angle(g)
     beta = (
@@ -198,21 +209,25 @@ def mppt_current_lines(
     upper = torch.polar(a_p / (2.0 * math.sqrt(2.0)), beta + p + math.pi)
     freqs: list[float] = []
     cols = []
+    fold = []
     for k, n in enumerate(mppt.orders()):
         f_n = n * mppt.rate_hz / 4.0
-        if f1_hz - f_n > 0:
-            freqs.append(f1_hz - f_n)
+        if abs(f1_hz - f_n) > 1e-9:
+            freqs.append(abs(f1_hz - f_n))
             cols.append(lower[..., k])
+            fold.append(f1_hz - f_n < 0)
         freqs.append(f1_hz + f_n)
         cols.append(upper[..., k])
-    lines = torch.stack(cols, dim=-1).to(cdt)  # [*batch, L]
+        fold.append(False)
+    lines = torch.stack(cols, dim=-1).to(cdt).unsqueeze(-1)  # [*batch, L, 1]
     if n_phases == 3:
         shift = torch.polar(
             torch.ones(3, dtype=rdt, device=dev),
             torch.as_tensor([0.0, -TWO_PI / 3.0, TWO_PI / 3.0], dtype=rdt, device=dev),
         ).to(cdt)
-        return freqs, lines.unsqueeze(-1) * shift
-    return freqs, lines.unsqueeze(-1)
+        lines = lines * shift
+    folded = torch.as_tensor(fold, dtype=torch.bool, device=dev).unsqueeze(-1)
+    return freqs, torch.where(folded, torch.conj(lines), lines)
 
 
 def ripple_third_harmonic(

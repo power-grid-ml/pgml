@@ -24,6 +24,7 @@ from pgml.inverter import (
     bessel_j,
     closed_loop,
     dead_time_voltage,
+    mppt_current_lines,
     propagate_norton,
     ripple_third_harmonic,
 )
@@ -401,3 +402,30 @@ def test_source_split_and_line_placement():
             i1=torch.tensor([20.0 + 0j], dtype=CDT),
             state=InverterState(u_dc_v=400.0),
         )
+
+
+def test_mppt_lower_sidebands_below_zero_fold():
+    """f_1 - n f_MPPT / 4 < 0 is the real line at n f_MPPT / 4 - f_1, conjugated."""
+    mppt = PerturbObserveMPPT(v_step_v=12.0, rate_hz=20.0, n_terms=8)
+    dc = DCLinkControl(c_dc_f=1100e-6, kp=0.185, ki=12.2, sampling_hz=20000.0)
+    kw = dict(
+        f1_hz=F1,
+        v_g=torch.tensor(230.0, dtype=RDT),
+        u_dc=torch.tensor(450.0, dtype=RDT),
+        current_angle=torch.tensor(0.3, dtype=RDT),
+    )
+    freqs, lines = mppt_current_lines(mppt, dc, **kw)
+    assert min(freqs) > 0 and 5.0 in freqs  # n = 11: |50 - 55| = 5 Hz
+    assert freqs == mppt.line_frequencies(F1)
+    # Folding conjugates: the lower line of n = 11 rebuilt from the unfolded formula.
+    fn, a_n, phi_n = mppt.reference_lines(RDT, "cpu")
+    g = -dc.reference_to_amplitude(laplace(fn, CDT), F1, kw["v_g"], kw["u_dc"])
+    k = mppt.orders().index(11)
+    unfolded = torch.polar(
+        a_n[k] * g[k].abs() / (2 * math.sqrt(2)),
+        0.3 + math.pi / 2 - (phi_n[k] + torch.angle(g[k])),
+    )
+    # n = 9 (50 - 45) and the folded n = 11 (55 - 50) share 5 Hz; the folded one is last.
+    at_5 = [j for j, f in enumerate(freqs) if f == 5.0]
+    assert len(at_5) == 2
+    torch.testing.assert_close(lines[at_5[-1], 0], torch.conj(unfolded))
