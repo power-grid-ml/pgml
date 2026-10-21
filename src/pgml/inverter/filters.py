@@ -26,6 +26,8 @@ from typing import Sequence, Union
 
 from torch import Tensor
 
+from pgml.errors import InputError
+
 from ._common import Scalar, as_real, capacitor_branch_admittance, series_admittance
 
 
@@ -88,6 +90,13 @@ class SeriesStage:
 
     l_h: Scalar
     r_ohm: Scalar = 0.0
+
+    def __post_init__(self):
+        if not isinstance(self.l_h, Tensor) and not isinstance(self.r_ohm, Tensor):
+            if float(self.l_h) == 0.0 and float(self.r_ohm) == 0.0:
+                raise InputError(
+                    "SeriesStage needs a nonzero inductance or resistance."
+                )
 
     def impedance(self, s: Tensor) -> Tensor:
         rdt = s.real.dtype

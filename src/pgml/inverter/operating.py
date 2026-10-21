@@ -5,7 +5,7 @@ harmonic model needs what the power flow does not carry: whether the bridge swit
 whether the AC relay is closed, and the DC-link voltage, which sets the modulation index
 and the dead-time and PWM residues. :class:`InverterState` holds these per scenario.
 
-Discrete states (from the knowledge base note on operating-state dependence):
+Discrete states:
 
 =================  ===========  =========  ==========================================
 state              bridge_on    connected  model

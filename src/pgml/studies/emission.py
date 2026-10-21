@@ -27,8 +27,8 @@ returned:
 - ``v_rms``: the expected magnitude ``sqrt(E|V|^2)`` when the unlocked components of
   different units have independent uniformly distributed phases,
   ``E|V|^2 = |V_locked|^2 + sum_d |V_unlocked,d|^2`` (the cross terms of independent
-  uniform phases average to zero). This is the random-phase (power) summation of the
-  knowledge base and the summation-law literature; the locked part adds as phasors.
+  uniform phases average to zero). This is the general summation law with exponent 2
+  (IEC TR 61000-3-6 uses that exponent above order 10); the locked part adds as phasors.
 
 Primary and secondary emission
 ------------------------------
@@ -73,7 +73,8 @@ from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.errors import InputError
 from pgml.inverter import GridFollowingInverter, InverterState, NortonEquivalent
-from pgml.schemas.grid_schema import Generator, Grid, Phase, Storage
+from pgml.assembly._symmetry import resolve_connection
+from pgml.schemas.grid_schema import Generator, Grid, Phase, Storage, WindingConnection
 from pgml.solver import lu_factor_system, solve_factored, solve_power_flow
 from pgml.solver.harmonic_flow import (
     _apply_node_sources,
@@ -299,7 +300,10 @@ def emission_flow(
         ``operating_point``.
     harmonic_orders, frequencies_hz, f_max_hz:
         Extend / cap the frequency grid (:func:`emission_frequencies`). The other
-        devices' spectra and ``node_sources`` act at the integer orders of the grid.
+        devices' spectra and ``node_sources`` act at the integer orders of the grid; a
+        voltage-kind node source's Thevenin shunt is therefore stamped at those orders
+        only, as in :func:`pgml.solve_harmonic_flow`, and the network has no background
+        source at other frequencies.
     operating_point, harmonic_injection, node_sources:
         As in :func:`pgml.solve_harmonic_flow` (operating-point overrides, other devices'
         spectra, background distortion).
@@ -370,6 +374,11 @@ def emission_flow(
             raise InputError(
                 f"emission_flow: device {dev_id} has {len(a.phases)} phase(s), its model "
                 f"{model.n_elements} element(s)."
+            )
+        if model.n_elements == 3 and resolve_connection(a) == WindingConnection.DELTA:
+            raise InputError(
+                f"emission_flow: three-phase device {dev_id} is DELTA-connected; the "
+                "sequence-domain model is per WYE element."
             )
         if model.n_elements == 3 and tuple(a.phases) != (Phase.A, Phase.B, Phase.C):
             raise InputError(
@@ -577,7 +586,10 @@ def emission_flow(
         v_locked = v_locked + v_l
         v = v + v_l + v_u
         power = power + v_u.abs() ** 2
-    v_rms = torch.sqrt(v_locked.abs() ** 2 + power)
+    p_total = v_locked.abs() ** 2 + power
+    # sqrt has an infinite derivative at 0 (frequencies where nothing emits).
+    safe = torch.where(p_total > 0, p_total, torch.ones_like(p_total))
+    v_rms = torch.where(p_total > 0, torch.sqrt(safe), torch.zeros_like(p_total))
 
     def element_v(d: _Device, x: Tensor) -> Tensor:
         return torch.einsum("eu,...u->...e", d.m, x[..., d.rows])

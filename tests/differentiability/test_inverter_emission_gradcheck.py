@@ -119,3 +119,33 @@ def test_emission_flow_finite_difference_spot_check():
     with torch.no_grad():
         fd = (_study(r, l2, u + h).sum() - _study(r, l2, u - h).sum()) / (2 * h)
     torch.testing.assert_close(grad, fd, rtol=1e-6, atol=1e-12)
+
+
+def test_dead_zone_gradcheck_at_low_power():
+    """The ripple dead zone is active when the current is comparable to the ripple."""
+    grid = two_bus(r_ohm=0.25, x_ohm=0.12)
+    gen = Generator(id=7, node=2, phases=(Phase.A,), p_nom_w=150.0, q_nom_var=0.0)
+    grid = grid.model_copy(update={"appliances": [*grid.appliances, gen]})
+    base = single_phase_inverter()
+
+    def fn(l1, u_dc):
+        model = dataclasses.replace(
+            base,
+            filter=dataclasses.replace(base.filter, l1_h=l1),
+            mechanisms=("dead_time",),
+            harmonic_orders=(3, 5),
+        )
+        res = emission_flow(
+            grid,
+            {7: model},
+            states={7: InverterState(u_dc_v=u_dc)},
+            f_max_hz=300.0,
+            stability=False,
+        )
+        return torch.view_as_real(res.v).reshape(-1)
+
+    args = (
+        torch.tensor(1.5e-3, dtype=RDT, requires_grad=True),
+        torch.tensor(400.0, dtype=RDT, requires_grad=True),
+    )
+    assert gradcheck(fn, args, eps=1e-9, atol=1e-6, rtol=1e-4)

@@ -21,9 +21,15 @@ and each ``|i_g|`` line ``A'_n`` gives two grid-current lines of amplitude ``A'_
 (eqs. 5-7). The phases use the quadrant-correct ``atan2`` and the exact product
 ``A' sin(w_n t + p) sin(w_1 t) = A'/2 [cos((w_1 - w_n) t - p) - cos((w_1 + w_n) t + p)]``:
 the printed eq. 2 describes the waveform shifted by half a period and eqs. 6-7 carry a
-sign slip in the lower sideband (both checked numerically in the knowledge base note on
-MPPT interharmonics). The MPPT clocks of different units are independent, so these lines
+sign slip in the lower sideband (both found by a numerical Fourier analysis of the
+four-level waveform and of the product). The MPPT clocks of different units are independent, so these lines
 have no common phase reference between devices.
+
+These lines are the grid current of eq. 4, whose inner current loop is the first-order
+``G_cc``; they are used as Norton currents directly, i.e. with ideal tracking of the
+reference by the inner loop (the closed loop's ``G_ref`` of
+:func:`~pgml.inverter.control.closed_loop` is not applied a second time; it is 1.10 in
+magnitude at 100 Hz for a typical single-phase unit).
 
 The plant above is single-phase. For an ``n``-phase unit the power is ``n`` times that
 of one element, so ``G_plant`` is scaled by ``n`` (an extension of the single-phase

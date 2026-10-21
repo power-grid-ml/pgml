@@ -33,6 +33,7 @@ stationary-frame control).
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Sequence
@@ -110,24 +111,30 @@ def _place_lines(
     """Sum line values ``[*batch, L, E]`` onto the frequency grid ``[*batch, F, E]``.
 
     Lines above the grid's highest frequency are outside the study and dropped; a line
-    inside the grid's range that the grid does not contain raises (matching to 1e-6 Hz).
+    inside the grid's range that the grid does not contain raises (matching to a
+    relative 1e-6).
     """
-    lookup = {}
-    for k, f in enumerate(grid_hz):
-        lookup.setdefault(round(float(f), 6), k)
-    f_top = max(grid_hz) + 1e-6
+    order = sorted(range(len(grid_hz)), key=lambda k: grid_hz[k])
+    sorted_hz = [float(grid_hz[k]) for k in order]
+    f_top = sorted_hz[-1] * (1.0 + 1e-6) + 1e-6
     keep, positions = [], []
     for j, f in enumerate(lines_hz):
         if f > f_top:
             continue
-        key = round(float(f), 6)
-        if key not in lookup:
+        # Nearest grid point; a relative tolerance of 1e-6 absorbs the rounding of a
+        # single-precision frequency grid and is far below any line spacing.
+        k = bisect.bisect_left(sorted_hz, f)
+        best = min(
+            (c for c in (k - 1, k) if 0 <= c < len(sorted_hz)),
+            key=lambda c: abs(sorted_hz[c] - f),
+        )
+        if abs(sorted_hz[best] - f) > 1e-6 * max(abs(f), 1.0):
             raise InputError(
                 f"emission line at {f} Hz is not in the frequency grid; build the grid "
                 "with emission_frequencies() or include the line."
             )
         keep.append(j)
-        positions.append(lookup[key])
+        positions.append(order[best])
     out = torch.zeros(
         (*values.shape[:-2], len(grid_hz), values.shape[-1]),
         dtype=values.dtype,
@@ -356,11 +363,11 @@ class GridFollowingInverter:
         # their (unused) spectra finite and in range.
         mi = torch.where(bridge_on, mi, torch.zeros_like(mi))
         if "pwm" in self.mechanisms:
-            lines_hz, lines = self.pwm.bridge_spectrum(
+            _, lines = self.pwm.bridge_spectrum(
                 mi, u_dc, f1_hz, torch.angle(v_b[..., 0]), state.carrier_angle_rad
             )
             parts["pwm"] = masked(
-                _place_lines(lines.to(cdt), lines_hz.tolist(), grid_list)
+                _place_lines(lines.to(cdt), self.pwm.line_frequencies(f1_hz), grid_list)
             )
         if "dead_time" in self.mechanisms and self.dead_time_s > 0:
             d = dead_time_voltage(
@@ -372,7 +379,7 @@ class GridFollowingInverter:
                 full_bridge=e == 1,
                 three_phase=e == 3,
                 ripple=self.dead_time_ripple,
-                l1_h=float(self.filter.l1_h),
+                l1_h=self.filter.l1_h,
                 modulation_index=mi,
                 bridge_angle=torch.angle(v_b),
                 topology=self.pwm.topology,

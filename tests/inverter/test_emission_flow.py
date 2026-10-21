@@ -222,3 +222,16 @@ def test_admittance_modes_separate_control_and_filter():
     torch.testing.assert_close(full.v[high], passive.v[high], rtol=1e-12, atol=1e-14)
     with pytest.raises(InputError, match="admittance"):
         emission_flow(grid, {7: model}, admittance="nonsense", **kw)
+
+
+def test_single_precision_at_an_off_nominal_fundamental():
+    grid = _pv_two_bus().model_copy(update={"base_frequency_hz": 49.95})
+    res = emission_flow(
+        grid,
+        {7: single_phase_inverter()},
+        states={7: InverterState(u_dc_v=400.0)},
+        f_max_hz=70000.0,
+        dtype="complex64",
+    )
+    assert res.v.dtype == torch.complex64 and torch.isfinite(res.v).all()
+    assert float(res.norton[7].components["pwm"].abs().max()) > 0

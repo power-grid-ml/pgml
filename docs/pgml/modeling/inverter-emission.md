@@ -220,6 +220,13 @@ The tests under `tests/inverter/` pin the closed forms of every block.
   modelled.
 - **Linearised at the operating point.** Saturation of filter chokes, current limits and the
   nonlinearity of the PLL under large distortion are outside the model.
+- **Ideal inner tracking of reference lines.** MPPT and ripple lines are the grid current
+  of the DC-link loop model (whose inner loop is first order) and are not passed through the
+  closed current loop again; at 100 to 500 Hz that loop's reference gain is about 1.1 in
+  magnitude for a typical single-phase unit.
+- **Background source at integer orders only.** A voltage-kind `NodeHarmonicSource` (its
+  Thevenin shunt and EMF) acts at the integer orders, as in the harmonic flow; at
+  interharmonic and supraharmonic frequencies the network has no background source.
 - **Integer orders for other devices.** Loads and generators without an inverter model emit
   only at integer orders, from their spectra; at other frequencies they are their harmonic
   shunt.

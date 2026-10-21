@@ -60,7 +60,7 @@ def dead_time_voltage(
     full_bridge: bool,
     three_phase: bool,
     ripple: Optional[str] = None,
-    l1_h: Optional[float] = None,
+    l1_h=None,
     modulation_index: Optional[Tensor] = None,
     bridge_angle: Optional[Tensor] = None,
     topology: Optional[str] = None,
@@ -126,6 +126,7 @@ def dead_time_voltage(
             t + bridge_angle.to(rdt).unsqueeze(-1)
         )
         udc = u_dc.to(rdt).unsqueeze(-1).unsqueeze(-1)
+        l1_h = l1_h.to(rdt) if isinstance(l1_h, Tensor) else float(l1_h)
         k = udc / (8.0 * l1_h * switching_hz)
         pos = wave > 0
         if topology == "single_phase_unipolar":
