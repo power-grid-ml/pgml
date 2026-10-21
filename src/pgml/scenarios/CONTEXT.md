@@ -28,6 +28,8 @@ Signatures: docstrings / API_INDEX.md.
   `perturbation_sweep`, `spectrum_sweep`, `build_background_sources`,
   `run_node_injection_sweep`.
 - `random.py` — `ar1_noise` (stationary AR(1) along the last axis).
+- `iec61000_2_2.py` — IEC 61000-2-2 / -2-12 compatibility levels (harmonics LV/MV,
+  2-150 kHz bands LV; packaged `iec61000_2_2.yaml`, which states what is not included).
 - `en50160.py`, `iec61000_3_2.py` — the standards tables (packaged YAML under
   `pgml/data/standards/`, `PGML_EN50160` / `PGML_IEC61000_3_2` overrides, `*_provenance`).
 - `run.py` — `ScenarioSpec` protocol, `run_scenarios`, `ScenarioResult`.

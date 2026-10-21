@@ -50,6 +50,12 @@ from .config import (
     Uniform,
 )
 from .en50160 import en50160_limit, en50160_limits, en50160_provenance
+from .iec61000_2_2 import (
+    iec61000_2_2_band_level_v,
+    iec61000_2_2_harmonic_levels,
+    iec61000_2_2_provenance,
+    iec61000_2_2_thd,
+)
 from .harmonics import build_background_sources, spectrum_sweep
 from .iec61000_3_2 import (
     iec61000_3_2_device_caps,
@@ -216,6 +222,10 @@ __all__ = [
     "en50160_limits",
     "en50160_limit",
     "en50160_provenance",
+    "iec61000_2_2_band_level_v",
+    "iec61000_2_2_harmonic_levels",
+    "iec61000_2_2_provenance",
+    "iec61000_2_2_thd",
     "iec61000_3_2_limits",
     "iec61000_3_2_fraction",
     "iec61000_3_2_device_caps",

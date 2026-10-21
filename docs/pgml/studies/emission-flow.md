@@ -7,7 +7,8 @@ terminal current it produces itself rather than draws from the rest of the grid.
 models are those of {mod}`pgml.inverter`; the derivation of the model and its validation are
 on {doc}`../modeling/inverter-emission`.
 
-The study solves the fundamental power flow, evaluates each inverter as a frequency-domain
+The study solves the fundamental power flow (with the source's Thevenin impedance,
+`slack="norton"`, by default; the inverter sources follow the terminal voltage), evaluates each inverter as a frequency-domain
 Norton equivalent `i = I_N - Y v` at its operating point, and solves the linear network on a
 frequency grid that holds every emission line of the models plus any requested frequency.
 Frequencies need not be integer multiples of the fundamental, which is the difference to
@@ -107,6 +108,19 @@ the frequency axis is `frequencies_hz`, ascending, without the fundamental.
   is a margin indicator, not a Nyquist test; `stability=False` skips it.
 - `norton[id]` is the {class}`~pgml.inverter.NortonEquivalent` evaluated at the solved
   operating point.
+
+## Holding the result against compatibility levels
+
+{meth}`~pgml.studies.EmissionFlow.compatibility` divides the solved voltage at a node by
+the IEC 61000-2-2 (low voltage) or IEC 61000-2-12 (`network="mv"`) compatibility level,
+per harmonic order and, for low voltage, per 200 Hz band from 2 kHz to 150 kHz:
+
+```python
+out = res.compatibility(2, "a")
+print(float(out["max_ratio"]))    # 1.0 = at the compatibility level
+```
+
+The tables and what they leave out are described on {doc}`../modeling/limitations`.
 
 ## Separating the mechanisms
 

@@ -180,6 +180,18 @@ They describe source or background distortion, not device emission. Device curre
 default to IEC 61000-3-2 per emission class A to D. There is no lighting consumer type, so
 class C is never selected automatically.
 
+IEC 61000-2-2 (low voltage) and IEC 61000-2-12 (medium voltage) compatibility levels ship
+for the harmonic orders (long-term values and the THD levels) and, for low-voltage
+networks, for 200 Hz bands from 2 kHz to 150 kHz
+({func}`pgml.scenarios.iec61000_2_2_harmonic_levels`,
+{func}`pgml.scenarios.iec61000_2_2_band_level_v`,
+{meth}`pgml.studies.EmissionFlow.compatibility`). Not included: the interharmonic
+compatibility levels, which the standard gives only as a flicker-based curve over the beat
+frequency, and the factor of the very-short-term harmonic levels. EN 50160 itself gives no
+interharmonic levels (under consideration) and refers to IEC 61000-2-2 for 2 kHz to 150 kHz.
+Above 9 kHz the standard's levels are quasi-peak readings in a 200 Hz bandwidth; for the
+steady line spectra of a frequency-domain solve the band rms is compared with them.
+
 ## Numerics
 
 **Single precision.** pgml solves in SI units without per-unit normalisation, and the diagonal

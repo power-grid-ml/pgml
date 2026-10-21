@@ -44,7 +44,9 @@ def test_without_inverters_the_study_is_the_harmonic_flow():
     ]
     for sources in (None, background):
         res = emission_flow(grid, {}, harmonic_orders=orders, node_sources=sources)
-        ref = solve_harmonic_flow(grid, [1, *orders], node_sources=sources)
+        ref = solve_harmonic_flow(
+            grid, [1, *orders], node_sources=sources, slack="norton"
+        )
         torch.testing.assert_close(res.v, ref.v[1:], rtol=1e-12, atol=1e-12)
         torch.testing.assert_close(res.v_rms, ref.v[1:].abs(), rtol=1e-12, atol=1e-12)
 
@@ -235,3 +237,27 @@ def test_single_precision_at_an_off_nominal_fundamental():
     )
     assert res.v.dtype == torch.complex64 and torch.isfinite(res.v).all()
     assert float(res.norton[7].components["pwm"].abs().max()) > 0
+
+
+def test_compatibility_ratios():
+    grid = _pv_two_bus()
+    res = emission_flow(
+        grid,
+        {7: single_phase_inverter()},
+        states={7: InverterState(u_dc_v=400.0)},
+        f_max_hz=70000.0,
+    )
+    out = res.compatibility(2, "a")
+    row = res.rows(2, "a")[0]
+    u1 = res.v1[row].abs()
+    k5 = out["harmonic_order"].index(5)
+    f5 = int(torch.nonzero(res.frequencies_hz == 250.0)[0, 0])
+    torch.testing.assert_close(
+        out["harmonic_ratio"][k5], res.v_rms[f5, row] / (u1 * 0.06)
+    )
+    assert out["band_centre_hz"][0] == 2100.0 and max(out["band_centre_hz"]) <= 70000.0
+    assert float(out["max_ratio"]) == pytest.approx(
+        float(torch.cat([out["harmonic_ratio"], out["band_ratio"]]).max())
+    )
+    back = EmissionFlow.from_dict(res.to_dict())
+    torch.testing.assert_close(back.v1, res.v1)

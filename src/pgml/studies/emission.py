@@ -121,6 +121,9 @@ class EmissionFlow:
         ``{device_id: [*batch, F]}`` (see module docstring), or empty.
     f1_hz:
         The fundamental frequency.
+    v1:
+        Complex ``[*batch, N]`` solved fundamental node-phase voltages (RMS phasors), or
+        ``None`` for a result restored without them.
     """
 
     frequencies_hz: Tensor
@@ -134,6 +137,7 @@ class EmissionFlow:
     norton: dict = field(default_factory=dict)
     stability_margin: dict = field(default_factory=dict)
     f1_hz: float = 50.0
+    v1: Optional[Tensor] = None
 
     def rows(self, node_id: int, phase=None) -> list[int]:
         """Row indices of ``node_id`` (all its phases, or one)."""
@@ -157,6 +161,65 @@ class EmissionFlow:
         mask = (self.frequencies_hz >= f_lo_hz) & (self.frequencies_hz < f_hi_hz)
         x = self.v_rms if kind == "rms" else self.v.abs()
         return torch.sqrt((x[..., mask, :] ** 2).sum(dim=-2))
+
+    def compatibility(self, node_id: int, phase=None, *, network: str = "lv") -> dict:
+        """Solved voltages against the compatibility levels of IEC 61000-2-2 / -2-12.
+
+        For the row of ``node_id`` / ``phase`` (the first row of the node when ``phase``
+        is ``None``): per integer harmonic order the ratio of ``v_rms`` to the order's
+        level (:func:`pgml.scenarios.iec61000_2_2_harmonic_levels`; ``network`` ``"lv"`` or
+        ``"mv"``), and for a low-voltage network per 200 Hz band from 2 kHz up to the
+        highest solved frequency the ratio of the band rms of ``v_rms`` to the band level
+        (:func:`pgml.scenarios.iec61000_2_2_band_level_v`). Voltages are phase to ground
+        rows of the solve, the compatibility levels are stated phase to neutral; the two
+        agree for a solidly earthed neutral at the node. A band without a solved line
+        reads 0. Returns ``{"harmonic_order", "harmonic_ratio" [*batch, H],
+        "band_centre_hz", "band_ratio" [*batch, B], "max_ratio" [*batch]}``.
+        """
+        from pgml.scenarios.iec61000_2_2 import (
+            iec61000_2_2_band_level_v,
+            iec61000_2_2_harmonic_levels,
+        )
+
+        if self.v1 is None:
+            raise InputError("compatibility needs the fundamental voltages (v1).")
+        row = self.rows(node_id, phase)[0]
+        u1 = self.v1[..., row].abs()  # [*batch]
+        f = self.frequencies_hz
+        levels = iec61000_2_2_harmonic_levels(network)
+        orders, ratios = [], []
+        for h, level in levels.items():
+            k = torch.nonzero((f - h * self.f1_hz).abs() < 1e-6 * h * self.f1_hz)
+            if k.numel():
+                orders.append(h)
+                ratios.append(self.v_rms[..., int(k[0, 0]), row] / (u1 * level))
+        harm = torch.stack(ratios, dim=-1) if ratios else torch.zeros((*u1.shape, 0))
+        centres, band = [], []
+        if network == "lv":
+            width = 200.0
+            start = 2100.0 if self.f1_hz != 60.0 else 2500.0
+            n_bands = int((float(f.max()) - start + width / 2) // width) + 1
+            for j in range(max(0, n_bands)):
+                centre = start + j * width
+                limit = iec61000_2_2_band_level_v(
+                    centre, 1.0, f1_hz=self.f1_hz
+                )  # per unit of u1 below 9 kHz, absolute volts above
+                if limit is None:
+                    continue
+                mask = (f >= centre - width / 2) & (f < centre + width / 2)
+                rms = torch.sqrt((self.v_rms[..., mask, row] ** 2).sum(-1))
+                scale = u1 if centre < 9000.0 else torch.ones_like(u1)
+                centres.append(centre)
+                band.append(rms / (scale * limit))
+        bands = torch.stack(band, dim=-1) if band else torch.zeros((*u1.shape, 0))
+        both = torch.cat([harm, bands], dim=-1)
+        return {
+            "harmonic_order": orders,
+            "harmonic_ratio": harm,
+            "band_centre_hz": centres,
+            "band_ratio": bands,
+            "max_ratio": both.amax(dim=-1) if both.shape[-1] else torch.zeros_like(u1),
+        }
 
     def to_dict(self) -> dict:
         """JSON-ready: frequencies, labels and the voltages (``*_re_v`` / ``*_im_v``)."""
@@ -192,6 +255,9 @@ class EmissionFlow:
                     str(k): x.cpu().tolist() for k, x in self.stability_margin.items()
                 },
             }
+            if self.v1 is not None:
+                out["v1_re_v"] = self.v1.real.cpu().tolist()
+                out["v1_im_v"] = self.v1.imag.cpu().tolist()
         return out
 
     @classmethod
@@ -225,6 +291,7 @@ class EmissionFlow:
                 for k, v in data["stability_margin"].items()
             },
             f1_hz=float(data["f1_hz"]),
+            v1=cplx(data["v1_re_v"], data["v1_im_v"]) if "v1_re_v" in data else None,
         )
 
 
@@ -299,7 +366,7 @@ def emission_flow(
     node_sources: Optional[Sequence] = None,
     load_shunt: Optional[str] = None,
     load_shunt_basis: Optional[str] = None,
-    slack: str = "ideal",
+    slack: str = "norton",
     method: str = "current_injection",
     stability: bool = True,
     admittance: str = "model",
@@ -332,15 +399,18 @@ def emission_flow(
     operating_point, harmonic_injection, node_sources:
         As in :func:`pgml.solve_harmonic_flow` (operating-point overrides, other devices'
         spectra, background distortion).
-    load_shunt, load_shunt_basis, slack, method:
-        As in :func:`pgml.solve_harmonic_flow` (load harmonic shunts, slack model,
-        fundamental solver). The inverter sources follow the fundamental terminal
-        voltage (the modulation index sets the PWM residues), so where the source's
-        Thevenin impedance matters use ``slack="norton"``: the default ``"ideal"`` pins
-        the source bus and ignores that impedance at the fundamental (at the harmonics
-        the source is always its Norton impedance). On a weak single-phase supply the
-        ideal slack put the modulation index 1.7 % low and single carrier lines 3 to 9 %
-        off against a switching simulation.
+    load_shunt, load_shunt_basis, method:
+        As in :func:`pgml.solve_harmonic_flow` (load harmonic shunts, fundamental
+        solver).
+    slack:
+        Slack model of the fundamental solve, ``"norton"`` (default) or ``"ideal"``. The
+        inverter sources follow the fundamental terminal voltage (the modulation index
+        sets the PWM residues), so the default keeps the source's Thevenin impedance at
+        the fundamental, as the study already does at every other frequency. ``"ideal"``
+        pins the source bus instead (the default of :func:`pgml.solve_harmonic_flow`); on
+        a weak single-phase supply it put the modulation index 1.7 % low and single
+        carrier lines 3 to 9 % off against a switching simulation. Pass the same slack to
+        :func:`pgml.solve_harmonic_flow` when comparing the two.
     stability:
         Compute the per-device stability indicator (one extra right-hand side per
         element).
@@ -662,4 +732,5 @@ def emission_flow(
         norton={i: devices[i].norton for i in ids},
         stability_margin=margin,
         f1_hz=f0,
+        v1=v1,
     )

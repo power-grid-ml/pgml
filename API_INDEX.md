@@ -480,6 +480,10 @@ Full documentation: the docstrings (published as the API reference).
 - def `en50160_limits(path: Optional[str] = None) -> dict` — Return ``{order: max_magnitude_pu}`` from the DIN EN 50160 table (cached).
 - def `en50160_provenance(path: Optional[str] = None) -> dict` — Identify the DIN EN 50160 table a run actually used.
 - def `generation_provenance() -> dict` — Everything a generated dataset should record beyond its config and seed.
+- def `iec61000_2_2_band_level_v(frequency_hz: float, u1_v: float, f1_hz: float = 50.0, path: Optional[str] = None) -> Optional[float]` — Low-voltage compatibility level of a 200 Hz band centred at ``frequency_hz`` [V].
+- def `iec61000_2_2_harmonic_levels(network: str = 'lv', path: Optional[str] = None) -> dict` — Long-term compatibility levels ``{order: fraction of the fundamental}``.
+- def `iec61000_2_2_provenance(path: Optional[str] = None) -> dict` — ``{"source", "override", "sha256"}`` of the table a run used.
+- def `iec61000_2_2_thd(network: str = 'lv', very_short_term: bool = False, path: Optional[str] = None) -> float` — Compatibility level of the total harmonic distortion (fraction).
 - def `iec61000_3_2_device_caps(grid: Grid, ids: list[int], orders: list[int], emission_class: str = 'auto', power_factor: float = 1.0, path: Optional[str] = None) -> dict[int, dict[int, float]]` — Per-device, per-order IEC 61000-3-2 emission fractions for a grid.
 - def `iec61000_3_2_fraction(order: int, emission_class: str, p_w: float, u_ln_v: float, power_factor: float = 1.0, path: Optional[str] = None) -> float` — IEC 61000-3-2 emission limit for one order as a fraction of the fundamental current.
 - def `iec61000_3_2_limits(emission_class: Optional[str] = None, path: Optional[str] = None) -> dict` — Return the IEC 61000-3-2 emission-limit table (cached copy).
@@ -530,6 +534,13 @@ Full documentation: the docstrings (published as the API reference).
 
 - `build_background_sources` — re-exported from `pgml.scenarios`
 - `spectrum_sweep` — re-exported from `pgml.scenarios`
+
+## `pgml.scenarios.iec61000_2_2`
+
+- `iec61000_2_2_band_level_v` — re-exported from `pgml.scenarios`
+- `iec61000_2_2_harmonic_levels` — re-exported from `pgml.scenarios`
+- `iec61000_2_2_provenance` — re-exported from `pgml.scenarios`
+- `iec61000_2_2_thd` — re-exported from `pgml.scenarios`
 
 ## `pgml.scenarios.iec61000_3_2`
 
@@ -866,7 +877,7 @@ Full documentation: the docstrings (published as the API reference).
 ## `pgml.studies`
 
 - class `BranchRating(i_max_a, s_rated_va)` — Thermal rating of one branch; either field is ``None`` when the grid declares none.
-- class `EmissionFlow(frequencies_hz, node_ids, phases, v, v_rms, v_locked, device_current=…, device_primary=…, norton=…, stability_margin=…, f1_hz=…)` — Result of :func:`emission_flow`.
+- class `EmissionFlow(frequencies_hz, node_ids, phases, v, v_rms, v_locked, device_current=…, device_primary=…, norton=…, stability_margin=…, f1_hz=…, v1=…)` — Result of :func:`emission_flow`.
 - class `HostingCapacity(node_ids, direction, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…, base_violations=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
 - class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…, neutral_loading=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
 - class `ImpedanceScan(frequencies_hz, base_frequency_hz, node_ids, phases, z_phase_ohm, z_positive_ohm, z_zero_ohm, transfer_rows=…, z_transfer_ohm=…)` — Result of :func:`impedance_scan`: impedances seen from each requested bus vs frequency.
@@ -874,7 +885,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `QVCurve(node_id, phases, v_pu, q_var, q_phase_var, converged, q_margin_var, v_at_min_pu, minimum_in_range)` — A Q-V curve at one bus (:func:`qv_curve`).
 - class `Resonance(kind, frequency_hz, order, z_ohm, prominence)` — One resonance of a driving-point impedance magnitude.
 - def `branch_ratings(grid: Grid) -> dict[int, BranchRating]` — Thermal rating of every branch of ``grid``, keyed by branch id (pure, no solve).
-- def `emission_flow(grid: Grid, inverters: Optional[Mapping[int, GridFollowingInverter]] = None, states: Optional[Mapping[int, InverterState]] = None, harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None, operating_point: Optional[dict] = None, harmonic_injection: Optional[dict] = None, node_sources: Optional[Sequence] = None, load_shunt: Optional[str] = None, load_shunt_basis: Optional[str] = None, slack: str = 'ideal', method: str = 'current_injection', stability: bool = True, admittance: str = 'model', dtype = 'complex128', device: Optional[device] = None) -> EmissionFlow` — Solve the emission spread with inverter Norton models at arbitrary frequencies.
+- def `emission_flow(grid: Grid, inverters: Optional[Mapping[int, GridFollowingInverter]] = None, states: Optional[Mapping[int, InverterState]] = None, harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None, operating_point: Optional[dict] = None, harmonic_injection: Optional[dict] = None, node_sources: Optional[Sequence] = None, load_shunt: Optional[str] = None, load_shunt_basis: Optional[str] = None, slack: str = 'norton', method: str = 'current_injection', stability: bool = True, admittance: str = 'model', dtype = 'complex128', device: Optional[device] = None) -> EmissionFlow` — Solve the emission spread with inverter Norton models at arbitrary frequencies.
 - def `emission_frequencies(grid: Grid, inverters: Optional[Mapping[int, GridFollowingInverter]] = None, harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None) -> list[float]` — The frequency grid :func:`emission_flow` solves: every model line plus extras.
 - def `hosting_capacity(grid: Grid, candidates: Optional[Sequence[int]] = None, direction: Literal['load', 'generation'] = 'generation', limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = None, phases: Union[str, Phase] = 'balanced', power_factor: float = 1.0, p_max_w: Optional[float] = None, tol_w: Optional[float] = None, harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> HostingCapacity` — Largest new generation or demand each candidate bus can take within the limits.
 - def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, load_shunt: Optional[Literal['opendss', 'motor', 'none', 'const_z']] = None, load_shunt_basis: Optional[Literal['operating_point', 'nameplate']] = None, transfer: bool = False, fold_generation: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
