@@ -392,7 +392,8 @@ def test_source_split_and_line_placement():
     # Dead-time harmonics are odd only for a single-phase bridge.
     f2 = (f - 100.0).abs().argmin()
     f3 = (f - 150.0).abs().argmin()
-    assert float(nor.components["dead_time"][f2].abs()) == 0.0
+    # Even orders vanish (to the round-off of the dead-zone DFT).
+    assert float(nor.components["dead_time"][f2].abs()) < 1e-12
     assert float(nor.components["dead_time"][f3].abs()) > 0.0
     with pytest.raises(InputError, match="not in the frequency grid"):
         model.norton(

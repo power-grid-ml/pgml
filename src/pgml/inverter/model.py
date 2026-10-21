@@ -161,8 +161,11 @@ class GridFollowingInverter:
     dead_time_s:
         Blanking time per commutation (0 disables the mechanism).
     dead_time_ripple:
-        ``None`` (hard sign) or ``"local"`` (the ripple dead zone of
-        :func:`~pgml.inverter.dead_time.dead_time_voltage`).
+        ``"local"`` (default: the ripple dead zone of
+        :func:`~pgml.inverter.dead_time.dead_time_voltage`, which follows switching
+        simulations at every current level) or ``None`` (the hard sign of the averaged
+        blanking error, which overstates the low-order error once the current is
+        comparable to the switching ripple).
     dc_link, mppt:
         Optional DC-link control and P&O MPPT (needed for the ``"mppt"`` and
         ``"dc_ripple"`` mechanisms).
@@ -179,7 +182,7 @@ class GridFollowingInverter:
     emc: tuple = ()
     emc_on_grid_side: bool = True
     dead_time_s: float = 0.0
-    dead_time_ripple: Optional[str] = None
+    dead_time_ripple: Optional[str] = "local"
     dc_link: Optional[DCLinkControl] = None
     mppt: Optional[PerturbObserveMPPT] = None
     harmonic_orders: tuple = tuple(range(2, 51))
