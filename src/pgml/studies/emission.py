@@ -53,6 +53,7 @@ operating point; the frequency grid is chunked against ``solver.harmonic.system_
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
@@ -277,6 +278,7 @@ def emission_flow(
     slack: str = "ideal",
     method: str = "current_injection",
     stability: bool = True,
+    admittance: str = "model",
     dtype="complex128",
     device: Optional[torch.device] = None,
 ) -> EmissionFlow:
@@ -305,6 +307,13 @@ def emission_flow(
     stability:
         Compute the per-device stability indicator (one extra right-hand side per
         element).
+    admittance:
+        Which inverter admittance the network sees, for separating the mechanisms
+        that shape the spread: ``"model"`` (default, the closed-loop admittance through
+        the filter), ``"passive"`` (the filter with the bridge shorted, i.e. the control's
+        contribution removed) or ``"none"`` (pure current sources, the classic harmonic
+        current-source model). The Norton currents are the same in all three; they are
+        short-circuit currents, so the terminal current of a unit changes with the mode.
     dtype, device:
         Complex working dtype (``"complex128"`` / ``"complex64"`` or the torch dtype)
         and device.
@@ -313,6 +322,11 @@ def emission_flow(
     -------
     EmissionFlow
     """
+    if admittance not in ("model", "passive", "none"):
+        raise InputError(
+            f"emission_flow: admittance must be 'model', 'passive' or 'none', got "
+            f"{admittance!r}."
+        )
     cdt = resolve_complex_dtype(dtype)
     rdt = _rdtype(cdt)
     cdt = _cdtype(cdt)
@@ -397,7 +411,12 @@ def emission_flow(
             vtc.abs() < 1e-300, torch.zeros_like(s_el), torch.conj(s_el) / safe
         )
         d = _Device(a, model, states[int(dev_id)], m, rows, vt, -i_abs)
-        d.norton = model.norton(f_t, f1_hz=f0, v1=vt, i1=-i_abs, state=d.state)
+        nor = model.norton(f_t, f1_hz=f0, v1=vt, i1=-i_abs, state=d.state)
+        if admittance == "passive":
+            nor = dataclasses.replace(nor, admittance=nor.admittance_passive)
+        elif admittance == "none":
+            nor = dataclasses.replace(nor, admittance=torch.zeros_like(nor.admittance))
+        d.norton = nor
         devices[int(dev_id)] = d
 
     # Integer orders of the grid: other devices' spectra and the background act there.

@@ -198,3 +198,27 @@ def test_contract_errors():
     three = lv_feeder()
     with pytest.raises(InputError, match="element"):
         emission_flow(three, {101: model}, states={101: InverterState(u_dc_v=400.0)})
+
+
+def test_admittance_modes_separate_control_and_filter():
+    """'none' is the pure current-source model, 'passive' the filter-only admittance."""
+    grid = _pv_two_bus()
+    model = single_phase_inverter()
+    kw = dict(states={7: InverterState(u_dc_v=400.0)}, f_max_hz=40000.0)
+    full = emission_flow(grid, {7: model}, **kw)
+    none = emission_flow(grid, {7: model}, admittance="none", **kw)
+    passive = emission_flow(grid, {7: model}, admittance="passive", **kw)
+    f = full.frequencies_hz
+    z_th = (0.25 + 1.0e-3) + laplace(f, CDT) * (0.12 / (2 * math.pi * F1) + 1.0e-6)
+    row = full.rows(2, "a")[0]
+    src = full.norton[7].source[:, 0]
+    torch.testing.assert_close(none.v[:, row], src * z_th, rtol=1e-10, atol=1e-12)
+    y_p = full.norton[7].admittance_passive[:, 0, 0]
+    torch.testing.assert_close(
+        passive.v[:, row], src * z_th / (1.0 + z_th * y_p), rtol=1e-10, atol=1e-12
+    )
+    # Above the controller's Nyquist frequency the control has no authority.
+    high = f > 16000.0
+    torch.testing.assert_close(full.v[high], passive.v[high], rtol=1e-12, atol=1e-14)
+    with pytest.raises(InputError, match="admittance"):
+        emission_flow(grid, {7: model}, admittance="nonsense", **kw)
