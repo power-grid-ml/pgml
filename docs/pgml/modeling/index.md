@@ -25,6 +25,9 @@ Each page states its own limits. Nothing here is hidden behind a default, and
   the earth-return term belongs to the zero sequence.
 - {doc}`der-pv-storage` covers inverter control laws, storage and dispatch, and which parts of
   them carry gradients.
+- {doc}`inverter-emission` models the harmonic, interharmonic and supraharmonic emission of a
+  grid-following inverter from its filter, controller, PLL, PWM, dead time and DC link, and how
+  that emission spreads through a grid.
 - {doc}`error-injection` describes injecting a defined harmonic disturbance at any node.
 
 ## Solver
@@ -55,6 +58,7 @@ asymmetric
 transformer
 harmonic-line-model
 der-pv-storage
+inverter-emission
 error-injection
 solver-performance
 references/index

@@ -300,10 +300,12 @@ def emission_flow(
     harmonic_orders, frequencies_hz, f_max_hz:
         Extend / cap the frequency grid (:func:`emission_frequencies`). The other
         devices' spectra and ``node_sources`` act at the integer orders of the grid.
-    operating_point, harmonic_injection, node_sources, load_shunt, load_shunt_basis,
-    slack, method:
-        As in :func:`pgml.solve_harmonic_flow` (fundamental solve, other devices'
-        spectra, background distortion, load harmonic shunts).
+    operating_point, harmonic_injection, node_sources:
+        As in :func:`pgml.solve_harmonic_flow` (operating-point overrides, other devices'
+        spectra, background distortion).
+    load_shunt, load_shunt_basis, slack, method:
+        As in :func:`pgml.solve_harmonic_flow` (load harmonic shunts, slack model,
+        fundamental solver).
     stability:
         Compute the per-device stability indicator (one extra right-hand side per
         element).

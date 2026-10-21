@@ -27,6 +27,16 @@ largest new generation or demand that keeps the :class:`~pgml.studies.HostingLim
 :func:`~pgml.studies.branch_ratings` resolves the line ampacities and transformer ratings
 those limits are checked against. User guide: :doc:`../studies/hosting-capacity`.
 
+Emission spread
+---------------
+
+:func:`~pgml.studies.emission_flow` solves the network at an arbitrary frequency grid, with
+each modelled inverter (:class:`~pgml.inverter.GridFollowingInverter`) as its Norton
+equivalent, and returns an :class:`~pgml.studies.EmissionFlow`: coherent and expected
+(random-phase) node voltages, the primary part of each inverter's terminal current and a
+per-frequency stability margin. :func:`~pgml.studies.emission_frequencies` gives the
+frequency grid the study solves. User guide: :doc:`../studies/emission-flow`.
+
 Reference
 ---------
 

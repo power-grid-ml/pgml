@@ -404,6 +404,30 @@ Full documentation: the docstrings (published as the API reference).
 - `ieee33_geometry_grid` — re-exported from `pgml.evaluation.oracles`
 - def `synthetic_feeder(n_nodes: int, n_feeders: int = 8, segment_m: float = 200.0, total_load_w: float = 5000000.0, power_factor: float = 0.95, u_rated_v: float = 20000.0, base_frequency_hz: float = 50.0, tie_switches: int = 0)` — A synthetic 3-phase radial MV feeder of arbitrary size (schema-only, no deps).
 
+## `pgml.inverter`
+
+- class `ClosedLoop(y, y_passive, g_ref, g_dist, y_mirror, loop_gain)` — Closed-loop transfer functions at the inner port, per frequency.
+- class `CurrentController(kind=…, kp=…, ki=…, resonant=…, resonant_bandwidth_rad_s=…, sampling_hz=…, delay_samples=…, feedback=…, active_damping_kc=…, feedforward_gain=…, feedforward_cutoff_hz=…)` — Current controller of a grid-following inverter.
+- class `DCLinkControl(c_dc_f, kp, ki, sampling_hz=…, notch_quality_rad_s=…)` — DC-link capacitor and voltage controller.
+- class `GridFollowingInverter(filter, control, pwm, pll=…, emc=…, emc_on_grid_side=…, dead_time_s=…, dead_time_ripple=…, dc_link=…, mppt=…, harmonic_orders=…, mechanisms=…)` — A current-controlled grid-following inverter with an LCL and EMC filter.
+- class `InverterState(u_dc_v, bridge_on=…, connected=…, carrier_angle_rad=…)` — Per-scenario state of an inverter (each field a float, bool or ``[*batch]`` tensor).
+- class `LCLFilter(l1_h, c_f=…, l2_h=…, r1_ohm=…, r_d_ohm=…, r2_ohm=…)` — The LCL output filter between the PWM bridge and the inner port.
+- `MECHANISMS` — tuple
+- class `NortonEquivalent(frequencies_hz, admittance, admittance_passive, source_locked, source_unlocked, components=…, y_mirror=…, loop_gain=…)` — Terminal Norton equivalent of a device over a frequency grid.
+- class `PVArray(p_stc_w, v_mpp_stc_v, gamma_p_per_k=…, beta_v_per_k=…, v_log_irradiance=…, noct_c=…)` — Maximum-power point of a PV array.
+- class `PWMModulator(topology=…, carrier_hz=…, carrier_groups=…, sidebands=…)` — Carrier-based PWM of the bridge.
+- class `PerturbObserveMPPT(v_step_v, rate_hz, max_line_hz=…, n_terms=…)` — Perturb-and-observe MPPT in steady state (three-level oscillation).
+- class `PhaseLockedLoop(kp, ki)` — Synchronous-reference-frame PLL with a PI loop filter.
+- class `SeriesStage(l_h, r_ohm=…)` — A series inductor (differential-mode choke) of an EMC filter, per element.
+- class `ShuntStage(c_f=…, c_ground_f=…, r_ohm=…)` — A shunt capacitor stage of an EMC filter, per element.
+- def `bessel_j(n: Tensor, x: Tensor, n_points: int = 0) -> Tensor` — Bessel function of the first kind ``J_n(x)`` for integer ``n``, differentiable in ``x``.
+- def `closed_loop(filt: LCLFilter, ctrl: CurrentController, f_hz: Tensor, f1_hz: float, pll: Optional[PhaseLockedLoop] = None, v1d: Optional[Tensor] = None, i1dq: Optional[Tensor] = None, vb1dq: Optional[Tensor] = None, control_active: Optional[Tensor] = None, cdt: dtype = torch.complex128) -> ClosedLoop` — Evaluate the closed loop of ``filt`` + ``ctrl`` at space-vector frequencies.
+- def `dead_time_voltage(i1: Tensor, u_dc: Tensor, dead_time_s: float, switching_hz: float, orders: Sequence[int], full_bridge: bool, three_phase: bool, ripple: Optional[str] = None, l1_h: Optional[float] = None, modulation_index: Optional[Tensor] = None, bridge_angle: Optional[Tensor] = None, topology: Optional[str] = None, n_samples: int = 2048) -> Tensor` — Dead-time bridge voltage disturbance at integer ``orders`` (RMS phasors).
+- def `inner_port_state(v_t: Tensor, i_t: Tensor, stages: Sequence[Stage], s: Tensor) -> tuple[Tensor, Tensor]` — Voltage and current at the inner port from the terminal values.
+- def `mppt_current_lines(mppt: PerturbObserveMPPT, dc: DCLinkControl, f1_hz: float, v_g: Tensor, u_dc: Tensor, current_angle: Tensor, n_phases: int = 1, cdt: dtype = torch.complex128) -> tuple[list[float], Tensor]` — Grid-current lines of the MPPT perturbation.
+- def `propagate_norton(i_n: Tensor, y: Tensor, stages: Sequence[Stage], s: Tensor, zero_sequence: bool = False) -> tuple[Tensor, Tensor]` — Carry a Norton equivalent ``(I_N, Y)`` through ``stages`` (inner to outer).
+- def `ripple_third_harmonic(dc: DCLinkControl, f1_hz: float, v_t: Tensor, i_t: Tensor, u_dc: Tensor, cdt: dtype = torch.complex128) -> Tensor` — Third-harmonic grid-current reference of the ``2 f_1`` DC-link ripple.
+
 ## `pgml.multigrid`
 
 - class `GridMember(index, row_start, n_rows, node_ids, branch_ids, appliance_ids)` — One member of a :class:`MergedGrid`: its row slice and id translations.
@@ -823,6 +847,7 @@ Full documentation: the docstrings (published as the API reference).
 ## `pgml.studies`
 
 - class `BranchRating(i_max_a, s_rated_va)` — Thermal rating of one branch; either field is ``None`` when the grid declares none.
+- class `EmissionFlow(frequencies_hz, node_ids, phases, v, v_rms, v_locked, device_current=…, device_primary=…, norton=…, stability_margin=…, f1_hz=…)` — Result of :func:`emission_flow`.
 - class `HostingCapacity(node_ids, direction, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…, base_violations=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
 - class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…, neutral_loading=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
 - class `ImpedanceScan(frequencies_hz, base_frequency_hz, node_ids, phases, z_phase_ohm, z_positive_ohm, z_zero_ohm, transfer_rows=…, z_transfer_ohm=…)` — Result of :func:`impedance_scan`: impedances seen from each requested bus vs frequency.
@@ -830,6 +855,8 @@ Full documentation: the docstrings (published as the API reference).
 - class `QVCurve(node_id, phases, v_pu, q_var, q_phase_var, converged, q_margin_var, v_at_min_pu, minimum_in_range)` — A Q-V curve at one bus (:func:`qv_curve`).
 - class `Resonance(kind, frequency_hz, order, z_ohm, prominence)` — One resonance of a driving-point impedance magnitude.
 - def `branch_ratings(grid: Grid) -> dict[int, BranchRating]` — Thermal rating of every branch of ``grid``, keyed by branch id (pure, no solve).
+- def `emission_flow(grid: Grid, inverters: Mapping[int, GridFollowingInverter], states: Optional[Mapping[int, InverterState]] = None, harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None, operating_point: Optional[dict] = None, harmonic_injection: Optional[dict] = None, node_sources: Optional[Sequence] = None, load_shunt: Optional[str] = None, load_shunt_basis: Optional[str] = None, slack: str = 'ideal', method: str = 'current_injection', stability: bool = True, admittance: str = 'model', dtype = 'complex128', device: Optional[device] = None) -> EmissionFlow` — Solve the emission spread with inverter Norton models at arbitrary frequencies.
+- def `emission_frequencies(grid: Grid, inverters: Mapping[int, GridFollowingInverter], harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None) -> list[float]` — The frequency grid :func:`emission_flow` solves: every model line plus extras.
 - def `hosting_capacity(grid: Grid, candidates: Optional[Sequence[int]] = None, direction: Literal['load', 'generation'] = 'generation', limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = None, phases: Union[str, Phase] = 'balanced', power_factor: float = 1.0, p_max_w: Optional[float] = None, tol_w: Optional[float] = None, harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> HostingCapacity` — Largest new generation or demand each candidate bus can take within the limits.
 - def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, load_shunt: Optional[Literal['opendss', 'motor', 'none', 'const_z']] = None, load_shunt_basis: Optional[Literal['operating_point', 'nameplate']] = None, transfer: bool = False, fold_generation: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
 - def `pv_curve(grid: Grid, selector: Optional[Union[Iterable[int], Callable[[ApplianceBase], bool]]] = None, direction: Literal['load', 'generation'] = 'load', config: Optional[SimulationConfig] = None, lambda_start: float = 1.0, lambda_max: Optional[float] = None, step: float = 0.05, step_min: float = 0.0001, step_max: Optional[float] = None, max_steps: int = 500, v_stop_pu: float = 0.3, stop_at_nose: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> PVCurve` — Trace the P-V curve through its nose by predictor-corrector continuation.

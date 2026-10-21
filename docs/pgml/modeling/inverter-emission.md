@@ -164,18 +164,26 @@ over the stated range, at complex128.
 | PWM residues | ngspice switched H bridge and three-phase bridge | 9e-4 relative (time-step limited), 0.04° |
 | first unipolar band | Klatt et al. 2019, fig. 3 | 136.02 V against "about 136 V" |
 | dead time, hard sign, leg and full bridge | switching simulation with blanking | 2e-4 relative, 0.7° |
-| dead time, three-phase | same, common mode removed | 1e-2 relative at h = 25 |
+| dead time, hard sign, three-phase | same, common mode removed | 1e-2 relative at h = 25 |
+| dead time, ripple dead zone (default), bipolar, unipolar, three-wire, currents 0.3 to 30 times the half ripple, two parameter sets | imposed-current switching simulation with the bridge's own ripple | 0.2 to 14 % normalised error over orders 2 to 25 (hard sign: up to 2.4 to 10) |
 | MPPT reference lines | Sangwongwanich et al. 2018, fig. 17(a) | 10.804 V (exact series) |
+| MPPT current lines, 2 to 20 Hz rates | averaged time-domain DC-link model; python-control linear loop | 0.12 % magnitude, 0.04° on the dominant lines; 4.1 %, 4.4° against a model with instantaneous single-phase power, which the linear model leaves out |
 | DC-link closed loop and ripple path | independent implementation of eq. 4; averaged time-domain DC-link model | 5e-16; ripple harmonic 0.12 % magnitude, 1.3° |
+| closed-loop admittance, PR control, five variants (grid and converter feedback, active damping, feedforward, L filter) | python-control interconnection with a high-order Padé delay | 8.5e-8 (the reference's own convergence) |
+| same | averaged time-domain simulation, frequency-sweep injection, continuous control | 1e-4; a digital controller adds 0.6 to 4 % (discretisation) |
+| dq-frame control with SRF-PLL, direct and mirror terms | independent implementation of Wang et al.'s dq transfer matrices | 2.3e-14 and 1.6e-11 |
+| same | averaged three-phase time-domain simulation with an SRF-PLL | 0.4 to 0.7 % direct term (continuous); a digital controller adds 12 to 20 % |
 | network solve with the Norton models, 168 frequencies, three feeder variants | OpenDSS (compensation theorem for the non-symmetric admittance) and ngspice AC analysis | 2.3e-9 (OpenDSS, set by its own fundamental solve), 4e-13 (ngspice) |
 | random-phase aggregation | 2000-draw Monte Carlo | within 2.8 standard errors |
 
-The closed-loop admittance with and without the PLL is checked against a python-control
-interconnection of the same blocks, against an independent dq-frame implementation of Wang et
-al.'s transfer matrices, and against an averaged time-domain simulation with frequency-sweep
-injection; the end-to-end model of a single-phase unit is checked against a switched
-time-domain simulation of the full unit. The tests under `tests/inverter/` pin the closed forms
-of every block.
+Wang et al.'s Table II gains reproduce the paper's stability trends (dq control stable at a
+20 Hz PLL bandwidth, lightly damped at 175 Hz, unstable at 330 Hz; stationary-frame control
+stable throughout) when read as a damping ratio 0.707 design, but not the paper's exact
+intersection frequencies; the 330 Hz instability appears only in the coupled model with the
+mirror term, not in the decoupled admittance alone. The model's controllers are continuous:
+the sampled-data effects of a digital controller (the 0.6 to 20 % above) are not modelled.
+
+The tests under `tests/inverter/` pin the closed forms of every block.
 
 ## Limits
 
@@ -189,6 +197,9 @@ of every block.
   current through the EMC ground capacitance, is not a source.
 - **One MPPT pattern.** The three-level steady state of perturb and observe; other trackers
   and two-stage units with an MPPT on the boost stage need their own amplitudes.
+- **Continuous control.** The controller and the delay are continuous-time; the
+  sampled-data behaviour of a digital controller (aliasing, the zero-order hold) is not
+  modelled.
 - **Linearised at the operating point.** Saturation of filter chokes, current limits and the
   nonlinearity of the PLL under large distortion are outside the model.
 - **Integer orders for other devices.** Loads and generators without an inverter model emit
