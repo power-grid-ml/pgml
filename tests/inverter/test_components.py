@@ -420,7 +420,7 @@ def test_mppt_lower_sidebands_below_zero_fold():
     # Folding conjugates: the lower line of n = 11 rebuilt from the unfolded formula.
     fn, a_n, phi_n = mppt.reference_lines(RDT, "cpu")
     g = -dc.reference_to_amplitude(laplace(fn, CDT), F1, kw["v_g"], kw["u_dc"])
-    k = mppt.orders().index(11)
+    k = mppt.orders(F1).index(11)
     unfolded = torch.polar(
         a_n[k] * g[k].abs() / (2 * math.sqrt(2)),
         0.3 + math.pi / 2 - (phi_n[k] + torch.angle(g[k])),

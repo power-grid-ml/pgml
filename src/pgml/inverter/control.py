@@ -211,7 +211,9 @@ class ClosedLoop:
         Coupling coefficient of the mirror-frequency vector from the PLL (zero without
         a PLL); a diagnostic of how large the neglected coupling is.
     loop_gain:
-        Open-loop gain of the current loop ``T(s)`` (zero above ``f_s / 2``).
+        Open-loop gain of the current loop ``T(s) = G_del G_c Y_p`` (zero above
+        ``f_s / 2``). It leaves out the capacitor-current damping loop, so with
+        ``active_damping_kc != 0`` ``g_ref`` is not ``T / (1 + T)``.
     """
 
     y: Tensor
@@ -248,8 +250,10 @@ def closed_loop(
     pll, v1d, i1dq, vb1dq:
         Optional PLL and the steady state it is linearised at: ``v1d`` the d-axis
         inner-port voltage (peak), ``i1dq`` the grid-side current and ``vb1dq`` the
-        bridge (modulating) voltage as complex dq values (peak, aligned to the inner
-        port voltage), each ``[*batch]``. ``vb1dq`` is used by ``"pi_dq"`` control only.
+        modulator command (the bridge voltage before the delay, i.e. the bridge
+        voltage advanced by ``w_1`` times the delay) as complex dq values (peak,
+        aligned to the inner port voltage), each ``[*batch]``. ``vb1dq`` is used by
+        ``"pi_dq"`` control only.
     control_active:
         Optional bool ``[*batch]``; ``False`` evaluates the passive filter with the
         bridge shorted (no control), used for a unit whose bridge does not switch.

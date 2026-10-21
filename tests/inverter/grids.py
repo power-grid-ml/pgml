@@ -138,7 +138,7 @@ def single_phase_inverter(**overrides) -> GridFollowingInverter:
         ),
         dead_time_s=1.0e-6,
         dc_link=DCLinkControl(c_dc_f=1100e-6, kp=0.05, ki=2.0, sampling_hz=32000.0),
-        mppt=PerturbObserveMPPT(v_step_v=4.0, rate_hz=5.0, n_terms=6),
+        mppt=PerturbObserveMPPT(v_step_v=4.0, rate_hz=5.0, max_line_hz=200.0),
         harmonic_orders=tuple(range(2, 41)),
     )
     kw.update(overrides)
@@ -161,7 +161,7 @@ def three_phase_inverter(**overrides) -> GridFollowingInverter:
         emc=(ShuntStage(c_f=2.2e-6, c_ground_f=10e-9),),
         dead_time_s=1.5e-6,
         dc_link=DCLinkControl(c_dc_f=1500e-6, kp=0.05, ki=2.0, sampling_hz=20000.0),
-        mppt=PerturbObserveMPPT(v_step_v=5.0, rate_hz=10.0, n_terms=6),
+        mppt=PerturbObserveMPPT(v_step_v=5.0, rate_hz=10.0, max_line_hz=200.0),
         harmonic_orders=tuple(range(2, 41)),
     )
     kw.update(overrides)

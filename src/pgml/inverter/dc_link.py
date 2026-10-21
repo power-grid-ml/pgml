@@ -125,19 +125,28 @@ class PerturbObserveMPPT:
         Perturbation step of the DC-link voltage reference.
     rate_hz:
         MPPT sampling rate ``f_MPPT``.
+    max_line_hz:
+        Highest line frequency returned. A line at ``f`` collects an upper sideband
+        from order ``4 (f - f_1) / f_MPPT`` and a folded lower one from
+        ``4 (f + f_1) / f_MPPT``, and the reference amplitudes fall only as ``1 / n``,
+        so the orders are taken up to ``4 (max_line_hz + f_1) / f_MPPT`` and every
+        returned line is complete. (A fixed count of 50 orders left lines at 2 Hz and
+        5 Hz MPPT rates up to 63 % off against a time-domain reference.)
     n_terms:
-        Number of odd Fourier orders ``n = 1, 3, ..`` kept. The reference amplitudes
-        fall only as ``1 / n`` and the closed loop shapes which lines dominate, so the
-        series needs many terms: with 8 terms the dominant lines were 4 to 45 % low at
-        2 to 20 Hz MPPT rates against a time-domain reference.
+        Optional fixed number of odd orders instead (lines are then complete only as
+        far as the orders reach).
     """
 
     v_step_v: Scalar
     rate_hz: float
-    n_terms: int = 50
+    max_line_hz: float = 500.0
+    n_terms: Optional[int] = None
 
-    def orders(self) -> list[int]:
-        return [2 * k + 1 for k in range(self.n_terms)]
+    def orders(self, f1_hz: float = 50.0) -> list[int]:
+        if self.n_terms is not None:
+            return [2 * k + 1 for k in range(self.n_terms)]
+        n_max = int(math.ceil(4.0 * (self.max_line_hz + f1_hz) / self.rate_hz))
+        return list(range(1, n_max + 1, 2))
 
     def line_frequencies(self, f1_hz: float) -> list[float]:
         """``|f_1 - n f_MPPT / 4|`` and ``f_1 + n f_MPPT / 4`` for the kept orders.
@@ -146,16 +155,19 @@ class PerturbObserveMPPT:
         (folded); one exactly at 0 Hz is a DC offset and dropped.
         """
         out = []
-        for n in self.orders():
+        for n in self.orders(f1_hz):
             fn = n * self.rate_hz / 4.0
-            if abs(f1_hz - fn) > 1e-9:
+            if abs(f1_hz - fn) > 1e-9 and abs(f1_hz - fn) <= self.max_line_hz:
                 out.append(abs(f1_hz - fn))
-            out.append(f1_hz + fn)
+            if f1_hz + fn <= self.max_line_hz:
+                out.append(f1_hz + fn)
         return out
 
-    def reference_lines(self, rdt, device) -> tuple[Tensor, Tensor, Tensor]:
+    def reference_lines(
+        self, rdt, device, f1_hz: float = 50.0
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """``(f_n, A_n, phi_n)`` of the DC-link reference (peak amplitudes)."""
-        n = torch.as_tensor(self.orders(), dtype=rdt, device=device)
+        n = torch.as_tensor(self.orders(f1_hz), dtype=rdt, device=device)
         v = as_real(self.v_step_v, rdt, device)
         a_n = -(2.0 * v / (math.pi * n)) * torch.sin(math.pi * n / 2.0)
         b_n = (v / (math.pi * n)) * (1.0 - torch.cos(math.pi * n))
@@ -195,7 +207,7 @@ def mppt_current_lines(
     """
     rdt = u_dc.dtype
     dev = u_dc.device
-    fn, a_n, phi_n = mppt.reference_lines(rdt, dev)
+    fn, a_n, phi_n = mppt.reference_lines(rdt, dev, f1_hz)
     s = laplace(fn, cdt)
     # A higher DC-link reference means less exported power: |i_g| = -G_cl v*_dc, the
     # loop convention of the ripple path below (|i_g| = G_cc G_PI (G_notch v_dc - v*)).
@@ -210,15 +222,16 @@ def mppt_current_lines(
     freqs: list[float] = []
     cols = []
     fold = []
-    for k, n in enumerate(mppt.orders()):
+    for k, n in enumerate(mppt.orders(f1_hz)):
         f_n = n * mppt.rate_hz / 4.0
-        if abs(f1_hz - f_n) > 1e-9:
+        if abs(f1_hz - f_n) > 1e-9 and abs(f1_hz - f_n) <= mppt.max_line_hz:
             freqs.append(abs(f1_hz - f_n))
             cols.append(lower[..., k])
             fold.append(f1_hz - f_n < 0)
-        freqs.append(f1_hz + f_n)
-        cols.append(upper[..., k])
-        fold.append(False)
+        if f1_hz + f_n <= mppt.max_line_hz:
+            freqs.append(f1_hz + f_n)
+            cols.append(upper[..., k])
+            fold.append(False)
     lines = torch.stack(cols, dim=-1).to(cdt).unsqueeze(-1)  # [*batch, L, 1]
     if n_phases == 3:
         shift = torch.polar(

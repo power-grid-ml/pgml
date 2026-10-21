@@ -297,7 +297,22 @@ class GridFollowingInverter:
         ss = {
             "v1d": math.sqrt(2.0) * torch.abs(ref_v),
             "i1dq": math.sqrt(2.0) * ref_i * rot,
-            "vb1dq": math.sqrt(2.0) * ref_b * rot,
+            # The PLL rotates the modulator COMMAND; the bridge voltage is that command
+            # delayed, so the command leads it by w_1 times the delay.
+            "vb1dq": math.sqrt(2.0)
+            * ref_b
+            * rot
+            * torch.polar(
+                torch.ones_like(ref_v.real),
+                torch.full_like(
+                    ref_v.real,
+                    2.0
+                    * math.pi
+                    * f1_hz
+                    * self.control.delay_samples
+                    / self.control.sampling_hz,
+                ),
+            ),
         }
 
         cl_p = self._loop(f, f1_hz, ss, bridge_on, cdt)
