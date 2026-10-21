@@ -40,7 +40,7 @@ from typing import Literal, Optional, Sequence
 import torch
 from torch import Tensor
 
-from pgml.errors import InputError
+from pgml.errors import InputError, ModelingError
 
 from ._common import (
     element_to_sequence,
@@ -160,8 +160,9 @@ class GridFollowingInverter:
         Whether the EMC stages stay on the grid when the relay is open (standby, night).
     dead_time_s:
         Blanking time per commutation (0 disables the mechanism).
-    dead_time_ripple_a:
-        Optional sign-softening current of the dead-time model.
+    dead_time_ripple:
+        ``None`` (hard sign) or ``"local"`` (the ripple dead zone of
+        :func:`~pgml.inverter.dead_time.dead_time_voltage`).
     dc_link, mppt:
         Optional DC-link control and P&O MPPT (needed for the ``"mppt"`` and
         ``"dc_ripple"`` mechanisms).
@@ -178,7 +179,7 @@ class GridFollowingInverter:
     emc: tuple = ()
     emc_on_grid_side: bool = True
     dead_time_s: float = 0.0
-    dead_time_ripple_a: Optional[float] = None
+    dead_time_ripple: Optional[str] = None
     dc_link: Optional[DCLinkControl] = None
     mppt: Optional[PerturbObserveMPPT] = None
     harmonic_orders: tuple = tuple(range(2, 51))
@@ -319,12 +320,24 @@ class GridFollowingInverter:
         def masked(x: Tensor) -> Tensor:
             return torch.where(on_mask, x, torch.zeros_like(x))
 
+        peak_b = (
+            math.sqrt(2.0) * torch.abs(v_b if e == 1 else ref_b.unsqueeze(-1))[..., 0]
+        )
+        mi = self.pwm.modulation_index(peak_b, u_dc)
+        with torch.no_grad():
+            over = bridge_on & (mi > 1.0)
+            if bool(over.any()):
+                raise ModelingError(
+                    "inverter bridge overmodulated (modulation index "
+                    f"{float(mi[over].max()):.3f} > 1): the DC-link voltage is below "
+                    "the peak bridge voltage the operating point needs. The sine-"
+                    "triangle spectrum does not hold there; raise u_dc_v or model the "
+                    "state as not switching."
+                )
+        # Scenarios whose bridge does not switch are masked below; a zero index keeps
+        # their (unused) spectra finite and in range.
+        mi = torch.where(bridge_on, mi, torch.zeros_like(mi))
         if "pwm" in self.mechanisms:
-            peak_b = (
-                math.sqrt(2.0)
-                * torch.abs(v_b if e == 1 else ref_b.unsqueeze(-1))[..., 0]
-            )
-            mi = self.pwm.modulation_index(peak_b, u_dc)
             lines_hz, lines = self.pwm.bridge_spectrum(
                 mi, u_dc, f1_hz, torch.angle(v_b[..., 0]), state.carrier_angle_rad
             )
@@ -340,7 +353,11 @@ class GridFollowingInverter:
                 self.harmonic_orders,
                 full_bridge=e == 1,
                 three_phase=e == 3,
-                ripple_a=self.dead_time_ripple_a,
+                ripple=self.dead_time_ripple,
+                l1_h=float(self.filter.l1_h),
+                modulation_index=mi,
+                bridge_angle=torch.angle(v_b),
+                topology=self.pwm.topology,
             ).to(cdt)
             parts["dead_time"] = masked(
                 _place_lines(d, [h * f1_hz for h in self.harmonic_orders], grid_list)

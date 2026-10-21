@@ -40,7 +40,7 @@ from typing import Literal
 import torch
 from torch import Tensor
 
-from pgml.errors import InputError
+from pgml.errors import InputError, ModelingError
 
 from ._common import Scalar, as_real
 
@@ -158,8 +158,15 @@ class PWMModulator:
             raise InputError(
                 "PWM residue lines below 0 Hz: carrier_hz must exceed sidebands * f1."
             )
+        with torch.no_grad():
+            if bool((modulation_index > 1.0).any()):
+                raise ModelingError(
+                    "PWM modulation index above 1: the naturally sampled sine-triangle "
+                    "series holds for M <= 1 only (overmodulation adds baseband "
+                    "harmonics it does not describe)."
+                )
         mi = modulation_index.to(rdt).unsqueeze(-1)  # [*batch, 1]
-        # Quadrature points from the static bound |n| + m pi M / 2 with M <= 1.5.
+        # Quadrature points from the static bound |n| + m pi M / 2 with M <= 1.
         n_points = int(2 * (self.sidebands + self.carrier_groups * math.pi * 0.75) + 64)
         jn = bessel_j(n_t, m_t * (math.pi / 2.0) * mi, n_points)  # [*batch, L]
         amp = (2.0 / math.pi) * u_dc.to(rdt).unsqueeze(-1) * jn / m_t

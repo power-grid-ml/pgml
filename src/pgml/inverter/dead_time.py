@@ -11,10 +11,25 @@ unit (same section). Its amplitude does not depend on the magnitude of the curre
 which is why the resulting low-order current harmonics do not scale with the power.
 
 With the hard sign the series is exact: ``-dV sgn(cos(w t + phi)) = -dV (4 / pi)
-sum_{h odd} (-1)^((h-1)/2) / h cos(h (w t + phi))``. A finite current ripple makes the
-current cross zero within a switching period near the fundamental zero crossing, which
-softens the sign; ``ripple_a`` replaces ``sgn(i)`` by ``clip(i / ripple_a, -1, 1)`` and the
-spectrum is then taken by a DFT over one fundamental period.
+sum_{h odd} (-1)^((h-1)/2) / h cos(h (w t + phi))``.
+
+Ripple dead zone (``ripple="local"``): a leg commutes at the extremes of the inductor's
+switching ripple. Where the fundamental current is smaller than half the local
+peak-to-peak ripple, the current at the two commutations of a period has opposite signs
+and the two blanking errors cancel, so the error vanishes there and keeps its full value
+elsewhere. The half ripple follows the local modulation ``m = M cos(w t + t_b)`` of the
+bridge-side inductor ``L1`` at carrier frequency ``f_c``:
+
+- one leg against a stiff point (three-phase): ``U_dc (1 - m^2) / (8 L1 f_c)``;
+- bipolar full bridge: ``U_dc (1 - m^2) / (4 L1 f_c)``;
+- unipolar full bridge (pulses between 0 and ``+-U_dc`` at ``2 f_c``):
+  ``U_dc |m| (1 - |m|) / (4 L1 f_c)``.
+
+This replaces the hard sign by ``sgn(i) [|i| > half ripple]`` and takes the spectrum by
+a DFT over one fundamental period. Compared with switching simulations, the hard sign
+overstates the low-order error once the current is comparable to the ripple (low
+power), where the dead zone follows the reference much more closely; see the inverter
+modelling page for the measured agreement.
 """
 
 from __future__ import annotations
@@ -24,6 +39,8 @@ from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
+
+from pgml.errors import InputError
 
 
 def dead_time_voltage(
@@ -35,7 +52,11 @@ def dead_time_voltage(
     *,
     full_bridge: bool,
     three_phase: bool,
-    ripple_a: Optional[float] = None,
+    ripple: Optional[str] = None,
+    l1_h: Optional[float] = None,
+    modulation_index: Optional[Tensor] = None,
+    bridge_angle: Optional[Tensor] = None,
+    topology: Optional[str] = None,
     n_samples: int = 2048,
 ) -> Tensor:
     """Dead-time bridge voltage disturbance at integer ``orders`` (RMS phasors).
@@ -57,10 +78,13 @@ def dead_time_voltage(
     three_phase:
         Remove the common-mode part of the three leg errors (a three-wire unit drives
         only the differential part).
-    ripple_a:
-        Optional current below which the sign softens linearly (see module docstring).
+    ripple:
+        ``None`` (hard sign) or ``"local"`` (ripple dead zone, see module docstring),
+        which needs ``l1_h``, ``modulation_index`` ``[*batch]``, ``bridge_angle``
+        ``[*batch, E]`` (angle of each element's bridge fundamental) and the PWM
+        ``topology``.
     n_samples:
-        Samples per fundamental period for the DFT used with ``ripple_a``.
+        Samples per fundamental period for the DFT of the dead-zone model.
 
     Returns
     -------
@@ -71,7 +95,7 @@ def dead_time_voltage(
     dv = (dead_time_s * switching_hz) * u_dc.to(rdt) * (2.0 if full_bridge else 1.0)
     phi = torch.angle(i1)  # [*batch, E]
     h = torch.as_tensor([float(o) for o in orders], dtype=rdt, device=u_dc.device)
-    if ripple_a is None:
+    if ripple is None:
         odd = (torch.remainder(h, 2.0) == 1.0).to(rdt)
         sign = torch.where(torch.remainder(h - 1.0, 4.0) == 0.0, 1.0, -1.0).to(rdt)
         coeff = odd * sign * (4.0 / math.pi) / h  # [H]
@@ -80,16 +104,34 @@ def dead_time_voltage(
             torch.ones_like(phi).unsqueeze(-2), h.unsqueeze(-1) * phi.unsqueeze(-2)
         )  # [*batch, H, E]
         d = amp.unsqueeze(-1).to(rotation.dtype) * rotation
-    else:
+    elif ripple == "local":
+        if l1_h is None or modulation_index is None or bridge_angle is None:
+            raise InputError(
+                "dead_time_voltage(ripple='local') needs l1_h, modulation_index and "
+                "bridge_angle."
+            )
         t = torch.arange(n_samples, dtype=rdt, device=u_dc.device) * (
             2.0 * math.pi / n_samples
         )  # w t over one period
         mag = math.sqrt(2.0) * torch.abs(i1)  # peak
         wave = mag.unsqueeze(-1) * torch.cos(t + phi.unsqueeze(-1))  # [*batch, E, N]
-        err = -dv.unsqueeze(-1).unsqueeze(-1) * torch.clamp(wave / ripple_a, -1.0, 1.0)
+        m = modulation_index.to(rdt).unsqueeze(-1).unsqueeze(-1) * torch.cos(
+            t + bridge_angle.to(rdt).unsqueeze(-1)
+        )
+        scale = u_dc.to(rdt).unsqueeze(-1).unsqueeze(-1) / (l1_h * switching_hz)
+        if topology == "single_phase_unipolar":
+            half = scale * m.abs() * (1.0 - m.abs()).clamp(min=0.0) / 4.0
+        elif topology == "single_phase_bipolar":
+            half = scale * (1.0 - m * m).clamp(min=0.0) / 4.0
+        else:
+            half = scale * (1.0 - m * m).clamp(min=0.0) / 8.0
+        conducts = (wave.abs() > half).to(rdt)
+        err = -dv.unsqueeze(-1).unsqueeze(-1) * torch.sign(wave) * conducts
         basis = torch.exp(-1j * h.unsqueeze(-1) * t)  # [H, N]
         d = math.sqrt(2.0) * torch.einsum("...en,hn->...he", err.to(basis.dtype), basis)
         d = d / n_samples
+    else:
+        raise InputError(f"dead_time_voltage: unknown ripple model {ripple!r}.")
     if three_phase:
         d = d - d.mean(dim=-1, keepdim=True)
     return d

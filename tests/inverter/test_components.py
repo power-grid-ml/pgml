@@ -10,7 +10,7 @@ import pytest
 import torch
 from scipy.special import jv
 
-from pgml.errors import InputError
+from pgml.errors import InputError, ModelingError
 from pgml.inverter import (
     CurrentController,
     DCLinkControl,
@@ -278,28 +278,37 @@ def test_dead_time_three_phase_removes_triplens():
     assert abs(float(d[1, 0].abs()) - leg * 4 / (5 * math.pi) / math.sqrt(2)) < 1e-12
 
 
-def test_dead_time_ripple_model_tends_to_the_hard_sign():
+def test_dead_time_ripple_dead_zone():
+    """Large current: the dead zone is negligible; current inside the ripple: no error."""
     u = torch.tensor(400.0, dtype=RDT)
-    i1 = torch.polar(torch.tensor([10.0], dtype=RDT), torch.tensor([0.2], dtype=RDT))
-    hard = dead_time_voltage(
-        i1, u, 2e-6, 16000.0, [3, 5], full_bridge=True, three_phase=False
+    kw = dict(full_bridge=True, three_phase=False)
+    loc = dict(
+        ripple="local",
+        l1_h=1.5e-3,
+        modulation_index=torch.tensor(0.8, dtype=RDT),
+        bridge_angle=torch.tensor([0.25], dtype=RDT),
+        topology="single_phase_bipolar",
+        n_samples=1 << 14,
     )
-    soft = dead_time_voltage(
-        i1,
-        u,
-        2e-6,
-        16000.0,
-        [3, 5],
-        full_bridge=True,
-        three_phase=False,
-        ripple_a=1e-4,
-        n_samples=1 << 16,
-    )
-    torch.testing.assert_close(soft, hard, rtol=2e-3, atol=1e-6)
-    wide = dead_time_voltage(
-        i1, u, 2e-6, 16000.0, [3], full_bridge=True, three_phase=False, ripple_a=5.0
-    )
-    assert float(wide.abs().max()) < float(hard[0].abs().max())
+    big = torch.polar(torch.tensor([200.0], dtype=RDT), torch.tensor([0.2], dtype=RDT))
+    hard = dead_time_voltage(big, u, 2e-6, 16000.0, [3, 5], **kw)
+    soft = dead_time_voltage(big, u, 2e-6, 16000.0, [3, 5], **kw, **loc)
+    torch.testing.assert_close(soft, hard, rtol=2e-2, atol=1e-3)
+    # Half ripple at least 400 (1 - 0.64) / (4 * 1.5e-3 * 16e3) = 1.5 A everywhere.
+    tiny = torch.polar(torch.tensor([0.5], dtype=RDT), torch.tensor([0.2], dtype=RDT))
+    none = dead_time_voltage(tiny, u, 2e-6, 16000.0, [3, 5], **kw, **loc)
+    assert float(none.abs().max()) == 0.0
+
+
+def test_overmodulation_is_refused():
+    pwm = PWMModulator("single_phase_unipolar", carrier_hz=16000.0)
+    with pytest.raises(ModelingError, match="modulation index"):
+        pwm.bridge_spectrum(
+            torch.tensor(1.15, dtype=RDT),
+            torch.tensor(400.0, dtype=RDT),
+            F1,
+            torch.tensor(0.0, dtype=RDT),
+        )
 
 
 # ---- DC link ------------------------------------------------------------------------
