@@ -274,6 +274,9 @@ class GridFollowingInverter:
             else state.u_dc_v.to(dtype=rdt, device=dev)
         )
         bridge_on, connected = state.masks(rdt, dev)
+        # A unit whose bridge does not switch may report any DC-link voltage (0 at
+        # night); its sources are masked, so a placeholder keeps them finite.
+        u_dc = torch.where(bridge_on & (u_dc > 0), u_dc, torch.ones_like(u_dc))
 
         # Fundamental state at the inner port and the bridge (positive sequence for
         # a three-phase unit).
@@ -311,7 +314,11 @@ class GridFollowingInverter:
         # ---- primary sources at the inner port: bridge disturbances and reference lines
         i_ref: dict[str, Tensor] = {}
         parts: dict[str, Tensor] = {}
-        on = bridge_on.to(cdt)
+        on_mask = bridge_on.unsqueeze(-1).unsqueeze(-1)  # [*batch, 1, 1]
+
+        def masked(x: Tensor) -> Tensor:
+            return torch.where(on_mask, x, torch.zeros_like(x))
+
         if "pwm" in self.mechanisms:
             peak_b = (
                 math.sqrt(2.0)
@@ -321,9 +328,9 @@ class GridFollowingInverter:
             lines_hz, lines = self.pwm.bridge_spectrum(
                 mi, u_dc, f1_hz, torch.angle(v_b[..., 0]), state.carrier_angle_rad
             )
-            parts["pwm"] = _place_lines(
-                lines.to(cdt), lines_hz.tolist(), grid_list
-            ) * on.unsqueeze(-1).unsqueeze(-1)
+            parts["pwm"] = masked(
+                _place_lines(lines.to(cdt), lines_hz.tolist(), grid_list)
+            )
         if "dead_time" in self.mechanisms and self.dead_time_s > 0:
             d = dead_time_voltage(
                 i_b,
@@ -335,9 +342,9 @@ class GridFollowingInverter:
                 three_phase=e == 3,
                 ripple_a=self.dead_time_ripple_a,
             ).to(cdt)
-            parts["dead_time"] = _place_lines(
-                d, [h * f1_hz for h in self.harmonic_orders], grid_list
-            ) * on.unsqueeze(-1).unsqueeze(-1)
+            parts["dead_time"] = masked(
+                _place_lines(d, [h * f1_hz for h in self.harmonic_orders], grid_list)
+            )
         if "mppt" in self.mechanisms and self.mppt is not None:
             if self.dc_link is None:
                 raise InputError(
@@ -354,9 +361,7 @@ class GridFollowingInverter:
                 n_phases=e,
                 cdt=cdt,
             )
-            i_ref["mppt"] = _place_lines(m_lines, m_hz, grid_list) * on.unsqueeze(
-                -1
-            ).unsqueeze(-1)
+            i_ref["mppt"] = masked(_place_lines(m_lines, m_hz, grid_list))
         if "dc_ripple" in self.mechanisms and self.dc_link is not None and e == 1:
             i3 = ripple_third_harmonic(
                 self.dc_link,
@@ -366,9 +371,9 @@ class GridFollowingInverter:
                 u_dc=u_dc,
                 cdt=cdt,
             )
-            i_ref["dc_ripple"] = _place_lines(
-                i3.unsqueeze(-1).unsqueeze(-1), [3.0 * f1_hz], grid_list
-            ) * on.unsqueeze(-1).unsqueeze(-1)
+            i_ref["dc_ripple"] = masked(
+                _place_lines(i3.unsqueeze(-1).unsqueeze(-1), [3.0 * f1_hz], grid_list)
+            )
 
         def to_terminal_current(x: Tensor, bridge_voltage: bool) -> Tensor:
             """Inner-port Norton current of one mechanism, carried to the terminals."""
@@ -424,8 +429,9 @@ class GridFollowingInverter:
         target = (*batch, n_f, e)
         locked = torch.zeros(target, dtype=cdt, device=dev)
         unlocked = torch.zeros(target, dtype=cdt, device=dev)
+        conn_mask = connected.unsqueeze(-1).unsqueeze(-1)
         for name, x in components.items():
-            x = x * conn.unsqueeze(-1)
+            x = torch.where(conn_mask, x, torch.zeros_like(x))
             components[name] = x
             if name in _LOCKED:
                 locked = locked + x

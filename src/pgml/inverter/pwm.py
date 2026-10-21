@@ -170,7 +170,10 @@ class PWMModulator:
         def leg(offset: float) -> Tensor:
             # cos(m (w_c t + t_c) + n (w_0 t + t_0 + offset)) as an RMS phasor.
             phase = m_t * tc + n_t * (t0 + offset)
-            return torch.polar(amp / math.sqrt(2.0), phase).to(cdt)  # [*batch, L]
+            # The Bessel amplitude is signed: multiply a unit phasor (torch.polar
+            # expects a nonnegative magnitude and differentiates wrongly otherwise).
+            unit = torch.polar(torch.ones_like(phase), phase)
+            return (amp / math.sqrt(2.0)).to(cdt) * unit.to(cdt)  # [*batch, L]
 
         if self.topology == "single_phase_bipolar":
             out = (2.0 * leg(0.0)).unsqueeze(-1)

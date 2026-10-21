@@ -479,6 +479,13 @@ def emission_flow(
     rhs_full_t = torch.stack(rhs_full, dim=0)  # [R, *b, F, N]
     n_rhs = rhs_full_t.shape[0]
 
+    unmodelled_generation = any(
+        isinstance(a, (Generator, Storage))
+        and a.in_service
+        and int(a.id) not in devices
+        for a in grid.appliances
+    )
+
     # 3./4. Network matrix per frequency chunk, inverter admittances stamped, solve.
     itemsize = torch.empty((), dtype=cdt).element_size()
     budget = float(defaults.get("solver.harmonic.system_budget_mb")) * 1024.0**2
@@ -503,7 +510,9 @@ def emission_flow(
             dtype=cdt,
             device=device,
             fusion=fusion,
-            warn=start == 0,
+            # The generation-shunt notice would name the modelled inverters, whose
+            # admittance is the model's; it stays on for unmodelled generators.
+            warn=start == 0 and unmodelled_generation,
         )
         to_red = None if fusion is None else fusion.row_to_reduced.to(device)
         if bg_diag is not None:
