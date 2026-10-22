@@ -54,9 +54,9 @@ for evaluating the inverter models. The inverters enter as a low-rank update at 
 terminals, so the network is factored without them and a scenario batch of inverter
 parameters repeats only the small terminal system: at 200 nodes the study took 524 ms
 (2 kHz) and 1.0 s (150 kHz) against 117 ms for the harmonic flow, and a batch of 64
-irradiance states took 0.79 s (2 kHz) against 0.16 s. On CUDA the stability margin of
-three-phase units relies on batched 3×3 SVDs, which are slow there; pass `stability=False`
-for large scenario batches on a GPU when the margin is not needed.
+irradiance states took 0.79 s (2 kHz) against 0.16 s. On CUDA the 3×3 SVDs of the
+three-phase stability margin run on the host, where they are about 60 times faster than
+batched on the GPU; the margin and its gradient return on the input device.
 
 ### Which effects matter for the spread
 
