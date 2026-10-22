@@ -47,11 +47,16 @@ background distortion a unit absorbs or amplifies), or when primary and secondar
 must be separated.
 
 Cost: measured on a 50-node feeder with 10 units (CPU, complex128, one scenario), the classic
-harmonic flow over 40 orders took 40 ms, the detailed study up to 2 kHz 191 ms (159
-frequencies) and up to 150 kHz 337 ms (306 frequencies). Per solved frequency the two cost
-about the same on small grids. The detailed study builds dense per-frequency matrices, so the
-ratio grows with network size and scenario batch (14 to 27 times at 200 nodes, 39 to 78 times
-per scenario in a batch of 64); gradients add about 1.7 times a forward pass in both.
+harmonic flow over 40 orders took 41 ms, the detailed study up to 2 kHz 162 ms (159
+frequencies) and up to 150 kHz 255 ms (306 frequencies). Per solved frequency the network
+part costs about the same in both; the detailed study pays for its larger frequency grid and
+for evaluating the inverter models. The inverters enter as a low-rank update at their
+terminals, so the network is factored without them and a scenario batch of inverter
+parameters repeats only the small terminal system: at 200 nodes the study took 524 ms
+(2 kHz) and 1.0 s (150 kHz) against 117 ms for the harmonic flow, and a batch of 64
+irradiance states took 0.79 s (2 kHz) against 0.16 s. On CUDA the stability margin of
+three-phase units relies on batched 3×3 SVDs, which are slow there; pass `stability=False`
+for large scenario batches on a GPU when the margin is not needed.
 
 ### Which effects matter for the spread
 
