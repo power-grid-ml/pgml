@@ -1,0 +1,93 @@
+# Compatibility levels for conducted voltage disturbances in public supply networks.
+#
+# Sources (German editions, clause 4 "Verträglichkeitspegel"):
+#   lv: IEC 61000-2-2 (DIN EN 61000-2-2), low-voltage public supply networks, including
+#       the clauses 4.11 (2 kHz to 9 kHz) and 4.12 (9 kHz to 150 kHz) introduced by its
+#       amendments (EN 50160, Table 4, refers to IEC 61000-2-2/AMD1:2017 for 2-30 kHz and
+#       AMD2:2018 for 30-150 kHz).
+#   mv: IEC 61000-2-12 (DIN EN 61000-2-12), medium-voltage public supply networks. Its
+#       harmonic levels equal the low-voltage ones but extend to order 50 (clause 4.3);
+#       it gives no levels for interharmonics or frequencies above order 50 (clause 4.4).
+#
+# Values are compatibility levels (reference levels for EMC coordination), not emission
+# limits. Harmonic levels are long-term values (10 min or longer), rms as a fraction of
+# the fundamental. The very-short-term (3 s) levels are the Table 1 values times a factor
+# k whose formula is not reproduced here; only the corresponding THD is.
+#
+# Not included: the interharmonic levels (IEC 61000-2-2 clause 4.4, figure 2, a curve
+# over the beat frequency based on flicker Pst = 1), which are given only as a figure.
+#
+# Rule forms (h = harmonic order):
+#   explicit: {order: level}
+#   ranges:   level = a * (b / h) + c for orders of the stated kind in [h_min, h_max]
+#   kinds:    odd_non_triplen, odd_triplen, even
+
+harmonics:
+  lv:
+    source: "IEC 61000-2-2, clause 4.3, Table 1"
+    max_order: 40
+    thd_long_term: 0.08
+    thd_very_short_term: 0.11
+    explicit:
+      2: 0.02
+      3: 0.05
+      4: 0.01
+      5: 0.06
+      6: 0.005
+      7: 0.05
+      8: 0.005
+      9: 0.015
+      11: 0.035
+      13: 0.03
+      15: 0.004
+      21: 0.003
+    ranges:
+      - {kind: odd_non_triplen, h_min: 17, h_max: 37, a: 0.0227, b: 17.0, c: -0.0027}
+      - {kind: odd_triplen, h_min: 22, h_max: 39, a: 0.0, b: 1.0, c: 0.002}
+      - {kind: even, h_min: 10, h_max: 40, a: 0.0025, b: 10.0, c: 0.0025}
+  mv:
+    source: "IEC 61000-2-12, clause 4.3, Table 1"
+    max_order: 50
+    thd_long_term: 0.08
+    thd_very_short_term: 0.11
+    explicit:
+      2: 0.02
+      3: 0.05
+      4: 0.01
+      5: 0.06
+      6: 0.005
+      7: 0.05
+      8: 0.005
+      9: 0.015
+      11: 0.035
+      13: 0.03
+      15: 0.004
+      21: 0.003
+    ranges:
+      - {kind: odd_non_triplen, h_min: 17, h_max: 49, a: 0.0227, b: 17.0, c: -0.0027}
+      - {kind: odd_triplen, h_min: 22, h_max: 45, a: 0.0, b: 1.0, c: 0.002}
+      - {kind: even, h_min: 10, h_max: 50, a: 0.0025, b: 10.0, c: 0.0025}
+
+# Symmetric (differential) voltage distortion above order 40, low-voltage networks only
+# (IEC 61000-2-2 clauses 4.11 and 4.12; IEC 61000-2-12 gives none). Long-term values.
+#   2-9 kHz: level of a 200 Hz band around the centre frequency F (2100 Hz to 8900 Hz
+#     in 50 Hz networks), as a fraction of the fundamental, between two phase
+#     conductors or a phase conductor and the neutral.
+#   9-150 kHz: dB(uV) between a phase conductor and the neutral, quasi-peak detector of
+#     CISPR 16-1-1 with 200 Hz measurement bandwidth.
+# Segment interpolation: "loglog" = log of the level linear in log f; "dB_logf" = level
+# in dB linear in log f; "constant". At 50 kHz the lower level applies.
+supraharmonics:
+  lv:
+    bandwidth_hz: 200.0
+    segments:
+      - {source: "IEC 61000-2-2, 4.11, Table 2", f_lo_hz: 2000.0, f_lo_hz_60: 2400.0, f_hi_hz: 3000.0,
+         unit: fraction_of_u1, interpolation: constant, level_lo: 0.014, level_hi: 0.014}
+      - {source: "IEC 61000-2-2, 4.11, Table 2", f_lo_hz: 3000.0, f_hi_hz: 9000.0,
+         unit: fraction_of_u1, interpolation: loglog, level_lo: 0.014, level_hi: 0.0065}
+      - {source: "IEC 61000-2-2, 4.12.2, Table 3", f_lo_hz: 9000.0, f_hi_hz: 30000.0,
+         unit: dBuV, interpolation: dB_logf, level_lo: 129.5, level_hi: 122.0}
+      - {source: "IEC 61000-2-2, 4.12.3, Table 4", f_lo_hz: 30000.0, f_hi_hz: 50000.0,
+         unit: dBuV, interpolation: dB_logf, level_lo: 122.0, level_hi: 119.0}
+      - {source: "IEC 61000-2-2, 4.12.3, Table 4", f_lo_hz: 50000.0, f_hi_hz: 150000.0,
+         unit: dBuV, interpolation: dB_logf, level_lo: 113.0, level_hi: 89.0}

@@ -1,0 +1,75 @@
+"""Harmonic emission models of grid-following inverters.
+
+A unit is described by its physical blocks (LCL and EMC filter, current control, PLL,
+PWM modulator, dead time, DC-link control and MPPT) and its operating state, and
+evaluates to a frequency-domain Norton equivalent ``i = I_N - Y v`` at its terminals
+(:meth:`GridFollowingInverter.norton`). The harmonic network solve with these
+equivalents is :func:`pgml.studies.emission_flow`.
+
+A unit is given either as grid data, the optional ``inverter_model`` block of a
+:class:`~pgml.schemas.grid_schema.Generator` or :class:`~pgml.schemas.grid_schema.Storage`
+(:class:`~pgml.schemas.grid_schema.InverterModel`, converted by :func:`from_schema`), or as
+a per-solve input keyed by device id, which takes precedence. Every function is
+written in torch and differentiable in its tensor-valued parameters.
+"""
+
+from __future__ import annotations
+
+from .control import (
+    ClosedLoop,
+    CurrentController,
+    PhaseLockedLoop,
+    closed_loop,
+)
+from .dc_link import (
+    DCLinkControl,
+    PerturbObserveMPPT,
+    mppt_current_lines,
+    ripple_third_harmonic,
+)
+from .dead_time import dead_time_voltage
+from .filters import (
+    LCLFilter,
+    SeriesStage,
+    ShuntStage,
+    inner_port_state,
+    propagate_norton,
+)
+from .model import MECHANISMS, GridFollowingInverter, NortonEquivalent, from_schema
+from .operating import InverterState, PVArray
+from .presets import (
+    GENERIC_PARAMETER_RANGES,
+    GenericInverterDesign,
+    generic_single_phase_inverter,
+    generic_three_phase_inverter,
+)
+from .pwm import PWMModulator, bessel_j
+
+__all__: list[str] = [
+    "GENERIC_PARAMETER_RANGES",
+    "GenericInverterDesign",
+    "generic_single_phase_inverter",
+    "generic_three_phase_inverter",
+    "ClosedLoop",
+    "CurrentController",
+    "DCLinkControl",
+    "GridFollowingInverter",
+    "InverterState",
+    "LCLFilter",
+    "MECHANISMS",
+    "NortonEquivalent",
+    "PVArray",
+    "PWMModulator",
+    "PerturbObserveMPPT",
+    "PhaseLockedLoop",
+    "SeriesStage",
+    "ShuntStage",
+    "bessel_j",
+    "closed_loop",
+    "dead_time_voltage",
+    "from_schema",
+    "inner_port_state",
+    "mppt_current_lines",
+    "propagate_norton",
+    "ripple_third_harmonic",
+]

@@ -12,6 +12,8 @@ reference is {mod}`pgml.studies`.
 - {doc}`hosting-capacity`: how much new generation or demand each bus can take before a
   voltage, loading, unbalance or distortion limit is violated, for every candidate bus in
   one batched search.
+- {doc}`emission-flow`: how the emission of modelled inverters (harmonics, interharmonics,
+  supraharmonics) spreads through the grid, and where the network and the inverters interact.
 
 ## Shared conventions
 
@@ -50,4 +52,5 @@ reference is {mod}`pgml.studies`.
 impedance-scan
 continuation
 hosting-capacity
+emission-flow
 ```

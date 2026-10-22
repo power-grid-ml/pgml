@@ -404,6 +404,35 @@ Full documentation: the docstrings (published as the API reference).
 - `ieee33_geometry_grid` — re-exported from `pgml.evaluation.oracles`
 - def `synthetic_feeder(n_nodes: int, n_feeders: int = 8, segment_m: float = 200.0, total_load_w: float = 5000000.0, power_factor: float = 0.95, u_rated_v: float = 20000.0, base_frequency_hz: float = 50.0, tie_switches: int = 0)` — A synthetic 3-phase radial MV feeder of arbitrary size (schema-only, no deps).
 
+## `pgml.inverter`
+
+- class `ClosedLoop(y, y_passive, g_ref, g_dist, y_mirror, loop_gain)` — Closed-loop transfer functions at the inner port, per frequency.
+- class `CurrentController(kind=…, kp=…, ki=…, resonant=…, resonant_bandwidth_rad_s=…, sampling_hz=…, delay_samples=…, feedback=…, active_damping_kc=…, feedforward_gain=…, feedforward_cutoff_hz=…)` — Current controller of a grid-following inverter.
+- class `DCLinkControl(c_dc_f, kp, ki, sampling_hz=…, notch_quality_rad_s=…)` — DC-link capacitor and voltage controller.
+- `GENERIC_PARAMETER_RANGES` — dict
+- class `GenericInverterDesign(p_rated_w, phases=…, u_ln_v=…, f1_hz=…, u_dc_v=…, carrier_hz=…, sampling_hz=…, mppt_rate_hz=…, ripple_fraction=…, cf_reactive_fraction=…, l2_ratio=…, dead_time_s=…, current_bandwidth_fraction=…, pll_bandwidth_hz=…, feedforward_gain=…, emc_cx_f=…, dc_ripple_fraction=…, dc_bandwidth_hz=…, mppt_step_v=…)` — A generic grid-following PV inverter designed from its rating.
+- class `GridFollowingInverter(filter, control, pwm, pll=…, emc=…, emc_on_grid_side=…, dead_time_s=…, dead_time_ripple=…, dc_link=…, mppt=…, harmonic_orders=…, mechanisms=…)` — A current-controlled grid-following inverter with an LCL and EMC filter.
+- class `InverterState(u_dc_v, bridge_on=…, connected=…, carrier_angle_rad=…)` — Per-scenario state of an inverter (each field a float, bool or ``[*batch]`` tensor).
+- class `LCLFilter(l1_h, c_f=…, l2_h=…, r1_ohm=…, r_d_ohm=…, r2_ohm=…)` — The LCL output filter between the PWM bridge and the inner port.
+- `MECHANISMS` — tuple
+- class `NortonEquivalent(frequencies_hz, admittance, admittance_passive, source_locked, source_unlocked, components=…, y_mirror=…, loop_gain=…)` — Terminal Norton equivalent of a device over a frequency grid.
+- class `PVArray(p_stc_w, v_mpp_stc_v, gamma_p_per_k=…, beta_v_per_k=…, v_log_irradiance=…, noct_c=…)` — Maximum-power point of a PV array.
+- class `PWMModulator(topology=…, carrier_hz=…, carrier_groups=…, sidebands=…)` — Carrier-based PWM of the bridge.
+- class `PerturbObserveMPPT(v_step_v, rate_hz, max_line_hz=…, n_terms=…)` — Perturb-and-observe MPPT in steady state (three-level oscillation).
+- class `PhaseLockedLoop(kp, ki)` — Synchronous-reference-frame PLL with a PI loop filter.
+- class `SeriesStage(l_h, r_ohm=…)` — A series inductor (differential-mode choke) of an EMC filter, per element.
+- class `ShuntStage(c_f=…, c_ground_f=…, r_ohm=…)` — A shunt capacitor stage of an EMC filter, per element.
+- def `bessel_j(n: Tensor, x: Tensor, n_points: int = 0) -> Tensor` — Bessel function of the first kind ``J_n(x)`` for integer ``n``, differentiable in ``x``.
+- def `closed_loop(filt: LCLFilter, ctrl: CurrentController, f_hz: Tensor, f1_hz: float, pll: Optional[PhaseLockedLoop] = None, v1d: Optional[Tensor] = None, i1dq: Optional[Tensor] = None, vb1dq: Optional[Tensor] = None, control_active: Optional[Tensor] = None, cdt: dtype = torch.complex128) -> ClosedLoop` — Evaluate the closed loop of ``filt`` + ``ctrl`` at space-vector frequencies.
+- def `dead_time_voltage(i1: Tensor, u_dc: Tensor, dead_time_s, switching_hz: float, orders: Sequence[int], full_bridge: bool, three_phase: bool, ripple: Optional[str] = None, l1_h = None, modulation_index: Optional[Tensor] = None, bridge_angle: Optional[Tensor] = None, topology: Optional[str] = None, n_samples: int = 2048) -> Tensor` — Dead-time bridge voltage disturbance at integer ``orders`` (RMS phasors).
+- def `from_schema(spec) -> GridFollowingInverter` — The :class:`GridFollowingInverter` described by a schema
+- def `generic_single_phase_inverter(p_rated_w: Scalar = 4600.0, **knobs) -> GridFollowingInverter` — A generic single-phase PV inverter of the given rating (see :class:`GenericInverterDesign`).
+- def `generic_three_phase_inverter(p_rated_w: Scalar = 10000.0, **knobs) -> GridFollowingInverter` — A generic three-phase PV inverter of the given rating (see :class:`GenericInverterDesign`).
+- def `inner_port_state(v_t: Tensor, i_t: Tensor, stages: Sequence[Stage], s: Tensor) -> tuple[Tensor, Tensor]` — Voltage and current at the inner port from the terminal values.
+- def `mppt_current_lines(mppt: PerturbObserveMPPT, dc: DCLinkControl, f1_hz: float, v_g: Tensor, u_dc: Tensor, current_angle: Tensor, n_phases: int = 1, cdt: dtype = torch.complex128) -> tuple[list[float], Tensor]` — Grid-current lines of the MPPT perturbation.
+- def `propagate_norton(i_n: Tensor, y: Tensor, stages: Sequence[Stage], s: Tensor, zero_sequence: bool = False) -> tuple[Tensor, Tensor]` — Carry a Norton equivalent ``(I_N, Y)`` through ``stages`` (inner to outer).
+- def `ripple_third_harmonic(dc: DCLinkControl, f1_hz: float, v_t: Tensor, i_t: Tensor, u_dc: Tensor, cdt: dtype = torch.complex128) -> Tensor` — Third-harmonic grid-current reference of the ``2 f_1`` DC-link ripple.
+
 ## `pgml.multigrid`
 
 - class `GridMember(index, row_start, n_rows, node_ids, branch_ids, appliance_ids)` — One member of a :class:`MergedGrid`: its row slice and id translations.
@@ -455,6 +484,10 @@ Full documentation: the docstrings (published as the API reference).
 - def `en50160_limits(path: Optional[str] = None) -> dict` — Return ``{order: max_magnitude_pu}`` from the DIN EN 50160 table (cached).
 - def `en50160_provenance(path: Optional[str] = None) -> dict` — Identify the DIN EN 50160 table a run actually used.
 - def `generation_provenance() -> dict` — Everything a generated dataset should record beyond its config and seed.
+- def `iec61000_2_2_band_level_v(frequency_hz: float, u1_v: float, f1_hz: float = 50.0, path: Optional[str] = None) -> Optional[float]` — Low-voltage compatibility level of a 200 Hz band centred at ``frequency_hz`` [V].
+- def `iec61000_2_2_harmonic_levels(network: str = 'lv', path: Optional[str] = None) -> dict` — Long-term compatibility levels ``{order: fraction of the fundamental}``.
+- def `iec61000_2_2_provenance(path: Optional[str] = None) -> dict` — ``{"source", "override", "sha256"}`` of the table a run used.
+- def `iec61000_2_2_thd(network: str = 'lv', very_short_term: bool = False, path: Optional[str] = None) -> float` — Compatibility level of the total harmonic distortion (fraction).
 - def `iec61000_3_2_device_caps(grid: Grid, ids: list[int], orders: list[int], emission_class: str = 'auto', power_factor: float = 1.0, path: Optional[str] = None) -> dict[int, dict[int, float]]` — Per-device, per-order IEC 61000-3-2 emission fractions for a grid.
 - def `iec61000_3_2_fraction(order: int, emission_class: str, p_w: float, u_ln_v: float, power_factor: float = 1.0, path: Optional[str] = None) -> float` — IEC 61000-3-2 emission limit for one order as a fraction of the fundamental current.
 - def `iec61000_3_2_limits(emission_class: Optional[str] = None, path: Optional[str] = None) -> dict` — Return the IEC 61000-3-2 emission-limit table (cached copy).
@@ -505,6 +538,13 @@ Full documentation: the docstrings (published as the API reference).
 
 - `build_background_sources` — re-exported from `pgml.scenarios`
 - `spectrum_sweep` — re-exported from `pgml.scenarios`
+
+## `pgml.scenarios.iec61000_2_2`
+
+- `iec61000_2_2_band_level_v` — re-exported from `pgml.scenarios`
+- `iec61000_2_2_harmonic_levels` — re-exported from `pgml.scenarios`
+- `iec61000_2_2_provenance` — re-exported from `pgml.scenarios`
+- `iec61000_2_2_thd` — re-exported from `pgml.scenarios`
 
 ## `pgml.scenarios.iec61000_3_2`
 
@@ -572,7 +612,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `EquationParam(kind=…, equation_id, bindings=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `ExtrapolationMethod()` — str(object='') -> str
 - def `FrequencyParam(*args, **kwargs)` — Runtime representation of an annotated type.
-- class `Generator(id, name=…, node, phases, in_service=…, tags=…, return_path=…, component=…, connection=…, load_model=…, p_nom_w, q_nom_var=…, p_nom_per_phase_w=…, q_nom_per_phase_var=…, zip_coefficients=…, control=…, voltage_regulation=…, consumer_type=…, profile_ref=…, spectrum=…, spectrum_per_phase=…, harmonic_impedance=…, harmonic_model=…)` — Generation unit (synchronous machine, wind, CHP, or — most commonly on a
+- class `Generator(id, name=…, node, phases, in_service=…, tags=…, return_path=…, component=…, connection=…, load_model=…, p_nom_w, q_nom_var=…, p_nom_per_phase_w=…, q_nom_per_phase_var=…, zip_coefficients=…, control=…, voltage_regulation=…, consumer_type=…, profile_ref=…, spectrum=…, spectrum_per_phase=…, harmonic_impedance=…, inverter_model=…, harmonic_model=…)` — Generation unit (synchronous machine, wind, CHP, or — most commonly on a
 - class `GenericBranch(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, series_resistance_ohm, series_inductance_h, shunt_capacitance_from_f=…, shunt_capacitance_to_f=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `GeoLineString(type=…, coordinates)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `GeoPoint(type=…, coordinates)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
@@ -588,6 +628,15 @@ Full documentation: the docstrings (published as the API reference).
 - class `InterpolationMethod()` — str(object='') -> str
 - def `InverterControl(*args, **kwargs)` — Runtime representation of an annotated type.
 - class `InverterControlBase(s_rated_va=…, smoothing=…)` — Shared fields of every inverter control mode.
+- class `InverterCurrentControl(kind=…, kp=…, ki=…, resonant=…, resonant_bandwidth_rad_s=…, sampling_hz=…, delay_samples=…, feedback=…, active_damping_kc=…, feedforward_gain=…, feedforward_cutoff_hz=…)` — Current controller of a grid-following inverter.
+- class `InverterDCLink(c_dc_f, kp, ki, sampling_hz=…, notch_quality_rad_s=…)` — DC-link capacitor and voltage controller (PI with an optional 2 f1 notch).
+- class `InverterLCLFilter(l1_h, r1_ohm=…, c_f=…, r_d_ohm=…, l2_h=…, r2_ohm=…)` — LCL output filter between the PWM bridge and the inner port, per element.
+- class `InverterMPPT(v_step_v, rate_hz, max_line_hz=…)` — Perturb-and-observe MPPT in steady state (three-level oscillation).
+- class `InverterModel(filter, control=…, pwm=…, pll=…, emc=…, emc_on_grid_side=…, dead_time_s=…, dead_time_ripple=…, dc_link=…, mppt=…, max_harmonic_order=…, mechanisms=…, u_dc_v=…)` — Detailed harmonic model of a grid-following inverter (optional).
+- class `InverterPLL(kp, ki)` — Synchronous-reference-frame PLL with a PI loop filter acting on the q-axis voltage.
+- class `InverterPWM(topology=…, carrier_hz=…, carrier_groups=…, sidebands=…)` — Carrier-based sine-triangle PWM of the bridge (natural sampling).
+- class `InverterSeriesStage(kind=…, l_h, r_ohm=…)` — Series inductor of an EMC filter (differential-mode choke), per element.
+- class `InverterShuntStage(kind=…, c_f=…, c_ground_f=…, r_ohm=…)` — Shunt capacitor stage of an EMC filter, per element.
 - class `Line(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, length_m, type_ref=…, series_resistance_ohm_per_m=…, series_inductance_h_per_m=…, shunt_capacitance_f_per_m=…, shunt_conductance_s_per_m=…, resistance_frequency=…, geometry=…, conductor_geometry=…, harmonic_line_model=…, harmonic_skin_effect=…, earth_return=…)` — Multi-phase line/cable, canonical SI per-length phase-domain form.
 - class `LineGeometry(conductors, internal_inductance=…, earth_resistivity_ohm_m=…, provenance=…)` — Conductor geometry of a line for the Carson/Deri impedance path.
 - class `LineSequenceInput(from_node, to_node, phases, length_m, r1_ohm_per_m, x1_ohm_per_m, c1_f_per_m, r0_ohm_per_m, x0_ohm_per_m, c0_f_per_m)` — Symmetrical-component line input. self=(Z0+2*Z1)/3, mutual=(Z0-Z1)/3.
@@ -621,7 +670,7 @@ Full documentation: the docstrings (published as the API reference).
 - def `Spectrum(*args, **kwargs)` — Runtime representation of an annotated type.
 - class `SpectrumPoint(components)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `StaticSpectrum(kind=…, spectrum)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
-- class `Storage(id, name=…, node, phases, in_service=…, tags=…, return_path=…, component=…, connection=…, load_model=…, p_nom_w, q_nom_var=…, p_nom_per_phase_w=…, q_nom_per_phase_var=…, zip_coefficients=…, control=…, energy_capacity_wh=…, soc=…, soc_min=…, soc_max=…, efficiency_charge=…, efficiency_discharge=…, p_rated_w=…, consumer_type=…, profile_ref=…, dispatch_ref=…, spectrum=…, spectrum_per_phase=…, harmonic_impedance=…, harmonic_model=…)` — Battery / energy storage as a bidirectional inverter injection.
+- class `Storage(id, name=…, node, phases, in_service=…, tags=…, return_path=…, component=…, connection=…, load_model=…, p_nom_w, q_nom_var=…, p_nom_per_phase_w=…, q_nom_per_phase_var=…, zip_coefficients=…, control=…, energy_capacity_wh=…, soc=…, soc_min=…, soc_max=…, efficiency_charge=…, efficiency_discharge=…, p_rated_w=…, consumer_type=…, profile_ref=…, dispatch_ref=…, spectrum=…, spectrum_per_phase=…, harmonic_impedance=…, inverter_model=…, harmonic_model=…)` — Battery / energy storage as a bidirectional inverter injection.
 - class `Switch(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, default_closed, resistance_ohm=…, inductance_h=…, shunt_conductance_s=…, shunt_capacitance_f=…)` — Switch/breaker as a degenerate pi-branch (consistent R/L/G/C convention,
 - class `TimeVaryingSpectrum(kind=…, schedule, profile_ref=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `Transformer(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, type_ref=…, s_rated_va=…, u_rated_from_v=…, u_rated_to_v=…, from_connection=…, to_connection=…, series_resistance_ohm=…, series_inductance_h=…, magnetizing_conductance_s=…, magnetizing_inductance_h=…, tap=…, from_grounding=…, to_grounding=…, zero_sequence=…, harmonic_xr_constant=…, resistance_frequency=…)` — Two-winding transformer, canonical phase-domain form. Assembly builds the
@@ -674,6 +723,15 @@ Full documentation: the docstrings (published as the API reference).
 - `InterpolationMethod` — re-exported from `pgml.schemas`
 - `InverterControl` — re-exported from `pgml.schemas`
 - `InverterControlBase` — re-exported from `pgml.schemas`
+- `InverterCurrentControl` — re-exported from `pgml.schemas`
+- `InverterDCLink` — re-exported from `pgml.schemas`
+- `InverterLCLFilter` — re-exported from `pgml.schemas`
+- `InverterMPPT` — re-exported from `pgml.schemas`
+- `InverterModel` — re-exported from `pgml.schemas`
+- `InverterPLL` — re-exported from `pgml.schemas`
+- `InverterPWM` — re-exported from `pgml.schemas`
+- `InverterSeriesStage` — re-exported from `pgml.schemas`
+- `InverterShuntStage` — re-exported from `pgml.schemas`
 - `Line` — re-exported from `pgml.schemas`
 - `LineGeometry` — re-exported from `pgml.schemas`
 - `LineSequenceInput` — re-exported from `pgml.schemas`
@@ -823,6 +881,7 @@ Full documentation: the docstrings (published as the API reference).
 ## `pgml.studies`
 
 - class `BranchRating(i_max_a, s_rated_va)` — Thermal rating of one branch; either field is ``None`` when the grid declares none.
+- class `EmissionFlow(frequencies_hz, node_ids, phases, v, v_rms, v_locked, device_current=…, device_primary=…, norton=…, stability_margin=…, f1_hz=…, v1=…)` — Result of :func:`emission_flow`.
 - class `HostingCapacity(node_ids, direction, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…, base_violations=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
 - class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…, neutral_loading=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
 - class `ImpedanceScan(frequencies_hz, base_frequency_hz, node_ids, phases, z_phase_ohm, z_positive_ohm, z_zero_ohm, transfer_rows=…, z_transfer_ohm=…)` — Result of :func:`impedance_scan`: impedances seen from each requested bus vs frequency.
@@ -830,6 +889,8 @@ Full documentation: the docstrings (published as the API reference).
 - class `QVCurve(node_id, phases, v_pu, q_var, q_phase_var, converged, q_margin_var, v_at_min_pu, minimum_in_range)` — A Q-V curve at one bus (:func:`qv_curve`).
 - class `Resonance(kind, frequency_hz, order, z_ohm, prominence)` — One resonance of a driving-point impedance magnitude.
 - def `branch_ratings(grid: Grid) -> dict[int, BranchRating]` — Thermal rating of every branch of ``grid``, keyed by branch id (pure, no solve).
+- def `emission_flow(grid: Grid, inverters: Optional[Mapping[int, GridFollowingInverter]] = None, states: Optional[Mapping[int, InverterState]] = None, harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None, operating_point: Optional[dict] = None, harmonic_injection: Optional[dict] = None, node_sources: Optional[Sequence] = None, load_shunt: Optional[str] = None, load_shunt_basis: Optional[str] = None, slack: str = 'norton', method: str = 'current_injection', stability: bool = True, admittance: str = 'model', dtype = 'complex128', device: Optional[device] = None) -> EmissionFlow` — Solve the emission spread with inverter Norton models at arbitrary frequencies.
+- def `emission_frequencies(grid: Grid, inverters: Optional[Mapping[int, GridFollowingInverter]] = None, harmonic_orders: Optional[Sequence[int]] = None, frequencies_hz: Optional[Sequence[float]] = None, f_max_hz: Optional[float] = None) -> list[float]` — The frequency grid :func:`emission_flow` solves: every model line plus extras.
 - def `hosting_capacity(grid: Grid, candidates: Optional[Sequence[int]] = None, direction: Literal['load', 'generation'] = 'generation', limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = None, phases: Union[str, Phase] = 'balanced', power_factor: float = 1.0, p_max_w: Optional[float] = None, tol_w: Optional[float] = None, harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> HostingCapacity` — Largest new generation or demand each candidate bus can take within the limits.
 - def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, load_shunt: Optional[Literal['opendss', 'motor', 'none', 'const_z']] = None, load_shunt_basis: Optional[Literal['operating_point', 'nameplate']] = None, transfer: bool = False, fold_generation: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
 - def `pv_curve(grid: Grid, selector: Optional[Union[Iterable[int], Callable[[ApplianceBase], bool]]] = None, direction: Literal['load', 'generation'] = 'load', config: Optional[SimulationConfig] = None, lambda_start: float = 1.0, lambda_max: Optional[float] = None, step: float = 0.05, step_min: float = 0.0001, step_max: Optional[float] = None, max_steps: int = 500, v_stop_pu: float = 0.3, stop_at_nose: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> PVCurve` — Trace the P-V curve through its nose by predictor-corrector continuation.

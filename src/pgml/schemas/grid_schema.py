@@ -1448,6 +1448,267 @@ class HarmonicImpedance(GridModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Detailed inverter harmonic model (optional; used by the emission study)
+# ---------------------------------------------------------------------------
+class InverterLCLFilter(GridModel):
+    """LCL output filter between the PWM bridge and the inner port, per element.
+
+    ``c_f = 0`` gives an L filter; ``l2_h = r2_ohm = 0`` an LC filter. ``r_d_ohm`` is the
+    passive damping resistance in series with the capacitor.
+    """
+
+    l1_h: PosNum = si_field("Bridge-side inductance.", short="H", long="henry")
+    r1_ohm: NonNegNum = si_field(
+        "Bridge-side series resistance.", short="ohm", long="ohm", default=0.0
+    )
+    c_f: NonNegNum = si_field(
+        "Filter capacitance.", short="F", long="farad", default=0.0
+    )
+    r_d_ohm: NonNegNum = si_field(
+        "Damping resistance in series with the filter capacitor.",
+        short="ohm",
+        long="ohm",
+        default=0.0,
+    )
+    l2_h: NonNegNum = si_field(
+        "Grid-side inductance.", short="H", long="henry", default=0.0
+    )
+    r2_ohm: NonNegNum = si_field(
+        "Grid-side series resistance.", short="ohm", long="ohm", default=0.0
+    )
+
+
+class InverterSeriesStage(GridModel):
+    """Series inductor of an EMC filter (differential-mode choke), per element."""
+
+    kind: Literal["series"] = "series"
+    l_h: NonNegNum = si_field("Series inductance.", short="H", long="henry")
+    r_ohm: NonNegNum = si_field(
+        "Series resistance.", short="ohm", long="ohm", default=0.0
+    )
+
+
+class InverterShuntStage(GridModel):
+    """Shunt capacitor stage of an EMC filter, per element.
+
+    ``c_f`` is the differential capacitance (an X capacitor as its star equivalent, no
+    zero-sequence path in a three-phase unit); ``c_ground_f`` the capacitance to ground
+    (Y capacitors), acting in every sequence.
+    """
+
+    kind: Literal["shunt"] = "shunt"
+    c_f: NonNegNum = si_field(
+        "Differential capacitance.", short="F", long="farad", default=0.0
+    )
+    c_ground_f: NonNegNum = si_field(
+        "Capacitance to ground.", short="F", long="farad", default=0.0
+    )
+    r_ohm: NonNegNum = si_field(
+        "Series resistance of the capacitor branches.",
+        short="ohm",
+        long="ohm",
+        default=0.0,
+    )
+
+
+InverterEMCStage = Annotated[
+    Union[InverterSeriesStage, InverterShuntStage], Field(discriminator="kind")
+]
+
+
+class InverterCurrentControl(GridModel):
+    """Current controller of a grid-following inverter.
+
+    ``kind="pr"``: proportional-resonant control in the stationary frame with one
+    non-ideal resonator ``2 k_r w_c s / (s^2 + 2 w_c s + (h w_1)^2)`` per entry of
+    ``resonant``; ``"pi_dq"``: PI control in the synchronous frame (three-phase only).
+    The command is delayed by ``delay_samples / sampling_hz``; the control acts below
+    ``sampling_hz / 2``.
+    """
+
+    kind: Literal["pr", "pi_dq"] = "pr"
+    kp: Num = si_field(
+        "Proportional gain.", short="V/A", long="volt per ampere", default=10.0
+    )
+    ki: Num = si_field(
+        "Integral gain of dq PI control.",
+        short="V/(A s)",
+        long="volt per ampere second",
+        default=0.0,
+    )
+    resonant: dict[int, Num] = Field(
+        default_factory=lambda: {1: 400.0},
+        description="Resonator gain k_r [V/A] per harmonic order (PR control).",
+    )
+    resonant_bandwidth_rad_s: PosNum = si_field(
+        "Resonator bandwidth w_c.", short="rad/s", long="radian per second", default=5.0
+    )
+    sampling_hz: float = si_field(
+        "Controller sampling frequency.",
+        short="Hz",
+        long="hertz",
+        default=16000.0,
+        gt=0.0,
+    )
+    delay_samples: float = Field(
+        default=1.5, ge=0.0, description="Total control delay in sampling periods."
+    )
+    feedback: Literal["grid", "converter"] = Field(
+        default="grid", description="Which inductor current is measured and controlled."
+    )
+    active_damping_kc: Num = si_field(
+        "Capacitor-current feedback gain.",
+        short="V/A",
+        long="volt per ampere",
+        default=0.0,
+    )
+    feedforward_gain: Num = Field(
+        default=0.0, description="Inner-port voltage feedforward gain."
+    )
+    feedforward_cutoff_hz: Optional[float] = si_field(
+        "First-order low-pass on the feedforward path (None: no filter).",
+        short="Hz",
+        long="hertz",
+        default=None,
+    )
+
+
+class InverterPLL(GridModel):
+    """Synchronous-reference-frame PLL with a PI loop filter acting on the q-axis voltage."""
+
+    kp: Num = si_field(
+        "Proportional gain.", short="rad/(V s)", long="radian per volt second"
+    )
+    ki: Num = si_field(
+        "Integral gain.", short="rad/(V s^2)", long="radian per volt second squared"
+    )
+
+
+class InverterPWM(GridModel):
+    """Carrier-based sine-triangle PWM of the bridge (natural sampling)."""
+
+    topology: Literal[
+        "single_phase_bipolar", "single_phase_unipolar", "three_phase"
+    ] = Field(
+        default="single_phase_unipolar",
+        description="Bridge and modulation; fixes the number of elements (1 or 3).",
+    )
+    carrier_hz: float = si_field(
+        "Triangular carrier frequency.",
+        short="Hz",
+        long="hertz",
+        default=16000.0,
+        gt=0.0,
+    )
+    carrier_groups: int = Field(default=4, ge=1, description="Carrier groups kept.")
+    sidebands: int = Field(
+        default=12, ge=0, description="Sideband orders kept per group."
+    )
+
+
+class InverterDCLink(GridModel):
+    """DC-link capacitor and voltage controller (PI with an optional 2 f1 notch)."""
+
+    c_dc_f: PosNum = si_field("DC-link capacitance.", short="F", long="farad")
+    kp: Num = si_field(
+        "PI proportional gain (voltage error to peak current).",
+        short="A/V",
+        long="ampere per volt",
+    )
+    ki: Num = si_field(
+        "PI integral gain.", short="A/(V s)", long="ampere per volt second"
+    )
+    sampling_hz: float = si_field(
+        "Controller sampling frequency.",
+        short="Hz",
+        long="hertz",
+        default=16000.0,
+        gt=0.0,
+    )
+    notch_quality_rad_s: Optional[Num] = si_field(
+        "k_h of the 2 f1 notch in the feedback path (None: no notch).",
+        short="rad/s",
+        long="radian per second",
+        default=100.0,
+    )
+
+
+class InverterMPPT(GridModel):
+    """Perturb-and-observe MPPT in steady state (three-level oscillation)."""
+
+    v_step_v: Num = si_field(
+        "DC-link reference perturbation step.", short="V", long="volt"
+    )
+    rate_hz: float = si_field("MPPT sampling rate.", short="Hz", long="hertz", gt=0.0)
+    max_line_hz: float = si_field(
+        "Highest interharmonic line frequency returned.",
+        short="Hz",
+        long="hertz",
+        default=500.0,
+        gt=0.0,
+    )
+
+
+class InverterModel(GridModel):
+    """Detailed harmonic model of a grid-following inverter (optional).
+
+    The physical blocks of the unit, from which :mod:`pgml.inverter` evaluates a terminal
+    Norton equivalent ``i = I_N - Y v`` at any frequency, following the operating state;
+    the network solve with it is :func:`pgml.studies.emission_flow`. A device without
+    this block is the simple injection mode (spectrum scaled to the fundamental, optional
+    ``harmonic_impedance``), which every solver keeps using. The two harmonic models of
+    a device are alternatives, so ``inverter_model`` and ``harmonic_impedance`` are
+    mutually exclusive. ``u_dc_v`` is the DC-link voltage used when the solve receives no
+    operating state for the device.
+    """
+
+    filter: InverterLCLFilter
+    control: InverterCurrentControl = Field(default_factory=InverterCurrentControl)
+    pwm: InverterPWM = Field(default_factory=InverterPWM)
+    pll: Optional[InverterPLL] = None
+    emc: list[InverterEMCStage] = Field(
+        default_factory=list,
+        description="EMC stages from the inner port to the terminals.",
+    )
+    emc_on_grid_side: bool = Field(
+        default=True,
+        description="Whether the EMC stages stay connected when the AC relay opens.",
+    )
+    dead_time_s: NonNegNum = si_field(
+        "Blanking time per commutation.", short="s", long="second", default=0.0
+    )
+    dead_time_ripple: Optional[Literal["local"]] = Field(
+        default="local",
+        description="'local': ripple dead zone of the blanking error; None: hard sign.",
+    )
+    dc_link: Optional[InverterDCLink] = None
+    mppt: Optional[InverterMPPT] = None
+    max_harmonic_order: int = Field(
+        default=50, ge=2, description="Highest integer order of the locked sources."
+    )
+    mechanisms: list[Literal["pwm", "dead_time", "mppt", "dc_ripple"]] = Field(
+        default_factory=lambda: ["pwm", "dead_time", "mppt", "dc_ripple"],
+        description="Primary emission mechanisms that contribute to the Norton current.",
+    )
+    u_dc_v: Optional[PosNum] = si_field(
+        "Default DC-link voltage of the operating state.",
+        short="V",
+        long="volt",
+        default=None,
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "InverterModel":
+        if self.control.kind == "pi_dq" and self.pwm.topology != "three_phase":
+            raise ValueError(
+                "dq-frame PI current control needs a three-phase PWM topology."
+            )
+        if "mppt" in self.mechanisms and self.mppt is not None and self.dc_link is None:
+            raise ValueError("the 'mppt' mechanism needs dc_link parameters.")
+        return self
+
+
 class HarmonicShuntModel(GridModel):
     """Per-device OVERRIDE of the harmonic Norton shunt (OpenDSS ``Load.pas``).
 
@@ -2092,6 +2353,12 @@ class Generator(InjectionAppliance):
         description="Optional passive harmonic R/L and spectrum basis. None means unknown; "
         "no impedance is invented. Independent of the load-shunt model.",
     )
+    inverter_model: Optional[InverterModel] = Field(
+        default=None,
+        description="Optional detailed harmonic model of the inverter (filters, control, "
+        "PLL, PWM, dead time, DC link, MPPT), used by the emission study. None = the "
+        "simple injection mode. Mutually exclusive with harmonic_impedance.",
+    )
     harmonic_model: Optional[HarmonicShuntModel] = Field(
         default=None,
         description="Per-device OVERRIDE of the harmonic Norton shunt. None "
@@ -2107,6 +2374,11 @@ class Generator(InjectionAppliance):
         _check_load_connection(self)
         _check_spectrum_per_phase(self)
         _check_control(self)
+        if self.inverter_model is not None and self.harmonic_impedance is not None:
+            raise ValueError(
+                "inverter_model and harmonic_impedance are alternative harmonic models; "
+                "give one."
+            )
         _check_voltage_regulation(self)
         return self
 
@@ -2243,6 +2515,12 @@ class Storage(InjectionAppliance):
         description="Optional passive harmonic R/L and spectrum basis. None means unknown; "
         "no impedance is invented. Independent of the load-shunt model.",
     )
+    inverter_model: Optional[InverterModel] = Field(
+        default=None,
+        description="Optional detailed harmonic model of the inverter (filters, control, "
+        "PLL, PWM, dead time, DC link, MPPT), used by the emission study. None = the "
+        "simple injection mode. Mutually exclusive with harmonic_impedance.",
+    )
     harmonic_model: Optional[HarmonicShuntModel] = Field(
         default=None,
         description="Per-device OVERRIDE of the harmonic Norton shunt. None "
@@ -2260,6 +2538,11 @@ class Storage(InjectionAppliance):
         _check_load_connection(self)
         _check_spectrum_per_phase(self)
         _check_control(self)
+        if self.inverter_model is not None and self.harmonic_impedance is not None:
+            raise ValueError(
+                "inverter_model and harmonic_impedance are alternative harmonic models; "
+                "give one."
+            )
         return self
 
 
@@ -2890,6 +3173,15 @@ __all__ = [
     "Source",
     "HarmonicShuntModel",
     "HarmonicImpedance",
+    "InverterCurrentControl",
+    "InverterDCLink",
+    "InverterLCLFilter",
+    "InverterMPPT",
+    "InverterModel",
+    "InverterPLL",
+    "InverterPWM",
+    "InverterSeriesStage",
+    "InverterShuntStage",
     "ZipCoefficients",
     "Characteristic",
     "QReference",

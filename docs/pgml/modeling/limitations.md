@@ -6,8 +6,10 @@ is where it has been measured, and what to do about it. The modelling pages link
 entry carry the derivations.
 
 pgml is a steady-state, frequency-domain tool: it solves the fundamental power flow and the
-harmonic system `Y(h)·V(h) = I(h)` at integer harmonic orders. Interharmonics, flicker,
-transients, saturation and inrush are out of scope; a non-integer order raises.
+harmonic system `Y(h)·V(h) = I(h)` at integer harmonic orders. Flicker, transients,
+saturation and inrush are out of scope. {func}`pgml.solve_harmonic_flow` raises on a
+non-integer order; {func}`pgml.studies.emission_flow` solves arbitrary frequencies
+(interharmonics and supraharmonics) with the inverter models of {mod}`pgml.inverter`.
 
 ## Transformers
 
@@ -81,12 +83,16 @@ passive internal impedance (an inverter's filter, a machine's subtransient react
 given per device with the `harmonic_impedance` field; leave it absent when it is unknown. See
 {doc}`der-pv-storage`.
 
-**Inverter harmonic models.** An inverter is a Norton current source with an optional passive
-R-L impedance. pgml does not model controller-dependent behaviour: no controlled incremental
-admittance (filter, current and voltage loops, PLL, droop or virtual impedance), no coupling
-between sequences or between frequencies (orders are solved independently), and no harmonic
-headroom or total-current limit. The passive impedance is valid only where the controller's
-influence on the harmonic response can be neglected; pgml does not check that range.
+**Inverter harmonic models.** {func}`pgml.solve_harmonic_flow` treats an inverter as a Norton
+current source with a fixed spectrum and an optional passive R-L impedance; it models no
+controller-dependent behaviour, no coupling between frequencies (orders are solved
+independently), and no harmonic headroom or total-current limit. The passive impedance is
+valid only where the controller's influence on the harmonic response can be neglected; pgml
+does not check that range. A physical Norton model of a grid-following inverter exists in
+{mod}`pgml.inverter` and is used by {func}`pgml.studies.emission_flow` (see
+{doc}`inverter-emission`). It still leaves out frequency coupling (the mirror frequency),
+common-mode PWM emission through the EMC ground capacitance, regularly sampled PWM and
+overmodulation, MPPT patterns other than perturb and observe, and nonlinear saturation.
 
 **Voltage-regulating generators.** The regulated row pair is formed for a wye terminal that
 returns to ground. A delta machine, a wye machine returning through its node's neutral row, a
@@ -173,6 +179,18 @@ EN 50160 gives supply-voltage compatibility levels (orders 26 to 49 are a marked
 They describe source or background distortion, not device emission. Device current spectra
 default to IEC 61000-3-2 per emission class A to D. There is no lighting consumer type, so
 class C is never selected automatically.
+
+IEC 61000-2-2 (low voltage) and IEC 61000-2-12 (medium voltage) compatibility levels ship
+for the harmonic orders (long-term values and the THD levels) and, for low-voltage
+networks, for 200 Hz bands from 2 kHz to 150 kHz
+({func}`pgml.scenarios.iec61000_2_2_harmonic_levels`,
+{func}`pgml.scenarios.iec61000_2_2_band_level_v`,
+{meth}`pgml.studies.EmissionFlow.compatibility`). Not included: the interharmonic
+compatibility levels, which the standard gives only as a flicker-based curve over the beat
+frequency, and the factor of the very-short-term harmonic levels. EN 50160 itself gives no
+interharmonic levels (under consideration) and refers to IEC 61000-2-2 for 2 kHz to 150 kHz.
+Above 9 kHz the standard's levels are quasi-peak readings in a 200 Hz bandwidth; for the
+steady line spectra of a frequency-domain solve the band rms is compared with them.
 
 ## Numerics
 
