@@ -783,8 +783,13 @@ def emission_flow(
             eye = torch.eye(len(k), dtype=cdt, device=device)
             term = (eye - z_tt @ y_el).broadcast_to((*batch, n_f, len(k), len(k)))
             loop_terms.setdefault(len(k), []).append((i, term))
-    for group in loop_terms.values():
-        s_max = torch.linalg.svdvals(torch.stack([t for _, t in group]))[..., 0]
+    for e, group in loop_terms.items():
+        stacked = torch.stack([t for _, t in group])
+        # A single element needs no SVD (batched small SVDs are slow on CUDA).
+        if e == 1:
+            s_max = stacked[..., 0, 0].abs()
+        else:
+            s_max = torch.linalg.svdvals(stacked)[..., 0]
         for (i, _), s in zip(group, s_max.unbind(0)):
             margin[i] = 1.0 / s
 
