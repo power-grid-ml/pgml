@@ -6,6 +6,46 @@ The classic harmonic model of a converter, a fixed current spectrum scaled to th
 current, is what {func}`pgml.solve_harmonic_flow` uses (see {doc}`der-pv-storage`); this page
 describes the physical model that replaces it for the devices it is attached to.
 
+## Scope at a glance
+
+The detailed model is a frequency-domain approximation of a grid-following inverter, not
+a dynamic simulation of its electronics. It keeps the effects that set how much emission a
+unit produces at each frequency and how the unit loads the network there, linearised at the
+solved operating point. What it covers, and how closely each part was found to agree with
+time-domain references (details under {ref}`inverter-validation`):
+
+| Effect | Modelled as | Agreement with references |
+|---|---|---|
+| Passive LCL and EMC filter | exact circuit, all frequencies | to rounding (circuit tools) |
+| Closed-loop current control (PR or dq PI, delay, feedforward, capacitor-current damping) | continuous transfer functions, exact per frequency | 1e-4 (continuous); a digital controller adds 0.6 to 20 % |
+| PLL (synchronous reference frame) | linearised, direct term solved, mirror term reported | 5e-4 three-phase; single-phase SOGI not modelled (+31 % near 175 Hz) |
+| PWM carrier groups | naturally sampled sine-triangle, three topologies | 1e-11 analytic, 1 % in a full-unit simulation; space-vector modulation not covered |
+| Dead time | averaged blanking error with the switching-ripple dead zone | 0.2 to 14 % imposed current; 1.4 to 1.8 times high at a few hundred watts |
+| MPPT interharmonics, double-frequency ripple | linear DC-link loop, perturb and observe | 0.1 to 4 % |
+| Operating state (night, standby, MPP window, DC-link voltage from irradiance) | discrete states and per-scenario inputs | — |
+| Network spread with Norton models, coherent and random-phase sums | exact linear solve at any frequency | 1e-9 to 1e-13 (OpenDSS, ngspice) |
+
+Not modelled, and where it matters:
+
+| Not modelled | Matters for |
+|---|---|
+| Frequency coupling (PLL mirror frequency `2 f_1 - f`, background harmonics into switching sidebands) | three-phase units with fast PLLs below about 500 Hz; harmonic instability; reported as `y_mirror` |
+| Space-vector / min-max modulation, regular sampling, overmodulation | single supraharmonic lines of three-phase units (group rms within 0.8 to 1.35) |
+| PWM common-mode voltage through ground capacitance | earth-return supraharmonic currents |
+| Measurement filters, dq decoupling, constant-power references in the controller | admittance near the control bandwidth (each 4 to 99 % in one compared unit) |
+| Digital (sampled-data) controller, aliasing | admittance near half the sampling frequency |
+| Nonlinear behaviour (current limits, choke saturation, PLL under heavy distortion) | large disturbances, faults |
+| Other MPPT patterns, multi-stage units | interharmonic amplitudes |
+| Interharmonic and supraharmonic emission of devices without a model | the network sees only their harmonic shunt there |
+
+When to use which mode: the simple injection mode (a spectrum, optionally with a passive
+impedance) is the faster choice when only integer harmonics at known operating points
+matter and the device spectra are measured. The detailed mode is the choice when emission
+must follow the operating state (irradiance, night), when interharmonics or supraharmonics
+matter, when the devices interact with resonances (the admittance decides how much of a
+background distortion a unit absorbs or amplifies), or when primary and secondary emission
+must be separated.
+
 ## Why a fixed spectrum is not enough
 
 A fixed relative spectrum gives a constant relative distortion at every power, no secondary
@@ -191,6 +231,8 @@ orders. The result carries:
 
 Everything is differentiable in the tensor-valued grid, filter, controller and state
 parameters, and runs on CPU and CUDA.
+
+(inverter-validation)=
 
 ## Validation
 
