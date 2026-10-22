@@ -785,9 +785,14 @@ def emission_flow(
             loop_terms.setdefault(len(k), []).append((i, term))
     for e, group in loop_terms.items():
         stacked = torch.stack([t for _, t in group])
-        # A single element needs no SVD (batched small SVDs are slow on CUDA).
+        # A single element needs no SVD. Batched SVDs of small complex matrices are
+        # slow on CUDA (6.1 s for 98k 3x3 complex128 matrices on a workstation GPU,
+        # 95 ms on its CPU), so they run on the host; the transfers stay on the tape
+        # and the result returns to the input device.
         if e == 1:
             s_max = stacked[..., 0, 0].abs()
+        elif stacked.is_cuda:
+            s_max = torch.linalg.svdvals(stacked.cpu())[..., 0].to(stacked.device)
         else:
             s_max = torch.linalg.svdvals(stacked)[..., 0]
         for (i, _), s in zip(group, s_max.unbind(0)):

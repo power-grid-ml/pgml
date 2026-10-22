@@ -39,3 +39,30 @@ def test_emission_flow_cpu_cuda_parity(dtype, rtol):
         torch.testing.assert_close(
             gpu.stability_margin[k].cpu(), cpu.stability_margin[k], rtol=rtol, atol=rtol
         )
+
+
+def test_three_phase_margin_gradient_matches_cpu():
+    """The multi-element margin's SVD runs on the host for CUDA inputs; the result and
+    its gradient must come back on the input device and equal the CPU path."""
+    grid = lv_feeder()
+
+    def margin_grad(device):
+        p = torch.tensor(9000.0, dtype=torch.float64, device=device, requires_grad=True)
+        res = emission_flow(
+            grid,
+            default_models(),
+            states=default_states(),
+            operating_point={101: {"p_w": p}},
+            harmonic_orders=range(2, 41),
+            f_max_hz=2000.0,
+            device=device,
+        )
+        m = res.stability_margin[101]
+        assert m.device.type == torch.device(device).type
+        (g,) = torch.autograd.grad(m.sum(), p)
+        return m.detach().cpu(), g.cpu()
+
+    m_cpu, g_cpu = margin_grad("cpu")
+    m_gpu, g_gpu = margin_grad("cuda")
+    torch.testing.assert_close(m_gpu, m_cpu, rtol=1e-9, atol=1e-12)
+    torch.testing.assert_close(g_gpu, g_cpu, rtol=1e-7, atol=1e-15)
