@@ -46,6 +46,30 @@ matter, when the devices interact with resonances (the admittance decides how mu
 background distortion a unit absorbs or amplifies), or when primary and secondary emission
 must be separated.
 
+### Which effects matter for the spread
+
+A sensitivity study on a 10-node 400 V feeder with households and PV (feeder-end voltages
+and one unit's current, at 100 W/m², 1000 W/m² and at night) compared the effect of each
+modelled feature with the spread between plausible products (Monte Carlo over the filter,
+carrier, dead time, controller, PLL and MPPT parameters) and with the model's known errors:
+
+- **Larger than the product spread**: the closed-loop control admittance (replacing it by
+  the filter alone changes the feeder's THD increment about ten times more than the product
+  spread does, and a unit's THD_I by two to three times); having a device admittance at all
+  (2-9 kHz voltage +130 to +230 % with pure current sources); the LCL capacitor and the EMC
+  stages, together with the households' appliance capacitance (9-150 kHz); dead time (the only
+  source in 2-9 kHz); MPPT (the only interharmonic source).
+- **Within the product spread**: PLL dynamics, the single-phase PLL form, the double-frequency
+  ripple, cable capacitance, regular versus natural sampling, space-vector modulation of a single
+  three-phase unit, the coherent instead of the random-phase sum.
+- **Missing effects that would matter**: the structure of the current controller (measurement
+  filters, decoupling, constant-power references): an uncertainty of ±50 % on the control part
+  of the admittance moves the THD increment by several times the product spread. Above 2 kHz the
+  product parameters (dead time, carrier frequency, capacitor sizes) dominate the result, so
+  measured product data helps more there than further model depth. The neglected mirror coupling
+  is 0.1 to 0.9 of the direct admittance between 100 and 500 Hz at rated power: it matters for
+  stability assessments, not for these spread metrics.
+
 ## Why a fixed spectrum is not enough
 
 A fixed relative spectrum gives a constant relative distortion at every power, no secondary
