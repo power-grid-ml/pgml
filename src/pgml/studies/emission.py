@@ -764,6 +764,7 @@ def emission_flow(
     v_rms = torch.where(p_total > 0, torch.sqrt(safe), torch.zeros_like(p_total))
 
     current, primary, margin = {}, {}, {}
+    loop_terms: dict[int, list[tuple[int, Tensor]]] = {}
     for j, i in enumerate(ids):
         d = devices[i]
         y_el = d.norton.admittance
@@ -775,11 +776,17 @@ def emission_flow(
         v_own = torch.einsum("...ef,...f->...e", z_tt, src)
         primary[i] = src - torch.einsum("...ef,...f->...e", y_el, v_own)
         if stability:
+            # With Z_g = (Z_tt^-1 - Y)^-1 the rest of the grid seen by the unit,
+            # I + Z_g Y = (I - Z_tt Y)^-1, so sigma_min(I + Z_g Y) is
+            # 1 / sigma_max(I - Z_tt Y): no inverse, and one batched SVD per element
+            # count instead of two inverses and an SVD per unit.
             eye = torch.eye(len(k), dtype=cdt, device=device)
-            # Z_g = (Z_tt^-1 - Y)^-1 and I + Z_g Y = Z_g Z_tt^-1.
-            z_inv = torch.linalg.inv(z_tt)
-            z_g = torch.linalg.inv(z_inv - y_el)
-            margin[i] = torch.linalg.svdvals(eye + z_g @ y_el)[..., -1]
+            term = (eye - z_tt @ y_el).broadcast_to((*batch, n_f, len(k), len(k)))
+            loop_terms.setdefault(len(k), []).append((i, term))
+    for group in loop_terms.values():
+        s_max = torch.linalg.svdvals(torch.stack([t for _, t in group]))[..., 0]
+        for (i, _), s in zip(group, s_max.unbind(0)):
+            margin[i] = 1.0 / s
 
     return EmissionFlow(
         frequencies_hz=f_t,
