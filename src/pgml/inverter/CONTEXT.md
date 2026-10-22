@@ -23,6 +23,10 @@ Signatures: docstrings / API_INDEX.md.
   `mppt_current_lines`, `ripple_third_harmonic`.
 - `operating.py` — `InverterState` (DC-link voltage, bridge and relay state, carrier phase),
   `PVArray` (MPP power and voltage from irradiance and temperature).
+- `presets.py` — `GenericInverterDesign` (rating-scaled generic unit: design rules,
+  per-design active-damping tuning, `report`), `current_loop_stability` (Nyquist count of
+  unstable current-loop poles on a stiff grid), `GENERIC_PARAMETER_RANGES` (knob ranges with
+  their basis), `generic_single_phase_inverter`, `generic_three_phase_inverter`.
 - `model.py` — `GridFollowingInverter` (`emission_frequencies`, `norton`), `NortonEquivalent`,
   `from_schema` (schema `InverterModel` block to the model),
   `_place_lines` (lines onto the frequency grid).
@@ -46,6 +50,14 @@ Signatures: docstrings / API_INDEX.md.
   values off the tape.
 - MPPT lower sidebands below 0 Hz are folded (conjugate phasor); lines sharing a frequency
   are summed by `_place_lines`, never merged earlier.
+- Physical parameters may be tensors with a scenario batch: every block aligns them with
+  its frequency (and element) axis through `_common.as_param`; structural parameters
+  (topology, carrier, sampling, resonator orders, MPPT rate) stay scalar. Pinned by
+  `tests/inverter/test_parameter_batching.py` (batched == serial).
+- Generic designs pick the capacitor-current damping per design among fixed multiples of
+  `w_res L1` by the Nyquist count on a shifted contour (it steps around the marginal poles
+  of integrators and resonators); the choice is off the tape, the gain stays differentiable.
+  Do not replace it by a single gain: no gain is stable over the whole knob range.
 - Two sources of a model: the optional schema block `Generator/Storage.inverter_model`
   (`pgml.schemas.InverterModel`, converted by `from_schema`) and a per-solve
   `{device_id: GridFollowingInverter}`, which overrides it. `from_schema` must stay a

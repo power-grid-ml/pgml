@@ -149,3 +149,35 @@ def test_dead_zone_gradcheck_at_low_power():
         torch.tensor(400.0, dtype=RDT, requires_grad=True),
     )
     assert gradcheck(fn, args, eps=1e-9, atol=1e-6, rtol=1e-4)
+
+
+def test_generic_design_knobs_gradcheck():
+    """Gradients flow from design knobs through the generated unit to the voltages; the
+    discrete choice of the damping gain is off the tape."""
+    from pgml.inverter import GenericInverterDesign
+
+    grid = two_bus(r_ohm=0.25, x_ohm=0.12)
+    gen = Generator(id=7, node=2, phases=(Phase.A,), p_nom_w=3000.0, q_nom_var=0.0)
+    grid = grid.model_copy(update={"appliances": [*grid.appliances, gen]})
+
+    def fn(ripple, cf_q):
+        model = GenericInverterDesign(
+            4600.0, phases=1, ripple_fraction=ripple, cf_reactive_fraction=cf_q
+        ).build()
+        model = dataclasses.replace(
+            model, mechanisms=("dead_time",), harmonic_orders=(3, 5)
+        )
+        res = emission_flow(
+            grid,
+            {7: model},
+            states={7: InverterState(u_dc_v=400.0)},
+            f_max_hz=300.0,
+            stability=False,
+        )
+        return torch.view_as_real(res.v).reshape(-1)
+
+    args = (
+        torch.tensor(0.2, dtype=RDT, requires_grad=True),
+        torch.tensor(0.03, dtype=RDT, requires_grad=True),
+    )
+    assert gradcheck(fn, args, eps=1e-8, atol=1e-6, rtol=1e-4)

@@ -37,9 +37,19 @@ from .filters import (
 )
 from .model import MECHANISMS, GridFollowingInverter, NortonEquivalent, from_schema
 from .operating import InverterState, PVArray
+from .presets import (
+    GENERIC_PARAMETER_RANGES,
+    GenericInverterDesign,
+    generic_single_phase_inverter,
+    generic_three_phase_inverter,
+)
 from .pwm import PWMModulator, bessel_j
 
 __all__: list[str] = [
+    "GENERIC_PARAMETER_RANGES",
+    "GenericInverterDesign",
+    "generic_single_phase_inverter",
+    "generic_three_phase_inverter",
     "ClosedLoop",
     "CurrentController",
     "DCLinkControl",

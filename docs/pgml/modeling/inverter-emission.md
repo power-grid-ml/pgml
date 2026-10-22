@@ -128,6 +128,47 @@ pv = Generator(
 `u_dc_v` is the DC-link voltage of the default operating state; a per-scenario state
 ({class}`~pgml.inverter.InverterState`) passed to the study overrides it.
 
+## Generic units and unknown products
+
+The internal design of a commercial inverter (filter values, controller structure and
+gains) is rarely published, and a user of pgml will usually not know it. pgml therefore
+offers generic units designed from their rating
+({class}`~pgml.inverter.GenericInverterDesign`, {func}`~pgml.inverter.generic_single_phase_inverter`,
+{func}`~pgml.inverter.generic_three_phase_inverter`). They describe no specific product:
+
+- the LCL filter follows the design rules of Liserre, Blaabjerg and Hansen (IEEE TIA 41(5),
+  2005): converter-side inductance from a current-ripple target, filter capacitor from its
+  reactive power (at most 5 % of the rated power), damping resistor one third of the
+  capacitor impedance at the resonance;
+- the current controller (stationary-frame PR for single-phase, dq PI for three-phase,
+  with grid-voltage feedforward) is tuned for a crossover at a fraction of the sampling
+  frequency, the PLL for a damping ratio of 0.707, the DC-link loop for a set bandwidth;
+- the capacitor-current damping gain is chosen per design: with the digital delay, a
+  grid-current-controlled LCL filter is stable without active damping only for a resonance
+  above about a sixth of the sampling frequency, and the damping turns into a negative
+  resistance above it, so among a set of gains the stable one with the largest
+  current-loop margin is taken (`GenericInverterDesign.report` gives the verdict).
+
+{data}`~pgml.inverter.GENERIC_PARAMETER_RANGES` lists a plausible range for every design
+knob with its basis, marking which ranges come from the literature and which are design
+assumptions. Every physical parameter of every block also accepts a tensor with a scenario
+batch, so a whole population of designs is one model and one batched study; structural
+choices (topology, carrier and sampling frequency, MPPT rate) stay scalar because they fix
+the frequency grid. Sampling a population over these ranges is the caller's choice: the
+sensitivity results above show that the product parameters dominate the spread above 2 kHz
+and that the control part of the admittance is the largest uncertainty below.
+
+```python
+import torch
+from pgml.inverter import GenericInverterDesign
+
+knobs = {"ripple_fraction": torch.tensor([0.1, 0.25, 0.4]),
+         "dead_time_s": torch.tensor([0.5e-6, 1e-6, 3e-6])}
+design = GenericInverterDesign(4600.0, phases=1, **knobs)
+fleet = design.build()               # one model, batch of three designs
+print(design.report()["stable"])     # tensor([True, True, True])
+```
+
 ## The Norton equivalent
 
 At each frequency a unit is
