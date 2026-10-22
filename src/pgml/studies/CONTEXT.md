@@ -95,11 +95,19 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   by `test_without_inverters_the_study_is_the_harmonic_flow`).
 - Modelled devices are silenced in the spectrum path (`harmonic_injection={id: {}}`); one
   carrying `harmonic_impedance` or a derived generation shunt is refused, never doubled.
-- Right-hand sides: column 0 = everything not modelled, then per unit one locked and one
-  unlocked column, then unit columns for the stability margin. `v_rms` sums the unlocked
-  columns in power, the locked ones as phasors.
-- Primary emission of a unit = response to its own two columns (all other sources zero).
-- `admittance="passive"|"none"` swaps only the stamped admittance; the Norton currents are
+- The units are never stamped into the dense `Y`. The network without them is factored
+  (with the `ybus_structure` pattern plus the diagonal, so the sparse backend gathers
+  instead of scanning) and solved for column 0 (everything not modelled) and one column
+  per unit element (port). The units' block-diagonal admittance `D` acts through
+  Woodbury in port space: `Y^-1 = Z0 - Z0 P D (I + Z_pp D)^-1 P^T Z0`, which never
+  inverts `D` (a unit may have none). Scenario batches of the unit parameters touch only
+  the `S x S` port system (`S` = number of unit elements); the network factorization is
+  batched only by the operating point. Agrees with stamping to ~1e-15 relative.
+- `v_rms` sums each unit's unlocked response in power, the locked ones as phasors.
+- Primary emission of a unit = closed-loop port impedance block of its own terminals
+  times its own Norton current (all other sources zero); the same block is the `Z_tt` of
+  the stability margin.
+- `admittance="passive"|"none"` swaps only the unit admittance `D`; the Norton currents are
   unchanged.
 - The generation-shunt notice is suppressed when every generator is modelled.
 

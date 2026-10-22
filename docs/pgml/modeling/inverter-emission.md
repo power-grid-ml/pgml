@@ -289,6 +289,13 @@ frequency:
 4. the right-hand side holds the Norton currents and, at integer orders, the other devices'
    spectra and the background distortion exactly as the harmonic flow forms them.
 
+The units enter the network only at their terminals. The network without them is
+factored once per frequency and solved for one column per unit terminal; the unit
+admittances then act as a low-rank (Woodbury) update on that terminal impedance matrix.
+The result equals stamping the admittances into `Y(f)` (agreement about 1e-15 relative),
+and a batch of unit parameters (irradiance, DC voltage, design knobs) only repeats the
+small terminal system, not the network factorization.
+
 Without inverter models the study reproduces {func}`pgml.solve_harmonic_flow` at the integer
 orders. The result carries:
 

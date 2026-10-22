@@ -20,6 +20,13 @@ argument, which overrides the block. Every other device keeps the simple injecti
    (``node_sources``), exactly as :func:`pgml.solve_harmonic_flow` forms them. Without
    inverter models the study reproduces the harmonic flow at integer orders.
 
+The inverters enter the network only at their terminals, so their admittance is a
+low-rank update of the network matrix. The network without them is factored once per
+frequency (and per operating-point scenario) and solved for the other devices' injections
+and for one column per inverter terminal; the inverter admittances, which may vary per
+scenario, then act through the Woodbury identity on the terminal impedance matrix, whose
+size is the number of inverter elements, not the number of rows.
+
 Aggregation
 -----------
 Each inverter's sources are split into components locked to its fundamental (dead time,
@@ -65,14 +72,13 @@ import torch
 from torch import Tensor
 
 from pgml import defaults
-from pgml.assembly import node_phase_index
+from pgml.assembly import node_phase_index, ybus_structure
 from pgml.assembly._incidence import build_incidence, group_appliances, used_rows
 from pgml.assembly._load_shunt import (
     generation_shunt_is_neglected,
     resolve_shunt_basis,
     resolve_shunt_model_name,
 )
-from pgml.assembly._scatter import scatter_blocks_into
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.errors import InputError
@@ -412,8 +418,8 @@ def emission_flow(
         carrier lines 3 to 9 % off against a switching simulation. Pass the same slack to
         :func:`pgml.solve_harmonic_flow` when comparing the two.
     stability:
-        Compute the per-device stability indicator (one extra right-hand side per
-        element).
+        Compute the per-device stability indicator (two small inverses and a singular
+        value decomposition per element block and frequency).
     admittance:
         Which inverter admittance the network sees, for separating the mechanisms
         that shape the spread: ``"model"`` (default, the closed-loop admittance through
@@ -586,34 +592,68 @@ def emission_flow(
             -2, pos, i_int.broadcast_to((*batch, len(int_orders), n_full))
         )
 
-    def nodal(d: _Device, x: Tensor) -> Tensor:
-        """Element currents ``[*b, F, E]`` injected -> full nodal vector ``[*b, F, N]``."""
-        u = torch.einsum("eu,...e->...u", d.m, x)
-        out = torch.zeros((*u.shape[:-1], n_full), dtype=cdt, device=device)
-        return out.index_add(-1, d.rows, u)
-
+    # Terminal ports: one per element of every modelled unit, in device order. The
+    # units enter the network only through these ports, so their admittance is a
+    # low-rank update of the network matrix (Woodbury): the network is factored and
+    # solved without them, and every unit quantity follows from the port impedance.
     ids = list(devices)
-    rhs_full = [other.broadcast_to((*batch, n_f, n_full))]
+    offsets = [0]
     for i in ids:
+        offsets.append(offsets[-1] + int(devices[i].m.shape[0]))
+    n_p = offsets[-1]
+    ports = [
+        torch.arange(offsets[j], offsets[j + 1], device=device) for j in range(len(ids))
+    ]
+    # P [N, S]: column p is the nodal current of a unit current on port p, and P^T v
+    # are the port (element) voltages of a nodal voltage v.
+    p_mat = torch.zeros((n_full, n_p), dtype=cdt, device=device)
+    for j, i in enumerate(ids):
         d = devices[i]
-        rhs_full.append(
-            nodal(d, d.norton.source_locked).broadcast_to((*batch, n_f, n_full))
+        p_mat = p_mat.index_put(
+            (d.rows.unsqueeze(-1), ports[j].unsqueeze(0)),
+            d.m.transpose(0, 1),
+            accumulate=True,
         )
-        rhs_full.append(
-            nodal(d, d.norton.source_unlocked).broadcast_to((*batch, n_f, n_full))
+
+    def stack_ports(x: list[Tensor]) -> Tensor:
+        """Per-unit element vectors ``[*b, F, E]`` -> port vector ``[*b, F, S]``."""
+        empty = torch.zeros((*batch, n_f, 0), dtype=cdt, device=device)
+        return torch.cat(
+            [empty, *(t.broadcast_to((*batch, n_f, t.shape[-1])) for t in x)], -1
         )
-    unit_cols: list[tuple[int, int]] = []
-    if stability:
-        for i in ids:
-            d = devices[i]
-            e = d.m.shape[0]
-            for k in range(e):
-                x = torch.zeros((n_f, e), dtype=cdt, device=device)
-                x[:, k] = 1.0
-                rhs_full.append(nodal(d, x).broadcast_to((*batch, n_f, n_full)))
-                unit_cols.append((i, k))
-    rhs_full_t = torch.stack(rhs_full, dim=0)  # [R, *b, F, N]
-    n_rhs = rhs_full_t.shape[0]
+
+    s_locked = stack_ports([devices[i].norton.source_locked for i in ids])
+    s_unlocked = stack_ports([devices[i].norton.source_unlocked for i in ids])
+    # Block-diagonal unit admittance D [*b, F, S, S], scattered in one pass.
+    lin = torch.cat(
+        [torch.zeros(0, dtype=torch.int64, device=device)]
+        + [
+            (ports[j].unsqueeze(-1) * n_p + ports[j].unsqueeze(0)).reshape(-1)
+            for j in range(len(ids))
+        ]
+    )
+    d_vals = torch.cat(
+        [torch.zeros((*batch, n_f, 0), dtype=cdt, device=device)]
+        + [
+            devices[i]
+            .norton.admittance.broadcast_to(
+                (*batch, n_f, *devices[i].norton.admittance.shape[-2:])
+            )
+            .flatten(-2)
+            for i in ids
+        ],
+        -1,
+    )
+    d_all = (
+        torch.zeros((*batch, n_f, n_p * n_p), dtype=cdt, device=device)
+        .index_add(-1, lin, d_vals)
+        .unflatten(-1, (n_p, n_p))
+    )
+    # Unit index of each port, to sum port contributions per unit.
+    unit_of_port = torch.cat(
+        [torch.zeros(0, dtype=torch.int64, device=device)]
+        + [torch.full((len(p),), j, device=device) for j, p in enumerate(ports)]
+    )
 
     unmodelled_generation = any(
         isinstance(a, (Generator, Storage))
@@ -622,14 +662,21 @@ def emission_flow(
         for a in grid.appliances
     )
 
-    # 3./4. Network matrix per frequency chunk, inverter admittances stamped, solve.
+    # 3./4. Network matrix per frequency chunk (without the units), factored once; the
+    # units enter through the port impedance.
     itemsize = torch.empty((), dtype=cdt).element_size()
     budget = float(defaults.get("solver.harmonic.system_budget_mb")) * 1024.0**2
     n_b = max(1, int(torch.Size(batch).numel()))
-    per_freq = itemsize * n_b * (2 * n_full**2 + 2 * n_rhs * n_full)
+    n_y = max(1, int(v1.shape[:-1].numel()))
+    per_freq = itemsize * (
+        n_y * (2 * n_full**2 + 2 * n_p * n_full)
+        + n_b * (6 * n_full + (3 + len(ids)) * n_p * n_full + 5 * n_p**2)
+    )
     chunk = max(1, int(budget // per_freq))
     fusion = None
-    v_parts = []
+    pattern = None
+    eye_p = torch.eye(n_p, dtype=cdt, device=device)
+    parts: dict[str, list[Tensor]] = {k: [] for k in ("v", "vl", "pw", "vp", "m")}
     for start in range(0, n_f, chunk):
         sl = slice(start, min(start + chunk, n_f))
         f_chunk = f_t[sl]
@@ -650,75 +697,89 @@ def emission_flow(
             # admittance is the model's; it stays on for unmodelled generators.
             warn=start == 0 and unmodelled_generation,
         )
-        to_red = None if fusion is None else fusion.row_to_reduced.to(device)
         if bg_diag is not None:
             diag = bg_diag[..., sl, :]
             if fusion is not None:
                 diag = fusion.restrict(diag)
             y = y + torch.diag_embed(diag)
-        for i in ids:
-            d = devices[i]
-            y_el = d.norton.admittance[..., sl, :, :]
-            block = torch.einsum("eu,...ef,fv->...uv", d.m, y_el, d.m)
-            rows = d.rows if to_red is None else to_red[d.rows]
-            y = scatter_blocks_into(
-                y, block.unsqueeze(-3), rows.unsqueeze(0), rows.unsqueeze(0)
+        if pattern is None:
+            # Topology pattern plus the diagonal (background shunts); read by the sparse
+            # backend only, which then gathers entries instead of scanning the matrix.
+            n_rows = y.shape[-1]
+            pattern = torch.unique(
+                torch.cat(
+                    [
+                        ybus_structure(grid, index, device=device),
+                        torch.arange(n_rows, device=device) * (n_rows + 1),
+                    ]
+                )
             )
-        rhs = rhs_full_t[..., sl, :]
+        fac = lu_factor_system(y, pattern=pattern)
+        fc = sl.stop - sl.start
+        rhs_o = other[..., sl, :]
+        rhs_p = p_mat.transpose(0, 1).unsqueeze(-2).expand(n_p, fc, n_full)
         if fusion is not None:
-            rhs = fusion.restrict(rhs)
-        fac = lu_factor_system(y)
-        x = solve_factored(
-            fac, rhs.broadcast_to((n_rhs, *batch, rhs.shape[-2], rhs.shape[-1]))
+            rhs_o = fusion.restrict(rhs_o)
+            rhs_p = fusion.restrict(rhs_p)
+        v0 = solve_factored(fac, rhs_o)  # [*b, Fc, N]
+        z0 = solve_factored(
+            fac, rhs_p.reshape(n_p, *([1] * (y.ndim - 3)), fc, rhs_p.shape[-1])
         )
         if fusion is not None:
-            x = fusion.prolong(x)
-        v_parts.append(x)
-    x_all = torch.cat(v_parts, dim=-2)  # [R, *b, F, N]
+            v0 = fusion.prolong(v0)
+            z0 = fusion.prolong(z0)
+        z0 = z0.movedim(0, -1)  # network impedance columns at the ports [*b, Fc, N, S]
+        z_pp = torch.einsum("na,...nq->...aq", p_mat, z0)
+        d_c = d_all[..., sl, :, :]
+        # With the units: Y^-1 = Z0 - Z0 P D (I + Z_pp D)^-1 P^T Z0, which never
+        # inverts D (a unit may have no admittance).
+        lu_a = torch.linalg.lu_factor(eye_p + z_pp @ d_c)
+        m_pp = torch.linalg.lu_solve(*lu_a, z_pp.broadcast_to(d_c.shape))
+        cols = z0 @ (eye_p - d_c @ m_pp)  # Y^-1 P [*b, Fc, N, S]
+        v0_p = torch.einsum("na,...n->...a", p_mat, v0)
+        corr = torch.linalg.lu_solve(*lu_a, v0_p.unsqueeze(-1))
+        v_other = v0 - (z0 @ (d_c @ corr)).squeeze(-1)
+        v_locked = v_other + (cols @ s_locked[..., sl, :].unsqueeze(-1)).squeeze(-1)
+        # Unlocked sources: one voltage per unit, summed in power.
+        per_port = cols * s_unlocked[..., sl, :].unsqueeze(-2)
+        per_unit = torch.zeros(
+            (*per_port.shape[:-1], len(ids)), dtype=cdt, device=device
+        ).index_add(-1, unit_of_port, per_port)
+        v = v_locked + per_unit.sum(-1)
+        parts["v"].append(v)
+        parts["vl"].append(v_locked)
+        parts["pw"].append((per_unit.abs() ** 2).sum(-1))
+        parts["vp"].append(torch.einsum("na,...n->...a", p_mat, v))
+        parts["m"].append(m_pp)
 
     # 5. Aggregate.
-    v_other = x_all[0]
-    v_locked = v_other
-    v = v_other
-    power = torch.zeros(v_other.shape, dtype=rdt, device=device)
-    for j, i in enumerate(ids):
-        v_l, v_u = x_all[1 + 2 * j], x_all[2 + 2 * j]
-        v_locked = v_locked + v_l
-        v = v + v_l + v_u
-        power = power + v_u.abs() ** 2
+    v = torch.cat(parts["v"], dim=-2)
+    v_locked = torch.cat(parts["vl"], dim=-2)
+    power = torch.cat(parts["pw"], dim=-2)
+    v_port = torch.cat(parts["vp"], dim=-2)  # [*b, F, S]
+    m_all = torch.cat(parts["m"], dim=-3)  # closed-loop port impedance [*b, F, S, S]
     p_total = v_locked.abs() ** 2 + power
     # sqrt has an infinite derivative at 0 (frequencies where nothing emits).
     safe = torch.where(p_total > 0, p_total, torch.ones_like(p_total))
     v_rms = torch.where(p_total > 0, torch.sqrt(safe), torch.zeros_like(p_total))
-
-    def element_v(d: _Device, x: Tensor) -> Tensor:
-        return torch.einsum("eu,...u->...e", d.m, x[..., d.rows])
 
     current, primary, margin = {}, {}, {}
     for j, i in enumerate(ids):
         d = devices[i]
         y_el = d.norton.admittance
         src = d.norton.source
-        v_t = element_v(d, v)
-        current[i] = src - torch.einsum("...ef,...f->...e", y_el, v_t)
-        v_own = element_v(d, x_all[1 + 2 * j] + x_all[2 + 2 * j])
+        k = ports[j]
+        current[i] = src - torch.einsum("...ef,...f->...e", y_el, v_port[..., k])
+        # Network impedance at the unit's own terminals, all units connected.
+        z_tt = m_all[..., k, :][..., k]
+        v_own = torch.einsum("...ef,...f->...e", z_tt, src)
         primary[i] = src - torch.einsum("...ef,...f->...e", y_el, v_own)
-    if stability:
-        col = 1 + 2 * len(ids)
-        for i in ids:
-            d = devices[i]
-            e = d.m.shape[0]
-            z_tt = torch.stack(
-                [element_v(d, x_all[col + k]) for k in range(e)], dim=-1
-            )  # [*b, F, E (response), E (injection)]
-            col += e
-            y_el = d.norton.admittance
-            eye = torch.eye(e, dtype=cdt, device=device)
+        if stability:
+            eye = torch.eye(len(k), dtype=cdt, device=device)
             # Z_g = (Z_tt^-1 - Y)^-1 and I + Z_g Y = Z_g Z_tt^-1.
             z_inv = torch.linalg.inv(z_tt)
             z_g = torch.linalg.inv(z_inv - y_el)
-            ratio = eye + z_g @ y_el
-            margin[i] = torch.linalg.svdvals(ratio)[..., -1]
+            margin[i] = torch.linalg.svdvals(eye + z_g @ y_el)[..., -1]
 
     return EmissionFlow(
         frequencies_hz=f_t,
