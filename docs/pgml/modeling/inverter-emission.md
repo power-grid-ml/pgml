@@ -215,6 +215,8 @@ over the stated range, at complex128.
 | same | averaged three-phase time-domain simulation with an SRF-PLL | 0.4 to 0.7 % direct term (continuous); a digital controller adds 12 to 20 % |
 | network solve with the Norton models, 168 frequencies, three feeder variants | OpenDSS (compensation theorem for the non-symmetric admittance) and ngspice AC analysis | 2.3e-9 (OpenDSS, set by its own fundamental solve), 4e-13 (ngspice) |
 | random-phase aggregation | 2000-draw Monte Carlo | within 2.8 standard errors |
+| three-phase dq-controlled converter with SRF-PLL, L filter, direct and mirror terms, 76 Hz to 2.5 kHz | VeraGrid EMT (averaged bridge, 5 µs trapezoidal), injection sweep with the controller structure reduced to pgml's | 5.2e-4 direct, 0.004°; 1.1e-3 mirror |
+| carrier-group current lines above the control band | same EMT, switched bridge | 0.977 to 1.016 of V_b / (Z_f + Z_g) |
 | complete single-phase unit (4.6 kW and 0.5 kW, stiff and weak supply): supraharmonic groups at 32 and 64 kHz | switched time-domain simulation (exact edges, 1 µs dead time, regularly sampled unipolar PWM, digital PR control, SOGI-PLL) | group RMS ratio 0.999 to 1.010 |
 | same: admittance 425 Hz to 25 kHz, dead time off | small-signal injection in the same simulation | 0.3 to 3.9 % magnitude, 0.6° |
 | same: dead-time harmonics, orders 5 to 21, rated power | same | 0.4 to 5 % magnitude; THD_I 1.86 % against 1.82 % |
@@ -249,6 +251,15 @@ The tests under `tests/inverter/` pin the closed forms of every block.
   the PLL (`f` and `2 f_1 - f`), the coupling of background harmonics into the switching
   sidebands, and measured frequency coupling matrices are not solved; `y_mirror` reports the
   size of the first.
+- **Sinusoidal modulation only.** Three-phase units with min-max (space-vector
+  equivalent) zero-sequence injection have different carrier-group lines: against a
+  switched simulation with that modulation, single lines differed by a median of 78 % and
+  group rms by 0.80 to 1.35. The differential spectrum of such a modulator is not
+  modelled.
+- **Controller structure.** The current controller has no filters on its measurements, no
+  dq cross-coupling decoupling and no constant-power reference (`i_ref ∝ 1 / |v|`); a
+  controller with them has a different admittance near the control bandwidth (each changed
+  the admittance of one compared unit by 4 to 99 %).
 - **Natural sampling.** Regularly sampled PWM has the same line frequencies with slightly
   different amplitudes and adds baseband harmonics; overmodulation is refused, not modelled.
 - **Differential mode only.** The PWM common-mode voltage of a three-wire unit, which drives

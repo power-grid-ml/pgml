@@ -457,3 +457,53 @@ def test_dead_zone_tends_to_the_hard_sign_at_large_current(topology):
         n_samples=1 << 14,
     )
     torch.testing.assert_close(soft, hard, rtol=3e-2, atol=2e-3)
+
+
+def test_dq_pll_is_linearised_at_the_pi_part_of_the_command():
+    """Feedforward and capacitor-current damping act in the stationary frame, so the
+    PLL rotates only the PI controller's share of the modulator command."""
+    model = three_phase_inverter(
+        control=CurrentController(
+            "pi_dq",
+            kp=10.0,
+            ki=2000.0,
+            sampling_hz=20000.0,
+            active_damping_kc=4.0,
+            feedforward_gain=1.0,
+        ),
+        emc=(),
+        mechanisms=(),
+    )
+    u = 400.0 / math.sqrt(3.0)
+    a = complex(math.cos(-2 * math.pi / 3), math.sin(-2 * math.pi / 3))
+    v1 = torch.tensor([u, u * a, u * a.conjugate()], dtype=CDT)
+    i1 = v1 / u * 14.0
+    f = _f([75.0, 125.0, 175.0, 425.0, 1175.0])
+    nor = model.norton(f, f1_hz=F1, v1=v1, i1=i1, state=InverterState(u_dc_v=700.0))
+    # Steady state by hand (positive sequence = phase a for a balanced set).
+    s1 = laplace(_f([F1]), CDT)[0]
+    z1, yc, z2 = model.filter.impedances(s1)
+    v_c = v1[0] + z2 * i1[0]
+    v_b = v_c + z1 * (i1[0] + yc * v_c)
+    lead = torch.polar(
+        torch.tensor(1.0, dtype=RDT),
+        torch.tensor(2 * math.pi * F1 * 1.5 / 20000.0, dtype=RDT),
+    )
+    pi_part = v_b * lead - 1.0 * v1[0] + 4.0 * yc * v_c
+    rot = torch.polar(torch.tensor(1.0, dtype=RDT), -torch.angle(v1[0]))
+    cl = closed_loop(
+        model.filter,
+        model.control,
+        f,
+        f1_hz=F1,
+        pll=model.pll,
+        v1d=torch.tensor(math.sqrt(2) * u, dtype=RDT),
+        i1dq=math.sqrt(2) * i1[0] * rot,
+        vb1dq=math.sqrt(2) * pi_part * rot,
+        cdt=CDT,
+    )
+    pos = torch.tensor([1.0, a, a.conjugate()], dtype=CDT)
+    y_pos = (nor.admittance @ pos)[
+        :, 0
+    ]  # response of phase a to a positive-sequence set
+    torch.testing.assert_close(y_pos, cl.y, rtol=1e-10, atol=1e-14)

@@ -44,6 +44,7 @@ from torch import Tensor
 from pgml.errors import InputError, ModelingError
 
 from ._common import (
+    as_real,
     element_to_sequence,
     laplace,
     sequence_to_element,
@@ -304,25 +305,29 @@ class GridFollowingInverter:
         else:
             ref_v, ref_i, ref_b = v_p[..., 0], i_p[..., 0], v_b[..., 0]
         rot = torch.polar(torch.ones_like(ref_v.real), -torch.angle(ref_v))
+        # The PLL rotates only the dq-frame (PI) part of the modulator command: the
+        # feedforward and the capacitor-current damping act in the stationary frame. The
+        # command is the bridge voltage before the delay (it leads by w_1 times the
+        # delay); its PI part is the command minus those two stationary-frame terms.
+        lead = torch.polar(
+            torch.ones_like(ref_v.real),
+            torch.full_like(
+                ref_v.real,
+                2.0
+                * math.pi
+                * f1_hz
+                * self.control.delay_samples
+                / self.control.sampling_hz,
+            ),
+        )
+        i_cap = yc * v_c
+        ref_c = element_to_sequence(i_cap)[..., 1] if e == 3 else i_cap[..., 0]
+        kc1 = as_real(self.control.active_damping_kc, rdt, dev).to(cdt)
+        pi_part = ref_b * lead - self.control.feedforward(s1) * ref_v + kc1 * ref_c
         ss = {
             "v1d": math.sqrt(2.0) * torch.abs(ref_v),
             "i1dq": math.sqrt(2.0) * ref_i * rot,
-            # The PLL rotates the modulator COMMAND; the bridge voltage is that command
-            # delayed, so the command leads it by w_1 times the delay.
-            "vb1dq": math.sqrt(2.0)
-            * ref_b
-            * rot
-            * torch.polar(
-                torch.ones_like(ref_v.real),
-                torch.full_like(
-                    ref_v.real,
-                    2.0
-                    * math.pi
-                    * f1_hz
-                    * self.control.delay_samples
-                    / self.control.sampling_hz,
-                ),
-            ),
+            "vb1dq": math.sqrt(2.0) * pi_part * rot,
         }
 
         cl_p = self._loop(f, f1_hz, ss, bridge_on, cdt)
