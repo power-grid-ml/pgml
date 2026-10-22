@@ -56,7 +56,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from ._common import TWO_PI, Scalar, as_real, laplace
+from ._common import TWO_PI, Scalar, as_param, as_real, laplace
 
 
 @dataclass(frozen=True)
@@ -85,14 +85,9 @@ class DCLinkControl:
     def _blocks(
         self, s: Tensor, f1_hz: float, v_g: Tensor, u_dc: Tensor, n_phases: int
     ):
-        rdt = s.real.dtype
-        dev = s.device
-        g_pi = (
-            as_real(self.kp, rdt, dev).to(s.dtype)
-            + as_real(self.ki, rdt, dev).to(s.dtype) / s
-        )
+        g_pi = as_param(self.kp, s).to(s.dtype) + as_param(self.ki, s).to(s.dtype) / s
         g_cc = 1.0 / (1.0 + 3.0 / self.sampling_hz * s)
-        c = as_real(self.c_dc_f, rdt, dev).to(s.dtype)
+        c = as_param(self.c_dc_f, s).to(s.dtype)
         plant = (
             n_phases
             * v_g.to(s.dtype).unsqueeze(-1)
@@ -102,7 +97,7 @@ class DCLinkControl:
             notch = torch.ones_like(s)
         else:
             wh2 = (2.0 * TWO_PI * f1_hz) ** 2
-            kh = as_real(self.notch_quality_rad_s, rdt, dev).to(s.dtype)
+            kh = as_param(self.notch_quality_rad_s, s).to(s.dtype)
             notch = (s * s + wh2) / (s * s + kh * s + wh2)
         return g_pi, g_cc, plant, notch
 
@@ -174,7 +169,7 @@ class PerturbObserveMPPT:
     ) -> tuple[Tensor, Tensor, Tensor]:
         """``(f_n, A_n, phi_n)`` of the DC-link reference (peak amplitudes)."""
         n = torch.as_tensor(self.orders(f1_hz), dtype=rdt, device=device)
-        v = as_real(self.v_step_v, rdt, device)
+        v = as_param(self.v_step_v, n)  # [*batch, 1] for a batched step
         a_n = -(2.0 * v / (math.pi * n)) * torch.sin(math.pi * n / 2.0)
         b_n = (v / (math.pi * n)) * (1.0 - torch.cos(math.pi * n))
         amp = torch.sqrt(a_n * a_n + b_n * b_n)

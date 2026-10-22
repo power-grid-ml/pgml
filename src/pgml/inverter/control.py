@@ -50,7 +50,7 @@ from torch import Tensor
 
 from pgml.errors import InputError
 
-from ._common import TWO_PI, Scalar, as_real, laplace
+from ._common import TWO_PI, Scalar, as_param, laplace
 from .filters import LCLFilter
 
 Feedback = Literal["grid", "converter"]
@@ -138,16 +138,14 @@ class CurrentController:
 
     def gain(self, s: Tensor, f1_hz: float) -> Tensor:
         """``G_c(s)`` for the stationary-frame space vector (or single-phase signal)."""
-        rdt = s.real.dtype
-        dev = s.device
-        g = as_real(self.kp, rdt, dev).to(s.dtype) + torch.zeros_like(s)
+        g = as_param(self.kp, s).to(s.dtype) + torch.zeros_like(s)
         w1 = TWO_PI * f1_hz
         if self.kind == "pi_dq":
-            ki = as_real(self.ki, rdt, dev).to(s.dtype)
+            ki = as_param(self.ki, s).to(s.dtype)
             return g + ki / (s - 1j * w1)
-        wc = as_real(self.resonant_bandwidth_rad_s, rdt, dev).to(s.dtype)
+        wc = as_param(self.resonant_bandwidth_rad_s, s).to(s.dtype)
         for order, kr in self.resonant.items():
-            kr_t = as_real(kr, rdt, dev).to(s.dtype)
+            kr_t = as_param(kr, s).to(s.dtype)
             wh2 = (float(order) * w1) ** 2
             g = g + 2.0 * kr_t * wc * s / (s * s + 2.0 * wc * s + wh2)
         return g
@@ -158,7 +156,7 @@ class CurrentController:
 
     def feedforward(self, s: Tensor) -> Tensor:
         """``H_ff(s)``: the feedforward gain behind its optional low-pass."""
-        k = as_real(self.feedforward_gain, s.real.dtype, s.device).to(s.dtype)
+        k = as_param(self.feedforward_gain, s).to(s.dtype)
         if self.feedforward_cutoff_hz is None:
             return k + torch.zeros_like(s)
         return k / (1.0 + s / (TWO_PI * float(self.feedforward_cutoff_hz)))
@@ -180,11 +178,7 @@ class PhaseLockedLoop:
 
     def transfer(self, s: Tensor, v1d: Tensor) -> Tensor:
         """``H_PLL(s)`` [rad/V] for the dq-frame Laplace variable ``s``."""
-        rdt = s.real.dtype
-        h_pi = (
-            as_real(self.kp, rdt, s.device).to(s.dtype)
-            + as_real(self.ki, rdt, s.device).to(s.dtype) / s
-        )
+        h_pi = as_param(self.kp, s).to(s.dtype) + as_param(self.ki, s).to(s.dtype) / s
         return h_pi / (s + h_pi * v1d.to(s.dtype))
 
 
@@ -274,7 +268,7 @@ def closed_loop(
     authority = (f_hz.abs() < nyquist).to(cdt)  # [F]
     gc = ctrl.gain(s, f1_hz) * authority
     gdel = ctrl.delay(s)
-    kc = as_real(ctrl.active_damping_kc, rdt, dev).to(cdt) * authority
+    kc = as_param(ctrl.active_damping_kc, s).to(cdt) * authority
     hff = ctrl.feedforward(s) * authority
 
     # PLL perturbations, all decoupled into a direct term (on v) and a mirror term (on
@@ -305,10 +299,22 @@ def closed_loop(
         y_pll = y_pll * active
         g_pll = g_pll * active
 
-    shape = (*batch, s.shape[-1])
+    # Every term carries the scenario batch of the operating point and of batched
+    # parameters, broadcast to one common shape.
+    shape = torch.broadcast_shapes(
+        (*batch, s.shape[-1]),
+        z1.shape,
+        yc.shape,
+        z2.shape,
+        gc.shape,
+        kc.shape,
+        hff.shape,
+        y_pll.shape,
+        g_pll.shape,
+    )
 
     def full(x):
-        return x.broadcast_to(shape) if x.dim() <= len(shape) else x
+        return x.broadcast_to(shape)
 
     z1b, ycb, z2b = full(z1), full(yc), full(z2)
     gcb, gdelb, kcb = full(gc), full(gdel), full(kc)
@@ -348,7 +354,7 @@ def closed_loop(
     i2 = x[..., 1, :]  # [*batch, F, 4]
     y = -i2[..., 0]
     loop = gdel * gc * (yp if not meas_i1 else (1.0 + z2 * yc) * yp)
-    y_passive = (yo * torch.ones_like(y)) if y.dim() else yo
+    y_passive = yo.broadcast_to(y.shape)
     return ClosedLoop(
         y=y,
         y_passive=y_passive,

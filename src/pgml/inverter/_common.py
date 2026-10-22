@@ -28,6 +28,21 @@ def as_real(x: Scalar, rdt: torch.dtype, device) -> Tensor:
     return torch.as_tensor(float(x), dtype=rdt, device=device)
 
 
+def as_param(x: Scalar, s: Tensor) -> Tensor:
+    """A physical parameter aligned for a product with the Laplace variable ``s``.
+
+    Parameters may carry a scenario batch ``[*batch]`` (a tensor), so a fleet of units with
+    different values is evaluated in one call. ``s`` has the frequency axis (and possibly an
+    element axis) last; the parameter gains that many trailing singleton axes, so the
+    product broadcasts to ``[*batch, *s.shape]``. A scalar stays 0-d.
+    """
+    rdt = s.real.dtype
+    t = as_real(x, rdt, s.device)
+    if t.dim() == 0:
+        return t
+    return t.reshape(*t.shape, *([1] * s.dim()))
+
+
 def real_dtype(cdt: torch.dtype) -> torch.dtype:
     """The real dtype matching a complex dtype."""
     if cdt == torch.complex64:

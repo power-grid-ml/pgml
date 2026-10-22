@@ -28,7 +28,7 @@ from torch import Tensor
 
 from pgml.errors import InputError
 
-from ._common import Scalar, as_real, capacitor_branch_admittance, series_admittance
+from ._common import Scalar, as_param, capacitor_branch_admittance, series_admittance
 
 
 @dataclass(frozen=True)
@@ -56,18 +56,16 @@ class LCLFilter:
 
     def impedances(self, s: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """``(Z1, Yc, Z2)`` at ``s``: bridge-side impedance, capacitor-branch admittance,
-        grid-side impedance."""
-        rdt = s.real.dtype
-        dev = s.device
-        z1 = as_real(self.r1_ohm, rdt, dev).to(s.dtype) + s * as_real(
-            self.l1_h, rdt, dev
-        ).to(s.dtype)
-        yc = capacitor_branch_admittance(
-            as_real(self.c_f, rdt, dev), as_real(self.r_d_ohm, rdt, dev), s
+        grid-side impedance (``[*batch, *s.shape]`` for batched parameters)."""
+        z1 = as_param(self.r1_ohm, s).to(s.dtype) + s * as_param(self.l1_h, s).to(
+            s.dtype
         )
-        z2 = as_real(self.r2_ohm, rdt, dev).to(s.dtype) + s * as_real(
-            self.l2_h, rdt, dev
-        ).to(s.dtype)
+        yc = capacitor_branch_admittance(
+            as_param(self.c_f, s), as_param(self.r_d_ohm, s), s
+        )
+        z2 = as_param(self.r2_ohm, s).to(s.dtype) + s * as_param(self.l2_h, s).to(
+            s.dtype
+        )
         return z1, yc, z2
 
     def plant(self, s: Tensor) -> tuple[Tensor, Tensor]:
@@ -99,9 +97,8 @@ class SeriesStage:
                 )
 
     def impedance(self, s: Tensor) -> Tensor:
-        rdt = s.real.dtype
         return 1.0 / series_admittance(
-            as_real(self.r_ohm, rdt, s.device), as_real(self.l_h, rdt, s.device), s
+            as_param(self.r_ohm, s), as_param(self.l_h, s), s
         )
 
 
@@ -126,13 +123,11 @@ class ShuntStage:
     r_ohm: Scalar = 0.0
 
     def admittance(self, s: Tensor, zero_sequence: bool = False) -> Tensor:
-        rdt = s.real.dtype
-        dev = s.device
-        r = as_real(self.r_ohm, rdt, dev)
-        y_ground = capacitor_branch_admittance(as_real(self.c_ground_f, rdt, dev), r, s)
+        r = as_param(self.r_ohm, s)
+        y_ground = capacitor_branch_admittance(as_param(self.c_ground_f, s), r, s)
         if zero_sequence:
             return y_ground
-        return y_ground + capacitor_branch_admittance(as_real(self.c_f, rdt, dev), r, s)
+        return y_ground + capacitor_branch_admittance(as_param(self.c_f, s), r, s)
 
 
 Stage = Union[SeriesStage, ShuntStage]

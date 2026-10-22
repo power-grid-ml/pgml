@@ -53,7 +53,7 @@ from pgml.errors import InputError
 def dead_time_voltage(
     i1: Tensor,
     u_dc: Tensor,
-    dead_time_s: float,
+    dead_time_s,
     switching_hz: float,
     orders: Sequence[int],
     *,
@@ -99,7 +99,9 @@ def dead_time_voltage(
         Complex ``[*batch, H, E]`` disturbance added to the bridge voltage.
     """
     rdt = u_dc.dtype
-    dv = (dead_time_s * switching_hz) * u_dc.to(rdt) * (2.0 if full_bridge else 1.0)
+    # The blanking time may carry a scenario batch, like the DC-link voltage.
+    td = dead_time_s.to(rdt) if isinstance(dead_time_s, Tensor) else float(dead_time_s)
+    dv = (td * switching_hz) * u_dc.to(rdt) * (2.0 if full_bridge else 1.0)
     phi = torch.angle(i1)  # [*batch, E]
     h = torch.as_tensor([float(o) for o in orders], dtype=rdt, device=u_dc.device)
     if ripple is None:
@@ -126,7 +128,13 @@ def dead_time_voltage(
             t + bridge_angle.to(rdt).unsqueeze(-1)
         )
         udc = u_dc.to(rdt).unsqueeze(-1).unsqueeze(-1)
-        l1_h = l1_h.to(rdt) if isinstance(l1_h, Tensor) else float(l1_h)
+        # Parameters [*batch] meet the waveform [*batch, E, N].
+        if isinstance(l1_h, Tensor) and l1_h.dim():
+            l1_h = l1_h.to(rdt)[..., None, None]
+        elif not isinstance(l1_h, Tensor):
+            l1_h = float(l1_h)
+        if isinstance(td, Tensor) and td.dim():
+            td = td[..., None, None]
         k = udc / (8.0 * l1_h * switching_hz)
         pos = wave > 0
         if topology == "single_phase_unipolar":
@@ -156,7 +164,7 @@ def dead_time_voltage(
                 )
                 / l1_h
             )
-        ramp = (slope * dead_time_s).clamp(min=1e-12)
+        ramp = (slope * td).clamp(min=1e-12)
         fraction = ((wave.abs() - half + ramp) / ramp).clamp(0.0, 1.0)
         err = -dv.unsqueeze(-1).unsqueeze(-1) * torch.sign(wave) * fraction
         basis = torch.exp(-1j * h.unsqueeze(-1) * t)  # [H, N]

@@ -292,7 +292,9 @@ class GridFollowingInverter:
 
         # Fundamental state at the inner port and the bridge (positive sequence for
         # a three-phase unit).
-        s1 = laplace(torch.as_tensor([f1_hz], dtype=rdt, device=dev), cdt)[0]
+        # Length-1 frequency axis: batched parameters [*batch] become [*batch, 1] and line
+        # up with the element axis of the terminal values [*batch, E].
+        s1 = laplace(torch.as_tensor([f1_hz], dtype=rdt, device=dev), cdt)
         v_p, i_p = inner_port_state(v1, i1, self.emc, s1)
         z1, yc, z2 = self.filter.impedances(s1)
         v_c = v_p + z2 * i_p
@@ -323,7 +325,8 @@ class GridFollowingInverter:
         i_cap = yc * v_c
         ref_c = element_to_sequence(i_cap)[..., 1] if e == 3 else i_cap[..., 0]
         kc1 = as_real(self.control.active_damping_kc, rdt, dev).to(cdt)
-        pi_part = ref_b * lead - self.control.feedforward(s1) * ref_v + kc1 * ref_c
+        ff1 = self.control.feedforward(s1)[..., 0]
+        pi_part = ref_b * lead - ff1 * ref_v + kc1 * ref_c
         ss = {
             "v1d": math.sqrt(2.0) * torch.abs(ref_v),
             "i1dq": math.sqrt(2.0) * ref_i * rot,
@@ -383,7 +386,9 @@ class GridFollowingInverter:
                     grid_list,
                 )
             )
-        if "dead_time" in self.mechanisms and self.dead_time_s > 0:
+        if "dead_time" in self.mechanisms and (
+            isinstance(self.dead_time_s, Tensor) or self.dead_time_s > 0
+        ):
             d = dead_time_voltage(
                 i_b,
                 u_dc,
@@ -556,7 +561,7 @@ def from_schema(spec) -> GridFollowingInverter:
         else PhaseLockedLoop(kp=spec.pll.kp, ki=spec.pll.ki),
         emc=emc,
         emc_on_grid_side=spec.emc_on_grid_side,
-        dead_time_s=float(spec.dead_time_s),
+        dead_time_s=spec.dead_time_s,
         dead_time_ripple=spec.dead_time_ripple,
         dc_link=None
         if dc is None
