@@ -46,6 +46,13 @@ matter, when the devices interact with resonances (the admittance decides how mu
 background distortion a unit absorbs or amplifies), or when primary and secondary emission
 must be separated.
 
+Cost: measured on a 50-node feeder with 10 units (CPU, complex128, one scenario), the classic
+harmonic flow over 40 orders took 40 ms, the detailed study up to 2 kHz 191 ms (159
+frequencies) and up to 150 kHz 337 ms (306 frequencies). Per solved frequency the two cost
+about the same on small grids. The detailed study builds dense per-frequency matrices, so the
+ratio grows with network size and scenario batch (14 to 27 times at 200 nodes, 39 to 78 times
+per scenario in a batch of 64); gradients add about 1.7 times a forward pass in both.
+
 ### Which effects matter for the spread
 
 A sensitivity study on a 10-node 400 V feeder with households and PV (feeder-end voltages
