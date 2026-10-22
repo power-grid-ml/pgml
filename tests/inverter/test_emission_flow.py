@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from pgml.errors import InputError
-from pgml.inverter import InverterState
+from pgml.inverter import InverterState, PWMModulator
 from pgml.inverter._common import laplace
 from pgml.schemas.grid_schema import Generator, HarmonicImpedance, Phase
 from pgml.solver import NodeHarmonicSource, solve_harmonic_flow
@@ -261,3 +261,19 @@ def test_compatibility_ratios():
     )
     back = EmissionFlow.from_dict(res.to_dict())
     torch.testing.assert_close(back.v1, res.v1)
+
+
+def test_pwm_sideband_on_the_fundamental_is_left_out():
+    """With f_c = 1 kHz the line m = 1, n = -19 lies at 50 Hz."""
+    model = single_phase_inverter(
+        pwm=PWMModulator(
+            "single_phase_bipolar", carrier_hz=1000.0, carrier_groups=2, sidebands=19
+        )
+    )
+    res = emission_flow(
+        _pv_two_bus(),
+        {7: model},
+        states={7: InverterState(u_dc_v=400.0)},
+        f_max_hz=3000.0,
+    )
+    assert torch.isfinite(res.v).all() and F1 not in res.frequencies_hz.tolist()

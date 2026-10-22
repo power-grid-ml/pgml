@@ -371,8 +371,17 @@ class GridFollowingInverter:
             _, lines = self.pwm.bridge_spectrum(
                 mi, u_dc, f1_hz, torch.angle(v_b[..., 0]), state.carrier_angle_rad
             )
+            # A sideband that lands on the fundamental (a low carrier ratio) belongs to the
+            # operating point, not to the emission, and is left out.
+            line_hz = self.pwm.line_frequencies(f1_hz)
+            keep = [j for j, x in enumerate(line_hz) if abs(x - f1_hz) > 1e-6 * f1_hz]
+            sel = torch.as_tensor(keep, dtype=torch.int64, device=dev)
             parts["pwm"] = masked(
-                _place_lines(lines.to(cdt), self.pwm.line_frequencies(f1_hz), grid_list)
+                _place_lines(
+                    lines.to(cdt).index_select(-2, sel),
+                    [line_hz[j] for j in keep],
+                    grid_list,
+                )
             )
         if "dead_time" in self.mechanisms and self.dead_time_s > 0:
             d = dead_time_voltage(
