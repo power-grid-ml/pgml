@@ -57,7 +57,11 @@ source at one node per scenario is the diagonal enumeration of that list.
 The same mechanism carries the upstream background. `pgml.scenarios`'
 `BackgroundHarmonicConfig` realizes one voltage-kind source per in-service `Source` node from
 a config plus a seed, which is how a reproducible study supplies the distortion the upstream
-network imposes. A voltage-kind source is an admittance as well as a current, so it cannot sit
+network imposes. Its level and angle drift along the step axis as a stationary AR(1) process,
+either one series shared by every order (`drift_mode="shared"`, the default) or an own series
+for the log-magnitude and for the angle of every order (`drift_mode="independent"`), each with
+the same per-step correlation and spread. The background's `phase_deg` follows the convention
+above: it is relative to `h` times the fundamental angle on each phase of the source node. A voltage-kind source is an admittance as well as a current, so it cannot sit
 on a row that bus fusion collapsed; such a placement is refused by name.
 
 The OpenDSS equivalents for validation are an `ISource` carrying the spectrum for the Norton

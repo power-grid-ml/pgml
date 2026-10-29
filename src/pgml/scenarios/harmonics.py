@@ -5,7 +5,8 @@ Two ways to put harmonic content into a batch without a per-device emission mode
 - :func:`build_background_sources` realizes a
   :class:`~pgml.scenarios.BackgroundHarmonicConfig` as batched
   :class:`~pgml.solver.NodeHarmonicSource` entries at the grid's supply nodes — one
-  upstream network state every device on the feeder sees, drifting along the step axis.
+  upstream network state every device on the feeder sees, drifting along the step axis
+  (one series for all orders, or one per order for magnitude and angle).
 - :func:`spectrum_sweep` injects one spectrum at one target per scenario (a diagonal
   enumeration), for mapping how a single source spreads through the network.
 
@@ -43,9 +44,16 @@ def build_background_sources(
     per-device injection tensors (``T = 1`` for snapshot recipes). The AR(1) drift runs
     along the STEP axis; a snapshot batch has no step to walk, so its scenarios sample
     the drift's stationary distribution independently — scenarios are far apart relative
-    to any correlation time, never neighbours on one drift path. One drift series is
-    shared by every order and every device on the feeder, which is the point: what the
-    background contributes is common, not private to a device.
+    to any correlation time, never neighbours on one drift path. The drift is shared by
+    every device on the feeder, which is the point: what the background contributes is
+    common, not private to a device. ``config.drift_mode`` decides whether one series
+    moves every order's magnitude and angle together (``"shared"``) or each order's
+    log-magnitude and angle follow their own series (``"independent"``, drawn as one
+    ``ar1_noise((2, n_orders, *shape))`` call: index 0 the log-magnitudes, index 1 the
+    angles, orders ascending).
+
+    The spectrum tensors are ``float64`` on the generator's device when a drift is drawn
+    (on the default device for a fixed level). Without a drift no randomness is consumed.
 
     The background is ONE upstream network state seen through every point of common
     coupling, so each in-service ``Source`` node receives a ``NodeHarmonicSource``
@@ -71,16 +79,24 @@ def build_background_sources(
                 "in-service Source to resolve it from; set node_id explicitly."
             ) from None
 
-    if config.drift_std > 0.0 or config.drift_phase_deg > 0.0:
-        drift = ar1_noise(shape, config.drift_rho, gen)
+    orders = sorted(config.magnitude_pu)
+    drifting = config.drift_std > 0.0 or config.drift_phase_deg > 0.0
+    if drifting and config.drift_mode == "independent":
+        noise = ar1_noise((2, len(orders), *shape), config.drift_rho, gen)
+        mag_drift, ang_drift = noise[0], noise[1]  # [n_orders, *shape] each
     else:
-        drift = torch.zeros(shape, dtype=_F64)
+        if drifting:
+            drift = ar1_noise(shape, config.drift_rho, gen)
+        else:
+            drift = torch.zeros(shape, dtype=_F64)
+        mag_drift = ang_drift = drift.expand(len(orders), *drift.shape)
     spectrum = {}
-    for order, mag in sorted(config.magnitude_pu.items()):
+    for k, order in enumerate(orders):
         ang0 = float(config.phase_deg.get(order, 0.0))
         spectrum[int(order)] = (
-            float(mag) * torch.exp(config.drift_std * drift),
-            ang0 + config.drift_phase_deg * drift,
+            float(config.magnitude_pu[order])
+            * torch.exp(config.drift_std * mag_drift[k]),
+            ang0 + config.drift_phase_deg * ang_drift[k],
         )
     return [
         NodeHarmonicSource(

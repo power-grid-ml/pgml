@@ -81,7 +81,10 @@ Signatures: docstrings / API_INDEX.md.
   Thevenin source at every in-service `Source` node carrying the same realized spectrum;
   `source_power_va` is batch-constant, so `Y(h)` stays shared and only the Norton current
   varies. The AR(1) drift walks the step axis; a snapshot batch draws from its stationary
-  distribution.
+  distribution. `drift_mode="shared"` (default) is one series for every order, magnitude
+  and angle; `"independent"` draws one `ar1_noise((2, n_orders, *shape))` (log-magnitude,
+  angle; orders ascending) with the same marginal law. `drift_mode` is excluded from the
+  serialized config while `"shared"`, so configs that predate it keep their `config_hash`.
 - `ScenarioSpec`: an object with `sample(grid)` and an optional `harmonic_orders` hint;
   a non-empty hint switches `run_scenarios` to a harmonic calculation. This is the seam
   downstream generators plug into.
