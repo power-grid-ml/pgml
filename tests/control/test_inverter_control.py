@@ -120,6 +120,59 @@ def test_cosphi_p_characteristic():
     assert math.isclose(q.item(), -10000.0 * tanphi, rel_tol=1e-6)
 
 
+def test_cosphi_p_default_reference_is_per_scenario():
+    # Without p_ref_w the reference is the largest element share of the available
+    # power; in a scenario batch each scenario must use its own, not the batch's.
+    c = PowerFactorWattControl(
+        characteristic=Characteristic(
+            x_values=[0.0, 0.5, 1.0], y_values=[0.95, 0.95, -0.9]
+        ),
+    )
+    p_batch = torch.tensor(
+        [[3000.0, 2400.0, 1500.0], [9000.0, 6000.0, 8100.0]],
+        dtype=RDT,
+        requires_grad=True,
+    )  # [B=2, n_elem=3]
+    v_batch = torch.ones(2, 2, 3, dtype=RDT)  # [B, H=2, n_elem]
+    p_eff_b, q_b = resolve_injection_power(c, p_batch, v_batch, rdt=RDT, device=None)
+    assert q_b.shape == (2, 2, 3)
+    for b in range(2):
+        p_eff_1, q_1 = resolve_injection_power(
+            c, p_batch[b].detach(), v_batch[b], rdt=RDT, device=None
+        )
+        torch.testing.assert_close(p_eff_b[b], p_eff_1, rtol=1e-12, atol=0.0)
+        torch.testing.assert_close(q_b[b], q_1, rtol=1e-12, atol=0.0)
+
+    # Hand check, scenario 0: reference 3000 W; element 1 sits at x = 0.8 on the
+    # sloped segment (pf = -0.16, absorbing), element 2 at x = 0.5 (pf = 0.95).
+    def q_of(p_w, pf):
+        return math.copysign(p_w * math.sqrt(1 - pf * pf) / abs(pf), pf)
+
+    pf_1 = 0.95 + (0.8 - 0.5) / 0.5 * (-0.9 - 0.95)
+    assert math.isclose(q_b[0, 0, 1].item(), q_of(2400.0, pf_1), rel_tol=1e-12)
+    assert math.isclose(q_b[0, 0, 2].item(), q_of(1500.0, 0.95), rel_tol=1e-12)
+    # The scenario reference is differentiable: the gradient reaches the element
+    # that sets it as well as the others.
+    q_b.sum().backward()
+    assert torch.isfinite(p_batch.grad).all()
+    assert (p_batch.grad[0] != 0).all()
+
+
+def test_cosphi_p_default_reference_broadcast_shapes():
+    # An unbatched p_avail against a batched terminal voltage, and a size-1
+    # placeholder batch axis, both broadcast to the voltage batch.
+    c = PowerFactorWattControl(
+        characteristic=Characteristic(x_values=[0.0, 1.0], y_values=[1.0, -0.9]),
+    )
+    p = torch.tensor([4000.0, 2000.0, 1000.0], dtype=RDT)
+    v = torch.ones(3, 2, 1, 3, dtype=RDT)  # [S=3, B=2, H=1, n_elem]
+    _, q_ref = resolve_injection_power(c, p, v[0, 0], rdt=RDT, device=None)
+    for p_in in (p, p.expand(1, 2, 3)):
+        _, q = resolve_injection_power(c, p_in, v, rdt=RDT, device=None)
+        assert q.shape == (3, 2, 1, 3)
+        torch.testing.assert_close(q, q_ref.expand_as(q), rtol=1e-12, atol=0.0)
+
+
 def test_volt_var_deadband_and_slope_rated():
     c = VoltVarControl(
         s_rated_va=10000.0,
