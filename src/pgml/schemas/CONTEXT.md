@@ -57,6 +57,10 @@ Signatures: docstrings / API_INDEX.md.
   `harmonic_impedance` (the two are alternative harmonic models of the device).
 - `Generator.voltage_regulation` and `control` are mutually exclusive; `spectrum` and
   `spectrum_per_phase` are mutually exclusive.
+- Spectrum kinds (0.4.0): `static`, `load_varying` (levels in per unit of the device
+  rating, complex interpolation, `extrapolation` default `constant`) and `time_varying`
+  (not evaluated by the solve). Random emission is a scenario-sampler responsibility, so
+  the former `random` and `distribution` kinds were removed.
 - Upstream background distortion is an operating-point quantity
   (`NodeHarmonicSource`, `BackgroundHarmonicConfig`), never grid data.
 - `MeasurementDevice` and the rest of `Grid.measurement_devices` are inert metadata:

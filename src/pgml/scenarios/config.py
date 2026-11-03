@@ -577,12 +577,34 @@ class BackgroundHarmonicConfig(_Base):
     constant across the batch, so ``Y(h)`` is unchanged scenario-to-scenario and only
     the Norton current varies — the batched solve is preserved.
 
-    The level drifts along the STEP axis as an AR(1) shared by every order, because an
+    The level drifts along the STEP axis as a stationary standard-normal AR(1) process
+    (:func:`~pgml.scenarios.ar1_noise`, stickiness ``drift_rho`` per step), because an
     upstream background moves on the timescale of the supplying network's own load rather
-    than with anything local. Note the drift is a per-step process: a recipe whose steps
-    are far apart relative to the drift's correlation time samples it as white noise —
-    and a snapshot recipe (``n_steps == 1``) has no step axis at all, so its scenarios
-    draw the level independently from the drift's stationary distribution.
+    than with anything local. Order ``h`` is realized as
+
+        ``magnitude_pu[h] * exp(drift_std * a_h[t])`` and
+        ``phase_deg[h] + drift_phase_deg * b_h[t]`` [deg],
+
+    where ``drift_mode`` decides what the unit series ``a_h`` and ``b_h`` are:
+
+    - ``"shared"`` (default): ONE series, ``a_h = b_h`` for every order, so all orders
+      and the magnitude and angle of each move in lockstep;
+    - ``"independent"``: ``2 * len(magnitude_pu)`` mutually independent series, one for
+      the log-magnitude and one for the angle of every order. Each series has the
+      shared mode's marginal law (same ``drift_rho``, unit variance), so the per-order
+      statistics are unchanged; only the coupling across orders and between magnitude
+      and angle is removed.
+
+    The phase follows the harmonic source convention of
+    :class:`~pgml.solver.NodeHarmonicSource`: the EMF of order ``h`` is
+    ``magnitude * |V1| * exp(j*(phase + h * arg V1))`` on each phase of the source node,
+    so ``phase_deg`` is relative to ``h`` times that phase's fundamental angle and a
+    rotated fundamental rotates the background with it.
+
+    Note the drift is a per-step process: a recipe whose steps are far apart relative to
+    the drift's correlation time samples it as white noise — and a snapshot recipe
+    (``n_steps == 1``) has no step axis at all, so its scenarios draw the level
+    independently from the drift's stationary distribution.
 
     ``magnitude_pu`` empty (the default) disables the background entirely, leaving the
     rest of the run unaffected.
@@ -600,12 +622,19 @@ class BackgroundHarmonicConfig(_Base):
     #: Source strength ``S_sc`` [VA] per injection — larger is stiffer, so more of the
     #: background appears at the node. Constant across the batch to keep ``Y(h)`` batched.
     source_power_va: float = Field(default=20e6, gt=0.0)
-    #: Log-magnitude std of the shared slow drift (``0.0`` = a fixed background level).
+    #: Log-magnitude std of the slow drift (``0.0`` = a fixed background level).
     drift_std: float = Field(default=0.0, ge=0.0)
-    #: Angle std [deg] of the same drift.
+    #: Angle std [deg] of the drift.
     drift_phase_deg: float = Field(default=0.0, ge=0.0)
     #: AR(1) stickiness of the drift along the step axis.
     drift_rho: float = Field(default=0.99, ge=0.0, le=1.0)
+    #: ``"shared"`` (default): one drift series moves every order's magnitude and angle
+    #: together. ``"independent"``: every order has its own log-magnitude series and its
+    #: own angle series. Left out of the serialized config while ``"shared"``, so a config
+    #: that does not use it keeps its ``config_hash``.
+    drift_mode: Literal["shared", "independent"] = Field(
+        default="shared", exclude_if=lambda mode: mode == "shared"
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "BackgroundHarmonicConfig":

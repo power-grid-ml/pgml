@@ -28,12 +28,12 @@ from typing import NamedTuple, Optional
 import torch
 from torch import Tensor
 
-from pgml.errors import InputError
+from pgml.assembly._spectrum import static_spectrum_dict
+from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
     Source,
-    StaticSpectrum,
 )
 
 from .config import CartesianConfig, ParameterSpec, ScenarioConfig
@@ -505,13 +505,23 @@ def _write_per_phase(entry: dict, field_: str, p_pp: list, q_pp: list) -> None:
 
 
 def _stored_spectrum(appliance) -> dict:
-    """``{order: [mag_pu, phase_deg]}`` from a device's stored ``StaticSpectrum``."""
-    spec = getattr(appliance, "spectrum", None)
-    if isinstance(spec, StaticSpectrum):
-        return {
-            c.order: [c.magnitude_pu, c.phase_deg] for c in spec.spectrum.components
-        }
-    return {}
+    """``{order: [mag_pu, phase_deg]}`` from a device's stored ``StaticSpectrum``.
+
+    A harmonic spec writes a ``harmonic_injection`` override, which replaces the stored
+    spectrum of the device in the solve; it is seeded from the stored spectrum so that
+    orders the spec does not draw keep their stored values. A per-phase stored spectrum
+    has no single-spectrum seed, and a non-static kind has no values to seed from: both
+    raise instead of silently dropping the stored emission.
+    """
+    if getattr(appliance, "spectrum_per_phase", None) is not None:
+        raise ModelingError(
+            f"Device {appliance.id} stores `spectrum_per_phase`; harmonic parameter "
+            "specs override a device's spectrum as a whole and cannot seed from "
+            "per-phase spectra. Store the spectrum in `spectrum`, or drive the device "
+            "through `harmonic_injection` with per-element values."
+        )
+    spec = static_spectrum_dict(getattr(appliance, "spectrum", None), appliance.id)
+    return {} if spec is None else {o: [m, ph] for o, (m, ph) in spec.items()}
 
 
 def _coefficient_column(value, b: int, like: Tensor) -> Tensor:

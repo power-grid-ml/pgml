@@ -15,10 +15,11 @@ name: CI
 # `cuda` system-requirement (the `gpu` feature), which would fail the cpu/docs jobs even
 # though those environments install fine. Bump deliberately alongside a local check.
 
-# Every branch is built on push, not only main: a feature branch that is never opened as a
-# PR otherwise runs no gate at all.
+# Pull requests and pushes to main run the gates. Feature branches are not built on push:
+# their pull request runs the same gates, and building both would test every change twice.
 on:
   push:
+    branches: [main]
   pull_request:
 
 # Cancel superseded runs on the same ref to save CI minutes.
@@ -47,6 +48,8 @@ jobs:
   test:
     name: Tests (CPU)
     runs-on: ubuntu-latest
+    # The suite takes about four minutes; a hung test otherwise holds the runner for six hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: prefix-dev/setup-pixi@v0.9.6
@@ -54,7 +57,9 @@ jobs:
           pixi-version: v0.66.0
           environments: cpu
           cache: true
-      - run: pixi run -e cpu pytest -q
+      # A test running longer than `faulthandler_timeout` (pyproject.toml) dumps every
+      # thread's traceback and ends the run, so a hang names the test that hung.
+      - run: pixi run -e cpu pytest -q -o faulthandler_exit_on_timeout=true
 
   docs:
     name: Docs (strict Sphinx build)

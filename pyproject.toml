@@ -90,6 +90,8 @@ exclude = ["**/CONTEXT.md", "**/STATUS.md", "**/API_INDEX.md"]
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Dump the traceback of every thread when a single test runs longer than five minutes.
+faulthandler_timeout = 300
 markers = [
     "gpu: requires a CUDA device (skipped on CPU-only hosts)",
     "opendss: runs a live OpenDSS solve via opendssdirect (slower, oracle tests)",
