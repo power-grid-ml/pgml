@@ -89,6 +89,7 @@ from pgml.assembly._params import (
     resolve_operating_power,
 )
 from pgml.assembly._scatter import PatternAccumulator, scatter_blocks_into
+from pgml.assembly._spectrum import element_spectrum_dicts
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.assembly.ybus import (
@@ -106,7 +107,6 @@ from pgml.schemas.grid_schema import (
     Load,
     LoadModel,
     Phase,
-    StaticSpectrum,
     Storage,
     WindingConnection,
 )
@@ -1751,15 +1751,6 @@ def _as_rt(x, rdt, device) -> Tensor:
     return torch.as_tensor(x, dtype=rdt, device=device)
 
 
-def _static_spectrum_dict(spec_obj) -> Optional[dict]:
-    """``{order: (magnitude_pu, phase_deg)}`` (floats) from a ``StaticSpectrum``, or None."""
-    if isinstance(spec_obj, StaticSpectrum):
-        return {
-            c.order: (c.magnitude_pu, c.phase_deg) for c in spec_obj.spectrum.components
-        }
-    return None
-
-
 def _element_coeff(value, n_elem: int, rdt, device) -> Tensor:
     """Per-element coefficient tensor with trailing dim ``n_elem``.
 
@@ -1807,9 +1798,9 @@ def _device_element_spectra(
       element whose phase has no entry injects NO harmonics (all orders 0).
     - ``spectrum`` (schema, ``StaticSpectrum``): the SAME spectrum on every element.
 
-    Returns ``None`` if the device injects no harmonics at all.
+    Returns ``None`` if the device injects no harmonics at all. A stored spectrum kind
+    other than ``static`` raises :class:`~pgml.errors.ModelingError`.
     """
-    phases = appliance.phases  # element k <-> phases[k] (WYE phase / DELTA branch)
 
     override = (
         harmonic_injection.get(appliance.id) if harmonic_injection is not None else None
@@ -1823,42 +1814,37 @@ def _device_element_spectra(
             for o, (mag, ph) in override.items()
         }
 
-    spp = getattr(appliance, "spectrum_per_phase", None)
-    if spp is not None:
-        # Gather the set of orders any element carries; element k uses phases[k].
-        per_elem_dicts = [
-            _static_spectrum_dict(spp.get(phases[k])) for k in range(n_elem)
-        ]
-        all_orders: set[int] = set()
-        for d in per_elem_dicts:
-            if d is not None:
-                all_orders.update(d.keys())
-        if not all_orders:
-            return None
-        out: dict[int, tuple] = {}
-        for o in all_orders:
-            mags = [
-                (d[o][0] if (d is not None and o in d) else 0.0) for d in per_elem_dicts
-            ]
-            phs = [
-                (d[o][1] if (d is not None and o in d) else 0.0) for d in per_elem_dicts
-            ]
-            out[o] = (
-                torch.stack([_as_rt(m, rdt, device) for m in mags], dim=-1),
-                torch.stack([_as_rt(p, rdt, device) for p in phs], dim=-1),
-            )
-        return out
-
-    sd = _static_spectrum_dict(getattr(appliance, "spectrum", None))
-    if sd is None:
+    per_elem_dicts = element_spectrum_dicts(appliance)
+    if per_elem_dicts is None:
         return None
-    return {
-        o: (
-            _as_rt(mag, rdt, device).reshape(()).expand(n_elem),
-            _as_rt(ph, rdt, device).reshape(()).expand(n_elem),
+    if getattr(appliance, "spectrum_per_phase", None) is None:
+        # `spectrum`: the same spectrum on every element.
+        sd = per_elem_dicts[0]
+        return {
+            o: (
+                _as_rt(mag, rdt, device).reshape(()).expand(n_elem),
+                _as_rt(ph, rdt, device).reshape(()).expand(n_elem),
+            )
+            for o, (mag, ph) in sd.items()
+        }
+    # `spectrum_per_phase`: element k uses the spectrum stored at phases[k].
+    all_orders: set[int] = set()
+    for d in per_elem_dicts:
+        if d is not None:
+            all_orders.update(d.keys())
+    if not all_orders:
+        return None
+    out: dict[int, tuple] = {}
+    for o in all_orders:
+        mags = [
+            (d[o][0] if (d is not None and o in d) else 0.0) for d in per_elem_dicts
+        ]
+        phs = [(d[o][1] if (d is not None and o in d) else 0.0) for d in per_elem_dicts]
+        out[o] = (
+            torch.stack([_as_rt(m, rdt, device) for m in mags], dim=-1),
+            torch.stack([_as_rt(p, rdt, device) for p in phs], dim=-1),
         )
-        for o, (mag, ph) in sd.items()
-    }
+    return out
 
 
 def _injection_batch_rank(harmonic_injection: Optional[dict]) -> int:

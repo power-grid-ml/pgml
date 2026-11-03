@@ -174,6 +174,15 @@ They describe source or background distortion, not device emission. Device curre
 default to IEC 61000-3-2 per emission class A to D. There is no lighting consumer type, so
 class C is never selected automatically.
 
+**Stored spectrum kinds.** Only a `StaticSpectrum` is evaluated. The schema's other kinds,
+`LoadVaryingSpectrum`, `TimeVaryingSpectrum`, `RandomSpectrum` and `DistributionSpectrum`,
+need an operating point, a time index, a random draw or an external fitted distribution that
+the solve does not have; a device that stores one raises a `ModelingError` in
+`solve_harmonic_flow`, in the numpy oracles and in the scenario sampler. Evaluate such a
+spectrum yourself and pass the result as `harmonic_injection`. A harmonic parameter spec of
+the scenario sampler replaces a device's whole spectrum, so it refuses a device with
+`spectrum_per_phase`.
+
 ## Numerics
 
 **Single precision.** pgml solves in SI units without per-unit normalisation, and the diagonal

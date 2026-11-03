@@ -19,11 +19,14 @@ import torch
 from pgml.assembly import branch_currents, device_current_injections
 from pgml.schemas.grid_schema import (
     Grid,
+    HarmonicComponent,
     Line,
     Load,
     Node,
     Phase,
     Source,
+    SpectrumPoint,
+    StaticSpectrum,
     Switch,
 )
 from pgml.solver import solve_harmonic_flow, solve_power_flow
@@ -163,7 +166,20 @@ def test_gradcheck_harmonic_voltages_with_a_fused_branch():
         update={
             "appliances": [
                 a.model_copy(
-                    update={"spectrum": {"magnitudes": {1: 1.0, 5: 0.1}, "angles": {}}}
+                    update={
+                        "spectrum": StaticSpectrum(
+                            spectrum=SpectrumPoint(
+                                components=[
+                                    HarmonicComponent(
+                                        order=1, magnitude_pu=1.0, phase_deg=0.0
+                                    ),
+                                    HarmonicComponent(
+                                        order=5, magnitude_pu=0.1, phase_deg=0.0
+                                    ),
+                                ]
+                            )
+                        )
+                    }
                 )
                 if getattr(a, "id", None) == 22
                 else a
@@ -185,6 +201,7 @@ def test_gradcheck_harmonic_voltages_with_a_fused_branch():
         assert res.fusion is not None
         return res.v.reshape(-1)
 
+    assert fn(r)[3:].abs().max() > 1.0  # the h5 emission reaches the grid
     assert torch.autograd.gradcheck(fn, (r,), eps=1e-9, atol=1e-6, rtol=1e-3)
 
 

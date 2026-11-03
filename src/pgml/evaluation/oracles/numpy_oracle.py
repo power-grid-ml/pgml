@@ -48,11 +48,11 @@ from pgml.schemas.grid_schema import (
     Load,
     Phase,
     Source,
-    StaticSpectrum,
     Switch,
     Transformer,
 )
 
+from pgml.assembly._spectrum import element_spectrum_dicts
 from pgml.evaluation._util import to_float
 from pgml.evaluation.data import HarmonicProfile
 from pgml.evaluation.topology import distance_from_slack
@@ -162,16 +162,35 @@ def solve_with_fusion(y: np.ndarray, i: np.ndarray, p_mat) -> np.ndarray:
     return p_mat @ np.linalg.solve(p_mat.conj().T @ y @ p_mat, p_mat.conj().T @ i)
 
 
-def _resolve_spectrum(app, harmonic_injection):
+def _element_spectra(app, harmonic_injection) -> Optional[list[Optional[dict]]]:
+    """Per-element ``{order: (mag_pu, phase_deg)}`` floats, as pgml's solve resolves them.
+
+    The ``harmonic_injection`` override wins (the same spectrum on every element);
+    otherwise the stored ``spectrum`` / ``spectrum_per_phase`` (element ``k`` keys off
+    ``phases[k]``). Non-static stored kinds raise like the solve.
+    """
+    n_elem = len(app.phases)
     if harmonic_injection is not None and app.id in harmonic_injection:
-        return dict(harmonic_injection[app.id])
-    spec = getattr(app, "spectrum", None)
-    if isinstance(spec, StaticSpectrum):
-        return {
-            c.order: (to_float(c.magnitude_pu), to_float(c.phase_deg))
-            for c in spec.spectrum.components
+        spec = {
+            int(o): (float(mag), float(ang))
+            for o, (mag, ang) in harmonic_injection[app.id].items()
         }
-    return None
+        return [spec] * n_elem
+    stored = element_spectrum_dicts(app)
+    if stored is None:
+        return None
+    return [
+        None
+        if d is None
+        else {o: (to_float(m), to_float(ph)) for o, (m, ph) in d.items()}
+        for d in stored
+    ]
+
+
+def _resolve_spectrum(app, harmonic_injection):
+    """Spectrum of a single-phase (phase A) device for the profile oracle."""
+    spectra = _element_spectra(app, harmonic_injection)
+    return None if spectra is None else spectra[0]
 
 
 def _stamp_transformer_numpy(
@@ -1053,21 +1072,9 @@ def numpy_harmonic_voltages(
     for a in grid.appliances:
         if not (isinstance(a, (PgmlLoad, PgmlGen)) and getattr(a, "in_service", True)):
             continue
-        # Resolve spectrum from override or stored spectrum
-        if harmonic_injection is not None and a.id in harmonic_injection:
-            spec: dict = {
-                int(o): (float(mag), float(ang))
-                for o, (mag, ang) in harmonic_injection[a.id].items()
-            }
-        else:
-            s = getattr(a, "spectrum", None)
-            if not isinstance(s, StaticSpectrum):
-                continue
-            spec = {
-                c.order: (to_float(c.magnitude_pu), to_float(c.phase_deg))
-                for c in s.spectrum.components
-            }
-        if not spec:
+        # Per-element spectrum from the override or the stored spectrum
+        spectra = _element_spectra(a, harmonic_injection)
+        if spectra is None or not any(spectra):
             continue
         phases_a = a.phases
         n_ph = len(phases_a)
@@ -1097,7 +1104,7 @@ def numpy_harmonic_voltages(
                 i1_list.append(0.0 + 0j)
             else:
                 i1_list.append(np.conj(s0_ph) / np.conj(v_term))
-        devs.append((spec, src_rows, i1_list))
+        devs.append((spectra, src_rows, i1_list))
 
     # --- Per-order solve ---
     result_slices: list[np.ndarray] = []
@@ -1108,13 +1115,15 @@ def numpy_harmonic_voltages(
         y_h = _build_numpy_ybus(grid, h, index)
         _stamp_device_shunts_numpy(y_h, grid, index, h, shunt, operating_point)
         i_h = np.zeros(n, dtype=complex)
-        for spec, src_rows, i1_list in devs:
-            mag1, ang1 = spec.get(1, (1.0, 0.0))
-            mag_h, ang_h = spec.get(h, (0.0, 0.0))
-            if mag1 == 0.0:
-                continue
-            ratio = mag_h / mag1
-            for i1_val, row in zip(i1_list, src_rows):
+        for spectra, src_rows, i1_list in devs:
+            for spec, i1_val, row in zip(spectra, i1_list, src_rows):
+                if not spec:
+                    continue
+                mag1, ang1 = spec.get(1, (1.0, 0.0))
+                mag_h, ang_h = spec.get(h, (0.0, 0.0))
+                if mag1 == 0.0:
+                    continue
+                ratio = mag_h / mag1
                 i_drawn = (
                     ratio
                     * abs(i1_val)
