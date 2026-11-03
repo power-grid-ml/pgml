@@ -289,11 +289,13 @@ def resolve_injection_power(
     elif isinstance(control, PowerFactorWattControl):
         p_ref = control.p_ref_w
         # No reference given: the largest element share of the available power,
-        # which is |p_nom_w| / n_elem for an equally split device.
+        # which is |p_nom_w| / n_elem for an equally split device. The maximum runs
+        # over the element axis only, so every scenario of a batch keeps its own
+        # reference: [*batch, n_elem] -> [*batch, 1, 1], broadcast over (H, n_elem).
         p_ref_t = (
             _element_share(p_ref, n_elem, rdt, device)
             if p_ref is not None
-            else p_avail.abs().amax()
+            else p_avail.abs().amax(dim=-1, keepdim=True).unsqueeze(-2)
         )
         p_ref_t = torch.clamp(p_ref_t, min=1e-30)
         x = p_eff.abs() / p_ref_t
