@@ -82,7 +82,7 @@ def _grid(spec=None, **gen_kw) -> Grid:
 
 
 def test_schema_version_bumped_for_the_block():
-    assert SCHEMA_VERSION == "0.4.0"
+    assert SCHEMA_VERSION == "0.5.0"
 
 
 def test_json_round_trip():
