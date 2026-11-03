@@ -567,7 +567,6 @@ Full documentation: the docstrings (published as the API reference).
 - class `ConsumerType()` — Closed device taxonomy for loads / generators / storage (an ML categorical).
 - class `CurrentChannel(branch, phases=…, terminal=…)` — One current channel (CT) of a :class:`MeasurementDevice`: a metered branch.
 - class `CurveParam(kind=…, frequencies_hz, values, interpolation=…, extrapolation=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
-- class `DistributionSpectrum(kind=…, distribution_ref, params=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `EarthReturnModel(resistance_coeff_ohm_per_m_per_hz=…, reactance_coeff_ohm_per_m_per_hz=…, x0_frequency=…, x0_nonnegative=…, x0_exponent=…, r0_includes_earth_return=…)` — Carson earth-return parameters of the lumped ``sequence_aware`` line model.
 - class `EquationParam(kind=…, equation_id, bindings=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `ExtrapolationMethod()` — str(object='') -> str
@@ -594,7 +593,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `LineType(id, n_phases, series_resistance_ohm_per_m, series_inductance_h_per_m, shunt_capacitance_f_per_m, shunt_conductance_s_per_m=…, resistance_frequency=…, max_i_a=…)` — Catalog line type: per-length electrical parameters, no connectivity/length.
 - class `Load(id, name=…, node, phases, in_service=…, tags=…, return_path=…, component=…, connection=…, load_model=…, p_nom_w, q_nom_var=…, p_nom_per_phase_w=…, q_nom_per_phase_var=…, zip_coefficients=…, consumer_type=…, profile_ref=…, spectrum=…, spectrum_per_phase=…, harmonic_model=…)` — Consumer. Fundamental behaviour set by ``load_model``; harmonic behaviour by the
 - class `LoadModel()` — Fundamental-frequency voltage dependence of a load/generator injection.
-- class `LoadVaryingSpectrum(kind=…, loading_levels_pu, spectra, interpolation=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
+- class `LoadVaryingSpectrum(kind=…, loading_levels_pu, spectra, interpolation=…, extrapolation=…)` — Spectra measured at several loading levels of the device.
 - class `MeasuredQuantity()` — Electrical quantity a :class:`MeasurementDevice` records.
 - class `MeasurementDevice(id, name=…, node, phases=…, in_service=…, measured_quantities=…, max_harmonic_order=…, max_current_channels=…, current_channels=…, manufacturer=…, model=…, supported_averaging_intervals_s=…, averaging_interval_s=…, accuracy_class=…, connection=…, tags=…)` — A physical measurement instrument installed at a node.
 - class `Node(id, name=…, u_rated_v, phases, zone=…, geometry=…, tags=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
@@ -605,7 +604,6 @@ Full documentation: the docstrings (published as the API reference).
 - class `PowerFactorWattControl(s_rated_va=…, smoothing=…, kind=…, characteristic, p_ref_w=…)` — Power-factor-vs-active-power characteristic ``cosphi(P)`` (VDE-AR-N 4105).
 - class `Provenance(source_convention, notes=…, extra=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `QReference()` — Reactive-power base a Volt-VAr ``y`` (pu) scales (OpenDSS ``RefReactivePower``).
-- class `RandomSpectrum(kind=…, order_magnitude_mean_pu, order_magnitude_std_pu, order_phase_mean_deg=…, order_phase_std_deg=…, distribution=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `RegulatedQuantity()` — Which voltage magnitude a :class:`VoltageRegulation` holds at its setpoint.
 - class `ResistanceFrequencyModel(multiplier=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `ResultSet(id, description=…, experiment_id=…, experiment_details=…, grid_id=…, grid_topology_id=…, scenario_id=…, set=…, base_frequency_hz=…, step_size_ms=…, date_created=…)` — Metadata for one coherent set of simulation results (a 'dataset'). Loose
@@ -654,7 +652,6 @@ Full documentation: the docstrings (published as the API reference).
 - `ConsumerType` — re-exported from `pgml.schemas`
 - `CurrentChannel` — re-exported from `pgml.schemas`
 - `CurveParam` — re-exported from `pgml.schemas`
-- `DistributionSpectrum` — re-exported from `pgml.schemas`
 - `EarthReturnModel` — re-exported from `pgml.schemas`
 - `EquationParam` — re-exported from `pgml.schemas`
 - `ExtrapolationMethod` — re-exported from `pgml.schemas`
@@ -689,7 +686,6 @@ Full documentation: the docstrings (published as the API reference).
 - `PowerFactorWattControl` — re-exported from `pgml.schemas`
 - `Provenance` — re-exported from `pgml.schemas`
 - `QReference` — re-exported from `pgml.schemas`
-- `RandomSpectrum` — re-exported from `pgml.schemas`
 - `RegulatedQuantity` — re-exported from `pgml.schemas`
 - `ResistanceFrequencyModel` — re-exported from `pgml.schemas`
 - `ShuntAppliance` — re-exported from `pgml.schemas`

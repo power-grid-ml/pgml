@@ -174,6 +174,21 @@ They describe source or background distortion, not device emission. Device curre
 default to IEC 61000-3-2 per emission class A to D. There is no lighting consumer type, so
 class C is never selected automatically.
 
+**Stored spectrum kinds.** A `StaticSpectrum` is used as stored. A `LoadVaryingSpectrum` is
+evaluated at the device's solved fundamental active power (after control laws and load
+models) over its rating — the inverter control's `s_rated_va`, else `Storage.p_rated_w`, else
+`|p_nom_w|`, which for a generator is its available power and logs a warning. Each order is
+interpolated as the complex phasor between the stored levels (`interpolation`: `linear` or
+`nearest`; `log_log` and `cubic` raise), and outside the levels the spectrum's
+`extrapolation` holds the end value (`constant`, the default), continues the end segment
+(`extend`) or raises (`error`). With `spectrum`, the device's total power sets one loading for
+all elements; with `spectrum_per_phase`, each element is loaded against `rating / n_elem`. A
+`TimeVaryingSpectrum` needs a time index the solve does not take and raises a
+`ModelingError`. Random emission is drawn by the scenario sampler (`h_mag` / `h_phase`
+parameter specs), not stored on the device. A harmonic parameter spec replaces a device's
+whole spectrum, so the sampler refuses devices with `spectrum_per_phase` or a load-varying
+spectrum.
+
 ## Numerics
 
 **Single precision.** pgml solves in SI units without per-unit normalisation, and the diagonal
