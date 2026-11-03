@@ -422,7 +422,7 @@ Full documentation: the docstrings (published as the API reference).
 
 ## `pgml.scenarios`
 
-- class `BackgroundHarmonicConfig(magnitude_pu=…, phase_deg=…, node_id=…, source_power_va=…, drift_std=…, drift_phase_deg=…, drift_rho=…)` — A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.
+- class `BackgroundHarmonicConfig(magnitude_pu=…, phase_deg=…, node_id=…, source_power_va=…, drift_std=…, drift_phase_deg=…, drift_rho=…, drift_mode=…)` — A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.
 - class `CartesianAxis(name, selector, values, field=…, mode=…)` — One axis of a cartesian-product sweep: explicit discrete levels.
 - class `CartesianConfig(axes)` — A reproducible (deterministic, no RNG) cartesian-product batch (pgm-style).
 - class `Constant(kind=…, value)` — !!! abstract "Usage Documentation"
