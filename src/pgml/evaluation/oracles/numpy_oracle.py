@@ -42,6 +42,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from pgml.schemas.grid_schema import (
+    LoadVaryingSpectrum,
     Grid,
     InjectionAppliance,
     Line,
@@ -52,7 +53,13 @@ from pgml.schemas.grid_schema import (
     Transformer,
 )
 
-from pgml.assembly._spectrum import element_spectrum_dicts
+import torch
+
+from pgml.assembly._spectrum import (
+    element_stored_spectra,
+    evaluate_load_varying,
+    spectrum_rating,
+)
 from pgml.evaluation._util import to_float
 from pgml.evaluation.data import HarmonicProfile
 from pgml.evaluation.topology import distance_from_slack
@@ -162,12 +169,16 @@ def solve_with_fusion(y: np.ndarray, i: np.ndarray, p_mat) -> np.ndarray:
     return p_mat @ np.linalg.solve(p_mat.conj().T @ y @ p_mat, p_mat.conj().T @ i)
 
 
-def _element_spectra(app, harmonic_injection) -> Optional[list[Optional[dict]]]:
+def _element_spectra(
+    app, harmonic_injection, element_power_w=None
+) -> Optional[list[Optional[dict]]]:
     """Per-element ``{order: (mag_pu, phase_deg)}`` floats, as pgml's solve resolves them.
 
     The ``harmonic_injection`` override wins (the same spectrum on every element);
     otherwise the stored ``spectrum`` / ``spectrum_per_phase`` (element ``k`` keys off
-    ``phases[k]``). Non-static stored kinds raise like the solve.
+    ``phases[k]``). A load-varying spectrum is evaluated at ``element_power_w`` (the
+    oracle's per-element active power) over the device rating, like the solve; a
+    time-varying one raises like the solve.
     """
     n_elem = len(app.phases)
     if harmonic_injection is not None and app.id in harmonic_injection:
@@ -176,9 +187,29 @@ def _element_spectra(app, harmonic_injection) -> Optional[list[Optional[dict]]]:
             for o, (mag, ang) in harmonic_injection[app.id].items()
         }
         return [spec] * n_elem
-    stored = element_spectrum_dicts(app)
+    stored = element_stored_spectra(app)
     if stored is None:
         return None
+    if any(isinstance(s, LoadVaryingSpectrum) for s in stored):
+        p_elem = [abs(to_float(p)) for p in element_power_w]
+        rating = to_float(spectrum_rating(app)[0])
+        shared = getattr(app, "spectrum_per_phase", None) is None
+        loadings = (
+            [sum(p_elem) / rating] * n_elem
+            if shared
+            else [p / (rating / n_elem) for p in p_elem]
+        )
+        stored = [
+            {
+                o: (float(m), float(ph))
+                for o, (m, ph) in evaluate_load_varying(
+                    s, torch.tensor(x, dtype=torch.float64), app.id
+                ).items()
+            }
+            if isinstance(s, LoadVaryingSpectrum)
+            else s
+            for s, x in zip(stored, loadings)
+        ]
     return [
         None
         if d is None
@@ -187,9 +218,11 @@ def _element_spectra(app, harmonic_injection) -> Optional[list[Optional[dict]]]:
     ]
 
 
-def _resolve_spectrum(app, harmonic_injection):
+def _resolve_spectrum(app, harmonic_injection, power_w=None):
     """Spectrum of a single-phase (phase A) device for the profile oracle."""
-    spectra = _element_spectra(app, harmonic_injection)
+    spectra = _element_spectra(
+        app, harmonic_injection, None if power_w is None else [power_w]
+    )
     return None if spectra is None else spectra[0]
 
 
@@ -842,9 +875,6 @@ def numpy_harmonic_profiles(
     for a in grid.appliances:
         if not (isinstance(a, InjectionAppliance) and getattr(a, "in_service", True)):
             continue
-        spec = _resolve_spectrum(a, harmonic_injection)
-        if spec is None:
-            continue
         row = index.row(a.node, Phase.A)
         sign = 1.0 if isinstance(a, Load) else -1.0
         p = to_float(a.p_nom_w)
@@ -855,6 +885,9 @@ def numpy_harmonic_profiles(
                 p = to_float(op["p_w"])
             if "q_var" in op:
                 q = to_float(op["q_var"])
+        spec = _resolve_spectrum(a, harmonic_injection, p)
+        if spec is None:
+            continue
         s0 = complex(sign * p, sign * q)
         i1 = np.conj(s0) / np.conj(v1[row])
         devs.append((spec, row, i1))
@@ -1072,9 +1105,11 @@ def numpy_harmonic_voltages(
     for a in grid.appliances:
         if not (isinstance(a, (PgmlLoad, PgmlGen)) and getattr(a, "in_service", True)):
             continue
-        # Per-element spectrum from the override or the stored spectrum
-        spectra = _element_spectra(a, harmonic_injection)
-        if spectra is None or not any(spectra):
+        if not (
+            (harmonic_injection is not None and a.id in harmonic_injection)
+            or getattr(a, "spectrum", None) is not None
+            or getattr(a, "spectrum_per_phase", None) is not None
+        ):
             continue
         phases_a = a.phases
         n_ph = len(phases_a)
@@ -1095,6 +1130,11 @@ def numpy_harmonic_voltages(
             if getattr(a, "q_nom_per_phase_var", None) is not None
             else [q_total / n_ph] * n_ph
         )
+        # Per-element spectrum from the override or the stored spectrum (a load-varying
+        # one at the per-phase nameplate power, the oracle's operating point)
+        spectra = _element_spectra(a, harmonic_injection, p_pp)
+        if spectra is None or not any(spectra):
+            continue
         # Fundamental current per phase: I1 = conj(S0_ph) / conj(V_term)
         i1_list = []
         for k_ph, row in enumerate(src_rows):

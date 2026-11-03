@@ -89,7 +89,11 @@ from pgml.assembly._params import (
     resolve_operating_power,
 )
 from pgml.assembly._scatter import PatternAccumulator, scatter_blocks_into
-from pgml.assembly._spectrum import element_spectrum_dicts
+from pgml.assembly._spectrum import (
+    element_stored_spectra,
+    evaluate_load_varying,
+    spectrum_rating,
+)
 from pgml.assembly._stamps import _cdtype, _rdtype
 from pgml.assembly._symmetry import resolve_asymmetric
 from pgml.assembly.ybus import (
@@ -105,6 +109,7 @@ from pgml.schemas.grid_schema import (
     Grid,
     InjectionAppliance,
     Load,
+    LoadVaryingSpectrum,
     LoadModel,
     Phase,
     Storage,
@@ -1782,8 +1787,18 @@ def _element_coeff(value, n_elem: int, rdt, device) -> Tensor:
     return t.unsqueeze(-1).expand(*t.shape, n_elem)
 
 
+def _injects_harmonics(appliance, harmonic_injection) -> bool:
+    """Whether a device has an override or a stored spectrum (cheap pre-check)."""
+    if harmonic_injection is not None and appliance.id in harmonic_injection:
+        return True
+    return (
+        getattr(appliance, "spectrum", None) is not None
+        or getattr(appliance, "spectrum_per_phase", None) is not None
+    )
+
+
 def _device_element_spectra(
-    appliance, harmonic_injection, n_elem, rdt, device
+    appliance, harmonic_injection, n_elem, rdt, device, element_power=None
 ) -> Optional[dict]:
     """Per-ELEMENT per-order ``{order: (mag_elem, phase_deg_elem)}`` for a device.
 
@@ -1796,10 +1811,16 @@ def _device_element_spectra(
     - ``spectrum_per_phase`` (schema): element ``k`` uses the spectrum stored at
       ``phases[k]`` (for DELTA-3 the delta branch ``k`` keys off ``phases[k]``); an
       element whose phase has no entry injects NO harmonics (all orders 0).
-    - ``spectrum`` (schema, ``StaticSpectrum``): the SAME spectrum on every element.
+    - ``spectrum`` (schema): the SAME spectrum on every element.
 
-    Returns ``None`` if the device injects no harmonics at all. A stored spectrum kind
-    other than ``static`` raises :class:`~pgml.errors.ModelingError`.
+    A ``LoadVaryingSpectrum`` is evaluated at the device's loading: the active part of
+    ``element_power`` (the solved, model-consistent element power ``[*batch, n_elem]``)
+    over the rating of :func:`pgml.assembly._spectrum.spectrum_rating` — the device
+    total for ``spectrum``, each element against ``rating / n_elem`` for
+    ``spectrum_per_phase``. Its coefficients then carry the power's batch dims.
+
+    Returns ``None`` if the device injects no harmonics at all. A
+    ``TimeVaryingSpectrum`` raises :class:`~pgml.errors.ModelingError`.
     """
 
     override = (
@@ -1814,22 +1835,48 @@ def _device_element_spectra(
             for o, (mag, ph) in override.items()
         }
 
-    per_elem_dicts = element_spectrum_dicts(appliance)
-    if per_elem_dicts is None:
+    stored = element_stored_spectra(appliance)
+    if stored is None:
         return None
-    if getattr(appliance, "spectrum_per_phase", None) is None:
-        # `spectrum`: the same spectrum on every element.
-        sd = per_elem_dicts[0]
-        return {
-            o: (
-                _as_rt(mag, rdt, device).reshape(()).expand(n_elem),
-                _as_rt(ph, rdt, device).reshape(()).expand(n_elem),
+    shared = getattr(appliance, "spectrum_per_phase", None) is None
+    if not any(isinstance(s, LoadVaryingSpectrum) for s in stored):
+        if shared:
+            # `spectrum`: the same static spectrum on every element.
+            return {
+                o: (
+                    _as_rt(mag, rdt, device).reshape(()).expand(n_elem),
+                    _as_rt(ph, rdt, device).reshape(()).expand(n_elem),
+                )
+                for o, (mag, ph) in stored[0].items()
+            }
+        evaluated = stored
+    else:
+        if element_power is None:
+            raise InputError(
+                f"Device {appliance.id}: a 'load_varying' spectrum needs the solved "
+                "element power."
             )
-            for o, (mag, ph) in sd.items()
-        }
-    # `spectrum_per_phase`: element k uses the spectrum stored at phases[k].
+        p_elem = element_power.real.abs()  # [*batch, n_elem]
+        rating = _as_rt(spectrum_rating(appliance)[0], rdt, device)
+        if shared:
+            lv = evaluate_load_varying(stored[0], p_elem.sum(-1) / rating, appliance.id)
+            return {
+                o: (
+                    mag.unsqueeze(-1).expand(*mag.shape, n_elem),
+                    ph.unsqueeze(-1).expand(*ph.shape, n_elem),
+                )
+                for o, (mag, ph) in lv.items()
+            }
+        loading = p_elem / (rating / n_elem)
+        evaluated = [
+            evaluate_load_varying(s, loading[..., k], appliance.id)
+            if isinstance(s, LoadVaryingSpectrum)
+            else s
+            for k, s in enumerate(stored)
+        ]
+    # Per element: element k uses what phases[k] stores (absent order = 0).
     all_orders: set[int] = set()
-    for d in per_elem_dicts:
+    for d in evaluated:
         if d is not None:
             all_orders.update(d.keys())
     if not all_orders:
@@ -1837,12 +1884,16 @@ def _device_element_spectra(
     out: dict[int, tuple] = {}
     for o in all_orders:
         mags = [
-            (d[o][0] if (d is not None and o in d) else 0.0) for d in per_elem_dicts
+            _as_rt(d[o][0] if (d is not None and o in d) else 0.0, rdt, device)
+            for d in evaluated
         ]
-        phs = [(d[o][1] if (d is not None and o in d) else 0.0) for d in per_elem_dicts]
+        phs = [
+            _as_rt(d[o][1] if (d is not None and o in d) else 0.0, rdt, device)
+            for d in evaluated
+        ]
         out[o] = (
-            torch.stack([_as_rt(m, rdt, device) for m in mags], dim=-1),
-            torch.stack([_as_rt(p, rdt, device) for p in phs], dim=-1),
+            torch.stack(torch.broadcast_tensors(*mags), dim=-1),
+            torch.stack(torch.broadcast_tensors(*phs), dim=-1),
         )
     return out
 
@@ -2157,16 +2208,13 @@ def _harmonic_injections(
         m_c = m.to(cdt)
         rows_grp = used_rows(grp, index, device)  # [K, n_used] int64
         for ki, a in enumerate(grp.appliances):
-            elem_spectra = _device_element_spectra(
-                a, harmonic_injection, n_elem, rdt, device
-            )
-            if elem_spectra is None:
+            if not _injects_harmonics(a, harmonic_injection):
                 continue  # device injects no harmonics.
             rows = rows_grp[ki]  # [n_used]
             vt = _element_terminal_voltage(m_c, rows, v1)  # [*vbatch, n_elem]
             # The harmonic current scales from the FUNDAMENTAL current the device
             # actually draws, so the injected spectrum is anchored to the current the
-            # device carries at order 1.
+            # device carries at order 1; a load-varying spectrum is evaluated at it.
             s0 = _effective_element_power(
                 a,
                 grp,
@@ -2179,6 +2227,11 @@ def _harmonic_injections(
                 rdt,
                 device,
             )  # [*batch, n_elem]
+            elem_spectra = _device_element_spectra(
+                a, harmonic_injection, n_elem, rdt, device, element_power=s0
+            )
+            if elem_spectra is None:
+                continue  # device injects no harmonics.
             # Guard the conj(vt) divide for a dead/disconnected terminal (vt == 0)
             # or a gradcheck perturbation toward zero: mask the DENOMINATOR before
             # dividing (so conj(s0)/0 never enters the graph), then mask the RESULT

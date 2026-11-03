@@ -32,6 +32,9 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
 - `_load_shunt.py` — the harmonic device Norton shunt (OpenDSS `Load` model, motor model,
   basis and reactive-element laws, generation-device policy). The nodal stamp itself is in
   `solver/harmonic_flow.py`, where the solved fundamental is available.
+- `_spectrum.py` — the one reader of stored device spectra (solve, scenario sampler, numpy
+  oracles): static components per element, `LoadVaryingSpectrum` evaluated at solved power
+  over `spectrum_rating` by complex interpolation; other kinds raise `ModelingError`.
 - `_fusion.py` — exact bus fusion of zero-impedance branches: `fusion_map`, `FusionMap`,
   `zero_impedance_branches`, `resolve_fusion`, `NO_FUSION`, fused-branch current recovery.
 

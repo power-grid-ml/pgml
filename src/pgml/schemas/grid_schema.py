@@ -424,6 +424,16 @@ class StaticSpectrum(GridModel):
 
 
 class LoadVaryingSpectrum(GridModel):
+    """Spectra measured at several loading levels of the device.
+
+    The harmonic solve evaluates it at the device's solved fundamental active power
+    (after control laws and load models) divided by its rating: the inverter control's
+    ``s_rated_va``, else ``Storage.p_rated_w``, else ``|p_nom_w|``. Between levels each
+    order is interpolated as the complex phasor ``magnitude_pu * exp(j*phase_deg)``,
+    so a phase that turns through ±180° interpolates without a jump; an order absent
+    at a level counts as zero there.
+    """
+
     kind: Literal["load_varying"] = "load_varying"
     loading_levels_pu: list[float] = si_field(
         "Measured power levels as a fraction of rated power. Increasing.",
@@ -432,7 +442,15 @@ class LoadVaryingSpectrum(GridModel):
         min_length=2,
     )
     spectra: list[SpectrumPoint] = Field(description="Spectrum at each loading level.")
-    interpolation: InterpolationMethod = Field(default=InterpolationMethod.LINEAR)
+    interpolation: InterpolationMethod = Field(
+        default=InterpolationMethod.LINEAR,
+        description="Between levels: 'linear' (complex phasor) or 'nearest' level.",
+    )
+    extrapolation: ExtrapolationMethod = Field(
+        default=ExtrapolationMethod.CONSTANT,
+        description="Outside the levels: 'constant' holds the end spectrum, 'extend' "
+        "continues the end segment linearly, 'error' raises.",
+    )
 
     @model_validator(mode="after")
     def _check(self) -> "LoadVaryingSpectrum":
@@ -457,34 +475,11 @@ class TimeVaryingSpectrum(GridModel):
     )
 
 
-class RandomSpectrum(GridModel):
-    kind: Literal["random"] = "random"
-    order_magnitude_mean_pu: dict[int, float] = Field(
-        description="Per-order mean magnitude (pu)."
-    )
-    order_magnitude_std_pu: dict[int, float] = Field(
-        description="Per-order magnitude std (pu)."
-    )
-    order_phase_mean_deg: dict[int, float] = Field(default_factory=dict)
-    order_phase_std_deg: dict[int, float] = Field(default_factory=dict)
-    distribution: Literal["normal", "lognormal", "uniform"] = Field(default="normal")
-
-
-class DistributionSpectrum(GridModel):
-    kind: Literal["distribution"] = "distribution"
-    distribution_ref: str = Field(
-        description="Id of the fitted spectral distribution (service)."
-    )
-    params: dict[str, float] = Field(default_factory=dict)
-
-
 Spectrum = Annotated[
     Union[
         StaticSpectrum,
         LoadVaryingSpectrum,
         TimeVaryingSpectrum,
-        RandomSpectrum,
-        DistributionSpectrum,
     ],
     Field(discriminator="kind"),
 ]
@@ -2868,8 +2863,6 @@ __all__ = [
     "StaticSpectrum",
     "LoadVaryingSpectrum",
     "TimeVaryingSpectrum",
-    "RandomSpectrum",
-    "DistributionSpectrum",
     "Spectrum",
     "Provenance",
     "ConductorPlacement",
