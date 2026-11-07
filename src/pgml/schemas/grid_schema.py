@@ -37,6 +37,11 @@ independent. A grid may define symmetric and asymmetric appliances together, and
 either a symmetric or an asymmetric calculation may run on the same grid:
 
 - ``p_nom_w`` / ``q_nom_var`` are ALWAYS the total over the connected phases.
+- A per-phase (single-phase positive-sequence) equivalent of a balanced
+  three-phase grid is a grid of one-phase nodes rated line-to-neutral
+  (``U_LL/√3``) whose appliances and transformers carry one third of the
+  three-phase power and rating, so a branch current is the physical conductor
+  current; ``GridMetadata.tags["phase_mode"]`` records the representation.
 - Optional ``p_nom_per_phase_w`` / ``q_nom_per_phase_var`` give an asymmetric
   nameplate split (length == ``len(phases)``; must sum to the totals).
 - Connection sets terminal pairing: WYE = each listed phase to neutral/ground
@@ -1592,9 +1597,11 @@ class InverterControlBase(GridModel):
       ``n_elem = len(phases)``: 1, 2 or 3.
     - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``.
 
-    A single-phase device (``n_elem = 1``) uses the values as written, and a balanced
-    three-phase device injects the same totals as its single-phase equivalent. The
-    split is equal whatever the per-phase distribution of the active power: an
+    A single-phase device (``n_elem = 1``) uses the values as written. In the
+    per-phase (single-phase positive-sequence) equivalent of a balanced three-phase
+    grid, a three-phase device becomes a one-phase device carrying one third of its
+    power and of every control power (``s_rated_va``, ``q_var``, ``p_ref_w``) on a
+    node rated line-to-neutral (``U_LL/√3``); see :class:`Node`. The split is equal whatever the per-phase distribution of the active power: an
     unbalanced device does not move rating from a lightly loaded element to a heavily
     loaded one. Each element evaluates a voltage-dependent curve at its own terminal
     voltage (phase-to-neutral for WYE, phase-to-phase for DELTA), not at a
