@@ -18,9 +18,9 @@ converter's voltage base and power split, not a per-unit identity.
 Alignment: branches are matched through the converter ``id_map`` (pandapower line/trafo
 index, pgm element id); pandapower kA are multiplied by 1e3; ``THREE_PHASE`` currents are
 taken per phase (all three phases carry the same magnitude in a balanced solve, asserted).
-Loading is ``|I| / I_rated`` with the reference's own rated current (``max_i_ka`` / ``i_n``),
-compared with the reference's reported loading; the converters do not emit ampacities, so
-the pgml side divides the converted current by the same rated value.
+Loading is ``|I| / I_rated`` with the ampacity the converter carried into
+``Grid.types.lines`` (``branch_ratings(grid)``: pandapower ``max_i_ka * df * parallel``, pgm
+``i_n``), compared with the reference's reported loading.
 
 Tolerance: relative 1e-6 on every current (the references' own solver tolerances are
 1e-8..1e-12; the transformer magnetizing placement is selected with the matching modeling
@@ -40,6 +40,7 @@ import torch
 from pgml import defaults
 from pgml.assembly import branch_currents, device_current_injections
 from pgml.convert import PhaseMode
+from pgml.studies.limits import branch_ratings
 from pgml.schemas.grid_schema import LoadModel
 from pgml.solver import solve_power_flow
 
@@ -158,6 +159,7 @@ def _pp_check(net, mode: PhaseMode):
     with defaults.use_preset("pandapower"):
         grid, id_map = to_grid(net, phase_mode=mode)
         cur = _pgml_currents(grid)
+        ratings = branch_ratings(grid)
     ratios = []
     for idx in net.line.index:
         ours = cur[id_map["line"][idx]]
@@ -169,7 +171,8 @@ def _pp_check(net, mode: PhaseMode):
         )
         ratios.append(ours / ref)
         loading_ref = float(net.res_line.at[idx, "loading_percent"])
-        loading_ours = 100.0 * ours.max() / (float(net.line.at[idx, "max_i_ka"]) * 1e3)
+        rated = ratings[id_map["line"][idx]].i_max_a  # the converted ampacity
+        loading_ours = 100.0 * ours.max() / rated
         assert loading_ours == pytest.approx(loading_ref, rel=RTOL)
     for idx in net.trafo.index:
         ours = cur[id_map["trafo"][idx]]
@@ -294,4 +297,5 @@ def test_pgm_line_and_transformer_currents(mode):
         ours = cur[id_map[kind][pgm_id]]
         assert np.max(np.abs(ours / ref - 1.0)) < RTOL, (kind, ours / ref)
         if kind == "line":
-            assert ours.max() / 270.0 == pytest.approx(float(row["loading"]), rel=RTOL)
+            rated = branch_ratings(grid)[id_map["line"][21]].i_max_a  # converted i_n
+            assert ours.max() / rated == pytest.approx(float(row["loading"]), rel=RTOL)

@@ -31,6 +31,10 @@ converter's convention handling changes.
   Every converted grid records `metadata.tags["phase_mode"]` (the `PhaseMode` value); an
   untagged grid is legacy: one-phase nodes carry the line-to-line voltage and appliances
   the three-phase totals.
+- Line ratings: pandapower `max_i_ka·df·parallel`, pgm `i_n`, OpenDSS `NormAmps` are carried
+  as `Grid.types.lines` `LineType.max_i_a` with `type_ref` on the line (`LineTypeCatalog` in
+  `_common.py`; identical lines share a type, explicit matrices are kept). A grid's
+  representation and the helpers to read it: `pgml.representation`.
 - `convert.<tool>.from_grid(grid, ...)` returns `PandapowerExport` / `PgmExport` /
   `OpenDSSExport` with element maps, `reductions` (strings) and `.report`.
 - `pgml.convert` exports `ConversionReport`, `ReportEntry`, `ModelMatch`,

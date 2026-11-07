@@ -29,7 +29,8 @@ Signatures: docstrings / API_INDEX.md.
 
 - `to_grid(net, ...)` is pure (the `net` is not mutated). It returns `(Grid, id_map)`,
   or `(Grid, id_map, ConversionReport)` with `return_report=True`. The `Grid` is
-  materialised: it carries no `type_ref`.
+  materialised: explicit matrices on every line; a line with `max_i_ka` also names a
+  `Grid.types.lines` entry through `type_ref` holding `max_i_a = max_i_ka·1e3·df·parallel`.
 - `id_map` buckets are `bus`, `line`, `trafo`, `switch` (closed bus-bus switches only),
   `load`, `asymmetric_load` (THREE_PHASE only), `sgen`, `gen`, `shunt`, `storage`,
   `ext_grid`, `open_terminal` and `slack_v_complex`. `gen` is empty under

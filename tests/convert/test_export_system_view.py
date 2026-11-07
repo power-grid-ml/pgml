@@ -61,6 +61,8 @@ def test_round_trip_restores_ratings_and_powers():
     assert float(exported.load.p_mw.iloc[0]) == pytest.approx(0.2, rel=1e-12)
     assert float(exported.sgen.p_mw.iloc[0]) == pytest.approx(0.05, rel=1e-12)
     assert float(exported.trafo.sn_mva.iloc[0]) == pytest.approx(0.63, rel=1e-12)
+    assert float(exported.trafo.vn_hv_kv.iloc[0]) == pytest.approx(20.0, rel=1e-12)
+    assert float(exported.trafo.vn_lv_kv.iloc[0]) == pytest.approx(0.4, rel=1e-12)
     assert float(exported.ext_grid.vm_pu.iloc[0]) == pytest.approx(1.02, rel=1e-12)
 
 

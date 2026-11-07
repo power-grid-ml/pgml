@@ -119,6 +119,7 @@ from typing import Any, Literal, Optional
 from pgml.assembly._params import phase_voltage_magnitude
 from pgml.convert._common import (
     IdCounter,
+    LineTypeCatalog,
     PhaseMode,
     build_generator,
     build_line_from_matrices,
@@ -418,6 +419,7 @@ def to_grid(
     # 2. Lines                                                                #
     # ---------------------------------------------------------------------- #
     branches: list = []
+    line_types = LineTypeCatalog("opendss")
 
     ret = dss.Lines.First()
     while ret:
@@ -508,19 +510,22 @@ def to_grid(
             line_to_phases = phases_for(phase_mode, native=tuple(to_phases))
 
         branches.append(
-            build_line_from_matrices(
-                id=line_id,
-                name=line_name,
-                from_node=bus_name_to_node_id[from_bus_name],
-                to_node=bus_name_to_node_id[to_bus_name],
-                phases=line_phases,
-                to_phases=line_to_phases,
-                length_m=length_m,
-                r_matrix=r_mat,
-                l_matrix=l_mat,
-                c_matrix=c_mat,
-                g_matrix=None,  # OpenDSS GMatrix is rare in distribution; omit
-                provenance=_PROVENANCE,
+            line_types.rate(
+                build_line_from_matrices(
+                    id=line_id,
+                    name=line_name,
+                    from_node=bus_name_to_node_id[from_bus_name],
+                    to_node=bus_name_to_node_id[to_bus_name],
+                    phases=line_phases,
+                    to_phases=line_to_phases,
+                    length_m=length_m,
+                    r_matrix=r_mat,
+                    l_matrix=l_mat,
+                    c_matrix=c_mat,
+                    g_matrix=None,  # OpenDSS GMatrix is rare in distribution; omit
+                    provenance=_PROVENANCE,
+                ),
+                float(dss.Lines.NormAmps()),
             )
         )
 
@@ -776,8 +781,8 @@ def to_grid(
                 from_phases=tx_from_phases,
                 to_phases=tx_to_phases,
                 s_rated_va=equivalent_power(phase_mode, s_rated_va),
-                u_rated_from_v=u_rated_from_v,
-                u_rated_to_v=u_rated_to_v,
+                u_rated_from_v=equivalent_voltage(phase_mode, u_rated_from_v),
+                u_rated_to_v=equivalent_voltage(phase_mode, u_rated_to_v),
                 from_connection=from_connection,
                 to_connection=to_connection,
                 series_resistance_ohm=r_lv_ohm,
@@ -1501,6 +1506,7 @@ def to_grid(
         else "Three-phase (abc) with real DSS phases, n×n line matrices, and load connections."
     )
     grid = Grid(
+        types=line_types.library(),
         base_frequency_hz=f0_hz,
         nodes=nodes,
         branches=branches,

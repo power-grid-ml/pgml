@@ -420,6 +420,16 @@ Full documentation: the docstrings (published as the API reference).
 - def `code_provenance() -> dict[str, Any]` — Everything an artifact should record about the code that produced it.
 - def `git_state() -> dict[str, Any]` — The commit identity of the code, resolved from git or the sync stamp.
 
+## `pgml.representation`
+
+- `PHASE_MODES` — tuple
+- `PHASE_MODE_TAG` — str
+- class `SystemTotals(phase_mode, power_factor)` — Converts one grid's stored values to three-phase system quantities.
+- def `phase_mode_of(grid: Grid) -> Optional[str]` — The representation ``grid`` names in ``metadata.tags["phase_mode"]``.
+- def `positive_sequence_resistance_ohm_per_m(line: Line) -> float` — Per-conductor (positive-sequence) series resistance of ``line`` [Ohm/m].
+- def `system_totals(grid: Grid) -> SystemTotals` — The :class:`SystemTotals` reader for ``grid``.
+- def `to_per_phase_equivalent(grid: Grid) -> Grid` — Migrate a legacy one-phase grid to the per-phase equivalent and tag it.
+
 ## `pgml.scenarios`
 
 - class `BackgroundHarmonicConfig(magnitude_pu=…, phase_deg=…, node_id=…, source_power_va=…, drift_std=…, drift_phase_deg=…, drift_rho=…, drift_mode=…)` — A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.

@@ -43,7 +43,8 @@ referral, vector-group mechanics, source impedance, converter coverage):
 
 - `to_grid` is pure with respect to pgml state: it only reads the active DSS engine.
   It returns `(Grid, id_map)`, or `(Grid, id_map, ConversionReport)` with
-  `return_report=True`. The `Grid` is materialised (no `type_ref`).
+  `return_report=True`. The `Grid` is materialised (explicit line matrices); a line also names a
+  `Grid.types.lines` entry through `type_ref` carrying its `NormAmps` as `max_i_a`.
 - `id_map` keys: `bus`, `line`, `trafo`, `load`, `vsource`, `capacitor`, `reactor`,
   `generator`, `pvsystem`, `storage` (each lowercase DSS name → schema id), plus
   `slack_v_complex`: the first Vsource phasor `BasekV·pu·1000·e^{jθ}` (divided by sqrt(3)

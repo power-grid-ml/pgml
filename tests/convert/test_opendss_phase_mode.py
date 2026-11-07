@@ -623,3 +623,31 @@ def test_four_wire_mixed_return_paths_convert_and_match_opendss() -> None:
                 f"bus {name} phase {phase}: |V| mismatch ours={vm_pu_ours:.8f} "
                 f"dss={vm_pu_ref:.8f}"
             )
+
+
+def test_three_phase_native_one_phase_node_carries_its_line_to_neutral_rating() -> None:
+    """The schema rule: a node with fewer than three phase rows is line-to-neutral."""
+    import opendssdirect as dss_
+
+    dss_.Text.Command("Clear")
+    dss_.Text.Command("Set DefaultBaseFrequency=50")
+    dss_.Text.Command("New Circuit.lat basekv=0.4 phases=3 bus1=src.1.2.3")
+    dss_.Text.Command(
+        "New Line.l1 bus1=src.1 bus2=tap.1 phases=1 r1=0.1 x1=0.05 length=1 units=km"
+    )
+    dss_.Text.Command("New Load.ld bus1=tap.1 phases=1 kv=0.2309 kw=5 kvar=1")
+    dss_.Text.Command("Set voltagebases=[0.4]")
+    dss_.Text.Command("Calcvoltagebases")
+    dss_.Text.Command("Solve")
+    from pgml.convert.opendss import to_grid as to_grid_
+
+    grid, id_map = to_grid_(dss_, phase_mode=PhaseMode.THREE_PHASE)
+    by_name = {n.name: n for n in grid.nodes}
+    one_phase = [n for n in grid.nodes if len(n.phases) < 3]
+    assert one_phase, [(n.name, n.phases) for n in grid.nodes]
+    for n in one_phase:
+        assert n.u_rated_v == pytest.approx(400.0 / math.sqrt(3.0), rel=1e-9)
+    assert any(
+        len(n.phases) >= 3 and n.u_rated_v == pytest.approx(400.0) for n in grid.nodes
+    )
+    assert by_name  # nodes are named

@@ -22,7 +22,9 @@ generator, storage and transformer rating is one third of the pandapower total, 
 per-phase impedances, admittances and ``max_i_ka`` are unchanged. Per-unit voltages and
 losses agree with pandapower, and a branch current is the conductor current pandapower
 reports (``res_line.i_from_ka``). The constant-impedance admittance
-``(S/3)/(V_LL/sqrt(3))^2 = S/V_LL^2`` equals pandapower's ``conj(S_total)/V_LL^2``.
+``(S/3)/(V_LL/sqrt(3))^2 = S/V_LL^2`` equals pandapower's ``conj(S_total)/V_LL^2``. Transformer rated voltages are divided by sqrt(3) too (their ratio is
+unchanged). A line's ``max_i_ka * df * parallel`` is carried as ``Grid.types.lines[...].max_i_a`` named by ``type_ref``
+on the line, which keeps its explicit matrices.
 Every converted grid carries ``metadata.tags["phase_mode"]`` (the ``PhaseMode`` value);
 a grid without the tag predates the per-phase equivalent and carries line-to-line voltages
 on its one-phase nodes and three-phase totals on its appliances.
@@ -123,6 +125,7 @@ from typing import Any, Literal, Optional
 from pgml import defaults
 from pgml.convert._common import (
     IdCounter,
+    LineTypeCatalog,
     PhaseMode,
     ZeroSequenceDefaults,
     build_generator,
@@ -368,6 +371,16 @@ def _scaling_factor(row: Any) -> float:
     ``sgen.scaling=0.0``)."""
     f = _opt_float(row, "scaling")
     return 1.0 if f is None else f
+
+
+def _line_ampacity_a(row: Any, parallel: float) -> Optional[float]:
+    """Rated current [A] of a pandapower line: ``max_i_ka * df * parallel`` (the
+    denominator of ``res_line.loading_percent``), ``None`` when ``max_i_ka`` is unset."""
+    max_i_ka = _opt_float(row, "max_i_ka")
+    if max_i_ka is None:
+        return None
+    df = _opt_float(row, "df")
+    return max_i_ka * 1.0e3 * (1.0 if df is None else df) * parallel
 
 
 def _parallel_count(row: Any) -> float:
@@ -1438,6 +1451,7 @@ def to_grid(
                     id_map["open_terminal"][switch_index] = terminal_nodes[key]
 
     zero_seq_lines = ZeroSequenceDefaults()
+    line_types = LineTypeCatalog("pandapower")
     branches: list = []
     for pp_idx, row in net.line.iterrows():
         if not bool(row.get("in_service", True)):
@@ -1487,26 +1501,29 @@ def to_grid(
             zero_seq_lines.note(r0=r0, x0=x0, c0=c0, source_id=pp_idx)
 
         branches.append(
-            build_line_from_sequence(
-                id=line_id,
-                name=str(row.get("name", f"line_{pp_idx}") or f"line_{pp_idx}"),
-                from_node=terminal_nodes.get(
-                    ("l", int(pp_idx), from_bus), id_map["bus"][from_bus]
+            line_types.rate(
+                build_line_from_sequence(
+                    id=line_id,
+                    name=str(row.get("name", f"line_{pp_idx}") or f"line_{pp_idx}"),
+                    from_node=terminal_nodes.get(
+                        ("l", int(pp_idx), from_bus), id_map["bus"][from_bus]
+                    ),
+                    to_node=terminal_nodes.get(
+                        ("l", int(pp_idx), to_bus), id_map["bus"][to_bus]
+                    ),
+                    mode=phase_mode,
+                    length_m=length_m,
+                    r1=r1,
+                    x1=x1,
+                    c1=c1,
+                    two_pi_f0=two_pi_f0,
+                    r0=r0,
+                    x0=x0,
+                    c0=c0,
+                    g1=g1,
+                    provenance=_PROVENANCE,
                 ),
-                to_node=terminal_nodes.get(
-                    ("l", int(pp_idx), to_bus), id_map["bus"][to_bus]
-                ),
-                mode=phase_mode,
-                length_m=length_m,
-                r1=r1,
-                x1=x1,
-                c1=c1,
-                two_pi_f0=two_pi_f0,
-                r0=r0,
-                x0=x0,
-                c0=c0,
-                g1=g1,
-                provenance=_PROVENANCE,
+                _line_ampacity_a(row, parallel),
             )
         )
 
@@ -1678,8 +1695,8 @@ def to_grid(
                     from_phases=tx_phases,
                     to_phases=tx_phases,
                     s_rated_va=equivalent_power(phase_mode, sn_va * parallel),
-                    u_rated_from_v=vn_hv_v,
-                    u_rated_to_v=vn_lv_v,
+                    u_rated_from_v=equivalent_voltage(phase_mode, vn_hv_v),
+                    u_rated_to_v=equivalent_voltage(phase_mode, vn_lv_v),
                     from_connection=from_connection,
                     to_connection=to_connection,
                     series_resistance_ohm=r_sc,
@@ -2308,6 +2325,7 @@ def to_grid(
         nodes=nodes,
         branches=branches,
         appliances=appliances,
+        types=line_types.library(),
         metadata=make_metadata(
             name=str(getattr(net, "name", "") or "pandapower_import"),
             description=description,

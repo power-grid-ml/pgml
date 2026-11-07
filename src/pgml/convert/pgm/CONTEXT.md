@@ -30,6 +30,8 @@ cross-tool conventions: `docs/pgml/modeling/conventions.md`.
 - `load_model` is applied to every load (default `CONST_IMPEDANCE`, the linear reference
   solve); `"source"` keeps each load's own pgm type. Loads whose type differs from the
   applied model are named in the report.
+- Line ampacity `i_n` becomes `Grid.types.lines[...].max_i_a` (`type_ref` on the line, the
+  explicit matrices stay); `branch_ratings(grid)` reads it.
 - `link` (pgm's perfect connection, realised inside pgm by a 1e6 p.u. stand-in) converts
   to a closed `Switch` with R = L = 0; the solve fuses its rows, so pgml carries no
   stand-in. pgm's symmetric `i` is the conductor current, which is what a branch current
