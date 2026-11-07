@@ -84,25 +84,27 @@ import torch
 from torch import Tensor
 
 from pgml import defaults
-from pgml.assembly import base_voltage_per_row, node_phase_index
 from pgml.errors import InputError
-from pgml.geometry.sequence import fortescue_matrix
 from pgml.scenarios import batch_from_values
 from pgml.schemas.grid_schema import (
     Generator,
     Grid,
-    Line,
     Load,
     Phase,
-    Source,
-    Transformer,
     WindingConnection,
 )
 from pgml.simulation import SimulationConfig, SolvedState
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
-from ._common import check_study, resolve_complex_dtype
-from .limits import HostingLimits, branch_ratings
+from ._common import (
+    BaseOperatingPoint,
+    base_operating_values,
+    check_study,
+    live_phases,
+    resolve_candidates,
+    resolve_complex_dtype,
+)
+from .limits import HostingLimits, _LimitElements
 
 #: Sides a hosting-capacity study can add: new generation or new demand.
 _DIRECTIONS = ("generation", "load")
@@ -122,8 +124,6 @@ _MARGIN_KEYS = (
     "thd",
     "neutral_loading",
 )
-
-BaseOperatingPoint = Union[None, str, Mapping[int, Mapping[str, Any]]]
 
 
 @dataclass(frozen=True, eq=False)
@@ -314,18 +314,13 @@ class _Evaluation:
         )
 
 
-def _live_phases(phases: Sequence[Phase]) -> tuple[Phase, ...]:
-    """The phase conductors of a terminal (its neutral excluded)."""
-    return tuple(p for p in phases if p != Phase.N)
-
-
 def _candidate_phases(grid: Grid, node_ids: Sequence[int], phases) -> list:
     """Phases each candidate device connects to, validated against its node."""
     nodes = {n.id: n for n in grid.nodes}
     if phases == "balanced":
         chosen = []
         for nid in node_ids:
-            live = _live_phases(nodes[nid].phases)
+            live = live_phases(nodes[nid].phases)
             if not live:
                 raise InputError(f"candidate node {nid} has no phase conductor")
             chosen.append(live)
@@ -342,74 +337,6 @@ def _candidate_phases(grid: Grid, node_ids: Sequence[int], phases) -> list:
     if missing:
         raise InputError(f"candidate nodes {missing} carry no phase {phase.value!r}")
     return [(phase,) for _ in node_ids]
-
-
-def _resolve_candidates(grid: Grid, candidates) -> list[int]:
-    """Candidate bus ids: as given (validated), else every bus without a source."""
-    node_ids = [n.id for n in grid.nodes]
-    if candidates is None:
-        source_nodes = {
-            a.node for a in grid.appliances if isinstance(a, Source) and a.in_service
-        }
-        return [
-            n.id
-            for n in grid.nodes
-            if n.id not in source_nodes and _live_phases(n.phases)
-        ]
-    chosen = [int(c) for c in candidates]
-    unknown = sorted(set(chosen) - set(node_ids))
-    if unknown:
-        raise InputError(f"candidates name unknown nodes {unknown}")
-    if len(set(chosen)) != len(chosen):
-        raise InputError("candidates must not repeat a node")
-    if not chosen:
-        raise InputError("candidates must name at least one node")
-    return chosen
-
-
-def _base_values(
-    grid: Grid, direction: str, base_operating_point: BaseOperatingPoint, real, device
-) -> tuple[str, dict]:
-    """The base operating point as ``batch_from_values`` mappings, plus its label.
-
-    ``None`` / ``"worst_case"``: for generation every in-service load draws nothing and
-    the existing generation runs at nameplate; for load every in-service generator
-    injects nothing and the loads draw nameplate. Storage keeps its nameplate setpoint in
-    both. ``"nameplate"``: every device at nameplate. A mapping: ``{appliance_id:
-    {"p_w", "q_var", "p_per_phase_w", "q_per_phase_var"}}`` overrides on nameplate.
-    """
-    values: dict = {"p_w": {}, "q_var": {}, "p_per_phase_w": {}, "q_per_phase_var": {}}
-
-    def _t(x) -> Tensor:
-        return torch.as_tensor(x, dtype=real, device=device)
-
-    if base_operating_point is None or base_operating_point == "worst_case":
-        zeroed = Load if direction == "generation" else Generator
-        for a in grid.appliances:
-            if a.in_service and isinstance(a, zeroed):
-                values["p_w"][a.id] = _t(0.0)
-                values["q_var"][a.id] = _t(0.0)
-        return "worst_case", values
-    if base_operating_point == "nameplate":
-        return "nameplate", values
-    if isinstance(base_operating_point, str):
-        raise InputError(
-            "base_operating_point must be None, 'worst_case', 'nameplate' or a mapping "
-            f"of appliance ids, got {base_operating_point!r}"
-        )
-    for cid, entry in base_operating_point.items():
-        unknown = set(entry) - set(values)
-        if unknown:
-            raise InputError(
-                f"base_operating_point[{cid}] has unknown keys {sorted(unknown)}; use "
-                f"{sorted(values)}"
-            )
-        for key, value in entry.items():
-            if key in ("p_per_phase_w", "q_per_phase_var"):
-                values[key][int(cid)] = [_t(x) for x in value]
-            else:
-                values[key][int(cid)] = _t(value)
-    return "custom", values
 
 
 class _Study:
@@ -493,64 +420,8 @@ class _Study:
     # -- static tables ------------------------------------------------------ #
     def _build_tables(self) -> None:
         """Row and branch index tables of every element a limit is checked on."""
-        grid = self.grid
-        index = node_phase_index(grid)
-        self.n_rows = index.size
-        base = base_voltage_per_row(grid, dtype=torch.float64)
-
-        live, neutral = [], []
-        for node in grid.nodes:
-            n_row = index.row(node.id, Phase.N) if Phase.N in node.phases else -1
-            for ph in _live_phases(node.phases):
-                live.append(index.row(node.id, ph))
-                neutral.append(n_row)
-        self.live_rows = torch.tensor(live, dtype=torch.long)
-        self.neutral_rows = torch.tensor(neutral, dtype=torch.long)
-        self.live_base = base[self.live_rows].numpy()
-        self.live_desc = [(index.node_id_of(r), index.phase_of(r).value) for r in live]
-
-        abc = [
-            [index.row(n.id, p) for p in (Phase.A, Phase.B, Phase.C)]
-            for n in grid.nodes
-            if all(p in n.phases for p in (Phase.A, Phase.B, Phase.C))
-        ]
-        self.abc_rows = torch.tensor(abc, dtype=torch.long).reshape(-1, 3)
-        self.abc_nodes = [
-            n.id
-            for n in grid.nodes
-            if all(p in n.phases for p in (Phase.A, Phase.B, Phase.C))
-        ]
-
-        ratings = branch_ratings(grid)
-        # Per rated line: (id, ampacity, live-conductor masks at the from / to terminal).
-        self.lines = []
-        for b in grid.branches:
-            if not (isinstance(b, Line) and b.in_service and ratings[b.id].i_max_a):
-                continue
-            live_from = torch.tensor([p != Phase.N for p in b.from_phases])
-            live_to = torch.tensor([p != Phase.N for p in b.to_phases])
-            self.lines.append((b.id, ratings[b.id].i_max_a, live_from, live_to))
-        self.neutral_lines = [
-            entry for entry in self.lines if not (entry[2].all() and entry[3].all())
-        ]
-        self.transformers = []
-        for b in grid.branches:
-            if not (isinstance(b, Transformer) and b.in_service):
-                continue
-            s_rated = ratings[b.id].s_rated_va
-            if not s_rated:
-                continue
-            terminals = []
-            for node_id, phases in (
-                (b.from_node, b.from_phases),
-                (b.to_node, b.to_phases),
-            ):
-                mask = torch.tensor([p != Phase.N for p in phases])
-                n_live = int(mask.sum())
-                u_ln = float(base[index.row(node_id, _live_phases(phases)[0])])
-                # loading = |I| * U_ln * n_live / S_rated per phase conductor
-                terminals.append((mask, u_ln * n_live / s_rated))
-            self.transformers.append((b.id, terminals))
+        self.elements = _LimitElements(self.grid)
+        self.n_rows = self.elements.n_rows
 
     # -- one batched evaluation -------------------------------------------- #
     def set_base(self, base: _Evaluation) -> None:
@@ -655,111 +526,66 @@ class _Study:
     def _judge(self, v: Tensor, state: SolvedState, ok: np.ndarray) -> _Evaluation:
         """Relative excess of every limit element, the verdict and the margins."""
         lim = self.limits
+        el = self.elements
         b = v.shape[0]
+        values = {
+            key: q.cpu().numpy()
+            for key, q in el.evaluate(v, state, lim, h1=self.h1).items()
+        }
         # Each part is [B, E_k]: (value - limit) / limit per element, > 0 violates.
         parts: list[np.ndarray] = []
         descs: list[dict] = []
         margins = {key: np.full(b, np.nan) for key in _MARGIN_KEYS}
 
-        # Phase-to-neutral voltage of every phase conductor (phase-to-ground without N).
-        v_live = v[..., self.live_rows.to(v.device)]
-        has_n = (self.neutral_rows >= 0).to(v.device)
-        v_n = v[..., self.neutral_rows.clamp_min(0).to(v.device)]
-        v_pn = v_live - torch.where(has_n, v_n, torch.zeros_like(v_n))  # [B, H, R]
-        mag = v_pn.abs().to(torch.float64).cpu().numpy()
-        v_pu = mag[:, self.h1, :] / self.live_base  # [B, R]
         if lim.v_max_pu is not None:
+            v_pu = values["v_pu"]
             parts.append((v_pu - lim.v_max_pu) / lim.v_max_pu)
             descs += [
                 {"kind": "voltage", "limit": "v_max_pu", "node_id": n, "phase": ph}
-                for n, ph in self.live_desc
+                for n, ph in el.live_desc
             ]
             margins["v_max_pu"] = lim.v_max_pu - v_pu.max(axis=1)
         if lim.v_min_pu is not None:
+            v_pu = values["v_pu"]
             parts.append((lim.v_min_pu - v_pu) / lim.v_min_pu)
             descs += [
                 {"kind": "voltage", "limit": "v_min_pu", "node_id": n, "phase": ph}
-                for n, ph in self.live_desc
+                for n, ph in el.live_desc
             ]
             margins["v_min_pu"] = v_pu.min(axis=1) - lim.v_min_pu
-
-        if lim.vuf_max is not None and self.abc_nodes:
-            v1 = v[:, self.h1, :][:, self.abc_rows.to(v.device)]  # [B, K, 3]
-            a_inv = torch.linalg.inv(fortescue_matrix(v1.dtype, v1.device))
-            seq = torch.einsum("ij,bkj->bki", a_inv, v1)  # [B, K, (0, +, -)]
-            vuf = (
-                (seq[..., 2].abs() / seq[..., 1].abs()).to(torch.float64).cpu().numpy()
-            )
+        if "vuf" in values:
+            vuf = values["vuf"]
             parts.append((vuf - lim.vuf_max) / lim.vuf_max)
-            descs += [{"kind": "vuf", "node_id": n} for n in self.abc_nodes]
+            descs += [{"kind": "vuf", "node_id": n} for n in el.abc_nodes]
             margins["vuf"] = lim.vuf_max - vuf.max(axis=1)
-
-        if lim.thd_max is not None:
-            sq = mag**2
-            thd = (
-                np.sqrt(np.clip(sq.sum(axis=1) - sq[:, self.h1, :], 0.0, None))
-                / mag[:, self.h1, :]
-            )
+        if "thd" in values:
+            thd = values["thd"]
             parts.append((thd - lim.thd_max) / lim.thd_max)
             descs += [
-                {"kind": "thd", "node_id": n, "phase": ph} for n, ph in self.live_desc
+                {"kind": "thd", "node_id": n, "phase": ph} for n, ph in el.live_desc
             ]
             margins["thd"] = lim.thd_max - thd.max(axis=1)
-
-        need_lines = lim.line_loading is not None and self.lines
-        need_neutral = lim.neutral_loading is not None and self.neutral_lines
-        need_trafos = lim.transformer_loading is not None and self.transformers
-        if need_lines or need_neutral or need_trafos:
-            currents = {bc.branch_id: bc for bc in state.branch_currents()}
-
-            def _rms(i: Tensor) -> Tensor:  # [B, H, P] -> [B, P]
-                return i.abs().pow(2).sum(dim=-2).sqrt()
-
-            def _line_loading(entries, live: bool) -> np.ndarray:
-                """Largest conductor loading [B, L]: phase (``live``) or neutral ones."""
-                cols = []
-                for bid, i_max, m_from, m_to in entries:
-                    bc = currents[bid]
-                    sel_from = (m_from if live else ~m_from).to(v.device)
-                    sel_to = (m_to if live else ~m_to).to(v.device)
-                    i_cond = torch.cat(
-                        [_rms(bc.i_from)[..., sel_from], _rms(bc.i_to)[..., sel_to]],
-                        dim=-1,
-                    )
-                    cols.append(i_cond.amax(dim=-1) / i_max)
-                out = torch.stack(cols, dim=-1).reshape(b, -1)
-                return out.to(torch.float64).cpu().numpy()
-
-            if need_lines:
-                loading = _line_loading(self.lines, live=True)
-                parts.append((loading - lim.line_loading) / lim.line_loading)
-                descs += [{"kind": "line", "branch_id": e[0]} for e in self.lines]
-                margins["line_loading"] = lim.line_loading - loading.max(axis=1)
-            if need_neutral:
-                loading = _line_loading(self.neutral_lines, live=False)
-                lim_n = lim.neutral_loading
-                parts.append((loading - lim_n) / lim_n)
-                descs += [
-                    {"kind": "line_neutral", "branch_id": e[0]}
-                    for e in self.neutral_lines
-                ]
-                margins["neutral_loading"] = lim_n - loading.max(axis=1)
-            if need_trafos:
-                cols = []
-                for bid, ((m_from, k_from), (m_to, k_to)) in self.transformers:
-                    bc = currents[bid]
-                    i_from = _rms(bc.i_from)[..., m_from.to(v.device)] * k_from
-                    i_to = _rms(bc.i_to)[..., m_to.to(v.device)] * k_to
-                    cols.append(torch.cat([i_from, i_to], dim=-1).amax(dim=-1))
-                loading = torch.stack(cols, dim=-1).reshape(b, -1)
-                loading = loading.to(torch.float64).cpu().numpy()
-                lim_t = lim.transformer_loading
-                parts.append((loading - lim_t) / lim_t)
-                descs += [
-                    {"kind": "transformer", "branch_id": bid}
-                    for bid, _ in self.transformers
-                ]
-                margins["transformer_loading"] = lim_t - loading.max(axis=1)
+        if "line_loading" in values:
+            loading = values["line_loading"]
+            parts.append((loading - lim.line_loading) / lim.line_loading)
+            descs += [{"kind": "line", "branch_id": e[0]} for e in el.lines]
+            margins["line_loading"] = lim.line_loading - loading.max(axis=1)
+        if "neutral_loading" in values:
+            loading = values["neutral_loading"]
+            lim_n = lim.neutral_loading
+            parts.append((loading - lim_n) / lim_n)
+            descs += [
+                {"kind": "line_neutral", "branch_id": e[0]} for e in el.neutral_lines
+            ]
+            margins["neutral_loading"] = lim_n - loading.max(axis=1)
+        if "transformer_loading" in values:
+            loading = values["transformer_loading"]
+            lim_t = lim.transformer_loading
+            parts.append((loading - lim_t) / lim_t)
+            descs += [
+                {"kind": "transformer", "branch_id": bid} for bid, _ in el.transformers
+            ]
+            margins["transformer_loading"] = lim_t - loading.max(axis=1)
 
         raw = np.concatenate(parts, axis=1) if parts else np.zeros((b, 0), np.float64)
         self.descs = descs
@@ -939,11 +765,11 @@ def hosting_capacity(
     if isinstance(device, str):
         device = torch.device(device)
 
-    node_ids = _resolve_candidates(grid, candidates)
+    node_ids = resolve_candidates(grid, candidates)
     cand_phases = _candidate_phases(grid, node_ids, phases)
     phase_label = "balanced" if phases == "balanced" else cand_phases[0][0].value
     real = torch.empty((), dtype=dtype).real.dtype
-    base_label, base_values = _base_values(
+    base_label, base_values = base_operating_values(
         grid, direction, base_operating_point, real, device
     )
 
