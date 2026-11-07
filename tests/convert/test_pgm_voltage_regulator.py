@@ -110,8 +110,8 @@ def test_regulated_generators_on_one_node_merge():
     )
     gens = [a for a in grid.appliances if isinstance(a, Generator)]
     assert len(gens) == 1
-    assert gens[0].p_nom_w == pytest.approx(0.9e6)
-    assert gens[0].voltage_regulation.q_max_var == pytest.approx(0.4e6)
+    assert gens[0].p_nom_w == pytest.approx(0.9e6 / 3.0)
+    assert gens[0].voltage_regulation.q_max_var == pytest.approx(0.4e6 / 3.0)
     assert id_map["sym_gen"] == {8: gens[0].id, 9: gens[0].id}
     (entry,) = report.get("approx.generator.merged_per_node")
     assert entry.ids == (8, 9)

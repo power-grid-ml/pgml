@@ -20,9 +20,9 @@ not differentiable.
 - `link`, power-grid-model's perfect connection, converts to an ideal closed switch that the
   solve collapses exactly. power-grid-model itself does not merge the two nodes: it uses a
   stand-in admittance of 1e6 per unit, which leaves about 7e-5 V across the link. It does
-  report the link current, so it is the only reference for a fused branch's current. A
-  symmetric calculation reports three-phase quantities, so that current is the pgml
-  single-phase equivalent's divided by √3.
+  report the link current, so it is the only reference for a fused branch's current. The
+  symmetric `i` is the conductor current, which is the quantity a branch of the pgml
+  per-phase equivalent carries, so the two agree at ratio 1 in both phase modes.
 - `source.z01_ratio` is read into the source's zero-sequence impedance.
 - `voltage_regulator`, added in 1.13, makes an existing generator or load a PV terminal. The
   reader maps a regulator on a `sym_gen` to that generator's `VoltageRegulation` block. A

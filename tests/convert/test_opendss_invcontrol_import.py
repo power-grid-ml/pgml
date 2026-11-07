@@ -123,13 +123,20 @@ def test_invcontrol_maps_to_the_control_law_and_matches_opendss(mode, law, phase
     pv = next(a for a in grid.appliances if isinstance(a, Generator))
     assert isinstance(pv.control, law)
     assert len(pv.phases) == phases
-    assert pv.control.s_rated_va == pytest.approx(25e3)  # the element total
+    # the element total; the single-phase equivalent carries one third of it
+    share = 1.0 / 3.0 if phases == 1 else 1.0
+    assert pv.control.s_rated_va == pytest.approx(25e3 * share)
     if mode != "voltvar":
-        assert pv.p_nom_w == pytest.approx(20e3)  # the uncurtailed available power
+        # the uncurtailed available power
+        assert pv.p_nom_w == pytest.approx(20e3 * share)
     assert "dropped.invcontrol" not in report
     ours = _pgml_voltages(grid, id_map)
+    # The one-phase OpenDSS circuit is read as one phase of a balanced system: pgml's
+    # node is line-to-neutral, so the voltages agree per unit of each tool's own base.
+    v_nom = U_LL_KV * 1e3 / (1.0 if phases == 1 else 3.0**0.5)
+    scale = 3.0**0.5 if phases == 1 else 1.0
     for bus, v in theirs.items():
-        assert abs(abs(ours[bus]) - abs(v)) < ATOL_V, (mode, bus, ours[bus], v)
+        assert abs(abs(ours[bus]) * scale - abs(v)) < ATOL_V, (mode, bus, ours[bus], v)
     if mode != "voltvar":
         # the curve knee at 1.02 pu binds on this feeder
         v_nom = U_LL_KV * 1e3 / (1.0 if phases == 1 else 3.0**0.5)

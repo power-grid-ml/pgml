@@ -81,9 +81,9 @@ def test_open_line_terminal_reroutes_only_that_end(side):
     assert (line.to_node if side == "from" else line.from_node) == id_map["bus"][
         connected_bus
     ]
-    assert (
-        next(node for node in grid.nodes if node.id == auxiliary).u_rated_v == 20_000.0
-    )
+    assert next(
+        node for node in grid.nodes if node.id == auxiliary
+    ).u_rated_v == pytest.approx(20_000.0 / 3.0**0.5)
 
 
 @pytest.mark.parametrize("side", ["from", "to"])

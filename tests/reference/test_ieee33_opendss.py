@@ -657,7 +657,8 @@ class TestOpenDSSConverterRoundTrip:
         net = self._net
         pp_total_p = float(net.load[net.load["in_service"]]["p_mw"].sum()) * 1e6
         dss_loads = [a for a in self._grid_dss.appliances if isinstance(a, GridLoad)]
-        dss_total_p = sum(a.p_nom_w for a in dss_loads)
+        # the grid carries one third of the system total (single-phase equivalent)
+        dss_total_p = 3.0 * sum(a.p_nom_w for a in dss_loads)
         assert abs(pp_total_p - dss_total_p) < 0.1, (
             f"Total P mismatch: pp={pp_total_p:.1f} W, dss={dss_total_p:.1f} W"
         )

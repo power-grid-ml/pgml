@@ -16,10 +16,16 @@ Phase mode
 ----------
 ``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) is the positive-sequence
 single-phase equivalent: every node/branch is ``phases=(Phase.A,)`` and lines carry
-1x1 matrices. ``u_rated_v = vn_kv * 1000`` (line-to-line magnitude, retained as-is for
-the 1-phase node because ``phase_voltage_magnitude`` returns ``u_rated_v`` unchanged
-for nodes with fewer than 3 phases); this matches pandapower's const-Z reference
-``y_const = conj(S_total)/(V_LL)^2``.
+1x1 matrices. The grid is ONE PHASE of the balanced system, as the schema's one-phase
+convention requires: ``u_rated_v = vn_kv * 1000 / sqrt(3)`` (line-to-neutral), every load,
+generator, storage and transformer rating is one third of the pandapower total, and the
+per-phase impedances, admittances and ``max_i_ka`` are unchanged. Per-unit voltages and
+losses agree with pandapower, and a branch current is the conductor current pandapower
+reports (``res_line.i_from_ka``). The constant-impedance admittance
+``(S/3)/(V_LL/sqrt(3))^2 = S/V_LL^2`` equals pandapower's ``conj(S_total)/V_LL^2``.
+Every converted grid carries ``metadata.tags["phase_mode"]`` (the ``PhaseMode`` value);
+a grid without the tag predates the per-phase equivalent and carries line-to-line voltages
+on its one-phase nodes and three-phase totals on its appliances.
 
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches become
 ``(A, B, C)``; lines are expanded from sequence quantities via the symmetric-component
@@ -43,8 +49,9 @@ positive-sequence one.
 
 Slack voltage phasor stored in id_map
 --------------------------------------
-``id_map["slack_v_complex"]`` holds the complex slack phasor (in V, LL) as a
-Python complex number so the test can pass it directly to ``solve_harmonic``.
+``id_map["slack_v_complex"]`` holds the complex slack phasor (in V) as a Python complex number so
+a caller can pass it directly to ``solve_harmonic``: line-to-neutral under
+``SINGLE_PHASE_EQUIV`` (the voltage of the one-phase node), line-to-line under ``THREE_PHASE``.
 
 ``parallel`` (identical parallel systems)
 ------------------------------------------
@@ -123,6 +130,9 @@ from pgml.convert._common import (
     build_load,
     build_node,
     build_source,
+    equivalent_power,
+    equivalent_voltage,
+    build_storage,
     make_metadata,
     phases_for,
     resolve_converted_line_models,
@@ -142,7 +152,6 @@ from pgml.schemas.grid_schema import (
     QReference,
     SourceConvention,
     ShuntAppliance,
-    Storage,
     Switch,
     Transformer,
     TransformerZeroSeq,
@@ -1303,8 +1312,9 @@ def to_grid(
         ``"ext_grid"`` -> ``{pp_eg_idx: Source.id}``,
         ``"open_terminal"`` -> ``{pp_switch_idx: Node.id}`` for singly-open
         line/transformer terminals,
-        ``"slack_v_complex"`` -> complex slack voltage phasor (V, LL) for
-        ideal-slack mode.
+        ``"slack_v_complex"`` -> complex slack voltage phasor (V) for ideal-slack mode
+        (line-to-neutral under ``SINGLE_PHASE_EQUIV``, line-to-line under
+        ``THREE_PHASE``).
     """
     if gen_volt_var_slope_pu <= 0.0:
         raise ConversionError(
@@ -1667,7 +1677,7 @@ def to_grid(
                     ),
                     from_phases=tx_phases,
                     to_phases=tx_phases,
-                    s_rated_va=sn_va * parallel,
+                    s_rated_va=equivalent_power(phase_mode, sn_va * parallel),
                     u_rated_from_v=vn_hv_v,
                     u_rated_to_v=vn_lv_v,
                     from_connection=from_connection,
@@ -1748,9 +1758,9 @@ def to_grid(
         # slack solve takes a single fixed phasor. Guard so the last ext_grid does
         # not silently overwrite it (matches the pgm converter).
         if id_map["slack_v_complex"] is None:
-            id_map["slack_v_complex"] = u_ref_v * complex(
-                math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg))
-            )
+            id_map["slack_v_complex"] = equivalent_voltage(
+                phase_mode, u_ref_v
+            ) * complex(math.cos(math.radians(va_deg)), math.sin(math.radians(va_deg)))
 
         r0_ohm, x0_ohm = _ext_grid_zero_sequence(row, u_rated_v, pp_idx)
 
@@ -1941,15 +1951,16 @@ def to_grid(
             if soc_percent is not None:
                 state["soc"] = soc_percent / 100.0
             appliances.append(
-                Storage(
+                build_storage(
                     id=storage_id,
                     name=str(
                         row.get("name", f"storage_{pp_idx}") or f"storage_{pp_idx}"
                     ),
                     node=id_map["bus"][bus_pp],
-                    phases=phases_for(phase_mode),
-                    p_nom_w=-float(row["p_mw"]) * 1e6 * scaling,
-                    q_nom_var=-float(row.get("q_mvar", 0.0) or 0.0) * 1e6 * scaling,
+                    mode=phase_mode,
+                    p_total_w=-float(row["p_mw"]) * 1e6 * scaling,
+                    q_total_var=-float(row.get("q_mvar", 0.0) or 0.0) * 1e6 * scaling,
+                    energy_capacity_wh=state.pop("energy_capacity_wh", None),
                     **state,
                 )
             )
@@ -2300,6 +2311,7 @@ def to_grid(
         metadata=make_metadata(
             name=str(getattr(net, "name", "") or "pandapower_import"),
             description=description,
+            phase_mode=phase_mode,
         ),
     )
     zero_seq_lines.warn(_logger, tool="pandapower", report=report)

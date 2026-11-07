@@ -48,7 +48,7 @@ A dict with string keys for each element table that was converted::
         "shunt":           {pp_shunt_index: ShuntAppliance.id, ...},
         "ext_grid":        {pp_extgrid_index: Source.id, ...},
         "open_terminal":   {pp_switch_index: Node.id, ...},
-        "slack_v_complex": complex,  # ideal-slack phasor (V, line-to-line)
+        "slack_v_complex": complex,  # ideal-slack phasor (V): L-N single-phase equiv., L-L three-phase
     }
 
 Only entries that were actually converted are included.

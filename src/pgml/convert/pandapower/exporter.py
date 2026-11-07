@@ -51,6 +51,7 @@ from pgml.convert._export import (
     scalar,
     shunt_is_unbalanced,
     shunt_positive_sequence,
+    system_view,
     validate_balanced_grid_phases,
 )
 
@@ -135,6 +136,7 @@ def from_grid(
     import pandapower as pp
 
     validate_balanced_grid_phases(grid)
+    grid = system_view(grid)
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
     net = pp.create_empty_network(name=name, f_hz=f0, sn_mva=1.0)

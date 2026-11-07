@@ -46,8 +46,8 @@ referral, vector-group mechanics, source impedance, converter coverage):
   `return_report=True`. The `Grid` is materialised (no `type_ref`).
 - `id_map` keys: `bus`, `line`, `trafo`, `load`, `vsource`, `capacitor`, `reactor`,
   `generator`, `pvsystem`, `storage` (each lowercase DSS name → schema id), plus
-  `slack_v_complex`: the first Vsource phasor `BasekV·pu·1000·e^{jθ}`, usable as
-  `v_fixed` for an ideal slack without further scaling.
+  `slack_v_complex`: the first Vsource phasor `BasekV·pu·1000·e^{jθ}` (divided by sqrt(3)
+  under `SINGLE_PHASE_EQUIV`), usable as `v_fixed` for an ideal slack without further scaling.
 - Node ids follow `Circuit.YNodeOrder()` first appearance, so `node_phase_index`
   rows align with OpenDSS `SystemY` rows. Oracle tests depend on this order.
 - `phase_mode`: `SINGLE_PHASE_EQUIV` (default) gives every node `phases=(A,)`, 1×1
@@ -67,8 +67,9 @@ referral, vector-group mechanics, source impedance, converter coverage):
   `CMatrix` nF per length unit, converted with the length-unit code table
   `_DSS_UNIT_TO_METERS` (code 0 = total values, length 1 m); `L = X/(2πf₀)`, with
   `f₀ = Solution.Frequency()`.
-- `u_rated_v` is line-to-line for every bus: `kVBase()·√3·1000` (`kVBase()` is
-  always L-N). `u_ref_v = BasekV·pu·1000` with no phase-count branch: `basekv` is
+- The system nominal of a bus is line-to-line, `kVBase()·√3·1000` (`kVBase()` is always
+  L-N). `SINGLE_PHASE_EQUIV` stores one phase: `u_rated_v = kVBase()·1000`, powers and
+  ratings at one third (`convert/_common.py`); every grid has `metadata.tags["phase_mode"]`. `u_ref_v = BasekV·pu·1000` with no phase-count branch: `basekv` is
   L-L for a ≥3-phase Vsource and used unscaled as the conductor EMF for a 1-phase
   one, and both formulas mirror what OpenDSS solves.
 - Phase numbers: 1=A, 2=B, 3=C, 0=ground; an explicit 4th conductor is `Phase.N`.

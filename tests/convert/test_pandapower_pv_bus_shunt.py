@@ -92,14 +92,14 @@ class TestGenMapping:
         assert len(gens) == 1
         gen = gens[0]
         assert list(id_map["gen"].values()) == [gen.id]
-        assert gen.p_nom_w == pytest.approx(1.0e6)
+        assert gen.p_nom_w == pytest.approx(1.0e6 / 3.0)
         assert gen.q_nom_var == 0.0  # the reactive power is solved, not set
         assert gen.control is None
         reg = gen.voltage_regulation
         assert isinstance(reg, VoltageRegulation)
         assert reg.v_set_pu == pytest.approx(1.02)
-        assert reg.q_min_var == pytest.approx(-3.0e6)
-        assert reg.q_max_var == pytest.approx(3.0e6)
+        assert reg.q_min_var == pytest.approx(-3.0e6 / 3.0)
+        assert reg.q_max_var == pytest.approx(3.0e6 / 3.0)
 
     def test_missing_limits_stay_unbounded(self):
         """pandapower reads an unset limit as effectively unbounded; so does this."""
@@ -110,7 +110,7 @@ class TestGenMapping:
     def test_one_sided_limit(self):
         row = dict(_GEN, max_q_mvar=float("nan"))
         reg = _gens(to_grid(_net(gens=[row]))[0])[0].voltage_regulation
-        assert reg.q_min_var == pytest.approx(-3.0e6)
+        assert reg.q_min_var == pytest.approx(-3.0e6 / 3.0)
         assert reg.q_max_var is None
 
     def test_missing_setpoint_defaults_to_one_per_unit(self):
@@ -123,8 +123,8 @@ class TestGenMapping:
     def test_scaling_scales_p_only(self):
         """pandapower's own build scales ``p_mw`` and reads the limits raw."""
         gen = _gens(to_grid(_net(gens=[dict(_GEN, scaling=0.5)]))[0])[0]
-        assert gen.p_nom_w == pytest.approx(0.5e6)
-        assert gen.voltage_regulation.q_max_var == pytest.approx(3.0e6)
+        assert gen.p_nom_w == pytest.approx(0.5e6 / 3.0)
+        assert gen.voltage_regulation.q_max_var == pytest.approx(3.0e6 / 3.0)
 
     def test_out_of_service_row_is_skipped(self):
         grid, id_map = to_grid(_net(gens=[dict(_GEN, in_service=False)]))
@@ -154,9 +154,9 @@ class TestGenMapping:
         gens = _gens(grid)
         assert len(gens) == 1
         assert set(id_map["gen"].values()) == {gens[0].id}
-        assert gens[0].p_nom_w == pytest.approx(1.4e6)
-        assert gens[0].voltage_regulation.q_max_var == pytest.approx(4.0e6)
-        assert gens[0].voltage_regulation.q_min_var == pytest.approx(-3.5e6)
+        assert gens[0].p_nom_w == pytest.approx(1.4e6 / 3.0)
+        assert gens[0].voltage_regulation.q_max_var == pytest.approx(4.0e6 / 3.0)
+        assert gens[0].voltage_regulation.q_min_var == pytest.approx(-3.5e6 / 3.0)
 
     def test_merged_rows_with_one_unbounded_side_stay_unbounded(self):
         grid, _ = to_grid(_net(gens=[dict(_GEN), dict(_GEN, max_q_mvar=float("nan"))]))
@@ -187,7 +187,7 @@ class TestGenMapping:
         res = solve_power_flow(grid, slack="ideal", tol=1e-9, max_iter=60, dtype=CDT)
         assert res.converged
         row = res.index.row(id_map["bus"][1], Phase.A)
-        v_pu = float(res.v.reshape(-1)[row].abs()) / 20_000.0
+        v_pu = float(res.v.reshape(-1)[row].abs()) / (20_000.0 / 3.0**0.5)
         assert v_pu == pytest.approx(1.02, abs=1e-12)
 
 
@@ -285,7 +285,7 @@ class TestShuntMapping:
         res = solve_power_flow(grid, slack="ideal", tol=1e-10, max_iter=80, dtype=CDT)
         assert res.converged
         row = res.index.row(id_map["bus"][1], Phase.A)
-        v_pu = float(res.v.reshape(-1)[row].abs()) / 20_000.0
+        v_pu = float(res.v.reshape(-1)[row].abs()) / (20_000.0 / 3.0**0.5)
         assert v_pu == pytest.approx(float(net.res_bus.vm_pu.at[1]), abs=1e-10)
 
     def test_gen_and_shunt_together_match_runpp(self):
@@ -306,11 +306,12 @@ class TestShuntMapping:
         for pp_bus, node in id_map["bus"].items():
             row = res.index.row(node, Phase.A)
             v_pu = float(res.v.reshape(-1)[row].abs()) / (
-                float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0
+                float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0 / 3.0**0.5
             )
             assert v_pu == pytest.approx(float(net.res_bus.vm_pu.at[pp_bus]), abs=1e-9)
         gid = id_map["gen"][0]
-        q_pgml = float(res.regulation.q_var[gid]) / 1.0e6
+        # the regulated reactive power of the single phase is one third of the system's
+        q_pgml = 3.0 * float(res.regulation.q_var[gid]) / 1.0e6
         assert q_pgml == pytest.approx(float(net.res_gen.q_mvar.at[0]), abs=1e-7)
 
 

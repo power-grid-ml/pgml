@@ -19,7 +19,11 @@ Phase mode
 ----------
 ``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) mirrors pgm's symmetric (sym)
 calculation: one positive-sequence equivalent per node, ``phases=(Phase.A,)``,
-``u_rated_v = node.u_rated`` (line-to-line, V), 1x1 line matrices.
+``u_rated_v = node.u_rated / sqrt(3)`` (the one-phase node is line-to-neutral), loads, generators and
+transformer ratings at one third of the system total, 1x1 line matrices. Branch currents are the
+conductor currents power-grid-model reports. Each converted grid carries
+``metadata.tags["phase_mode"]`` (the ``PhaseMode`` value); a grid without the tag predates the
+per-phase equivalent and carries line-to-line one-phase node voltages and three-phase totals.
 
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches
 become ``(A, B, C)``; lines are expanded from sequence quantities via the
@@ -120,6 +124,8 @@ from pgml.convert._common import (
     build_load,
     build_node,
     build_source,
+    equivalent_power,
+    equivalent_voltage,
     make_metadata,
     phases_for,
     resolve_converted_line_models,
@@ -241,7 +247,9 @@ def to_grid(
         - ``"sym_gen"``      : ``{pgm_id: Generator.id}`` (merged PV terminals share one id)
         - ``"voltage_regulator"``: ``{pgm_id: Generator.id}`` of the regulated terminal
         - ``"source"``       : ``{pgm_id: Source.id}``
-        - ``"slack_v_complex"``: complex slack voltage phasor (V, line-to-line).
+        - ``"slack_v_complex"``: complex slack voltage phasor (V): line-to-neutral under
+          ``SINGLE_PHASE_EQUIV`` (the value to pin on the one-phase node), line-to-line
+          under ``THREE_PHASE``.
         - ``"load_types"``   : ``{pgm_id: LoadGenType value}`` original pgm type.
     """
     two_pi_f0 = 2.0 * math.pi * base_frequency_hz
@@ -511,7 +519,7 @@ def to_grid(
                 to_node=id_map["node"][to_pgm],
                 from_phases=tx_phases,
                 to_phases=tx_phases,
-                s_rated_va=sn,
+                s_rated_va=equivalent_power(phase_mode, sn),
                 u_rated_from_v=u1,
                 u_rated_to_v=u2,
                 from_connection=from_connection,
@@ -572,9 +580,9 @@ def to_grid(
         id_map["source"][pgm_id] = src_id
 
         if id_map["slack_v_complex"] is None:
-            id_map["slack_v_complex"] = u_ref_v * complex(
-                math.cos(u_ref_angle_rad), math.sin(u_ref_angle_rad)
-            )
+            id_map["slack_v_complex"] = equivalent_voltage(
+                phase_mode, u_ref_v
+            ) * complex(math.cos(u_ref_angle_rad), math.sin(u_ref_angle_rad))
 
         appliances.append(
             build_source(
@@ -884,7 +892,9 @@ def to_grid(
         nodes=nodes,
         branches=branches,
         appliances=appliances,
-        metadata=make_metadata(name="pgm_import", description=description),
+        metadata=make_metadata(
+            name="pgm_import", description=description, phase_mode=phase_mode
+        ),
     )
     zero_seq_lines.warn(_logger, tool="power-grid-model", report=report)
     resolve_converted_line_models(

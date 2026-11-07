@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import math
+
 import numpy as np
 
 from pgml.convert._report import ConversionReport, ReportCategory
@@ -329,7 +331,86 @@ def validate_balanced_grid_phases(grid: Any) -> None:
             )
 
 
+_POWER_FIELDS = ("p_nom_w", "q_nom_var", "energy_capacity_wh", "p_rated_w")
+_CONTROL_POWER_FIELDS = ("s_rated_va", "q_var", "p_ref_w")
+
+
+def _times(value: Any, factor: float) -> Any:
+    """``value * factor`` for a float, a tensor or a tuple/list of either; None stays None."""
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list)):
+        return type(value)(_times(v, factor) for v in value)
+    return value * factor
+
+
+def _update(model: Any, names: tuple, factor: float) -> Any:
+    update = {
+        n: _times(getattr(model, n), factor)
+        for n in names
+        if getattr(model, n, None) is not None
+    }
+    return model.model_copy(update=update) if update else model
+
+
+def system_view(grid: Any) -> Any:
+    """The grid with SYSTEM voltages and powers, for a target tool of three-phase systems.
+
+    A grid tagged ``metadata.tags["phase_mode"] == "single_phase_equiv"`` is one phase of a
+    balanced system: its ``(A,)`` node rating and source voltage are line-to-neutral and its
+    appliance powers and transformer rating are per-phase shares (the schema's one-phase
+    convention, written by every inbound converter in that mode). Exporters to pandapower
+    and power-grid-model describe the whole system, so this returns a copy with node and
+    source voltages times sqrt(3) and every power quantity times 3 (the exact inverse of
+    :func:`pgml.convert._common.equivalent_voltage` / ``equivalent_power``). Per-phase
+    impedances, admittances and current ratings are unchanged. Any other grid is returned
+    as is: an ``(A, B, C)`` grid already carries system quantities, and an untagged ``(A,)``
+    grid (hand-built or converted before the tag existed) keeps its established reading,
+    line-to-line rating and totals. The input is not mutated.
+    """
+    from pgml.convert._common import PHASE_MODE_TAG, PhaseMode
+
+    tag = grid.metadata.tags.get(PHASE_MODE_TAG) if grid.metadata else None
+    if tag != PhaseMode.SINGLE_PHASE_EQUIV.value:
+        return grid
+    if not grid.nodes or any(len(n.phases) != 1 for n in grid.nodes):
+        return grid
+    root3 = math.sqrt(3.0)
+    nodes = [
+        n.model_copy(update={"u_rated_v": n.u_rated_v * root3}) for n in grid.nodes
+    ]
+    branches = []
+    for br in grid.branches:
+        if getattr(br, "s_rated_va", None) is not None:
+            br = br.model_copy(update={"s_rated_va": br.s_rated_va * 3.0})
+        branches.append(br)
+    appliances = []
+    for ap in grid.appliances:
+        if getattr(ap, "u_ref_v", None) is not None:
+            ap = ap.model_copy(update={"u_ref_v": _times(ap.u_ref_v, root3)})
+        ap = _update(ap, _POWER_FIELDS, 3.0)
+        control = getattr(ap, "control", None)
+        if control is not None:
+            ap = ap.model_copy(
+                update={"control": _update(control, _CONTROL_POWER_FIELDS, 3.0)}
+            )
+        regulation = getattr(ap, "voltage_regulation", None)
+        if regulation is not None:
+            ap = ap.model_copy(
+                update={
+                    "voltage_regulation": _update(
+                        regulation, ("q_min_var", "q_max_var"), 3.0
+                    )
+                }
+            )
+        appliances.append(ap)
+    return grid.model_copy(
+        update={"nodes": nodes, "branches": branches, "appliances": appliances}
+    )
+
+
 __all__ = [
+    "system_view",
     "REDUCTIONS",
     "UnsupportedGridError",
     "new_export_report",

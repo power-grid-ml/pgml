@@ -230,6 +230,11 @@ def _add_capacitor(grid, node_id: int, kvar_total: float) -> None:
     p = len(node.phases)
     u = float(node.u_rated_v)
     b_elem = kvar_total * 1e3 / (u * u)
+    if p == 1:
+        # a one-phase node is one phase of the system: the bank's per-phase share,
+        # on the line-to-neutral rating (the same admittance as the system total on
+        # the line-to-line one)
+        b_elem /= 3.0
     c_elem = b_elem / (2.0 * math.pi * float(grid.base_frequency_hz))
     grid.appliances.append(
         ShuntAppliance(
