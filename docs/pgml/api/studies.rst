@@ -27,6 +27,14 @@ largest new generation or demand that keeps the :class:`~pgml.studies.HostingLim
 :func:`~pgml.studies.branch_ratings` resolves the line ampacities and transformer ratings
 those limits are checked against. User guide: :doc:`../studies/hosting-capacity`.
 
+Enhancement sensitivities
+-------------------------
+
+:func:`~pgml.studies.enhancement_sensitivities` builds a smooth stress metric from the same
+limits at one base operating point and returns its gradient, from one backward pass, with
+respect to the impedance and rating of every line and transformer, every transformer tap and
+new power at every bus. User guide: :doc:`../studies/enhancement`.
+
 Reference
 ---------
 

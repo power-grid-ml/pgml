@@ -18,7 +18,7 @@ Signatures: docstrings / `API_INDEX.md`.
 | Converters from pandapower, OpenDSS and power-grid-model to `Grid`, and back | `convert/` |
 | The batch contract: declared batches of solver-input deltas, sampling, sweeps, background distortion, batched solve, parquet persistence | `scenarios/` |
 | Plots and the optional reference oracles | `evaluation/` |
-| Grid-planning studies on top of assembly and solver: impedance scan (driving-point / transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins, hosting capacity with branch ratings and study limits | `studies/` |
+| Grid-planning studies on top of assembly and solver: impedance scan (driving-point / transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins, hosting capacity with branch ratings and study limits, gradient ranking of grid enhancements by a limit-stress metric | `studies/` |
 
 ## Top-level modules
 
