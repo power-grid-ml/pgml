@@ -175,6 +175,19 @@ class HostingLimits:
         return cls(**dict(data))
 
 
+def _sqrt(x: Tensor) -> Tensor:
+    """``sqrt(x)`` of a non-negative tensor, with a zero (not infinite) slope at ``0``.
+
+    The value is ``x.sqrt()`` exactly. A branch that carries no current, or a voltage
+    without harmonic content, sits at ``x = 0``, where the slope of the square root is
+    infinite and times the zero slope of ``|i|^2`` gives NaN; the slope there is taken
+    as zero, the least-norm subgradient of the norm it completes.
+    """
+    positive = x > 0.0
+    root = torch.where(positive, x, torch.ones_like(x)).sqrt()
+    return torch.where(positive, root, torch.zeros_like(x))
+
+
 class _LimitElements:
     """The elements every limit of :class:`HostingLimits` is checked on, and their values.
 
@@ -305,9 +318,8 @@ class _LimitElements:
             out["vuf"] = (seq[..., 2].abs() / seq[..., 1].abs()).to(torch.float64)
         if limits.thd_max is not None:
             sq = mag.pow(2)
-            out["thd"] = (sq.sum(dim=1) - sq[:, h1, :]).clamp_min(0.0).sqrt() / mag[
-                :, h1, :
-            ]
+            harmonic_sq = (sq.sum(dim=1) - sq[:, h1, :]).clamp_min(0.0)
+            out["thd"] = _sqrt(harmonic_sq) / mag[:, h1, :]
 
         need_lines = limits.line_loading is not None and self.lines
         need_neutral = limits.neutral_loading is not None and self.neutral_lines
@@ -317,7 +329,7 @@ class _LimitElements:
         currents = {bc.branch_id: bc for bc in state.branch_currents()}
 
         def _rms(i: Tensor) -> Tensor:  # [B, H, P] -> [B, P]
-            return i.abs().pow(2).sum(dim=-2).sqrt()
+            return _sqrt(i.abs().pow(2).sum(dim=-2))
 
         def _line_loading(entries, live: bool) -> Tensor:
             """Largest conductor loading [B, L]: phase (``live``) or neutral ones."""

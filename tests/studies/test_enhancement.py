@@ -18,7 +18,7 @@ import torch
 
 from pgml import SimulationConfig
 from pgml.errors import ConvergenceError, InputError
-from pgml.schemas.grid_schema import Load, Phase, WindingConnection
+from pgml.schemas.grid_schema import Load, Phase, Switch, WindingConnection
 from pgml.studies import (
     EnhancementSensitivities,
     HostingLimits,
@@ -236,6 +236,46 @@ def test_neutral_and_unbalance_terms():
 
     fd = _central(ampacity, 1e-4, limits=limits)
     assert _close(res.line_rating_elasticity[0], fd)
+
+
+def test_a_branch_without_current_keeps_every_gradient_finite(tapped):
+    # a cable bridged by a closed ideal switch has both ends fused into one bus and
+    # carries exactly zero current, where the RMS norm has no slope; the study must not
+    # turn that into NaN for every other sensitivity
+    grid, reference = tapped
+    bridged = next(b for b in grid.branches if b.id == 32).model_copy(
+        update={"id": 33, "from_node": 4, "to_node": 5}
+    )
+    switch = Switch(
+        id=34,
+        from_node=4,
+        to_node=5,
+        from_phases=ABC,
+        to_phases=ABC,
+        default_closed=True,
+    )
+    node = next(n for n in grid.nodes if n.id == 4).model_copy(update={"id": 5})
+    grid = grid.model_copy(
+        update={
+            "nodes": [*grid.nodes, node],
+            "branches": [*grid.branches, bridged, switch],
+        }
+    )
+    res = enhancement_sensitivities(grid, stress_onset=ONSET, config=TIGHT)
+    for name in (
+        "line_impedance_elasticity",
+        "line_rating_elasticity",
+        "transformer_impedance_elasticity",
+        "transformer_tap_gradient",
+        "d_stress_d_p_per_kw",
+    ):
+        assert np.isfinite(getattr(res, name)).all(), name
+    assert res.line_impedance_elasticity[res.line_ids.index(33)] == 0.0
+    # the bridged cable carries nothing: the loading stress upstream is unchanged
+    for kind in ("line", "transformer"):
+        assert res.stress_by_kind[kind] == pytest.approx(
+            reference.stress_by_kind[kind], rel=1e-9
+        )
 
 
 def test_no_stress_below_the_onset_gives_zero_gradients():
