@@ -264,3 +264,15 @@ def test_schema_rejects_misplaced_neutral_and_bad_centre_taps():
         _centre_tap_grid(CentreTap(), to_phases=(P.A, P.N))
     with pytest.raises(ValidationError, match="more resistance"):
         _centre_tap_grid(CentreTap(half_resistance_ohm=1.0))
+
+
+def test_oracle_builders_refuse_terminal_model_units():
+    from pgml.errors import ConversionError
+    from pgml.evaluation.oracles.numpy_oracle import _stamp_transformer_numpy
+    from pgml.evaluation.oracles.opendss_scenario_oracle import _export_transformer
+
+    xfmr = _dyn(ABCN, "wye").branches[0]
+    with pytest.raises(NotImplementedError, match="terminal model"):
+        _stamp_transformer_numpy(np.zeros((7, 7), complex), xfmr, 1, 1.0, [], [], 3)
+    with pytest.raises(ConversionError, match="centre tap"):
+        _export_transformer(None, xfmr, {}, F0)
