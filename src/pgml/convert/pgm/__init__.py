@@ -24,7 +24,8 @@ Phase mode
 ----------
 ``phase_mode=PhaseMode.SINGLE_PHASE_EQUIV`` (default) mirrors pgm's symmetric
 calculation: one positive-sequence equivalent per node, ``phases=(Phase.A,)``,
-``u_rated_v = node.u_rated`` (line-to-line, V), 1x1 line matrices.
+``u_rated_v = node.u_rated / sqrt(3)`` (line-to-neutral, V), appliance powers at one third,
+1x1 line matrices; ``metadata.tags["phase_mode"]`` records the representation.
 
 ``phase_mode=PhaseMode.THREE_PHASE`` produces a genuine abc grid: nodes/branches
 become ``(A, B, C)``; lines are expanded from sequence quantities via the
@@ -50,7 +51,7 @@ A dict with string keys for each component type that was converted::
         "asym_load":       {pgm_id: Load.id, ...},  # THREE_PHASE only
         "source":          {pgm_id: Source.id, ...},
         "load_types":      {pgm_id: LoadGenType value, ...},
-        "slack_v_complex": complex,  # slack voltage phasor (V, L-L)
+        "slack_v_complex": complex,  # slack phasor (V): L-N single-phase equiv., L-L three-phase
     }
 
 Only in-service elements are converted.

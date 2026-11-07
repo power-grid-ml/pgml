@@ -12,10 +12,11 @@ and the link current to 6.0e-9 relative. Both residuals are the reference's own 
 error: its 1e6 pu admittance leaves 7.0e-5 V across the link, which fusion makes exactly
 zero.
 
-The single-phase-equivalent convention: power-grid-model reports a symmetric calculation
-as a three-phase system (``i = S / (sqrt(3) U_LL)``) while a pgml one-phase-per-node grid
-reports the conductor current against the same rated voltage, so the currents differ by
-``sqrt(3)`` by construction.
+Conventions: power-grid-model reports a symmetric calculation as a three-phase system
+(``u`` line-to-line, ``i = S / (sqrt(3) U_LL)`` the conductor current). A pgml
+single-phase-equivalent grid solves one line-to-neutral phase, so its node voltage is
+``u / sqrt(3)`` and its branch current is the same conductor current ``i``; the voltage
+comparison scales ours by ``sqrt(3)`` and the current comparison needs no factor.
 """
 
 from __future__ import annotations
@@ -148,7 +149,10 @@ def test_node_voltages_match_power_grid_model():
     v = res.v.reshape(-1)
     dv = 0.0
     for k, pgm_id in enumerate(out["node"]["id"].tolist()):
-        ours = abs(complex(v[res.index.row(id_map["node"][pgm_id], Phase.A)]))
+        # the one-phase node is line-to-neutral; power-grid-model's symmetric u is line-to-line
+        ours = abs(
+            complex(v[res.index.row(id_map["node"][pgm_id], Phase.A)])
+        ) * math.sqrt(3.0)
         dv = max(dv, abs(ours - float(out["node"]["u"][k])) / 20e3)
     # the residual IS power-grid-model's own 1e6 pu stand-in drop across the link
     assert dv < 1e-8, f"max |dV| = {dv:.3e} pu"
@@ -175,8 +179,9 @@ def test_the_fused_link_current_matches_power_grid_model():
     }
     bc = currents[id_map["link"][20]]
     ours = float(bc.i_from.abs().reshape(-1)[0])
-    # power-grid-model reports a symmetric calculation in three-phase quantities.
-    ref = float(out["link"]["i_from"][0]) * math.sqrt(3.0)
+    # power-grid-model's symmetric `i` is the conductor current, the quantity of the
+    # per-phase equivalent.
+    ref = float(out["link"]["i_from"][0])
     assert abs(ours - ref) / ref < 1e-8, f"{ours} A vs {ref} A"
     # an ideal conductor has no shunt path: the two terminal currents are opposite
     assert torch.allclose(bc.i_from, -bc.i_to, atol=0.0, rtol=0.0)

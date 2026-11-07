@@ -29,12 +29,14 @@ Signatures: docstrings / API_INDEX.md.
 
 - `to_grid(net, ...)` is pure (the `net` is not mutated). It returns `(Grid, id_map)`,
   or `(Grid, id_map, ConversionReport)` with `return_report=True`. The `Grid` is
-  materialised: it carries no `type_ref`.
+  materialised: explicit matrices on every line; a line with `max_i_ka` also names a
+  `Grid.types.lines` entry through `type_ref` holding `max_i_a = max_i_ka·1e3·df·parallel`.
 - `id_map` buckets are `bus`, `line`, `trafo`, `switch` (closed bus-bus switches only),
   `load`, `asymmetric_load` (THREE_PHASE only), `sgen`, `gen`, `shunt`, `storage`,
   `ext_grid`, `open_terminal` and `slack_v_complex`. `gen` is empty under
   `GenMode.DROP`, and rows merged on one bus share one id. `et='l'`/`'t'` switches have
-  no bucket of their own. `slack_v_complex` is the first ext_grid's phasor in V, L-L.
+  no bucket of their own. `slack_v_complex` is the first ext_grid's phasor in V (L-N under
+  `SINGLE_PHASE_EQUIV`, L-L under `THREE_PHASE`).
   Downstream packages index results through these maps.
 - `ideal` slack fixes every in-service `Source` row on its own. A network with several
   `ext_grid`s (`mv_oberrhein` has 2) therefore needs no special case, and
@@ -44,9 +46,13 @@ Signatures: docstrings / API_INDEX.md.
 
 - Units: kV→V, km→m, Ω/km→Ω/m, MW/MVAr→W/var. Reactance becomes inductance at the
   network's `f_hz`.
-- `SINGLE_PHASE_EQUIV` (default) nodes carry `u_rated_v = vn_kv·1000` (L-L), which
-  matches pandapower's per-unit base. `vm_pu` setpoints and droop axes use the same
-  base in both phase modes.
+- `SINGLE_PHASE_EQUIV` (default) is one phase of the balanced system: nodes carry
+  `u_rated_v = vn_kv·1000/√3` (L-N, the schema's one-phase convention), loads, sgens, gens,
+  storage, transformer `sn_mva` and control ratings are one third of the pandapower total,
+  impedances, admittances and `max_i_ka` are unchanged. Per-unit voltages equal pandapower's
+  `vm_pu`; a branch current equals `res_line.i_from_ka` (test_branch_current_oracles.py).
+  `vm_pu` setpoints and droop axes are per unit in both modes. Every grid has
+  `metadata.tags["phase_mode"]`; an untagged grid is legacy (L-L one-phase nodes, totals).
 - Transformer orientation: `from` = HV, `to` = LV. `shift_degree` passes through
   unchanged: positive means the LV side lags the HV side, which is pgml's convention.
 - **Delta-LV coil referral is phase-mode independent.** `series_resistance_ohm` and

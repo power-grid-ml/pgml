@@ -146,8 +146,8 @@ class TestConverterSourceVoltageTracksOpenDSS:
 
     def test_ieee33_style_single_phase_ll_source_converts_correctly(self) -> None:
         """A positive-sequence-equivalent 1-phase Vsource (basekv=parent L-L):
-        u_ref_v recovers the same L-L number (matches pandapower's vn_kv*1000
-        convention for the same circuit, per the existing IEEE-33 oracle)."""
+        the per-phase equivalent carries the line-to-neutral value
+        (basekv*1000/sqrt(3)), on a node of the same rating."""
         _dss_clear()
         dss.Text.Command(
             "New Circuit.cieee phases=1 basekv=12.66 bus1=src.1 pu=1.0 angle=0.0 "
@@ -162,9 +162,9 @@ class TestConverterSourceVoltageTracksOpenDSS:
 
         grid, id_map = to_grid(dss)  # default SINGLE_PHASE_EQUIV
         src = next(a for a in grid.appliances if isinstance(a, Source))
-        assert src.u_ref_v[0] == pytest.approx(12660.0, rel=1e-6)
+        assert src.u_ref_v[0] == pytest.approx(12660.0 / 3.0**0.5, rel=1e-6)
         node = grid.nodes[0]
-        assert node.u_rated_v == pytest.approx(12660.0, rel=1e-6)
+        assert node.u_rated_v == pytest.approx(12660.0 / 3.0**0.5, rel=1e-6)
 
     def test_three_phase_source_divides_by_sqrt3_for_ln_emf(self) -> None:
         """A 3-phase Vsource: converted per-phase u_ref_v is the L-N EMF

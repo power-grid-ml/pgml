@@ -168,7 +168,9 @@ class TestTransformerVoltagesSinglePhase:
             r_hv = result.index.row(node_hv, Phase.A)
             v_hv = result.v.reshape(-1)[r_hv].item()
 
-            u_rated_hv = float(net.bus.at[hv_bus, "vn_kv"]) * 1_000.0
+            u_rated_hv = (
+                float(net.bus.at[hv_bus, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
+            )  # L-N base
             vm_pu_ours, va_deg_ours = _vm_va(v_hv, u_rated_hv)
             vm_pu_ref = float(net.res_bus.at[hv_bus, "vm_pu"])
             va_deg_ref = float(net.res_bus.at[hv_bus, "va_degree"])
@@ -207,7 +209,9 @@ class TestTransformerVoltagesSinglePhase:
             r_lv = result.index.row(node_lv, Phase.A)
             v_lv = result.v.reshape(-1)[r_lv].item()
 
-            u_rated_lv = float(net.bus.at[lv_bus, "vn_kv"]) * 1_000.0
+            u_rated_lv = (
+                float(net.bus.at[lv_bus, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
+            )  # L-N base
             vm_pu_ours, va_deg_ours = _vm_va(v_lv, u_rated_lv)
             vm_pu_ref = float(net.res_bus.at[lv_bus, "vm_pu"])
             va_deg_ref = float(net.res_bus.at[lv_bus, "va_degree"])
@@ -254,7 +258,7 @@ class TestTransformerVoltagesSinglePhase:
                 node_id = id_map["bus"][bus]
                 r = result.index.row(node_id, Phase.A)
                 v_c = result.v.reshape(-1)[r].item()
-                u_rated = float(net.bus.at[bus, "vn_kv"]) * 1_000.0
+                u_rated = float(net.bus.at[bus, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
                 vm, va = _vm_va(v_c, u_rated)
                 vm_pu_ours[k] = vm
                 va_deg_ours[k] = va

@@ -71,8 +71,8 @@ class TestPandapowerSgen:
         grid, id_map = pp_to_grid(_pp_net(with_sgen=True))
         gens = [a for a in grid.appliances if isinstance(a, Generator)]
         assert len(gens) == 1
-        assert gens[0].p_nom_w == pytest.approx(0.3e6)
-        assert gens[0].q_nom_var == pytest.approx(0.05e6)
+        assert gens[0].p_nom_w == pytest.approx(0.3e6 / 3.0)
+        assert gens[0].q_nom_var == pytest.approx(0.05e6 / 3.0)
         assert id_map["sgen"] and list(id_map["sgen"].values()) == [gens[0].id]
 
     def test_sgen_raises_load_bus_voltage(self):
@@ -150,7 +150,7 @@ class TestPgmSymGen:
         grid, id_map = pgm_to_grid(self._input(with_gen=True), base_frequency_hz=50.0)
         gens = [a for a in grid.appliances if isinstance(a, Generator)]
         assert len(gens) == 1
-        assert gens[0].p_nom_w == pytest.approx(3e5)
+        assert gens[0].p_nom_w == pytest.approx(3e5 / 3.0)
         assert id_map["sym_gen"] and list(id_map["sym_gen"].values()) == [gens[0].id]
 
     def test_sym_gen_raises_load_bus_voltage(self):

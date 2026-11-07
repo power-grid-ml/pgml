@@ -146,26 +146,27 @@ class TestSinglePhaseEquiv:
         for ld in loads:
             assert ld.connection is None
 
-    def test_u_rated_v_is_line_to_line(self) -> None:
-        """u_rated_v equals the L-L voltage (BasekV_LL * 1000).
+    def test_u_rated_v_is_line_to_neutral(self) -> None:
+        """A one-phase node carries the line-to-neutral voltage (BasekV_LL * 1000 / sqrt(3)).
 
         ``_BASEKV`` is the line-to-line kilovoltage specified in the ``New Circuit``
-        command.  OpenDSS stores ``kVBase = _BASEKV / sqrt(3)`` internally (L-N).
-        The converter recovers L-L via ``kVBase * sqrt(3) * 1000 = _BASEKV * 1000``.
+        command. OpenDSS stores ``kVBase = _BASEKV / sqrt(3)`` internally (L-N), which
+        is exactly the value a one-phase pgml node carries.
         """
-        expected_v = _BASEKV * 1_000.0  # L-L in volts
+        expected_v = _BASEKV * 1_000.0 / math.sqrt(3.0)
         for n in self._grid.nodes:
             assert abs(n.u_rated_v - expected_v) < 1.0, (
                 f"Node {n.name}: u_rated_v={n.u_rated_v:.2f} V, "
-                f"expected {expected_v:.2f} V (L-L)"
+                f"expected {expected_v:.2f} V (L-N)"
             )
 
     def test_slack_v_complex_in_id_map(self) -> None:
         """id_map carries a 'slack_v_complex' entry from the first Vsource."""
         assert "slack_v_complex" in self._id_map
         assert self._id_map["slack_v_complex"] is not None
+        # the phasor to pin on the one-phase grid: line-to-neutral
         assert abs(self._id_map["slack_v_complex"]) == pytest.approx(
-            _BASEKV * 1_000.0, rel=1e-6
+            _BASEKV * 1_000.0 / math.sqrt(3.0), rel=1e-6
         )
 
     def test_id_map_has_all_required_buckets(self) -> None:
@@ -622,3 +623,31 @@ def test_four_wire_mixed_return_paths_convert_and_match_opendss() -> None:
                 f"bus {name} phase {phase}: |V| mismatch ours={vm_pu_ours:.8f} "
                 f"dss={vm_pu_ref:.8f}"
             )
+
+
+def test_three_phase_native_one_phase_node_carries_its_line_to_neutral_rating() -> None:
+    """The schema rule: a node with fewer than three phase rows is line-to-neutral."""
+    import opendssdirect as dss_
+
+    dss_.Text.Command("Clear")
+    dss_.Text.Command("Set DefaultBaseFrequency=50")
+    dss_.Text.Command("New Circuit.lat basekv=0.4 phases=3 bus1=src.1.2.3")
+    dss_.Text.Command(
+        "New Line.l1 bus1=src.1 bus2=tap.1 phases=1 r1=0.1 x1=0.05 length=1 units=km"
+    )
+    dss_.Text.Command("New Load.ld bus1=tap.1 phases=1 kv=0.2309 kw=5 kvar=1")
+    dss_.Text.Command("Set voltagebases=[0.4]")
+    dss_.Text.Command("Calcvoltagebases")
+    dss_.Text.Command("Solve")
+    from pgml.convert.opendss import to_grid as to_grid_
+
+    grid, id_map = to_grid_(dss_, phase_mode=PhaseMode.THREE_PHASE)
+    by_name = {n.name: n for n in grid.nodes}
+    one_phase = [n for n in grid.nodes if len(n.phases) < 3]
+    assert one_phase, [(n.name, n.phases) for n in grid.nodes]
+    for n in one_phase:
+        assert n.u_rated_v == pytest.approx(400.0 / math.sqrt(3.0), rel=1e-9)
+    assert any(
+        len(n.phases) >= 3 and n.u_rated_v == pytest.approx(400.0) for n in grid.nodes
+    )
+    assert by_name  # nodes are named

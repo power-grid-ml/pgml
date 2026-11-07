@@ -100,7 +100,8 @@ def _vm_pu(net, grid, id_map, pp_bus: int, *, method: str = "newton") -> float:
     assert res.converged, f"solve did not converge (residual={float(res.residual):.3e})"
     row = res.index.row(id_map["bus"][pp_bus], Phase.A)
     v = res.v.reshape(-1)[row].item()
-    return abs(v) / (float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0)
+    # one-phase node: line-to-neutral base
+    return abs(v) / (float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0 / 3.0**0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +147,7 @@ class TestVoltVarMapping:
         gen = gens[0]
         assert list(id_map["gen"].values()) == [gen.id]
         assert gen.name == "gen_0"
-        assert gen.p_nom_w == pytest.approx(1.0e6)
+        assert gen.p_nom_w == pytest.approx(1.0e6 / 3.0)
         # A controlled generator's reactive nameplate is never read.
         assert gen.q_nom_var == 0.0
         assert isinstance(gen.control, VoltVarControl)
@@ -160,7 +161,7 @@ class TestVoltVarMapping:
         grid, _ = to_grid(_net(), gen_mode=GenMode.VOLT_VAR_APPROX)
         control = _gens(grid)[0].control
         q_base = math.hypot(1.0e6, 3.0e6)  # hypot(P, max(|q_min|, |q_max|))
-        assert control.s_rated_va == pytest.approx(q_base)
+        assert control.s_rated_va == pytest.approx(q_base / 3.0)
         y_max, y_min = 3.0e6 / q_base, -3.0e6 / q_base
         assert control.characteristic.y_values == pytest.approx((y_max, y_min))
         assert control.characteristic.x_values == pytest.approx(
@@ -194,9 +195,9 @@ class TestVoltVarMapping:
         ``min/max_q_mvar`` raw (``add_q_constraints``); the converter mirrors it."""
         grid, _ = to_grid(_net(scaling=0.5), gen_mode=GenMode.VOLT_VAR_APPROX)
         gen = _gens(grid)[0]
-        assert gen.p_nom_w == pytest.approx(0.5e6)
+        assert gen.p_nom_w == pytest.approx(0.5e6 / 3.0)
         q_base = math.hypot(0.5e6, 3.0e6)
-        assert gen.control.s_rated_va == pytest.approx(q_base)
+        assert gen.control.s_rated_va == pytest.approx(q_base / 3.0)
         assert gen.control.characteristic.y_values == pytest.approx(
             (3.0e6 / q_base, -3.0e6 / q_base)
         )
@@ -231,7 +232,7 @@ class TestReactiveLimitFallbacks:
             )
         envelope = math.sqrt((2.5e6) ** 2 - (1.0e6) ** 2)
         control = _gens(grid)[0].control
-        assert control.s_rated_va == pytest.approx(math.hypot(1.0e6, envelope))
+        assert control.s_rated_va == pytest.approx(math.hypot(1.0e6, envelope) / 3.0)
         assert any("no min_q_mvar/max_q_mvar" in r.message for r in caplog.records)
 
     def test_missing_limits_and_rating_fall_back_to_the_active_power(self):
@@ -240,7 +241,7 @@ class TestReactiveLimitFallbacks:
             gen_mode=GenMode.VOLT_VAR_APPROX,
         )
         control = _gens(grid)[0].control
-        assert control.s_rated_va == pytest.approx(math.hypot(1.0e6, 1.0e6))
+        assert control.s_rated_va == pytest.approx(math.hypot(1.0e6, 1.0e6) / 3.0)
 
     def test_one_sided_limit_uses_the_envelope_only_on_the_missing_side(self):
         grid, _ = to_grid(
@@ -250,7 +251,7 @@ class TestReactiveLimitFallbacks:
         envelope = math.sqrt((2.5e6) ** 2 - (1.0e6) ** 2)
         control = _gens(grid)[0].control
         q_base = math.hypot(1.0e6, envelope)  # the wider (synthesised) side dominates
-        assert control.s_rated_va == pytest.approx(q_base)
+        assert control.s_rated_va == pytest.approx(q_base / 3.0)
         assert control.characteristic.y_values == pytest.approx(
             (envelope / q_base, -0.4e6 / q_base)
         )
@@ -262,7 +263,7 @@ class TestReactiveLimitFallbacks:
         )
         gen = _gens(grid)[0]
         assert gen.control is None
-        assert gen.q_nom_var == pytest.approx(0.25e6)
+        assert gen.q_nom_var == pytest.approx(0.25e6 / 3.0)
 
     def test_inconsistent_limits_raise(self):
         with pytest.raises(ConversionError, match="inconsistent"):

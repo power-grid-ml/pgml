@@ -34,6 +34,7 @@ power.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import pytest
 import torch
@@ -89,12 +90,13 @@ def _compare(
     assert res.converged, f"pgml did not converge (residual {float(res.residual):.3e})"
     rows = np.array([res.index.row(id_map["bus"][b], "a") for b in net.bus.index])
     v = res.v.detach().numpy()[rows]
-    base = net.bus.vn_kv.values * 1_000.0
+    base = net.bus.vn_kv.values * 1_000.0 / math.sqrt(3.0)  # one-phase node: L-N
     d_vm = np.abs(np.abs(v) / base - net.res_bus.vm_pu.values)
     d_va = np.abs(np.degrees(np.angle(v)) - net.res_bus.va_degree.values)
     d_q, pinned = [], 0
     for pp_idx, gid in id_map["gen"].items():
-        q_pgml = float(res.regulation.q_var[gid]) / 1.0e6
+        # per-phase share of the system reactive power
+        q_pgml = 3.0 * float(res.regulation.q_var[gid]) / 1.0e6
         d_q.append(abs(q_pgml - float(net.res_gen.q_mvar.at[pp_idx])))
         pinned += not bool(res.regulation.regulating[gid])
     assert d_vm.max() < tol_vm, f"max |dV| = {d_vm.max():.3e} pu"

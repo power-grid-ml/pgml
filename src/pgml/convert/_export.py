@@ -329,7 +329,35 @@ def validate_balanced_grid_phases(grid: Any) -> None:
             )
 
 
+def system_view(grid: Any) -> Any:
+    """The grid with SYSTEM voltages and powers, for a target tool of three-phase systems.
+
+    A grid tagged ``metadata.tags["phase_mode"] == "single_phase_equiv"`` is one phase of a
+    balanced system: its ``(A,)`` node, source and transformer rated voltages are
+    line-to-neutral and its appliance powers and transformer rating are per-phase shares
+    (the schema's one-phase convention, written by every inbound converter in that mode).
+    Exporters to pandapower and power-grid-model describe the whole system, so this returns
+    a copy with those voltages times sqrt(3) and every power quantity times 3 (the exact
+    inverse of :func:`pgml.convert._common.equivalent_voltage` / ``equivalent_power``).
+    Per-phase impedances, admittances and current ratings are unchanged. Any other grid is
+    returned as is: an ``(A, B, C)`` grid already carries system quantities, and an
+    untagged ``(A,)`` grid (hand-built or converted before the tag existed) keeps its
+    established reading, line-to-line rating and totals. The input is not mutated.
+    """
+    from pgml.convert._common import PHASE_VOLTAGE_DIVISOR, PHASE_POWER_DIVISOR
+    from pgml.representation import _is_one_phase, _rescale_grid, phase_mode_of
+
+    if phase_mode_of(grid) != "single_phase_equiv" or not _is_one_phase(grid):
+        return grid
+    return _rescale_grid(
+        grid,
+        lambda u: u * PHASE_VOLTAGE_DIVISOR,
+        lambda p: p * PHASE_POWER_DIVISOR,
+    )
+
+
 __all__ = [
+    "system_view",
     "REDUCTIONS",
     "UnsupportedGridError",
     "new_export_report",

@@ -575,9 +575,9 @@ class TestSinglePhaseEquivTransformer:
         dss.Circuit.SetActiveBus("lv")
         dss_va = dss.Bus.puVmagAngle()
         kvbase_ln_kv = dss.Bus.kVBase()
-        # SINGLE_PHASE_EQUIV stores u_rated_v as the recovered L-L nameplate
-        # (kVBase*sqrt(3)*1000), matching Node.u_rated_v == _KV_LV*1000.
-        vm_pu_ours = abs(v) / (_KV_LV * 1_000.0)
+        # SINGLE_PHASE_EQUIV stores u_rated_v line-to-neutral (kVBase*1000), the
+        # per-unit base of OpenDSS puVmagAngle.
+        vm_pu_ours = abs(v) / (_KV_LV * 1_000.0 / math.sqrt(3.0))
         va_deg_ours = math.degrees(math.atan2(v.imag, v.real))
 
         assert abs(vm_pu_ours - dss_va[0]) < self.ATOL_VM_PU

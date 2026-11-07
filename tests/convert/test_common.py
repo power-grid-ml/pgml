@@ -13,6 +13,7 @@ import pytest
 
 from pgml import defaults as config
 from pgml.convert._common import (
+    make_metadata,
     IdCounter,
     PhaseMode,
     build_line_from_matrices,
@@ -187,12 +188,14 @@ def test_thevenin_from_sk_fallback_on_huge_sk():
 def test_build_node_single_phase():
     n = build_node(id=1, u_rated_v=400.0, mode=PhaseMode.SINGLE_PHASE_EQUIV)
     assert n.phases == (Phase.A,)
-    assert n.u_rated_v == 400.0
+    # the single phase is line-to-neutral: U_LL / sqrt(3)
+    assert n.u_rated_v == pytest.approx(400.0 / 3.0**0.5, rel=1e-15)
 
 
 def test_build_node_three_phase():
     n = build_node(id=1, u_rated_v=400.0, mode=PhaseMode.THREE_PHASE)
     assert n.phases == ABC
+    assert n.u_rated_v == 400.0
 
 
 def test_build_node_native_phases():
@@ -215,8 +218,9 @@ def test_build_load_single_phase_total_only():
         q_total_var=200.0,
     )
     assert ld.phases == (Phase.A,)
-    assert ld.p_nom_w == 1000.0
-    assert ld.q_nom_var == 200.0
+    # one third of the three-phase total
+    assert ld.p_nom_w == pytest.approx(1000.0 / 3.0, rel=1e-15)
+    assert ld.q_nom_var == pytest.approx(200.0 / 3.0, rel=1e-15)
     assert ld.p_nom_per_phase_w is None
     assert ld.connection is None  # default not set -> resolves from config
 
@@ -297,7 +301,8 @@ def test_build_source_single_phase():
         l_h=1e-12,
     )
     assert s.phases == (Phase.A,)
-    assert s.u_ref_v == (231.0,)
+    # u_ref_v is the line-to-line magnitude; the single phase is line-to-neutral
+    assert s.u_ref_v == pytest.approx((231.0 / 3.0**0.5,), rel=1e-15)
     assert s.u_angle_deg == (0.0,)
     assert s.resistance_ohm == [[1e-6]]
 
@@ -474,3 +479,55 @@ def test_build_line_from_sequence_three_phase_matrix():
     r_mut = (0.4 - r1) / 3.0
     assert R[0][0] == pytest.approx(r_self)
     assert R[0][1] == pytest.approx(r_mut)
+
+
+# ----------------------------------------------------------------------- #
+# per-phase equivalent scaling helpers
+# ----------------------------------------------------------------------- #
+def test_equivalent_scaling_rule():
+    from pgml.convert._common import (
+        equivalent_control,
+        equivalent_power,
+        equivalent_voltage,
+        equivalent_voltage_regulation,
+    )
+    from pgml.schemas.grid_schema import VoltageRegulation, VoltVarControl
+
+    single, three = PhaseMode.SINGLE_PHASE_EQUIV, PhaseMode.THREE_PHASE
+    assert equivalent_voltage(single, 400.0) == pytest.approx(400.0 / 3.0**0.5)
+    assert equivalent_voltage(three, 400.0) == 400.0
+    assert equivalent_power(single, 900.0) == pytest.approx(300.0)
+    assert equivalent_power(three, 900.0) == 900.0
+    assert equivalent_power(single, None) is None
+    # the constant-impedance admittance S/U^2 is the same in both representations
+    y_system = 900.0 / 400.0**2
+    y_phase = equivalent_power(single, 900.0) / equivalent_voltage(single, 400.0) ** 2
+    assert y_phase == pytest.approx(y_system, rel=1e-14)
+
+    vv = VoltVarControl.model_validate(
+        {
+            "kind": "volt_var",
+            "characteristic": {"x_values": [0.9, 1.1], "y_values": [0.3, -0.3]},
+            "s_rated_va": 3000.0,
+        }
+    )
+    assert equivalent_control(single, vv).s_rated_va == pytest.approx(1000.0)
+    assert equivalent_control(three, vv) is vv
+    reg = VoltageRegulation(v_set_pu=1.02, q_min_var=-300.0, q_max_var=600.0)
+    scaled = equivalent_voltage_regulation(single, reg)
+    assert (scaled.q_min_var, scaled.q_max_var) == pytest.approx((-100.0, 200.0))
+    assert scaled.v_set_pu == 1.02
+
+
+def test_converters_record_the_phase_mode_tag():
+    """Every converted grid names its representation in ``metadata.tags``."""
+    import pandapower.networks as pn
+
+    from pgml.convert.pandapower import to_grid
+
+    for mode in PhaseMode:
+        grid, _ = to_grid(pn.case33bw(), phase_mode=mode)
+        assert grid.metadata.tags["phase_mode"] == mode.value
+    assert PhaseMode.SINGLE_PHASE_EQUIV.value == "single_phase_equiv"
+    assert PhaseMode.THREE_PHASE.value == "three_phase"
+    assert make_metadata("x", "y").tags == {}

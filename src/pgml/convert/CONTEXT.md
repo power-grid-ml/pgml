@@ -26,7 +26,15 @@ converter's convention handling changes.
 - `convert.<tool>.to_grid(source, ...)` is pure: `(Grid, id_map)`, or
   `(Grid, id_map, ConversionReport)` with `return_report=True`. The `id_map` is keyed by
   the source tool's element kind and source index/id; `id_map["slack_v_complex"]` is the
-  line-to-line slack phasor in volts (a single-phase ideal-slack `v_fixed` convenience).
+  slack phasor in volts as the grid's node carries it (line-to-neutral under
+  `SINGLE_PHASE_EQUIV`, line-to-line under `THREE_PHASE`; a `v_fixed` convenience).
+  Every converted grid records `metadata.tags["phase_mode"]` (the `PhaseMode` value); an
+  untagged grid is legacy: one-phase nodes carry the line-to-line voltage and appliances
+  the three-phase totals.
+- Line ratings: pandapower `max_i_ka·df·parallel`, pgm `i_n`, OpenDSS `NormAmps` are carried
+  as `Grid.types.lines` `LineType.max_i_a` with `type_ref` on the line (`LineTypeCatalog` in
+  `_common.py`; identical lines share a type, explicit matrices are kept). A grid's
+  representation and the helpers to read it: `pgml.representation`.
 - `convert.<tool>.from_grid(grid, ...)` returns `PandapowerExport` / `PgmExport` /
   `OpenDSSExport` with element maps, `reductions` (strings) and `.report`.
 - `pgml.convert` exports `ConversionReport`, `ReportEntry`, `ModelMatch`,
@@ -49,8 +57,11 @@ converter's convention handling changes.
 - All converters stamp identical schema objects for the same physical input because the
   phase decision and per-phase mapping live only in the `_common` emit helpers. Add new
   plumbing there, not in a per-tool converter.
-- `phase_mode=PhaseMode.SINGLE_PHASE_EQUIV` (default): one positive-sequence equivalent,
-  `phases=(A,)`, 1x1 matrices. Its output must stay unchanged by edits made for
+- `phase_mode=PhaseMode.SINGLE_PHASE_EQUIV` (default): ONE PHASE of the balanced system,
+  `phases=(A,)`, 1x1 matrices. System voltages divide by √3 and system powers/ratings by 3
+  (`equivalent_voltage/power/control` in `_common.py`, the only place the rule is written);
+  per-phase impedances/admittances, `max_i_a`, per-unit setpoints and spectra are unchanged,
+  so branch currents are the conductor currents the reference tools report. Its output must stay unchanged by edits made for
   `THREE_PHASE`; the reference oracle suite calls `to_grid(net)` with no `phase_mode`.
   Asymmetric loads collapse to a balanced total with an INFO log. A coupled multi-phase
   OpenDSS line reduces to its positive sequence `Z1 = Z_self - Z_mutual`.
@@ -61,7 +72,8 @@ converter's convention handling changes.
   whose zero sequence comes from native data (OpenDSS `R0/X0`, pgm `z01_ratio`, pandapower
   `x0x_max`/`r0x0_max`) or the `source.zero_sequence.*` ratios with a WARNING;
   `Z0 == Z1` yields the plain diagonal.
-- Voltage base: `Node.u_rated_v` is line-to-line for a node with three or more phases;
+- Voltage base: `Node.u_rated_v` is line-to-line for a node with three or more phases and
+  line-to-neutral below (what `SINGLE_PHASE_EQUIV` writes);
   every per-phase working voltage is line-to-neutral, derived only by
   `assembly._params.phase_voltage_magnitude`. Under `THREE_PHASE` `build_source` divides
   the L-L `u_ref_v` by sqrt(3); pinning the L-L magnitude per phase is the classic
@@ -86,6 +98,11 @@ converter's convention handling changes.
 
 ## Outbound (`from_grid`)
 
+- A grid tagged `phase_mode = single_phase_equiv` is one phase of a balanced system; the
+  pandapower and pgm exporters first take `_export.system_view` (voltages x sqrt(3), powers
+  and ratings x 3, the inverse of the inbound rule), so a round trip restores the system's
+  bus ratings, powers and currents. An untagged `(A,)` grid is exported as written
+  (line-to-line rating, totals).
 - pandapower and pgm exports are fundamental-only and balanced: a consistent `(A,)` or
   `(A, B, C)` layout; partial-phase, mixed-layout and neutral-conductor grids raise
   `UnsupportedGridError`, as do unsupported elements. Harmonic fields (spectra, harmonic
