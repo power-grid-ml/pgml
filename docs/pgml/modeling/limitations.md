@@ -35,21 +35,27 @@ deviates by 9.2e-5 pu at a no-load current of 0.1 %, 2.2e-4 pu at 0.5 % and 8.2e
 placement. No placement has a zero-sequence magnetizing branch. See {doc}`transformer`.
 
 **Construction.** Every two-winding pairing except zigzag-zigzag is supported, at every clock
-number of the pairing's parity. Zigzag-zigzag and non-solid neutral grounding raise. The zigzag
+number of the pairing's parity. Zigzag-zigzag and a zigzag star point that is not solidly earthed
+raise; wye star points may sit on a neutral row and be earthed through an impedance, and
+centre-tapped single-phase units are modelled (see {doc}`transformer`). The zigzag
 incidence is experimental: it reproduces the clock shift, the blocked zero-sequence transfer
 and the winding's own zero-sequence path, and agrees with power-grid-model on an unbalanced
 solve, but no second reference tool can express the same unit as one two-winding element.
-Constructing one logs a warning once per process. Three-winding units are not modelled.
+Constructing one logs a warning once per process. General three-winding units are not
+modelled. On a split-phase (centre-tapped) node `Node.u_rated_v` cannot describe both the
+X1-N and the X1-X2 voltage, so a voltage-dependent load model or a per-unit base there uses the
+three-conductor convention; and a load across X1-X2 (a two-phase delta element) is not
+modelled.
 
 **Zero sequence.** The zero-sequence leakage is `Transformer.zero_sequence` when set (the
 pandapower converter reads `vk0_percent`/`vkr0_percent`), otherwise the
 `transformer.zero_sequence.*` ratios of the modelling defaults (1.0, that is `Z0 = Z1`, which
 is what OpenDSS and power-grid-model imply). Not modelled: a zero-sequence magnetizing branch
 (pandapower `mag0_percent`/`mag0_rx`, power-grid-model `i0_zero_sequence`/`p0_zero_sequence`),
-the HV/LV split of the zero-sequence leakage inside a T equivalent (pandapower
-`si0_hv_partial`), and a neutral earthing impedance (pandapower `xn_ohm`/`rn_ohm`, OpenDSS
-`Rneut`/`Xneut`). The converters name each of these in a warning, or refuse the element,
-instead of dropping it silently. pgml has no explicit transformer T equivalent; the
+and the HV/LV split of the zero-sequence leakage inside a T equivalent (pandapower
+`si0_hv_partial`). A neutral earthing impedance is modelled, but the pandapower (`xn_ohm`/
+`rn_ohm`) and OpenDSS (`Rneut`/`Xneut`) converters do not map it yet. The converters name each
+of these in a warning, or refuse the element, instead of dropping it silently. pgml has no explicit transformer T equivalent; the
 differences to a T-model tool are reported by the converters.
 
 **Ungrounded secondaries.** A fully ungrounded secondary island has no absolute zero-sequence

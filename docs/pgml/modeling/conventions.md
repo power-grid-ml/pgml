@@ -171,8 +171,10 @@ zigzag windings raise `NotImplementedError` there.
 
 The OpenDSS transformer scope is narrower than the core model. Only two-winding units
 convert, and only solidly grounded wye windings (the shorthand bus, or an explicit `.0`) or
-delta windings. Three-winding units, and an explicit non-zero neutral node that is floating
-or impedance-grounded, raise `ConversionError`. So does a non-cyclic winding-bus
+delta windings. Three-winding units (including the centre-tapped single-phase unit, which
+the core models as {class}`~pgml.schemas.grid_schema.CentreTap`), and an explicit non-zero
+neutral node that is floating or impedance-grounded (which the core models as a star point on
+the neutral row with a `GroundingImpedance`), raise `ConversionError` in this converter. So does a non-cyclic winding-bus
 permutation, such as swapping two phase conductors, which reverses the phase rotation;
 raising avoids silently producing a wrong clock. The polarity-flip clocks 2, 6 and 10 need
 a reversed winding construction that no bus wiring can express, so this converter never

@@ -46,7 +46,11 @@ Signatures: docstrings / API_INDEX.md.
   all connected phases; control-block powers are DEVICE totals that assembly splits over
   the device's elements. Injection sign: +1 `Load`, −1 `Generator` / `Storage`.
 - Transformer zero-sequence and leakage data are referred to the to-side (LV) winding
-  coil.
+  coil. A centre-tapped unit (`CentreTap`, 0.5.0) keeps `series_*` as the primary to
+  FULL secondary short circuit; the half-winding values are in their own coil ohms.
+- Transformer star points (0.5.0): `Phase.N` may only be the LAST entry of a winding's
+  phases and makes the star point that neutral row. `GroundingImpedance` is stamped;
+  `r = x = 0` floats are solid, a tensor value is always an impedance.
 - `type_ref` is an authoring layer: assembly consumes materialised parameters and pgml
   ships no resolver (see the module docstring "Standard types").
 - `Generator.voltage_regulation` and `control` are mutually exclusive; `spectrum` and
