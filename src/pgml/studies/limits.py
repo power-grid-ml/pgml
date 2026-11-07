@@ -284,7 +284,8 @@ class _LimitElements:
             the same for the neutral conductor (``neutral_lines``);
             ``"transformer_loading"`` ``[B, T]`` largest per-phase current times the
             terminal's nominal line-to-neutral voltage per rated power per phase
-            (``transformers``).
+            (``transformers``), the larger of ``"transformer_terminal_loading"``
+            ``[B, T, 2]`` (the from and the to terminal).
         """
         b = v.shape[0]
         dev = v.device
@@ -342,9 +343,12 @@ class _LimitElements:
                 bc = currents[bid]
                 i_from = _rms(bc.i_from)[..., m_from.to(dev)] * k_from
                 i_to = _rms(bc.i_to)[..., m_to.to(dev)] * k_to
-                cols.append(torch.cat([i_from, i_to], dim=-1).amax(dim=-1))
-            loading = torch.stack(cols, dim=-1).reshape(b, -1)
-            out["transformer_loading"] = loading.to(torch.float64)
+                cols.append(
+                    torch.stack([i_from.amax(dim=-1), i_to.amax(dim=-1)], dim=-1)
+                )
+            terminal = torch.stack(cols, dim=-2).reshape(b, -1, 2).to(torch.float64)
+            out["transformer_terminal_loading"] = terminal
+            out["transformer_loading"] = terminal.amax(dim=-1)
         return out
 
 
