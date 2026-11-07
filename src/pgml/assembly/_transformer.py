@@ -279,13 +279,23 @@ def _classify(conn: WindingConnection) -> SideConn:
 
 
 def _grounding_is_finite(grounding) -> bool:
-    """True when a nonzero neutral grounding impedance is set (r=x=0 = solid)."""
+    """True when a finite neutral grounding impedance is set (r=x=0 = solid).
+
+    A tensor-valued field always counts as finite: it is a gradient leaf, and the
+    choice between the solid and the impedance stamp is a topology decision that must
+    not depend on a tensor's value.
+    """
     if grounding is None:
         return False
-    return float(grounding.r_ohm) != 0.0 or float(grounding.x_ohm) != 0.0
+    values = (grounding.r_ohm, grounding.x_ohm)
+    if any(hasattr(v, "detach") or hasattr(v, "__array__") for v in values):
+        return True
+    return float(values[0]) != 0.0 or float(values[1]) != 0.0
 
 
-def resolve_vector_group(t, n_phases: Optional[int] = None) -> VectorGroup:
+def resolve_vector_group(
+    t, n_phases: Optional[int] = None, *, check_grounding: bool = True
+) -> VectorGroup:
     """Resolve a transformer's vector group: explicit connections + clock, else defaults.
 
     ``from_connection`` / ``to_connection`` come from the schema when set, else the
@@ -306,11 +316,12 @@ def resolve_vector_group(t, n_phases: Optional[int] = None) -> VectorGroup:
       topology. Pass ``n_phases`` to enable this check; ``None`` skips it.
     - Zigzag-zigzag pairings are rejected (no such standard unit; the limb-domain
       elimination needs one plain-star or delta winding).
-    - Windings are stamped solidly grounded: a finite neutral grounding impedance
-      would alter the zero-sequence path, so it is rejected rather than silently
-      ignored.
+    - With ``check_grounding`` (the default, used by the solidly grounded vector-group
+      stamp) a finite neutral grounding impedance is rejected rather than silently
+      ignored. The star-point terminal model
+      (:mod:`pgml.assembly._transformer_terminals`) stamps it and passes ``False``.
     """
-    for side in ("from", "to"):
+    for side in ("from", "to") if check_grounding else ():
         if _grounding_is_finite(getattr(t, f"{side}_grounding", None)):
             raise ModelingError(
                 f"transformer {t.id}: a finite {side}-side neutral grounding "

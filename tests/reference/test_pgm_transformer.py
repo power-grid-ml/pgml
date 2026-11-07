@@ -594,6 +594,48 @@ class TestAsymOracle:
         assert max(e[0] for e in errors.values()) < self.ATOL_VM_PU
         assert max(e[1] for e in errors.values()) < self.ATOL_VA_DEG
 
+    @pytest.mark.parametrize(
+        "winding_from,winding_to,clock,grounding",
+        [
+            pytest.param(
+                WindingType.delta,
+                WindingType.wye_n,
+                5,
+                {"r_grounding_to": [2.0], "x_grounding_to": [0.5]},
+                id="Dyn5-Zn_to",
+            ),
+            pytest.param(
+                WindingType.wye_n,
+                WindingType.wye_n,
+                0,
+                {
+                    "r_grounding_from": [30.0],
+                    "x_grounding_from": [10.0],
+                    "r_grounding_to": [2.0],
+                },
+                id="YNyn0-Zn_both",
+            ),
+        ],
+    )
+    def test_impedance_earthed_star_points_unbalanced(
+        self, winding_from: int, winding_to: int, clock: int, grounding: dict
+    ) -> None:
+        """A neutral earthing impedance carries ``3·Z_g`` in the zero sequence in both
+        tools: pgml's terminal model (star point eliminated after its earthing
+        admittance) against pgm's sequence-domain ``z_grounding`` term.
+
+        Measured (power-grid-model 1.13.142, complex128, CPU): 2.8e-11 pu and 3.8e-9
+        deg on both cases, while the earthing moves pgm's own LV voltages by 0.13 pu
+        against solid earthing, so the check is sensitive to the stamp."""
+        input_data = _asym_input(
+            winding_from=winding_from, winding_to=winding_to, clock=clock
+        )
+        for key, value in grounding.items():
+            input_data["transformer"][key] = value
+        errors = _run_asym_case(input_data)
+        assert max(e[0] for e in errors.values()) < self.ATOL_VM_PU
+        assert max(e[1] for e in errors.values()) < self.ATOL_VA_DEG
+
     def test_ynzn5_unbalanced_zigzag_zero_sequence(self) -> None:
         """Grounded zigzag under imbalance: tight on BOTH buses.
 
@@ -666,16 +708,6 @@ class TestUnsupportedRejections:
         )
         grid, _ = to_grid(input_data, base_frequency_hz=_F0)
         with pytest.raises(ModelingError, match="zigzag-zigzag"):
-            assemble_ybus(grid, [_F0], dtype=torch.complex128)
-
-    def test_finite_grounding_impedance_raises_at_assembly(self) -> None:
-        input_data = _sym_input(
-            winding_from=WindingType.delta, winding_to=WindingType.wye_n, clock=5
-        )
-        input_data["transformer"]["r_grounding_to"] = [2.0]
-        grid, _ = to_grid(input_data, base_frequency_hz=_F0)
-        assert grid.branches[0].to_grounding is not None
-        with pytest.raises(ModelingError, match="grounding"):
             assemble_ybus(grid, [_F0], dtype=torch.complex128)
 
     def test_solid_grounding_does_not_raise(self) -> None:

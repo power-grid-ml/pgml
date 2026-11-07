@@ -967,13 +967,80 @@ class ComplexTap(GridModel):
 
 
 class GroundingImpedance(GridModel):
-    """Neutral-to-ground impedance of a grounded-wye / zigzag winding (r=x=0 = solid)."""
+    """Earthing impedance between a winding's star point and earth.
+
+    Consumed for a ``wye_grounded`` winding (and the centre tap of a
+    :class:`CentreTap` secondary). ``r_ohm = x_ohm = 0`` (both plain floats) is solid
+    earthing, the same as no grounding block. Any other value, or a tensor value, is
+    stamped as the admittance ``1/(r_ohm + j·h·x_ohm)`` from the star point to earth:
+    the resistance is frequency-independent and the reactance scales with the
+    harmonic order ``h``. Where the star point is depends on the winding's phases
+    (see :class:`Transformer`): an internal point eliminated from the nodal system,
+    or the node's ``Phase.N`` row, which then cannot be solidly earthed and needs a
+    finite value. ``zigzag_grounded`` windings support solid earthing only.
+    """
 
     r_ohm: Num = si_field(
-        "Neutral grounding resistance.", short="Ohm", long="ohm", default=0.0
+        "Earthing resistance of the star point (0 with x_ohm = 0: solid).",
+        short="Ohm",
+        long="ohm",
+        default=0.0,
     )
     x_ohm: Num = si_field(
-        "Neutral grounding reactance at f0.", short="Ohm", long="ohm", default=0.0
+        "Earthing reactance of the star point at f0; X(h) = h·x_ohm.",
+        short="Ohm",
+        long="ohm",
+        default=0.0,
+    )
+
+
+class CentreTap(GridModel):
+    """Centre-tapped secondary of a single-phase transformer (split phase, X1-N-X2).
+
+    The secondary consists of two equal half windings in series; the centre tap
+    between them is the secondary's star point (the neutral of a single-phase
+    three-wire service, e.g. 440/220 V or 240/120 V). The unit is the three-winding
+    single-phase transformer of OpenDSS (``windings=3``, half-secondary ``kVs``) in
+    its star (T) equivalent: one leakage branch per winding behind an ideal core.
+
+    *Impedances.* The transformer's ``series_resistance_ohm`` /
+    ``series_inductance_h`` keep their meaning: the short-circuit impedance
+    ``Z_a = R_a + jX_a`` between the primary and the FULL secondary (X1-X2 shorted,
+    centre tap open), referred to the full secondary coil (``u_rated_to_v``). This
+    block gives the leakage of ONE half winding, in its own coil ohms (rated
+    ``u_rated_to_v / 2``); the primary branch takes the rest,
+    ``Z_H = Z_a - 2·Z_half`` (referred to the full secondary coil), so the full
+    short circuit reproduces ``Z_a``. ``None`` applies Kersting's split
+    (*Distribution System Modeling and Analysis*, centre-tapped transformer):
+    ``Z_half = (R_a + j·0.4·X_a)/4``, i.e. ``Z_H = 0.5·R_a + j·0.8·X_a``, the split of
+    the standard OpenDSS centre-tap example (``%Rs=[0.6 1.2 1.2]``,
+    ``XHL=XHT=2.04``, ``XLT=1.36``).
+
+    *Terminals.* ``to_phases`` lists the outer terminals ``(X1, X2)`` (two distinct
+    phases) and optionally ``Phase.N`` last: the centre tap is then the node's
+    neutral row, otherwise an internal point earthed per ``to_connection`` /
+    ``to_grounding``. ``X1`` is in phase with the primary, ``X2`` in antiphase. The
+    primary is one winding: ``from_phases=(x,)`` or ``(x, N)`` with a wye
+    ``from_connection`` (phase to earth / to neutral), or ``(x, y)`` with
+    ``from_connection = delta`` (phase to phase). ``u_rated_from_v`` is the primary
+    coil voltage (e.g. 7967 V for a 13.8 kV system's phase-to-earth primary),
+    ``u_rated_to_v`` the full secondary voltage X1-X2.
+    """
+
+    half_resistance_ohm: Optional[NonNegNum] = si_field(
+        "Leakage resistance of one half winding. None = Kersting's split R_a/4.",
+        short="Ohm",
+        long="ohm",
+        reference="own half-winding coil (u_rated_to_v / 2)",
+        default=None,
+    )
+    half_inductance_h: Optional[NonNegNum] = si_field(
+        "Leakage inductance of one half winding. None = Kersting's split 0.1·L_a "
+        "(X_half = 0.4·X_a/4).",
+        short="H",
+        long="henry",
+        reference="own half-winding coil (u_rated_to_v / 2)",
+        default=None,
     )
 
 
@@ -1010,7 +1077,22 @@ class Transformer(BranchBase):
     """Two-winding transformer, canonical phase-domain form. Assembly builds the
     per-phase primitive from connections, clock (via tap.shift_deg), grounding and
     the series/magnetizing branches. Ratings/electrical/connections may come from
-    `type_ref` (Grid.types.transformers); a resolver materialises before assembly."""
+    `type_ref` (Grid.types.transformers); a resolver materialises before assembly.
+
+    *Winding terminals.* ``from_phases`` / ``to_phases`` list the phase terminals of
+    each winding. A wye winding's phase tuple may end with ``Phase.N``: its star
+    point is then the node's neutral row (bonded to the neutral conductor) instead of
+    an internal point. A ``wye_grounded`` star point on the neutral row is earthed
+    through the side's finite :class:`GroundingImpedance` (required); a ``wye``
+    star point on it is bonded only. Without ``Phase.N`` the star point of a
+    ``wye_grounded`` winding is earthed solidly, or through a finite grounding
+    impedance; that of a ``wye`` winding floats.
+
+    *Single-phase units.* With one winding per side: a wye winding on ``(x,)`` or
+    ``(x, N)`` (phase to earth / to neutral) or a delta winding on ``(x, y)``
+    (phase to phase); the rated voltages are then the COIL voltages and the clock is
+    0 (or 6, reversed polarity). A three-wire split-phase secondary is a
+    :class:`CentreTap` unit (``centre_tap``)."""
 
     component: Literal["transformer"] = "transformer"
     type_ref: Optional[str] = Field(
@@ -1060,8 +1142,22 @@ class Transformer(BranchBase):
         default=None,
     )
     tap: ComplexTap = Field(default_factory=lambda: ComplexTap(ratio_magnitude=1.0))
-    from_grounding: Optional[GroundingImpedance] = Field(default=None)
-    to_grounding: Optional[GroundingImpedance] = Field(default=None)
+    from_grounding: Optional[GroundingImpedance] = Field(
+        default=None,
+        description="Earthing impedance of the from-side star point. None = solid "
+        "(wye_grounded) / not earthed (other connections).",
+    )
+    to_grounding: Optional[GroundingImpedance] = Field(
+        default=None,
+        description="Earthing impedance of the to-side star point (the centre tap of "
+        "a CentreTap unit). None = solid (wye_grounded) / not earthed (other "
+        "connections).",
+    )
+    centre_tap: Optional[CentreTap] = Field(
+        default=None,
+        description="Single-phase unit with a centre-tapped (split-phase) secondary: "
+        "to_phases = (X1, X2[, N]). None = a standard two-winding unit.",
+    )
     zero_sequence: Optional[TransformerZeroSeq] = Field(default=None)
     harmonic_xr_constant: bool = Field(
         default=False,
@@ -1088,7 +1184,77 @@ class Transformer(BranchBase):
                 "Transformer requires either `type_ref` or explicit ratings, "
                 "connections and series R/L."
             )
+        for side in ("from", "to"):
+            phases = getattr(self, f"{side}_phases")
+            if len(set(phases)) != len(phases):
+                raise ValueError(f"Transformer `{side}_phases` must be unique.")
+            if Phase.N in phases[:-1]:
+                raise ValueError(
+                    f"Transformer `{side}_phases`: Phase.N (the winding's star point "
+                    "on the neutral row) must be the last entry."
+                )
+            if phases == (Phase.N,):
+                raise ValueError(
+                    f"Transformer `{side}_phases` needs at least one phase terminal."
+                )
+        if self.centre_tap is not None:
+            self._check_centre_tap()
         return self
+
+    def _check_centre_tap(self) -> None:
+        """Terminal and connection rules of a centre-tapped single-phase unit."""
+        if self.from_connection is None or self.to_connection is None:
+            raise ValueError(
+                "A centre-tapped Transformer needs explicit from_/to_connection."
+            )
+        if self.to_connection not in (
+            WindingConnection.WYE,
+            WindingConnection.WYE_GROUNDED,
+        ):
+            raise ValueError(
+                "A centre-tapped secondary is a star of two half windings: "
+                "to_connection must be wye_grounded (centre tap earthed) or wye."
+            )
+        outer = [p for p in self.to_phases if p != Phase.N]
+        if len(outer) != 2:
+            raise ValueError(
+                "A centre-tapped Transformer needs to_phases = (X1, X2) or (X1, X2, N)."
+            )
+        primary = [p for p in self.from_phases if p != Phase.N]
+        if self.from_connection == WindingConnection.DELTA:
+            if len(primary) != 2 or Phase.N in self.from_phases:
+                raise ValueError(
+                    "A phase-to-phase (delta) centre-tap primary needs "
+                    "from_phases = (x, y)."
+                )
+        elif self.from_connection in (
+            WindingConnection.WYE,
+            WindingConnection.WYE_GROUNDED,
+        ):
+            if len(primary) != 1:
+                raise ValueError(
+                    "A phase-to-earth / phase-to-neutral centre-tap primary needs "
+                    "from_phases = (x,) or (x, N)."
+                )
+        else:
+            raise ValueError(
+                "A centre-tap primary is a wye (phase to earth / neutral) or delta "
+                "(phase to phase) winding."
+            )
+        if float(self.tap.shift_deg) != 0.0:
+            raise ValueError(
+                "A centre-tapped Transformer has no vector-group shift: "
+                "tap.shift_deg must be 0."
+            )
+        ct = self.centre_tap
+        floats = (self.series_resistance_ohm, ct.half_resistance_ohm)
+        if all(isinstance(x, float) for x in floats) and (
+            2.0 * floats[1] > floats[0] * (1.0 + 1e-12)
+        ):
+            raise ValueError(
+                "CentreTap.half_resistance_ohm: two half windings carry more "
+                "resistance than the full short-circuit series_resistance_ohm."
+            )
 
 
 class Switch(BranchBase):
@@ -2880,6 +3046,7 @@ __all__ = [
     "Line",
     "ComplexTap",
     "GroundingImpedance",
+    "CentreTap",
     "TransformerZeroSeq",
     "Transformer",
     "Switch",
