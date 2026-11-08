@@ -346,6 +346,21 @@ def _is_one_phase(grid: Grid) -> bool:
     return bool(grid.nodes) and all(len(tuple(n.phases)) == 1 for n in grid.nodes)
 
 
+def _represented_phases(totals: SystemTotals, node: Node, phases: Any) -> int:
+    """Live conductors a terminal with ``phases`` on ``node`` stands for.
+
+    Three on a node with fewer than three phase rows of a ``"single_phase_equiv"`` or
+    ``"legacy_ll"`` grid (the one phase represents a balanced three-phase terminal),
+    otherwise the non-neutral entries of ``phases`` (at least one).
+    """
+    if len(tuple(node.phases)) < 3 and totals.phase_mode in (
+        "single_phase_equiv",
+        _LEGACY_LL,
+    ):
+        return 3
+    return max(1, sum(1 for p in phases if p != Phase.N))
+
+
 def _with_tag(grid: Grid, mode: str) -> Grid:
     tags = dict(grid.metadata.tags)
     tags[PHASE_MODE_TAG] = mode

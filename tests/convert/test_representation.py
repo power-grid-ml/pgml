@@ -20,7 +20,9 @@ from pgml.representation import (  # noqa: E402
     system_totals,
     to_per_phase_equivalent,
 )
+from pgml.scenarios import iec61000_3_2_device_caps  # noqa: E402
 from pgml.schemas.grid_schema import (  # noqa: E402
+    ConsumerType,
     Line,
     Load,
     Source,
@@ -198,6 +200,38 @@ def test_migration_refuses_other_representations():
     three.metadata.tags.pop(PHASE_MODE_TAG)
     with pytest.raises(ValueError):
         to_per_phase_equivalent(three, assume_legacy=True)  # three-phase nodes
+
+
+def _office_net():
+    """A 0.4 kV feeder with a 900 W office load: Class A by its total nameplate."""
+    net = _net()
+    pp.create_load(net, 2, p_mw=900e-6, q_mvar=0.0)
+    return net
+
+
+def test_iec_device_caps_agree_across_representations():
+    """Caps and the Class D window read the system total in every representation."""
+    reps = _representations(_office_net())
+    caps = {}
+    for mode, grid in reps.items():
+        st = system_totals(grid)
+        k, office = next(
+            (k, a)
+            for k, a in enumerate(grid.appliances)
+            if isinstance(a, Load) and st.total(a.p_nom_w) == pytest.approx(900.0)
+        )
+        grid.appliances[k] = office.model_copy(
+            update={"consumer_type": ConsumerType.OFFICE}
+        )
+        caps[mode] = iec61000_3_2_device_caps(grid, [office.id], [3, 5, 7])[office.id]
+    # Class A: limit [A] over the per-phase fundamental P / (3 * 400 V / sqrt(3)).
+    i1 = 900.0 / (3.0 * 400.0 / math.sqrt(3.0))
+    assert caps["single_phase_equiv"][7] == pytest.approx(0.77 / i1, rel=1e-12)
+    for mode in ("three_phase", "legacy_ll"):
+        for order in (3, 5, 7):
+            assert caps[mode][order] == pytest.approx(
+                caps["single_phase_equiv"][order], rel=1e-12
+            )
 
 
 def test_positive_sequence_resistance_is_mode_independent():
