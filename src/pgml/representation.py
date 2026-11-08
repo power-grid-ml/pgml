@@ -140,11 +140,18 @@ class SystemTotals:
         """Line-to-line nominal voltage of ``node`` [V].
 
         ``Node.u_rated_v`` on a node with three or more phase rows; ``sqrt(3)`` times it
-        on a node with fewer (stored line-to-neutral, the schema rule). A ``"legacy_ll"``
+        on a node with fewer (stored line-to-neutral, the schema rule), except on a node
+        with two phase conductors that sets ``Node.u_rated_ln_v``: there ``u_rated_v`` is
+        already the phase-to-phase voltage (two phases of a three-phase system, or the
+        X1-X2 voltage of a split phase) and is returned as stored. A ``"legacy_ll"``
         grid's node is read as stored at any phase count.
         """
         u = _to_float(node.u_rated_v)
-        if self.legacy or len(tuple(node.phases)) >= 3:
+        phases = tuple(node.phases)
+        if self.legacy or len(phases) >= 3:
+            return u
+        conductors = sum(1 for p in phases if p != Phase.N)
+        if conductors == 2 and getattr(node, "u_rated_ln_v", None) is not None:
             return u
         return u * _SQRT3
 
