@@ -81,6 +81,13 @@ from ._transformer import (
     winding_leakage_block,
     zero_sequence_leakage,
 )
+from ._transformer_terminals import (
+    centre_tap_coil_primitive,
+    earthing_admittance,
+    kron_eliminate,
+    resolve_terminal_layout,
+    uses_terminal_model,
+)
 from ._params import (
     _preserve_solved_pv_q,
     const_z_shunt_admittance,
@@ -1595,6 +1602,14 @@ def _transformer_block_groups(
         for b in grid.branches
         if isinstance(b, Transformer) and _branch_active(b, branch_states)
     ]
+    # Star points as terminals (neutral rows, earthing impedances, centre taps) take
+    # the terminal model; every other unit keeps the vector-group stamp below.
+    terminal = [t for t in xfmrs if uses_terminal_model(t)]
+    if terminal:
+        yield from _terminal_transformer_block_groups(
+            grid, terminal, f, index, cdt, rdt, device, param_overrides
+        )
+    xfmrs = [t for t in xfmrs if not uses_terminal_model(t)]
     if not xfmrs:
         return
     # Group transformers sharing one incidence N (same connection pair, clock, P).
@@ -1733,6 +1748,219 @@ def _transformer_block_groups(
 
         rows, cols = _series_terminal_indices(group, index, device)
         yield group, block, rows, cols
+
+
+def _terminal_transformer_block_groups(
+    grid, xfmrs, f, index, cdt, rdt, device, param_overrides
+):
+    """Yield ``(group, block, rows, cols)`` for the transformers of the terminal model.
+
+    The units whose star point is a terminal of its own (a ``Phase.N`` row, an internal
+    point behind a finite earthing impedance, a floating star point of a unit stamped
+    here) and the centre-tapped single-phase units
+    (:mod:`pgml.assembly._transformer_terminals`). The block is
+    ``Nᵀ·(Y_coil + coil magnetizing)·N + earthing`` over the extended terminals, with
+    the internal star points eliminated by Kron reduction, so it spans exactly the
+    rows of ``from_phases + to_phases`` like every other two-terminal branch.
+
+    - Coil primitive: the two-winding leakage primitive of
+      :func:`pgml.assembly._transformer.winding_leakage_block` (``three_phase`` and
+      ``coils`` units; sequence-aware leakage for three-phase units as in the
+      vector-group stamp), or the three-winding star of a centre tap
+      (:func:`pgml.assembly._transformer_terminals.centre_tap_coil_primitive`) with
+      the half-winding leakage of ``Transformer.centre_tap`` (Kersting's split when
+      unset). The winding-resistance frequency law applies to every leakage branch.
+    - Magnetizing: three-phase units keep the vector-group stamp's placement (phase
+      terminal to earth). Single-core units (``coils``, ``centre_tap``) stamp it across
+      the coil it is placed on: the primary coil (``from_terminal``), the secondary
+      coil, referred by the squared coil-voltage ratio (``to_terminal``; the full
+      X1-X2 coil of a centre tap), or half on each (``split``).
+    - Earthing: ``1/(r_ohm + j·h·x_ohm)`` of the side's
+      :class:`~pgml.schemas.grid_schema.GroundingImpedance` on the star terminal.
+
+    Differentiable w.r.t. series R / L, tap magnitude, zero-sequence R0 / L0, the
+    earthing R / X and the centre-tap half-winding R / L. Additional
+    ``param_overrides`` keys: ``("transformer", id, "from_grounding_resistance_ohm" |
+    "from_grounding_reactance_ohm" | "to_grounding_resistance_ohm" |
+    "to_grounding_reactance_ohm" | "centre_tap_half_resistance_ohm" |
+    "centre_tap_half_inductance_h")``; a grounding key acts only on a side stamped
+    with a finite earthing impedance.
+    """
+    layouts: dict[int, object] = {}
+    by_key: dict[tuple, list] = {}
+    for t in xfmrs:
+        lay = resolve_terminal_layout(t)
+        seq = lay.model == "three_phase" and _xfmr_is_sequence_aware(t, 3)
+        layouts[id(t)] = lay
+        by_key.setdefault((lay.key, seq), []).append(t)
+
+    f0 = float(grid.base_frequency_hz)
+    two_pi_f = (2.0 * torch.pi) * f  # [H]
+    two_pi_f0 = 2.0 * torch.pi * f0
+    placement = magnetizing_placement()
+    resistance_law = harmonic_resistance_law()
+
+    def leaf(t, name, value):
+        return _override(
+            param_overrides,
+            ("transformer", t.id, name),
+            torch.as_tensor(value, dtype=rdt, device=device)
+            if not isinstance(value, Tensor)
+            else value.to(dtype=rdt, device=device),
+        )
+
+    for (_key, sequence_aware), group in by_key.items():
+        lay = layouts[id(group[0])]
+        p = lay.n_coils
+        yse, taus, ratios, yms, z_prim, z_half = [], [], [], [], [], []
+        zr_list, zl_list, rmult_list = [], [], []
+        earth = {"from": [], "to": []}
+        for t in group:
+            r = leaf(t, "series_resistance_ohm", t.series_resistance_ohm)
+            ell = leaf(t, "series_inductance_h", t.series_inductance_h)
+            rmult = _resistance_multiplier(t, f, rdt, device)  # [H]
+            if resistance_scales_with_order(t, resistance_law):
+                rmult = rmult * (f / f0)
+            tap_mag = leaf(t, "tap_magnitude", t.tap.ratio_magnitude)
+            u_from = torch.as_tensor(t.u_rated_from_v, dtype=rdt, device=device)
+            u_to = torch.as_tensor(t.u_rated_to_v, dtype=rdt, device=device)
+            ratios.append(u_from / u_to)
+            if lay.model == "three_phase":
+                vg = resolve_vector_group(t, n_phases=3, check_grounding=False)
+                taus.append(nominal_turns_ratio(vg, u_from, u_to) * tap_mag)
+            else:
+                taus.append(u_from / u_to * tap_mag)
+
+            if lay.model == "centre_tap":
+                ct = t.centre_tap
+                r_h = leaf(
+                    t,
+                    "centre_tap_half_resistance_ohm",
+                    r / 4.0
+                    if ct.half_resistance_ohm is None
+                    else ct.half_resistance_ohm,
+                )
+                l_h = leaf(
+                    t,
+                    "centre_tap_half_inductance_h",
+                    0.1 * ell if ct.half_inductance_h is None else ct.half_inductance_h,
+                )
+                z_prim.append(
+                    torch.complex((r - 2.0 * r_h) * rmult, two_pi_f * (ell - 2.0 * l_h))
+                )
+                z_half.append(torch.complex(r_h * rmult, two_pi_f * l_h))
+            elif sequence_aware:
+                r0_default, l0_default = zero_sequence_leakage(t, r, ell, two_pi_f0)
+                r0 = _override(
+                    param_overrides,
+                    ("transformer", t.id, "zero_sequence_resistance_ohm"),
+                    r0_default,
+                )
+                l0 = _override(
+                    param_overrides,
+                    ("transformer", t.id, "zero_sequence_inductance_h"),
+                    l0_default,
+                )
+                r_mat, l_mat = sequence_leakage_matrices(r, ell, r0, l0, 3)
+                zr_list.append(r_mat)
+                zl_list.append(l_mat)
+                rmult_list.append(rmult)
+            else:
+                yse.append(1.0 / torch.complex(r * rmult, two_pi_f * ell).to(cdt))
+
+            gm = torch.as_tensor(t.magnetizing_conductance_s, dtype=rdt, device=device)
+            lm = t.magnetizing_inductance_h
+            lm_t = torch.as_tensor(
+                lm if lm is not None else math.inf, dtype=rdt, device=device
+            )
+            bm = -1.0 / (two_pi_f * lm_t)  # [H]; lm=inf -> 0
+            yms.append(torch.complex(gm.expand_as(bm), bm).to(cdt))
+
+            for side, earthed in (("from", lay.from_earthed), ("to", lay.to_earthed)):
+                if earthed:
+                    g = getattr(t, f"{side}_grounding")
+                    earth[side].append(
+                        (
+                            leaf(t, f"{side}_grounding_resistance_ohm", g.r_ohm),
+                            leaf(t, f"{side}_grounding_reactance_ohm", g.x_ohm),
+                        )
+                    )
+
+        tau = torch.stack(taus, dim=0)  # [K]
+        ratio = torch.stack(ratios, dim=0)  # [K] rated voltage ratio
+        ym = torch.stack(yms, dim=1)  # [H,K]
+        if lay.model == "centre_tap":
+            y_coil = centre_tap_coil_primitive(
+                torch.stack(z_prim, dim=1).to(cdt),
+                torch.stack(z_half, dim=1).to(cdt),
+                tau,
+            )
+            share_from, share_to = _magnetizing_shares(ym, ratio, placement)
+            y_coil = y_coil + _centre_tap_magnetizing(share_from, share_to)
+        else:
+            if sequence_aware:
+                y_se = series_admittance_matrix(
+                    torch.stack(zr_list, 0),
+                    torch.stack(zl_list, 0),
+                    f,
+                    cdt,
+                    r_mult=torch.stack(rmult_list, 1)[:, :, None, None],
+                )
+            else:
+                y_se = torch.stack(yse, dim=1)  # [H,K]
+            eye = torch.eye(2 * p, dtype=rdt, device=device)
+            y_coil = winding_leakage_block(y_se, tau, eye)
+            if lay.model == "coils":
+                y_coil = y_coil + magnetizing_blocks(ym, ratio, p, placement)
+
+        n_ext = torch.as_tensor(lay.incidence, dtype=rdt, device=device).to(cdt)
+        block = n_ext.t() @ y_coil @ n_ext  # [H,K,T,T]
+        n_slots = n_ext.shape[-1]
+        if lay.model == "three_phase":
+            sel = torch.zeros((6, n_slots), dtype=rdt, device=device)
+            sel[torch.arange(6, device=device), list(lay.phase_slots)] = 1.0
+            sel = sel.to(cdt)
+            block = block + sel.t() @ magnetizing_blocks(ym, ratio, 3, placement) @ sel
+        for side, slot in (("from", lay.from_star), ("to", lay.to_star)):
+            if not earth[side]:
+                continue
+            r_g = torch.stack([v[0] for v in earth[side]], dim=0)
+            x_g = torch.stack([v[1] for v in earth[side]], dim=0)
+            y_g = earthing_admittance(r_g, x_g, f, f0, cdt)  # [H,K]
+            unit = torch.zeros((n_slots, n_slots), dtype=cdt, device=device)
+            unit[slot, slot] = 1.0
+            block = block + y_g[..., None, None] * unit
+        block = kron_eliminate(block, lay.internal)
+        rows, cols = _series_terminal_indices(group, index, device)
+        yield group, block, rows, cols
+
+
+def _magnetizing_shares(ym: Tensor, ratio: Tensor, placement: str):
+    """Magnetizing admittance ``[H, K]`` on the primary and on the secondary coil.
+
+    ``ym`` is stored referred to the primary; the secondary share is referred through
+    the squared rated coil-voltage ratio ``ratio`` ``[K]``.
+    """
+    n2 = (ratio.to(ym.dtype) ** 2)[None, :]
+    if placement == "from_terminal":
+        return ym, torch.zeros_like(ym)
+    if placement == "to_terminal":
+        return torch.zeros_like(ym), ym * n2
+    return 0.5 * ym, 0.5 * ym * n2
+
+
+def _centre_tap_magnetizing(share_from: Tensor, share_to: Tensor) -> Tensor:
+    """Coil-domain magnetizing ``[H, K, 3, 3]``: across the primary and across X1-X2.
+
+    The full secondary voltage is the sum of the two half-coil voltages, so a shunt
+    across it adds ``y·[[1, 1], [1, 1]]`` to the half-coil block.
+    """
+    dev, cdt = share_from.device, share_from.dtype
+    e_h = torch.zeros((3, 3), dtype=cdt, device=dev)
+    e_h[0, 0] = 1.0
+    e_x = torch.zeros((3, 3), dtype=cdt, device=dev)
+    e_x[1:, 1:] = 1.0
+    return share_from[..., None, None] * e_h + share_to[..., None, None] * e_x
 
 
 def _harmonic_order_class(f: Tensor, f0: float) -> Tensor:

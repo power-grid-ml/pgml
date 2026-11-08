@@ -119,11 +119,10 @@ Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
   ``opendss_oracle``'s own scope); clock values ``{2, 6, 10}`` (the polarity-flip group) on a
   3-phase unit — no OpenDSS bus wiring reaches them (see
   ``opendss_oracle._dss_leadlag_and_rotation``).
-- ``Transformer.from_grounding``/``to_grounding`` with non-zero impedance, or an explicit
-  ``Transformer.zero_sequence`` override — these schema fields are NOT YET consumed by
-  ``pgml.assembly`` (grep-verified: solid grounding / topology-derived Z0 only), so exporting
-  them faithfully to OpenDSS would create a genuine, silent model mismatch rather than a
-  representability gap; refused instead of silently diverging.
+- A transformer of the star-point terminal model (a star point on a ``Phase.N`` row, a
+  finite earthing impedance, a centre tap): not written by this exporter. An explicit
+  ``Transformer.zero_sequence`` override: a DSS two-winding Transformer has no
+  zero-sequence impedance input.
 - A per-scenario per-phase P/Q override, or a per-phase nameplate, on a DELTA-connected
   appliance — a "phase" of a delta device is a LEG between two bus phases, not a
   independently-editable DSS sub-element; only the balanced total is supported.
@@ -622,6 +621,14 @@ def _export_transformer(dss, t: Transformer, busname: dict, f0: float) -> None:
             f"Transformer {t.id}: OpenDSS's Transformer element has no zigzag "
             "winding connection; not representable."
         )
+    from pgml.assembly._transformer_terminals import uses_terminal_model
+
+    if uses_terminal_model(t):
+        raise ConversionError(
+            f"Transformer {t.id}: a star point on a neutral row, an earthing "
+            "impedance or a centre tap is not exported (only units stamped by the "
+            "vector-group model are)."
+        )
     p = len(t.from_phases)
     if p not in (1, 3):
         raise ConversionError(
@@ -630,17 +637,6 @@ def _export_transformer(dss, t: Transformer, busname: dict, f0: float) -> None:
             f"rotation is specific to the 3-phase A/B/C cyclic group; got "
             f"{p} phases)."
         )
-    for grounding, side in ((t.from_grounding, "HV"), (t.to_grounding, "LV")):
-        if grounding is not None and (
-            to_float(grounding.r_ohm) != 0.0 or to_float(grounding.x_ohm) != 0.0
-        ):
-            raise ConversionError(
-                f"Transformer {t.id}: an impedance-grounded {side} neutral is "
-                "not exported -- pgml.assembly does not yet consume "
-                "from_grounding/to_grounding (solid grounding only), so "
-                "faithfully reproducing it on the OpenDSS side would silently "
-                "diverge from what pgml actually solves."
-            )
     if t.zero_sequence is not None:
         raise ConversionError(
             f"Transformer {t.id}: an explicit zero_sequence leakage has no OpenDSS "

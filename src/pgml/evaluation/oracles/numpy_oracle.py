@@ -261,7 +261,14 @@ def _stamp_transformer_numpy(
     them; ``b`` supplies all other transformer parameters.
     """
     from pgml.assembly._transformer import block_incidence, resolve_vector_group
+    from pgml.assembly._transformer_terminals import uses_terminal_model
 
+    if uses_terminal_model(b):
+        raise NotImplementedError(
+            f"transformer {b.id}: the numpy oracle mirrors the vector-group stamp only; "
+            "a star point on a neutral row, an earthing impedance or a centre tap "
+            "(the terminal model) is not reimplemented here."
+        )
     r_t = to_float(b.series_resistance_ohm)
     l_t = to_float(b.series_inductance_h)
     z_se = r_t + 1j * h * w0 * l_t

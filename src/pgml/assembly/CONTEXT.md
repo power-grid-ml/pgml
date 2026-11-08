@@ -22,6 +22,10 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
 - `_structure.py` — `ybus_structure`, the topology-derived sparsity superset of `Y`.
 - `_transformer.py` — vector-group winding incidence, clock selection, sequence-aware
   leakage, winding-resistance frequency law, magnetizing placement.
+- `_transformer_terminals.py` — star points as terminals: neutral-row star points,
+  earthing impedances (Kron-eliminated internal star), single-coil units and centre-tapped
+  units (`uses_terminal_model` dispatch, `resolve_terminal_layout`, the centre-tap coil
+  primitive). The group builder `_terminal_transformer_block_groups` is in `ybus.py`.
 - `_incidence.py` — terminal incidence `M` of WYE / WYE-neutral / DELTA appliances.
 - `_params.py` — `phase_voltage_magnitude`, const-Z shunt admittance,
   `resolve_operating_power`.
@@ -104,8 +108,13 @@ accumulator raises on an off-pattern target instead of dropping it.
 - Transformer: winding-incidence primitive `Y_node = Nᵀ Y_winding N`; the nominal ratio
   comes from `u_rated_from/to_v` + connections, `tap.ratio_magnitude` is the off-nominal
   tap only, `tap.shift_deg = clock·30`. Every pairing except zigzag–zigzag, at every clock
-  of the pairing's parity; a parity mismatch or a finite (non-solid) neutral grounding
-  raises. Zigzag is modelled but experimental (one warning per process). The zero-sequence
+  of the pairing's parity; a parity mismatch raises. A unit with a star point on a
+  `Phase.N` row, a finite earthing impedance, unequal from/to phase counts, a two-phase
+  delta coil or a `centre_tap` takes the terminal model (`_transformer_terminals`); every
+  other unit keeps the vector-group stamp unchanged. The terminal model's block is
+  Kron-reduced to `from_phases + to_phases`, so registry consumers see an ordinary
+  two-terminal block; its star-row current includes the unit's own earth current. A
+  neutral row is never earthed solidly (raises: give the earth resistance). Zigzag is modelled but experimental (one warning per process). The zero-sequence
   PATH is topology, its VALUE is the unit's own Z0. Magnetizing shunt placement is
   `transformer.magnetizing_placement`, default `split` (half on each terminal); OpenDSS
   conformance selects `to_terminal` through the `opendss` preset. `P == 1` folds the group

@@ -276,3 +276,114 @@ def test_ignore_mode_skips_the_check():
     except Exception:
         return  # a numerical failure is acceptable historical behavior
     assert res.v.shape[-1] == 5
+
+
+# ---------------------------------------------------------------------------
+# neutral rows referenced to earth through electrodes
+# ---------------------------------------------------------------------------
+_ABC = (Phase.A, Phase.B, Phase.C)
+_ABCN = (*_ABC, Phase.N)
+
+
+def _busbar_grid(*, conductance=1.0e4, capacitance=0.0, islanded_line=False):
+    """MV source -> Dyn5 unit -> LV busbar with a neutral row tied only to earth."""
+    from pgml.schemas.grid_schema import ComplexTap, ShuntReactor, Transformer
+
+    nodes = [
+        Node(id=0, u_rated_v=20e3, phases=_ABC),
+        Node(id=1, u_rated_v=400.0, phases=_ABCN),
+    ]
+    branches = [
+        Transformer(
+            id=1,
+            from_node=0,
+            to_node=1,
+            from_phases=_ABC,
+            to_phases=_ABC,
+            s_rated_va=250e3,
+            u_rated_from_v=20e3,
+            u_rated_to_v=400.0,
+            from_connection="delta",
+            to_connection="wye_grounded",
+            series_resistance_ohm=0.006,
+            series_inductance_h=8e-5,
+            tap=ComplexTap(ratio_magnitude=1.0, shift_deg=150.0),
+        ),
+        ShuntReactor(
+            id=2,
+            from_node=1,
+            to_node=1,
+            from_phases=(Phase.N,),
+            to_phases=(Phase.N,),
+            conductance_s=[[conductance]],
+            capacitance_f=[[capacitance]],
+        ),
+    ]
+    if islanded_line:
+        nodes += [
+            Node(id=2, u_rated_v=400.0, phases=_ABCN),
+            Node(id=3, u_rated_v=400.0, phases=_ABCN),
+        ]
+        branches += [
+            Line(
+                id=3,
+                from_node=2,
+                to_node=3,
+                from_phases=_ABCN,
+                to_phases=_ABCN,
+                length_m=100.0,
+                series_resistance_ohm_per_m=[
+                    [3e-4 if i == j else 0.0 for j in range(4)] for i in range(4)
+                ],
+                series_inductance_h_per_m=[
+                    [3e-7 if i == j else 0.0 for j in range(4)] for i in range(4)
+                ],
+                shunt_capacitance_f_per_m=[[0.0] * 4 for _ in range(4)],
+            ),
+            ShuntReactor(
+                id=4,
+                from_node=3,
+                to_node=3,
+                from_phases=(Phase.N,),
+                to_phases=(Phase.N,),
+                conductance_s=[[1.0 / 30.0]],
+                capacitance_f=[[0.0]],
+            ),
+        ]
+    src = Source(
+        id=100,
+        node=0,
+        phases=_ABC,
+        u_ref_v=(20e3 / 3**0.5,) * 3,
+        u_angle_deg=(0.0, -120.0, 120.0),
+        resistance_ohm=[[0.5 if i == j else 0.0 for j in range(3)] for i in range(3)],
+        inductance_h=[[5e-3 if i == j else 0.0 for j in range(3)] for i in range(3)],
+    )
+    load = Load(id=200, node=1, phases=(Phase.A,), p_nom_w=5e3, q_nom_var=1e3)
+    return Grid(
+        base_frequency_hz=50.0, nodes=nodes, branches=branches, appliances=[src, load]
+    )
+
+
+def test_neutral_earthed_only_through_an_electrode_is_referenced():
+    grid = _busbar_grid()
+    assert connectivity_report(grid).connected
+    res = solve_power_flow(grid)
+    assert res.converged
+    index = node_phase_index(grid)
+    # The WYE load returns through the neutral row and its 1e-4 Ohm earth bond.
+    v_n = res.v.reshape(-1)[index.row(1, Phase.N)]
+    assert 0.0 < abs(complex(v_n)) < 0.01
+
+
+def test_capacitive_shunt_is_no_galvanic_earth():
+    report = connectivity_report(_busbar_grid(conductance=0.0, capacitance=1e-6))
+    assert not report.connected
+    assert report.unenergized == ((1, (Phase.N,)),)
+
+
+def test_islanded_section_with_an_electrode_stays_unenergized():
+    report = connectivity_report(_busbar_grid(islanded_line=True))
+    assert not report.connected
+    assert {n for n, _ in report.unenergized} == {2, 3}
+    assert all(ph == _ABCN for _, ph in report.unenergized)
