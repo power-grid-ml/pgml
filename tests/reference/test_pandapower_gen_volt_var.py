@@ -129,7 +129,7 @@ def _deviations(net, *, slope: float, max_iter: int = 80, **to_grid_kwargs):
     flat = result.v.reshape(-1)
     for pp_idx, node_id in id_map["bus"].items():
         v = flat[result.index.row(node_id, Phase.A)].item()
-        u_rated_v = float(net.bus.at[pp_idx, "vn_kv"]) * 1_000.0
+        u_rated_v = float(net.bus.at[pp_idx, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
         v_dev.append(abs(abs(v) / u_rated_v - float(net.res_bus.at[pp_idx, "vm_pu"])))
         a_dev.append(
             abs(

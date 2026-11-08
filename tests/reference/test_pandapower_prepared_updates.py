@@ -63,7 +63,7 @@ def test_changed_prepared_network_rejects_then_matches_pandapower(change):
     rows = [result.index.row(mapping["bus"][b], "a") for b in net.bus.index]
     ref = (
         net.res_bus.vm_pu.to_numpy()
-        * 20000.0
+        * (20000.0 / np.sqrt(3.0))  # one-phase node: line-to-neutral
         * np.exp(1j * np.deg2rad(net.res_bus.va_degree.to_numpy()))
     )
     assert result.converged

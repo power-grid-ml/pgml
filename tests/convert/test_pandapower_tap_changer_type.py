@@ -85,7 +85,8 @@ def _max_dv_pu(net) -> float:
     worst = 0.0
     for pp_bus, node_id in id_map["bus"].items():
         row = res.index.row(node_id, grid.nodes[0].phases[0])
-        base = float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0
+        # one-phase node: line-to-neutral base
+        base = float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0 / 3.0**0.5
         ours = float(res.v.reshape(-1)[row].abs()) / base
         worst = max(worst, abs(ours - float(solved.res_bus.at[pp_bus, "vm_pu"])))
     return worst

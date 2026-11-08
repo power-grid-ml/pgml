@@ -306,3 +306,105 @@ def four_wire_two_bus(
         ],
         **rated,
     )
+
+
+def stressed_feeder(
+    *,
+    tap: float = 1.0,
+    magnetizing: bool = False,
+    load_scale: float = 1.0,
+) -> Grid:
+    """20 kV source -- Dyn5 100 kVA transformer -- 400 V bus 2 -- cable -- 3 -- cable -- 4.
+
+    Both cables carry the catalog type ``"nayy"`` (150 A); loads at 3 and 4 load the
+    transformer to 93 % and the first cable to 90 % and leave 0.93 pu at bus 4 (at
+    ``tap=1.02`` with the core branch: 96 %, 92 %, 0.91 pu). ``tap`` is the off-nominal
+    ratio magnitude; ``magnetizing`` adds a core branch (no-load current 1 %, losses
+    0.2 %), so the two transformer terminals no longer carry the same loading.
+    """
+    s_rated, u_lv, u_hv = 100.0e3, 400.0, 20_000.0
+    z_base = u_lv**2 / s_rated
+    r_t, x_t = 0.01 * z_base, 0.04 * z_base
+    y_hv = s_rated / u_hv**2
+    core = (
+        {
+            "magnetizing_conductance_s": 0.002 * y_hv,
+            "magnetizing_inductance_h": 1.0 / (2.0 * math.pi * F0 * 0.0098 * y_hv),
+        }
+        if magnetizing
+        else {}
+    )
+    r, l_h = 0.206e-3, 0.256e-6
+    cable = {
+        "type_ref": "nayy",
+        "series_resistance_ohm_per_m": _diag(r, 3),
+        "series_inductance_h_per_m": _diag(l_h, 3),
+        "shunt_capacitance_f_per_m": _diag(0.0, 3),
+        "harmonic_line_model": "naive",
+        "from_phases": ABC,
+        "to_phases": ABC,
+    }
+    return Grid(
+        base_frequency_hz=F0,
+        nodes=[
+            Node(id=1, u_rated_v=u_hv, phases=ABC),
+            *(Node(id=i, u_rated_v=u_lv, phases=ABC) for i in (2, 3, 4)),
+        ],
+        branches=[
+            Transformer(
+                id=30,
+                from_node=1,
+                to_node=2,
+                from_phases=ABC,
+                to_phases=ABC,
+                s_rated_va=s_rated,
+                u_rated_from_v=u_hv,
+                u_rated_to_v=u_lv,
+                from_connection=WindingConnection.DELTA,
+                to_connection=WindingConnection.WYE_GROUNDED,
+                series_resistance_ohm=r_t,
+                series_inductance_h=x_t / (2.0 * math.pi * F0),
+                tap=ComplexTap(ratio_magnitude=tap, shift_deg=150.0),
+                **core,
+            ),
+            Line(id=31, from_node=2, to_node=3, length_m=250.0, **cable),
+            Line(id=32, from_node=3, to_node=4, length_m=300.0, **cable),
+        ],
+        appliances=[
+            Source(
+                id=1,
+                node=1,
+                phases=ABC,
+                u_ref_v=tuple(u_hv / math.sqrt(3.0) for _ in range(3)),
+                u_angle_deg=(0.0, -120.0, 120.0),
+                resistance_ohm=_diag(0.01, 3),
+                inductance_h=_diag(1.0e-4, 3),
+            ),
+            Load(
+                id=2,
+                node=3,
+                phases=ABC,
+                p_nom_w=45.0e3 * load_scale,
+                q_nom_var=12.0e3 * load_scale,
+            ),
+            Load(
+                id=3,
+                node=4,
+                phases=ABC,
+                p_nom_w=40.0e3 * load_scale,
+                q_nom_var=10.0e3 * load_scale,
+            ),
+        ],
+        types=TypeLibrary(
+            lines={
+                "nayy": LineType(
+                    id="nayy",
+                    n_phases=3,
+                    series_resistance_ohm_per_m=_diag(r, 3),
+                    series_inductance_h_per_m=_diag(l_h, 3),
+                    shunt_capacitance_f_per_m=_diag(0.0, 3),
+                    max_i_a=150.0,
+                )
+            }
+        ),
+    )

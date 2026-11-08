@@ -49,13 +49,17 @@ only on its own candidate, so the slicing does not change the result.
 | `base_operating_point` | worst case | What the other devices do, see below |
 | `phases` | `"balanced"` | All phase conductors with an equal split, or `"a"`, `"b"`, `"c"` for a single-phase device |
 | `power_factor` | `1.0` | Positive: reactive power flows with the active power; negative: against it (an under-excited generator) |
-| `p_max_w` | none | Search cap; without one the bracket doubles from 1 kW up to 1 TW |
-| `tol_w` | 0.1 % | Bisection tolerance, by default relative to each candidate's bracket |
+| `p_max_w` | none | Search cap in W of system power; without one the bracket doubles from 1 kW up to 1 TW |
+| `tol_w` | 0.1 % | Bisection tolerance in W of system power, by default relative to each candidate's bracket |
 | `harmonic_emission` | none | Spectrum of the new device, harmonic calculation only |
 | `config` | fundamental power flow | A {class}`~pgml.SimulationConfig` for slack, symmetry, convergence control and harmonic orders |
 
 `p_max_w` is a power at which every limit was verified; the limit itself lies within
-`tol_w` above it. A candidate that reaches the cap without a violation reports exactly the
+`tol_w` above it. It is the three-phase system power of the new device in every grid
+representation: on a per-phase equivalent (`metadata.tags["phase_mode"] ==
+"single_phase_equiv"`) the device's stored setpoint is a third of it, and the one phase
+stands for all three, so every device there is balanced (`phases="a"` is the same device
+as `"balanced"`). A candidate that reaches the cap without a violation reports exactly the
 cap (`p_cap_w`: the given `p_max_w`, else 1 TW) with the binding entry `{"kind": "none"}`. A
 bus behind an ideal slack, for example one tied to the source bus by a closed switch, never
 reaches a voltage limit.
@@ -70,7 +74,9 @@ The base case decides the answer, so it is an explicit option:
   setpoint in both.
 - `"nameplate"`: every device at nameplate.
 - A mapping `{appliance_id: {"p_w": ..., "q_var": ...}}`: those devices overridden on top of
-  nameplate (per-phase keys `p_per_phase_w`, `q_per_phase_var` work too).
+  nameplate (per-phase keys `p_per_phase_w`, `q_per_phase_var` work too). The values are
+  setpoints in the grid's stored units, like `p_nom_w` and `q_nom_var`: on a per-phase
+  equivalent a third of the device's three-phase power.
 
 ### A base case that already violates a limit
 

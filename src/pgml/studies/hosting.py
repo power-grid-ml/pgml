@@ -60,6 +60,21 @@ be violated at a small power, satisfied over a middle range and violated again; 
 doubling bracket can step over that structure, and the search reports the end of the
 first feasible interval it brackets, which need not be the first one.
 
+Powers are system powers
+------------------------
+Every power the study takes or reports (``p_max_w``, ``tol_w``, ``p_cap_w``, the 1 kW
+start and 1 TW ceiling of the bracket) is the three-phase SYSTEM power of the new device,
+the same number in every representation of a network: a per-phase equivalent
+(``metadata.tags["phase_mode"] == "single_phase_equiv"``, which stores a third of every
+power) gets the candidate's stored setpoint as the system power divided by three
+(:func:`pgml.representation.system_totals`), a three-phase, as-built or untagged grid
+stores it as is. The bisection itself runs in system watts, so its trial sequence does
+not depend on the representation. On a per-phase equivalent every device is balanced by
+construction: its one phase stands for all three, and ``phases="a"`` is the same device
+as ``"balanced"``. A custom ``base_operating_point`` mapping is the exception: it sets
+appliance setpoints and is in stored units, like the appliance fields it replaces.
+Voltages are per unit and loadings fractions, independent of the representation.
+
 The fundamental power flow is the default calculation. A harmonic
 :class:`~pgml.SimulationConfig` solves every scenario at its harmonic orders (order 1
 must be among them), which is what the ``thd_max`` limit needs; the line and
@@ -84,31 +99,35 @@ import torch
 from torch import Tensor
 
 from pgml import defaults
-from pgml.assembly import base_voltage_per_row, node_phase_index
 from pgml.errors import InputError
-from pgml.geometry.sequence import fortescue_matrix
+from pgml.representation import system_totals
 from pgml.scenarios import batch_from_values
 from pgml.schemas.grid_schema import (
     Generator,
     Grid,
-    Line,
     Load,
     Phase,
-    Source,
-    Transformer,
     WindingConnection,
 )
 from pgml.simulation import SimulationConfig, SolvedState
 from pgml.solver import prepare_power_flow, solve_harmonic_flow, solve_power_flow
 
-from ._common import check_study, resolve_complex_dtype
-from .limits import HostingLimits, branch_ratings
+from ._common import (
+    BaseOperatingPoint,
+    base_operating_values,
+    check_study,
+    live_phases,
+    resolve_candidates,
+    resolve_complex_dtype,
+)
+from .limits import HostingLimits, _LimitElements
 
 #: Sides a hosting-capacity study can add: new generation or new demand.
 _DIRECTIONS = ("generation", "load")
-#: First trial power of the doubling bracket when no search cap is given (W).
+#: First trial power of the doubling bracket when no search cap is given (W, system).
 _P_START_W = 1.0e3
-#: Largest power the doubling bracket tries; a candidate feasible there reports it (W).
+#: Largest power the doubling bracket tries; a candidate feasible there reports it
+#: (W, system power).
 _P_CEILING_W = 1.0e12
 #: Default bisection tolerance, relative to the candidate's upper bracket.
 _REL_TOL = 1.0e-3
@@ -123,8 +142,6 @@ _MARGIN_KEYS = (
     "neutral_loading",
 )
 
-BaseOperatingPoint = Union[None, str, Mapping[int, Mapping[str, Any]]]
-
 
 @dataclass(frozen=True, eq=False)
 class HostingCapacity:
@@ -137,8 +154,8 @@ class HostingCapacity:
     direction:
         ``"generation"`` or ``"load"``.
     p_max_w:
-        ``[n]`` float64, W: the largest added active power (total over the device's
-        phases) at which every limit was verified (a limit already violated in the base
+        ``[n]`` float64, W: the largest added active power (three-phase system power,
+        see :mod:`pgml.studies.hosting`) at which every limit was verified (a limit already violated in the base
         case: not made worse, see :mod:`pgml.studies.hosting`). ``0`` when even a small
         addition violates a limit, and when the base case does not converge. Exactly
         :attr:`p_cap_w` for a candidate that reached no limit.
@@ -163,10 +180,11 @@ class HostingCapacity:
         ``[n]`` int64: power flows solved for that candidate (base case excluded); one
         batched solve serves every open candidate.
     p_cap_w:
-        Search cap in W: ``p_max_w`` as given, else the doubling ceiling (1 TW).
+        Search cap in W (system power): ``p_max_w`` as given, else the doubling ceiling
+        (1 TW).
     tol_w:
-        ``[n]`` float64, W: bisection tolerance per candidate; ``p_max_w`` is within it
-        of the limit. ``NaN`` where no bisection ran (base case not converged).
+        ``[n]`` float64, W (system power): bisection tolerance per candidate;
+        ``p_max_w`` is within it of the limit. ``NaN`` where no bisection ran (base case not converged).
     base_case_feasible:
         Whether the base operating point (no new device) converges and keeps every
         limit, i.e. ``base_violations`` is empty.
@@ -314,18 +332,13 @@ class _Evaluation:
         )
 
 
-def _live_phases(phases: Sequence[Phase]) -> tuple[Phase, ...]:
-    """The phase conductors of a terminal (its neutral excluded)."""
-    return tuple(p for p in phases if p != Phase.N)
-
-
 def _candidate_phases(grid: Grid, node_ids: Sequence[int], phases) -> list:
     """Phases each candidate device connects to, validated against its node."""
     nodes = {n.id: n for n in grid.nodes}
     if phases == "balanced":
         chosen = []
         for nid in node_ids:
-            live = _live_phases(nodes[nid].phases)
+            live = live_phases(nodes[nid].phases)
             if not live:
                 raise InputError(f"candidate node {nid} has no phase conductor")
             chosen.append(live)
@@ -342,74 +355,6 @@ def _candidate_phases(grid: Grid, node_ids: Sequence[int], phases) -> list:
     if missing:
         raise InputError(f"candidate nodes {missing} carry no phase {phase.value!r}")
     return [(phase,) for _ in node_ids]
-
-
-def _resolve_candidates(grid: Grid, candidates) -> list[int]:
-    """Candidate bus ids: as given (validated), else every bus without a source."""
-    node_ids = [n.id for n in grid.nodes]
-    if candidates is None:
-        source_nodes = {
-            a.node for a in grid.appliances if isinstance(a, Source) and a.in_service
-        }
-        return [
-            n.id
-            for n in grid.nodes
-            if n.id not in source_nodes and _live_phases(n.phases)
-        ]
-    chosen = [int(c) for c in candidates]
-    unknown = sorted(set(chosen) - set(node_ids))
-    if unknown:
-        raise InputError(f"candidates name unknown nodes {unknown}")
-    if len(set(chosen)) != len(chosen):
-        raise InputError("candidates must not repeat a node")
-    if not chosen:
-        raise InputError("candidates must name at least one node")
-    return chosen
-
-
-def _base_values(
-    grid: Grid, direction: str, base_operating_point: BaseOperatingPoint, real, device
-) -> tuple[str, dict]:
-    """The base operating point as ``batch_from_values`` mappings, plus its label.
-
-    ``None`` / ``"worst_case"``: for generation every in-service load draws nothing and
-    the existing generation runs at nameplate; for load every in-service generator
-    injects nothing and the loads draw nameplate. Storage keeps its nameplate setpoint in
-    both. ``"nameplate"``: every device at nameplate. A mapping: ``{appliance_id:
-    {"p_w", "q_var", "p_per_phase_w", "q_per_phase_var"}}`` overrides on nameplate.
-    """
-    values: dict = {"p_w": {}, "q_var": {}, "p_per_phase_w": {}, "q_per_phase_var": {}}
-
-    def _t(x) -> Tensor:
-        return torch.as_tensor(x, dtype=real, device=device)
-
-    if base_operating_point is None or base_operating_point == "worst_case":
-        zeroed = Load if direction == "generation" else Generator
-        for a in grid.appliances:
-            if a.in_service and isinstance(a, zeroed):
-                values["p_w"][a.id] = _t(0.0)
-                values["q_var"][a.id] = _t(0.0)
-        return "worst_case", values
-    if base_operating_point == "nameplate":
-        return "nameplate", values
-    if isinstance(base_operating_point, str):
-        raise InputError(
-            "base_operating_point must be None, 'worst_case', 'nameplate' or a mapping "
-            f"of appliance ids, got {base_operating_point!r}"
-        )
-    for cid, entry in base_operating_point.items():
-        unknown = set(entry) - set(values)
-        if unknown:
-            raise InputError(
-                f"base_operating_point[{cid}] has unknown keys {sorted(unknown)}; use "
-                f"{sorted(values)}"
-            )
-        for key, value in entry.items():
-            if key in ("p_per_phase_w", "q_per_phase_var"):
-                values[key][int(cid)] = [_t(x) for x in value]
-            else:
-                values[key][int(cid)] = _t(value)
-    return "custom", values
 
 
 class _Study:
@@ -439,6 +384,8 @@ class _Study:
         # 1e-8 pu tolerance, or the resolution of single precision.
         self.tie_tol = max(1.0e-7, 100.0 * torch.finfo(self.real).eps)
         self.base_values = base_values
+        # Stored setpoint per watt of system power: 1/3 on a per-phase equivalent.
+        self.stored_per_system_w = 1.0 / system_totals(grid).power_factor
         self.harmonic = config.calculation == "harmonic"
         self.orders = [int(o) for o in config.harmonic_orders] if self.harmonic else [1]
         self.h1 = self.orders.index(1)
@@ -493,64 +440,8 @@ class _Study:
     # -- static tables ------------------------------------------------------ #
     def _build_tables(self) -> None:
         """Row and branch index tables of every element a limit is checked on."""
-        grid = self.grid
-        index = node_phase_index(grid)
-        self.n_rows = index.size
-        base = base_voltage_per_row(grid, dtype=torch.float64)
-
-        live, neutral = [], []
-        for node in grid.nodes:
-            n_row = index.row(node.id, Phase.N) if Phase.N in node.phases else -1
-            for ph in _live_phases(node.phases):
-                live.append(index.row(node.id, ph))
-                neutral.append(n_row)
-        self.live_rows = torch.tensor(live, dtype=torch.long)
-        self.neutral_rows = torch.tensor(neutral, dtype=torch.long)
-        self.live_base = base[self.live_rows].numpy()
-        self.live_desc = [(index.node_id_of(r), index.phase_of(r).value) for r in live]
-
-        abc = [
-            [index.row(n.id, p) for p in (Phase.A, Phase.B, Phase.C)]
-            for n in grid.nodes
-            if all(p in n.phases for p in (Phase.A, Phase.B, Phase.C))
-        ]
-        self.abc_rows = torch.tensor(abc, dtype=torch.long).reshape(-1, 3)
-        self.abc_nodes = [
-            n.id
-            for n in grid.nodes
-            if all(p in n.phases for p in (Phase.A, Phase.B, Phase.C))
-        ]
-
-        ratings = branch_ratings(grid)
-        # Per rated line: (id, ampacity, live-conductor masks at the from / to terminal).
-        self.lines = []
-        for b in grid.branches:
-            if not (isinstance(b, Line) and b.in_service and ratings[b.id].i_max_a):
-                continue
-            live_from = torch.tensor([p != Phase.N for p in b.from_phases])
-            live_to = torch.tensor([p != Phase.N for p in b.to_phases])
-            self.lines.append((b.id, ratings[b.id].i_max_a, live_from, live_to))
-        self.neutral_lines = [
-            entry for entry in self.lines if not (entry[2].all() and entry[3].all())
-        ]
-        self.transformers = []
-        for b in grid.branches:
-            if not (isinstance(b, Transformer) and b.in_service):
-                continue
-            s_rated = ratings[b.id].s_rated_va
-            if not s_rated:
-                continue
-            terminals = []
-            for node_id, phases in (
-                (b.from_node, b.from_phases),
-                (b.to_node, b.to_phases),
-            ):
-                mask = torch.tensor([p != Phase.N for p in phases])
-                n_live = int(mask.sum())
-                u_ln = float(base[index.row(node_id, _live_phases(phases)[0])])
-                # loading = |I| * U_ln * n_live / S_rated per phase conductor
-                terminals.append((mask, u_ln * n_live / s_rated))
-            self.transformers.append((b.id, terminals))
+        self.elements = _LimitElements(self.grid)
+        self.n_rows = self.elements.n_rows
 
     # -- one batched evaluation -------------------------------------------- #
     def set_base(self, base: _Evaluation) -> None:
@@ -559,7 +450,8 @@ class _Study:
         self.base_violated = base.excess[0] > 0.0
 
     def evaluate(self, trial_w: np.ndarray, cand: np.ndarray) -> _Evaluation:
-        """Scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W, in budget slices."""
+        """Scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W (system power), in
+        budget slices."""
         n = int(trial_w.shape[0])
         step = self.batch_size
         return _Evaluation.concat(
@@ -572,7 +464,9 @@ class _Study:
     def _evaluate_slice(self, trial_w: np.ndarray, cand: np.ndarray) -> _Evaluation:
         """Solve one batch, scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W."""
         b = int(trial_w.shape[0])
-        p = torch.as_tensor(trial_w, dtype=self.real, device=self.device)
+        p = torch.as_tensor(
+            trial_w * self.stored_per_system_w, dtype=self.real, device=self.device
+        )
         # [B, B]: column k is candidate cand[k]'s power in every scenario of the batch
         p_diag = torch.diag(p)
         q_diag = p_diag * self.q_per_w
@@ -655,111 +549,66 @@ class _Study:
     def _judge(self, v: Tensor, state: SolvedState, ok: np.ndarray) -> _Evaluation:
         """Relative excess of every limit element, the verdict and the margins."""
         lim = self.limits
+        el = self.elements
         b = v.shape[0]
+        values = {
+            key: q.cpu().numpy()
+            for key, q in el.evaluate(v, state, lim, h1=self.h1).items()
+        }
         # Each part is [B, E_k]: (value - limit) / limit per element, > 0 violates.
         parts: list[np.ndarray] = []
         descs: list[dict] = []
         margins = {key: np.full(b, np.nan) for key in _MARGIN_KEYS}
 
-        # Phase-to-neutral voltage of every phase conductor (phase-to-ground without N).
-        v_live = v[..., self.live_rows.to(v.device)]
-        has_n = (self.neutral_rows >= 0).to(v.device)
-        v_n = v[..., self.neutral_rows.clamp_min(0).to(v.device)]
-        v_pn = v_live - torch.where(has_n, v_n, torch.zeros_like(v_n))  # [B, H, R]
-        mag = v_pn.abs().to(torch.float64).cpu().numpy()
-        v_pu = mag[:, self.h1, :] / self.live_base  # [B, R]
         if lim.v_max_pu is not None:
+            v_pu = values["v_pu"]
             parts.append((v_pu - lim.v_max_pu) / lim.v_max_pu)
             descs += [
                 {"kind": "voltage", "limit": "v_max_pu", "node_id": n, "phase": ph}
-                for n, ph in self.live_desc
+                for n, ph in el.live_desc
             ]
             margins["v_max_pu"] = lim.v_max_pu - v_pu.max(axis=1)
         if lim.v_min_pu is not None:
+            v_pu = values["v_pu"]
             parts.append((lim.v_min_pu - v_pu) / lim.v_min_pu)
             descs += [
                 {"kind": "voltage", "limit": "v_min_pu", "node_id": n, "phase": ph}
-                for n, ph in self.live_desc
+                for n, ph in el.live_desc
             ]
             margins["v_min_pu"] = v_pu.min(axis=1) - lim.v_min_pu
-
-        if lim.vuf_max is not None and self.abc_nodes:
-            v1 = v[:, self.h1, :][:, self.abc_rows.to(v.device)]  # [B, K, 3]
-            a_inv = torch.linalg.inv(fortescue_matrix(v1.dtype, v1.device))
-            seq = torch.einsum("ij,bkj->bki", a_inv, v1)  # [B, K, (0, +, -)]
-            vuf = (
-                (seq[..., 2].abs() / seq[..., 1].abs()).to(torch.float64).cpu().numpy()
-            )
+        if "vuf" in values:
+            vuf = values["vuf"]
             parts.append((vuf - lim.vuf_max) / lim.vuf_max)
-            descs += [{"kind": "vuf", "node_id": n} for n in self.abc_nodes]
+            descs += [{"kind": "vuf", "node_id": n} for n in el.abc_nodes]
             margins["vuf"] = lim.vuf_max - vuf.max(axis=1)
-
-        if lim.thd_max is not None:
-            sq = mag**2
-            thd = (
-                np.sqrt(np.clip(sq.sum(axis=1) - sq[:, self.h1, :], 0.0, None))
-                / mag[:, self.h1, :]
-            )
+        if "thd" in values:
+            thd = values["thd"]
             parts.append((thd - lim.thd_max) / lim.thd_max)
             descs += [
-                {"kind": "thd", "node_id": n, "phase": ph} for n, ph in self.live_desc
+                {"kind": "thd", "node_id": n, "phase": ph} for n, ph in el.live_desc
             ]
             margins["thd"] = lim.thd_max - thd.max(axis=1)
-
-        need_lines = lim.line_loading is not None and self.lines
-        need_neutral = lim.neutral_loading is not None and self.neutral_lines
-        need_trafos = lim.transformer_loading is not None and self.transformers
-        if need_lines or need_neutral or need_trafos:
-            currents = {bc.branch_id: bc for bc in state.branch_currents()}
-
-            def _rms(i: Tensor) -> Tensor:  # [B, H, P] -> [B, P]
-                return i.abs().pow(2).sum(dim=-2).sqrt()
-
-            def _line_loading(entries, live: bool) -> np.ndarray:
-                """Largest conductor loading [B, L]: phase (``live``) or neutral ones."""
-                cols = []
-                for bid, i_max, m_from, m_to in entries:
-                    bc = currents[bid]
-                    sel_from = (m_from if live else ~m_from).to(v.device)
-                    sel_to = (m_to if live else ~m_to).to(v.device)
-                    i_cond = torch.cat(
-                        [_rms(bc.i_from)[..., sel_from], _rms(bc.i_to)[..., sel_to]],
-                        dim=-1,
-                    )
-                    cols.append(i_cond.amax(dim=-1) / i_max)
-                out = torch.stack(cols, dim=-1).reshape(b, -1)
-                return out.to(torch.float64).cpu().numpy()
-
-            if need_lines:
-                loading = _line_loading(self.lines, live=True)
-                parts.append((loading - lim.line_loading) / lim.line_loading)
-                descs += [{"kind": "line", "branch_id": e[0]} for e in self.lines]
-                margins["line_loading"] = lim.line_loading - loading.max(axis=1)
-            if need_neutral:
-                loading = _line_loading(self.neutral_lines, live=False)
-                lim_n = lim.neutral_loading
-                parts.append((loading - lim_n) / lim_n)
-                descs += [
-                    {"kind": "line_neutral", "branch_id": e[0]}
-                    for e in self.neutral_lines
-                ]
-                margins["neutral_loading"] = lim_n - loading.max(axis=1)
-            if need_trafos:
-                cols = []
-                for bid, ((m_from, k_from), (m_to, k_to)) in self.transformers:
-                    bc = currents[bid]
-                    i_from = _rms(bc.i_from)[..., m_from.to(v.device)] * k_from
-                    i_to = _rms(bc.i_to)[..., m_to.to(v.device)] * k_to
-                    cols.append(torch.cat([i_from, i_to], dim=-1).amax(dim=-1))
-                loading = torch.stack(cols, dim=-1).reshape(b, -1)
-                loading = loading.to(torch.float64).cpu().numpy()
-                lim_t = lim.transformer_loading
-                parts.append((loading - lim_t) / lim_t)
-                descs += [
-                    {"kind": "transformer", "branch_id": bid}
-                    for bid, _ in self.transformers
-                ]
-                margins["transformer_loading"] = lim_t - loading.max(axis=1)
+        if "line_loading" in values:
+            loading = values["line_loading"]
+            parts.append((loading - lim.line_loading) / lim.line_loading)
+            descs += [{"kind": "line", "branch_id": e[0]} for e in el.lines]
+            margins["line_loading"] = lim.line_loading - loading.max(axis=1)
+        if "neutral_loading" in values:
+            loading = values["neutral_loading"]
+            lim_n = lim.neutral_loading
+            parts.append((loading - lim_n) / lim_n)
+            descs += [
+                {"kind": "line_neutral", "branch_id": e[0]} for e in el.neutral_lines
+            ]
+            margins["neutral_loading"] = lim_n - loading.max(axis=1)
+        if "transformer_loading" in values:
+            loading = values["transformer_loading"]
+            lim_t = lim.transformer_loading
+            parts.append((loading - lim_t) / lim_t)
+            descs += [
+                {"kind": "transformer", "branch_id": bid} for bid, _ in el.transformers
+            ]
+            margins["transformer_loading"] = lim_t - loading.max(axis=1)
 
         raw = np.concatenate(parts, axis=1) if parts else np.zeros((b, 0), np.float64)
         self.descs = descs
@@ -843,12 +692,15 @@ def hosting_capacity(
         nothing and the loads draw nameplate; storage keeps its nameplate setpoint.
         ``"nameplate"``: every device at nameplate. A mapping ``{appliance_id: {"p_w",
         "q_var", "p_per_phase_w", "q_per_phase_var"}}`` (W, var; any subset) overrides
-        the named devices on top of nameplate.
+        the named devices on top of nameplate. Its values are in the grid's stored
+        units, like the appliance fields they replace: on a per-phase equivalent a
+        third of the device's three-phase power.
     phases:
         ``"balanced"`` (default): the device connects WYE to every phase conductor of
         its bus and the power splits equally. ``"a"``, ``"b"`` or ``"c"``: a
         single-phase device on that phase (to neutral where the bus has one, else to
-        ground); every candidate must carry the phase.
+        ground); every candidate must carry the phase. On a per-phase equivalent the
+        one phase stands for all three, so every device is balanced.
     power_factor:
         Power factor of the new device, ``0 < |power_factor| <= 1``. Positive: the
         reactive power flows with the active power (a generator injects ``Q``,
@@ -856,10 +708,13 @@ def hosting_capacity(
         absorbs ``Q``, under-excited, the usual voltage-rise countermeasure; a load is
         capacitive). ``Q = sign(pf) * P * tan(arccos|pf|)``.
     p_max_w:
-        Search cap in W (total over the device's phases). ``None``: no cap, the bracket
-        doubles from 1 kW until a limit is violated, up to 1 TW (``p_cap_w``).
+        Search cap in W, three-phase system power (the total over the device's phases;
+        on a per-phase equivalent three times what its one phase carries). ``None``: no
+        cap, the bracket doubles from 1 kW until a limit is violated, up to 1 TW
+        (``p_cap_w``).
     tol_w:
-        Bisection tolerance in W. ``None``: 0.1 % of each candidate's upper bracket.
+        Bisection tolerance in W of system power. ``None``: 0.1 % of each candidate's
+        upper bracket.
     harmonic_emission:
         Harmonic current spectrum of the new device, ``{order: (magnitude_pu,
         phase_deg)}`` in per unit of its own fundamental current (the format of
@@ -878,7 +733,8 @@ def hosting_capacity(
     Returns
     -------
     HostingCapacity
-        Host numpy arrays, one entry per candidate in ``candidates`` order.
+        Host numpy arrays, one entry per candidate in ``candidates`` order; powers in
+        W of three-phase system power, the same in every representation of a network.
 
     Notes
     -----
@@ -939,11 +795,11 @@ def hosting_capacity(
     if isinstance(device, str):
         device = torch.device(device)
 
-    node_ids = _resolve_candidates(grid, candidates)
+    node_ids = resolve_candidates(grid, candidates)
     cand_phases = _candidate_phases(grid, node_ids, phases)
     phase_label = "balanced" if phases == "balanced" else cand_phases[0][0].value
     real = torch.empty((), dtype=dtype).real.dtype
-    base_label, base_values = _base_values(
+    base_label, base_values = base_operating_values(
         grid, direction, base_operating_point, real, device
     )
 

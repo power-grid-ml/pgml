@@ -115,7 +115,9 @@ class TestIEEE33ConstPowerVsPandapower:
             row = result.index.row(node_id, Phase.A)
             v_complex = result.v.reshape(-1)[row].item()
 
-            u_rated_v = net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0
+            u_rated_v = (
+                net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0 / math.sqrt(3.0)
+            )  # L-N base
             vm_pu_ours = abs(v_complex) / u_rated_v
             va_deg_ours = math.degrees(_cmath_angle(v_complex))
 

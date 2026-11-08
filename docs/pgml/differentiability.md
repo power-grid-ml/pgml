@@ -241,63 +241,69 @@ Each of those is another differentiable term in the same objective.
 Reinforcing a feeder means replacing a cable with a larger cross section, which lowers its
 impedance. Ranking candidates by trial and error costs one solve per candidate. The gradient
 of a stress metric with respect to a per-line impedance scale ranks all of them at once.
+{func}`~pgml.studies.enhancement_sensitivities` packages exactly that: it turns the voltage
+band and the thermal limits into a smooth stress, which grows from zero once an element passes
+80 % of its limit, and returns its elasticity `dS / d ln k` for an impedance `Z / k` of every
+line (negative means the upgrade helps). The same backward pass also ranks transformer
+impedances, ratings and taps and new power at every bus; see {doc}`studies/enhancement`.
 
 ```python
-import torch
-import pgml
-from pgml.assembly import base_voltage_per_row
+import math
+
 from pgml.grids import cigre_lv_full_grid
-from pgml.schemas.grid_schema import Line
+from pgml.studies import HostingLimits, enhancement_sensitivities
 
 grid, _ = cigre_lv_full_grid()
-config = pgml.SimulationConfig(calculation="power_flow")
-base = base_voltage_per_row(grid)
-lines = [b for b in grid.branches if isinstance(b, Line)]
-r0 = torch.tensor([float(b.series_resistance_ohm_per_m[0][0]) for b in lines], dtype=torch.float64)
-l0 = torch.tensor([float(b.series_inductance_h_per_m[0][0]) for b in lines], dtype=torch.float64)
+limits = HostingLimits(line_loading=None, transformer_loading=None)  # the voltage band only
+result = enhancement_sensitivities(grid, limits=limits)  # one solve, one backward pass
+rank = result.ranking("line_impedance_elasticity")      # most relief first
 
-def stress(scale):
-    """Summed squared undervoltage below 0.95 pu, with every line impedance scaled."""
-    for k, line in enumerate(lines):
-        line.series_resistance_ohm_per_m = (r0[k] * scale[k]).reshape(1, 1)
-        line.series_inductance_h_per_m = (l0[k] * scale[k]).reshape(1, 1)
-    v = pgml.simulate(grid, config).node_voltages().abs() / base
-    return (torch.relu(0.95 - v) ** 2).sum()
+print(f"voltage stress {result.stress:.5f}, {len(rank)} lines ranked")
+for line_id, elasticity in rank[:3]:
+    line = next(b for b in grid.branches if b.id == line_id)
+    print(f"  line {line_id} ({line.from_node}->{line.to_node})  dS/dln(k) {elasticity:+.5f}")
 
-scale = torch.ones(len(lines), dtype=torch.float64, requires_grad=True)
-j = stress(scale)
-j.backward()                                  # one pass ranks all 37 lines
+def stress_with_upgrade(line_id, k):
+    """Re-solve with the line's series impedance divided by k."""
+    g = grid.model_copy(deep=True)
+    line = next(b for b in g.branches if b.id == line_id)
+    for name in ("series_resistance_ohm_per_m", "series_inductance_h_per_m"):
+        setattr(line, name, [[x / k for x in row] for row in getattr(line, name)])
+    return enhancement_sensitivities(g, limits=limits).stress
 
-print(f"voltage stress {j:.5f} over {len(lines)} lines")
-rank = torch.argsort(scale.grad, descending=True)
-for k in rank[:3]:
-    print(f"  line {lines[k].id} ({lines[k].from_node}->{lines[k].to_node})  dJ/dscale {scale.grad[k]:+.5f}")
-
-for label, k in (("top ranked", int(rank[0])), ("10th ranked", int(rank[9]))):
-    trial = torch.ones(len(lines), dtype=torch.float64)
-    trial[k] = 0.5                            # halve that line's impedance and re-solve
-    print(f"  {label} line {lines[k].id} halved -> stress {stress(trial):.5f}")
+# check against one re-solve per line: a 1 % lower impedance (k = 1.01)
+step = math.log(1.01)
+resolved = {i: (stress_with_upgrade(i, 1.01) - result.stress) / step for i, _ in rank}
+worst = max(abs(resolved[i] - e) for i, e in rank)
+print(f"{len(rank)} re-solves, largest difference {worst:.1e} (top value {abs(rank[0][1]):.2f})")
+for label, (line_id, elasticity) in (("top ranked", rank[0]), ("10th ranked", rank[9])):
+    after = stress_with_upgrade(line_id, 2.0)
+    print(f"  {label} line {line_id} halved -> stress {after:.5f} ({1 - after / result.stress:.0%} less)")
 ```
 
 ```text
-voltage stress 0.01581 over 37 lines
-  line 63 (25->26)  dJ/dscale +0.01292
-  line 64 (26->27)  dJ/dscale +0.01292
-  line 71 (27->34)  dJ/dscale +0.00596
-  top ranked line 63 halved -> stress 0.01039
-  10th ranked line 76 halved -> stress 0.01483
+voltage stress 1.04520, 37 lines ranked
+  line 71 (27->34)  dS/dln(k) -4.40139
+  line 64 (26->27)  dS/dln(k) -4.31398
+  line 63 (25->26)  dS/dln(k) -4.31398
+37 re-solves, largest difference 7.6e-02 (top value 4.40)
+  top ranked line 71 halved -> stress 0.13888 (87% less)
+  10th ranked line 55 halved -> stress 0.97291 (7% less)
 ```
 
-The first two lines are in series and carry the same current, so their gradients are equal to
+Lines 64 and 63 are in series and carry the same current, so their elasticities are equal to
 the digits printed and the order between them is a tie-break.
 
-The two head sections of the loaded feeder come out on top, ahead of the lateral that feeds
-the worst node. Halving the impedance of the top-ranked line removes 34 % of the stress.
-Halving the tenth-ranked line removes 6 %. The ranking from a single backward pass matches
-what 37 separate re-solves would have told you.
+The first section of the lateral that feeds the worst nodes (36 and 37) and the two
+sections upstream of it come out on top.
+Thirty-seven separate re-solves with a 1 % lower impedance give the same numbers within
+7.6e-2 (under 2 % of the top value), the first-order error of a 1 % step. Halving the
+impedance of the top-ranked line removes 87 % of the stress, halving the tenth-ranked line
+removes 7 %.
 
-The derivative is local, so it ranks candidates rather than sizing them. Use it to shortlist,
-then re-solve the shortlist with the real conductor data.
+The derivative is local, so it ranks candidates rather than sizing them: `ln 2` times the top
+elasticity would predict more relief than there is stress. Use it to shortlist, then re-solve
+the shortlist with the real conductor data.
 
 ## What else carries gradients
 

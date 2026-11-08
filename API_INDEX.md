@@ -420,6 +420,16 @@ Full documentation: the docstrings (published as the API reference).
 - def `code_provenance() -> dict[str, Any]` — Everything an artifact should record about the code that produced it.
 - def `git_state() -> dict[str, Any]` — The commit identity of the code, resolved from git or the sync stamp.
 
+## `pgml.representation`
+
+- `PHASE_MODES` — tuple
+- `PHASE_MODE_TAG` — str
+- class `SystemTotals(phase_mode, power_factor)` — Converts one grid's stored values to three-phase system quantities.
+- def `phase_mode_of(grid: Grid) -> Optional[str]` — The representation ``grid`` names in ``metadata.tags["phase_mode"]``.
+- def `positive_sequence_resistance_ohm_per_m(line: Line) -> float` — Per-conductor (positive-sequence) series resistance of ``line`` [Ohm/m].
+- def `system_totals(grid: Grid) -> SystemTotals` — The :class:`SystemTotals` reader for ``grid``.
+- def `to_per_phase_equivalent(grid: Grid) -> Grid` — Migrate a legacy one-phase grid to the per-phase equivalent and tag it.
+
 ## `pgml.scenarios`
 
 - class `BackgroundHarmonicConfig(magnitude_pu=…, phase_deg=…, node_id=…, source_power_va=…, drift_std=…, drift_phase_deg=…, drift_rho=…, drift_mode=…)` — A slowly-varying UPSTREAM harmonic background, injected at the grid's sources.
@@ -819,6 +829,7 @@ Full documentation: the docstrings (published as the API reference).
 ## `pgml.studies`
 
 - class `BranchRating(i_max_a, s_rated_va)` — Thermal rating of one branch; either field is ``None`` when the grid declares none.
+- class `EnhancementSensitivities(stress, stress_by_kind, stressed, line_ids, line_impedance_elasticity, line_impedance_elasticity_per_km, line_rating_elasticity, transformer_ids, transformer_impedance_elasticity, transformer_rating_elasticity, transformer_tap_gradient, node_ids, d_stress_d_p_per_kw, d_stress_d_q_per_kvar, direction, base_operating_point, calculation, stress_onset, limits=…, iterations=…, solve_time_s=…, backward_time_s=…)` — Result of :func:`enhancement_sensitivities`: the stress and its gradient.
 - class `HostingCapacity(node_ids, direction, p_max_w, binding, margins, iterations, p_cap_w, tol_w, base_case_feasible, base_operating_point, phases, power_factor, limits=…, base_violations=…)` — Result of :func:`hosting_capacity`: one entry per candidate bus.
 - class `HostingLimits(v_min_pu=…, v_max_pu=…, line_loading=…, transformer_loading=…, vuf_max=…, thd_max=…, neutral_loading=…)` — The limits a hosting-capacity search keeps; ``None`` disables a limit.
 - class `ImpedanceScan(frequencies_hz, base_frequency_hz, node_ids, phases, z_phase_ohm, z_positive_ohm, z_zero_ohm, transfer_rows=…, z_transfer_ohm=…)` — Result of :func:`impedance_scan`: impedances seen from each requested bus vs frequency.
@@ -826,6 +837,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `QVCurve(node_id, phases, v_pu, q_var, q_phase_var, converged, q_margin_var, v_at_min_pu, minimum_in_range)` — A Q-V curve at one bus (:func:`qv_curve`).
 - class `Resonance(kind, frequency_hz, order, z_ohm, prominence)` — One resonance of a driving-point impedance magnitude.
 - def `branch_ratings(grid: Grid) -> dict[int, BranchRating]` — Thermal rating of every branch of ``grid``, keyed by branch id (pure, no solve).
+- def `enhancement_sensitivities(grid: Grid, limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = 'nameplate', direction: Literal['load', 'generation'] = 'generation', stress_onset: float = 0.8, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> EnhancementSensitivities` — Rank every candidate grid enhancement by its first-order relief of limit stress.
 - def `hosting_capacity(grid: Grid, candidates: Optional[Sequence[int]] = None, direction: Literal['load', 'generation'] = 'generation', limits: Optional[HostingLimits] = None, base_operating_point: BaseOperatingPoint = None, phases: Union[str, Phase] = 'balanced', power_factor: float = 1.0, p_max_w: Optional[float] = None, tol_w: Optional[float] = None, harmonic_emission: Optional[Mapping[int, tuple[float, float]]] = None, config: Optional[SimulationConfig] = None, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> HostingCapacity` — Largest new generation or demand each candidate bus can take within the limits.
 - def `impedance_scan(grid: Grid, nodes: Optional[Sequence[int]] = None, frequencies_hz = None, config: Optional[SimulationConfig] = None, operating_point: Optional[dict] = None, load_shunt: Optional[Literal['opendss', 'motor', 'none', 'const_z']] = None, load_shunt_basis: Optional[Literal['operating_point', 'nameplate']] = None, transfer: bool = False, fold_generation: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> ImpedanceScan` — Driving-point (and optionally transfer) impedance seen from buses vs frequency.
 - def `pv_curve(grid: Grid, selector: Optional[Union[Iterable[int], Callable[[ApplianceBase], bool]]] = None, direction: Literal['load', 'generation'] = 'load', config: Optional[SimulationConfig] = None, lambda_start: float = 1.0, lambda_max: Optional[float] = None, step: float = 0.05, step_min: float = 0.0001, step_max: Optional[float] = None, max_steps: int = 500, v_stop_pu: float = 0.3, stop_at_nose: bool = False, dtype: Union[str, dtype] = torch.complex128, device: Optional[Union[str, device]] = None) -> PVCurve` — Trace the P-V curve through its nose by predictor-corrector continuation.
@@ -837,6 +849,11 @@ Full documentation: the docstrings (published as the API reference).
 - `QVCurve` — re-exported from `pgml.studies`
 - `pv_curve` — re-exported from `pgml.studies`
 - `qv_curve` — re-exported from `pgml.studies`
+
+## `pgml.studies.enhancement`
+
+- `EnhancementSensitivities` — re-exported from `pgml.studies`
+- `enhancement_sensitivities` — re-exported from `pgml.studies`
 
 ## `pgml.studies.hosting`
 

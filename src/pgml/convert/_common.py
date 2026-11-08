@@ -22,10 +22,40 @@ only contains the source-specific field reading. It provides:
   invented from the configured ratios, warned once per converted grid.
 - :func:`source_zero_sequence_ratios` — the defaults-driven R0/R1, X0/X1 of a
   source Thevenin, used when the dataset carries no zero-sequence source data.
+- Per-phase equivalent helpers — :func:`equivalent_voltage`,
+  :func:`equivalent_power`, :func:`equivalent_control` — the one place the scaling of
+  :data:`PhaseMode.SINGLE_PHASE_EQUIV` is written (see below).
 - Emit helpers — :func:`build_node`, :func:`build_load`, :func:`build_source`,
   :func:`build_line_from_sequence`, :func:`build_line_from_matrices` — the single
   place the :class:`PhaseMode` decision and the per-phase mapping live, so all three
   converters stamp identical schema objects for the same physical input.
+
+Per-phase equivalent (``SINGLE_PHASE_EQUIV``)
+---------------------------------------------
+A converted grid in the default mode is one phase of the balanced three-phase system, so
+it obeys the schema's 1-phase convention (``Node.u_rated_v`` is line-to-neutral): every
+SYSTEM voltage is divided by sqrt(3) and every SYSTEM power by 3, while every per-phase
+impedance and admittance, every current rating and every dimensionless quantity stays as
+it is. A branch current of the grid is then the physical conductor current.
+
+========================================  =====================================
+quantity                                  ``SINGLE_PHASE_EQUIV``
+========================================  =====================================
+node ``u_rated_v``, source ``u_ref_v``    line-to-line / sqrt(3)
+load, generator, storage P, Q, rating     system total / 3
+control ``s_rated_va``/``q_var``/``p_ref_w``, PV ``q_min_var``/``q_max_var``
+                                          system total / 3
+transformer ``s_rated_va``                three-phase rating / 3
+transformer ``u_rated_from_v``/``to_v``   line-to-line / sqrt(3) (the ratio is unchanged)
+R, L, G, C of lines, transformers,        unchanged (per-phase ohm, the same value
+sources, shunts; ``max_i_a``; per-unit    ``U_LL^2 / S_total`` and
+setpoints, ZIP fractions, spectra         ``(U_LL/sqrt(3))^2 / (S/3)`` give)
+========================================  =====================================
+
+Under :data:`PhaseMode.THREE_PHASE` nothing is scaled: nodes carry the line-to-line
+rating, appliances their system totals, and the solver derives the per-phase values.
+The constant-impedance load admittance ``conj(S)/V^2`` is the same in both
+representations.
 
 Zero-sequence assumption
 ------------------------
@@ -51,11 +81,13 @@ from enum import Enum
 from typing import Any, Optional
 
 from pgml import defaults
+from pgml.representation import PHASE_MODE_TAG
 from pgml.schemas.grid_schema import (
     ConstantParam,
     Generator,
     GridMetadata,
     Line,
+    LineType,
     Load,
     LoadModel,
     Node,
@@ -63,6 +95,8 @@ from pgml.schemas.grid_schema import (
     Provenance,
     ResistanceFrequencyModel,
     Source,
+    Storage,
+    TypeLibrary,
     WindingConnection,
     ZipCoefficients,
 )
@@ -133,6 +167,79 @@ def phases_for(
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         return _PHASE_A
     return native if native is not None else _ABC
+
+
+# =============================================================================
+# Per-phase equivalent scaling (the single place the rule lives)
+# =============================================================================
+_SQRT3 = math.sqrt(3.0)
+#: The per-phase equivalent divides system voltages and powers by these (the single
+#: source of the rule; :mod:`pgml.representation` and the exporters use the same numbers).
+PHASE_VOLTAGE_DIVISOR = _SQRT3
+PHASE_POWER_DIVISOR = 3.0
+
+#: Control-block fields that are DEVICE TOTALS of power (see ``InverterControlBase``).
+_CONTROL_POWER_FIELDS: tuple[str, ...] = ("s_rated_va", "q_var", "p_ref_w")
+
+
+def equivalent_voltage(mode: PhaseMode, u_line_to_line_v: float) -> float:
+    """A system (line-to-line) voltage as the grid stores it under ``mode``.
+
+    ``SINGLE_PHASE_EQUIV``: the line-to-neutral value ``U_LL / sqrt(3)``, which is what a
+    1-phase :class:`~pgml.schemas.grid_schema.Node` carries. ``THREE_PHASE``: unchanged
+    (``u_rated_v`` of a three-phase node is line-to-line).
+    """
+    if mode is PhaseMode.SINGLE_PHASE_EQUIV:
+        return u_line_to_line_v / PHASE_VOLTAGE_DIVISOR
+    return u_line_to_line_v
+
+
+def equivalent_power(mode: PhaseMode, total):
+    """A three-phase total (W, var or VA) as the grid stores it under ``mode``.
+
+    ``SINGLE_PHASE_EQUIV``: one third, the share of the single phase that is modelled.
+    ``THREE_PHASE``: unchanged (the solver splits a total over the connected phases).
+    Accepts a float or ``None`` (returned as ``None``).
+    """
+    if total is None:
+        return None
+    if mode is PhaseMode.SINGLE_PHASE_EQUIV:
+        return total / PHASE_POWER_DIVISOR
+    return total
+
+
+def equivalent_control(mode: PhaseMode, control):
+    """A copy of an inverter control block with its power totals scaled for ``mode``.
+
+    ``s_rated_va``, ``q_var`` and ``p_ref_w`` are device totals; under
+    ``SINGLE_PHASE_EQUIV`` each is divided by three (:func:`equivalent_power`). Curve
+    breakpoints are per unit and unchanged. ``None`` and ``THREE_PHASE`` return the
+    control as given.
+    """
+    if control is None or mode is not PhaseMode.SINGLE_PHASE_EQUIV:
+        return control
+    update = {
+        name: equivalent_power(mode, getattr(control, name))
+        for name in _CONTROL_POWER_FIELDS
+        if getattr(control, name, None) is not None
+    }
+    return control.model_copy(update=update) if update else control
+
+
+def equivalent_voltage_regulation(mode: PhaseMode, regulation):
+    """A copy of a PV-terminal block with its reactive limits scaled for ``mode``.
+
+    ``q_min_var`` / ``q_max_var`` are totals (:func:`equivalent_power`); the set point
+    ``v_set_pu`` is per unit of the host node and unchanged.
+    """
+    if regulation is None or mode is not PhaseMode.SINGLE_PHASE_EQUIV:
+        return regulation
+    return regulation.model_copy(
+        update={
+            "q_min_var": equivalent_power(mode, regulation.q_min_var),
+            "q_max_var": equivalent_power(mode, regulation.q_max_var),
+        }
+    )
 
 
 # =============================================================================
@@ -423,9 +530,23 @@ def thevenin_from_sk(
 # =============================================================================
 # Provenance / metadata helpers
 # =============================================================================
-def make_metadata(name: str, description: str) -> GridMetadata:
-    """Build a :class:`~pgml.schemas.grid_schema.GridMetadata` (thin shared helper)."""
-    return GridMetadata(name=name, description=description)
+# ``PHASE_MODE_TAG`` (``GridMetadata.tags`` key naming a grid's representation, value the
+# :class:`PhaseMode` value string) is defined in :mod:`pgml.representation`, which also
+# documents the legacy meaning of an untagged grid.
+
+
+def make_metadata(
+    name: str, description: str, *, phase_mode: Optional[PhaseMode] = None
+) -> GridMetadata:
+    """Build a :class:`~pgml.schemas.grid_schema.GridMetadata` (thin shared helper).
+
+    With ``phase_mode`` the representation is recorded as
+    ``tags[PHASE_MODE_TAG] = phase_mode.value`` (``"single_phase_equiv"`` or
+    ``"three_phase"``), the marker consumers use to tell a per-phase grid from a
+    three-phase one.
+    """
+    tags = {} if phase_mode is None else {PHASE_MODE_TAG: str(phase_mode.value)}
+    return GridMetadata(name=name, description=description, tags=tags)
 
 
 # =============================================================================
@@ -444,18 +565,23 @@ def build_node(
     Parameters
     ----------
     id, u_rated_v, name:
-        Node id, rated voltage [V] and optional name.
+        Node id, SYSTEM (line-to-line) rated voltage [V] and optional name. Under
+        :data:`PhaseMode.SINGLE_PHASE_EQUIV` the stored value is ``u_rated_v / sqrt(3)``
+        (the 1-phase node is line-to-neutral, :func:`equivalent_voltage`). Under
+        :data:`PhaseMode.THREE_PHASE` a node with fewer than three phase rows (a native
+        one-phase OpenDSS bus) is divided by sqrt(3) as well, the schema's rule.
     mode:
         :class:`PhaseMode`; selects ``(A,)`` vs ``(A,B,C)`` / ``native_phases``.
     native_phases:
         Source-native phase tuple used under :data:`PhaseMode.THREE_PHASE`.
     """
-    return Node(
-        id=id,
-        name=name,
-        u_rated_v=u_rated_v,
-        phases=phases_for(mode, native=native_phases),
-    )
+    phases = phases_for(mode, native=native_phases)
+    if mode is PhaseMode.SINGLE_PHASE_EQUIV:
+        u_stored = equivalent_voltage(mode, u_rated_v)
+    else:
+        # the schema rule: line-to-line on three or more phase rows, else line-to-neutral
+        u_stored = u_rated_v if len(phases) >= 3 else u_rated_v / _SQRT3
+    return Node(id=id, name=name, u_rated_v=u_stored, phases=phases)
 
 
 def build_load(
@@ -476,8 +602,9 @@ def build_load(
     """Build a :class:`~pgml.schemas.grid_schema.Load`, phase decision centralized.
 
     Under :data:`PhaseMode.SINGLE_PHASE_EQUIV` the load is emitted with
-    ``phases=(Phase.A,)`` and the TOTAL P/Q only (today's exact behaviour); any
-    per-phase split is collapsed by the caller before reaching here. Under
+    ``phases=(Phase.A,)`` and one third of the three-phase total P/Q (the single
+    modelled phase, :func:`equivalent_power`); any per-phase split is collapsed by the
+    caller before reaching here. Under
     :data:`PhaseMode.THREE_PHASE` the load is emitted on ``(A,B,C)`` (or
     ``native_phases``) and threads ``connection`` plus the per-phase nameplate
     split when given.
@@ -522,8 +649,8 @@ def build_load(
         "id": id,
         "name": name,
         "node": node,
-        "p_nom_w": p_total_w,
-        "q_nom_var": q_total_var,
+        "p_nom_w": equivalent_power(mode, p_total_w),
+        "q_nom_var": equivalent_power(mode, q_total_var),
     }
     if load_model is not None:
         kwargs["load_model"] = load_model
@@ -562,7 +689,10 @@ def build_generator(
 
     Mirrors :func:`build_load` with the GENERATION-POSITIVE nameplate convention:
     ``p_total_w > 0`` injects into the grid (the assembly applies the −1 sign for
-    the :class:`Generator` component). Used for source-library static generators
+    the :class:`Generator` component). Callers pass SYSTEM totals, including the power
+    quantities of ``control`` and ``voltage_regulation``; under
+    :data:`PhaseMode.SINGLE_PHASE_EQUIV` they are stored at one third
+    (:func:`equivalent_power`, :func:`equivalent_control`). Used for source-library static generators
     (pandapower ``sgen``, power-grid-model ``sym_gen``).
 
     ``control`` optionally attaches an
@@ -581,15 +711,17 @@ def build_generator(
         "id": id,
         "name": name,
         "node": node,
-        "p_nom_w": p_total_w,
-        "q_nom_var": q_total_var,
+        "p_nom_w": equivalent_power(mode, p_total_w),
+        "q_nom_var": equivalent_power(mode, q_total_var),
     }
     if consumer_type is not None:
         kwargs["consumer_type"] = consumer_type
     if control is not None:
-        kwargs["control"] = control
+        kwargs["control"] = equivalent_control(mode, control)
     if voltage_regulation is not None:
-        kwargs["voltage_regulation"] = voltage_regulation
+        kwargs["voltage_regulation"] = equivalent_voltage_regulation(
+            mode, voltage_regulation
+        )
     if mode is PhaseMode.SINGLE_PHASE_EQUIV:
         kwargs["phases"] = _PHASE_A
         return Generator(**kwargs)
@@ -597,6 +729,42 @@ def build_generator(
     if connection is not None:
         kwargs["connection"] = connection
     return Generator(**kwargs)
+
+
+def build_storage(
+    *,
+    id: int,
+    node: int,
+    mode: PhaseMode,
+    p_total_w: float,
+    q_total_var: float,
+    name: Optional[str] = None,
+    native_phases: Optional[tuple[Phase, ...]] = None,
+    energy_capacity_wh: Optional[float] = None,
+    p_rated_w: Optional[float] = None,
+    **state: Any,
+) -> Storage:
+    """Build a :class:`~pgml.schemas.grid_schema.Storage` (discharge-positive injection).
+
+    Callers pass SYSTEM totals. Under :data:`PhaseMode.SINGLE_PHASE_EQUIV` the active and
+    reactive setpoints, the inverter rating ``p_rated_w`` and the energy capacity
+    (which keeps the duration ``E / P``) are stored at one third. ``state`` carries the
+    dimensionless state fields (``soc``, ``soc_min``, ...) unchanged.
+    """
+    kwargs: dict[str, Any] = {
+        "id": id,
+        "name": name,
+        "node": node,
+        "phases": phases_for(mode, native=native_phases),
+        "p_nom_w": equivalent_power(mode, p_total_w),
+        "q_nom_var": equivalent_power(mode, q_total_var),
+        **state,
+    }
+    if energy_capacity_wh is not None:
+        kwargs["energy_capacity_wh"] = equivalent_power(mode, energy_capacity_wh)
+    if p_rated_w is not None:
+        kwargs["p_rated_w"] = equivalent_power(mode, p_rated_w)
+    return Storage(**kwargs)
 
 
 def warn_dropped_elements(
@@ -681,8 +849,10 @@ def build_source(
         magnitude (matching ``Node.u_rated_v``). Under :data:`PhaseMode.THREE_PHASE`
         it is converted to the per-phase line-to-neutral phase-to-ground EMF
         (``u_ref_v / sqrt(3)``) for the balanced wye source; under
-        :data:`PhaseMode.SINGLE_PHASE_EQUIV` it is used directly (positive-sequence
-        equivalent).
+        :data:`PhaseMode.SINGLE_PHASE_EQUIV` it is divided by sqrt(3) as well
+        (:func:`equivalent_voltage`): the single phase is line-to-neutral. The Thevenin
+        ``r_ohm`` / ``l_h`` are per-phase ohms and are stored unchanged (``U_LL^2/Sk`` equals
+        ``(U_LL/sqrt(3))^2 / (Sk/3)``).
     r_ohm, l_h:
         Positive-sequence Thevenin resistance [Ohm] and inductance [H].
     native_phases:
@@ -706,7 +876,7 @@ def build_source(
             name=name,
             node=node,
             phases=_PHASE_A,
-            u_ref_v=(u_ref_v,),
+            u_ref_v=(equivalent_voltage(mode, u_ref_v),),
             u_angle_deg=(u_angle_deg,),
             resistance_ohm=[[r_ohm]],
             inductance_h=[[l_h]],
@@ -891,6 +1061,59 @@ def build_line_from_matrices(
     )
 
 
+class LineTypeCatalog:
+    """Line ampacities of one conversion, carried as ``Grid.types.lines`` entries.
+
+    A converter calls :meth:`rate` on every line it builds. A line whose source declares a
+    finite positive rating (pandapower ``max_i_ka * df * parallel``, power-grid-model
+    ``i_n``, OpenDSS ``NormAmps``) gets a :class:`~pgml.schemas.grid_schema.LineType`
+    holding its per-length matrices and ``max_i_a``, and ``type_ref`` naming it; the line
+    keeps its explicit matrices, which are what the assembly reads. Lines with identical
+    matrices and rating share one type. The rating is a per-conductor current in amperes
+    and is the same in every phase mode. :meth:`library` returns the
+    :class:`~pgml.schemas.grid_schema.TypeLibrary` for the :class:`Grid`.
+    """
+
+    def __init__(self, tool: str) -> None:
+        self._tool = tool
+        self._by_key: dict[tuple, str] = {}
+        self._types: dict[str, LineType] = {}
+
+    def rate(self, line: Line, max_i_a: Optional[float]) -> Line:
+        """``line`` with ``type_ref`` set to its (possibly new) rated type, or unchanged."""
+        if max_i_a is None or not math.isfinite(max_i_a) or max_i_a <= 0.0:
+            return line
+        r, x, c, g = (
+            line.series_resistance_ohm_per_m,
+            line.series_inductance_h_per_m,
+            line.shunt_capacitance_f_per_m,
+            line.shunt_conductance_s_per_m,
+        )
+        key = (
+            len(line.from_phases),
+            *(None if m is None else tuple(map(tuple, m)) for m in (r, x, c, g)),
+            float(max_i_a),
+        )
+        type_id = self._by_key.get(key)
+        if type_id is None:
+            type_id = f"{self._tool}_line_{len(self._by_key) + 1}"
+            self._by_key[key] = type_id
+            self._types[type_id] = LineType(
+                id=type_id,
+                n_phases=len(line.from_phases),
+                series_resistance_ohm_per_m=r,
+                series_inductance_h_per_m=x,
+                shunt_capacitance_f_per_m=c,
+                shunt_conductance_s_per_m=g,
+                max_i_a=float(max_i_a),
+            )
+        return line.model_copy(update={"type_ref": type_id})
+
+    def library(self) -> TypeLibrary:
+        """The collected types (empty when no line declared a rating)."""
+        return TypeLibrary(lines=dict(self._types))
+
+
 def build_line_from_sequence(
     *,
     id: int,
@@ -980,9 +1203,16 @@ __all__ = [
     "thevenin_from_z",
     "thevenin_from_sk",
     "make_metadata",
+    "PHASE_MODE_TAG",
     "build_node",
     "build_load",
     "build_generator",
+    "build_storage",
+    "LineTypeCatalog",
+    "equivalent_voltage",
+    "equivalent_power",
+    "equivalent_control",
+    "equivalent_voltage_regulation",
     "warn_dropped_elements",
     "build_source",
     "build_line_from_matrices",

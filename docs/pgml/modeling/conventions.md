@@ -38,15 +38,67 @@ the converter and recorded in `Provenance`.
 
 | | nominal-voltage field | stored as | per-unit base / output voltage |
 |---|---|---|---|
-| pgml | `Node.u_rated_v` [V] | L-L (≥3φ), L-N (1φ) | working voltages are L-N; pu = `\|V_LN\|/(u_rated/√3)` |
+| pgml | `Node.u_rated_v` [V] | L-L (≥3φ), L-N (1φ; written as `U_LL/√3` by `SINGLE_PHASE_EQUIV`) | working voltages are L-N; pu = `\|V_LN\|/(u_rated/√3)` |
 | pandapower | `bus.vn_kv` [kV] | L-L | `res_bus.vm_pu = \|V_LL\|/vn_kv`; asymmetric `res_bus_3ph` uses the L-N base `vn_kv/√3` |
 | OpenDSS | `Vsource.basekv` [kV] | L-L for `phases>=3`, used directly for `phases=1` | `Bus.kVBase()` always returns the matched voltage base over √3; `AllBusVolts` are L-N phasors |
 | pgm | `node.u_rated` [V] | L-L | symmetric output `u` is L-L with `u_pu=u/u_rated`; asymmetric output `u` is L-N |
 
 Storing the universal nameplate and deriving the line-to-neutral working voltage at one
-point of use makes the const-Z load admittance `y=conj(S)/V²` agree with pandapower's
-positive-sequence reference in the one-phase path (`V=V_LL`) and stay physically correct
-per phase in the three-phase path (`V=V_LN`, total power preserved).
+point of use keeps the const-Z load admittance `y=conj(S)/V²` physically correct in both
+representations (below).
+
+### The per-phase equivalent (`PhaseMode.SINGLE_PHASE_EQUIV`)
+
+A converted grid in the default mode is ONE PHASE of the balanced three-phase system, so it
+follows the one-phase convention above: node `u_rated_v` and source `u_ref_v` are
+`U_LL/√3`, and every system power or power rating (load, generator, storage, inverter
+`s_rated_va`/`q_var`/`p_ref_w`, PV reactive limits, transformer `s_rated_va`) is one third
+of the three-phase total; transformer `u_rated_from_v`/`u_rated_to_v` are divided by √3 like
+the nodes (their ratio is unchanged). Per-phase impedances and admittances (lines, transformers,
+source Thevenin, shunts), `max_i_a`, per-unit setpoints, ZIP fractions and spectra are
+unchanged: `U_LL²/S` and `(U_LL/√3)²/(S/3)` are the same ohm value. Consequences:
+
+- per-unit voltages and total losses are those of pandapower, power-grid-model and OpenDSS;
+- a branch current is the physical conductor current those tools report (`res_line.i_from_ka`,
+  pgm symmetric `i`, OpenDSS `CktElement.Currents`); the oracle tests compare it at ratio 1
+  in both phase modes (`tests/reference/test_branch_current_oracles.py`,
+  `test_opendss_branch_current_oracle.py`);
+- the const-Z load admittance is `(S/3)/(U_LL/√3)² = S/U_LL²`, the value pandapower derives
+  from total power on the line-to-line base, so the per-unit solve is unchanged;
+- `id_map["slack_v_complex"]` is the line-to-neutral phasor of the one-phase node.
+
+pandapower's own convention is total power on a line-to-line base (`vn_kv`, `sn_mva`), which
+is why its currents are conductor currents even though its equations are per unit of the
+line-to-line base; pgml's per-phase grid reaches the same currents by carrying one phase.
+The pandapower and power-grid-model exporters undo the scaling for a grid carrying the
+`single_phase_equiv` tag (voltages times √3, powers and ratings times 3), so a
+convert-then-export round trip restores the source network; an untagged one-phase grid is
+exported as written. Under `PhaseMode.THREE_PHASE` nothing is scaled (except that a node with fewer than three
+phase rows, a native one-phase OpenDSS bus, carries its line-to-neutral rating, the schema's
+rule): three-phase nodes keep the line-to-line
+rating and appliances their totals.
+
+Line ratings follow the same pattern in every mode: pandapower `max_i_ka·df·parallel`, pgm
+`i_n` and OpenDSS `NormAmps` become `Grid.types.lines[...].max_i_a`, named by `type_ref` on
+the line, which keeps its explicit matrices. They are per-conductor currents in amperes and
+are not scaled.
+
+A genuinely one-phase OpenDSS circuit read in `SINGLE_PHASE_EQUIV` is treated as one phase
+of a balanced system fed with the line-to-line nominal, so its voltages agree per unit but
+its absolute currents are the system's, not the one-phase circuit's; read it in
+`THREE_PHASE` to keep the one-phase circuit's own values.
+
+Consumers read a grid through `pgml.representation` (`system_totals`, `phase_mode_of`);
+`to_per_phase_equivalent` migrates a legacy one-phase grid. The planning studies
+({doc}`../studies/index`) take and report three-phase system powers in every
+representation; only appliance setpoint mappings stay in stored units.
+
+Every grid the pandapower, pgm and OpenDSS converters emit records its representation as
+`metadata.tags["phase_mode"]`, the `PhaseMode` value (`"single_phase_equiv"` or
+`"three_phase"`; loaders of other sources may add their own values). A grid WITHOUT the tag
+predates the per-phase equivalent: its one-phase nodes carry the line-to-line voltage and
+its appliances the three-phase totals, so currents are √3 too large and a one-phase node
+rating must not be read as line-to-neutral.
 
 pandapower `vn_kv·1000` and pgm `u_rated` are already line-to-line. `Bus.kVBase()` is
 line-to-neutral for every OpenDSS bus whatever its local phase count, so the converter

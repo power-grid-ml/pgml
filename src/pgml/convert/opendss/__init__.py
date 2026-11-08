@@ -55,7 +55,7 @@ A dict with string keys for each element type that was converted::
         "generator":     {dss_gen_name: Generator.id, ...},
         "pvsystem":      {dss_pv_name: Generator.id, ...},
         "storage":       {dss_storage_name: Storage.id, ...},
-        "slack_v_complex": complex,  # slack voltage phasor (V, L-L) from first Vsource
+        "slack_v_complex": complex,  # first Vsource phasor (V): L-N single-phase equiv., L-L three-phase
     }
 
 DSS element names are normalised to lowercase. Node ids are assigned in the

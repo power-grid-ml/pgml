@@ -120,6 +120,12 @@ with `None` in place of a missing value, and `from_dict()` restores the object; 
 dict whose `"study"` key names another study. `PVCurve.voltage_pu(node_id, phase)` returns
 one node's voltage along the curve; `phase` is a `Phase` or its letter, in either case.
 
+`p_total_w`, `q_var`, `q_phase_var` and `q_margin_var` are three-phase system powers in
+every grid representation: on a per-phase equivalent (`metadata.tags["phase_mode"] ==
+"single_phase_equiv"`) the solved power of its one phase is multiplied by three. Its one
+held phase stands for all three, so its `q_phase_var` column carries the system total and
+`q_var` is the sum of `q_phase_var` in every representation.
+
 ## Validation
 
 All measurements are at complex128 (`tests/studies/test_continuation.py`).

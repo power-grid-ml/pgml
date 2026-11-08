@@ -18,7 +18,7 @@ Signatures: docstrings / `API_INDEX.md`.
 | Converters from pandapower, OpenDSS and power-grid-model to `Grid`, and back | `convert/` |
 | The batch contract: declared batches of solver-input deltas, sampling, sweeps, background distortion, batched solve, parquet persistence | `scenarios/` |
 | Plots and the optional reference oracles | `evaluation/` |
-| Grid-planning studies on top of assembly and solver: impedance scan (driving-point / transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins, hosting capacity with branch ratings and study limits | `studies/` |
+| Grid-planning studies on top of assembly and solver: impedance scan (driving-point / transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins, hosting capacity with branch ratings and study limits, gradient ranking of grid enhancements by a limit-stress metric | `studies/` |
 
 ## Top-level modules
 
@@ -28,6 +28,10 @@ Signatures: docstrings / `API_INDEX.md`.
 - `defaults.py` — `pgml.defaults`: the modelling-default loader (`get`, `describe`, `units`,
   `resolve`) and `use_preset(name)`, a context manager that selects a reference tool's
   modelling choices. Precedence: explicit value > modelling default > converter value.
+- `representation.py` — the `phase_mode` tag (`PHASE_MODE_TAG`, `PHASE_MODES`), `phase_mode_of`,
+  `system_totals` (system voltages/totals of a grid in any representation),
+  `to_per_phase_equivalent` (migrates a legacy untagged one-phase grid) and
+  `positive_sequence_resistance_ohm_per_m`. The scaling rule is `convert/_common.py`'s.
 - `paths.py` — `experiments_root()`: where run outputs and config instances live
   (`PGML_EXPERIMENTS`, default `./data`).
 - `provenance.py` — `code_provenance()` / `git_state()`: the commit, dirty flag and versions

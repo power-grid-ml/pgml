@@ -30,10 +30,18 @@ cross-tool conventions: `docs/pgml/modeling/conventions.md`.
 - `load_model` is applied to every load (default `CONST_IMPEDANCE`, the linear reference
   solve); `"source"` keeps each load's own pgm type. Loads whose type differs from the
   applied model are named in the report.
+- Line ampacity `i_n` becomes `Grid.types.lines[...].max_i_a` (`type_ref` on the line, the
+  explicit matrices stay); `branch_ratings(grid)` reads it.
 - `link` (pgm's perfect connection, realised inside pgm by a 1e6 p.u. stand-in) converts
   to a closed `Switch` with R = L = 0; the solve fuses its rows, so pgml carries no
-  stand-in. pgm reports symmetric results in three-phase quantities, so its link current
-  is the pgml single-phase-equivalent current divided by sqrt(3).
+  stand-in. pgm's symmetric `i` is the conductor current, which is what a branch current
+  of the per-phase equivalent is: the link current agrees at ratio 1 in both phase modes
+  (`test_switch_fusion_pgm.py`, `test_branch_current_oracles.py`).
+- `SINGLE_PHASE_EQUIV` (default) is one phase of the balanced system: `u_rated_v = u_rated
+  / sqrt(3)`, `source.u_ref_v` likewise, loads, generators, regulator limits and the
+  transformer `sn` at one third, impedances and ratings unchanged (the rule is written once
+  in `convert/_common.py`). `id_map["slack_v_complex"]` is the line-to-neutral phasor in
+  that mode. Every grid carries `metadata.tags["phase_mode"]`.
 - `voltage_regulator` on a converted `sym_gen` makes it a PV terminal
   (`VoltageRegulation`: `u_ref` -> `v_set_pu` on the node's rated voltage, `q_min`/`q_max`
   -> reactive limits); regulated generators sharing a node merge into one terminal
