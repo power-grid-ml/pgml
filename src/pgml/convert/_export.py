@@ -340,9 +340,10 @@ def system_view(grid: Any) -> Any:
     a copy with those voltages times sqrt(3) and every power quantity times 3 (the exact
     inverse of :func:`pgml.convert._common.equivalent_voltage` / ``equivalent_power``).
     Per-phase impedances, admittances and current ratings are unchanged. Any other grid is
-    returned as is: an ``(A, B, C)`` grid already carries system quantities, and an
-    untagged ``(A,)`` grid (hand-built or converted before the tag existed) keeps its
-    established reading, line-to-line rating and totals. The input is not mutated.
+    returned as is and exported as written: an ``(A, B, C)`` grid already carries system
+    quantities, a ``"legacy_ll"`` ``(A,)`` grid carries the line-to-line rating and totals
+    the older converters wrote, and an untagged ``(A,)`` grid is taken by its stored
+    values. The input is not mutated.
     """
     from pgml.convert._common import PHASE_VOLTAGE_DIVISOR, PHASE_POWER_DIVISOR
     from pgml.representation import _is_one_phase, _rescale_grid, phase_mode_of

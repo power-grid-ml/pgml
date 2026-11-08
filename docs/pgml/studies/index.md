@@ -41,10 +41,11 @@ reference is {mod}`pgml.studies`.
   (`{appliance_id: {"p_w", "q_var", ...}}`) set appliance powers and are in the grid's
   stored units, like the appliance fields they replace: on a per-phase equivalent a third of
   the device's three-phase power.
-- **Legacy grids** (no `phase_mode` tag, one-phase nodes at the line-to-line voltage with
-  three-phase totals) are read as stored. Their per-unit voltages and powers agree with the
+- **Legacy grids** (`phase_mode = "legacy_ll"`, written by older converters: one-phase
+  nodes at the line-to-line voltage with three-phase totals) are read as stored. Their per-unit voltages and powers agree with the
   other representations, but their branch currents are √3 too large, so line loading does
-  not; migrate them with {func}`pgml.representation.to_per_phase_equivalent`.
+  not; migrate them with {func}`pgml.representation.to_per_phase_equivalent`. An untagged
+  grid is read as the schema defines it (a one-phase node is a single-phase circuit).
 - **Serialization.** Every result has `to_dict()`, JSON-ready with plain lists, ids and the
   unit in each key name (`z_positive_re_ohm`, `p_total_w`, `q_margin_var`, `p_max_w`), and
   `from_dict()`, its inverse. The top-level dict carries a `"study"` key naming the entry

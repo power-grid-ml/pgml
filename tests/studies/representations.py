@@ -6,8 +6,8 @@ written four ways:
 
 - ``"per_phase"``: the pandapower converter's per-phase equivalent (one phase,
   ``U_LL/sqrt(3)``, a third of every power; tag ``"single_phase_equiv"``);
-- ``"legacy"``: the same one-phase grid with line-to-line voltages and three-phase totals
-  and no ``phase_mode`` tag (the representation before the per-phase equivalent);
+- ``"legacy"``: the same one-phase grid with line-to-line voltages and three-phase totals,
+  as converters wrote it before the per-phase equivalent (tag ``"legacy_ll"``);
 - ``"three_phase"``: the converter's ``(A, B, C)`` build (tag ``"three_phase"``);
 - ``"four_wire"``: a hand-built phase-domain grid whose LV part is four-wire (an
   ``(A, B, C, N)`` row at every LV bus, uncoupled 4x4 cable matrices with the
@@ -172,7 +172,7 @@ def representations() -> dict[str, Grid]:
     """``{name: grid}`` of the network in every representation (module documentation)."""
     per_phase, _ = to_grid(mv_lv_net(), phase_mode=PhaseMode.SINGLE_PHASE_EQUIV)
     legacy = system_view(per_phase)
-    tags = {k: v for k, v in legacy.metadata.tags.items() if k != PHASE_MODE_TAG}
+    tags = {**legacy.metadata.tags, PHASE_MODE_TAG: "legacy_ll"}
     legacy = legacy.model_copy(
         update={"metadata": legacy.metadata.model_copy(update={"tags": tags})}
     )

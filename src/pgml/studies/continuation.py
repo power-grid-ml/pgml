@@ -61,7 +61,7 @@ Reported powers (:attr:`PVCurve.p_total_w`, :attr:`QVCurve.q_var`,
 every representation of a network: on a per-phase equivalent
 (``metadata.tags["phase_mode"] == "single_phase_equiv"``, which stores a third of every
 power) the solved power of its one phase is multiplied by three
-(:func:`pgml.representation.system_totals`); three-phase, as-built and untagged grids
+(:func:`pgml.representation.system_totals`); three-phase, as-built, ``legacy_ll`` and untagged grids
 report what they solve. The one held phase of a per-phase equivalent's Q-V curve stands
 for all three, so its ``q_phase_var`` column is the system total too and
 ``q_var = q_phase_var.sum(axis=1)`` holds in every representation. Inputs that set powers

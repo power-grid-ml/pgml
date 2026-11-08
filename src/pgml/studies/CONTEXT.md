@@ -59,9 +59,9 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   total, so `q_var = q_phase_var.sum(1)` everywhere), `q_margin_var`. `branch_ratings`
   `s_rated_va` is the three-phase rating. Voltages stay pu, currents A per conductor.
   Setpoint mappings (`base_operating_point` mapping, `operating_point` of the impedance
-  scan and of `config`) stay in STORED units: they replace appliance fields. Untagged
-  (legacy) grids read as stored (factor 1), so their line currents remain sqrt(3) too
-  large. Pinned by `tests/studies/test_system_power.py` (one network in four
+  scan and of `config`) stay in STORED units: they replace appliance fields. `legacy_ll`
+  grids (older converters) read as stored (factor 1), so their line currents remain
+  sqrt(3) too large; untagged grids are read by the schema rule (factor 1). Pinned by `tests/studies/test_system_power.py` (one network in four
   representations, `tests/studies/representations.py`).
 - Every result has `to_dict()` (JSON-ready: plain lists, ids, units in the key names,
   `None` where JSON would need `NaN`) and `from_dict()`, its inverse. Every top-level
@@ -195,8 +195,8 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - A voltage / THD row of a per-phase equivalent counts `_LimitElements.conductors_per_row`
   (3) times in `S`: it stands for three conductors, and the stress then equals that of
   the phase-domain build of the same network (a `stressed` entry keeps the stress of one
-  conductor). Untagged one-phase grids count once (they may be genuine single-phase
-  circuits). Transformer loading divides the three-phase rating over
+  conductor). Untagged one-phase grids count once (by the schema they are genuine
+  single-phase circuits), and so do `legacy_ll` grids. Transformer loading divides the three-phase rating over
   `n_live * conductors_per_row` conductors.
 - `limits._sqrt` (zero slope at 0) under every RMS norm and THD: a branch with exactly
   zero current (a cable bridged by a closed switch, both ends fused) otherwise turns

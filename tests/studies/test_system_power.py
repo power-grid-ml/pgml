@@ -10,10 +10,10 @@ representation), P-V nose ``lambda`` and power within 2e-14, Q-V curve within 2e
 the enhancement stress and every sensitivity within 4e-14 (relative). A verdict flip in
 the bisection would show as about 1e-3, a missing factor of three as 2/3.
 
-A legacy grid (no ``phase_mode`` tag) carries line-to-line voltages and three-phase
-totals on one-phase nodes, so its branch currents are sqrt(3) too large: it agrees
-wherever line currents do not enter (voltage and transformer limits, P-V, Q-V), and
-through :func:`pgml.representation.to_per_phase_equivalent` everywhere.
+A legacy grid (``phase_mode = "legacy_ll"``) carries line-to-line voltages and
+three-phase totals on one-phase nodes, so its branch currents are sqrt(3) too large: it
+agrees wherever line currents do not enter (voltage and transformer limits, P-V, Q-V),
+and through :func:`pgml.representation.to_per_phase_equivalent` everywhere.
 """
 
 from __future__ import annotations

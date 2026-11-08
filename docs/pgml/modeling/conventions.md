@@ -72,8 +72,8 @@ is why its currents are conductor currents even though its equations are per uni
 line-to-line base; pgml's per-phase grid reaches the same currents by carrying one phase.
 The pandapower and power-grid-model exporters undo the scaling for a grid carrying the
 `single_phase_equiv` tag (voltages times √3, powers and ratings times 3), so a
-convert-then-export round trip restores the source network; an untagged one-phase grid is
-exported as written. Under `PhaseMode.THREE_PHASE` nothing is scaled (except that a node with fewer than three
+convert-then-export round trip restores the source network; any other grid (untagged,
+`legacy_ll`, three-phase) is exported as written. Under `PhaseMode.THREE_PHASE` nothing is scaled (except that a node with fewer than three
 phase rows, a native one-phase OpenDSS bus, carries its line-to-neutral rating, the schema's
 rule): three-phase nodes keep the line-to-line
 rating and appliances their totals.
@@ -88,17 +88,29 @@ of a balanced system fed with the line-to-line nominal, so its voltages agree pe
 its absolute currents are the system's, not the one-phase circuit's; read it in
 `THREE_PHASE` to keep the one-phase circuit's own values.
 
-Consumers read a grid through `pgml.representation` (`system_totals`, `phase_mode_of`);
-`to_per_phase_equivalent` migrates a legacy one-phase grid. The planning studies
-({doc}`../studies/index`) take and report three-phase system powers in every
-representation; only appliance setpoint mappings stay in stored units.
+Consumers read a grid through `pgml.representation` (`system_totals`, `phase_mode_of`).
+The planning studies ({doc}`../studies/index`) take and report three-phase system powers
+in every representation; only appliance setpoint mappings stay in stored units.
 
 Every grid the pandapower, pgm and OpenDSS converters emit records its representation as
 `metadata.tags["phase_mode"]`, the `PhaseMode` value (`"single_phase_equiv"` or
-`"three_phase"`; loaders of other sources may add their own values). A grid WITHOUT the tag
-predates the per-phase equivalent: its one-phase nodes carry the line-to-line voltage and
-its appliances the three-phase totals, so currents are √3 too large and a one-phase node
-rating must not be read as line-to-neutral.
+`"three_phase"`; loaders of other sources may add their own values, e.g. `"as_built"`).
+A grid WITHOUT the tag is read exactly as the schema defines it: values as stored, a
+one-phase node is a real single-phase circuit with a line-to-neutral rating, and appliance
+powers are what they state. Converters that predate the per-phase equivalent wrote untagged
+single-phase equivalents with the line-to-line voltage on the one-phase nodes and
+three-phase totals on the appliances (currents √3 too large). Such a file must carry the tag
+value `"legacy_ll"` (`mark_legacy`) to be read the old way, or be migrated with
+`to_per_phase_equivalent`; exporters write a `legacy_ll` grid as the older converters did.
+
+| `phase_mode` | one-phase node `u_rated_v` | appliance powers, transformer `s_rated_va` | transformer rated voltages |
+|---|---|---|---|
+| (none) | line-to-neutral (schema) | as stored (totals over connected phases) | as stored |
+| `single_phase_equiv` | `U_LL/√3` | one third of the three-phase total | `U_LL/√3` |
+| `three_phase`, `as_built` | line-to-neutral (schema) | as stored | as stored |
+| `legacy_ll` | `U_LL` | three-phase total | as stored (line-to-line) |
+
+Nodes with three or more phase rows are line-to-line in every representation.
 
 pandapower `vn_kv·1000` and pgm `u_rated` are already line-to-line. `Bus.kVBase()` is
 line-to-neutral for every OpenDSS bus whatever its local phase count, so the converter

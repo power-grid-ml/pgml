@@ -20,7 +20,7 @@ what you see here is the public surface.
 | {mod}`pgml.evaluation` | Comparison plots and the reference oracles |
 | {mod}`pgml.errors` | The exception hierarchy and its HTTP status hints |
 | {mod}`pgml.defaults` | The shipped modelling defaults and standards tables |
-| {mod}`pgml.representation` | Read a grid's voltages and powers as system totals whatever its `phase_mode`, migrate a legacy one-phase grid to the per-phase equivalent |
+| {mod}`pgml.representation` | Read a grid's voltages and powers as system totals whatever its `phase_mode`, tag and migrate a `legacy_ll` grid of an older converter |
 | {mod}`pgml.paths` | Where run outputs go |
 | {mod}`pgml.provenance` | The commit and version stamp to write beside a generated artifact |
 

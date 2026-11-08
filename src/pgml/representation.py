@@ -4,6 +4,10 @@ A :class:`~pgml.schemas.grid_schema.Grid` stores powers, ratings and voltages in
 representation it was built in, named by ``GridMetadata.tags["phase_mode"]``
 (:data:`PHASE_MODE_TAG`):
 
+- no tag -- the grid is read exactly as the schema defines it: values as stored,
+  ``Node.u_rated_v`` line-to-line on a node with three or more phase rows (a neutral row
+  counts) and line-to-neutral otherwise, appliance powers and ratings totals over their
+  connected phases. A one-phase node is a real single-phase circuit.
 - ``"single_phase_equiv"`` -- one phase of a balanced three-phase grid. Every node is
   one-phase and stores the line-to-neutral nominal ``U_LL/sqrt(3)``; loads, generators,
   storage, inverter ratings and transformer ``s_rated_va`` carry one third of the
@@ -11,20 +15,18 @@ representation it was built in, named by ``GridMetadata.tags["phase_mode"]``
   unchanged); per-phase impedances, admittances and ampacities are unchanged. The default
   output of the pandapower, power-grid-model and OpenDSS converters.
 - ``"three_phase"`` -- an explicit phase-domain build (``(A, B, C)`` or source-native
-  phases). Appliance powers and ratings are totals over their connected phases.
+  phases). Values as for an untagged grid.
 - ``"as_built"`` -- the unbalanced phase-domain network of a dataset that records it
-  (the BDGD loader). Values as in ``"three_phase"``.
-
-In all three, ``Node.u_rated_v`` follows the schema rule: line-to-line on a node with
-three or more phase rows (a neutral row counts), line-to-neutral otherwise.
-
-A grid WITHOUT the tag predates the per-phase equivalent (*legacy*): its one-phase nodes
-carry the line-to-line voltage and its appliances the three-phase totals, so a branch
-current is sqrt(3) too large. It is read as stored.
+  (the BDGD loader). Values as for an untagged grid.
+- ``"legacy_ll"`` -- a single-phase equivalent written before the per-phase equivalent
+  existed: its one-phase nodes carry the line-to-line voltage and its appliances the
+  three-phase totals, so a branch current is sqrt(3) too large. Such files are tagged
+  with :func:`mark_legacy` (or migrated with :func:`to_per_phase_equivalent`); untagged,
+  they would be read as single-phase circuits.
 
 Every consumer that compares grids across representations goes through
 :func:`system_totals` (system voltages and totals from any representation), and
-:func:`to_per_phase_equivalent` migrates a legacy one-phase grid. The conversion rule
+:func:`to_per_phase_equivalent` migrates a ``"legacy_ll"`` grid. The conversion rule
 itself is written once, in :mod:`pgml.convert._common` (``equivalent_voltage``,
 ``equivalent_power``, ``equivalent_control``, ``equivalent_voltage_regulation``); this
 module reuses it.
@@ -43,6 +45,7 @@ __all__ = [
     "PHASE_MODES",
     "PHASE_MODE_TAG",
     "SystemTotals",
+    "mark_legacy",
     "phase_mode_of",
     "positive_sequence_resistance_ohm_per_m",
     "system_totals",
@@ -54,11 +57,19 @@ _logger = logging.getLogger(__name__)
 #: ``GridMetadata.tags`` key naming a grid's representation.
 PHASE_MODE_TAG = "phase_mode"
 #: The representations a grid may name under :data:`PHASE_MODE_TAG`: the converters'
-#: ``PhaseMode`` values plus the phase-domain ``"as_built"`` of dataset loaders.
-PHASE_MODES: tuple[str, ...] = ("single_phase_equiv", "three_phase", "as_built")
+#: ``PhaseMode`` values, the phase-domain ``"as_built"`` of dataset loaders and
+#: ``"legacy_ll"``, the line-to-line single-phase equivalent of older converters.
+PHASE_MODES: tuple[str, ...] = (
+    "single_phase_equiv",
+    "three_phase",
+    "as_built",
+    "legacy_ll",
+)
+# The tag value of a legacy line-to-line single-phase equivalent (``mark_legacy``).
+_LEGACY_LL = "legacy_ll"
 
 _SQRT3 = math.sqrt(3.0)
-_legacy_logged = False
+_untagged_logged = False
 
 
 def _to_float(value: Any) -> float:
@@ -81,7 +92,8 @@ def phase_mode_of(grid: Grid) -> Optional[str]:
     Returns
     -------
     str or None
-        One of :data:`PHASE_MODES`, or ``None`` for an untagged (legacy) grid.
+        One of :data:`PHASE_MODES`, or ``None`` for an untagged grid (read by the schema
+        rule).
 
     Raises
     ------
@@ -110,7 +122,7 @@ class SystemTotals:
     Attributes
     ----------
     phase_mode:
-        The grid's representation (:data:`PHASE_MODES`), ``None`` for a legacy grid.
+        The grid's representation (:data:`PHASE_MODES`), ``None`` for an untagged grid.
     power_factor:
         Multiplier from a stored appliance power (W, var) or transformer rating (VA) to
         the three-phase total: ``3`` for ``"single_phase_equiv"``, else ``1``.
@@ -121,15 +133,15 @@ class SystemTotals:
 
     @property
     def legacy(self) -> bool:
-        """Whether the grid carries no ``phase_mode`` tag."""
-        return self.phase_mode is None
+        """Whether the grid is a line-to-line single-phase equivalent (``"legacy_ll"``)."""
+        return self.phase_mode == _LEGACY_LL
 
     def node_voltage_ll_v(self, node: Node) -> float:
         """Line-to-line nominal voltage of ``node`` [V].
 
         ``Node.u_rated_v`` on a node with three or more phase rows; ``sqrt(3)`` times it
-        on a node with fewer (stored line-to-neutral). A legacy grid's node is read as
-        stored at any phase count.
+        on a node with fewer (stored line-to-neutral, the schema rule). A ``"legacy_ll"``
+        grid's node is read as stored at any phase count.
         """
         u = _to_float(node.u_rated_v)
         if self.legacy or len(tuple(node.phases)) >= 3:
@@ -166,24 +178,26 @@ def system_totals(grid: Grid) -> SystemTotals:
     Returns
     -------
     SystemTotals
-        ``power_factor = 3`` for ``"single_phase_equiv"``, ``1`` for ``"three_phase"``,
-        ``"as_built"`` and legacy grids. The first legacy grid with a node of fewer than
-        three phase rows logs one INFO line on logger ``pgml.representation``.
+        ``power_factor = 3`` for ``"single_phase_equiv"``, ``1`` for every other
+        representation and for untagged grids. The first untagged grid with a node of
+        fewer than three phase rows logs one INFO line on logger ``pgml.representation``
+        (it is read as a single-phase circuit; a file written by an older converter needs
+        :func:`mark_legacy`).
 
     Raises
     ------
     ValueError
         When the tag holds an unknown representation.
     """
-    global _legacy_logged
+    global _untagged_logged
     mode = phase_mode_of(grid)
-    if mode is None and not _legacy_logged:
+    if mode is None and not _untagged_logged:
         if any(len(tuple(n.phases)) < 3 for n in grid.nodes):
-            _legacy_logged = True
+            _untagged_logged = True
             _logger.info(
                 "grid %r carries no %r tag: its one-phase nodes are read as "
-                "line-to-line and its powers as three-phase totals (legacy rule; "
-                "logged once).",
+                "single-phase circuits with a line-to-neutral rating (schema rule; "
+                "a file from an older converter needs mark_legacy; logged once).",
                 getattr(grid.metadata, "name", None),
                 PHASE_MODE_TAG,
             )
@@ -332,27 +346,95 @@ def _is_one_phase(grid: Grid) -> bool:
     return bool(grid.nodes) and all(len(tuple(n.phases)) == 1 for n in grid.nodes)
 
 
-def to_per_phase_equivalent(grid: Grid) -> Grid:
-    """Migrate a legacy one-phase grid to the per-phase equivalent and tag it.
+def _represented_phases(totals: SystemTotals, node: Node, phases: Any) -> int:
+    """Live conductors a terminal with ``phases`` on ``node`` stands for.
 
-    A grid without ``metadata.tags["phase_mode"]`` whose nodes are all one-phase was
-    written with the line-to-line voltage on its nodes and three-phase totals on its
-    appliances. This returns a copy in the representation the converters now write
-    (:class:`pgml.convert.PhaseMode` ``SINGLE_PHASE_EQUIV``): node, source and
-    transformer rated voltages divided by sqrt(3); load, generator, storage, inverter
-    control, PV reactive-limit and transformer ``s_rated_va`` powers divided by 3;
-    per-phase impedances, admittances, ampacities, per-unit fields and spectra unchanged;
-    tag ``"single_phase_equiv"`` set. Branch currents of the result are the conductor
-    currents. The rule is the converters' own (``pgml.convert._common.equivalent_*``).
+    Three on a node with fewer than three phase rows of a ``"single_phase_equiv"`` or
+    ``"legacy_ll"`` grid (the one phase represents a balanced three-phase terminal),
+    otherwise the non-neutral entries of ``phases`` (at least one).
+    """
+    if len(tuple(node.phases)) < 3 and totals.phase_mode in (
+        "single_phase_equiv",
+        _LEGACY_LL,
+    ):
+        return 3
+    return max(1, sum(1 for p in phases if p != Phase.N))
 
-    Only grids that really are legacy per-system L-L grids should be migrated: a
-    hand-built one-phase grid that already holds line-to-neutral values has no tag
-    either, and migrating it would scale it twice.
+
+def _with_tag(grid: Grid, mode: str) -> Grid:
+    tags = dict(grid.metadata.tags)
+    tags[PHASE_MODE_TAG] = mode
+    return grid.model_copy(
+        update={"metadata": grid.metadata.model_copy(update={"tags": tags})}
+    )
+
+
+def mark_legacy(grid: Grid) -> Grid:
+    """Tag a grid written by an older converter as a line-to-line equivalent.
+
+    Converters and loaders that predate the per-phase equivalent wrote single-phase
+    equivalents with the line-to-line voltage on their one-phase nodes and three-phase
+    totals on their appliances, without a ``phase_mode`` tag. Read untagged, such a grid
+    is taken for a network of real single-phase circuits. This returns a copy tagged
+    ``"legacy_ll"``, which :func:`system_totals` reads the old way and
+    :func:`to_per_phase_equivalent` migrates. No value is changed.
+
+    Only apply it to grids KNOWN to come from such a converter: an untagged grid built by
+    hand with line-to-neutral one-phase nodes is already read correctly.
 
     Parameters
     ----------
     grid:
         An untagged grid whose nodes all have exactly one phase. Not modified.
+
+    Returns
+    -------
+    Grid
+        The tagged copy; ``grid`` itself, unchanged, when it is already ``"legacy_ll"``.
+
+    Raises
+    ------
+    ValueError
+        When the grid carries another ``phase_mode`` tag, has a node with more than one
+        phase, or has no nodes.
+    """
+    mode = phase_mode_of(grid)
+    if mode == _LEGACY_LL:
+        return grid
+    if mode is not None:
+        raise ValueError(
+            f"grid is tagged {PHASE_MODE_TAG}={mode!r}; only an untagged grid is "
+            f"marked {_LEGACY_LL!r}."
+        )
+    if not _is_one_phase(grid):
+        raise ValueError(
+            f"only a grid whose nodes are all one-phase can be marked {_LEGACY_LL!r}."
+        )
+    return _with_tag(grid, _LEGACY_LL)
+
+
+def to_per_phase_equivalent(grid: Grid, *, assume_legacy: bool = False) -> Grid:
+    """Migrate a line-to-line single-phase equivalent to the per-phase equivalent.
+
+    A ``"legacy_ll"`` grid (:func:`mark_legacy`) carries the line-to-line voltage on its
+    one-phase nodes and three-phase totals on its appliances. This returns a copy in the
+    representation the converters now write (:class:`pgml.convert.PhaseMode`
+    ``SINGLE_PHASE_EQUIV``): node, source and transformer rated voltages divided by
+    sqrt(3); load, generator, storage, inverter control, PV reactive-limit and
+    transformer ``s_rated_va`` powers divided by 3; per-phase impedances, admittances,
+    ampacities, per-unit fields and spectra unchanged; tag ``"single_phase_equiv"`` set.
+    Branch currents of the result are the conductor currents. The rule is the converters'
+    own (``pgml.convert._common.equivalent_*``).
+
+    Parameters
+    ----------
+    grid:
+        A ``"legacy_ll"`` grid, or an untagged grid together with
+        ``assume_legacy=True``; every node must have exactly one phase. Not modified.
+    assume_legacy:
+        Read an UNTAGGED grid as ``"legacy_ll"``. Without it an untagged grid is refused:
+        by the schema its one-phase nodes are already line-to-neutral, and migrating a
+        grid that really holds line-to-neutral values would scale it twice.
 
     Returns
     -------
@@ -363,18 +445,25 @@ def to_per_phase_equivalent(grid: Grid) -> Grid:
     Raises
     ------
     ValueError
-        When the grid carries another ``phase_mode`` tag, or has a node with more than
-        one phase, or has no nodes.
+        When the grid carries another ``phase_mode`` tag, is untagged without
+        ``assume_legacy``, has a node with more than one phase, or has no nodes.
     """
     from pgml.convert._common import PhaseMode, equivalent_power, equivalent_voltage
 
     mode = phase_mode_of(grid)
     if mode == "single_phase_equiv":
         return grid
-    if mode is not None:
+    if mode is None and not assume_legacy:
         raise ValueError(
-            f"grid is tagged {PHASE_MODE_TAG}={mode!r}; only an untagged (legacy) "
-            "one-phase grid is migrated."
+            f"grid carries no {PHASE_MODE_TAG!r} tag and is read by the schema rule "
+            f"(line-to-neutral one-phase nodes); tag it with mark_legacy, or pass "
+            "assume_legacy=True, when it is a line-to-line equivalent of an older "
+            "converter."
+        )
+    if mode not in (None, _LEGACY_LL):
+        raise ValueError(
+            f"grid is tagged {PHASE_MODE_TAG}={mode!r}; only a {_LEGACY_LL!r} grid is "
+            "migrated."
         )
     if not _is_one_phase(grid):
         raise ValueError(
@@ -387,8 +476,4 @@ def to_per_phase_equivalent(grid: Grid) -> Grid:
         lambda u: equivalent_voltage(single, u),
         lambda p: equivalent_power(single, p),
     )
-    tags = dict(grid.metadata.tags)
-    tags[PHASE_MODE_TAG] = single.value
-    return out.model_copy(
-        update={"metadata": grid.metadata.model_copy(update={"tags": tags})}
-    )
+    return _with_tag(out, single.value)

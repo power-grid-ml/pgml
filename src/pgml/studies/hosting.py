@@ -67,7 +67,7 @@ start and 1 TW ceiling of the bracket) is the three-phase SYSTEM power of the ne
 the same number in every representation of a network: a per-phase equivalent
 (``metadata.tags["phase_mode"] == "single_phase_equiv"``, which stores a third of every
 power) gets the candidate's stored setpoint as the system power divided by three
-(:func:`pgml.representation.system_totals`), a three-phase, as-built or untagged grid
+(:func:`pgml.representation.system_totals`), a three-phase, as-built, ``legacy_ll`` or untagged grid
 stores it as is. The bisection itself runs in system watts, so its trial sequence does
 not depend on the representation. On a per-phase equivalent every device is balanced by
 construction: its one phase stands for all three, and ``phases="a"`` is the same device
