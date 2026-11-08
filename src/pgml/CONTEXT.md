@@ -30,8 +30,12 @@ Signatures: docstrings / `API_INDEX.md`.
   modelling choices. Precedence: explicit value > modelling default > converter value.
 - `representation.py` — the `phase_mode` tag (`PHASE_MODE_TAG`, `PHASE_MODES`), `phase_mode_of`,
   `system_totals` (system voltages/totals of a grid in any representation),
-  `to_per_phase_equivalent` (migrates a legacy untagged one-phase grid) and
-  `positive_sequence_resistance_ohm_per_m`. The scaling rule is `convert/_common.py`'s.
+  `mark_legacy` (tags an older converter's line-to-line equivalent `legacy_ll`),
+  `to_per_phase_equivalent` (migrates a `legacy_ll` grid; an untagged one only with
+  `assume_legacy=True`) and `positive_sequence_resistance_ohm_per_m`. The scaling rule is
+  `convert/_common.py`'s. Invariant: an untagged grid is read by the schema rule (one-phase
+  node = line-to-neutral single-phase circuit, powers as stored); only `legacy_ll` reads
+  one-phase nodes as line-to-line.
 - `paths.py` — `experiments_root()`: where run outputs and config instances live
   (`PGML_EXPERIMENTS`, default `./data`).
 - `provenance.py` — `code_provenance()` / `git_state()`: the commit, dirty flag and versions

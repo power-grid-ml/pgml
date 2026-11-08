@@ -67,9 +67,10 @@ Every ``to_grid`` function accepts a ``phase_mode`` keyword (default
     :doc:`the conventions page <../modeling/conventions>` for the full rule.
     Every converted grid records its representation in
     ``metadata.tags["phase_mode"]`` (``"single_phase_equiv"`` or
-    ``"three_phase"``); a grid without the tag predates the per-phase
-    equivalent and carries line-to-line one-phase node voltages and
-    three-phase totals.
+    ``"three_phase"``); a grid without the tag is read as the schema
+    defines it, and a file written by an older converter (line-to-line
+    one-phase node voltages, three-phase totals) is tagged ``"legacy_ll"``
+    with :func:`pgml.representation.mark_legacy`.
 
 ``PhaseMode.THREE_PHASE``
     Genuine per-phase abc representation. Nodes and branches become
