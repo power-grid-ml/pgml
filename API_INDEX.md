@@ -42,7 +42,7 @@ Full documentation: the docstrings (published as the API reference).
 - def `fusion_map(grid: Grid, param_overrides: Optional[dict] = None, branch_states: Optional[dict] = None, zero: Optional[Sequence[ZeroImpedanceBranch]] = None) -> Optional[FusionMap]` — Build the exact bus fusion of ``grid``'s zero-impedance branches.
 - def `injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor` — Evaluate ``I_device(V)`` from a precomputed :class:`InjectionPlan`.
 - def `node_phase_index(grid: Grid) -> NodePhaseIndex` — Build the compact :class:`NodePhaseIndex` for ``grid``.
-- def `phase_voltage_magnitude(u_rated_v: float, n_phases: int, line_to_line: bool = False) -> float` — Nominal element voltage magnitude ``V0`` for the const-Z / ZIP load model.
+- def `phase_voltage_magnitude(u_rated_v: float, n_phases: int, line_to_line: bool = False, u_rated_ln_v: Optional[float] = None) -> float` — Nominal element voltage magnitude ``V0`` of a node [V].
 - def `ybus_structure(grid: Grid, index: NodePhaseIndex, device: Optional[device] = None) -> Tensor` — Sorted int64 linear indices ``row * N + col`` of every stampable ``Y`` entry.
 - def `zero_impedance_branches(grid: Grid, param_overrides: Optional[dict] = None) -> list[ZeroImpedanceBranch]` — Every in-service branch whose EFFECTIVE series impedance is exactly zero.
 
@@ -597,7 +597,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `LoadVaryingSpectrum(kind=…, loading_levels_pu, spectra, interpolation=…, extrapolation=…)` — Spectra measured at several loading levels of the device.
 - class `MeasuredQuantity()` — Electrical quantity a :class:`MeasurementDevice` records.
 - class `MeasurementDevice(id, name=…, node, phases=…, in_service=…, measured_quantities=…, max_harmonic_order=…, max_current_channels=…, current_channels=…, manufacturer=…, model=…, supported_averaging_intervals_s=…, averaging_interval_s=…, accuracy_class=…, connection=…, tags=…)` — A physical measurement instrument installed at a node.
-- class `Node(id, name=…, u_rated_v, phases, zone=…, geometry=…, tags=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
+- class `Node(id, name=…, u_rated_v, u_rated_ln_v=…, phases, zone=…, geometry=…, tags=…)` — A bus: an ordered set of conductor rows and its rated voltages.
 - class `NodeResult(result_set_id, node_id, frequency_hz, step, phases, v_re, v_im, p_w=…, q_var=…, s_va=…)` — Per-node voltage phasor (and optional net injected power) at one frequency
 - class `NodeZone()` — Land-use / consumer character of a node (closed taxonomy; ML stratifier).
 - class `ParameterPerturbation(scenario_id, step=…, component_kind, component_id, parameter_path, nominal_value, perturbed_value, unit_short=…)` — A deliberate perturbation of a grid parameter recorded as ground truth, for

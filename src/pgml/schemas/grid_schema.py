@@ -576,14 +576,65 @@ class LineGeometry(GridModel):
 # =============================================================================
 # 6. Nodes
 # =============================================================================
+#: Relative tolerance of the ``Node.u_rated_v`` / ``Node.u_rated_ln_v`` consistency
+#: check: nameplates such as 400/230 V (ratio 1.739) or 220/127 V are accepted as
+#: sqrt(3) (1.732), while sqrt(3) and 2 stay distinguishable.
+_RATED_RATIO_RTOL = 0.02
+
+
 class Node(GridModel):
+    """A bus: an ordered set of conductor rows and its rated voltages.
+
+    *Rated voltages.* ``u_rated_v`` is the nameplate: line-to-line on a node with three
+    or more phase rows (a ``Phase.N`` row counts), line-to-neutral on a node with fewer.
+    A delta (phase-to-phase) appliance element sees ``u_rated_v``. ``u_rated_ln_v``
+    (optional) is the phase-to-neutral rating and then the per-phase base of every row
+    of the node: the nominal voltage of a wye appliance element, the per-unit base
+    (:func:`pgml.assembly.base_voltage_per_row`) and the reference of constant-impedance
+    and constant-current loads and of the harmonic load shunt. Without it the per-phase
+    base is ``u_rated_v/√3`` on a node with three or more phase rows and ``u_rated_v``
+    otherwise.
+
+    Set ``u_rated_ln_v`` where that rule does not describe the node, above all a
+    split-phase node ``(X1, X2, N)`` behind a centre-tapped transformer (stored as
+    ``(A, B, N)``): ``u_rated_v`` is the X1-X2 voltage (e.g. 440 or 240 V) and
+    ``u_rated_ln_v`` half of it (220 or 120 V), where the rule would give
+    ``u_rated_v/√3``. On a node with two phase conductors (with or without a ``Phase.N``
+    row) that gives it, ``u_rated_v`` is the phase-to-phase voltage.
+
+    When both are plain numbers they must agree within 2 % (relative), by the number
+    of phase conductors (rows other than ``Phase.N``):
+
+    - three: ``u_rated_v = √3·u_rated_ln_v``;
+    - two: ``u_rated_v = √3·u_rated_ln_v`` (two phases of a three-phase system) or
+      ``2·u_rated_ln_v`` (split phase);
+    - one: ``u_rated_v = u_rated_ln_v`` (both phase-to-neutral).
+
+    Tensor values are not checked here (float/tensor duality).
+    """
+
     id: int = Field(description="Unique node id within the grid.")
     name: Optional[str] = Field(default=None)
     u_rated_v: PosNum = si_field(
-        "Rated voltage.",
+        "Rated voltage: line-to-line on a node with three or more phase rows "
+        "(the X1-X2 voltage on a split-phase node), line-to-neutral on a one-phase "
+        "node. A delta (phase-to-phase) appliance element sees this voltage.",
         short="V",
         long="volt",
         reference="line-to-line (3-phase) / line-to-neutral (1-phase)",
+    )
+    u_rated_ln_v: Optional[PosNum] = si_field(
+        "Rated phase-to-neutral voltage, the per-phase base of every row of the "
+        "node (wye element voltage, per-unit base, constant-Z/I load and harmonic "
+        "shunt reference). None derives it: u_rated_v/sqrt(3) on a node with three "
+        "or more phase rows, u_rated_v otherwise. Set it where that does not hold, "
+        "e.g. a split-phase node (X1, X2, N) whose X1-N voltage is half of "
+        "u_rated_v. Must agree with u_rated_v within 2 %: ratio sqrt(3) for three "
+        "phase conductors, sqrt(3) or 2 for two, 1 for one.",
+        short="V",
+        long="volt",
+        reference="phase-to-neutral",
+        default=None,
     )
     phases: tuple[Phase, ...] = Field(
         description="Ordered phases present; fixes matrix row/column order for this node."
@@ -606,6 +657,26 @@ class Node(GridModel):
         if len(set(v)) != len(v):
             raise ValueError("Node phases must be unique.")
         return v
+
+    @model_validator(mode="after")
+    def _rated_voltages_agree(self) -> "Node":
+        ln = self.u_rated_ln_v
+        if ln is None or _is_arraylike(ln) or _is_arraylike(self.u_rated_v):
+            return self
+        import math
+
+        n_cond = sum(1 for p in self.phases if p != Phase.N)
+        sqrt3 = math.sqrt(3.0)
+        allowed = {3: (sqrt3,), 2: (sqrt3, 2.0)}.get(n_cond, (1.0,))
+        ratio = float(self.u_rated_v) / float(ln)
+        if not any(abs(ratio - r) <= _RATED_RATIO_RTOL * r for r in allowed):
+            names = " or ".join(f"{r:.4g}" for r in allowed)
+            raise ValueError(
+                f"Node {self.id}: u_rated_v / u_rated_ln_v = {ratio:.4g} on a node "
+                f"with {n_cond} phase conductor(s); expected {names} (within "
+                f"{_RATED_RATIO_RTOL:.0%})."
+            )
+        return self
 
 
 # =============================================================================
@@ -1761,7 +1832,8 @@ class InverterControlBase(GridModel):
 
     - WYE: one element per connected phase (phase to neutral or ground), so
       ``n_elem = len(phases)``: 1, 2 or 3.
-    - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``.
+    - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``;
+      a two-phase DELTA device is one phase-to-phase element, ``n_elem = 1``.
 
     A single-phase device (``n_elem = 1``) uses the values as written. In the
     per-phase (single-phase positive-sequence) equivalent of a balanced three-phase
@@ -1935,9 +2007,9 @@ class VoltageRegulation(GridModel):
     ``voltage_regulator`` and OpenDSS ``Generator model=3``.
 
     ``v_set_pu`` is per unit of the HOST NODE's rated voltage, i.e. the regulated
-    magnitude in volts is ``v_set_pu * phase_voltage_magnitude(node.u_rated_v,
-    len(node.phases))`` (line-to-neutral for a three-phase node, the rated value
-    itself below three phases) — the same per-unit base the Volt-VAr characteristic
+    magnitude in volts is ``v_set_pu`` times the node's per-phase base
+    (``Node.u_rated_ln_v`` when set, else line-to-neutral ``u_rated_v/√3`` for a
+    three-phase node and the rated value itself below three phases) — the same per-unit base the Volt-VAr characteristic
     and the convergence diagnostics use, and numerically equal to pandapower's
     ``vm_pu``.
 
@@ -2106,14 +2178,19 @@ class Load(InjectionAppliance):
     ``appliance.load.default_connection`` otherwise (both default to WYE — the LV norm).
     For a WYE load the return path is the node's ``Phase.N`` row when that node carries a
     neutral (the 4-wire case), else ground (3-wire / solidly grounded). DELTA needs
-    ``len(phases) >= 2``; ZIGZAG is transformer-only. See
-    ``docs/pgml/modeling/asymmetric.md`` §2-4.
+    two or three phase conductors (no ``Phase.N``): on three phases it is a delta of
+    three elements, on two phases ONE phase-to-phase element (e.g. a 440 V load across
+    X1-X2 of a split-phase node, or across A-B), whose nominal voltage is the node's
+    ``u_rated_v`` and onto which per-phase values are summed. ZIGZAG is
+    transformer-only. See ``docs/pgml/modeling/asymmetric.md`` §2-4 and
+    ``docs/pgml/modeling/appliances.md``.
 
     *Harmonics.* ``spectrum`` is one harmonic current source applied to every phase
     (OpenDSS multi-phase Load semantics). ``spectrum_per_phase`` instead gives an
     ASYMMETRIC spectrum per phase (e.g. a single-phase EV charger distorting only phase
     A); the two are mutually exclusive. For a DELTA load a per-phase spectrum key
-    identifies the delta branch starting at that phase. See
+    identifies the delta branch starting at that phase (the single element of a
+    two-phase DELTA load keys off ``phases[0]``). See
     ``docs/pgml/modeling/asymmetric.md`` §5.
     """
 

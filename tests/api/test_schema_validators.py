@@ -13,6 +13,7 @@ from pgml.schemas import SCHEMA_VERSION
 from pgml.schemas.grid_schema import (
     ComplexTap,
     GenericBranch,
+    Node,
     Phase,
     ShuntReactor,
     Source,
@@ -340,3 +341,56 @@ def test_switch_rejects_contradicting_legacy_and_new_keys():
             default_closed=False,
         )
     assert "default_closed" in Switch.model_json_schema()["required"]
+
+
+# --- Node.u_rated_ln_v -----------------------------------------------------------
+@pytest.mark.parametrize(
+    "u,ln,phases",
+    [
+        (400.0, 400.0 / 3**0.5, (Phase.A, Phase.B, Phase.C)),
+        (400.0, 230.0, (Phase.A, Phase.B, Phase.C, Phase.N)),  # nameplate 400/230 V
+        (440.0, 220.0, (Phase.A, Phase.B, Phase.N)),  # split phase
+        (240.0, 120.0, (Phase.A, Phase.B)),
+        (400.0, 230.0, (Phase.A, Phase.C, Phase.N)),  # two phases of a 3-phase system
+        (230.0, 230.0, (Phase.A, Phase.N)),
+        (230.0, 230.0, (Phase.B,)),
+    ],
+)
+def test_node_accepts_consistent_phase_to_neutral_rating(u, ln, phases):
+    node = Node(id=1, u_rated_v=u, u_rated_ln_v=ln, phases=phases)
+    assert node.u_rated_ln_v == ln
+    again = Node.model_validate_json(node.model_dump_json())
+    assert again == node
+
+
+@pytest.mark.parametrize(
+    "u,ln,phases",
+    [
+        (440.0, 220.0, (Phase.A, Phase.B, Phase.C, Phase.N)),  # 2 needs two phases
+        (400.0, 400.0, (Phase.A, Phase.B, Phase.C)),
+        (440.0, 254.0, (Phase.A,)),
+        (400.0, 210.0, (Phase.A, Phase.B, Phase.N)),
+    ],
+)
+def test_node_rejects_inconsistent_phase_to_neutral_rating(u, ln, phases):
+    with pytest.raises(ValidationError, match="u_rated_ln_v"):
+        Node(id=1, u_rated_v=u, u_rated_ln_v=ln, phases=phases)
+
+
+def test_node_phase_to_neutral_rating_defaults_to_none_and_is_documented():
+    node = Node(id=1, u_rated_v=400.0, phases=(Phase.A, Phase.B, Phase.C))
+    assert node.u_rated_ln_v is None
+    assert "u_rated_ln_v" not in node.model_dump(exclude_none=True)
+    field = Node.model_json_schema()["properties"]["u_rated_ln_v"]
+    assert field["unit"] == {
+        "short": "V",
+        "long": "volt",
+        "reference": "phase-to-neutral",
+    }
+
+
+def test_node_phase_to_neutral_rating_skips_tensor_values():
+    torch = pytest.importorskip("torch")
+    ln = torch.tensor(100.0, dtype=torch.float64, requires_grad=True)
+    node = Node(id=1, u_rated_v=440.0, u_rated_ln_v=ln, phases=(Phase.A, Phase.B))
+    assert node.u_rated_ln_v is ln

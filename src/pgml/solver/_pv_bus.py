@@ -76,7 +76,7 @@ import torch
 from torch import Tensor
 
 from pgml import defaults
-from pgml.assembly._params import phase_voltage_magnitude
+from pgml.assembly._params import node_voltage_magnitude
 from pgml.assembly._symmetry import resolve_connection
 from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import (
@@ -397,9 +397,7 @@ def collect_pv_terminals(
         v0 = torch.stack(
             [
                 _as_real(
-                    phase_voltage_magnitude(
-                        node_map[a.node].u_rated_v, len(node_map[a.node].phases)
-                    ),
+                    node_voltage_magnitude(node_map[a.node]),
                     rdt,
                     device,
                 )

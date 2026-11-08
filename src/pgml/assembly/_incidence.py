@@ -39,8 +39,15 @@ meaningful for WYE only — a non-``'auto'`` value on a DELTA appliance raises.
   between phase ``k`` and phase ``(k+1) % 3``). Same matrix as pandapower's
   ``v_del_xfmn`` (reference doc section 2). Per-phase value ``k`` maps to delta
   branch ``k`` (documented convention).
-- DELTA, ``n != 3``: raises ``NotImplementedError`` (the schema already forbids
-  DELTA on 1 phase; open / 2-phase delta loads are not modeled yet).
+- DELTA, ``n == 2`` (a phase-to-phase appliance, e.g. across X1-X2 of a split-phase
+  node or across A-B of a three-phase node): ONE element, ``n_elem == 1``, used rows
+  the two phase rows, ``M = [[1, -1]]`` (element voltage ``V_p0 - V_p1``). Its
+  per-phase powers are summed onto the element
+  (:func:`pgml.assembly._params.resolve_operating_power`); a per-phase spectrum keys
+  off ``phases[0]``. This is OpenDSS's ``phases=1 conn=delta`` Load.
+- DELTA otherwise (one phase, a ``Phase.N`` among the phases, or more than three
+  phases) raises :class:`~pgml.errors.ModelingError`; the schema already forbids
+  DELTA on one phase.
 
 The matrices are real and constant (built once per group via ``torch.as_tensor``,
 then cast to complex for the ``Y`` block); ``index_add_`` / out-of-place scatter
@@ -78,7 +85,8 @@ class IncidenceGroup:
     appliances:
         The python schema objects in this group (deterministic order).
     n_elem:
-        Number of internal elements (== ``n_phases`` for WYE/DELTA-3).
+        Number of internal elements (``n_phases`` for WYE and DELTA-3, 1 for a
+        two-phase DELTA).
     n_used:
         Number of distinct node rows the incidence touches.
     """
@@ -106,6 +114,11 @@ def _group_key(appliance, node_phases) -> tuple:
     n = len(appliance.phases)
     return_path = getattr(appliance, "return_path", "auto")
     if conn == WindingConnection.DELTA:
+        if Phase.N in appliance.phases:
+            raise ModelingError(
+                f"appliance {appliance.id}: a DELTA appliance connects phase "
+                "conductors only; Phase.N in its phases is a WYE connection."
+            )
         if return_path != "auto":
             raise ModelingError(
                 f"appliance {appliance.id}: return_path={return_path!r} is meaningful "
@@ -134,7 +147,7 @@ def group_appliances(appliances, node_map) -> list[IncidenceGroup]:
 
     ``node_map`` maps node id -> node (for the ``Phase.N`` membership test, which is
     a property of the appliance's NODE, not its own phases). Raises for an
-    unsupported DELTA arity.
+    unsupported DELTA arity (anything but two or three phases).
     """
     by_key: dict[tuple, list] = {}
     for a in appliances:
@@ -144,12 +157,12 @@ def group_appliances(appliances, node_map) -> list[IncidenceGroup]:
 
     groups: list[IncidenceGroup] = []
     for (conn, n, has_neutral), group in by_key.items():
-        if conn == WindingConnection.DELTA and n != 3:
+        if conn == WindingConnection.DELTA and n not in (2, 3):
             raise ModelingError(
-                "open/2-phase delta load not supported yet; use WYE or a 3-phase "
-                f"DELTA (got a DELTA appliance with {n} phase(s))."
+                "a DELTA appliance connects two phases (one phase-to-phase element) "
+                f"or three (a delta of three elements); got {n} phase(s)."
             )
-        n_elem = n
+        n_elem = 1 if (conn == WindingConnection.DELTA and n == 2) else n
         n_used = n + 1 if has_neutral else n
         groups.append(
             IncidenceGroup(
@@ -187,11 +200,14 @@ def build_incidence(grp: IncidenceGroup, rdt: torch.dtype, device) -> Tensor:
     """Real incidence ``M`` ``[n_elem, n_used]`` for ``grp`` (constant topology).
 
     WYE-ground -> ``I_n``; WYE-neutral -> ``[I_n | -1]``; DELTA-3 -> the circulant
-    difference matrix (:func:`cyclic_delta_incidence`). Built with ``torch.as_tensor``
-    (no autograd through ``M``).
+    difference matrix (:func:`cyclic_delta_incidence`); two-phase DELTA -> the single
+    phase-to-phase row ``[[1, -1]]``. Built with ``torch.as_tensor`` (no autograd
+    through ``M``).
     """
     n = grp.n_phases
     if grp.connection == WindingConnection.DELTA:
+        if grp.n_elem == 1:
+            return torch.tensor([[1.0, -1.0]], dtype=rdt, device=device)
         return cyclic_delta_incidence(n, rdt, device)
     # WYE
     eye = torch.eye(n, dtype=rdt, device=device)

@@ -20,6 +20,8 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor
 
+from ._symmetry import connection_element_count
+
 
 class _SolvedPVOperatingPoint(dict):
     """Solver-produced device readout, not a prescribed per-phase Q override.
@@ -49,31 +51,80 @@ def _preserve_solved_pv_q(appliance, operating_point) -> bool:
 
 
 def phase_voltage_magnitude(
-    u_rated_v: float, n_phases: int, *, line_to_line: bool = False
+    u_rated_v: float,
+    n_phases: int,
+    *,
+    line_to_line: bool = False,
+    u_rated_ln_v: Optional[float] = None,
 ) -> float:
-    """Nominal element voltage magnitude ``V0`` for the const-Z / ZIP load model.
+    """Nominal element voltage magnitude ``V0`` of a node [V].
 
-    The schema stores ``Node.u_rated_v`` as line-to-line for 3-phase nodes and
-    line-to-neutral for 1-phase nodes.
+    The reference of the const-Z / const-I / ZIP load models, the harmonic load shunt
+    and every per-unit view. The schema stores ``Node.u_rated_v`` as line-to-line on a
+    node with three or more phase rows and line-to-neutral on a node with fewer, and
+    optionally the phase-to-neutral rating ``Node.u_rated_ln_v``.
 
-    - ``line_to_line=False`` (WYE, the default): a line-to-NEUTRAL element voltage —
-      divide by sqrt(3) when 3 (or more) phases are present (``u_rated`` for 1-phase
-      nodes is already L-N).
-    - ``line_to_line=True`` (DELTA): the element sees the full line-to-LINE voltage,
-      so return ``u_rated_v`` directly for a 3-phase node (no sqrt(3) division).
+    Parameters
+    ----------
+    u_rated_v:
+        ``Node.u_rated_v`` [V], a float or a tensor (passed through, so a tensor keeps
+        its autograd history).
+    n_phases:
+        Number of phase rows of the node (``len(node.phases)``; a ``Phase.N`` row
+        counts).
+    line_to_line:
+        ``False`` (a wye element, a per-row base): the phase-to-neutral voltage.
+        ``True`` (a delta element, phase to phase): ``u_rated_v`` itself.
+    u_rated_ln_v:
+        ``Node.u_rated_ln_v`` [V] or ``None``. When given it is the phase-to-neutral
+        voltage; otherwise ``u_rated_v/√3`` for ``n_phases >= 3`` and ``u_rated_v``
+        below.
 
+    Returns
+    -------
+    float or Tensor
+        The voltage magnitude [V], of the type of the value it came from.
+
+    Notes
+    -----
     Connection-aware per ``docs/pgml/modeling/asymmetric.md`` section 2 (OpenDSS
-    ``VBase``: wye 3-phase uses ``kVLL/sqrt(3)``; delta uses the supplied kV).
+    ``VBase``: wye three-phase uses ``kVLL/√3``; delta uses the supplied kV). A
+    four-wire ABCN node has four rows and is read line-to-line like ABC. Pass a node's
+    fields through ``pgml.assembly._params.node_voltage_magnitude`` to keep them together.
     """
     if line_to_line:
         return u_rated_v
-    # ``n_phases >= 3`` intentionally also covers a 4-wire ABCN node (4 phases):
-    # ``u_rated`` is the line-to-line value for ANY node with >= 3 phases, so a WYE
-    # element there sees ``u_rated / sqrt(3)`` regardless of whether a neutral row
-    # is modeled.
+    if u_rated_ln_v is not None:
+        return u_rated_ln_v
     if n_phases >= 3:
         return u_rated_v / math.sqrt(3.0)
     return u_rated_v
+
+
+def _plain_float(value) -> float:
+    """``float`` of a number or a one-element array-like (read out, off the tape)."""
+    if hasattr(value, "detach"):
+        return float(value.detach().reshape(-1)[0])
+    return float(value)
+
+
+def node_voltage_magnitude(node, *, line_to_line: bool = False, plain: bool = False):
+    """:func:`phase_voltage_magnitude` of a schema ``Node`` [V].
+
+    ``line_to_line=False`` gives the node's per-phase (phase-to-neutral) base,
+    ``True`` the voltage a delta (phase-to-phase) element on it sees. Tensor-valued
+    ratings pass through untouched (the value stays on the autograd tape);
+    ``plain=True`` reads them out as python floats first, for constant references
+    such as per-unit bases.
+    """
+    u = node.u_rated_v
+    ln = getattr(node, "u_rated_ln_v", None)
+    if plain:
+        u = _plain_float(u)
+        ln = None if ln is None else _plain_float(ln)
+    return phase_voltage_magnitude(
+        u, len(node.phases), line_to_line=line_to_line, u_rated_ln_v=ln
+    )
 
 
 def const_z_shunt_admittance(
@@ -145,7 +196,12 @@ def resolve_operating_power(
     *,
     asymmetric: bool = True,
 ) -> tuple[list[float], list[float]]:
-    """Per-phase (P, Q) operating point for a Load/Generator, length == phases.
+    """Per-element (P, Q) operating point of a Load/Generator/Storage.
+
+    One entry per connection element (:func:`~pgml.assembly._symmetry
+    .connection_element_count`): per phase for a wye or three-phase delta appliance,
+    a single entry for a two-phase delta appliance, whose per-phase values are summed
+    onto its one phase-to-phase element.
 
     Resolution order (when ``asymmetric=True``):
     1. ``operating_point[appliance.id]`` if given, a dict with ``p_w`` / ``q_var``
@@ -190,6 +246,14 @@ def resolve_operating_power(
             q_total = op["q_var"]
             q_per = None
 
+    if connection_element_count(appliance) != n:
+        # A two-phase DELTA appliance is ONE element between its two phases: its
+        # per-phase values (nameplate split or operating point) are summed onto it,
+        # and the symmetric/asymmetric split has nothing to distribute.
+        p_e = _tensor_sum(p_per) if p_per is not None else p_total
+        q_e = _tensor_sum(q_per) if q_per is not None else q_total
+        return [p_e], [q_e]
+
     if not asymmetric:
         # Symmetric calc: ignore per-phase data, split the total equally. Prefer an
         # explicit total; otherwise sum a per-phase spec back to a total with the
@@ -218,6 +282,7 @@ def resolve_operating_power(
 
 __all__ = [
     "phase_voltage_magnitude",
+    "node_voltage_magnitude",
     "const_z_shunt_admittance",
     "resolve_operating_power",
 ]

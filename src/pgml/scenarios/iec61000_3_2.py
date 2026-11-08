@@ -35,7 +35,7 @@ from typing import Optional
 
 import yaml
 
-from pgml.assembly._params import phase_voltage_magnitude
+from pgml.assembly._params import node_voltage_magnitude
 from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid
 
@@ -281,7 +281,7 @@ def iec61000_3_2_device_caps(
 
     Builds ``{device_id: {order: fraction}}`` for the given appliance ids, resolving
     each device's fundamental current from its nominal active power and its node's
-    line-to-neutral voltage (via :func:`pgml.assembly._params.phase_voltage_magnitude`,
+    line-to-neutral voltage (via :func:`pgml.assembly._params.node_voltage_magnitude`,
     the same convention the solver uses). When ``emission_class="auto"`` the class is
     resolved per device from its ``consumer_type`` (see :func:`resolve_emission_class`);
     otherwise the given concrete class applies to every device.
@@ -322,7 +322,7 @@ def iec61000_3_2_device_caps(
         # Total nominal active power as a plain float (off-tape sampling bound).
         p_total = float(dev.p_nom_w)
         p_phase = p_total / n_phase if n_phase else p_total
-        u_ln = phase_voltage_magnitude(float(node.u_rated_v), len(node.phases))
+        u_ln = node_voltage_magnitude(node, plain=True)
         cls = (
             resolve_emission_class(getattr(dev, "consumer_type", None), p_total)
             if str(emission_class).lower() == "auto"

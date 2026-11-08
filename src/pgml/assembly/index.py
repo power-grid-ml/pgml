@@ -128,23 +128,34 @@ def base_voltage_per_row(
     """Per-row line-to-neutral base voltage ``[N]``, aligned to :func:`node_phase_index`.
 
     The per-unit voltage reference for each node-phase row: dividing a state or residual
-    ``[..., N]`` by this puts it in per-unit. Uses the same connection-aware convention as
-    the solver (:func:`pgml.assembly._params.phase_voltage_magnitude`): ``Node.u_rated_v`` is
-    line-to-line for nodes with >= 3 phases (so the L-N base is ``u_rated / sqrt(3)``) and
-    already line-to-neutral for 1-phase nodes.
+    ``[..., N]`` by this puts it in per-unit. It is the node's per-phase base, the same
+    value the solver uses for wye elements
+    (:func:`pgml.assembly._params.node_voltage_magnitude`): ``Node.u_rated_ln_v`` when
+    the node sets it, otherwise ``u_rated_v/√3`` on a node with three or more phase rows
+    (``u_rated_v`` is line-to-line there) and ``u_rated_v`` on a node with fewer. A
+    split-phase node ``(X1, X2, N)`` therefore needs ``u_rated_ln_v`` (half its X1-X2
+    rating) for its rows to read 1 pu at nominal.
 
-    This is a fixed reference constant for normalization / per-unit reporting, NOT a value on
-    the differentiable path; if ``u_rated_v`` is a tracked tensor its scalar value is read
-    out. Row order matches :func:`node_phase_index`.
+    Parameters
+    ----------
+    grid:
+        The grid.
+    device, dtype:
+        Placement and real dtype of the result (default CPU, float64).
+
+    Returns
+    -------
+    Tensor
+        Real ``[N]`` in volts. A fixed reference constant for normalization and per-unit
+        reporting, NOT on the differentiable path: a tensor-valued rating is read out
+        as its scalar value.
     """
-    from ._params import phase_voltage_magnitude
+    from ._params import node_voltage_magnitude
 
     idx = node_phase_index(grid)
     base = torch.empty(idx.size, dtype=dtype)
     for node in grid.nodes:
-        u = node.u_rated_v
-        u = float(u.detach().reshape(-1)[0]) if hasattr(u, "detach") else float(u)
-        b = phase_voltage_magnitude(u, len(node.phases))
+        b = node_voltage_magnitude(node, plain=True)
         for row in idx.rows(node.id):
             base[row] = b
     return base.to(device) if device is not None else base
