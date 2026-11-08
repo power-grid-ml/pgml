@@ -425,10 +425,11 @@ Full documentation: the docstrings (published as the API reference).
 - `PHASE_MODES` — tuple
 - `PHASE_MODE_TAG` — str
 - class `SystemTotals(phase_mode, power_factor)` — Converts one grid's stored values to three-phase system quantities.
+- def `mark_legacy(grid: Grid) -> Grid` — Tag a grid written by an older converter as a line-to-line equivalent.
 - def `phase_mode_of(grid: Grid) -> Optional[str]` — The representation ``grid`` names in ``metadata.tags["phase_mode"]``.
 - def `positive_sequence_resistance_ohm_per_m(line: Line) -> float` — Per-conductor (positive-sequence) series resistance of ``line`` [Ohm/m].
 - def `system_totals(grid: Grid) -> SystemTotals` — The :class:`SystemTotals` reader for ``grid``.
-- def `to_per_phase_equivalent(grid: Grid) -> Grid` — Migrate a legacy one-phase grid to the per-phase equivalent and tag it.
+- def `to_per_phase_equivalent(grid: Grid, assume_legacy: bool = False) -> Grid` — Migrate a line-to-line single-phase equivalent to the per-phase equivalent.
 
 ## `pgml.scenarios`
 

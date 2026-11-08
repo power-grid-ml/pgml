@@ -27,6 +27,7 @@ or the ``PGML_IEC61000_3_2`` environment variable overrides it (e.g. a revised t
 
 from __future__ import annotations
 
+import math
 import os
 from functools import lru_cache
 from importlib.resources import files
@@ -35,8 +36,8 @@ from typing import Optional
 
 import yaml
 
-from pgml.assembly._params import phase_voltage_magnitude
 from pgml.errors import InputError
+from pgml.representation import _represented_phases, system_totals
 from pgml.schemas.grid_schema import Grid
 
 #: Environment variable pointing at a replacement limits file (optional override).
@@ -280,16 +281,20 @@ def iec61000_3_2_device_caps(
     """Per-device, per-order IEC 61000-3-2 emission fractions for a grid.
 
     Builds ``{device_id: {order: fraction}}`` for the given appliance ids, resolving
-    each device's fundamental current from its nominal active power and its node's
-    line-to-neutral voltage (via :func:`pgml.assembly._params.phase_voltage_magnitude`,
-    the same convention the solver uses). When ``emission_class="auto"`` the class is
-    resolved per device from its ``consumer_type`` (see :func:`resolve_emission_class`);
-    otherwise the given concrete class applies to every device.
+    each device's fundamental current from its nominal active power and the
+    line-to-neutral nominal of its node's voltage level. Both are read through
+    :func:`pgml.representation.system_totals`, so every representation of one network
+    (per-phase equivalent, three-phase build, as-built, ``"legacy_ll"``) gives the same
+    caps. When ``emission_class="auto"`` the class is resolved per device from its
+    ``consumer_type`` and its three-phase total nameplate (see
+    :func:`resolve_emission_class`); otherwise the given concrete class applies to every
+    device.
 
-    The per-phase current uses the device's total nominal power divided by its phase
-    count (single-phase equivalent), so Class A/B absolute (per-phase amperes) limits are
-    referenced correctly. The caps are plain floats (off the autograd tape) -- a sampling
-    bound, not a differentiable quantity.
+    The per-phase current uses the device's total nominal power divided by the live
+    conductors it stands for (three for a one-phase device of a single-phase equivalent,
+    otherwise its non-neutral phases), so Class A/B absolute (per-phase amperes) limits
+    are referenced correctly. The caps are plain floats (off the autograd tape) -- a
+    sampling bound, not a differentiable quantity.
 
     Parameters
     ----------
@@ -312,17 +317,17 @@ def iec61000_3_2_device_caps(
     dict
         ``{device_id: {order: fraction}}`` with every fraction in ``[0, 1]``.
     """
+    totals = system_totals(grid)
     nodes_by_id = {n.id: n for n in grid.nodes}
     appliances_by_id = {a.id: a for a in grid.appliances}
     caps: dict[int, dict[int, float]] = {}
     for cid in ids:
         dev = appliances_by_id[cid]
         node = nodes_by_id[dev.node]
-        n_phase = len(dev.phases)
-        # Total nominal active power as a plain float (off-tape sampling bound).
-        p_total = float(dev.p_nom_w)
-        p_phase = p_total / n_phase if n_phase else p_total
-        u_ln = phase_voltage_magnitude(float(node.u_rated_v), len(node.phases))
+        # Three-phase total nominal active power as a plain float (off-tape bound).
+        p_total = totals.total(dev.p_nom_w)
+        p_phase = p_total / _represented_phases(totals, node, dev.phases)
+        u_ln = totals.node_voltage_ll_v(node) / math.sqrt(3.0)
         cls = (
             resolve_emission_class(getattr(dev, "consumer_type", None), p_total)
             if str(emission_class).lower() == "auto"

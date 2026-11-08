@@ -532,7 +532,7 @@ def thevenin_from_sk(
 # =============================================================================
 # ``PHASE_MODE_TAG`` (``GridMetadata.tags`` key naming a grid's representation, value the
 # :class:`PhaseMode` value string) is defined in :mod:`pgml.representation`, which also
-# documents the legacy meaning of an untagged grid.
+# documents how an untagged and a ``legacy_ll`` grid are read.
 
 
 def make_metadata(

@@ -29,8 +29,8 @@ converter's convention handling changes.
   slack phasor in volts as the grid's node carries it (line-to-neutral under
   `SINGLE_PHASE_EQUIV`, line-to-line under `THREE_PHASE`; a `v_fixed` convenience).
   Every converted grid records `metadata.tags["phase_mode"]` (the `PhaseMode` value); an
-  untagged grid is legacy: one-phase nodes carry the line-to-line voltage and appliances
-  the three-phase totals.
+  untagged grid is read by the schema rule. Grids of older converters (one-phase nodes at
+  the line-to-line voltage, three-phase totals) carry `legacy_ll` (`mark_legacy`).
 - Line ratings: pandapower `max_i_ka·df·parallel`, pgm `i_n`, OpenDSS `NormAmps` are carried
   as `Grid.types.lines` `LineType.max_i_a` with `type_ref` on the line (`LineTypeCatalog` in
   `_common.py`; identical lines share a type, explicit matrices are kept). A grid's
@@ -101,8 +101,9 @@ converter's convention handling changes.
 - A grid tagged `phase_mode = single_phase_equiv` is one phase of a balanced system; the
   pandapower and pgm exporters first take `_export.system_view` (voltages x sqrt(3), powers
   and ratings x 3, the inverse of the inbound rule), so a round trip restores the system's
-  bus ratings, powers and currents. An untagged `(A,)` grid is exported as written
-  (line-to-line rating, totals).
+  bus ratings, powers and currents. Any other grid is exported as written: a `legacy_ll`
+  `(A,)` grid as the older converters wrote it (line-to-line rating, totals), an untagged
+  one by its stored values.
 - pandapower and pgm exports are fundamental-only and balanced: a consistent `(A,)` or
   `(A, B, C)` layout; partial-phase, mixed-layout and neutral-conductor grids raise
   `UnsupportedGridError`, as do unsupported elements. Harmonic fields (spectra, harmonic
