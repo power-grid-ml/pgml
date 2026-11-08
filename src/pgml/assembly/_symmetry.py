@@ -126,6 +126,20 @@ def resolve_connection(appliance) -> WindingConnection:
     return WindingConnection(defaults.get(key))
 
 
+def connection_element_count(appliance) -> int:
+    """Number of connection ELEMENTS of a Load/Generator/Storage.
+
+    One element per connected phase for a wye appliance (phase to neutral or ground)
+    and for a three-phase delta appliance (one per phase pair); ONE element for a
+    two-phase delta appliance, which sits between its two phases (a phase-to-phase
+    load such as a 440 V appliance across X1-X2 of a split-phase node).
+    """
+    n = len(appliance.phases)
+    if n == 2 and resolve_connection(appliance) == WindingConnection.DELTA:
+        return 1
+    return n
+
+
 def log_modeling_summary(grid: Grid, *, asymmetric: bool) -> None:
     """INFO-log the FINAL modeling: neutral handling + load connections + symmetry.
 
@@ -263,6 +277,7 @@ def log_synthesized_geometry_radius(lines) -> None:
 __all__ = [
     "resolve_asymmetric",
     "resolve_connection",
+    "connection_element_count",
     "log_modeling_summary",
     "log_line_models",
     "log_synthesized_geometry_radius",

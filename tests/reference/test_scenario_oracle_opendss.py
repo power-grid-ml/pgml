@@ -983,3 +983,122 @@ def test_four_wire_return_path_matched_tight():
     )
     for h, st in report["per_order"].items():
         assert st["rel_max"] < _MATCHED_REL_TOL, (h, st)
+
+
+def _phase_to_phase_grid() -> Grid:
+    """A 4-wire feeder with a two-phase DELTA load and a node rated 400/230 V."""
+    from pgml.schemas.grid_schema import Line
+
+    abcn = (Phase.A, Phase.B, Phase.C, Phase.N)
+
+    def mat(diag, off):
+        return [[diag if i == j else off for j in range(4)] for i in range(4)]
+
+    nodes = [
+        Node(id=0, u_rated_v=400.0, phases=abcn),
+        Node(id=1, u_rated_v=400.0, u_rated_ln_v=230.0, phases=abcn),
+    ]
+    line = Line(
+        id=10,
+        from_node=0,
+        to_node=1,
+        from_phases=abcn,
+        to_phases=abcn,
+        length_m=300.0,
+        series_resistance_ohm_per_m=mat(4.0e-4, 5.0e-5),
+        series_inductance_h_per_m=mat(9.0e-7, 3.0e-7),
+        shunt_capacitance_f_per_m=mat(0.0, 0.0),
+    )
+    src = Source(
+        id=1,
+        node=0,
+        phases=_ABC,
+        u_ref_v=[400.0 / 1.7320508] * 3,
+        u_angle_deg=[0.0, -120.0, 120.0],
+        resistance_ohm=[[0.05 if i == j else 0.0 for j in range(3)] for i in range(3)],
+        inductance_h=[[3.0e-4 if i == j else 0.0 for j in range(3)] for i in range(3)],
+    )
+    ld_ab = Load(
+        id=20,
+        node=1,
+        phases=(Phase.A, Phase.B),
+        connection=WindingConnection.DELTA,
+        p_nom_w=9.0e3,
+        q_nom_var=2.0e3,
+        p_nom_per_phase_w=(5.0e3, 4.0e3),
+        q_nom_per_phase_var=(1.0e3, 1.0e3),
+        load_model=LoadModel.CONST_CURRENT,
+    )
+    ld_c = Load(
+        id=21,
+        node=1,
+        phases=(Phase.C,),
+        p_nom_w=6.0e3,
+        q_nom_var=1.0e3,
+        load_model=LoadModel.CONST_IMPEDANCE,
+    )
+    n_ground = ShuntAppliance(
+        id=2, node=0, phases=(Phase.N,), conductance_s=(1.0e4,), capacitance_f=(0.0,)
+    )
+    return Grid(nodes=nodes, branches=[line], appliances=[src, ld_ab, ld_c, n_ground])
+
+
+def test_two_phase_delta_load_and_node_ln_rating_matched_tight():
+    """A two-phase DELTA load exports as a ``phases=1 conn=delta`` DSS Load (its
+    per-phase nameplate and per-phase scenario values summed onto the element), and a
+    wye constant-impedance load is referred to its node's ``u_rated_ln_v`` (230 V, not
+    400/√3 V, which would shift its admittance by 0.8 %); both match pgml."""
+    grid = _phase_to_phase_grid()
+    export_grid_to_opendss(grid)
+    dss.Text.Command("? Load.lo20.phases")
+    assert dss.Text.Result().strip() == "1"
+    dss.Text.Command("? Load.lo20.conn")
+    assert dss.Text.Result().strip().lower() == "delta"
+    dss.Text.Command("? Load.lo21_c.kV")
+    assert float(dss.Text.Result()) == pytest.approx(0.23)
+
+    cfg = ScenarioConfig(
+        n_samples=3,
+        seed=4,
+        parameters=[
+            ParameterSpec(
+                name="load_scale",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.6, high=1.4),
+                field="pq",
+                mode="scale",
+                per="each",
+            ),
+            ParameterSpec(
+                name="h_mag",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=0.1, high=0.4),
+                field="h_mag",
+                mode="absolute",
+                orders=[3, 5],
+                per="each",
+            ),
+            ParameterSpec(
+                name="h_phase",
+                selector=Selector(component="load"),
+                distribution=Uniform(low=-90.0, high=90.0),
+                field="h_phase",
+                mode="absolute",
+                orders=[3, 5],
+                per="each",
+            ),
+        ],
+    )
+    sampled = sample(grid, cfg)
+    # load_shunt="none": the harmonic shunt of a voltage-dependent load model is the
+    # documented divergence of test_const_current_zip_harmonic_matched_tight.
+    report = compare_to_pgml(
+        grid,
+        sampled,
+        harmonic_orders=[1, 3, 5],
+        mode="matched",
+        symmetry="asymmetric",
+        load_shunt="none",
+    )
+    for h, st in report["per_order"].items():
+        assert st["rel_max"] < _MATCHED_REL_TOL, (h, st)

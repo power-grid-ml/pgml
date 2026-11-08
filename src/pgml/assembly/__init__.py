@@ -25,10 +25,11 @@ Public surface (the modeling behind it: ``docs/pgml/modeling/``):
   device, param_overrides=None) -> list[BranchStampBlock]`` — the primitive
   admittance block and global rows of each named branch (the incidence structure
   a low-rank admittance update needs; see :mod:`pgml.solver.lowrank`).
-- ``phase_voltage_magnitude(u_rated_v, n_phases, *, line_to_line=False) -> float`` —
-  the nominal ELEMENT voltage magnitude behind every per-unit quantity: line-to-neutral
-  for a wye connection on a node whose ``u_rated_v`` is line-to-line, the full
-  line-to-line value for a delta one.
+- ``phase_voltage_magnitude(u_rated_v, n_phases, *, line_to_line=False,
+  u_rated_ln_v=None) -> float`` — the nominal ELEMENT voltage magnitude behind every
+  per-unit quantity: the node's phase-to-neutral rating (``u_rated_ln_v`` when given,
+  else ``u_rated_v/√3`` on a node with three or more phase rows) for a wye connection,
+  ``u_rated_v`` for a delta one.
 - ``build_injections(grid, frequencies_hz, index, *, dtype, device,
   operating_point, param_overrides=None) -> Tensor`` — Norton ``I`` ``[*batch, H, N]``.
 - ``device_current_injections(grid, v, index, frequencies_hz, *, dtype, device,

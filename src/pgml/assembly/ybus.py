@@ -91,7 +91,7 @@ from ._transformer_terminals import (
 from ._params import (
     _preserve_solved_pv_q,
     const_z_shunt_admittance,
-    phase_voltage_magnitude,
+    node_voltage_magnitude,
     resolve_operating_power,
 )
 from ._scatter import scatter_blocks_into
@@ -1473,9 +1473,10 @@ def _stamp_const_z_loads(
     WYE-to-ground reduces to ``M = I`` (the plain per-phase diagonal stamp,
     reproduced exactly);
     WYE-with-neutral uses ``[I|-1]`` (the neutral row receives the phase return);
-    DELTA-3 uses the circulant difference. ``asymmetric=False`` forces the equal split
-    inside ``resolve_operating_power``. ``V0`` is L-N for WYE and L-L for DELTA
-    (:func:`phase_voltage_magnitude`).
+    DELTA-3 uses the circulant difference, a two-phase DELTA the single
+    phase-to-phase row ``[1, -1]``. ``asymmetric=False`` forces the equal split
+    inside ``resolve_operating_power``. ``V0`` is the node's phase-to-neutral rating
+    for WYE and its ``u_rated_v`` for DELTA (:func:`node_voltage_magnitude`).
 
     Frequency dependence: the CONDUCTANCE ``G = P/|V0|^2`` is frequency-flat (a
     resistance), while the SUSCEPTANCE ``B = -Q/|V0|^2`` is the equivalent reactive
@@ -1503,9 +1504,7 @@ def _stamp_const_z_loads(
         elem_list = []
         for a in grp.appliances:
             node = node_map[a.node]
-            v0 = phase_voltage_magnitude(
-                node.u_rated_v, len(node.phases), line_to_line=is_delta
-            )
+            v0 = node_voltage_magnitude(node, line_to_line=is_delta)
             sign = 1.0 if isinstance(a, Load) else -1.0
             p_pp, q_pp = resolve_operating_power(
                 a, operating_point, asymmetric=asymmetric
@@ -2748,9 +2747,7 @@ def build_injection_plan(
             kind = "load" if isinstance(a, Load) else "generator"
             sign = 1.0 if isinstance(a, Load) else -1.0
             node = node_map[a.node]
-            v0 = phase_voltage_magnitude(
-                node.u_rated_v, len(node.phases), line_to_line=is_delta
-            )
+            v0 = node_voltage_magnitude(node, line_to_line=is_delta)
 
             # Resolve total / per-phase honoring operating_point, keeping tensors.
             p_total, q_total = a.p_nom_w, a.q_nom_var
@@ -2772,6 +2769,13 @@ def build_injection_plan(
                     p_total, p_per = _tensor_sum(p_per, rdt, device), None
                 solved_q = _preserve_solved_pv_q(a, operating_point)
                 if q_per is not None and not solved_q:
+                    q_total, q_per = _tensor_sum(q_per, rdt, device), None
+            if n_elem != len(a.phases):
+                # Two-phase DELTA: one element between the two phases carries the
+                # sum of the per-phase values (resolve_operating_power).
+                if p_per is not None:
+                    p_total, p_per = _tensor_sum(p_per, rdt, device), None
+                if q_per is not None:
                     q_total, q_per = _tensor_sum(q_per, rdt, device), None
 
             p_t = _override(
@@ -2840,9 +2844,7 @@ def build_injection_plan(
         for ki, a in enumerate(grp.appliances):
             sign = 1.0 if isinstance(a, Load) else -1.0
             node = node_map[a.node]
-            v0 = phase_voltage_magnitude(
-                node.u_rated_v, len(node.phases), line_to_line=is_delta
-            )
+            v0 = node_voltage_magnitude(node, line_to_line=is_delta)
             p_list, _q_list = resolve_operating_power(
                 a, operating_point, asymmetric=asymmetric
             )

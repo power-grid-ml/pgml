@@ -36,6 +36,7 @@ from typing import Optional
 
 import yaml
 
+from pgml.assembly._params import node_voltage_magnitude
 from pgml.errors import InputError
 from pgml.representation import _represented_phases, system_totals
 from pgml.schemas.grid_schema import Grid
@@ -282,11 +283,13 @@ def iec61000_3_2_device_caps(
 
     Builds ``{device_id: {order: fraction}}`` for the given appliance ids, resolving
     each device's fundamental current from its nominal active power and the
-    line-to-neutral nominal of its node's voltage level. Both are read through
-    :func:`pgml.representation.system_totals`, so every representation of one network
-    (per-phase equivalent, three-phase build, as-built, ``"legacy_ll"``) gives the same
-    caps. When ``emission_class="auto"`` the class is resolved per device from its
-    ``consumer_type`` and its three-phase total nameplate (see
+    phase-to-neutral nominal of its node: the per-phase base the solver uses
+    (:func:`pgml.assembly._params.node_voltage_magnitude`, ``Node.u_rated_ln_v`` when
+    set), or on a ``"legacy_ll"`` grid the line-to-line value over sqrt(3). Powers are
+    read through :func:`pgml.representation.system_totals`, so every representation of
+    one network (per-phase equivalent, three-phase build, as-built, ``"legacy_ll"``)
+    gives the same caps. When ``emission_class="auto"`` the class is resolved per device
+    from its ``consumer_type`` and its three-phase total nameplate (see
     :func:`resolve_emission_class`); otherwise the given concrete class applies to every
     device.
 
@@ -327,7 +330,10 @@ def iec61000_3_2_device_caps(
         # Three-phase total nominal active power as a plain float (off-tape bound).
         p_total = totals.total(dev.p_nom_w)
         p_phase = p_total / _represented_phases(totals, node, dev.phases)
-        u_ln = totals.node_voltage_ll_v(node) / math.sqrt(3.0)
+        if totals.legacy:
+            u_ln = totals.node_voltage_ll_v(node) / math.sqrt(3.0)
+        else:
+            u_ln = node_voltage_magnitude(node, plain=True)
         cls = (
             resolve_emission_class(getattr(dev, "consumer_type", None), p_total)
             if str(emission_class).lower() == "auto"

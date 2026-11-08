@@ -27,8 +27,9 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
   units (`uses_terminal_model` dispatch, `resolve_terminal_layout`, the centre-tap coil
   primitive). The group builder `_terminal_transformer_block_groups` is in `ybus.py`.
 - `_incidence.py` — terminal incidence `M` of WYE / WYE-neutral / DELTA appliances.
-- `_params.py` — `phase_voltage_magnitude`, const-Z shunt admittance,
-  `resolve_operating_power`.
+- `_params.py` — `phase_voltage_magnitude` and its node form `node_voltage_magnitude` (the
+  one place a node's element voltage / per-phase base is derived), const-Z shunt
+  admittance, `resolve_operating_power` (per ELEMENT).
 - `_symmetry.py` — symmetric/asymmetric resolution, connection defaults, the one-shot
   modeling-summary and line-model warnings.
 - `_control.py` — inverter control laws (constant PF, cosφ(P), Volt-VAr, Volt-Watt),
@@ -49,8 +50,9 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
   sum(len(node.phases))`. No padded (A,B,C,N) grid here; a padded/masked layout is a
   downstream ML-tensor concern.
 - Phase codes a=0, b=1, c=2, n=3.
-- `base_voltage_per_row` is line-to-neutral (`u_rated/√3` on ≥3-phase nodes, else
-  `u_rated`), a constant reference, not on the differentiable path.
+- `base_voltage_per_row` is line-to-neutral: `Node.u_rated_ln_v` when set, else
+  `u_rated/√3` on ≥3-row nodes and `u_rated` below; a constant reference, not on the
+  differentiable path. Grids without `u_rated_ln_v` keep their bases and results exactly.
 - Under fusion the reduced `NodePhaseIndex` maps (node, phase) → row MANY-TO-ONE; every
   stamp indexing through it accumulates `PᵀYP` and `PᵀI` directly. No reduction matrix and
   no full-size matrix is materialised.
@@ -68,8 +70,9 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
 - Device sign: `S0 = sign·(P + jQ)`, +1 load (consumes), −1 generator/storage. A const-Z
   ZIP solve reproduces the `assemble_ybus` system exactly; the nodal balance is
   `Y_eff·V = I_slack − I_device(V)`.
-- `V0` of a device element is line-to-neutral for WYE and line-to-line for DELTA
-  (`phase_voltage_magnitude(line_to_line=…)`).
+- `V0` of a device element is the node's phase-to-neutral rating for WYE and `u_rated_v` for
+  DELTA (`node_voltage_magnitude(node, line_to_line=…)`); never derive it from
+  `u_rated_v` and the phase count directly.
 - Branch current sign: positive INTO the branch terminal (matches
   `result_schema.BranchResult`). KCL invariant: scattering every `(i_from, i_to)` back to
   its rows equals `assemble_network_ybus(...).Y @ V` at every row.
@@ -131,9 +134,13 @@ accumulator raises on an off-pattern target instead of dropping it.
   conductance for an injecting device. A stored `harmonic_model` block does not override
   this (older grids carry a default block on every device); naming the `motor` model or
   setting `load_style` does.
-- Incidence: WYE to ground `M = I`; WYE on a `Phase.N` node `[I | −1]`; DELTA a cyclic
-  difference (n == 3 only; other DELTA raises). `return_path` (`auto` / `ground` /
-  `neutral`) is part of the grouping key.
+- Incidence: WYE to ground `M = I`; WYE on a `Phase.N` node `[I | −1]`; three-phase DELTA
+  a cyclic difference; two-phase DELTA ONE element `[1, −1]` (`n_elem = 1`), its per-phase
+  powers summed onto it (`resolve_operating_power`, the plan's `_tensor_sum`), a per-phase
+  spectrum keyed off `phases[0]`. Other DELTA (one phase, `Phase.N`, four phases) raises.
+  Every per-element quantity (powers, `param_overrides` `p_nom_per_phase_w` vectors,
+  spectra, control shares) has length `n_elem`, not `len(phases)`. `return_path`
+  (`auto` / `ground` / `neutral`) is part of the grouping key.
 - Zero-impedance branches are FUSED (exact), never replaced by a small impedance and never
   removed from the grid (`branch.zero_impedance: fuse`, `branch.switch_model: ideal`).
   Not fusable: transformers, and a zero-series branch with a shunt. Fusion and

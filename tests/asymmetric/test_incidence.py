@@ -1,7 +1,7 @@
 """Connection-aware terminal incidence ``M`` construction.
 
-Verifies the WYE-ground / WYE-neutral / DELTA-3 incidence matrices and the
-identity-reduction guarantee ``M^T diag(y) M == diag(y)`` for WYE-to-ground.
+Verifies the WYE-ground / WYE-neutral / DELTA-3 / two-phase DELTA incidence matrices
+and the identity-reduction guarantee ``M^T diag(y) M == diag(y)`` for WYE-to-ground.
 """
 
 from __future__ import annotations
@@ -115,19 +115,48 @@ def test_delta3_incidence_is_circulant():
     assert torch.allclose(m, expected)
 
 
-def test_delta_n2_raises():
+def test_two_phase_delta_is_one_phase_to_phase_element():
+    """A DELTA appliance on two phases is ONE element ``V_p0 - V_p1``."""
+    grp, grid = _grp(
+        _grid(
+            (Phase.B, Phase.C, Phase.N),
+            Load(
+                id=1,
+                node=1,
+                phases=(Phase.C, Phase.B),
+                p_nom_w=2000.0,
+                connection=WindingConnection.DELTA,
+            ),
+        )
+    )
+    assert (grp.n_phases, grp.n_elem, grp.n_used) == (2, 1, 2)
+    assert grp.has_neutral_return is False
+    m = build_incidence(grp, RDT, DEV)
+    assert torch.equal(m, torch.tensor([[1.0, -1.0]], dtype=RDT))
+    rows = used_rows(grp, node_phase_index(grid), DEV)
+    assert rows.tolist() == [[1, 0]]  # phases order: C then B
+
+
+@pytest.mark.parametrize(
+    "node_phases,phases",
+    [
+        ((Phase.A, Phase.N), (Phase.A, Phase.N)),
+        (ABCN, ABCN),
+    ],
+)
+def test_delta_on_neutral_or_four_phases_raises(node_phases, phases):
     grid = _grid(
-        (Phase.A, Phase.B),
+        node_phases,
         Load(
             id=1,
             node=1,
-            phases=(Phase.A, Phase.B),
+            phases=phases,
             p_nom_w=2000.0,
             connection=WindingConnection.DELTA,
         ),
     )
     node_map = {nd.id: nd for nd in grid.nodes}
-    with pytest.raises(NotImplementedError, match="open/2-phase delta"):
+    with pytest.raises(errors.ModelingError):
         group_appliances([grid.appliances[0]], node_map)
 
 

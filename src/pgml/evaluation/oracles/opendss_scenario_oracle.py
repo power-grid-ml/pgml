@@ -84,8 +84,11 @@ Generator/Storage without explicit internal impedance, exports as a native DSS
 ``Load`` (negative P/Q for generation); native internal-voltage DER instead retains
 its Generator/PVSystem/Storage class and passive harmonic impedance; a WYE appliance is exported as
 ONE single-phase ``Load`` PER PHASE, enabling per-phase P/Q scenario overrides a single
-balanced multi-phase element cannot express; a DELTA appliance exports as one multi-phase
-element and supports only a balanced total P/Q scenario override), ``ShuntAppliance``/
+balanced multi-phase element cannot express; a three-phase DELTA appliance exports as one
+multi-phase element and supports only a balanced total P/Q scenario override; a two-phase
+DELTA appliance exports as OpenDSS's one-element phase-to-phase ``Load`` (``phases=1
+conn=delta`` across its two conductors, ``kV`` = the node's ``u_rated_v``), onto which a
+per-phase nameplate or override is summed), ``ShuntAppliance``/
 ``ShuntReactor`` (WYE: a ``Capacitor`` for the C part + a diagonal-``Rmatrix`` ``Reactor``
 for the G part; DELTA ``ShuntAppliance``: a ``conn=delta`` ``Capacitor`` (per-leg ``Cuf``) +
 a ``conn=delta`` scalar-``R`` ``Reactor`` — an UNBALANCED delta bank is refused, OpenDSS's
@@ -123,9 +126,10 @@ Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
   finite earthing impedance, a centre tap): not written by this exporter. An explicit
   ``Transformer.zero_sequence`` override: a DSS two-winding Transformer has no
   zero-sequence impedance input.
-- A per-scenario per-phase P/Q override, or a per-phase nameplate, on a DELTA-connected
-  appliance — a "phase" of a delta device is a LEG between two bus phases, not a
-  independently-editable DSS sub-element; only the balanced total is supported.
+- A per-scenario per-phase P/Q override, or a per-phase nameplate, on a three-phase
+  DELTA-connected appliance — a "phase" of a delta device is a LEG between two bus
+  phases, not an independently-editable DSS sub-element; only the balanced total is
+  supported.
 - Any other branch/appliance schema type (there are none left uncovered today; a future
   schema addition would raise here rather than silently vanish).
 
@@ -278,7 +282,9 @@ class _ApplianceExport:
     ``kind="split"``: one single-phase WYE DSS element PER connected phase (``elements``
     keyed by :class:`Phase`) — supports both a balanced total and an independent
     per-phase scenario override. ``kind="whole"``: one multi-phase DELTA DSS element
-    (``elements={None: name}``) — balanced total only.
+    (``elements={None: name}``) — balanced total only. ``sums_phases`` marks the
+    one-element DSS ``phases=1 conn=delta`` Load of a two-phase DELTA appliance, onto
+    which a per-phase override is summed (pgml's own rule for that element).
 
     Pure terminal-current Generator/Storage models use a negative-P/Q native Load,
     with ``sign=-1``. Explicit native internal-voltage DER impedance uses the real
@@ -294,6 +300,7 @@ class _ApplianceExport:
     q_nom_pp: list
     dss_class: str
     sign: float = 1.0
+    sums_phases: bool = False
 
 
 @dataclass(frozen=True)
@@ -823,7 +830,7 @@ def _export_native_der(dss, a, node, busname, f0, *, mode) -> _ApplianceExport:
     The OpenDSS native model is balanced, scalar impedance and constant P/Q. A
     different physical source or frequency law is rejected, never silently changed.
     """
-    from pgml.assembly._params import phase_voltage_magnitude
+    from pgml.assembly._params import node_voltage_magnitude
 
     block = a.harmonic_impedance
     if (
@@ -867,12 +874,7 @@ def _export_native_der(dss, a, node, busname, f0, *, mode) -> _ApplianceExport:
         r, x = r / 3, x / 3
     p, q = to_float(a.p_nom_w), to_float(a.q_nom_var)
     kva = max(1.0, math.hypot(p, q) / 1000) * 2
-    kv = (
-        phase_voltage_magnitude(
-            to_float(node.u_rated_v), len(node.phases), line_to_line=n > 1
-        )
-        / 1000
-    )
+    kv = node_voltage_magnitude(node, line_to_line=n > 1, plain=True) / 1000
     zbase = kv * kv * 1000 / kva
     native_class = (
         "Storage"
@@ -961,7 +963,7 @@ def _export_injection_appliance(
     every later per-scenario edit -- carry the correct sign for DSS's consumption-positive
     ``Load`` convention while representing net injection).
     """
-    from pgml.assembly._params import phase_voltage_magnitude
+    from pgml.assembly._params import node_voltage_magnitude
 
     phases = a.phases
     n = len(phases)
@@ -981,8 +983,11 @@ def _export_injection_appliance(
     model, zipv = _dss_load_model(a)
     node_id = int(a.node)
 
+    two_phase_delta = is_delta and n == 2
     if is_delta:
-        if a.p_nom_per_phase_w is not None or a.q_nom_per_phase_var is not None:
+        if not two_phase_delta and (
+            a.p_nom_per_phase_w is not None or a.q_nom_per_phase_var is not None
+        ):
             raise ConversionError(
                 f"appliance {a.id}: an explicit per-phase P/Q nameplate on a "
                 "DELTA-connected appliance has no unambiguous single-element "
@@ -990,19 +995,17 @@ def _export_injection_appliance(
                 "between two bus phases); only a balanced total is supported "
                 "for a DELTA appliance in this exporter."
             )
-        kv = (
-            phase_voltage_magnitude(
-                to_float(node.u_rated_v), len(node.phases), line_to_line=True
-            )
-            / 1000.0
-        )
+        kv = node_voltage_magnitude(node, line_to_line=True, plain=True) / 1000.0
         name = f"{name_prefix}{a.id}"
         bus = f"{busname[node_id]}.{_bus_conductor_str(phases)}"
+        # A two-phase DELTA appliance is OpenDSS's one-element phase-to-phase Load
+        # (phases=1 conn=delta on the two conductors); kV is then the voltage
+        # across the element.
         _emit_pq_element(
             dss,
             name,
             bus,
-            n,
+            1 if two_phase_delta else n,
             kv,
             sign * p_total / 1000.0,
             sign * q_total / 1000.0,
@@ -1020,14 +1023,10 @@ def _export_injection_appliance(
             q_nom_pp=q_pp,
             dss_class="Load",
             sign=sign,
+            sums_phases=two_phase_delta,
         )
 
-    kv = (
-        phase_voltage_magnitude(
-            to_float(node.u_rated_v), len(node.phases), line_to_line=False
-        )
-        / 1000.0
-    )
+    kv = node_voltage_magnitude(node, plain=True) / 1000.0
     # WYE return conductor: mirror the assembly rule (_incidence) — an appliance
     # returns through the node's explicit neutral when return_path="neutral", or
     # "auto" on a Phase.N-carrying node; "ground" (or a node without Phase.N)
@@ -1086,7 +1085,7 @@ def _export_shunt(
     *,
     connection: WindingConnection = WindingConnection.WYE,
 ) -> None:
-    from pgml.assembly._params import phase_voltage_magnitude
+    from pgml.assembly._params import node_voltage_magnitude
 
     n = len(phases)
     g = [to_float(x) for x in conductance_s]
@@ -1106,12 +1105,7 @@ def _export_shunt(
                 "G/C) has no single balanced-bank OpenDSS representation; only a "
                 "balanced delta bank is exported."
             )
-        kv_ll = (
-            phase_voltage_magnitude(
-                to_float(node.u_rated_v), len(node.phases), line_to_line=True
-            )
-            / 1000.0
-        )
+        kv_ll = node_voltage_magnitude(node, line_to_line=True, plain=True) / 1000.0
         if abs(c[0]) > 1e-15:
             dss.Text.Command(
                 f"New Capacitor.{name}c phases={n} bus1={bus_str} kV={kv_ll:.10g} "
@@ -1124,12 +1118,7 @@ def _export_shunt(
             )
         return
 
-    kv_ln = (
-        phase_voltage_magnitude(
-            to_float(node.u_rated_v), len(node.phases), line_to_line=False
-        )
-        / 1000.0
-    )
+    kv_ln = node_voltage_magnitude(node, plain=True) / 1000.0
     if any(abs(x) > 1e-15 for x in c):
         cuf_str = " ".join(f"{x * 1.0e6:.10g}" for x in c)
         dss.Text.Command(
@@ -1415,6 +1404,14 @@ def _apply_pq(
     sign = exp.sign
     p_pp_key = entry.get("p_per_phase_w")
     q_pp_key = entry.get("q_per_phase_var")
+    if (p_pp_key is not None or q_pp_key is not None) and exp.sums_phases:
+        # One phase-to-phase element: the per-phase values add up onto it.
+        entry = dict(entry)
+        if p_pp_key is not None:
+            entry["p_w"] = sum(_scalar_at(x, b, t) for x in p_pp_key)
+        if q_pp_key is not None:
+            entry["q_var"] = sum(_scalar_at(x, b, t) for x in q_pp_key)
+        p_pp_key = q_pp_key = None
     if p_pp_key is not None or q_pp_key is not None:
         if exp.kind != "split":
             raise ConversionError(

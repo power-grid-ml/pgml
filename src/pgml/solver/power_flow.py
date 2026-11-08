@@ -4497,20 +4497,14 @@ def _phase_name(code: int) -> str:
 
 def _node_voltage_bases(grid: Grid, index, rdt, device) -> Tensor:
     """Per-row line-to-neutral voltage base ``[N]`` (the per-unit denominator)."""
-    from pgml.assembly._params import phase_voltage_magnitude
+    from pgml.assembly._params import node_voltage_magnitude
 
     # The base only scales the convergence test, the warm start and the diagnostics,
     # none of which is on the differentiable path (the gradient of a rated voltage
     # flows through the residual), so a tensor-valued rating is read detached. One
     # value per NODE, shared by its rows.
     base_by_node = {
-        int(nd.id): phase_voltage_magnitude(
-            float(nd.u_rated_v.detach())
-            if isinstance(nd.u_rated_v, Tensor)
-            else float(nd.u_rated_v),
-            len(nd.phases),
-        )
-        for nd in grid.nodes
+        int(nd.id): node_voltage_magnitude(nd, plain=True) for nd in grid.nodes
     }
     bases = [base_by_node[int(nid)] for nid in index.node_ids.tolist()]
     return torch.tensor(bases, dtype=rdt, device=device)
