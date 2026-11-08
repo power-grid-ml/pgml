@@ -80,7 +80,8 @@ A voltage or THD row of a per-phase equivalent (`metadata.tags["phase_mode"] ==
 "single_phase_equiv"`) stands for the three phase conductors of the system and counts three
 times in `S`, so `S` and every sensitivity are the same for a network stored as a per-phase
 equivalent, a three-phase build or an as-built phase-domain grid. (An untagged one-phase grid
-counts each row once: it may be a genuine single-phase circuit.)
+counts each row once: by the schema it is a genuine single-phase circuit. A `legacy_ll` grid
+counts each row once too.)
 
 `S` is continuously differentiable. It is zero, and so is every gradient, while every element
 stays below `c` of its limit. The onset therefore lies below 1, so an element approaching its
