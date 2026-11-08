@@ -28,6 +28,23 @@ reference is {mod}`pgml.studies`.
   a copy of the grid.
 - **Units are SI** (ohm, W, var, Hz); voltages are in per unit of each row's
   line-to-neutral rated voltage where a key ends in `_pu`.
+- **Powers are system powers.** Every power a study takes or reports in W or var
+  (`p_max_w`, `tol_w`, `p_cap_w`, `p_total_w`, `q_var`, `q_margin_var`, a transformer's
+  `s_rated_va` from {func}`~pgml.studies.branch_ratings`) and every sensitivity per kW or
+  kvar is the three-phase total, whatever representation the grid is stored in
+  (`metadata.tags["phase_mode"]`, see {doc}`../modeling/conventions`). A per-phase
+  equivalent stores a third of every power; the studies scale through
+  {func}`pgml.representation.system_totals`, so the same network gives the same numbers as a
+  per-phase equivalent, a three-phase build or an as-built phase-domain grid. Voltages stay
+  per unit, currents stay amperes per conductor, loadings stay fractions.
+- **Setpoints stay stored.** A `base_operating_point` mapping and an `operating_point`
+  (`{appliance_id: {"p_w", "q_var", ...}}`) set appliance powers and are in the grid's
+  stored units, like the appliance fields they replace: on a per-phase equivalent a third of
+  the device's three-phase power.
+- **Legacy grids** (no `phase_mode` tag, one-phase nodes at the line-to-line voltage with
+  three-phase totals) are read as stored. Their per-unit voltages and powers agree with the
+  other representations, but their branch currents are √3 too large, so line loading does
+  not; migrate them with {func}`pgml.representation.to_per_phase_equivalent`.
 - **Serialization.** Every result has `to_dict()`, JSON-ready with plain lists, ids and the
   unit in each key name (`z_positive_re_ohm`, `p_total_w`, `q_margin_var`, `p_max_w`), and
   `from_dict()`, its inverse. The top-level dict carries a `"study"` key naming the entry

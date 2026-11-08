@@ -89,7 +89,9 @@ its absolute currents are the system's, not the one-phase circuit's; read it in
 `THREE_PHASE` to keep the one-phase circuit's own values.
 
 Consumers read a grid through `pgml.representation` (`system_totals`, `phase_mode_of`);
-`to_per_phase_equivalent` migrates a legacy one-phase grid.
+`to_per_phase_equivalent` migrates a legacy one-phase grid. The planning studies
+({doc}`../studies/index`) take and report three-phase system powers in every
+representation; only appliance setpoint mappings stay in stored units.
 
 Every grid the pandapower, pgm and OpenDSS converters emit records its representation as
 `metadata.tags["phase_mode"]`, the `PhaseMode` value (`"single_phase_equiv"` or
