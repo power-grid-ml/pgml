@@ -53,8 +53,9 @@ stays physical that way, and a gradient lands on a physical parameter rather tha
 frequency-specific one.
 
 `Node.u_rated_v` is the line-to-line nameplate for a node with three or more phases, and the
-line-to-neutral value for a one-phase node. Every per-phase voltage inside the solver is
-line-to-neutral. {doc}`modeling/conventions` pins the full convention set and compares it
+line-to-neutral value for a one-phase node; the optional `Node.u_rated_ln_v` gives the
+phase-to-neutral rating where `u_rated_v/√3` is not it (a split-phase node). Every per-phase
+voltage inside the solver is line-to-neutral. {doc}`modeling/conventions` pins the full convention set and compares it
 with the reference tools.
 
 ## Branches are pi stamps

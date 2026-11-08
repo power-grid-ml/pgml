@@ -294,13 +294,17 @@ variant; and a Dyn1 unit with its LV star on the neutral row earthed through 0.3
 1.1e-11 pu at order 3; terminal, neutral and earth currents to 2.2e-8 A
 (`tests/reference/test_opendss_centre_tap_grounding.py`).
 
-A split-phase node has no single rated-voltage convention: `Node.u_rated_v` of a node with
-three conductor rows is read as line-to-line, while X1-N is half of X1-X2 rather than
-`1/√3` of it. Constant-power loads and the transformer are unaffected; a constant-impedance
-or constant-current load, a harmonic load shunt or a per-unit base on such a node uses
-`u_rated_v/√3` for a wye element and `u_rated_v` for a delta element. A load across X1-X2
-(a two-phase delta element) is not modelled yet; a resistive element across them can be
-entered as a two-phase `ShuntReactor`.
+**Split-phase nodes.** Behind a centre-tapped unit X1-N and X2-N are half of X1-X2, not
+`1/√3` of it. Rate the secondary nodes `(X1, X2, N)` with `u_rated_v` the X1-X2 voltage and
+`u_rated_ln_v` half of it (440 and 220 V, or 240 and 120 V): the half loads (wye on `(A,)` or
+`(B,)`) are then referred to 220 V and a load across X1-X2 (a two-phase delta appliance on
+`(A, B)`) to 440 V, and each row reads 1 pu at 220 V. Without `u_rated_ln_v` the node is read
+like a three-phase node, `u_rated_v/√3` per row, which leaves constant-power loads and the
+transformer unaffected but refers constant-impedance and constant-current loads, the harmonic
+load shunt and the per-unit base to 254 V. Validated against OpenDSS on this unit with a 440 V
+load across X1-X2 in every load model and constant-impedance half loads: 3.4e-10 pu at the
+fundamental, at most 9.2e-12 pu at order 3 (`tests/reference/test_opendss_delta_appliances.py`,
+{doc}`appliances`).
 
 ## OpenDSS mapping
 

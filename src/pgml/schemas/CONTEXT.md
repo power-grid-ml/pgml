@@ -48,6 +48,11 @@ Signatures: docstrings / API_INDEX.md.
 - Transformer zero-sequence and leakage data are referred to the to-side (LV) winding
   coil. A centre-tapped unit (`CentreTap`, 0.5.0) keeps `series_*` as the primary to
   FULL secondary short circuit; the half-winding values are in their own coil ohms.
+- `Node.u_rated_ln_v` (0.5.0, optional) is the phase-to-neutral rating and per-phase
+  base; unset keeps the old rule (`u_rated_v/√3` on ≥3 rows). With it set, `u_rated_v` of a
+  node with two phase conductors is the phase-to-phase voltage; the validator checks the
+  ratio (√3 / √3 or 2 / 1 by phase-conductor count, 2 %), floats only.
+- A two-phase DELTA appliance is one phase-to-phase element (0.5.0; earlier it raised).
 - Transformer star points (0.5.0): `Phase.N` may only be the LAST entry of a winding's
   phases and makes the star point that neutral row. `GroundingImpedance` is stamped;
   `r = x = 0` floats are solid, a tensor value is always an impedance.

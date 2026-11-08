@@ -42,10 +42,9 @@ incidence is experimental: it reproduces the clock shift, the blocked zero-seque
 and the winding's own zero-sequence path, and agrees with power-grid-model on an unbalanced
 solve, but no second reference tool can express the same unit as one two-winding element.
 Constructing one logs a warning once per process. General three-winding units are not
-modelled. On a split-phase (centre-tapped) node `Node.u_rated_v` cannot describe both the
-X1-N and the X1-X2 voltage, so a voltage-dependent load model or a per-unit base there uses the
-three-conductor convention; and a load across X1-X2 (a two-phase delta element) is not
-modelled.
+modelled. A split-phase (centre-tapped) node needs `Node.u_rated_ln_v` (half the X1-X2
+rating); without it a voltage-dependent load model and the per-unit base there use
+`u_rated_v/√3`.
 
 **Zero sequence.** The zero-sequence leakage is `Transformer.zero_sequence` when set (the
 pandapower converter reads `vk0_percent`/`vkr0_percent`), otherwise the
@@ -111,6 +110,14 @@ the physical model: a constant-impedance load and a constant-power inverter canc
 nominal voltage. On an LV feeder where each inverter mirrors its bus's load the two tools
 differ by 3.9e-3 pu at the affected buses, and agree to 5e-8 pu with the generation stopped.
 Keep this in mind when pandapower serves as ground truth for such a grid.
+
+**Delta appliances.** A delta appliance is either three elements on three phases or one
+phase-to-phase element on two phases ({doc}`appliances`). An open delta (two elements on
+three conductors, OpenDSS `Load phases=2 conn=delta`) is not an appliance form; enter it as
+two two-phase delta appliances. The OpenDSS reader converts a `phases=1 conn=delta` load as a
+wye load, and sets no `u_rated_ln_v` on an imported bus. A voltage-regulating generator on a
+delta connection and the `opendss_voltage` harmonic reference on a two-phase delta device
+raise.
 
 **Voltage limits of loads.** The schema has no load voltage-limit model. OpenDSS
 `Vminpu`/`Vmaxpu`/`Vlowpu` and CVR settings are not read; the converter warns when a

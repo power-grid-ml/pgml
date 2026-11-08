@@ -99,7 +99,9 @@ of the suite. Everything conforms to it. A schema change needs the maintainer's 
 - Compact node-phase indexing: one matrix row per existing `(node, phase)`
   (`assembly.node_phase_index`), not a padded A/B/C/N layout.
 - `Node.u_rated_v` is line-to-line for three-phase nodes; the solver's per-phase voltages are
-  line-to-neutral (`assembly._params.phase_voltage_magnitude`). The cross-tool record is
+  line-to-neutral. The optional `Node.u_rated_ln_v` (0.5.0) is the per-phase base where
+  `u_rated_v/√3` is not (split-phase nodes); one helper applies both
+  (`assembly._params.node_voltage_magnitude`). The cross-tool record is
   `docs/pgml/modeling/conventions.md`.
 - Reference-tool divergence: add an option and state the physics verdict; change a default
   only when pgml lacks the option.
