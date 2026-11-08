@@ -60,6 +60,21 @@ be violated at a small power, satisfied over a middle range and violated again; 
 doubling bracket can step over that structure, and the search reports the end of the
 first feasible interval it brackets, which need not be the first one.
 
+Powers are system powers
+------------------------
+Every power the study takes or reports (``p_max_w``, ``tol_w``, ``p_cap_w``, the 1 kW
+start and 1 TW ceiling of the bracket) is the three-phase SYSTEM power of the new device,
+the same number in every representation of a network: a per-phase equivalent
+(``metadata.tags["phase_mode"] == "single_phase_equiv"``, which stores a third of every
+power) gets the candidate's stored setpoint as the system power divided by three
+(:func:`pgml.representation.system_totals`), a three-phase, as-built or untagged grid
+stores it as is. The bisection itself runs in system watts, so its trial sequence does
+not depend on the representation. On a per-phase equivalent every device is balanced by
+construction: its one phase stands for all three, and ``phases="a"`` is the same device
+as ``"balanced"``. A custom ``base_operating_point`` mapping is the exception: it sets
+appliance setpoints and is in stored units, like the appliance fields it replaces.
+Voltages are per unit and loadings fractions, independent of the representation.
+
 The fundamental power flow is the default calculation. A harmonic
 :class:`~pgml.SimulationConfig` solves every scenario at its harmonic orders (order 1
 must be among them), which is what the ``thd_max`` limit needs; the line and
@@ -85,6 +100,7 @@ from torch import Tensor
 
 from pgml import defaults
 from pgml.errors import InputError
+from pgml.representation import system_totals
 from pgml.scenarios import batch_from_values
 from pgml.schemas.grid_schema import (
     Generator,
@@ -108,9 +124,10 @@ from .limits import HostingLimits, _LimitElements
 
 #: Sides a hosting-capacity study can add: new generation or new demand.
 _DIRECTIONS = ("generation", "load")
-#: First trial power of the doubling bracket when no search cap is given (W).
+#: First trial power of the doubling bracket when no search cap is given (W, system).
 _P_START_W = 1.0e3
-#: Largest power the doubling bracket tries; a candidate feasible there reports it (W).
+#: Largest power the doubling bracket tries; a candidate feasible there reports it
+#: (W, system power).
 _P_CEILING_W = 1.0e12
 #: Default bisection tolerance, relative to the candidate's upper bracket.
 _REL_TOL = 1.0e-3
@@ -137,8 +154,8 @@ class HostingCapacity:
     direction:
         ``"generation"`` or ``"load"``.
     p_max_w:
-        ``[n]`` float64, W: the largest added active power (total over the device's
-        phases) at which every limit was verified (a limit already violated in the base
+        ``[n]`` float64, W: the largest added active power (three-phase system power,
+        see :mod:`pgml.studies.hosting`) at which every limit was verified (a limit already violated in the base
         case: not made worse, see :mod:`pgml.studies.hosting`). ``0`` when even a small
         addition violates a limit, and when the base case does not converge. Exactly
         :attr:`p_cap_w` for a candidate that reached no limit.
@@ -163,10 +180,11 @@ class HostingCapacity:
         ``[n]`` int64: power flows solved for that candidate (base case excluded); one
         batched solve serves every open candidate.
     p_cap_w:
-        Search cap in W: ``p_max_w`` as given, else the doubling ceiling (1 TW).
+        Search cap in W (system power): ``p_max_w`` as given, else the doubling ceiling
+        (1 TW).
     tol_w:
-        ``[n]`` float64, W: bisection tolerance per candidate; ``p_max_w`` is within it
-        of the limit. ``NaN`` where no bisection ran (base case not converged).
+        ``[n]`` float64, W (system power): bisection tolerance per candidate;
+        ``p_max_w`` is within it of the limit. ``NaN`` where no bisection ran (base case not converged).
     base_case_feasible:
         Whether the base operating point (no new device) converges and keeps every
         limit, i.e. ``base_violations`` is empty.
@@ -366,6 +384,8 @@ class _Study:
         # 1e-8 pu tolerance, or the resolution of single precision.
         self.tie_tol = max(1.0e-7, 100.0 * torch.finfo(self.real).eps)
         self.base_values = base_values
+        # Stored setpoint per watt of system power: 1/3 on a per-phase equivalent.
+        self.stored_per_system_w = 1.0 / system_totals(grid).power_factor
         self.harmonic = config.calculation == "harmonic"
         self.orders = [int(o) for o in config.harmonic_orders] if self.harmonic else [1]
         self.h1 = self.orders.index(1)
@@ -430,7 +450,8 @@ class _Study:
         self.base_violated = base.excess[0] > 0.0
 
     def evaluate(self, trial_w: np.ndarray, cand: np.ndarray) -> _Evaluation:
-        """Scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W, in budget slices."""
+        """Scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W (system power), in
+        budget slices."""
         n = int(trial_w.shape[0])
         step = self.batch_size
         return _Evaluation.concat(
@@ -443,7 +464,9 @@ class _Study:
     def _evaluate_slice(self, trial_w: np.ndarray, cand: np.ndarray) -> _Evaluation:
         """Solve one batch, scenario ``k`` = candidate ``cand[k]`` at ``trial_w[k]`` W."""
         b = int(trial_w.shape[0])
-        p = torch.as_tensor(trial_w, dtype=self.real, device=self.device)
+        p = torch.as_tensor(
+            trial_w * self.stored_per_system_w, dtype=self.real, device=self.device
+        )
         # [B, B]: column k is candidate cand[k]'s power in every scenario of the batch
         p_diag = torch.diag(p)
         q_diag = p_diag * self.q_per_w
@@ -669,12 +692,15 @@ def hosting_capacity(
         nothing and the loads draw nameplate; storage keeps its nameplate setpoint.
         ``"nameplate"``: every device at nameplate. A mapping ``{appliance_id: {"p_w",
         "q_var", "p_per_phase_w", "q_per_phase_var"}}`` (W, var; any subset) overrides
-        the named devices on top of nameplate.
+        the named devices on top of nameplate. Its values are in the grid's stored
+        units, like the appliance fields they replace: on a per-phase equivalent a
+        third of the device's three-phase power.
     phases:
         ``"balanced"`` (default): the device connects WYE to every phase conductor of
         its bus and the power splits equally. ``"a"``, ``"b"`` or ``"c"``: a
         single-phase device on that phase (to neutral where the bus has one, else to
-        ground); every candidate must carry the phase.
+        ground); every candidate must carry the phase. On a per-phase equivalent the
+        one phase stands for all three, so every device is balanced.
     power_factor:
         Power factor of the new device, ``0 < |power_factor| <= 1``. Positive: the
         reactive power flows with the active power (a generator injects ``Q``,
@@ -682,10 +708,13 @@ def hosting_capacity(
         absorbs ``Q``, under-excited, the usual voltage-rise countermeasure; a load is
         capacitive). ``Q = sign(pf) * P * tan(arccos|pf|)``.
     p_max_w:
-        Search cap in W (total over the device's phases). ``None``: no cap, the bracket
-        doubles from 1 kW until a limit is violated, up to 1 TW (``p_cap_w``).
+        Search cap in W, three-phase system power (the total over the device's phases;
+        on a per-phase equivalent three times what its one phase carries). ``None``: no
+        cap, the bracket doubles from 1 kW until a limit is violated, up to 1 TW
+        (``p_cap_w``).
     tol_w:
-        Bisection tolerance in W. ``None``: 0.1 % of each candidate's upper bracket.
+        Bisection tolerance in W of system power. ``None``: 0.1 % of each candidate's
+        upper bracket.
     harmonic_emission:
         Harmonic current spectrum of the new device, ``{order: (magnitude_pu,
         phase_deg)}`` in per unit of its own fundamental current (the format of
@@ -704,7 +733,8 @@ def hosting_capacity(
     Returns
     -------
     HostingCapacity
-        Host numpy arrays, one entry per candidate in ``candidates`` order.
+        Host numpy arrays, one entry per candidate in ``candidates`` order; powers in
+        W of three-phase system power, the same in every representation of a network.
 
     Notes
     -----

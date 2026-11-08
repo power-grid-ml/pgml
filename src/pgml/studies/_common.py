@@ -11,7 +11,9 @@ from pgml.errors import InputError
 from pgml.schemas.grid_schema import Generator, Grid, Load, Phase, Source
 
 #: A study's base operating point: ``None`` / ``"worst_case"``, ``"nameplate"``, or a
-#: mapping ``{appliance_id: {"p_w", "q_var", "p_per_phase_w", "q_per_phase_var"}}``.
+#: mapping ``{appliance_id: {"p_w", "q_var", "p_per_phase_w", "q_per_phase_var"}}`` in
+#: the grid's STORED units (the appliance's own setpoint fields, see
+#: :func:`base_operating_values`).
 BaseOperatingPoint = Union[None, str, Mapping[int, Mapping[str, Any]]]
 
 _COMPLEX_DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
@@ -89,6 +91,12 @@ def base_operating_values(
     injects nothing and the loads draw nameplate. Storage keeps its nameplate setpoint in
     both. ``"nameplate"``: every device at nameplate. A mapping: ``{appliance_id:
     {"p_w", "q_var", "p_per_phase_w", "q_per_phase_var"}}`` overrides on nameplate.
+
+    A mapping is in the grid's stored units, like the appliance fields it replaces
+    (``p_nom_w``, ``q_nom_var``, ``p_nom_per_phase_w``, ``q_nom_per_phase_var``) and the
+    ``operating_point`` of :func:`~pgml.scenarios.batch_from_values`: on a per-phase
+    equivalent (``metadata.tags["phase_mode"] == "single_phase_equiv"``) one third of
+    the device's three-phase power. It is passed through unscaled.
 
     Returns ``(label, values)``: ``label`` is ``"worst_case"``, ``"nameplate"`` or
     ``"custom"``; ``values`` maps each of the four keys to ``{appliance_id: tensor}``

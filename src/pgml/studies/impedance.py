@@ -505,9 +505,11 @@ def impedance_scan(
         convergence settings.
     operating_point:
         ``{appliance_id: {"p_w", "q_var"} | {"p_per_phase_w", "q_per_phase_var"}}``
-        powers the device shunts are built from. Replaces ``config.operating_point``
-        when given; ``None`` falls back to it, then to the nameplate. Not modified. A
-        batched (scenario) operating point is not supported.
+        powers the device shunts are built from, in the grid's stored units like the
+        appliance fields they replace (on a per-phase equivalent a third of the
+        three-phase power). Replaces ``config.operating_point`` when given; ``None``
+        falls back to it, then to the nameplate. Not modified. A batched (scenario)
+        operating point is not supported.
     load_shunt:
         Load model in ``Y(f)``: ``"opendss"`` (the operating-point admittance split
         into a parallel and a series R-L branch), ``"motor"`` (fixed blocked-rotor

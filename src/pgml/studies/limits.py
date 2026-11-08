@@ -19,6 +19,7 @@ from torch import Tensor
 from pgml.assembly import base_voltage_per_row, node_phase_index
 from pgml.errors import InputError
 from pgml.geometry.sequence import fortescue_matrix
+from pgml.representation import system_totals
 from pgml.schemas.grid_schema import Grid, Line, Phase, Transformer
 
 from ._common import live_phases
@@ -36,7 +37,8 @@ class BranchRating(NamedTuple):
         Ampacity in A (per conductor), set for a :class:`~pgml.schemas.grid_schema.Line`
         whose catalog type declares ``max_i_a``.
     s_rated_va:
-        Rated apparent power in VA (three-phase total), set for a
+        Rated apparent power in VA, the three-phase total in every grid
+        representation (a per-phase equivalent stores a third of it), set for a
         :class:`~pgml.schemas.grid_schema.Transformer`.
     """
 
@@ -60,7 +62,10 @@ def branch_ratings(grid: Grid) -> dict[int, BranchRating]:
       ``type_ref`` names (``grid.types.lines``); a line with explicit parameters and no
       ``type_ref`` reports no ampacity;
     - a :class:`~pgml.schemas.grid_schema.Transformer` takes its own ``s_rated_va`` or,
-      when that is unset, the one of its catalog type (``grid.types.transformers``);
+      when that is unset, the one of its catalog type (``grid.types.transformers``),
+      reported as the three-phase total
+      (:func:`pgml.representation.system_totals`: three times the stored value on a
+      per-phase equivalent, the stored value otherwise);
     - every other branch kind (switch, generic branch, shunt reactor) reports neither.
 
     Every branch is listed, in service or not, so a caller can tell "no rating" from
@@ -75,8 +80,10 @@ def branch_ratings(grid: Grid) -> dict[int, BranchRating]:
     -------
     dict[int, BranchRating]
         ``{branch_id: BranchRating(i_max_a, s_rated_va)}`` in ``grid.branches`` order;
-        values are plain floats in A and VA, or ``None``.
+        values are plain floats in A (per conductor) and VA (three-phase total), or
+        ``None``.
     """
+    totals = system_totals(grid)
     ratings: dict[int, BranchRating] = {}
     for branch in grid.branches:
         i_max_a: Optional[float] = None
@@ -93,7 +100,7 @@ def branch_ratings(grid: Grid) -> dict[int, BranchRating]:
                 if transformer_type is not None:
                     rated = transformer_type.s_rated_va
             if rated is not None:
-                s_rated_va = _as_float(rated)
+                s_rated_va = totals.total(_as_float(rated))
         ratings[int(branch.id)] = BranchRating(i_max_a=i_max_a, s_rated_va=s_rated_va)
     return ratings
 
@@ -121,8 +128,11 @@ class HostingLimits:
     transformer_loading:
         Largest allowed transformer loading as a fraction of its rated power: the
         per-phase current times the terminal node's nominal line-to-neutral voltage,
-        against ``s_rated_va`` divided by the number of phase conductors, at both
-        terminals (the current-based loading pandapower reports).
+        against the rated power per phase conductor, at both terminals (the
+        current-based loading pandapower reports). The rated power per conductor is the
+        three-phase rating (:func:`branch_ratings`) over the number of phase conductors
+        it covers: the terminal's phase conductors, three times that on a per-phase
+        equivalent, whose one conductor stands for three.
     vuf_max:
         Largest voltage unbalance factor ``|V2| / |V1|`` (fraction, e.g. 0.02) at nodes
         that carry phases a, b and c.
@@ -199,14 +209,18 @@ class _LimitElements:
     Elements, each in grid order:
 
     - ``live_desc``: ``(node_id, phase)`` of every phase conductor (rows of ``v_pu``,
-      ``thd``);
+      ``thd``); on a per-phase equivalent each row stands for
+      ``conductors_per_row = 3`` conductors of the system (``1`` in every other
+      representation, :func:`pgml.representation.system_totals`);
     - ``abc_nodes``: nodes carrying phases a, b and c (rows of ``vuf``);
     - ``lines``: ``(branch_id, i_max_a, live_from, live_to)`` of every in-service line
       with an ampacity (:func:`branch_ratings`); ``neutral_lines`` the subset with a
       neutral conductor at either terminal;
     - ``transformers``: ``(branch_id, terminals)`` of every in-service rated
-      transformer, ``terminals`` the ``(phase mask, u_ln * n_live / s_rated)`` pair of
-      the from and the to terminal.
+      transformer, ``terminals`` the ``(phase mask, u_ln * n_covered / s_rated)`` pair
+      of the from and the to terminal: ``s_rated`` the three-phase rating,
+      ``n_covered`` the phase conductors it is shared by (the terminal's, times the
+      representation's power factor, :func:`pgml.representation.system_totals`).
     """
 
     def __init__(self, grid: Grid) -> None:
@@ -234,6 +248,8 @@ class _LimitElements:
         self.abc_nodes = [n.id for n in abc_nodes]
 
         ratings = branch_ratings(grid)
+        # Phase conductors one stored row stands for: 3 on a per-phase equivalent.
+        self.conductors_per_row = system_totals(grid).power_factor
         self.lines = []
         for b in grid.branches:
             if not (isinstance(b, Line) and b.in_service and ratings[b.id].i_max_a):
@@ -257,10 +273,10 @@ class _LimitElements:
                 (b.to_node, b.to_phases),
             ):
                 mask = torch.tensor([p != Phase.N for p in phases])
-                n_live = int(mask.sum())
+                n_covered = int(mask.sum()) * self.conductors_per_row
                 u_ln = float(base[index.row(node_id, live_phases(phases)[0])])
-                # loading = |I| * U_ln * n_live / S_rated per phase conductor
-                terminals.append((mask, u_ln * n_live / s_rated))
+                # loading = |I| * U_ln / (S_rated / n_covered) per phase conductor
+                terminals.append((mask, u_ln * n_covered / s_rated))
             self.transformers.append((b.id, terminals))
 
     def evaluate(

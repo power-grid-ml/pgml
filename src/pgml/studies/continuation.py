@@ -54,6 +54,20 @@ magnitude as well and injects into the phase rows only (no neutral return): the 
 regulating terminals are wye-to-ground, and holding a phase-to-neutral voltage would need a
 terminal that returns through the neutral row, which they do not support.
 
+Powers
+------
+Reported powers (:attr:`PVCurve.p_total_w`, :attr:`QVCurve.q_var`,
+:attr:`QVCurve.q_phase_var`, :attr:`QVCurve.q_margin_var`) are three-phase SYSTEM powers in
+every representation of a network: on a per-phase equivalent
+(``metadata.tags["phase_mode"] == "single_phase_equiv"``, which stores a third of every
+power) the solved power of its one phase is multiplied by three
+(:func:`pgml.representation.system_totals`); three-phase, as-built and untagged grids
+report what they solve. The one held phase of a per-phase equivalent's Q-V curve stands
+for all three, so its ``q_phase_var`` column is the system total too and
+``q_var = q_phase_var.sum(axis=1)`` holds in every representation. Inputs that set powers
+(``config.operating_point``) are appliance setpoints in the grid's stored units, like the
+appliance fields they replace.
+
 Outputs are host numpy arrays; neither study is differentiable (both run detached), and
 neither mutates its inputs. Every tensor operation honours ``device`` and ``dtype``
 (complex64 or complex128); a single grid and a single operating point per call.
@@ -64,7 +78,7 @@ from __future__ import annotations
 import logging
 import math
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Iterable, Iterator, Literal, Optional, Union
 
 import numpy as np
@@ -72,6 +86,7 @@ import torch
 from torch import Tensor
 
 from pgml.errors import ConvergenceError, InputError
+from pgml.representation import system_totals
 from pgml.schemas.grid_schema import (
     ApplianceBase,
     Generator,
@@ -110,7 +125,8 @@ class PVCurve:
         point. Increases up to the nose and decreases after it.
     p_total_w:
         Total active power of the scaled appliances at each point ``[K]`` [W], at the
-        solved voltage (``λ · P_base`` for constant-power appliances). Consumption is
+        solved voltage (``λ · P_base`` for constant-power appliances); three-phase
+        system power in every representation (module documentation, "Powers"). Consumption is
         positive for ``direction="load"``, generation is positive for
         ``direction="generation"``.
     v_pu:
@@ -262,16 +278,18 @@ class QVCurve:
         documentation, "Voltage convention").
     q_var:
         Total reactive power the fictitious source injects ``[K]`` [var] (positive =
-        injected into the grid, i.e. capacitive support); ``NaN`` where the power flow
-        did not converge.
+        injected into the grid, i.e. capacitive support), three-phase system power
+        (module documentation, "Powers"); ``NaN`` where the power flow did not
+        converge.
     q_phase_var:
-        The same per held phase ``[K, P]`` [var].
+        The same per held phase ``[K, P]`` [var]. On a per-phase equivalent the one
+        held phase stands for all three and carries the system total.
     converged:
         Per setpoint ``[K]`` (bool).
     q_margin_var:
-        Reactive power margin ``−min(q_var)`` [var]: how much reactive LOAD the bus can
-        take before the voltage collapses (negative: the bus needs that much reactive
-        support to operate at all). ``None`` when no point converged.
+        Reactive power margin ``−min(q_var)`` [var, system power]: how much reactive
+        LOAD the bus can take before the voltage collapses (negative: the bus needs that
+        much reactive support to operate at all). ``None`` when no point converged.
     v_at_min_pu:
         Voltage at the minimum of the curve [pu].
     minimum_in_range:
@@ -466,7 +484,7 @@ def pv_curve(
     ids = _select(grid, selector, direction)
     with _quiet_pgml():
         problem = _problem(grid, cfg, cdt, device, scaled_ids=ids)
-        return _Tracer(problem).trace(
+        curve = _Tracer(problem).trace(
             ids=ids,
             direction=direction,
             lambda_start=float(lambda_start),
@@ -479,6 +497,8 @@ def pv_curve(
             stop_at_nose=bool(stop_at_nose),
             start_max_iter=int(cfg.max_iter),
         )
+    to_system = system_totals(grid).power_factor
+    return replace(curve, p_total_w=curve.p_total_w * to_system)
 
 
 def qv_curve(
@@ -572,6 +592,7 @@ def qv_curve(
                     q_phase[k] = problem.source_q_per_phase(v).cpu().numpy()
                     conv[k] = True
                     v_prev, sp_prev = v, float(setpoints[k])
+    q_phase *= system_totals(grid).power_factor
     q = q_phase.sum(axis=1)
     q[~conv] = np.nan
     q_min, v_min, inside = _curve_minimum(setpoints, q, conv)
