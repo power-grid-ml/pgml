@@ -174,6 +174,7 @@ accumulator raises on an off-pattern target instead of dropping it.
 ## Cross-package surface
 
 `node_phase_index`, `NodePhaseIndex`, `base_voltage_per_row`, `phase_voltage_magnitude`,
+`node_voltage_magnitude` (the form consumers should use for a schema node),
 `branch_currents` / `BranchCurrent`, `branch_stamp_blocks`, `assemble_network_ybus`,
 `assemble_ybus`, `build_injections`, `device_current_injections` (consumed by pgl, pgd,
 pgg). Consumers import only from `pgml.assembly`, never private modules.

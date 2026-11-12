@@ -41,7 +41,8 @@ phase-to-phase voltage against the full rating.
 ## Rated voltage of an element
 
 The load models refer to a nominal element voltage `V0`, taken from the host node
-({func}`pgml.assembly.phase_voltage_magnitude`):
+({func}`pgml.assembly.node_voltage_magnitude`; {func}`pgml.assembly.phase_voltage_magnitude`
+computes it from the two rating fields):
 
 - a wye element (and every per-phase base, see below) uses the node's phase-to-neutral
   rating: `Node.u_rated_ln_v` when it is set, otherwise `u_rated_v/√3` on a node with three or

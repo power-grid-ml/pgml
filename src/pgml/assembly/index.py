@@ -130,7 +130,7 @@ def base_voltage_per_row(
     The per-unit voltage reference for each node-phase row: dividing a state or residual
     ``[..., N]`` by this puts it in per-unit. It is the node's per-phase base, the same
     value the solver uses for wye elements
-    (:func:`pgml.assembly._params.node_voltage_magnitude`): ``Node.u_rated_ln_v`` when
+    (:func:`pgml.assembly.node_voltage_magnitude`): ``Node.u_rated_ln_v`` when
     the node sets it, otherwise ``u_rated_v/√3`` on a node with three or more phase rows
     (``u_rated_v`` is line-to-line there) and ``u_rated_v`` on a node with fewer. A
     split-phase node ``(X1, X2, N)`` therefore needs ``u_rated_ln_v`` (half its X1-X2

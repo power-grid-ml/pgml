@@ -75,7 +75,7 @@ converter's convention handling changes.
 - Voltage base: `Node.u_rated_v` is line-to-line for a node with three or more phases and
   line-to-neutral below (what `SINGLE_PHASE_EQUIV` writes);
   every per-phase working voltage is line-to-neutral, derived only by
-  `assembly._params.phase_voltage_magnitude`. Under `THREE_PHASE` `build_source` divides
+  `assembly.phase_voltage_magnitude`. Under `THREE_PHASE` `build_source` divides
   the L-L `u_ref_v` by sqrt(3); pinning the L-L magnitude per phase is the classic
   sqrt(3) error. OpenDSS `Bus.kVBase()` is L-N and is recovered as `kVBase*sqrt(3)*1000`.
 - Transformer leakage is stored TO-coil-referred (x3 for a DELTA to-winding) in BOTH phase

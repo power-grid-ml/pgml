@@ -11,6 +11,7 @@ pp = pytest.importorskip("pandapower")
 from pgml.convert import PhaseMode  # noqa: E402
 from pgml.convert._export import system_view  # noqa: E402
 from pgml.convert.pandapower import to_grid  # noqa: E402
+from pgml.errors import InputError, PgmlError  # noqa: E402
 from pgml.representation import (  # noqa: E402
     PHASE_MODE_TAG,
     PHASE_MODES,
@@ -73,8 +74,13 @@ def test_phase_mode_of_reads_the_tag():
     grid.metadata.tags[PHASE_MODE_TAG] = "legacy_ll"
     assert phase_mode_of(grid) == "legacy_ll"
     grid.metadata.tags[PHASE_MODE_TAG] = "nonsense"
-    with pytest.raises(ValueError):
+    with pytest.raises(InputError, match="nonsense") as info:
         phase_mode_of(grid)
+    # The pgml input error, still a ValueError for callers that catch the builtin.
+    assert isinstance(info.value, ValueError)
+    assert isinstance(info.value, PgmlError)
+    with pytest.raises(InputError):
+        system_totals(grid)
     assert set(m.value for m in PhaseMode) <= set(PHASE_MODES)
 
 
@@ -146,11 +152,11 @@ def test_mark_legacy_tags_a_copy_and_changes_no_value():
     assert [n.u_rated_v for n in tagged.nodes] == [n.u_rated_v for n in untagged.nodes]
     assert mark_legacy(tagged) is tagged
     per_phase, _ = to_grid(_net())
-    with pytest.raises(ValueError):
+    with pytest.raises(InputError):
         mark_legacy(per_phase)  # tagged single_phase_equiv
     three, _ = to_grid(_net(), phase_mode=PhaseMode.THREE_PHASE)
     three.metadata.tags.pop(PHASE_MODE_TAG)
-    with pytest.raises(ValueError):
+    with pytest.raises(InputError):
         mark_legacy(three)  # untagged but three-phase nodes
 
 
@@ -186,7 +192,7 @@ def test_migration_restores_the_per_phase_equivalent():
 def test_migration_of_an_untagged_grid_needs_assume_legacy():
     per_phase, _ = to_grid(_net())
     untagged = _legacy_ll()
-    with pytest.raises(ValueError, match="assume_legacy"):
+    with pytest.raises(InputError, match="assume_legacy"):
         to_per_phase_equivalent(untagged)
     migrated = to_per_phase_equivalent(untagged, assume_legacy=True)
     assert PHASE_MODE_TAG not in untagged.metadata.tags  # input untouched
@@ -195,10 +201,10 @@ def test_migration_of_an_untagged_grid_needs_assume_legacy():
 
 def test_migration_refuses_other_representations():
     three, _ = to_grid(_net(), phase_mode=PhaseMode.THREE_PHASE)
-    with pytest.raises(ValueError):
+    with pytest.raises(InputError):
         to_per_phase_equivalent(three)
     three.metadata.tags.pop(PHASE_MODE_TAG)
-    with pytest.raises(ValueError):
+    with pytest.raises(InputError):
         to_per_phase_equivalent(three, assume_legacy=True)  # three-phase nodes
 
 

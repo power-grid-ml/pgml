@@ -47,7 +47,7 @@ Signatures: docstrings / `API_INDEX.md`.
 - Plotting is outside the differentiable path; `_util` detaches tensors to numpy (correct
   here, never on a loss tape). Grid fields follow the float/tensor duality.
 - Profile magnitudes in pu are `|V|` over the line-to-neutral base
-  (`assembly._params.phase_voltage_magnitude`).
+  (`assembly.phase_voltage_magnitude`).
 - Distances, edges and profile lines exclude open switches (no path across them); closed
   switches draw dashed.
 - Display numbering is zero-based position in `grid.nodes` (the source tool's bus index for

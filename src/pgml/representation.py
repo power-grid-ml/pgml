@@ -16,8 +16,9 @@ representation it was built in, named by ``GridMetadata.tags["phase_mode"]``
   output of the pandapower, power-grid-model and OpenDSS converters.
 - ``"three_phase"`` -- an explicit phase-domain build (``(A, B, C)`` or source-native
   phases). Values as for an untagged grid.
-- ``"as_built"`` -- the unbalanced phase-domain network of a dataset that records it
-  (the BDGD loader). Values as for an untagged grid.
+- ``"as_built"`` -- the unbalanced phase-domain network as a data source records it
+  (source-native phases, single-phase and two-phase branches kept), written by a loader
+  that does not reduce the network to an equivalent. Values as for an untagged grid.
 - ``"legacy_ll"`` -- a single-phase equivalent written before the per-phase equivalent
   existed: its one-phase nodes carry the line-to-line voltage and its appliances the
   three-phase totals, so a branch current is sqrt(3) too large. Such files are tagged
@@ -39,6 +40,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import Grid, Line, Node, Phase
 
 __all__ = [
@@ -97,15 +99,17 @@ def phase_mode_of(grid: Grid) -> Optional[str]:
 
     Raises
     ------
-    ValueError
-        When the tag holds a value outside :data:`PHASE_MODES`.
+    InputError
+        When the tag holds a value outside :data:`PHASE_MODES`. Every error of this
+        module is a :class:`~pgml.errors.InputError`, which subclasses
+        :class:`ValueError`, so ``except ValueError`` still catches it.
     """
     tags = getattr(getattr(grid, "metadata", None), "tags", None) or {}
     mode = tags.get(PHASE_MODE_TAG)
     if mode is None:
         return None
     if mode not in PHASE_MODES:
-        raise ValueError(
+        raise InputError(
             f"grid {getattr(grid.metadata, 'name', None)!r} has "
             f"tags[{PHASE_MODE_TAG!r}] = {mode!r}; expected one of {PHASE_MODES}."
         )
@@ -193,7 +197,7 @@ def system_totals(grid: Grid) -> SystemTotals:
 
     Raises
     ------
-    ValueError
+    InputError
         When the tag holds an unknown representation.
     """
     global _untagged_logged
@@ -401,7 +405,7 @@ def mark_legacy(grid: Grid) -> Grid:
 
     Raises
     ------
-    ValueError
+    InputError
         When the grid carries another ``phase_mode`` tag, has a node with more than one
         phase, or has no nodes.
     """
@@ -409,12 +413,12 @@ def mark_legacy(grid: Grid) -> Grid:
     if mode == _LEGACY_LL:
         return grid
     if mode is not None:
-        raise ValueError(
+        raise InputError(
             f"grid is tagged {PHASE_MODE_TAG}={mode!r}; only an untagged grid is "
             f"marked {_LEGACY_LL!r}."
         )
     if not _is_one_phase(grid):
-        raise ValueError(
+        raise InputError(
             f"only a grid whose nodes are all one-phase can be marked {_LEGACY_LL!r}."
         )
     return _with_tag(grid, _LEGACY_LL)
@@ -451,7 +455,7 @@ def to_per_phase_equivalent(grid: Grid, *, assume_legacy: bool = False) -> Grid:
 
     Raises
     ------
-    ValueError
+    InputError
         When the grid carries another ``phase_mode`` tag, is untagged without
         ``assume_legacy``, has a node with more than one phase, or has no nodes.
     """
@@ -461,19 +465,19 @@ def to_per_phase_equivalent(grid: Grid, *, assume_legacy: bool = False) -> Grid:
     if mode == "single_phase_equiv":
         return grid
     if mode is None and not assume_legacy:
-        raise ValueError(
+        raise InputError(
             f"grid carries no {PHASE_MODE_TAG!r} tag and is read by the schema rule "
             f"(line-to-neutral one-phase nodes); tag it with mark_legacy, or pass "
             "assume_legacy=True, when it is a line-to-line equivalent of an older "
             "converter."
         )
     if mode not in (None, _LEGACY_LL):
-        raise ValueError(
+        raise InputError(
             f"grid is tagged {PHASE_MODE_TAG}={mode!r}; only a {_LEGACY_LL!r} grid is "
             "migrated."
         )
     if not _is_one_phase(grid):
-        raise ValueError(
+        raise InputError(
             "only a grid whose nodes are all one-phase can be migrated to the "
             "per-phase equivalent."
         )

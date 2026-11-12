@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence, Union
 
 import torch
 from torch import Tensor
 
 from ._symmetry import connection_element_count
+
+if TYPE_CHECKING:
+    from pgml.schemas.grid_schema import Node
 
 
 class _SolvedPVOperatingPoint(dict):
@@ -57,12 +60,14 @@ def phase_voltage_magnitude(
     line_to_line: bool = False,
     u_rated_ln_v: Optional[float] = None,
 ) -> float:
-    """Nominal element voltage magnitude ``V0`` of a node [V].
+    """Nominal element voltage magnitude ``V0`` of a node [V], from its rating fields.
 
     The reference of the const-Z / const-I / ZIP load models, the harmonic load shunt
     and every per-unit view. The schema stores ``Node.u_rated_v`` as line-to-line on a
     node with three or more phase rows and line-to-neutral on a node with fewer, and
-    optionally the phase-to-neutral rating ``Node.u_rated_ln_v``.
+    optionally the phase-to-neutral rating ``Node.u_rated_ln_v``. Prefer
+    :func:`~pgml.assembly.node_voltage_magnitude`, which takes the node itself and
+    cannot drop a field.
 
     Parameters
     ----------
@@ -78,19 +83,30 @@ def phase_voltage_magnitude(
     u_rated_ln_v:
         ``Node.u_rated_ln_v`` [V] or ``None``. When given it is the phase-to-neutral
         voltage; otherwise ``u_rated_v/√3`` for ``n_phases >= 3`` and ``u_rated_v``
-        below.
+        below. Pass the node's value whenever it is set: see the warning.
 
     Returns
     -------
     float or Tensor
-        The voltage magnitude [V], of the type of the value it came from.
+        The voltage magnitude [V], of the type (and, for a tensor, the device and
+        dtype) of the value it came from.
+
+    Warnings
+    --------
+    The phase-row rule alone is wrong on every node that sets ``Node.u_rated_ln_v``,
+    above all a two-conductor node whose ``u_rated_v`` is phase-to-phase. Called as
+    ``phase_voltage_magnitude(node.u_rated_v, len(node.phases))`` it returns, for a
+    split-phase node ``(A, B, N)`` rated 240/120 V, ``240/√3 ≈ 138.6`` V instead of
+    120 V, and for a two-phase node ``(A, B)`` rated 400/230 V, 400 V instead of 230 V.
+    Pass ``u_rated_ln_v=node.u_rated_ln_v`` for a phase-to-neutral base, or call
+    :func:`~pgml.assembly.node_voltage_magnitude`. On a node without
+    ``Node.u_rated_ln_v`` both calls agree.
 
     Notes
     -----
     Connection-aware per ``docs/pgml/modeling/asymmetric.md`` section 2 (OpenDSS
     ``VBase``: wye three-phase uses ``kVLL/√3``; delta uses the supplied kV). A
-    four-wire ABCN node has four rows and is read line-to-line like ABC. Pass a node's
-    fields through ``pgml.assembly._params.node_voltage_magnitude`` to keep them together.
+    four-wire ABCN node has four rows and is read line-to-line like ABC.
     """
     if line_to_line:
         return u_rated_v
@@ -108,14 +124,59 @@ def _plain_float(value) -> float:
     return float(value)
 
 
-def node_voltage_magnitude(node, *, line_to_line: bool = False, plain: bool = False):
-    """:func:`phase_voltage_magnitude` of a schema ``Node`` [V].
+def node_voltage_magnitude(
+    node: Node, *, line_to_line: bool = False, plain: bool = False
+) -> Union[float, Tensor]:
+    """Nominal element voltage magnitude ``V0`` of a schema ``Node`` [V].
 
-    ``line_to_line=False`` gives the node's per-phase (phase-to-neutral) base,
-    ``True`` the voltage a delta (phase-to-phase) element on it sees. Tensor-valued
-    ratings pass through untouched (the value stays on the autograd tape);
-    ``plain=True`` reads them out as python floats first, for constant references
-    such as per-unit bases.
+    The voltage the solver refers a node's elements and per-unit values to: the
+    reference of the const-Z / const-I / ZIP load models, of the harmonic load shunt,
+    of :func:`~pgml.assembly.base_voltage_per_row` and of the convergence test. It
+    reads both rating fields of the node (:func:`~pgml.assembly.phase_voltage_magnitude`
+    with ``u_rated_ln_v=node.u_rated_ln_v``), so it is the one call to use for a node
+    of the schema.
+
+    Parameters
+    ----------
+    node:
+        A :class:`~pgml.schemas.grid_schema.Node` (any object with ``u_rated_v``,
+        ``phases`` and optionally ``u_rated_ln_v``).
+    line_to_line:
+        Which element voltage to return:
+
+        - ``False`` (default): the phase-to-neutral voltage, the per-phase base of every
+          row of the node and the voltage of a wye element. ``Node.u_rated_ln_v`` when
+          the node sets it, otherwise ``u_rated_v/√3`` on a node with three or more
+          phase rows (a ``Phase.N`` row counts) and ``u_rated_v`` on a node with fewer.
+        - ``True``: ``Node.u_rated_v``, the phase-to-phase voltage a delta element sees.
+
+        Pass ``True`` exactly when the quantity is referred to a phase-to-phase element:
+        a delta appliance (two- or three-phase), or the X1-X2 voltage of a split-phase
+        node ``(A, B, N)``. On a two-conductor node that sets ``u_rated_ln_v`` the two
+        values differ by a factor of 2 (split phase, e.g. 240 and 120 V) or √3 (two
+        phases of a three-phase system); a per-unit base, a wye element and a
+        phase-to-neutral limit need the default.
+    plain:
+        ``False`` (default): tensor-valued ratings pass through, so the result stays on
+        the autograd tape of the grid parameters. ``True``: they are read out as python
+        floats first, for constant references such as per-unit bases or limits.
+
+    Returns
+    -------
+    float or Tensor
+        The voltage magnitude [V]: a python float for float ratings or ``plain=True``,
+        otherwise the stored tensor (or a tensor computed from it, same device and
+        dtype).
+
+    Examples
+    --------
+    >>> from pgml.schemas.grid_schema import Node, Phase
+    >>> split = Node(id=1, u_rated_v=240.0, u_rated_ln_v=120.0,
+    ...              phases=(Phase.A, Phase.B, Phase.N))
+    >>> node_voltage_magnitude(split)
+    120.0
+    >>> node_voltage_magnitude(split, line_to_line=True)
+    240.0
     """
     u = node.u_rated_v
     ln = getattr(node, "u_rated_ln_v", None)

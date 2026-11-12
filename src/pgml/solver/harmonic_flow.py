@@ -2761,7 +2761,7 @@ def _apply_node_sources(
     ``docs/pgml/modeling/error-injection.md``:
 
     - ``V_base`` = node line-to-neutral base
-      (:func:`pgml.assembly._params.node_voltage_magnitude`).
+      (:func:`pgml.assembly.node_voltage_magnitude`).
     - ``Y_s = source_power_va / V_base**2`` (REAL, frequency-flat / resistive).
     - ``E_h = (mag_h/mag_1)*|V1| * exp(j*(rad(ang_h) + h*(angle(V1) - rad(ang_1))))``
       using the SAME phase convention as :func:`_harmonic_injections`. ``V1`` is the

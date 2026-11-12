@@ -36,7 +36,7 @@ from typing import Optional
 
 import yaml
 
-from pgml.assembly._params import node_voltage_magnitude
+from pgml.assembly import node_voltage_magnitude
 from pgml.errors import InputError
 from pgml.representation import _represented_phases, system_totals
 from pgml.schemas.grid_schema import Grid
@@ -284,7 +284,7 @@ def iec61000_3_2_device_caps(
     Builds ``{device_id: {order: fraction}}`` for the given appliance ids, resolving
     each device's fundamental current from its nominal active power and the
     phase-to-neutral nominal of its node: the per-phase base the solver uses
-    (:func:`pgml.assembly._params.node_voltage_magnitude`, ``Node.u_rated_ln_v`` when
+    (:func:`pgml.assembly.node_voltage_magnitude`, ``Node.u_rated_ln_v`` when
     set), or on a ``"legacy_ll"`` grid the line-to-line value over sqrt(3). Powers are
     read through :func:`pgml.representation.system_totals`, so every representation of
     one network (per-phase equivalent, three-phase build, as-built, ``"legacy_ll"``)

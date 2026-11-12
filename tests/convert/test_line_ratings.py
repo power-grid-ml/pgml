@@ -107,3 +107,37 @@ def test_pgm_and_opendss_carry_their_ratings():
     for mode in PhaseMode:
         grid, id_map = dss_to_grid(dss, phase_mode=mode)
         assert branch_ratings(grid)[id_map["line"]["l1"]].i_max_a == 210.0
+
+
+@pytest.mark.parametrize("mode", list(PhaseMode), ids=lambda m: m.value)
+def test_pandapower_export_round_trips_the_rating(mode):
+    """``max_i_ka * df * parallel`` returns as one ``max_i_ka``; loading is preserved."""
+    from pgml.convert.pandapower import from_grid
+
+    net = _net()
+    grid, id_map = to_grid(net, phase_mode=mode)
+    export = from_grid(grid, allow_approximation=True)
+    out = export.net
+    rows = [export.line_of_branch[id_map["line"][i]] for i in net.line.index]
+    rated = net.line.max_i_ka * net.line.df * net.line.parallel
+    assert list(out.line.max_i_ka.loc[rows]) == pytest.approx(list(rated), rel=1e-14)
+    assert list(out.line.df.loc[rows]) == [1.0] * len(rows)
+    assert list(out.line.parallel.loc[rows]) == [1] * len(rows)
+    # Same physical network, same loading against the rating. The first line is two
+    # parallel conductors in the source net and one equivalent conductor in the export,
+    # so only the per-line loading is comparable, not the per-conductor current.
+    pp.runpp(net)
+    pp.runpp(out)
+    assert list(out.res_line.loading_percent.loc[rows]) == pytest.approx(
+        list(net.res_line.loading_percent), rel=1e-10
+    )
+
+
+def test_pandapower_export_of_an_unrated_line_uses_the_placeholder():
+    from pgml.convert.pandapower import from_grid
+
+    net = _net()
+    net.line["max_i_ka"] = float("nan")
+    grid, _ = to_grid(net)
+    out = from_grid(grid, allow_approximation=True).net
+    assert list(out.line.max_i_ka) == [10.0] * len(net.line)
