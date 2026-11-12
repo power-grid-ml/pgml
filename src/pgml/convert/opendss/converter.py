@@ -116,7 +116,7 @@ import logging
 import math
 from typing import Any, Literal, Optional
 
-from pgml.assembly._params import phase_voltage_magnitude
+from pgml.assembly._params import node_voltage_magnitude
 from pgml.convert._common import (
     IdCounter,
     LineTypeCatalog,
@@ -319,6 +319,19 @@ def to_grid(
       ``model`` converts as a PQ injection. A DELTA-connected ``model=3`` generator
       raises :class:`~pgml.errors.ConversionError` (the regulated row pair is
       modelled for a WYE terminal).
+    - A one-phase ``Load``/``Generator``/``PVSystem``/``Storage`` whose bus string names
+      two phases (``bus.1.2``) is ONE phase-to-phase element in either connection
+      (the second node of a one-phase wye element is its return terminal), and a
+      single-terminal ``conn=delta`` ``Capacitor``/``Reactor`` on two phases is the
+      same. It converts, under ``THREE_PHASE``, to a two-phase DELTA appliance on the
+      two phases in OpenDSS's conductor order (the inverse of the OpenDSS exporter). A
+      node with fewer than three phase rows that hosts one gets ``u_rated_ln_v`` (its
+      stored line-to-neutral value) and ``u_rated_v`` as the phase-to-phase voltage; a
+      voltage-dependent load whose ``kV`` is not that voltage is reported. A shunt's
+      one OpenDSS leg is split over the two cyclic legs of pgml's two-phase delta
+      shunt (half the admittance each, twice the inductance). Native DER harmonics
+      raise for such an element. A neutral or ground return (``bus.1``, ``bus.1.0``,
+      ``bus.1.4``) stays WYE; ``SINGLE_PHASE_EQUIV`` keeps its one-phase reading.
     - An open delta, a ``phases=2 conn=delta`` ``Load``, ``Generator``,
       ``PVSystem``, ``Storage``, ``Capacitor`` or ``Reactor``, raises
       :class:`~pgml.errors.ConversionError` in either ``phase_mode``: OpenDSS stamps
@@ -939,15 +952,30 @@ def to_grid(
         # NeutralRules convention; delta requires at least 2 phases.
         is_delta = bool(dss.Loads.IsDelta())
         _refuse_open_delta(dss, "Load", load_name, n_phases, is_delta)
+        # A one-phase element on two phase conductors is one phase-to-phase element,
+        # whatever its connection keyword: a pgml two-phase DELTA appliance.
+        one_leg = _one_leg_phases(dss, n_phases, phase_mode)
+        if one_leg is not None:
+            load_phases = list(one_leg)
+            is_delta = True
+            _rate_node_phase_to_phase(node_by_id[bus_name_to_node_id[load_bus_name]])
+            if int(dss.Loads.Model()) != 1:
+                _warn_one_leg_voltage_base(
+                    dss,
+                    "Load",
+                    load_name,
+                    node_by_id[bus_name_to_node_id[load_bus_name]],
+                    report,
+                )
         # DELTA needs >=2 phases (schema validator enforces this). A 1-phase load
         # flagged delta is a misconfiguration; treat it as WYE rather than let the
         # schema raise an error that does not point back to the converter.
         conn = (
             WindingConnection.DELTA
-            if (is_delta and n_phases >= 2)
+            if (is_delta and (n_phases >= 2 or one_leg is not None))
             else WindingConnection.WYE
         )
-        if is_delta and n_phases < 2:
+        if is_delta and n_phases < 2 and one_leg is None:
             _logger.info(
                 "OpenDSS load %s is flagged delta but has a single phase; "
                 "treating it as WYE (delta requires at least 2 phases).",
@@ -1071,8 +1099,13 @@ def to_grid(
 
         is_delta = _dss_query(dss, "Capacitor", cap_name, "conn").lower() == "delta"
         _refuse_open_delta(dss, "Capacitor", cap_name, n_phases, is_delta)
+        one_leg = is_delta and _one_leg_phases(dss, n_phases, phase_mode) is not None
         if is_delta:
-            phase_list = _shunt_phase_conductors(dss, n_phases)
+            phase_list = (
+                list(_one_leg_phases(dss, n_phases, phase_mode))
+                if one_leg
+                else _shunt_phase_conductors(dss, n_phases)
+            )
             connection = WindingConnection.DELTA
             if phase_list is None or len(phase_list) < 2:
                 _logger.warning(
@@ -1101,6 +1134,10 @@ def to_grid(
         cuf_per_step = _parse_dss_float_array(dss.Text.Result())
         states = list(dss.Capacitors.States())
         c_per_phase_f = sum(cuf for cuf, on in zip(cuf_per_step, states) if on) * 1.0e-6
+        if one_leg:
+            # pgml's two-phase delta shunt stamps two cyclic legs between the same
+            # pair; one OpenDSS leg is their sum, so each leg takes half.
+            c_per_phase_f /= 2.0
 
         cap_id = _id.next()
         id_map["capacitor"][cap_name] = cap_id
@@ -1155,8 +1192,13 @@ def to_grid(
 
         is_delta = _dss_query(dss, "Reactor", reactor_name, "conn").lower() == "delta"
         _refuse_open_delta(dss, "Reactor", reactor_name, n_phases, is_delta)
+        one_leg = is_delta and _one_leg_phases(dss, n_phases, phase_mode) is not None
         if is_delta:
-            phase_list = _shunt_phase_conductors(dss, n_phases)
+            phase_list = (
+                list(_one_leg_phases(dss, n_phases, phase_mode))
+                if one_leg
+                else _shunt_phase_conductors(dss, n_phases)
+            )
             connection = WindingConnection.DELTA
             if phase_list is None or len(phase_list) < 2:
                 _logger.warning(
@@ -1221,6 +1263,13 @@ def to_grid(
                     abs(x_ohm / r_ohm),
                 )
 
+        if one_leg:
+            # see the Capacitor above: one OpenDSS leg is the sum of two pgml legs
+            g_scalar /= 2.0
+            c_scalar /= 2.0
+            if l_scalar is not None:
+                l_scalar *= 2.0
+
         reactor_id = _id.next()
         id_map["reactor"][reactor_name] = reactor_id
         appliances.append(
@@ -1256,12 +1305,17 @@ def to_grid(
 
         is_delta = bool(dss.Generators.IsDelta())
         _refuse_open_delta(dss, "Generator", gen_name, n_phases, is_delta)
+        one_leg = _one_leg_phases(dss, n_phases, phase_mode)
+        if one_leg is not None:
+            gen_phases = list(one_leg)
+            is_delta = True
+            _rate_node_phase_to_phase(node_by_id[bus_name_to_node_id[gen_bus_name]])
         conn = (
             WindingConnection.DELTA
-            if (is_delta and n_phases >= 2)
+            if (is_delta and (n_phases >= 2 or one_leg is not None))
             else WindingConnection.WYE
         )
-        if is_delta and n_phases < 2:
+        if is_delta and n_phases < 2 and one_leg is None:
             _logger.info(
                 "OpenDSS generator %s is flagged delta but has a single "
                 "phase; treating it as WYE (delta requires at least 2 "
@@ -1306,7 +1360,14 @@ def to_grid(
                 gen_obj.return_path = rp
         if der_harmonics:
             gen_obj.harmonic_impedance, gen_obj.spectrum = _der_harmonic_model(
-                dss, "Generator", gen_name, n_phases, conn, phase_mode, f0_hz
+                dss,
+                "Generator",
+                gen_name,
+                n_phases,
+                conn,
+                phase_mode,
+                f0_hz,
+                one_leg=one_leg is not None,
             )
         appliances.append(gen_obj)
         ret = dss.Generators.Next()
@@ -1334,9 +1395,14 @@ def to_grid(
 
         is_delta = _dss_query(dss, "PVSystem", pv_name, "conn").lower() == "delta"
         _refuse_open_delta(dss, "PVSystem", pv_name, n_phases, is_delta)
+        one_leg = _one_leg_phases(dss, n_phases, phase_mode)
+        if one_leg is not None:
+            pv_phases = list(one_leg)
+            is_delta = True
+            _rate_node_phase_to_phase(node_by_id[bus_name_to_node_id[pv_bus_name]])
         conn = (
             WindingConnection.DELTA
-            if (is_delta and n_phases >= 2)
+            if (is_delta and (n_phases >= 2 or one_leg is not None))
             else WindingConnection.WYE
         )
 
@@ -1366,7 +1432,14 @@ def to_grid(
                 pv_obj.return_path = rp
         if der_harmonics:
             pv_obj.harmonic_impedance, pv_obj.spectrum = _der_harmonic_model(
-                dss, "PVSystem", pv_name, n_phases, conn, phase_mode, f0_hz
+                dss,
+                "PVSystem",
+                pv_name,
+                n_phases,
+                conn,
+                phase_mode,
+                f0_hz,
+                one_leg=one_leg is not None,
             )
         appliances.append(pv_obj)
         ret = dss.PVsystems.Next()
@@ -1394,9 +1467,14 @@ def to_grid(
 
         is_delta = _dss_query(dss, "Storage", bat_name, "conn").lower() == "delta"
         _refuse_open_delta(dss, "Storage", bat_name, n_phases, is_delta)
+        one_leg = _one_leg_phases(dss, n_phases, phase_mode)
+        if one_leg is not None:
+            bat_phases = list(one_leg)
+            is_delta = True
+            _rate_node_phase_to_phase(node_by_id[bus_name_to_node_id[bat_bus_name]])
         conn = (
             WindingConnection.DELTA
-            if (is_delta and n_phases >= 2)
+            if (is_delta and (n_phases >= 2 or one_leg is not None))
             else WindingConnection.WYE
         )
 
@@ -1441,7 +1519,14 @@ def to_grid(
 
         if der_harmonics:
             impedance, spectrum = _der_harmonic_model(
-                dss, "Storage", bat_name, n_phases, conn, phase_mode, f0_hz
+                dss,
+                "Storage",
+                bat_name,
+                n_phases,
+                conn,
+                phase_mode,
+                f0_hz,
+                one_leg=one_leg is not None,
             )
             storage_kwargs.update(harmonic_impedance=impedance, spectrum=spectrum)
         appliances.append(
@@ -1648,10 +1733,13 @@ def _import_inv_controls(
                 kva = float(dss.Properties.Value("kva")) * 1e3
                 node = node_by_id[der.node]
                 kv_node = equivalent_voltage(phase_mode, kv)
-                if abs(kv_node - float(node.u_rated_v)) > 1e-6 * float(node.u_rated_v):
+                node_rated_v = _nameplate_voltage(
+                    node, delta=der.connection == WindingConnection.DELTA
+                )
+                if abs(kv_node - node_rated_v) > 1e-6 * node_rated_v:
                     raise ConversionError(
                         f"{entry}: element kv {kv:g} V differs from the node rated "
-                        f"voltage {float(node.u_rated_v):g} V, so the curve voltage "
+                        f"voltage {node_rated_v:g} V, so the curve voltage "
                         "base is not the node base"
                     )
                 if law != "vw" and q_ref == "VARMAX":
@@ -2051,13 +2139,23 @@ def _der_harmonic_model(
     connection: WindingConnection,
     phase_mode: PhaseMode,
     f0_hz: float,
+    *,
+    one_leg: bool = False,
 ) -> tuple[HarmonicImpedance, Optional[StaticSpectrum]]:
     """Read the native passive impedance and internal-voltage spectrum.
 
     Machine harmonics use pure Xdpp; XRdp belongs to the dynamic model. PV and
     storage use %R/%X on the device's own kV/kVA base. OpenDSS scales the imaginary
     part of the resulting *admittance*, which differs from series R/L when R>0.
+    A one-phase element across two phase conductors (``one_leg``) raises: pgml's
+    ``opendss_voltage`` reference is not defined on a two-phase delta device.
     """
+    if one_leg:
+        raise ConversionError(
+            f"{class_name}.{name}: native harmonic import does not support a "
+            "one-phase element across two phase conductors (a phase-to-phase "
+            "element); use der_harmonics=False for fundamental-only import"
+        )
     native_conn = _dss_query(dss, class_name, name, "conn").lower()
     if n_phases not in (1, 3) or (n_phases == 1 and native_conn == "delta"):
         raise ConversionError(
@@ -2128,6 +2226,100 @@ def _der_harmonic_model(
     finally:
         dss.Circuit.SetActiveElement(f"{class_name}.{name}")
     return impedance, spectrum
+
+
+def _nameplate_voltage(node: Any, *, delta: bool = False) -> float:
+    """The voltage [V] an element's ``kV`` is compared with, from the node's ratings.
+
+    Built from :func:`pgml.assembly.node_voltage_magnitude`, so a node that sets
+    ``u_rated_ln_v`` is read correctly. A delta element sees the phase-to-phase rating.
+    Any other element sees the node nameplate as the reader stores it: line-to-line on
+    a node with three or more phase rows, line-to-neutral on a node with fewer.
+    """
+    if delta:
+        return float(node_voltage_magnitude(node, line_to_line=True, plain=True))
+    line_to_neutral = float(node_voltage_magnitude(node, plain=True))
+    return line_to_neutral * _SQRT3 if len(node.phases) >= 3 else line_to_neutral
+
+
+def _one_leg_phases(
+    dss: Any, n_phases: int, phase_mode: PhaseMode
+) -> Optional[tuple[Phase, Phase]]:
+    """The two phases of a one-phase element placed across two phase conductors.
+
+    A one-phase OpenDSS element has two conductors: for ``conn=delta`` the two ends
+    of its single phase-to-phase leg, for ``conn=wye`` the phase and its return
+    terminal (``NodeOrder()`` of a ``Load``, ``Generator``, ``PVSystem``, ``Storage``
+    or of a single-terminal delta ``Capacitor``/``Reactor``). When the second
+    conductor is itself a phase (``bus.1.2``) the element sits between the two phases
+    in either connection: a pgml two-phase DELTA appliance, ordered as OpenDSS orders
+    it. A neutral or ground return (``bus.1``, ``bus.1.0``, ``bus.1.4``) is not a leg
+    and returns ``None``, as does anything outside :data:`PhaseMode.THREE_PHASE`
+    (the single-phase equivalent has one phase row). The active ``CktElement`` must
+    be the element in question.
+    """
+    if n_phases != 1 or phase_mode is not PhaseMode.THREE_PHASE:
+        return None
+    node_order = [int(n) for n in dss.CktElement.NodeOrder()]
+    if len(node_order) != 2:
+        return None
+    first, second = node_order
+    if first == second or not (1 <= first <= 3 and 1 <= second <= 3):
+        return None
+    return _phase_num_to_enum(first), _phase_num_to_enum(second)
+
+
+def _rate_node_phase_to_phase(node: Any) -> None:
+    """Give a node with fewer than three phase rows the rating a delta element needs.
+
+    The reader stores such a node line-to-neutral (``u_rated_v = U_LL/sqrt(3)``). A
+    delta appliance is rated at ``u_rated_v`` taken as phase-to-phase, which on that
+    node needs ``u_rated_ln_v`` (:func:`pgml.assembly.node_voltage_magnitude`): the
+    stored value becomes ``u_rated_ln_v`` and ``u_rated_v`` the phase-to-phase
+    voltage, so every wye element and per-unit base on the node is unchanged.
+    """
+    if len(node.phases) >= 3 or node.u_rated_ln_v is not None:
+        return
+    line_to_neutral = float(node.u_rated_v)
+    node.u_rated_v = line_to_neutral * _SQRT3
+    node.u_rated_ln_v = line_to_neutral
+
+
+def _warn_one_leg_voltage_base(
+    dss: Any, kind: str, name: str, node: Any, report: ConversionReport
+) -> None:
+    """Report a one-leg element whose ``kV`` is not the node's phase-to-phase voltage.
+
+    A constant-impedance, constant-current or ZIP element is referred to its own
+    ``kV`` by OpenDSS and to the node's phase-to-phase rating by pgml, so a different
+    ``kV`` changes the element's admittance (by the squared ratio) and current.
+    Nominal P/Q are not rescaled.
+    """
+    kv_v = float(dss.Properties.Value("kV")) * 1_000.0
+    node_v = float(node_voltage_magnitude(node, line_to_line=True, plain=True))
+    if abs(kv_v - node_v) <= 1e-3 * node_v:
+        return
+    _logger.warning(
+        "OpenDSS %s '%s' spans two phases with kV=%g V, but the node is rated %g V "
+        "phase-to-phase; its voltage-dependent law is referred to the node rating, "
+        "so a constant-impedance/-current/ZIP element differs from OpenDSS by "
+        "the ratio of the two.",
+        kind,
+        name,
+        kv_v,
+        node_v,
+    )
+    report.approximated(
+        "load.one_leg_voltage_base",
+        "A voltage-dependent load across two phases is referred to its own kV by "
+        "OpenDSS and to the node's phase-to-phase rating by pgml; the two differ for "
+        "this element. Nominal P/Q are not rescaled.",
+        element_type="load",
+        ids=[name],
+        affects=("fundamental", "unbalanced", "harmonic"),
+        values={"element_kv_v": kv_v, "node_rating_v": node_v},
+        announced=True,
+    )
 
 
 def _refuse_open_delta(
@@ -2295,8 +2487,9 @@ def _generator_voltage_regulation(dss, gen_name: str, *, n_phases, node, connect
         return None
     if connection is WindingConnection.DELTA:
         raise ConversionError(
-            f"OpenDSS generator {gen_name} is delta-connected with model=3 "
-            "(constant |V|). Voltage regulation is modelled for a WYE terminal only "
+            f"OpenDSS generator {gen_name} is delta-connected (or a one-phase "
+            "element across two phases) with model=3 (constant |V|). Voltage "
+            "regulation is modelled for a WYE terminal only "
             "-- a delta element's reactive current is shared between two node rows, "
             "so the regulated row pair cannot be formed. Connect it in wye, or use a "
             "PQ generator model."
@@ -2305,7 +2498,7 @@ def _generator_voltage_regulation(dss, gen_name: str, *, n_phases, node, connect
     gen_kv = float(dss.Properties.Value("kV"))
     # Generator kV: L-L for >= 2 phases, L-N for a single-phase machine.
     gen_base_ln_v = gen_kv * 1_000.0 / (_SQRT3 if n_phases >= 2 else 1.0)
-    node_base_ln_v = float(phase_voltage_magnitude(node.u_rated_v, len(node.phases)))
+    node_base_ln_v = float(node_voltage_magnitude(node, plain=True))
     v_set_pu = v_pu_dss * gen_base_ln_v / node_base_ln_v
     if abs(gen_base_ln_v - node_base_ln_v) > 1.0e-6 * node_base_ln_v:
         _logger.info(

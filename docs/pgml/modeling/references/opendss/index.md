@@ -59,8 +59,15 @@ host node's base; a delta-connected `model=3` machine raises. An open delta (`ph
 conn=delta` on any of these classes or on a `Load`) raises a `ConversionError` naming the
 element: OpenDSS gives it three conductors and two phase-to-phase legs, 1-2 and 2-3, the third
 conductor being ground when the bus string names two nodes, while a two-phase delta appliance is
-one element. Split it into two one-leg delta elements in the source model; note that the reader
-converts a one-leg `phases=1 conn=delta` load as a wye load ({doc}`../../limitations`). Every other element
+one element. Split it into two one-leg delta elements in the source model: a one-phase
+element whose bus string names two phases (`b.1.2`, `conn=delta`, or `conn=wye`, whose second
+node is its return terminal) is one phase-to-phase element in OpenDSS, and the reader returns
+a two-phase delta appliance on those phases, setting `u_rated_ln_v` on a node with fewer than
+three phase rows (`phases=1` on `b.1`, `b.1.0` or `b.1.4` stays a wye element). The one-leg
+elements agree with live OpenDSS to 3.4e-10 pu at the fundamental and 5.6e-12 pu at order 3
+(all of the classes above, on a three-phase and on a two-phase bus, constant P, Z, I and ZIP
+loads; `tests/reference/test_opendss_one_leg_delta.py`), and an open delta `Load` split into
+its two legs agrees with OpenDSS's own open delta to the same figures. Every other element
 class is enumerated and raises one warning per class naming the kind and the count, so nothing
 disappears quietly.
 

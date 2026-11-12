@@ -115,11 +115,15 @@ Keep this in mind when pandapower serves as ground truth for such a grid.
 phase-to-phase element on two phases ({doc}`appliances`). An open delta (two elements on
 three conductors, OpenDSS `Load phases=2 conn=delta`) is not an appliance form; enter it as
 two two-phase delta appliances. The OpenDSS reader refuses an open delta of any appliance or
-shunt class with a `ConversionError` naming the element. It converts a `phases=1 conn=delta`
-load as a wye load, and sets no `u_rated_ln_v` on an imported bus (a delta appliance on a node
-with fewer than three phase rows needs `u_rated_ln_v`, {doc}`appliances`). A voltage-regulating generator on a
+shunt class with a `ConversionError` naming the element. A one-phase OpenDSS element across
+two phase conductors (`phases=1 conn=delta` or `conn=wye` on `bus.1.2`; the second node of a
+one-phase wye element is its return terminal) converts to a two-phase delta appliance on those
+phases, and a node with fewer than three phase rows that hosts one gets `u_rated_ln_v`
+({doc}`appliances`). A split-phase (centre-tapped) bus read from OpenDSS gets no
+`u_rated_ln_v`. A voltage-dependent such element whose `kV` is not the node's phase-to-phase
+voltage is referred to the node rating and reported. A voltage-regulating generator on a
 delta connection and the `opendss_voltage` harmonic reference on a two-phase delta device
-raise.
+raise, also for a native DER import of such an element.
 
 **Voltage limits of loads.** The schema has no load voltage-limit model. OpenDSS
 `Vminpu`/`Vmaxpu`/`Vlowpu` and CVR settings are not read; the converter warns when a

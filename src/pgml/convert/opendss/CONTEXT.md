@@ -54,8 +54,9 @@ referral, vector-group mechanics, source impedance, converter coverage):
 - `phase_mode`: `SINGLE_PHASE_EQUIV` (default) gives every node `phases=(A,)`, 1×1
   line values and `connection=None` loads (a delta load collapses with an INFO
   log); `THREE_PHASE` gives the real DSS phases (`Phase.N` for a neutral conductor),
-  full n×n matrices and `connection` from `IsDelta()` (single-phase loads are
-  always WYE).
+  full n×n matrices and `connection` from `IsDelta()`; a one-phase element whose
+  two conductors are two phases is a two-phase DELTA appliance (below), every other
+  one-phase element is WYE.
 - Nothing is dropped silently: each unhandled element class warns once with kind
   and count and is recorded in the report. Out-of-scope inputs raise
   `ConversionError` instead: three-winding transformers, differing per-winding kVA,
@@ -76,6 +77,22 @@ referral, vector-group mechanics, source impedance, converter coverage):
   L-L for a ≥3-phase Vsource and used unscaled as the conductor EMF for a 1-phase
   one, and both formulas mirror what OpenDSS solves.
 - Phase numbers: 1=A, 2=B, 3=C, 0=ground; an explicit 4th conductor is `Phase.N`.
+- One-leg elements (`THREE_PHASE`): a one-phase `Load`/`Generator`/`PVSystem`/`Storage`
+  (any `conn`) or single-terminal delta `Capacitor`/`Reactor` whose `NodeOrder()` is two
+  different phases (`bus.1.2`; in OpenDSS the second node of a one-phase wye element is its
+  return terminal) is ONE phase-to-phase element: `_one_leg_phases` returns its phases in
+  OpenDSS's order and the appliance is a two-phase DELTA, the inverse of the scenario
+  exporter. `_rate_node_phase_to_phase` gives a host node with fewer than three phase rows
+  `u_rated_ln_v` = its stored line-to-neutral value and `u_rated_v` = that times sqrt(3),
+  so wye ratings are unchanged and the node stays valid for the assembly's delta check.
+  A node's nameplate is then read through `assembly.node_voltage_magnitude`
+  (`_nameplate_voltage`, `_generator_voltage_regulation`), never `u_rated_v` alone. A
+  two-phase DELTA `ShuntAppliance` stamps two cyclic legs between the same phases, so one
+  OpenDSS leg is split into two legs of half the admittance (twice the inductance); the
+  exporter writes their sum back as one `phases=1 conn=delta` bank. A neutral or ground
+  return (`b.1`, `b.1.0`, `b.1.4`, bare `b`) is not a leg and stays WYE. Native DER
+  harmonics (`der_harmonics=True`) raise for a leg: the `opendss_voltage` reference is not
+  defined on a two-phase delta device. An open delta (`phases=2 conn=delta`) is still refused.
 - `Phases=` of a PC element counts phase conductors only; OpenDSS appends one
   return conductor for WYE. The converter reads `NodeOrder()` (OpenDSS's resolved
   assignment), never the raw bus string. Each WYE appliance carries its own
