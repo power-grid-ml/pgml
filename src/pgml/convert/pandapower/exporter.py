@@ -25,6 +25,18 @@ Scope and deliberate reductions
 * Harmonic-only fields are outside this fundamental export and are named in the
   reduction ledger when present.
 
+Line ratings
+------------
+A line whose catalog type (``Grid.types.lines[line.type_ref]``) declares ``max_i_a``
+exports it as ``max_i_ka`` with ``df = 1`` and ``parallel = 1``, so
+``res_line.loading_percent`` is the loading against that rating. ``max_i_a`` is a
+per-conductor current in every representation (:mod:`pgml.representation`: ampacities
+are not scaled by the per-phase equivalent), the same quantity as pandapower's line
+current, so it is written unscaled. An inbound pandapower line's ``max_i_ka * df *
+parallel`` therefore returns as one ``max_i_ka``. A line without a rating gets the
+placeholder ``max_i_ka = 10`` kA: pandapower requires a value, and its
+``loading_percent`` then carries no thermal meaning.
+
 Units: pgml stores SI with L/C (never X/B); pandapower stores per-km
 reactances and nF.  Every conversion factor is spelled out at its use site.
 """
@@ -73,6 +85,11 @@ from pgml.schemas.grid_schema import (
     Transformer,
     WindingConnection,
 )
+
+
+# ``max_i_ka`` [kA] written for a line whose grid declares no ampacity: a value far above
+# any distribution conductor, so ``loading_percent`` stays near zero for such a line.
+_UNRATED_LINE_MAX_I_KA = 10.0
 
 
 @dataclass
@@ -126,6 +143,9 @@ def from_grid(
     -------
     PandapowerExport
         A new network, complete id maps, and every applied or out-of-scope reduction.
+        Each line's ``max_i_ka`` is its per-conductor ampacity
+        (:func:`pgml.studies.branch_ratings`, the catalog type's ``max_i_a``) in kA,
+        with ``df = parallel = 1``; an unrated line gets the placeholder 10 kA.
 
     Raises
     ------
@@ -135,7 +155,10 @@ def from_grid(
     """
     import pandapower as pp
 
+    from pgml.studies.limits import branch_ratings
+
     validate_balanced_grid_phases(grid)
+    ratings = branch_ratings(grid)
     grid = system_view(grid)
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
@@ -167,7 +190,7 @@ def from_grid(
     for br in grid.branches:
         _record_branch_scope(out, br, allow_approximation)
         if isinstance(br, Line):
-            _export_line(net, out, br, w0)
+            _export_line(net, out, br, w0, ratings[int(br.id)].i_max_a)
         elif isinstance(br, Transformer):
             _export_transformer(net, out, br, w0)
         elif isinstance(br, Switch):
@@ -342,7 +365,11 @@ def _record_branch_scope(
             )
 
 
-def _export_line(net, out: PandapowerExport, br: Line, w0: float) -> None:
+def _export_line(
+    net, out: PandapowerExport, br: Line, w0: float, i_max_a: float | None
+) -> None:
+    """Add ``br`` as a pandapower line; ``i_max_a`` is its per-conductor ampacity [A]
+    (``None`` for an unrated line, exported as ``_UNRATED_LINE_MAX_I_KA``)."""
     import pandapower as pp
 
     if br.conductor_geometry is not None:
@@ -385,7 +412,7 @@ def _export_line(net, out: PandapowerExport, br: Line, w0: float) -> None:
         c_nf_per_km=c_per_m * 1e12,
         # S/m -> uS/km: x 1e3 m/km x 1e6 uS/S
         g_us_per_km=g_per_m * 1e9,
-        max_i_ka=10.0,
+        max_i_ka=_UNRATED_LINE_MAX_I_KA if i_max_a is None else i_max_a / 1e3,
         name=br.name or f"line{br.id}",
         in_service=bool(br.in_service),
     )

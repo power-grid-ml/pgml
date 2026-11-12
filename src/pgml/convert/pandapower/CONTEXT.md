@@ -21,6 +21,9 @@ Signatures: docstrings / API_INDEX.md.
 - `exporter.py`: outbound `from_grid` → `PandapowerExport` (`net` plus Grid-id ↔
   pandapower-index maps and the named `reductions`). Balanced fundamental export only;
   what raises and what needs `allow_approximation=True` is in the `from_grid` docstring.
+  A line's `max_i_ka` is its catalog type's `max_i_a` (`studies.branch_ratings`, per
+  conductor in every representation, never scaled) with `df = parallel = 1`, else a
+  10 kA placeholder, so an import-export round trip keeps `loading_percent`.
 - Shared scaffold: `pgml.convert._common` (phase mode, builders, dropped-element
   warning). Tool-difference catalogue: `pgml.convert._model_differences` (`PANDAPOWER`),
   surfaced through the `ConversionReport`.
