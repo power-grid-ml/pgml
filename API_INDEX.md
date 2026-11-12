@@ -42,7 +42,8 @@ Full documentation: the docstrings (published as the API reference).
 - def `fusion_map(grid: Grid, param_overrides: Optional[dict] = None, branch_states: Optional[dict] = None, zero: Optional[Sequence[ZeroImpedanceBranch]] = None) -> Optional[FusionMap]` — Build the exact bus fusion of ``grid``'s zero-impedance branches.
 - def `injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor` — Evaluate ``I_device(V)`` from a precomputed :class:`InjectionPlan`.
 - def `node_phase_index(grid: Grid) -> NodePhaseIndex` — Build the compact :class:`NodePhaseIndex` for ``grid``.
-- def `phase_voltage_magnitude(u_rated_v: float, n_phases: int, line_to_line: bool = False, u_rated_ln_v: Optional[float] = None) -> float` — Nominal element voltage magnitude ``V0`` of a node [V].
+- def `node_voltage_magnitude(node: Node, line_to_line: bool = False, plain: bool = False) -> Union[float, Tensor]` — Nominal element voltage magnitude ``V0`` of a schema ``Node`` [V].
+- def `phase_voltage_magnitude(u_rated_v: float, n_phases: int, line_to_line: bool = False, u_rated_ln_v: Optional[float] = None) -> float` — Nominal element voltage magnitude ``V0`` of a node [V], from its rating fields.
 - def `ybus_structure(grid: Grid, index: NodePhaseIndex, device: Optional[device] = None) -> Tensor` — Sorted int64 linear indices ``row * N + col`` of every stampable ``Y`` entry.
 - def `zero_impedance_branches(grid: Grid, param_overrides: Optional[dict] = None) -> list[ZeroImpedanceBranch]` — Every in-service branch whose EFFECTIVE series impedance is exactly zero.
 

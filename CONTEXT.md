@@ -101,7 +101,7 @@ of the suite. Everything conforms to it. A schema change needs the maintainer's 
 - `Node.u_rated_v` is line-to-line for three-phase nodes; the solver's per-phase voltages are
   line-to-neutral. The optional `Node.u_rated_ln_v` (0.5.0) is the per-phase base where
   `u_rated_v/√3` is not (split-phase nodes); one helper applies both
-  (`assembly._params.node_voltage_magnitude`). The cross-tool record is
+  (`assembly.node_voltage_magnitude`). The cross-tool record is
   `docs/pgml/modeling/conventions.md`.
 - Reference-tool divergence: add an option and state the physics verdict; change a default
   only when pgml lacks the option.

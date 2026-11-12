@@ -30,6 +30,9 @@ Public surface (the modeling behind it: ``docs/pgml/modeling/``):
   per-unit quantity: the node's phase-to-neutral rating (``u_rated_ln_v`` when given,
   else ``u_rated_v/√3`` on a node with three or more phase rows) for a wye connection,
   ``u_rated_v`` for a delta one.
+- ``node_voltage_magnitude(node, *, line_to_line=False, plain=False)`` — the same
+  voltage read from a schema ``Node`` (both rating fields together); the call to use for
+  a node, since a split-phase or two-phase node needs its ``u_rated_ln_v``.
 - ``build_injections(grid, frequencies_hz, index, *, dtype, device,
   operating_point, param_overrides=None) -> Tensor`` — Norton ``I`` ``[*batch, H, N]``.
 - ``device_current_injections(grid, v, index, frequencies_hz, *, dtype, device,
@@ -58,7 +61,7 @@ from ._fusion import (
     fusion_map,
     zero_impedance_branches,
 )
-from ._params import phase_voltage_magnitude
+from ._params import node_voltage_magnitude, phase_voltage_magnitude
 from ._structure import ybus_structure
 from .index import NodePhaseIndex, base_voltage_per_row, node_phase_index
 from .ybus import (
@@ -96,6 +99,7 @@ __all__ = [
     "zero_impedance_branches",
     "base_voltage_per_row",
     "phase_voltage_magnitude",
+    "node_voltage_magnitude",
     "YBus",
     "BranchCurrent",
     "BranchStampBlock",

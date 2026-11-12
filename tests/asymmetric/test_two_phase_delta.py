@@ -18,8 +18,9 @@ from pgml.assembly import (
     base_voltage_per_row,
     device_current_injections,
     node_phase_index,
+    node_voltage_magnitude,
+    phase_voltage_magnitude,
 )
-from pgml.assembly._params import node_voltage_magnitude
 from pgml.schemas.grid_schema import (
     Generator,
     Grid,
@@ -239,6 +240,54 @@ def test_split_phase_rating_sets_the_row_base_and_element_voltages():
     assert base_voltage_per_row(legacy).tolist() == pytest.approx(
         [440.0 / math.sqrt(3.0)] * 6, rel=1e-15
     )
+
+
+def test_node_voltage_magnitude_is_public_and_matches_the_private_name():
+    from pgml.assembly import _params
+
+    assert node_voltage_magnitude is _params.node_voltage_magnitude
+    import pgml.assembly as asm
+
+    assert "node_voltage_magnitude" in asm.__all__
+
+
+def test_phase_voltage_magnitude_needs_the_ln_rating_on_two_conductor_nodes():
+    """Without ``u_rated_ln_v`` the phase-row rule gives the wrong per-phase base."""
+    split = Node(id=1, u_rated_v=240.0, u_rated_ln_v=120.0, phases=ABN)
+    two = Node(id=2, u_rated_v=400.0, u_rated_ln_v=230.0, phases=(P.A, P.B))
+    for node, ln in ((split, 120.0), (two, 230.0)):
+        n = len(node.phases)
+        assert node_voltage_magnitude(node) == ln
+        assert phase_voltage_magnitude(node.u_rated_v, n, u_rated_ln_v=ln) == ln
+        assert node_voltage_magnitude(node, line_to_line=True) == node.u_rated_v
+    # The phase-row rule alone: 240/sqrt(3) and 400 V instead of 120 and 230 V.
+    assert phase_voltage_magnitude(240.0, 3) == pytest.approx(240.0 / math.sqrt(3.0))
+    assert phase_voltage_magnitude(400.0, 2) == 400.0
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_node_voltage_magnitude_tensor_ratings(dtype):
+    """Tensor ratings stay on the tape (device/dtype kept); ``plain`` reads floats."""
+    u = torch.tensor(240.0, dtype=dtype, requires_grad=True)
+    ln = torch.tensor(120.0, dtype=dtype, requires_grad=True)
+    node = Node(id=1, u_rated_v=u, u_rated_ln_v=ln, phases=ABN)
+    v = node_voltage_magnitude(node)
+    assert isinstance(v, torch.Tensor) and v.dtype == dtype and v.device == ln.device
+    v.backward()
+    assert ln.grad == 1.0
+    delta = node_voltage_magnitude(node, line_to_line=True)
+    assert delta is u
+    plain = node_voltage_magnitude(node, plain=True)
+    assert type(plain) is float and plain == 120.0
+    no_ln = Node(id=2, u_rated_v=u, phases=(P.A, P.B, P.C))
+    w = node_voltage_magnitude(no_ln)
+    torch.autograd.gradcheck(
+        lambda x: node_voltage_magnitude(
+            Node(id=3, u_rated_v=x, phases=(P.A, P.B, P.C))
+        ),
+        (torch.tensor(400.0, dtype=torch.float64, requires_grad=True),),
+    )
+    assert float(w.detach()) == pytest.approx(240.0 / math.sqrt(3.0), rel=1e-6)
 
 
 def test_split_phase_constant_impedance_halves_use_the_rating():
