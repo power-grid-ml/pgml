@@ -319,6 +319,11 @@ def to_grid(
       ``model`` converts as a PQ injection. A DELTA-connected ``model=3`` generator
       raises :class:`~pgml.errors.ConversionError` (the regulated row pair is
       modelled for a WYE terminal).
+    - An open delta, a ``phases=2 conn=delta`` ``Load``, ``Generator``,
+      ``PVSystem``, ``Storage``, ``Capacitor`` or ``Reactor``, raises
+      :class:`~pgml.errors.ConversionError` in either ``phase_mode``: OpenDSS stamps
+      two phase-to-phase legs on three conductors, while a two-phase DELTA appliance
+      is one element. Split it into two one-leg delta elements in the source model.
     """
     f0_hz: float = float(dss.Solution.Frequency())
     two_pi_f0 = 2.0 * math.pi * f0_hz
@@ -933,6 +938,7 @@ def to_grid(
         # OpenDSS single-phase loads are always wye (L-N, two-conductor) per the
         # NeutralRules convention; delta requires at least 2 phases.
         is_delta = bool(dss.Loads.IsDelta())
+        _refuse_open_delta(dss, "Load", load_name, n_phases, is_delta)
         # DELTA needs >=2 phases (schema validator enforces this). A 1-phase load
         # flagged delta is a misconfiguration; treat it as WYE rather than let the
         # schema raise an error that does not point back to the converter.
@@ -1064,6 +1070,7 @@ def to_grid(
             continue
 
         is_delta = _dss_query(dss, "Capacitor", cap_name, "conn").lower() == "delta"
+        _refuse_open_delta(dss, "Capacitor", cap_name, n_phases, is_delta)
         if is_delta:
             phase_list = _shunt_phase_conductors(dss, n_phases)
             connection = WindingConnection.DELTA
@@ -1147,6 +1154,7 @@ def to_grid(
             continue
 
         is_delta = _dss_query(dss, "Reactor", reactor_name, "conn").lower() == "delta"
+        _refuse_open_delta(dss, "Reactor", reactor_name, n_phases, is_delta)
         if is_delta:
             phase_list = _shunt_phase_conductors(dss, n_phases)
             connection = WindingConnection.DELTA
@@ -1247,6 +1255,7 @@ def to_grid(
             continue
 
         is_delta = bool(dss.Generators.IsDelta())
+        _refuse_open_delta(dss, "Generator", gen_name, n_phases, is_delta)
         conn = (
             WindingConnection.DELTA
             if (is_delta and n_phases >= 2)
@@ -1324,6 +1333,7 @@ def to_grid(
             continue
 
         is_delta = _dss_query(dss, "PVSystem", pv_name, "conn").lower() == "delta"
+        _refuse_open_delta(dss, "PVSystem", pv_name, n_phases, is_delta)
         conn = (
             WindingConnection.DELTA
             if (is_delta and n_phases >= 2)
@@ -1383,6 +1393,7 @@ def to_grid(
             continue
 
         is_delta = _dss_query(dss, "Storage", bat_name, "conn").lower() == "delta"
+        _refuse_open_delta(dss, "Storage", bat_name, n_phases, is_delta)
         conn = (
             WindingConnection.DELTA
             if (is_delta and n_phases >= 2)
@@ -2117,6 +2128,32 @@ def _der_harmonic_model(
     finally:
         dss.Circuit.SetActiveElement(f"{class_name}.{name}")
     return impedance, spectrum
+
+
+def _refuse_open_delta(
+    dss: Any, kind: str, name: str, n_phases: int, is_delta: bool
+) -> None:
+    """Raise :class:`~pgml.errors.ConversionError` for an OpenDSS open delta.
+
+    OpenDSS gives a delta element of two phases three conductors and stamps one
+    phase-to-phase leg per phase, between conductors 1-2 and 2-3 (the "open delta" of
+    ``SetNcondsForConnection`` in ``Load``, ``Generator``, ``PVSystem``, ``Storage``,
+    ``Capacitor`` and ``Reactor``). The third conductor is whatever the bus string
+    assigns, node 0 (ground) when it names only two nodes. A pgml DELTA appliance on
+    two phases is ONE phase-to-phase element, so no single appliance represents the
+    two legs. The active ``CktElement`` must be the element in question.
+    """
+    if not (is_delta and n_phases == 2):
+        return
+    bus = dss.CktElement.BusNames()[0].split(".")[0].lower()
+    nodes = ".".join(str(int(n)) for n in dss.CktElement.NodeOrder())
+    raise ConversionError(
+        f"OpenDSS {kind} '{name}' is an open delta (phases=2 conn=delta, legs "
+        f"between conductors 1-2 and 2-3 on {bus}.{nodes}). pgml has no "
+        "single-element model of an open delta: a two-phase delta appliance is one "
+        "phase-to-phase element. Split it into two two-phase delta elements, one "
+        "per leg, in the source model."
+    )
 
 
 def _parse_appliance_bus_connection(

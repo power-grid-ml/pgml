@@ -124,7 +124,7 @@ injection and shunt, and a tensor `u_rated_ln_v`
 ## Not modelled
 
 - An open delta (two elements on three conductors, OpenDSS `Load phases=2 conn=delta`). Enter
-  it as two two-phase delta appliances.
+  it as two two-phase delta appliances; the OpenDSS reader refuses it.
 - The OpenDSS reader still converts a `phases=1 conn=delta` load as a wye load and an
   imported split-phase bus gets no `u_rated_ln_v`; see {doc}`limitations`.
 - A voltage-regulating generator on a delta connection, and OpenDSS's internal-voltage

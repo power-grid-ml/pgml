@@ -55,8 +55,14 @@ its loss term then stays flat with frequency where the series one decays. `Gener
 solved power, already derated. A `Generator` with `model=3` is a voltage-regulating bus, and
 it converts to a regulating terminal with its `Vpu` setpoint and its `Minkvar`/`Maxkvar`
 bounds. `Vpu` is per unit of the machine's own `kV` rating, so the reader re-refers it to the
-host node's base; a delta-connected `model=3` machine raises. Every other element class is enumerated and raises one warning
-per class naming the kind and the count, so nothing disappears quietly.
+host node's base; a delta-connected `model=3` machine raises. An open delta (`phases=2
+conn=delta` on any of these classes or on a `Load`) raises a `ConversionError` naming the
+element: OpenDSS gives it three conductors and two phase-to-phase legs, 1-2 and 2-3, the third
+conductor being ground when the bus string names two nodes, while a two-phase delta appliance is
+one element. Split it into two one-leg delta elements in the source model; note that the reader
+converts a one-leg `phases=1 conn=delta` load as a wye load ({doc}`../../limitations`). Every other element
+class is enumerated and raises one warning per class naming the kind and the count, so nothing
+disappears quietly.
 
 ## Extracting ground truth
 
