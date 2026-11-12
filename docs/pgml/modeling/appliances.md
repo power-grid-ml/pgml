@@ -24,7 +24,15 @@ to the element voltages, `V_elem = M·V_node`. A per-element admittance `y` is s
 A two-phase delta appliance is a phase-to-phase load: a 440 V appliance across X1-X2 of a
 split-phase node, a 400 V welder across A-B of a three-phase node, or a single-phase MV load
 across two phase conductors. It is OpenDSS's `Load phases=1 conn=delta` on two conductors,
-which OpenDSS's neutral rules describe as a one-element line-to-line load. A delta appliance
+which OpenDSS's neutral rules describe as a one-element line-to-line load. The OpenDSS reader
+returns this form for every one-phase `Load`, `Generator`, `PVSystem` or `Storage` whose bus
+string names two phases (`bus.1.2`), in `conn=delta` and in `conn=wye` (the second node of a
+one-phase wye element is its return terminal), and for a single-terminal `conn=delta`
+`Capacitor` or `Reactor` on two phases; it sets `u_rated_ln_v` on a node with fewer than three
+phase rows that hosts one. A shunt differs in one detail: the two-phase delta
+`ShuntAppliance` stamps two cyclic legs between the same phases, so the reader gives each leg
+half of OpenDSS's single-leg admittance (twice its inductance), and the exporter writes the
+sum of the legs as one leg. A delta appliance
 on one phase is rejected by the schema, one with `Phase.N` among its phases or on four phases
 by the assembly ({class}`~pgml.errors.ModelingError`).
 
@@ -125,8 +133,7 @@ injection and shunt, and a tensor `u_rated_ln_v`
 
 - An open delta (two elements on three conductors, OpenDSS `Load phases=2 conn=delta`). Enter
   it as two two-phase delta appliances; the OpenDSS reader refuses it.
-- The OpenDSS reader still converts a `phases=1 conn=delta` load as a wye load and an
-  imported split-phase bus gets no `u_rated_ln_v`; see {doc}`limitations`.
+- An imported OpenDSS split-phase bus gets no `u_rated_ln_v`; see {doc}`limitations`.
 - A voltage-regulating generator on a delta connection, and OpenDSS's internal-voltage
   harmonic reference (`spectrum_reference="opendss_voltage"`) on a two-phase delta device,
   raise.

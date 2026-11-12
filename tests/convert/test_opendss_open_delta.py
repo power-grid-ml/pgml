@@ -22,7 +22,7 @@ import opendssdirect as dss  # noqa: E402
 from pgml.convert._common import PhaseMode  # noqa: E402
 from pgml.convert.opendss import to_grid  # noqa: E402
 from pgml.errors import ConversionError  # noqa: E402
-from pgml.schemas.grid_schema import Load, WindingConnection  # noqa: E402
+from pgml.schemas.grid_schema import Load, Phase, WindingConnection  # noqa: E402
 
 pytestmark = pytest.mark.opendss
 
@@ -88,11 +88,11 @@ def test_three_phase_delta_still_converts(kind: str) -> None:
     assert len(element.phases) == 3
 
 
-def test_one_phase_delta_load_still_converts() -> None:
+def test_one_phase_delta_load_is_one_phase_to_phase_element() -> None:
     """``phases=1 conn=delta`` has one leg (two conductors); it is not refused and
-    keeps its existing reading as a WYE load on its first conductor."""
+    converts to the two-phase delta appliance between its conductors."""
     _circuit(_ELEMENTS["Load"].format(phases=1, bus="b.1.2"))
     grid, _ = to_grid(dss, phase_mode=PhaseMode.THREE_PHASE)
     (load,) = [a for a in grid.appliances if isinstance(a, Load) and a.name == "x"]
-    assert load.connection == WindingConnection.WYE
-    assert len(load.phases) == 1
+    assert load.connection == WindingConnection.DELTA
+    assert load.phases == (Phase.A, Phase.B)

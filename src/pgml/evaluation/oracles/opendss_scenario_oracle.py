@@ -91,8 +91,10 @@ conn=delta`` across its two conductors, ``kV`` = the node's ``u_rated_v``), onto
 per-phase nameplate or override is summed), ``ShuntAppliance``/
 ``ShuntReactor`` (WYE: a ``Capacitor`` for the C part + a diagonal-``Rmatrix`` ``Reactor``
 for the G part; DELTA ``ShuntAppliance``: a ``conn=delta`` ``Capacitor`` (per-leg ``Cuf``) +
-a ``conn=delta`` scalar-``R`` ``Reactor`` — an UNBALANCED delta bank is refused, OpenDSS's
-Capacitor/Reactor banks being balanced per leg).
+a ``conn=delta`` scalar-``R`` ``Reactor`` — an UNBALANCED three-phase delta bank is
+refused, OpenDSS's Capacitor/Reactor banks being balanced per leg; a two-phase DELTA
+``ShuntAppliance`` exports as OpenDSS's one-leg bank (``phases=1 conn=delta``) with the
+sum of its two cyclic legs, since only that sum acts between the two phases).
 
 Refused (raises :class:`~pgml.errors.ConversionError`), with the reason:
 - ``Line.conductor_geometry`` — out of scope for this exporter; the EXISTING geometry
@@ -1093,28 +1095,37 @@ def _export_shunt(
     bus_str = f"{bus}.{_bus_conductor_str(phases)}"
 
     if connection is WindingConnection.DELTA:
-        # OpenDSS's Capacitor/Reactor banks are BALANCED per leg (a single Cuf / R
-        # applies to every phase-to-phase leg), and the leg value is used directly
-        # (verified live: Cuf == per-leg C, R == 1/(per-leg G)); an unbalanced delta
-        # bank has no single-element representation.
-        if any(abs(x - c[0]) > 1e-15 * max(1.0, abs(c[0])) for x in c) or any(
-            abs(x - g[0]) > 1e-15 * max(1.0, abs(g[0])) for x in g
-        ):
-            raise ConversionError(
-                f"shunt {name}: an UNBALANCED DELTA ShuntAppliance (unequal per-leg "
-                "G/C) has no single balanced-bank OpenDSS representation; only a "
-                "balanced delta bank is exported."
-            )
         kv_ll = node_voltage_magnitude(node, line_to_line=True, plain=True) / 1000.0
-        if abs(c[0]) > 1e-15:
+        if n == 2:
+            # A two-phase DELTA shunt stamps two cyclic legs between the same pair of
+            # phases, the sum of their admittances. OpenDSS's equivalent is its
+            # one-leg bank (``phases=1 conn=delta`` on the two conductors, one
+            # terminal); phases=2 would be an open delta on three conductors. The
+            # legs need not be equal: only their sum acts.
+            c_leg, g_leg, phases_str = sum(c), sum(g), "1"
+        else:
+            # OpenDSS's Capacitor/Reactor banks are BALANCED per leg (a single Cuf / R
+            # applies to every phase-to-phase leg), and the leg value is used directly
+            # (verified live: Cuf == per-leg C, R == 1/(per-leg G)); an unbalanced
+            # delta bank has no single-element representation.
+            if any(abs(x - c[0]) > 1e-15 * max(1.0, abs(c[0])) for x in c) or any(
+                abs(x - g[0]) > 1e-15 * max(1.0, abs(g[0])) for x in g
+            ):
+                raise ConversionError(
+                    f"shunt {name}: an UNBALANCED DELTA ShuntAppliance (unequal "
+                    "per-leg G/C) has no single balanced-bank OpenDSS "
+                    "representation; only a balanced delta bank is exported."
+                )
+            c_leg, g_leg, phases_str = c[0], g[0], str(n)
+        if abs(c_leg) > 1e-15:
             dss.Text.Command(
-                f"New Capacitor.{name}c phases={n} bus1={bus_str} kV={kv_ll:.10g} "
-                f"Cuf=[{c[0] * 1.0e6:.10g}] conn=delta"
+                f"New Capacitor.{name}c phases={phases_str} bus1={bus_str} "
+                f"kV={kv_ll:.10g} Cuf=[{c_leg * 1.0e6:.10g}] conn=delta"
             )
-        if abs(g[0]) > 1e-15:
+        if abs(g_leg) > 1e-15:
             dss.Text.Command(
-                f"New Reactor.{name}r phases={n} bus1={bus_str} "
-                f"R={1.0 / g[0]:.10g} X=0 conn=delta"
+                f"New Reactor.{name}r phases={phases_str} bus1={bus_str} "
+                f"R={1.0 / g_leg:.10g} X=0 conn=delta"
             )
         return
 
