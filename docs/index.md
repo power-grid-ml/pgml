@@ -72,8 +72,9 @@ the assembled admittance to that one load parameter.
 - {doc}`pgml/modeling/index` records the modelling decisions and their limits, from
   transformer vector groups to the frequency dependence of a line.
 - {doc}`pgml/studies/index` collects the planning studies: the impedance a bus sees over
-  frequency and its resonances, the P-V and Q-V voltage-stability curves, and the hosting
-  capacity of every bus for new generation or demand.
+  frequency and its resonances, the P-V and Q-V voltage-stability curves, the hosting
+  capacity of every bus for new generation or demand, and the gradient ranking of grid
+  enhancements.
 - {doc}`pgml/examples` lists the runnable example scripts and the validation figures.
 - {doc}`pgml/api/index` is the generated API reference.
 

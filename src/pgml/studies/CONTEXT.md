@@ -17,12 +17,22 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   switching come from `pgml.solver._continuation`; the predictor, corrector, step control
   and event location (nose, reactive-limit switch, `λ` cap) live here.
 - `limits.py` — `branch_ratings` (line ampacity from the catalog type's `max_i_a`,
-  transformer `s_rated_va` from the component, else its type; every branch listed) and
+  transformer `s_rated_va` from the component, else its type; every branch listed),
   `HostingLimits` (voltage band, line phase-conductor / transformer loading, optional
-  VUF, THD and neutral loading).
+  VUF, THD and neutral loading), and the private `_LimitElements`: the element tables of
+  every limit and `evaluate`, the differentiable float64 limit quantities (`v_pu`, `vuf`,
+  `thd`, `line_loading`, `neutral_loading`, `transformer_loading`,
+  `transformer_terminal_loading`) of a solved state. Hosting and the enhancement study
+  both judge through it.
 - `hosting.py` — `hosting_capacity` and `HostingCapacity`.
+- `enhancement.py` — `enhancement_sensitivities` and `EnhancementSensitivities`; the
+  private `_Problem` (extended grid, leaves, `forward` = solve + stress on the tape, the
+  function the gradcheck checks) and `_Forward`.
 - `_common.py` — private helpers every study uses: `resolve_complex_dtype` (the `dtype`
-  argument) and `check_study` (the `"study"` key check of `from_dict`).
+  argument), `check_study` (the `"study"` key check of `from_dict`), `live_phases`,
+  `resolve_candidates` (default: every bus with a phase conductor and no source) and
+  `base_operating_values` / `BaseOperatingPoint` (the `"worst_case"` / `"nameplate"` /
+  mapping base of hosting and enhancement).
 
 ## Shared conventions
 
@@ -32,14 +42,16 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Phases in results and phase arguments are the schema value `Phase.value` (`"a"`, `"b"`,
   `"c"`, `"n"`); an argument also accepts a `Phase`, letters case-insensitively.
 - The load / generation side is ONE keyword in every study that has one:
-  `direction: Literal["load", "generation"]` (`pv_curve`, `hosting_capacity`), echoed by
+  `direction: Literal["load", "generation"]` (`pv_curve`, `hosting_capacity`,
+  `enhancement_sensitivities` for its worst-case base), echoed by
   the result field and the `to_dict` key `direction`. (The `"kind"` key of a hosting
   `binding` entry names the limit kind, not the side.)
 - Per-phase arrays name the quantity first, the unit last: `q_phase_var`.
 - Every result has `to_dict()` (JSON-ready: plain lists, ids, units in the key names,
   `None` where JSON would need `NaN`) and `from_dict()`, its inverse. Every top-level
   `to_dict()` carries a `"study"` key naming the entry function (`"impedance_scan"`,
-  `"pv_curve"`, `"qv_curve"`, `"hosting_capacity"`); nested records (`Resonance`,
+  `"pv_curve"`, `"qv_curve"`, `"hosting_capacity"`, `"enhancement_sensitivities"`);
+  nested records (`Resonance`,
   `HostingLimits`) do not. Every top-level `from_dict()` checks that key first
   (`_common.check_study`) and raises `InputError` naming expected and found.
 - Complex values serialize as `*_re_<unit>` / `*_im_<unit>` lists.
@@ -47,7 +59,8 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   on the autograd tape (`to_dict` and resonance detection read values off it); the
   voltage-stability and hosting-capacity results are host numpy arrays because those
   studies are not differentiable (continuation events and feasibility verdicts; they run
-  detached).
+  detached). The enhancement results are host numpy arrays too: they ARE gradients,
+  taken inside the study.
 
 ## Impedance scan decisions an edit must not undo
 
@@ -138,6 +151,35 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   kind `line_neutral`, margin key `neutral_loading`.
 - Not differentiable (feasibility is boolean); the search runs under `torch.no_grad()`.
 
+## Enhancement sensitivity decisions an edit must not undo
+
+- The stress is built from `_LimitElements.evaluate`, the quantities hosting judges; a
+  limit quantity is never recomputed in the study. Keep `_LimitElements` values equal to
+  what hosting judged before (A/B of `hosting_capacity(...).to_dict()` across a refactor).
+- Utilisation `u` is `0` at the reference (1 pu for the voltage band, zero for loading,
+  VUF, THD) and `1` at the limit; stress `max(0, (u - c) / (1 - c))^2`, `c` the onset.
+  A voltage bound on the wrong side of 1 pu is refused.
+- Sign convention: every enhancement is `dS / d ln k` of an UPGRADE factor `k` (impedance
+  `Z / k`, rating `k * rating`), so negative = the upgrade relieves stress, for both
+  families. The leaves are `ln k` (impedance via `exp(-ln k)`, rating via
+  `exp(ln k)` on the loading); the tap leaf is the ratio itself; injections are kW /
+  kvar on zero-power constant-power WYE probe loads added to a copy (load convention).
+- All leaves go through `param_overrides` (line R/L, transformer R/L, explicit
+  zero-sequence R0/L0, tap) and the operating point, so `simulate` threads the same
+  overrides into the branch currents. Lines with a `conductor_geometry` are not scaled
+  (`NaN`).
+- ONE `torch.autograd.grad` call on all leaves; the power flow differentiates through
+  the solver's IFT (`_IFTPowerFlow`). A base that does not converge raises
+  `ConvergenceError`; there is no partial result.
+- Transformer terminals within the hosting tie tolerance (`max(1e-7, 100 eps)`) count
+  with their MEAN in the stress: at a nominal tap without a core branch both terminals
+  carry the same loading while their tap slopes differ, and `amax` would pick a side by
+  rounding (measured: tap gradient off by about 1 % and flipping with the solve
+  tolerance). Hosting keeps the hard max.
+- `limits._sqrt` (zero slope at 0) under every RMS norm and THD: a branch with exactly
+  zero current (a cable bridged by a closed switch, both ends fused) otherwise turns
+  every gradient through the solve into NaN. The value equals `sqrt`.
+
 ## Tests
 
 - Impedance scan: `tests/studies/test_impedance_scan.py` (closed forms, fusion, chunking,
@@ -153,3 +195,8 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Hosting capacity: `tests/studies/test_hosting.py` (closed forms, serial `simulate`
   reference, every limit kind, base-case violations, slicing, round trip), `tests/studies/test_limits.py`, shared test
   grids in `tests/studies/grids.py`, `tests/gpu/test_hosting_parity.py`.
+- Enhancement: `tests/studies/test_enhancement.py` (central differences of every
+  sensitivity family, hosting agreement of the quantities, nominal-tap kink, zero-current
+  branch, bases, harmonic, complex64, contracts),
+  `tests/differentiability/test_enhancement_gradcheck.py` (float64 gradcheck of
+  `_Problem.forward`), `tests/gpu/test_enhancement_parity.py`.
