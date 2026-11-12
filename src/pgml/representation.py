@@ -16,8 +16,9 @@ representation it was built in, named by ``GridMetadata.tags["phase_mode"]``
   output of the pandapower, power-grid-model and OpenDSS converters.
 - ``"three_phase"`` -- an explicit phase-domain build (``(A, B, C)`` or source-native
   phases). Values as for an untagged grid.
-- ``"as_built"`` -- the unbalanced phase-domain network of a dataset that records it
-  (the BDGD loader). Values as for an untagged grid.
+- ``"as_built"`` -- the unbalanced phase-domain network as a data source records it
+  (source-native phases, single-phase and two-phase branches kept), written by a loader
+  that does not reduce the network to an equivalent. Values as for an untagged grid.
 - ``"legacy_ll"`` -- a single-phase equivalent written before the per-phase equivalent
   existed: its one-phase nodes carry the line-to-line voltage and its appliances the
   three-phase totals, so a branch current is sqrt(3) too large. Such files are tagged
