@@ -31,7 +31,10 @@ The schema is the data source of truth, see the [Schemas API reference](../api/s
   the node and the element connection: `u_rated_ln_v` when set, else `u_rated_v/√3` for a
   WYE element on a node with three or more phase rows and `u_rated_v` on a one-phase node;
   a DELTA element (three-phase, or the single phase-to-phase element of a two-phase delta
-  appliance) sees `u_rated_v`. The const-Z/ZIP load model, the harmonic load shunt, the
+  appliance) sees `u_rated_v`. On a node with fewer than three phase rows, such as
+  `(A, B)`, `u_rated_v` is line-to-neutral unless `u_rated_ln_v` is set, so a delta
+  appliance there is refused ({class}`~pgml.errors.InputError`) until the node sets
+  `u_rated_ln_v`; `u_rated_v` is then the phase-to-phase voltage. The const-Z/ZIP load model, the harmonic load shunt, the
   harmonic source admittance, the convergence test and the per-unit reporting
   (`base_voltage_per_row`) all call it, so they cannot drift apart. See {doc}`appliances`.
 - The slack EMF is the line-to-neutral phasor. Converters pass the line-to-line magnitude

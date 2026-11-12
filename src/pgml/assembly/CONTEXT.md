@@ -72,7 +72,9 @@ asymmetric, transformer, der-pv-storage, references/opendss/harmonics).
   `Y_eff·V = I_slack − I_device(V)`.
 - `V0` of a device element is the node's phase-to-neutral rating for WYE and `u_rated_v` for
   DELTA (`node_voltage_magnitude(node, line_to_line=…)`); never derive it from
-  `u_rated_v` and the phase count directly.
+  `u_rated_v` and the phase count directly. A DELTA device on a node with fewer than three
+  phase rows needs `Node.u_rated_ln_v` (without it `u_rated_v` is line-to-neutral there);
+  the incidence grouping raises `InputError` otherwise, before any stamp.
 - Branch current sign: positive INTO the branch terminal (matches
   `result_schema.BranchResult`). KCL invariant: scattering every `(i_from, i_to)` back to
   its rows equals `assemble_network_ybus(...).Y @ V` at every row.

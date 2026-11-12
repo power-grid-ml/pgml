@@ -49,6 +49,16 @@ computes it from the two rating fields):
   more phase rows and `u_rated_v` on a node with fewer;
 - a delta element, two- or three-phase, uses `Node.u_rated_v`, the phase-to-phase rating.
 
+On a node with three or more phase rows (a `Phase.N` row counts) `u_rated_v` is line-to-line,
+so a delta element is rated correctly without further data. On a node with fewer, such as
+`(A, B)`, `u_rated_v` is line-to-neutral unless the node sets `u_rated_ln_v`, and a delta
+element would be rated at the line-to-neutral voltage. The assembly therefore refuses a delta
+appliance (load, generator or storage, by its explicit or its configured connection) on such a
+node without `u_rated_ln_v`, with an {class}`~pgml.errors.InputError` that names the node and
+the appliance. Rate the node with both fields, e.g. `u_rated_v = 400`, `u_rated_ln_v = 230`,
+or connect the appliance wye. A delta {class}`~pgml.schemas.grid_schema.ShuntAppliance` is
+given by its admittances and needs no rating.
+
 The same phase-to-neutral rating is the per-unit base of every row of the node
 ({func}`pgml.assembly.base_voltage_per_row`), the reference of the convergence test, of a
 voltage-regulating generator's setpoint and of a node harmonic source.

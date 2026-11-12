@@ -3,7 +3,9 @@
 A DELTA appliance on two phases is one element between them (``M = [1, -1]``): it is
 stamped and drawn on both phase rows with opposite sign, its nominal voltage is the
 node's ``u_rated_v`` and its per-phase values are summed onto the element. A node's
-``u_rated_ln_v`` is the per-phase base of its rows.
+``u_rated_ln_v`` is the per-phase base of its rows. A node with fewer than three phase
+rows stores ``u_rated_v`` line-to-neutral unless it sets ``u_rated_ln_v``, so a DELTA
+appliance there needs that field.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from pgml.assembly import (
     node_voltage_magnitude,
     phase_voltage_magnitude,
 )
+from pgml.errors import InputError
 from pgml.schemas.grid_schema import (
     Generator,
     Grid,
@@ -325,3 +328,144 @@ def test_split_phase_delta_and_halves_solve():
     v = res.v
     v_x1x2 = abs(complex(v[idx.row(2, P.A)] - v[idx.row(2, P.B)]))
     assert abs(v_x1x2 - 440.0) / 440.0 < 0.05
+
+
+# --- DELTA appliance on a node with fewer than three phase rows ------------------
+AB = (P.A, P.B)
+U_LN = 400.0 / math.sqrt(3.0)
+
+
+def _two_wire_grid(appliances, *, ln=None) -> Grid:
+    """Source node 1 and load node 2 on two phase conductors ``(A, B)``, no neutral.
+
+    Without ``ln`` the nodes carry the line-to-neutral rating (the schema rule for a
+    node with fewer than three phase rows); with it they are rated 400/``ln`` V.
+    """
+    u = U_LN if ln is None else 400.0
+    r = [[3e-4, 5e-5], [5e-5, 3e-4]]
+    ell = [[1e-6, 3e-7], [3e-7, 1e-6]]
+    nodes = [
+        Node(id=1, u_rated_v=u, phases=AB, u_rated_ln_v=ln),
+        Node(id=2, u_rated_v=u, phases=AB, u_rated_ln_v=ln),
+    ]
+    line = Line(
+        id=10,
+        from_node=1,
+        to_node=2,
+        from_phases=AB,
+        to_phases=AB,
+        length_m=100.0,
+        series_resistance_ohm_per_m=r,
+        series_inductance_h_per_m=ell,
+        shunt_capacitance_f_per_m=[[0.0, 0.0], [0.0, 0.0]],
+    )
+    src = Source(
+        id=1,
+        node=1,
+        phases=AB,
+        u_ref_v=[U_LN, U_LN],
+        u_angle_deg=[0.0, -120.0],
+        resistance_ohm=[[0.01, 0.0], [0.0, 0.01]],
+        inductance_h=[[1e-5, 0.0], [0.0, 1e-5]],
+    )
+    return Grid(
+        base_frequency_hz=50.0,
+        nodes=nodes,
+        branches=[line],
+        appliances=[src, *appliances],
+    )
+
+
+@pytest.mark.parametrize("cls", [Load, Generator, Storage])
+def test_delta_on_two_row_node_without_ln_rating_is_refused(cls):
+    app = cls(
+        id=20,
+        node=2,
+        phases=AB,
+        connection=WindingConnection.DELTA,
+        p_nom_w=9e3,
+        q_nom_var=3e3,
+    )
+    grid = _two_wire_grid([app])
+    with pytest.raises(InputError, match=r"appliance 20.*node 2.*`u_rated_ln_v`"):
+        solve_power_flow(grid, tol=1e-12)
+
+
+def test_delta_on_two_row_node_is_refused_by_the_linear_assembly():
+    grid = _two_wire_grid([_delta(model=LoadModel.CONST_IMPEDANCE)])
+    with pytest.raises(InputError, match="Set `u_rated_ln_v` on the node"):
+        assemble_ybus(grid, 50.0)
+
+
+def test_delta_by_config_default_on_two_row_node_is_refused(monkeypatch, tmp_path):
+    """The refusal follows the RESOLVED connection, not only an explicit field."""
+    import yaml
+
+    from pgml import defaults
+
+    load = Load(id=20, node=2, phases=AB, p_nom_w=9e3, q_nom_var=3e3)
+    grid = _two_wire_grid([load])
+    assert solve_power_flow(grid, tol=1e-12).converged
+    data = yaml.safe_load(yaml.safe_dump(defaults.defaults()))
+    data["appliance"]["load"]["default_connection"]["value"] = "delta"
+    custom = tmp_path / "defaults.yaml"
+    custom.write_text(yaml.safe_dump(data))
+    monkeypatch.setenv("PGML_DEFAULTS", str(custom))
+    try:
+        defaults.reload(str(custom))
+        with pytest.raises(InputError, match="u_rated_ln_v"):
+            solve_power_flow(grid, tol=1e-12)
+    finally:
+        monkeypatch.delenv("PGML_DEFAULTS", raising=False)
+        defaults.reload()
+
+
+@pytest.mark.parametrize(
+    "model",
+    [LoadModel.CONST_POWER, LoadModel.CONST_IMPEDANCE, LoadModel.CONST_CURRENT],
+)
+def test_delta_on_two_row_node_with_ln_rating_is_rated_phase_to_phase(model):
+    grid = _two_wire_grid([_delta(model=model)], ln=U_LN)
+    assert node_voltage_magnitude(grid.nodes[1], line_to_line=True) == 400.0
+    res = solve_power_flow(grid, tol=1e-12)
+    assert res.converged
+    idx = node_phase_index(grid)
+    v_ab = res.v[idx.row(2, P.A)] - res.v[idx.row(2, P.B)]
+    assert abs(abs(complex(v_ab)) - 400.0) / 400.0 < 0.05
+    if model is LoadModel.CONST_IMPEDANCE:
+        bare = _two_wire_grid([], ln=U_LN)
+        y_load = assemble_ybus(grid, 50.0).Y - assemble_ybus(bare, 50.0).Y
+        a = idx.row(2, P.A)
+        y = (9e3 - 3e3j) / 400.0**2
+        assert abs(complex(y_load[a, a]) - y) < 1e-13 * abs(y)
+
+
+def test_wye_on_two_row_node_without_ln_rating_is_unaffected():
+    wye = Load(
+        id=20,
+        node=2,
+        phases=AB,
+        connection=WindingConnection.WYE,
+        p_nom_w=9e3,
+        q_nom_var=3e3,
+        load_model=LoadModel.CONST_IMPEDANCE,
+    )
+    grid = _two_wire_grid([wye])
+    assert solve_power_flow(grid, tol=1e-12).converged
+    bare = _two_wire_grid([])
+    y_load = assemble_ybus(grid, 50.0).Y - assemble_ybus(bare, 50.0).Y
+    idx = node_phase_index(grid)
+    a = idx.row(2, P.A)
+    y = (4.5e3 - 1.5e3j) / U_LN**2
+    assert abs(complex(y_load[a, a]) - y) < 1e-13 * abs(y)
+
+
+@pytest.mark.parametrize(
+    "phases,app_phases",
+    [(ABCN, (P.A, P.B, P.C)), (ABCN, AB), (ABN, AB)],
+)
+def test_delta_on_three_row_node_without_ln_rating_is_unaffected(phases, app_phases):
+    """Three or more phase rows: ``u_rated_v`` is line-to-line, the delta rating."""
+    grid = _grid([_delta(phases=app_phases)], phases=phases)
+    assert grid.nodes[1].u_rated_ln_v is None
+    assert solve_power_flow(grid, tol=1e-12).converged
