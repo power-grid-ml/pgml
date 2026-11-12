@@ -68,6 +68,83 @@ def test_batched_solve_and_factorization_survive_several_threads(threads):
     assert torch.get_num_threads() == threads
 
 
+def test_set_num_threads_puts_the_math_library_in_the_nested_state(threads):
+    """The detector follows torch's own thread setting and leaves it as it found it."""
+    library = _dense_lapack._mkl()
+    if library is None:
+        pytest.skip("oneMKL's threading state is not readable in this build")
+
+    def local_count():
+        count = library.MKL_Set_Num_Threads_Local(0)
+        library.MKL_Set_Num_Threads_Local(count)
+        return count
+
+    before = local_count()
+    assert _dense_lapack.nested_lapack_threads()
+    assert local_count() == before
+    torch.set_num_threads(1)
+    assert not _dense_lapack.nested_lapack_threads()
+
+
+def _record_lapack_calls(monkeypatch):
+    """Record, per factorizing call, whether it was handed a stack."""
+    truth_solve, truth_factor = torch.linalg.solve, torch.linalg.lu_factor
+    stacked = []
+
+    def solve(a, b, *args, **kwargs):
+        stacked.append(a.ndim > 2)
+        return truth_solve(a, b, *args, **kwargs)
+
+    def lu_factor(a, *args, **kwargs):
+        stacked.append(a.ndim > 2)
+        return truth_factor(a, *args, **kwargs)
+
+    monkeypatch.setattr(torch.linalg, "solve", solve)
+    monkeypatch.setattr(torch.linalg, "lu_factor", lu_factor)
+    return stacked
+
+
+def test_a_large_stack_never_reaches_the_nested_batched_factorization(
+    monkeypatch, threads
+):
+    """In the nested state the batched call can hang, which no check can repair."""
+    y, i = _stack(rows=_dense_lapack._NESTED_ROWS + 1, batch=3)
+    monkeypatch.setattr(_dense_lapack, "_repair", _dense_lapack.AS_ASKED)
+    monkeypatch.setattr(_dense_lapack, "nested_lapack_threads", lambda: True)
+    stacked = _record_lapack_calls(monkeypatch)
+
+    v = solve_harmonic(y, i)
+    v_factored = solve_factored(lu_factor_system(y, backend="dense"), i)
+
+    assert _backward_error(y, v, i) < 1e-10
+    assert _backward_error(y, v_factored, i) < 1e-10
+    assert stacked and not any(stacked)
+    # A thread setting, not a property of the build: nothing is latched.
+    assert _dense_lapack.repair_in_use() == _dense_lapack.AS_ASKED
+    assert torch.get_num_threads() == threads
+
+
+@pytest.mark.parametrize(
+    "rows, nested",
+    [(_dense_lapack._NESTED_ROWS, True), (_dense_lapack._NESTED_ROWS + 1, False)],
+)
+def test_a_small_stack_or_an_unnested_state_keeps_the_batched_call(
+    monkeypatch, rows, nested
+):
+    """Only the size and the detector decide; the call itself runs in one thread so
+    that the test never makes the call it guards against."""
+    y, i = _stack(rows=rows, batch=3)
+    monkeypatch.setattr(_dense_lapack, "_repair", _dense_lapack.AS_ASKED)
+    monkeypatch.setattr(_dense_lapack, "nested_lapack_threads", lambda: nested)
+    stacked = _record_lapack_calls(monkeypatch)
+
+    with _dense_lapack.single_thread(True):
+        v = solve_harmonic(y, i)
+
+    assert _backward_error(y, v, i) < 1e-10
+    assert stacked[0]
+
+
 def test_a_single_system_is_never_guarded():
     """The per-iteration path of the nonlinear solvers must pay nothing for this."""
     one = torch.eye(4, dtype=torch.complex128)

@@ -9,15 +9,16 @@ a per-scenario admittance, a switch-state sweep and the implicit-function adjoin
 hand to LAPACK, so an affected install would otherwise lose those paths on any
 multi-core machine.
 
-The mechanism decides the repair. Setting the thread count also disables the math
-library's dynamic thread adjustment, which is what would otherwise make it fall back to
-one thread when it is entered from inside someone else's parallel region; the batched
-factorization then calls the per-matrix routine from several threads at once, each
-insisting on its full thread count, and above roughly 145 rows the blocked kernel
-rejects the pivot array it is handed, skips the interchange and still reports success.
-Factoring the same stack ONE MATRIX AT A TIME therefore repairs it without giving up a
-single thread, because a single-matrix factorization is exactly the case the math
-library threads correctly.
+The mechanism decides the repair. torch factors a CPU stack with one LAPACK call per
+matrix, spread over its own OpenMP threads. ``torch.set_num_threads(n)`` with ``n > 1``
+also disables oneMKL's dynamic thread adjustment and gives the calling thread its own
+oneMKL thread count, and either one makes each of those calls open a nested team of
+threads instead of running in the one thread it was given (:func:`nested_lapack_threads`).
+Above roughly 145 rows the nested factorization rejects the pivot array it is handed,
+skips the interchange and still reports success; on a 4-vCPU CI runner the same call has
+also been seen never to return. A stack factored ONE MATRIX AT A TIME leaves torch's
+loop out, so each factorization is the single-matrix case that the math library threads
+correctly, at the caller's full thread count.
 
 The guard applies only on CPU and only to a stack of MORE THAN ONE matrix, so a single
 system, the CUDA path, the sparse backend and the per-iteration back-substitutions of
@@ -25,7 +26,9 @@ the nonlinear solvers are untouched. For those calls it:
 
 1. runs the call as the caller asked, then measures the residual of the result against
    one probe right-hand side per matrix: one triangular solve and one matrix-vector
-   product per matrix, ``O(n²)`` against the factorization's ``O(n³)``;
+   product per matrix, ``O(n²)`` against the factorization's ``O(n³)``. A stack above
+   :data:`_NESTED_ROWS` rows starts at the next stage instead while the math library is
+   in the nested state, because a call that hangs cannot be checked afterwards;
 2. on a raised call or a residual above round-off, repeats the factorization one matrix
    at a time at the caller's thread count and remembers for the rest of the process that
    this build needs it, so the cost of the discovery is paid once rather than per call;
@@ -45,13 +48,16 @@ single-threaded batched repair: even at 200 rows, 1.5x at 450 and 2.6x at 900, a
 same backward error.</sub>
 
 On the oneMKL builds where the defect was measured it fires only in a process that has
-called ``torch.set_num_threads`` with more than one thread (the call that disables the
-dynamic adjustment); default threads or ``OMP_NUM_THREADS`` alone factor the same stack
-exactly. A benchmark of these paths must therefore time both configurations. Always
-factoring one matrix at a time was not adopted: on an unaffected configuration it is up
-to several times slower than the guarded batched call on small stacks. Math-library
-thread knobs are not a substitute for the residual check; one such workaround produced
-factors with valid pivots and a backward error near ``1e-2``.
+called ``torch.set_num_threads`` with more than one thread; default threads or
+``OMP_NUM_THREADS`` alone factor the same stack exactly. A benchmark of these paths must
+therefore time both configurations. Always factoring one matrix at a time was not
+adopted: in the default state the batched call is faster, by 1.9x on sixteen 600-row
+complex128 systems in four threads of a 13th-generation Core i5, and up to several times
+on small stacks. Switching the math library's thread settings around the call was not
+adopted either: torch gives every thread that runs one of its parallel loops its own
+count, which only that thread can reset, and one such workaround produced factors with
+valid pivots and a backward error near ``1e-2``. When oneMKL's state cannot be read the
+guard starts from the batched call as before.
 
 The thread count is a process-global setting, so a caller that reaches the last resort
 and solves from several threads at once must serialize its solves.
@@ -60,6 +66,7 @@ and solves from several threads at once must serialize its solves.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 import logging
 import math
 
@@ -128,6 +135,67 @@ def single_thread(active: bool):
         yield
     finally:
         torch.set_num_threads(threads)
+
+
+#: Rows above which a stack skips the batched call in the nested state. In that state
+#: 16-matrix stacks were factored correctly in 20 of 20 calls at 144 rows and wrongly in
+#: 20 of 20 at 152, alike for complex128, complex64, float64 and float32 and for 4 and 8
+#: threads (oneMKL 2026.1, torch 2.13); the bound keeps a margin below that edge.
+_NESTED_ROWS = 128
+
+_UNPROBED = object()
+_mkl_library = _UNPROBED
+
+
+def _mkl():
+    """oneMKL's service functions as torch exported them to the process, or ``None``.
+
+    A torch built against a shared oneMKL places it in the process's global symbol
+    scope, so the threading state that torch itself sets is readable there. A build
+    without MKL, with MKL linked privately, or a platform without a global scope
+    (Windows) gives ``None``.
+    """
+    global _mkl_library
+    if _mkl_library is _UNPROBED:
+        _mkl_library = None
+        if torch.backends.mkl.is_available():
+            try:
+                library = ctypes.CDLL(None)
+                library.MKL_Get_Dynamic.restype = ctypes.c_int
+                library.MKL_Get_Dynamic.argtypes = []
+                library.MKL_Set_Num_Threads_Local.restype = ctypes.c_int
+                library.MKL_Set_Num_Threads_Local.argtypes = [ctypes.c_int]
+            except (AttributeError, OSError, TypeError):
+                pass
+            else:
+                _mkl_library = library
+    return _mkl_library
+
+
+def nested_lapack_threads() -> bool:
+    """Whether a batched CPU factorization would run oneMKL threads inside torch's.
+
+    torch factors a CPU stack with one LAPACK call per matrix, spread over its own
+    OpenMP threads (``at::parallel_for`` over the batch). oneMKL then runs each call in
+    one thread, unless its dynamic adjustment is off or the calling thread carries its
+    own thread count above one; then every matrix opens a nested team of its own.
+    ``torch.set_num_threads(n)`` with ``n > 1`` does both, and the nested state is the
+    one in which the factorization corrupts its row interchanges above
+    :data:`_NESTED_ROWS` rows. Measured with oneMKL 2026.1 (GNU threading layer on
+    LLVM's OpenMP), torch 2.13, complex128, 16 matrices of 600 rows, 4 threads: every
+    one of 351 calls raised in this state; with both settings put back to oneMKL's
+    defaults none of 10 calls was wrong, with only one of them put back all 10 were.
+
+    Reads the calling thread's count by setting it to zero (oneMKL's "use the global
+    setting") and putting the returned value straight back. ``False`` when torch runs
+    one thread (no outer loop) or oneMKL's state cannot be read (see :func:`_mkl`).
+    """
+    library = _mkl()
+    if library is None or torch.get_num_threads() <= 1:
+        return False
+    local = library.MKL_Set_Num_Threads_Local(0)
+    library.MKL_Set_Num_Threads_Local(local)
+    return local > 1 or library.MKL_Get_Dynamic() == 0
 
 
 def _ratio(residual: Tensor, scale: Tensor) -> float:
@@ -233,16 +301,30 @@ def _escalate(stage: str, where: str) -> None:
         _log.warning("%s: %s", where, _ESCALATION_NOTE[following])
 
 
-def _attempt(run, *, where: str, limit: float):
+def _first_stage(a: Tensor) -> str:
+    """The stage a batched call on ``a`` starts from.
+
+    The latched repair, except that a stack large enough for oneMKL to thread each
+    factorization skips the batched call while :func:`nested_lapack_threads` holds: in
+    that state the call corrupts its pivots or never returns, and a hang cannot be
+    repaired after the fact. This is a property of the current thread settings, not of
+    the build, so it is decided per call and not latched.
+    """
+    if _repair == AS_ASKED and a.shape[-1] > _NESTED_ROWS and nested_lapack_threads():
+        return PER_MATRIX
+    return _repair
+
+
+def _attempt(run, *, where: str, limit: float, start: str):
     """Run a batched call, escalating through the repairs until one is right.
 
     ``run(per_matrix)`` performs the LAPACK call AND measures the residual of its
     result, returning both. It runs inside the thread context under test, because the
     defect reaches the triangular solve the measurement itself needs: a raised
     measurement is the same evidence as a raised factorization and counts as an
-    infinite error.
+    infinite error. ``start`` is the first stage tried (:func:`_first_stage`).
     """
-    for stage in _STAGES[_STAGES.index(_repair) :]:
+    for stage in _STAGES[_STAGES.index(start) :]:
         last = stage == _STAGES[-1]
         try:
             with single_thread(stage == ONE_THREAD):
@@ -305,7 +387,7 @@ def lu_factor(a: Tensor, *, where: str) -> tuple[Tensor, Tensor]:
             x = torch.linalg.lu_solve(lu.detach(), piv, b)
         return (lu, piv), _relative_residual(a_d, x, b, limit)
 
-    return _attempt(run, where=where, limit=limit)
+    return _attempt(run, where=where, limit=limit, start=_first_stage(a))
 
 
 def lu_solve(lu: Tensor, piv: Tensor, rhs: Tensor, *, adjoint: bool = False) -> Tensor:
@@ -336,7 +418,7 @@ def solve(a: Tensor, b: Tensor, *, where: str) -> Tensor:
         x = _per_matrix_solve(a, b) if per_matrix else torch.linalg.solve(a, b)
         return x, _relative_residual(a_d, x.detach(), b_d, limit)
 
-    return _attempt(run, where=where, limit=limit)
+    return _attempt(run, where=where, limit=limit, start=_first_stage(a))
 
 
 __all__ = [
@@ -346,6 +428,7 @@ __all__ = [
     "is_batched_cpu",
     "lu_factor",
     "lu_solve",
+    "nested_lapack_threads",
     "repair_in_use",
     "single_thread",
     "solve",

@@ -1,0 +1,42 @@
+name: LAPACK threading probe
+
+# Manual diagnostic, not a gate. Repeats the batched CPU factorization of a complex stack
+# in the thread state in which oneMKL nests its own threads inside torch's batch loop
+# (`torch.set_num_threads(n > 1)`), on the same 4-vCPU runner and locked environment as
+# the test job. `torch` makes the raw call that the dense guard avoids in that state;
+# `pgml` goes through the guarded solve. A call that stops returning gets every native
+# thread's backtrace printed (tools/lapack_hang_probe.py) and fails the job.
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds of repeated calls per target"
+        default: "900"
+      hang_after:
+        description: "Seconds after which one call counts as hung"
+        default: "120"
+
+jobs:
+  probe:
+    name: Probe (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [torch, pgml]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: v0.66.0
+          environments: cpu
+          cache: true
+      - run: sudo apt-get update && sudo apt-get install -y gdb
+      # The probe's MKL messages go to stdout on every corrupted call; keep only the rest.
+      - run: |
+          set -o pipefail
+          pixi run -e cpu python tools/lapack_hang_probe.py \
+            --target ${{ matrix.target }} --threads 4 \
+            --seconds ${{ inputs.seconds }} --hang-after ${{ inputs.hang_after }} \
+            | grep -v -e 'oneMKL ERROR' -e '^$'

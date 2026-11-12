@@ -68,6 +68,9 @@ The subpackage map is `src/pgml/CONTEXT.md`; each subpackage has its own `CONTEX
 - `.githooks/pre-commit` — ruff on staged Python, API index check when `src/` changes
   (`git config core.hooksPath .githooks`). `.github/workflows/ci.yml` — lint, API index,
   tests, strict docs, package build.
+- `tools/lapack_hang_probe.py` with the manual workflow `.github/workflows/lapack-threads.yml`
+  — repeats the batched CPU LU in the nested oneMKL thread state on a CI runner and prints
+  native backtraces if a call hangs; a diagnostic, not a gate.
 
 ## Configuration: three buckets
 
