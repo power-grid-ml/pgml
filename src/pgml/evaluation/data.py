@@ -15,10 +15,10 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from pgml.assembly._params import phase_voltage_magnitude
+from pgml.assembly._params import node_voltage_magnitude
 from pgml.schemas.grid_schema import Grid, Phase
 
-from ._util import to_float, to_numpy
+from ._util import to_numpy
 from .topology import distance_from_slack
 
 
@@ -98,7 +98,7 @@ def row_labels(index, *, numbering: Optional[dict] = None) -> list[str]:
 
 def _phase_base(node) -> float:
     """Line-to-neutral base voltage of a node (per-unit denominator)."""
-    return phase_voltage_magnitude(to_float(node.u_rated_v), len(node.phases))
+    return node_voltage_magnitude(node, plain=True)
 
 
 def _scenario_slice(

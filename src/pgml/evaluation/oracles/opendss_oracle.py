@@ -39,6 +39,7 @@ from pgml.schemas.grid_schema import (
     WindingConnection,
 )
 
+from pgml.assembly._transformer_terminals import uses_terminal_model
 from pgml.evaluation._util import to_float
 from pgml.evaluation.data import HarmonicProfile, LabeledMatrix, row_labels
 from pgml.evaluation.topology import distance_from_slack
@@ -1369,6 +1370,11 @@ def _build_circuit_with_real_transformer(grid: Grid, busname: dict) -> None:
     for t in grid.branches:
         if not (isinstance(t, Transformer) and t.in_service):
             continue
+        if uses_terminal_model(t):
+            raise NotImplementedError(
+                f"transformer {t.id}: a star point on a neutral row, an earthing "
+                "impedance or a centre tap is not written by this oracle builder."
+            )
         if t.from_connection in (
             WindingConnection.ZIGZAG,
             WindingConnection.ZIGZAG_GROUNDED,

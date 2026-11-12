@@ -85,7 +85,7 @@ from pgml.assembly._load_shunt import (
 )
 from pgml.assembly._params import (
     _SolvedPVOperatingPoint,
-    phase_voltage_magnitude,
+    node_voltage_magnitude,
     resolve_operating_power,
 )
 from pgml.assembly._scatter import PatternAccumulator, scatter_blocks_into
@@ -1809,7 +1809,8 @@ def _device_element_spectra(
       where a python list/tuple of length ``n_elem`` applies PER ELEMENT and a scalar
       or bare tensor BROADCASTS to all elements (see :func:`_element_coeff`).
     - ``spectrum_per_phase`` (schema): element ``k`` uses the spectrum stored at
-      ``phases[k]`` (for DELTA-3 the delta branch ``k`` keys off ``phases[k]``); an
+      ``phases[k]`` (for DELTA the delta branch ``k`` keys off ``phases[k]``, so the
+      single element of a two-phase DELTA device uses ``phases[0]``); an
       element whose phase has no entry injects NO harmonics (all orders 0).
     - ``spectrum`` (schema): the SAME spectrum on every element.
 
@@ -1838,6 +1839,8 @@ def _device_element_spectra(
     stored = element_stored_spectra(appliance)
     if stored is None:
         return None
+    # A two-phase DELTA device has one element, keyed off phases[0].
+    stored = stored[:n_elem]
     shared = getattr(appliance, "spectrum_per_phase", None) is None
     if not any(isinstance(s, LoadVaryingSpectrum) for s in stored):
         if shared:
@@ -2032,11 +2035,7 @@ def _effective_element_power(
         return torch.complex(sign * p_t, sign * q_t).to(cdt)  # [*b, n_elem]
 
     is_delta = grp.connection == WindingConnection.DELTA
-    v0 = phase_voltage_magnitude(
-        node_map[a.node].u_rated_v,
-        len(node_map[a.node].phases),
-        line_to_line=is_delta,
-    )
+    v0 = node_voltage_magnitude(node_map[a.node], line_to_line=is_delta)
     if getattr(a, "control", None) is not None:
         v_pu = (torch.abs(vt) / v0).unsqueeze(-2)  # [*vbatch, 1, n_elem]
         p_eff, q_eff = resolve_injection_power(
@@ -2260,10 +2259,13 @@ def _harmonic_injections(
                 if mode == "internal_voltage":
                     reference = vt - z1 * i1
                 else:
-                    if n_elem not in (1, 3):
+                    if n_elem not in (1, 3) or (
+                        n_elem == 1 and grp.connection == WindingConnection.DELTA
+                    ):
                         raise InputError(
                             f"{type(a).__name__} {a.id}: spectrum_reference="
-                            "'opendss_voltage' supports one- or three-phase devices."
+                            "'opendss_voltage' supports a one-phase wye or a "
+                            "three-phase device."
                         )
                     # OpenDSS initializes one phase-to-ground internal voltage from
                     # terminal-1 LINE current, then synthesizes the balanced phase
@@ -2482,9 +2484,7 @@ def _stamp_harmonic_load_shunt(
         for ki in keep:
             a = grp.appliances[ki]
             node = node_map[a.node]
-            v0 = phase_voltage_magnitude(
-                node.u_rated_v, len(node.phases), line_to_line=is_delta
-            )
+            v0 = node_voltage_magnitude(node, line_to_line=is_delta)
             v0_t = _as_rt(v0, rdt, device)
             if v1 is None:
                 # Rated-voltage terminal: exact for a constant-power device.
@@ -2761,7 +2761,7 @@ def _apply_node_sources(
     ``docs/pgml/modeling/error-injection.md``:
 
     - ``V_base`` = node line-to-neutral base
-      (:func:`pgml.assembly._params.phase_voltage_magnitude`).
+      (:func:`pgml.assembly._params.node_voltage_magnitude`).
     - ``Y_s = source_power_va / V_base**2`` (REAL, frequency-flat / resistive).
     - ``E_h = (mag_h/mag_1)*|V1| * exp(j*(rad(ang_h) + h*(angle(V1) - rad(ang_1))))``
       using the SAME phase convention as :func:`_harmonic_injections`. ``V1`` is the
@@ -2800,7 +2800,7 @@ def _apply_node_sources(
             phases = src.phases if src.phases is not None else node.phases
             rows = index.rows_for_terminal(src.node_id, phases, device=device)  # [P]
 
-            v_base = phase_voltage_magnitude(node.u_rated_v, len(node.phases))
+            v_base = node_voltage_magnitude(node)
             # Y_s = S_sc / V_base^2 (REAL, frequency-flat). Keeps grad to S_sc.
             s_sc = _as_rt(src.source_power_va, rdt, device)  # 0-d or [*batch]
             y_s = (s_sc / (v_base * v_base)).to(cdt)  # [*batch]

@@ -84,8 +84,12 @@ node's `Phase.N` row, when the node has one, or to ground. With no neutral row t
 reduces to the identity and the stamp becomes the plain diagonal one. DELTA maps terminal `k`
 to the pair `(phase_k, phase_{k+1})`, with the loop order taken from the appliance's `phases`
 tuple. A constant-impedance shunt is stamped as `Mᵀ·diag(y)·M` and a ZIP current as
-`I_node = Mᵀ·i_term` with `V_term = M·V_node`. DELTA needs at least two phases, and zigzag is
-a transformer connection that appliances reject.
+`I_node = Mᵀ·i_term` with `V_term = M·V_node`. DELTA needs two or three phase conductors. On
+two phases it is ONE element between them, OpenDSS's `phases=1 conn=delta` load (a 440 V
+appliance across X1-X2, or a load across A-B), whose per-phase values are summed onto it; the
+open delta of OpenDSS's `phases=2 conn=delta` is not a pgml appliance. Zigzag is a
+transformer connection that appliances reject. {doc}`appliances` gives the element table and
+the rated voltage of each element.
 
 ## Single-phase loads
 

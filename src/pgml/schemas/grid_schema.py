@@ -37,6 +37,11 @@ independent. A grid may define symmetric and asymmetric appliances together, and
 either a symmetric or an asymmetric calculation may run on the same grid:
 
 - ``p_nom_w`` / ``q_nom_var`` are ALWAYS the total over the connected phases.
+- A per-phase (single-phase positive-sequence) equivalent of a balanced
+  three-phase grid is a grid of one-phase nodes rated line-to-neutral
+  (``U_LL/√3``) whose appliances and transformers carry one third of the
+  three-phase power and rating, so a branch current is the physical conductor
+  current; ``GridMetadata.tags["phase_mode"]`` records the representation.
 - Optional ``p_nom_per_phase_w`` / ``q_nom_per_phase_var`` give an asymmetric
   nameplate split (length == ``len(phases)``; must sum to the totals).
 - Connection sets terminal pairing: WYE = each listed phase to neutral/ground
@@ -571,14 +576,65 @@ class LineGeometry(GridModel):
 # =============================================================================
 # 6. Nodes
 # =============================================================================
+#: Relative tolerance of the ``Node.u_rated_v`` / ``Node.u_rated_ln_v`` consistency
+#: check: nameplates such as 400/230 V (ratio 1.739) or 220/127 V are accepted as
+#: sqrt(3) (1.732), while sqrt(3) and 2 stay distinguishable.
+_RATED_RATIO_RTOL = 0.02
+
+
 class Node(GridModel):
+    """A bus: an ordered set of conductor rows and its rated voltages.
+
+    *Rated voltages.* ``u_rated_v`` is the nameplate: line-to-line on a node with three
+    or more phase rows (a ``Phase.N`` row counts), line-to-neutral on a node with fewer.
+    A delta (phase-to-phase) appliance element sees ``u_rated_v``. ``u_rated_ln_v``
+    (optional) is the phase-to-neutral rating and then the per-phase base of every row
+    of the node: the nominal voltage of a wye appliance element, the per-unit base
+    (:func:`pgml.assembly.base_voltage_per_row`) and the reference of constant-impedance
+    and constant-current loads and of the harmonic load shunt. Without it the per-phase
+    base is ``u_rated_v/√3`` on a node with three or more phase rows and ``u_rated_v``
+    otherwise.
+
+    Set ``u_rated_ln_v`` where that rule does not describe the node, above all a
+    split-phase node ``(X1, X2, N)`` behind a centre-tapped transformer (stored as
+    ``(A, B, N)``): ``u_rated_v`` is the X1-X2 voltage (e.g. 440 or 240 V) and
+    ``u_rated_ln_v`` half of it (220 or 120 V), where the rule would give
+    ``u_rated_v/√3``. On a node with two phase conductors (with or without a ``Phase.N``
+    row) that gives it, ``u_rated_v`` is the phase-to-phase voltage.
+
+    When both are plain numbers they must agree within 2 % (relative), by the number
+    of phase conductors (rows other than ``Phase.N``):
+
+    - three: ``u_rated_v = √3·u_rated_ln_v``;
+    - two: ``u_rated_v = √3·u_rated_ln_v`` (two phases of a three-phase system) or
+      ``2·u_rated_ln_v`` (split phase);
+    - one: ``u_rated_v = u_rated_ln_v`` (both phase-to-neutral).
+
+    Tensor values are not checked here (float/tensor duality).
+    """
+
     id: int = Field(description="Unique node id within the grid.")
     name: Optional[str] = Field(default=None)
     u_rated_v: PosNum = si_field(
-        "Rated voltage.",
+        "Rated voltage: line-to-line on a node with three or more phase rows "
+        "(the X1-X2 voltage on a split-phase node), line-to-neutral on a one-phase "
+        "node. A delta (phase-to-phase) appliance element sees this voltage.",
         short="V",
         long="volt",
         reference="line-to-line (3-phase) / line-to-neutral (1-phase)",
+    )
+    u_rated_ln_v: Optional[PosNum] = si_field(
+        "Rated phase-to-neutral voltage, the per-phase base of every row of the "
+        "node (wye element voltage, per-unit base, constant-Z/I load and harmonic "
+        "shunt reference). None derives it: u_rated_v/sqrt(3) on a node with three "
+        "or more phase rows, u_rated_v otherwise. Set it where that does not hold, "
+        "e.g. a split-phase node (X1, X2, N) whose X1-N voltage is half of "
+        "u_rated_v. Must agree with u_rated_v within 2 %: ratio sqrt(3) for three "
+        "phase conductors, sqrt(3) or 2 for two, 1 for one.",
+        short="V",
+        long="volt",
+        reference="phase-to-neutral",
+        default=None,
     )
     phases: tuple[Phase, ...] = Field(
         description="Ordered phases present; fixes matrix row/column order for this node."
@@ -601,6 +657,26 @@ class Node(GridModel):
         if len(set(v)) != len(v):
             raise ValueError("Node phases must be unique.")
         return v
+
+    @model_validator(mode="after")
+    def _rated_voltages_agree(self) -> "Node":
+        ln = self.u_rated_ln_v
+        if ln is None or _is_arraylike(ln) or _is_arraylike(self.u_rated_v):
+            return self
+        import math
+
+        n_cond = sum(1 for p in self.phases if p != Phase.N)
+        sqrt3 = math.sqrt(3.0)
+        allowed = {3: (sqrt3,), 2: (sqrt3, 2.0)}.get(n_cond, (1.0,))
+        ratio = float(self.u_rated_v) / float(ln)
+        if not any(abs(ratio - r) <= _RATED_RATIO_RTOL * r for r in allowed):
+            names = " or ".join(f"{r:.4g}" for r in allowed)
+            raise ValueError(
+                f"Node {self.id}: u_rated_v / u_rated_ln_v = {ratio:.4g} on a node "
+                f"with {n_cond} phase conductor(s); expected {names} (within "
+                f"{_RATED_RATIO_RTOL:.0%})."
+            )
+        return self
 
 
 # =============================================================================
@@ -962,13 +1038,80 @@ class ComplexTap(GridModel):
 
 
 class GroundingImpedance(GridModel):
-    """Neutral-to-ground impedance of a grounded-wye / zigzag winding (r=x=0 = solid)."""
+    """Earthing impedance between a winding's star point and earth.
+
+    Consumed for a ``wye_grounded`` winding (and the centre tap of a
+    :class:`CentreTap` secondary). ``r_ohm = x_ohm = 0`` (both plain floats) is solid
+    earthing, the same as no grounding block. Any other value, or a tensor value, is
+    stamped as the admittance ``1/(r_ohm + j·h·x_ohm)`` from the star point to earth:
+    the resistance is frequency-independent and the reactance scales with the
+    harmonic order ``h``. Where the star point is depends on the winding's phases
+    (see :class:`Transformer`): an internal point eliminated from the nodal system,
+    or the node's ``Phase.N`` row, which then cannot be solidly earthed and needs a
+    finite value. ``zigzag_grounded`` windings support solid earthing only.
+    """
 
     r_ohm: Num = si_field(
-        "Neutral grounding resistance.", short="Ohm", long="ohm", default=0.0
+        "Earthing resistance of the star point (0 with x_ohm = 0: solid).",
+        short="Ohm",
+        long="ohm",
+        default=0.0,
     )
     x_ohm: Num = si_field(
-        "Neutral grounding reactance at f0.", short="Ohm", long="ohm", default=0.0
+        "Earthing reactance of the star point at f0; X(h) = h·x_ohm.",
+        short="Ohm",
+        long="ohm",
+        default=0.0,
+    )
+
+
+class CentreTap(GridModel):
+    """Centre-tapped secondary of a single-phase transformer (split phase, X1-N-X2).
+
+    The secondary consists of two equal half windings in series; the centre tap
+    between them is the secondary's star point (the neutral of a single-phase
+    three-wire service, e.g. 440/220 V or 240/120 V). The unit is the three-winding
+    single-phase transformer of OpenDSS (``windings=3``, half-secondary ``kVs``) in
+    its star (T) equivalent: one leakage branch per winding behind an ideal core.
+
+    *Impedances.* The transformer's ``series_resistance_ohm`` /
+    ``series_inductance_h`` keep their meaning: the short-circuit impedance
+    ``Z_a = R_a + jX_a`` between the primary and the FULL secondary (X1-X2 shorted,
+    centre tap open), referred to the full secondary coil (``u_rated_to_v``). This
+    block gives the leakage of ONE half winding, in its own coil ohms (rated
+    ``u_rated_to_v / 2``); the primary branch takes the rest,
+    ``Z_H = Z_a - 2·Z_half`` (referred to the full secondary coil), so the full
+    short circuit reproduces ``Z_a``. ``None`` applies Kersting's split
+    (*Distribution System Modeling and Analysis*, centre-tapped transformer):
+    ``Z_half = (R_a + j·0.4·X_a)/4``, i.e. ``Z_H = 0.5·R_a + j·0.8·X_a``, the split of
+    the standard OpenDSS centre-tap example (``%Rs=[0.6 1.2 1.2]``,
+    ``XHL=XHT=2.04``, ``XLT=1.36``).
+
+    *Terminals.* ``to_phases`` lists the outer terminals ``(X1, X2)`` (two distinct
+    phases) and optionally ``Phase.N`` last: the centre tap is then the node's
+    neutral row, otherwise an internal point earthed per ``to_connection`` /
+    ``to_grounding``. ``X1`` is in phase with the primary, ``X2`` in antiphase. The
+    primary is one winding: ``from_phases=(x,)`` or ``(x, N)`` with a wye
+    ``from_connection`` (phase to earth / to neutral), or ``(x, y)`` with
+    ``from_connection = delta`` (phase to phase). ``u_rated_from_v`` is the primary
+    coil voltage (e.g. 7967 V for a 13.8 kV system's phase-to-earth primary),
+    ``u_rated_to_v`` the full secondary voltage X1-X2.
+    """
+
+    half_resistance_ohm: Optional[NonNegNum] = si_field(
+        "Leakage resistance of one half winding. None = Kersting's split R_a/4.",
+        short="Ohm",
+        long="ohm",
+        reference="own half-winding coil (u_rated_to_v / 2)",
+        default=None,
+    )
+    half_inductance_h: Optional[NonNegNum] = si_field(
+        "Leakage inductance of one half winding. None = Kersting's split 0.1·L_a "
+        "(X_half = 0.4·X_a/4).",
+        short="H",
+        long="henry",
+        reference="own half-winding coil (u_rated_to_v / 2)",
+        default=None,
     )
 
 
@@ -1005,7 +1148,22 @@ class Transformer(BranchBase):
     """Two-winding transformer, canonical phase-domain form. Assembly builds the
     per-phase primitive from connections, clock (via tap.shift_deg), grounding and
     the series/magnetizing branches. Ratings/electrical/connections may come from
-    `type_ref` (Grid.types.transformers); a resolver materialises before assembly."""
+    `type_ref` (Grid.types.transformers); a resolver materialises before assembly.
+
+    *Winding terminals.* ``from_phases`` / ``to_phases`` list the phase terminals of
+    each winding. A wye winding's phase tuple may end with ``Phase.N``: its star
+    point is then the node's neutral row (bonded to the neutral conductor) instead of
+    an internal point. A ``wye_grounded`` star point on the neutral row is earthed
+    through the side's finite :class:`GroundingImpedance` (required); a ``wye``
+    star point on it is bonded only. Without ``Phase.N`` the star point of a
+    ``wye_grounded`` winding is earthed solidly, or through a finite grounding
+    impedance; that of a ``wye`` winding floats.
+
+    *Single-phase units.* With one winding per side: a wye winding on ``(x,)`` or
+    ``(x, N)`` (phase to earth / to neutral) or a delta winding on ``(x, y)``
+    (phase to phase); the rated voltages are then the COIL voltages and the clock is
+    0 (or 6, reversed polarity). A three-wire split-phase secondary is a
+    :class:`CentreTap` unit (``centre_tap``)."""
 
     component: Literal["transformer"] = "transformer"
     type_ref: Optional[str] = Field(
@@ -1055,8 +1213,22 @@ class Transformer(BranchBase):
         default=None,
     )
     tap: ComplexTap = Field(default_factory=lambda: ComplexTap(ratio_magnitude=1.0))
-    from_grounding: Optional[GroundingImpedance] = Field(default=None)
-    to_grounding: Optional[GroundingImpedance] = Field(default=None)
+    from_grounding: Optional[GroundingImpedance] = Field(
+        default=None,
+        description="Earthing impedance of the from-side star point. None = solid "
+        "(wye_grounded) / not earthed (other connections).",
+    )
+    to_grounding: Optional[GroundingImpedance] = Field(
+        default=None,
+        description="Earthing impedance of the to-side star point (the centre tap of "
+        "a CentreTap unit). None = solid (wye_grounded) / not earthed (other "
+        "connections).",
+    )
+    centre_tap: Optional[CentreTap] = Field(
+        default=None,
+        description="Single-phase unit with a centre-tapped (split-phase) secondary: "
+        "to_phases = (X1, X2[, N]). None = a standard two-winding unit.",
+    )
     zero_sequence: Optional[TransformerZeroSeq] = Field(default=None)
     harmonic_xr_constant: bool = Field(
         default=False,
@@ -1083,7 +1255,77 @@ class Transformer(BranchBase):
                 "Transformer requires either `type_ref` or explicit ratings, "
                 "connections and series R/L."
             )
+        for side in ("from", "to"):
+            phases = getattr(self, f"{side}_phases")
+            if len(set(phases)) != len(phases):
+                raise ValueError(f"Transformer `{side}_phases` must be unique.")
+            if Phase.N in phases[:-1]:
+                raise ValueError(
+                    f"Transformer `{side}_phases`: Phase.N (the winding's star point "
+                    "on the neutral row) must be the last entry."
+                )
+            if phases == (Phase.N,):
+                raise ValueError(
+                    f"Transformer `{side}_phases` needs at least one phase terminal."
+                )
+        if self.centre_tap is not None:
+            self._check_centre_tap()
         return self
+
+    def _check_centre_tap(self) -> None:
+        """Terminal and connection rules of a centre-tapped single-phase unit."""
+        if self.from_connection is None or self.to_connection is None:
+            raise ValueError(
+                "A centre-tapped Transformer needs explicit from_/to_connection."
+            )
+        if self.to_connection not in (
+            WindingConnection.WYE,
+            WindingConnection.WYE_GROUNDED,
+        ):
+            raise ValueError(
+                "A centre-tapped secondary is a star of two half windings: "
+                "to_connection must be wye_grounded (centre tap earthed) or wye."
+            )
+        outer = [p for p in self.to_phases if p != Phase.N]
+        if len(outer) != 2:
+            raise ValueError(
+                "A centre-tapped Transformer needs to_phases = (X1, X2) or (X1, X2, N)."
+            )
+        primary = [p for p in self.from_phases if p != Phase.N]
+        if self.from_connection == WindingConnection.DELTA:
+            if len(primary) != 2 or Phase.N in self.from_phases:
+                raise ValueError(
+                    "A phase-to-phase (delta) centre-tap primary needs "
+                    "from_phases = (x, y)."
+                )
+        elif self.from_connection in (
+            WindingConnection.WYE,
+            WindingConnection.WYE_GROUNDED,
+        ):
+            if len(primary) != 1:
+                raise ValueError(
+                    "A phase-to-earth / phase-to-neutral centre-tap primary needs "
+                    "from_phases = (x,) or (x, N)."
+                )
+        else:
+            raise ValueError(
+                "A centre-tap primary is a wye (phase to earth / neutral) or delta "
+                "(phase to phase) winding."
+            )
+        if float(self.tap.shift_deg) != 0.0:
+            raise ValueError(
+                "A centre-tapped Transformer has no vector-group shift: "
+                "tap.shift_deg must be 0."
+            )
+        ct = self.centre_tap
+        floats = (self.series_resistance_ohm, ct.half_resistance_ohm)
+        if all(isinstance(x, float) for x in floats) and (
+            2.0 * floats[1] > floats[0] * (1.0 + 1e-12)
+        ):
+            raise ValueError(
+                "CentreTap.half_resistance_ohm: two half windings carry more "
+                "resistance than the full short-circuit series_resistance_ohm."
+            )
 
 
 class Switch(BranchBase):
@@ -1590,11 +1832,14 @@ class InverterControlBase(GridModel):
 
     - WYE: one element per connected phase (phase to neutral or ground), so
       ``n_elem = len(phases)``: 1, 2 or 3.
-    - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``.
+    - DELTA: one element per phase pair of a three-phase device, so ``n_elem = 3``;
+      a two-phase DELTA device is one phase-to-phase element, ``n_elem = 1``.
 
-    A single-phase device (``n_elem = 1``) uses the values as written, and a balanced
-    three-phase device injects the same totals as its single-phase equivalent. The
-    split is equal whatever the per-phase distribution of the active power: an
+    A single-phase device (``n_elem = 1``) uses the values as written. In the
+    per-phase (single-phase positive-sequence) equivalent of a balanced three-phase
+    grid, a three-phase device becomes a one-phase device carrying one third of its
+    power and of every control power (``s_rated_va``, ``q_var``, ``p_ref_w``) on a
+    node rated line-to-neutral (``U_LL/√3``); see :class:`Node`. The split is equal whatever the per-phase distribution of the active power: an
     unbalanced device does not move rating from a lightly loaded element to a heavily
     loaded one. Each element evaluates a voltage-dependent curve at its own terminal
     voltage (phase-to-neutral for WYE, phase-to-phase for DELTA), not at a
@@ -1762,9 +2007,9 @@ class VoltageRegulation(GridModel):
     ``voltage_regulator`` and OpenDSS ``Generator model=3``.
 
     ``v_set_pu`` is per unit of the HOST NODE's rated voltage, i.e. the regulated
-    magnitude in volts is ``v_set_pu * phase_voltage_magnitude(node.u_rated_v,
-    len(node.phases))`` (line-to-neutral for a three-phase node, the rated value
-    itself below three phases) — the same per-unit base the Volt-VAr characteristic
+    magnitude in volts is ``v_set_pu`` times the node's per-phase base
+    (``Node.u_rated_ln_v`` when set, else line-to-neutral ``u_rated_v/√3`` for a
+    three-phase node and the rated value itself below three phases) — the same per-unit base the Volt-VAr characteristic
     and the convergence diagnostics use, and numerically equal to pandapower's
     ``vm_pu``.
 
@@ -1933,14 +2178,19 @@ class Load(InjectionAppliance):
     ``appliance.load.default_connection`` otherwise (both default to WYE — the LV norm).
     For a WYE load the return path is the node's ``Phase.N`` row when that node carries a
     neutral (the 4-wire case), else ground (3-wire / solidly grounded). DELTA needs
-    ``len(phases) >= 2``; ZIGZAG is transformer-only. See
-    ``docs/pgml/modeling/asymmetric.md`` §2-4.
+    two or three phase conductors (no ``Phase.N``): on three phases it is a delta of
+    three elements, on two phases ONE phase-to-phase element (e.g. a 440 V load across
+    X1-X2 of a split-phase node, or across A-B), whose nominal voltage is the node's
+    ``u_rated_v`` and onto which per-phase values are summed. ZIGZAG is
+    transformer-only. See ``docs/pgml/modeling/asymmetric.md`` §2-4 and
+    ``docs/pgml/modeling/appliances.md``.
 
     *Harmonics.* ``spectrum`` is one harmonic current source applied to every phase
     (OpenDSS multi-phase Load semantics). ``spectrum_per_phase`` instead gives an
     ASYMMETRIC spectrum per phase (e.g. a single-phase EV charger distorting only phase
     A); the two are mutually exclusive. For a DELTA load a per-phase spectrum key
-    identifies the delta branch starting at that phase. See
+    identifies the delta branch starting at that phase (the single element of a
+    two-phase DELTA load keys off ``phases[0]``). See
     ``docs/pgml/modeling/asymmetric.md`` §5.
     """
 
@@ -2873,6 +3123,7 @@ __all__ = [
     "Line",
     "ComplexTap",
     "GroundingImpedance",
+    "CentreTap",
     "TransformerZeroSeq",
     "Transformer",
     "Switch",

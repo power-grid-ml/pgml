@@ -21,6 +21,10 @@ Each page states its own limits. Nothing here is hidden behind a default, and
 
 - {doc}`transformer` derives the winding-incidence primitive `Y = NᵀY_windingN` and shows why
   a Dyn delta traps triplen harmonics.
+- {doc}`appliances` states the connection elements of loads, generators and storage (wye,
+  three-phase delta, two-phase phase-to-phase delta), the rated voltage each element is
+  referred to, including a node's phase-to-neutral rating on split-phase nodes, and the
+  load models on an element.
 - {doc}`harmonic-line-model` explains how a line's impedance scales with frequency, and why
   the earth-return term belongs to the zero sequence.
 - {doc}`der-pv-storage` covers inverter control laws, storage and dispatch, and which parts of
@@ -53,6 +57,7 @@ Each page states its own limits. Nothing here is hidden behind a default, and
 conventions
 asymmetric
 transformer
+appliances
 harmonic-line-model
 der-pv-storage
 error-injection

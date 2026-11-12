@@ -146,7 +146,10 @@ because a delta coil's own base is `3·u_LL²/S`.
 
 - Every winding pairing of wye, grounded wye, delta, zigzag and grounded zigzag except
   zigzag to zigzag, at every clock of the pairing's parity.
-- Solid neutral grounding only. A grounding impedance is rejected rather than ignored.
+- Star points as terminals: a wye star point on the node's neutral row, earthing
+  impedances on either side, single-phase units with one coil per side and centre-tapped
+  units (see "Star points, earthing and centre taps" below).
+  A zigzag star point is solidly earthed only.
 - The zero-sequence path follows the winding topology, so a delta or zigzag winding blocks
   it. Its value is `Transformer.zero_sequence` when set, otherwise the documented
   `transformer.zero_sequence.{r0_over_r1, x0_over_x1}` ratios, which ship at 1.0 so that
@@ -161,9 +164,11 @@ because a delta coil's own base is `3·u_LL²/S`.
   zero-sequence magnetizing branch (pandapower `mag0_percent`/`mag0_rx`, power-grid-model
   `i0_zero_sequence`/`p0_zero_sequence`, the path a three-limb core's zero-sequence flux
   takes through tank and air), the HV/LV split of the zero-sequence leakage inside a T
-  (pandapower `si0_hv_partial`), and a neutral earthing impedance `3·Z_N` (pandapower
-  `xn_ohm`/`rn_ohm`, OpenDSS `Rneut`/`Xneut`, which the OpenDSS converter refuses).
-- Two-winding units only. No three-winding units and no regulators.
+  (pandapower `si0_hv_partial`). A neutral earthing impedance is modelled (see below), but
+  the pandapower (`xn_ohm`/`rn_ohm`) and OpenDSS (`Rneut`/`Xneut`) converters do not map it
+  yet.
+- Two-winding units, plus the centre-tapped single-phase unit. No general three-winding
+  units and no regulators.
 - The magnetizing branch is a shunt from each phase terminal to ground, outside the winding
   incidence. On a delta side that is a zero-sequence path to ground the real winding does
   not have; at a magnetizing current of 0.5 % its admittance is 200 times smaller than the
@@ -208,6 +213,98 @@ because a delta coil's own base is `3·u_LL²/S`.
   reference only. Constructing one logs a warning.
 - With no winding metadata in the source data the default vector group is Dyn11, the European
   LV default.
+
+## Star points, earthing and centre taps
+
+The winding-incidence form extends to a star point that is a terminal of its own. Each coil
+spans two terminals; a wye coil `k` contributes `+B[k,:]` on the phase terminals and
+`−B[k,:]·1` on the star terminal, where `B` is the side's signed phase permutation that
+the clock selects. The block is built over the extended terminals,
+
+```
+Y_ext = Nᵀ·(Y_coil + coil magnetizing)·N + y_g on each earthed star terminal,
+```
+
+and the star terminal is then either a node row or eliminated exactly by a Schur complement
+(Kron reduction), so the stamped block spans `from_phases + to_phases` like any other
+branch. Which case applies follows from the schema:
+
+| winding | `Phase.N` in its phases | grounding | star point |
+|---|---|---|---|
+| `wye_grounded` | no | none or `r=x=0` | earth reference (the vector-group stamp) |
+| `wye_grounded` | no | finite `Z_g` | internal, `y_g = 1/Z_g` to earth, eliminated |
+| `wye_grounded` | yes | finite `Z_g` (required) | the neutral row, `y_g` to earth on it |
+| `wye` | no | none | internal, floating, eliminated (the projection `P = I − 11ᵀ/3`) |
+| `wye` | yes | none | the neutral row, bonded but not earthed by the unit |
+
+`y_g(h) = 1/(r_ohm + j·h·x_ohm)`: the resistance is frequency-independent and the
+reactance scales with the order, as OpenDSS's `Rneut`/`Xneut` do. A neutral row cannot be
+earthed solidly (it would have to be the reference itself), so that combination raises and
+asks for the earth resistance at the unit. A delta star point and a finite earthing of a
+`wye` or zigzag winding raise. Units that use none of this keep the vector-group stamp
+unchanged. With an impedance-earthed star the zero-sequence impedance behind it is
+`Z0 + 3·Z_g`; checked in closed form and against power-grid-model's asymmetric solve
+(Dyn5 and YNyn0 with earthing impedances, 2.8e-11 pu).
+
+The current a transformer reports at its star row includes the current through its own
+earthing impedance, which is part of the branch. The earth current itself is
+`y_g·V_star`.
+
+**Single-phase units.** With one coil per side, a wye coil on `(x,)` or `(x, N)` runs from a
+phase to earth or to the neutral row, and a delta coil on `(x, y)` runs from phase to phase.
+The rated voltages are then the coil voltages and the clock is 0 or 6 (reversed polarity).
+A unit on one phase without a neutral row and without earthing impedance stays on the
+positive-sequence-equivalent stamp described above.
+
+**Centre-tapped units.** `Transformer.centre_tap` (a
+{class}`~pgml.schemas.grid_schema.CentreTap`) selects the single-phase three-wire unit
+(split phase, X1-N-X2, e.g. 440/220 V or 240/120 V): one primary coil and two half coils in
+series, the centre tap being the secondary's star point. It is the star (T) equivalent of
+OpenDSS's three-winding single-phase transformer: per winding one leakage branch behind an
+ideal core. With the branch admittances `d = (y_H, y_X, y_X)`, both referred to the full
+secondary coil, the referred coil primitive is `D − d·dᵀ/Σd`, and the coil quantities follow
+through `T = diag(1/τ, 2, 2)`, `τ` being the primary to full-secondary coil ratio.
+
+The impedance data: `series_resistance_ohm`/`series_inductance_h` remain the short circuit
+`Z_a` from the primary to the full secondary (X1-X2 shorted, centre tap open), referred to
+the full secondary coil. `CentreTap.half_resistance_ohm`/`half_inductance_h` are one half
+winding's leakage in its own coil ohms; the primary branch is `Z_H = Z_a − 2·Z_half`, so the
+full short circuit returns `Z_a`. Without them Kersting's split applies
+(*Distribution System Modeling and Analysis*, centre-tapped transformer),
+
+```
+Z_H = 0.5·R_a + j·0.8·X_a        (referred to the full secondary)
+Z_half = (R_a + j·0.4·X_a) / 4   (own half-coil ohms)
+```
+
+which is also the split of the standard OpenDSS centre-tap data
+(`%Rs=[0.6 1.2 1.2] XHL=XHT=2.04 XLT=1.36`). From OpenDSS data (all windings on one kVA
+base), the star branches are `x_H = (XHL+XHT−XLT)/2` and `x_X = (XHL+XLT−XHT)/2` in percent,
+`Z_half = (%R_X + j·x_X)/100 · kV_half²·1000/kVA` and `Z_a = (%R_H + j·x_H)/100 · Z_base,full
++ 2·Z_half`. The magnetizing branch sits across the coil it is placed on: the primary
+(`from_terminal`), the full secondary X1-X2 referred by the squared coil ratio
+(`to_terminal`), or half on each (`split`).
+
+Validated against live OpenDSS (opendssdirect 0.9.4, `Tolerance=1e-12`) on eleven circuits:
+a 50 kVA unit with a 7.967 kV phase-to-earth primary behind a `10 + j2` Ohm electrode and its
+centre tap on the neutral row earthed through 0.3, 5 and 25 Ohm; a phase-to-phase primary
+with the centre tap bonded to a neutral earthed only at the far end; a solidly earthed
+variant; and a Dyn1 unit with its LV star on the neutral row earthed through 0.3, 5 and
+25 Ohm, all with unbalanced loads. Voltages agree to 3.4e-10 pu at the fundamental and
+1.1e-11 pu at order 3; terminal, neutral and earth currents to 2.2e-8 A
+(`tests/reference/test_opendss_centre_tap_grounding.py`).
+
+**Split-phase nodes.** Behind a centre-tapped unit X1-N and X2-N are half of X1-X2, not
+`1/√3` of it. Rate the secondary nodes `(X1, X2, N)` with `u_rated_v` the X1-X2 voltage and
+`u_rated_ln_v` half of it (440 and 220 V, or 240 and 120 V): the half loads (wye on `(A,)` or
+`(B,)`) are then referred to 220 V and a load across X1-X2 (a two-phase delta appliance on
+`(A, B)`) to 440 V, and each row reads 1 pu at 220 V. Without `u_rated_ln_v` the node is read
+like a three-phase node, `u_rated_v/√3` per row, which leaves constant-power loads and the
+transformer unaffected but refers constant-impedance and constant-current loads, the harmonic
+load shunt and the per-unit base to 254 V. Validated against OpenDSS on this unit with a 440 V
+load across X1-X2 in every load model and constant-impedance half loads: 3.4e-10 pu at the
+fundamental, at most 9.2e-12 pu at order 3 (`tests/reference/test_opendss_delta_appliances.py`,
+{doc}`appliances`).
 
 ## OpenDSS mapping
 

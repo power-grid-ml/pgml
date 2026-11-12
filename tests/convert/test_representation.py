@@ -244,3 +244,64 @@ def test_positive_sequence_resistance_is_mode_independent():
     assert values[0] == pytest.approx(0.2 / 1000.0, rel=1e-12)
     assert values[1] == pytest.approx(values[0], rel=1e-12)
     assert math.isfinite(values[1])
+
+
+def test_line_to_line_voltage_of_two_conductor_nodes():
+    """A node with two phase conductors that sets u_rated_ln_v stores the phase-to-phase
+    voltage in u_rated_v; without u_rated_ln_v a node of fewer than three rows follows
+    the schema rule (line-to-neutral)."""
+    from pgml.representation import SystemTotals
+    from pgml.schemas.grid_schema import Node, Phase
+
+    split = Node(id=1, u_rated_v=440.0, u_rated_ln_v=220.0, phases=(Phase.A, Phase.B))
+    two_of_three = Node(
+        id=2,
+        u_rated_v=400.0,
+        u_rated_ln_v=400.0 / math.sqrt(3.0),
+        phases=(Phase.A, Phase.C),
+    )
+    one = Node(id=3, u_rated_v=230.0, u_rated_ln_v=230.0, phases=(Phase.A, Phase.N))
+    plain = Node(id=4, u_rated_v=230.0, phases=(Phase.A, Phase.B))
+    split_n = Node(
+        id=5, u_rated_v=440.0, u_rated_ln_v=220.0, phases=(Phase.A, Phase.B, Phase.N)
+    )
+    for mode in ("as_built", "three_phase", "single_phase_equiv", None):
+        st = SystemTotals(mode, 3.0 if mode == "single_phase_equiv" else 1.0)
+        assert st.node_voltage_ll_v(split) == pytest.approx(440.0, rel=1e-12)
+        assert st.node_voltage_ll_v(two_of_three) == pytest.approx(400.0, rel=1e-12)
+        assert st.node_voltage_ll_v(split_n) == pytest.approx(440.0, rel=1e-12)
+        assert st.node_voltage_ll_v(one) == pytest.approx(230.0 * math.sqrt(3.0))
+        assert st.node_voltage_ll_v(plain) == pytest.approx(230.0 * math.sqrt(3.0))
+
+
+def test_iec_device_caps_use_the_split_phase_neutral_voltage():
+    """A one-phase device on X1-N of a 440/220 V split-phase node draws its fundamental
+    at 220 V (Node.u_rated_ln_v), not 440 V / sqrt(3)."""
+    from pgml.schemas.grid_schema import Grid, Node, Phase
+
+    def grid(u_ln):
+        node = Node(
+            id=1,
+            u_rated_v=440.0,
+            u_rated_ln_v=u_ln,
+            phases=(Phase.A, Phase.B, Phase.N),
+        )
+        load = Load(
+            id=10,
+            node=1,
+            phases=(Phase.A, Phase.N),
+            p_nom_w=900.0,
+            q_nom_var=0.0,
+            consumer_type=ConsumerType.OFFICE,
+        )
+        return Grid(
+            nodes=[node],
+            appliances=[load],
+            metadata={"tags": {PHASE_MODE_TAG: "as_built"}},
+        )
+
+    split = iec61000_3_2_device_caps(grid(220.0), [10], [7])[10][7]
+    rule = iec61000_3_2_device_caps(grid(None), [10], [7])[10][7]
+    # Class A limit [A] over the fundamental P / U_LN: the cap scales with U_LN.
+    assert split == pytest.approx(0.77 / (900.0 / 220.0), rel=1e-12)
+    assert rule == pytest.approx(0.77 / (900.0 / (440.0 / math.sqrt(3.0))), rel=1e-12)

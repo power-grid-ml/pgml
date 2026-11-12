@@ -55,6 +55,7 @@ from pgml.schemas.grid_schema import (
 
 import torch
 
+from pgml.assembly._params import node_voltage_magnitude
 from pgml.assembly._spectrum import (
     element_stored_spectra,
     evaluate_load_varying,
@@ -261,7 +262,14 @@ def _stamp_transformer_numpy(
     them; ``b`` supplies all other transformer parameters.
     """
     from pgml.assembly._transformer import block_incidence, resolve_vector_group
+    from pgml.assembly._transformer_terminals import uses_terminal_model
 
+    if uses_terminal_model(b):
+        raise NotImplementedError(
+            f"transformer {b.id}: the numpy oracle mirrors the vector-group stamp only; "
+            "a star point on a neutral row, an earthing impedance or a centre tap "
+            "(the terminal model) is not reimplemented here."
+        )
     r_t = to_float(b.series_resistance_ohm)
     l_t = to_float(b.series_inductance_h)
     z_se = r_t + 1j * h * w0 * l_t
@@ -641,7 +649,8 @@ def _apply_node_sources_numpy(
 
     Implements the physics from ``docs/pgml/modeling/error-injection.md``:
 
-    - ``V_base`` = node ``u_rated_v`` (L-N for ≥3-phase, else L-L).
+    - ``V_base`` = the node's per-phase base (``u_rated_ln_v``, else ``u_rated_v/√3``
+      on a node with ≥3 rows and ``u_rated_v`` below).
     - ``Y_s = S_sc / V_base^2`` (real, frequency-flat).
     - ``E_h = (mag_h/mag_1) * |V1_row| * exp(j*(ang_h + h*(arg(V1_row) - ang_1)))``.
     - ``I_N = E_h * Y_s``.
@@ -651,13 +660,10 @@ def _apply_node_sources_numpy(
     Modifies ``y_h`` and ``i_h`` in-place (numpy arrays).
     """
     node_map = {int(nd.id): nd for nd in grid.nodes}
-    from pgml.assembly._params import phase_voltage_magnitude
-
     for ns in node_sources:
         nid = int(ns.node_id)
         node = node_map[nid]
-        n_phases_node = len(node.phases)
-        v_base = phase_voltage_magnitude(float(node.u_rated_v), n_phases_node)
+        v_base = node_voltage_magnitude(node, plain=True)
         y_s = float(ns.source_power_va) / (v_base * v_base)  # real admittance S
 
         spec = {
@@ -785,11 +791,7 @@ def _stamp_device_shunts_numpy(
             continue
         n_ph = len(a.phases)
         node = nodes[int(a.node)]
-        v0 = (
-            to_float(node.u_rated_v) / math.sqrt(3.0)
-            if len(node.phases) >= 3
-            else to_float(node.u_rated_v)
-        )
+        v0 = node_voltage_magnitude(node, plain=True)
         sign = 1.0 if isinstance(a, Load) else -1.0
         p_pp, q_pp = _operating_power_numpy(a, operating_point, n_ph)
         for k_ph, row in enumerate(index.rows(a.node)[:n_ph]):

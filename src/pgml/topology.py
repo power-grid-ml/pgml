@@ -12,8 +12,9 @@ contract (plain python + stdlib, no torch / networkx / plotting):
   feature of the ML layer.
 - :func:`connectivity_report` / :func:`energized_subgrid` — the pre-solve
   connectivity check: which (node, phase) rows have a galvanic path to an
-  in-service :class:`Source`, and the energized sub-grid for solving around
-  deliberately disconnected areas.
+  in-service :class:`Source` (a neutral earthed through electrodes is referenced
+  through earth), and the energized sub-grid for solving around deliberately
+  disconnected areas.
 
 The networkx graph view (:func:`pgml.evaluation.topology.grid_graph`) stays in
 the evaluation package with the plotting stack; everything here is safe to
@@ -322,6 +323,50 @@ def _branch_rows(branch) -> list[tuple[int, Phase]]:
     return rows
 
 
+def _galvanic_earth_rows(grid: Grid) -> set:
+    """Rows tied to earth by a conducting shunt with a conductive or inductive path.
+
+    A :class:`ShuntReactor` with a nonzero conductance entry or an inductance matrix
+    connects its rows galvanically to earth; a purely capacitive one does not.
+    """
+    rows: set = set()
+    for b in grid.branches:
+        if not isinstance(b, ShuntReactor) or not _conducting(b):
+            continue
+        galvanic = b.inductance_h is not None or any(
+            _to_float(g) != 0.0 for row in b.conductance_s for g in row
+        )
+        if galvanic:
+            rows.update((int(b.from_node), ph) for ph in b.from_phases)
+    return rows
+
+
+def _earthed_neutral_roots(grid: Grid, uf: "_UnionFind", energized_roots: set) -> set:
+    """Components of neutral rows referenced to earth through electrodes only.
+
+    Every source is referenced to earth, so a neutral conductor earthed through a
+    galvanic shunt (an electrode, a grounding reactor) has a defined potential even
+    where no branch ties it to a source: its nodal rows are not singular. Only
+    components made entirely of ``Phase.N`` rows are accepted this way; a component
+    with phase rows (an islanded multi-conductor section) stays unenergized, because
+    its phase rows have no path to a source whatever its neutral does.
+    """
+    earthed = _galvanic_earth_rows(grid)
+    if not earthed:
+        return set()
+    members: dict = {}
+    for node in grid.nodes:
+        for ph in node.phases:
+            root = uf.find((int(node.id), ph))
+            if root not in energized_roots:
+                members.setdefault(root, []).append((int(node.id), ph))
+    return {
+        root
+        for root, rows in members.items()
+        if all(ph == Phase.N for _, ph in rows) and any(r in earthed for r in rows)
+    }
+
+
 def connectivity_report(grid: Grid) -> ConnectivityReport:
     """Pre-solve energization check: can every (node, phase) row reach a source?
 
@@ -333,6 +378,11 @@ def connectivity_report(grid: Grid) -> ConnectivityReport:
     solve; the solvers run it up front so a disconnected grid fails with an
     explanation instead of a numerical error (see
     :class:`~pgml.errors.ConnectivityError`).
+
+    Earth is the common reference of every source. A component made only of
+    ``Phase.N`` rows that a conducting :class:`ShuntReactor` with a conductive or
+    inductive path ties to earth (a neutral earthed through electrodes) therefore
+    counts as energized; phase rows are never energized through earth.
     """
     uf = _UnionFind()
     for node in grid.nodes:  # register every row (isolated nodes must appear)
@@ -352,6 +402,8 @@ def connectivity_report(grid: Grid) -> ConnectivityReport:
         if isinstance(a, Source) and getattr(a, "in_service", True)
     ]
     energized_roots = {uf.find((int(s.node), ph)) for s in sources for ph in s.phases}
+    if sources:
+        energized_roots |= _earthed_neutral_roots(grid, uf, energized_roots)
 
     unenergized: list[tuple[int, tuple[Phase, ...]]] = []
     dead_rows: list[tuple[int, Phase]] = []

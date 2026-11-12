@@ -42,7 +42,7 @@ Full documentation: the docstrings (published as the API reference).
 - def `fusion_map(grid: Grid, param_overrides: Optional[dict] = None, branch_states: Optional[dict] = None, zero: Optional[Sequence[ZeroImpedanceBranch]] = None) -> Optional[FusionMap]` — Build the exact bus fusion of ``grid``'s zero-impedance branches.
 - def `injections_from_plan(plan: InjectionPlan, v: Tensor) -> Tensor` — Evaluate ``I_device(V)`` from a precomputed :class:`InjectionPlan`.
 - def `node_phase_index(grid: Grid) -> NodePhaseIndex` — Build the compact :class:`NodePhaseIndex` for ``grid``.
-- def `phase_voltage_magnitude(u_rated_v: float, n_phases: int, line_to_line: bool = False) -> float` — Nominal element voltage magnitude ``V0`` for the const-Z / ZIP load model.
+- def `phase_voltage_magnitude(u_rated_v: float, n_phases: int, line_to_line: bool = False, u_rated_ln_v: Optional[float] = None) -> float` — Nominal element voltage magnitude ``V0`` of a node [V].
 - def `ybus_structure(grid: Grid, index: NodePhaseIndex, device: Optional[device] = None) -> Tensor` — Sorted int64 linear indices ``row * N + col`` of every stampable ``Y`` entry.
 - def `zero_impedance_branches(grid: Grid, param_overrides: Optional[dict] = None) -> list[ZeroImpedanceBranch]` — Every in-service branch whose EFFECTIVE series impedance is exactly zero.
 
@@ -569,6 +569,7 @@ Full documentation: the docstrings (published as the API reference).
 - def `Branch(*args, **kwargs)` — Runtime representation of an annotated type.
 - class `BranchBase(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `BranchResult(result_set_id, branch_id, branch_kind, frequency_hz, step, from_phases, to_phases, i_from_re, i_from_im, i_to_re, i_to_im, p_from_w=…, q_from_var=…, s_from_va=…, p_to_w=…, q_to_var=…, s_to_va=…)` — Per-branch terminal currents (both ends) and optional terminal powers at one
+- class `CentreTap(half_resistance_ohm=…, half_inductance_h=…)` — Centre-tapped secondary of a single-phase transformer (split phase, X1-N-X2).
 - class `Characteristic(x_values, y_values, interpolation=…, extrapolation=…)` — Generic monotone-``x`` piecewise lookup ``y = f(x)`` for a control law.
 - class `ComplexTap(ratio_magnitude, shift_deg=…)` — Off-nominal tap as a complex ratio: magnitude + phase shift (clock/vector group).
 - class `ConductorPlacement(phase, x_m, y_m, gmr_m, radius_m, r_dc_ohm_per_m, is_neutral=…)` — One physical conductor of a line: its position and electrical wire data.
@@ -589,7 +590,7 @@ Full documentation: the docstrings (published as the API reference).
 - `Grid` — re-exported from `pgml`
 - class `GridEnvironment()` — Settlement character of the whole grid/feeder (closed taxonomy).
 - class `GridMetadata(name=…, description=…, crs=…, environment=…, tags=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
-- class `GroundingImpedance(r_ohm=…, x_ohm=…)` — Neutral-to-ground impedance of a grounded-wye / zigzag winding (r=x=0 = solid).
+- class `GroundingImpedance(r_ohm=…, x_ohm=…)` — Earthing impedance between a winding's star point and earth.
 - class `HarmonicComponent(order, magnitude_pu, phase_deg)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `HarmonicImpedance(resistance_ohm=…, inductance_h=…, spectrum_reference=…, frequency_model=…)` — Passive harmonic internal impedance of a generator or storage converter.
 - class `HarmonicShuntModel(series_rl_fraction=…, neglect_shunt=…, motor_x_harm_pu=…, motor_xr_harm=…)` — Per-device OVERRIDE of the harmonic Norton shunt (OpenDSS ``Load.pas``).
@@ -607,7 +608,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `LoadVaryingSpectrum(kind=…, loading_levels_pu, spectra, interpolation=…, extrapolation=…)` — Spectra measured at several loading levels of the device.
 - class `MeasuredQuantity()` — Electrical quantity a :class:`MeasurementDevice` records.
 - class `MeasurementDevice(id, name=…, node, phases=…, in_service=…, measured_quantities=…, max_harmonic_order=…, max_current_channels=…, current_channels=…, manufacturer=…, model=…, supported_averaging_intervals_s=…, averaging_interval_s=…, accuracy_class=…, connection=…, tags=…)` — A physical measurement instrument installed at a node.
-- class `Node(id, name=…, u_rated_v, phases, zone=…, geometry=…, tags=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
+- class `Node(id, name=…, u_rated_v, u_rated_ln_v=…, phases, zone=…, geometry=…, tags=…)` — A bus: an ordered set of conductor rows and its rated voltages.
 - class `NodeResult(result_set_id, node_id, frequency_hz, step, phases, v_re, v_im, p_w=…, q_var=…, s_va=…)` — Per-node voltage phasor (and optional net injected power) at one frequency
 - class `NodeZone()` — Land-use / consumer character of a node (closed taxonomy; ML stratifier).
 - class `ParameterPerturbation(scenario_id, step=…, component_kind, component_id, parameter_path, nominal_value, perturbed_value, unit_short=…)` — A deliberate perturbation of a grid parameter recorded as ground truth, for
@@ -633,7 +634,7 @@ Full documentation: the docstrings (published as the API reference).
 - class `Storage(id, name=…, node, phases, in_service=…, tags=…, return_path=…, component=…, connection=…, load_model=…, p_nom_w, q_nom_var=…, p_nom_per_phase_w=…, q_nom_per_phase_var=…, zip_coefficients=…, control=…, energy_capacity_wh=…, soc=…, soc_min=…, soc_max=…, efficiency_charge=…, efficiency_discharge=…, p_rated_w=…, consumer_type=…, profile_ref=…, dispatch_ref=…, spectrum=…, spectrum_per_phase=…, harmonic_impedance=…, harmonic_model=…)` — Battery / energy storage as a bidirectional inverter injection.
 - class `Switch(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, default_closed, resistance_ohm=…, inductance_h=…, shunt_conductance_s=…, shunt_capacitance_f=…)` — Switch/breaker as a degenerate pi-branch (consistent R/L/G/C convention,
 - class `TimeVaryingSpectrum(kind=…, schedule, profile_ref=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
-- class `Transformer(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, type_ref=…, s_rated_va=…, u_rated_from_v=…, u_rated_to_v=…, from_connection=…, to_connection=…, series_resistance_ohm=…, series_inductance_h=…, magnetizing_conductance_s=…, magnetizing_inductance_h=…, tap=…, from_grounding=…, to_grounding=…, zero_sequence=…, harmonic_xr_constant=…, resistance_frequency=…)` — Two-winding transformer, canonical phase-domain form. Assembly builds the
+- class `Transformer(id, name=…, from_node, to_node, from_phases, to_phases, in_service=…, provenance=…, tags=…, component=…, type_ref=…, s_rated_va=…, u_rated_from_v=…, u_rated_to_v=…, from_connection=…, to_connection=…, series_resistance_ohm=…, series_inductance_h=…, magnetizing_conductance_s=…, magnetizing_inductance_h=…, tap=…, from_grounding=…, to_grounding=…, centre_tap=…, zero_sequence=…, harmonic_xr_constant=…, resistance_frequency=…)` — Two-winding transformer, canonical phase-domain form. Assembly builds the
 - class `TransformerImpedanceInput(from_node, to_node, s_rated_va, u_rated_from_v, u_rated_to_v, series_resistance_ohm, series_reactance_ohm, r0_ohm=…, x0_ohm=…, magnetizing_conductance_s=…, magnetizing_susceptance_s=…, from_connection=…, to_connection=…, phase_shift_deg=…, vector_group=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `TransformerShortCircuitInput(from_node, to_node, s_rated_va, u_rated_from_v, u_rated_to_v, uk_percent, pk_w, i0_percent=…, p0_w=…, uk0_percent=…, pk0_w=…, vector_group=…, tap_position=…, tap_step_percent=…, tap_step_degree=…)` — Base model: unknown fields are rejected so a misspelled field fails loudly.
 - class `TransformerType(id, s_rated_va, u_rated_from_v, u_rated_to_v, from_connection, to_connection, series_resistance_ohm, series_inductance_h, magnetizing_conductance_s=…, magnetizing_inductance_h=…, zero_sequence=…, harmonic_xr_constant=…, resistance_frequency=…, nominal_tap=…)` — Catalog transformer type: ratings, connections, electrical; no connectivity.
@@ -654,6 +655,7 @@ Full documentation: the docstrings (published as the API reference).
 - `ApplianceBase` — re-exported from `pgml.schemas`
 - `Branch` — re-exported from `pgml.schemas`
 - `BranchBase` — re-exported from `pgml.schemas`
+- `CentreTap` — re-exported from `pgml.schemas`
 - `Characteristic` — re-exported from `pgml.schemas`
 - `ComplexTap` — re-exported from `pgml.schemas`
 - `ConductorPlacement` — re-exported from `pgml.schemas`

@@ -21,12 +21,19 @@ The schema is the data source of truth, see the [Schemas API reference](../api/s
   frequency-dependence is an explicit law.
 - Phasors are `(real, imag)` pairs. Results are indexed by `frequency_hz`.
 - `Node.u_rated_v` is line-to-line for a node with three or more phases, and
-  line-to-neutral for a one-phase node, where there is no √3 to apply.
+  line-to-neutral for a one-phase node, where there is no √3 to apply. The optional
+  `Node.u_rated_ln_v` is the node's phase-to-neutral rating; it exists for nodes where
+  `u_rated_v/√3` is not the phase voltage, above all a split-phase node `(X1, X2, N)` whose
+  X1-N voltage is half of X1-X2 (`u_rated_v = 440`, `u_rated_ln_v = 220`). Both given, they
+  must agree within 2 % (ratio `√3` on three phase conductors, `√3` or `2` on two, `1` on
+  one).
 - Every per-phase voltage the solver touches is line-to-neutral. One helper derives it from
-  `Node.u_rated_v` and the element connection, returning `u_rated_v/√3` for a WYE element
-  on a node with three or more phases and `u_rated_v` for a DELTA element or a one-phase
-  node. The const-Z/ZIP load model, the slack EMF, the harmonic source admittance and the
-  per-unit reporting all call it, so they cannot drift apart.
+  the node and the element connection: `u_rated_ln_v` when set, else `u_rated_v/√3` for a
+  WYE element on a node with three or more phase rows and `u_rated_v` on a one-phase node;
+  a DELTA element (three-phase, or the single phase-to-phase element of a two-phase delta
+  appliance) sees `u_rated_v`. The const-Z/ZIP load model, the harmonic load shunt, the
+  harmonic source admittance, the convergence test and the per-unit reporting
+  (`base_voltage_per_row`) all call it, so they cannot drift apart. See {doc}`appliances`.
 - The slack EMF is the line-to-neutral phasor. Converters pass the line-to-line magnitude
   and the source builder divides by √3 for the balanced three-phase wye expansion.
 
@@ -38,7 +45,7 @@ the converter and recorded in `Provenance`.
 
 | | nominal-voltage field | stored as | per-unit base / output voltage |
 |---|---|---|---|
-| pgml | `Node.u_rated_v` [V] | L-L (≥3φ), L-N (1φ; written as `U_LL/√3` by `SINGLE_PHASE_EQUIV`) | working voltages are L-N; pu = `\|V_LN\|/(u_rated/√3)` |
+| pgml | `Node.u_rated_v` [V], optional `Node.u_rated_ln_v` [V] | L-L (≥3φ), L-N (1φ; written as `U_LL/√3` by `SINGLE_PHASE_EQUIV`); `u_rated_ln_v` L-N | working voltages are L-N; pu = `\|V_LN\|/u_rated_ln_v`, else `\|V_LN\|/(u_rated/√3)` |
 | pandapower | `bus.vn_kv` [kV] | L-L | `res_bus.vm_pu = \|V_LL\|/vn_kv`; asymmetric `res_bus_3ph` uses the L-N base `vn_kv/√3` |
 | OpenDSS | `Vsource.basekv` [kV] | L-L for `phases>=3`, used directly for `phases=1` | `Bus.kVBase()` always returns the matched voltage base over √3; `AllBusVolts` are L-N phasors |
 | pgm | `node.u_rated` [V] | L-L | symmetric output `u` is L-L with `u_pu=u/u_rated`; asymmetric output `u` is L-N |
@@ -235,8 +242,10 @@ zigzag windings raise `NotImplementedError` there.
 
 The OpenDSS transformer scope is narrower than the core model. Only two-winding units
 convert, and only solidly grounded wye windings (the shorthand bus, or an explicit `.0`) or
-delta windings. Three-winding units, and an explicit non-zero neutral node that is floating
-or impedance-grounded, raise `ConversionError`. So does a non-cyclic winding-bus
+delta windings. Three-winding units (including the centre-tapped single-phase unit, which
+the core models as {class}`~pgml.schemas.grid_schema.CentreTap`), and an explicit non-zero
+neutral node that is floating or impedance-grounded (which the core models as a star point on
+the neutral row with a `GroundingImpedance`), raise `ConversionError` in this converter. So does a non-cyclic winding-bus
 permutation, such as swapping two phase conductors, which reverses the phase rotation;
 raising avoids silently producing a wrong clock. The polarity-flip clocks 2, 6 and 10 need
 a reversed winding construction that no bus wiring can express, so this converter never

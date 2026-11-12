@@ -53,7 +53,10 @@ Frequency dependence is typed on the element that owns it.  A
 ``harmonic_skin_effect`` and ``earth_return``; a
 :class:`~pgml.schemas.grid_schema.Transformer` carries ``zero_sequence``
 (:class:`~pgml.schemas.grid_schema.TransformerZeroSeq`), ``harmonic_xr_constant``
-(OpenDSS's ``XRConst``) and ``resistance_frequency``.  The validators reject a combination an
+(OpenDSS's ``XRConst``), ``resistance_frequency``, the star-point earthing
+``from_grounding`` / ``to_grounding``
+(:class:`~pgml.schemas.grid_schema.GroundingImpedance`) and ``centre_tap``
+(:class:`~pgml.schemas.grid_schema.CentreTap`, a split-phase secondary).  The validators reject a combination an
 element's model does not consume, rather than accepting a field nothing reads.  See
 :doc:`/pgml/modeling/harmonic-line-model` and :doc:`/pgml/modeling/transformer`.
 
