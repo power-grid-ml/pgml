@@ -94,7 +94,6 @@ def _max_deviation(net, grid, id_map):
     )
     assert res.converged, f"pgml did not converge (mismatch {float(res.residual):.2e})"
     v = res.v.reshape(-1)
-    node_by_id = {int(n.id): n for n in grid.nodes}
     dv = dth = 0.0
     for pp_bus, node_id in id_map["bus"].items():
         if not bool(net.bus.at[pp_bus, "in_service"]):
@@ -102,9 +101,8 @@ def _max_deviation(net, grid, id_map):
         vm_ref = float(net.res_bus.at[pp_bus, "vm_pu"])
         if not math.isfinite(vm_ref):
             continue
-        base = float(net.bus.at[pp_bus, "vn_kv"]) * 1e3
-        if len(node_by_id[node_id].phases) >= 3:
-            base /= math.sqrt(3.0)  # a >=3-phase node's rated voltage is line-to-line
+        # both phase modes solve line-to-neutral: pandapower's L-L base over sqrt(3)
+        base = float(net.bus.at[pp_bus, "vn_kv"]) * 1e3 / math.sqrt(3.0)
         vc = complex(v[res.index.row(node_id, Phase.A)])
         dv = max(dv, abs(abs(vc) / base - vm_ref))
         ours = math.degrees(math.atan2(vc.imag, vc.real))

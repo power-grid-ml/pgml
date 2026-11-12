@@ -31,15 +31,19 @@ for name, ascending in (
 ```
 
 ```text
-stress 0.473: {'voltage': 0.348, 'transformer': 0.125}
+stress 1.170: {'voltage': 1.045, 'transformer': 0.125}
   voltage      36  value 0.912  stress 0.149
   voltage      37  value 0.912  stress 0.149
   transformer  84  value 0.853  stress 0.069
-line_impedance_elasticity      71: -1.480, 64: -1.458, 63: -1.458
+line_impedance_elasticity      71: -4.415, 64: -4.334, 63: -4.334
 transformer_rating_elasticity  84: -2.240, 82: -2.002, 83: -0.000
-transformer_tap_gradient       84: +104.318, 82: +18.262, 83: +0.000
-d_stress_d_p_per_kw            37: +0.096, 36: +0.096, 35: +0.078
+transformer_tap_gradient       84: +310.149, 82: +52.355, 83: +0.000
+d_stress_d_p_per_kw            36: +0.268, 37: +0.268, 35: +0.216
 ```
+
+The CIGRE grid is a per-phase equivalent: each voltage entry in `stressed` is the stress of
+one conductor and counts three times in the voltage stress, and `d_stress_d_p_per_kw` is per
+kW of three-phase power.
 
 The grid is stressed by low voltages at the end of the residential feeder and by two
 transformers above 80 % of their rating. Line 71 is the line whose reinforcement relieves the
@@ -72,6 +76,13 @@ The stress of one element is the squared excess of its utilisation over the onse
 s = max(0, (u - c) / (1 - c))^2,      S = sum of s over every element
 ```
 
+A voltage or THD row of a per-phase equivalent (`metadata.tags["phase_mode"] ==
+"single_phase_equiv"`) stands for the three phase conductors of the system and counts three
+times in `S`, so `S` and every sensitivity are the same for a network stored as a per-phase
+equivalent, a three-phase build or an as-built phase-domain grid. (An untagged one-phase grid
+counts each row once: by the schema it is a genuine single-phase circuit. A `legacy_ll` grid
+counts each row once too.)
+
 `S` is continuously differentiable. It is zero, and so is every gradient, while every element
 stays below `c` of its limit. The onset therefore lies below 1, so an element approaching its
 limit already contributes a gradient. `S = 1` means, for example, one element exactly at its
@@ -92,13 +103,15 @@ Every enhancement is an elasticity `dS / d ln k` of an upgrade factor `k` at `k 
 | `transformer_impedance_elasticity` | Leakage impedance `Z / k` | Every in-service transformer |
 | `transformer_rating_elasticity` | Rated power `k * s_rated_va` | Rated transformers; always `<= 0` |
 | `transformer_tap_gradient` | `dS / dn` of the off-nominal ratio magnitude `n` | Every in-service transformer |
-| `d_stress_d_p_per_kw` | `dS / dP` per kW of new constant-power demand | Every bus without a source |
-| `d_stress_d_q_per_kvar` | `dS / dQ` per kvar of new reactive demand (inductive positive) | Every bus without a source |
+| `d_stress_d_p_per_kw` | `dS / dP` per kW of new constant-power demand (system power) | Every bus without a source |
+| `d_stress_d_q_per_kvar` | `dS / dQ` per kvar of new reactive demand (inductive positive, system power) | Every bus without a source |
 
 The injections use the load convention: positive `P` is new demand, so new generation changes
 the stress by the negative of the reported value. The new device is wye-connected over every
-phase conductor of the bus with the power split equally. Its sensitivities are taken on
-zero-power probe loads added to a copy of the grid, which leave the base case unchanged.
+phase conductor of the bus with the power split equally; `P` and `Q` are its three-phase
+system power in every representation (one kW on a per-phase equivalent is a third of a kW on
+its stored phase). Its sensitivities are taken on zero-power probe loads added to a copy of
+the grid, which leave the base case unchanged.
 
 `result.ranking(name, k, ascending=True)` returns `(id, value)` pairs sorted with the most
 negative first and `NaN` left out; `ascending=False` reverses the order (the bus where new
@@ -119,7 +132,8 @@ terminal rounding ranks larger.
 `base_operating_point` takes the values of {func}`~pgml.studies.hosting_capacity`:
 `"nameplate"` (the default here), `"worst_case"` with `direction="generation"` (loads off,
 generation at nameplate) or `direction="load"` (generation off, loads at nameplate), or a
-mapping `{appliance_id: {"p_w", "q_var", ...}}` on top of nameplate. A base that does not
+mapping `{appliance_id: {"p_w", "q_var", ...}}` on top of nameplate, in the grid's stored
+units (on a per-phase equivalent a third of the device's three-phase power). A base that does not
 converge raises {class}`~pgml.errors.ConvergenceError`: there is no operating point to
 differentiate at. A grid whose loads are stored as individual peaks usually needs a mapping
 with diversified powers.

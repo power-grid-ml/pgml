@@ -18,12 +18,12 @@ pandapower const-Z: ``y = conj(S_rated) / V_rated^2`` where ``V_rated`` is the
 bus rated voltage (``vn_kv * 1000``) which is **line-to-line** in pandapower's
 positive-sequence convention.
 
-Our schema stores single-phase nodes with ``u_rated_v = vn_kv * 1000`` (LL).
-The assembly uses ``phase_voltage_magnitude(u_rated_v, n_phases=1)`` which returns
-``u_rated_v`` unchanged (the sqrt(3) division only applies for n_phases >= 3).
-Therefore both sides compute ``y = (P - jQ) / V_LL^2``, which is the 3-phase
-total admittance of a Y-connected load expressed as a single scalar in the
-positive-sequence equivalent network.  The two formulations are identical.
+Our schema stores single-phase nodes line-to-neutral, ``u_rated_v = vn_kv * 1000 /
+sqrt(3)``, and the converter stores the per-phase share ``S/3`` of every load. The
+assembly uses ``phase_voltage_magnitude(u_rated_v, n_phases=1)``, which returns
+``u_rated_v`` unchanged, so pgml computes ``y = (S/3) / (V_LL/sqrt(3))^2 =
+S / V_LL^2``: the per-phase admittance equals the pandapower total-power,
+line-to-line-base expression, and the two formulations are identical.
 
 Slack voltage
 -------------
@@ -125,7 +125,7 @@ class TestIEEE33VsReference:
         slack_row = index.row(slack_node_id, Phase.A)
         fixed_rows = torch.tensor([slack_row], dtype=torch.int64)
 
-        # Slack voltage: vm_pu * vn_kv * 1e3  (LL phasor, matches our 1-phase convention)
+        # Slack voltage: vm_pu * vn_kv * 1e3 / sqrt(3)  (L-N phasor of the one-phase grid)
         v_slack_complex = id_map["slack_v_complex"]  # stored by to_grid
         v_fixed = torch.tensor([v_slack_complex], dtype=torch.complex128)
 
@@ -143,7 +143,9 @@ class TestIEEE33VsReference:
             v_complex = v_all[0, row].item()  # Python complex from torch
 
             # Our voltage magnitude in pu
-            u_rated_v = net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0
+            u_rated_v = (
+                net.bus.at[pp_bus_idx, "vn_kv"] * 1_000.0 / math.sqrt(3.0)
+            )  # L-N
             vm_pu_ours = abs(v_complex) / u_rated_v
             va_deg_ours = math.degrees(cmath_angle(v_complex))
 
@@ -268,7 +270,8 @@ class TestIEEE33YbusVsReference:
             if isinstance(app, GridLoad) and app.in_service:
                 node_id = app.node
                 pp_bus_idx = node_id_of[node_id]
-                u_rated_v = float(net.bus.at[pp_bus_idx, "vn_kv"]) * 1_000.0
+                # per-phase share of the power on the line-to-neutral rating
+                u_rated_v = float(net.bus.at[pp_bus_idx, "vn_kv"]) * 1_000.0 / 3.0**0.5
                 y = complex(app.p_nom_w, -app.q_nom_var) / (u_rated_v**2)
                 load_shunt[node_id] = load_shunt.get(node_id, 0.0) + y
 
@@ -343,7 +346,7 @@ class TestToGridConverter:
         grid, id_map = to_grid(net)
         for pp_bus, node_id in id_map["bus"].items():
             node = next(n for n in grid.nodes if n.id == node_id)
-            expected_v = float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0
+            expected_v = float(net.bus.at[pp_bus, "vn_kv"]) * 1_000.0 / 3.0**0.5
             assert node.u_rated_v == pytest.approx(expected_v)
 
     def test_line_unit_conversion(self) -> None:
@@ -386,9 +389,9 @@ class TestToGridConverter:
         _, id_map = to_grid(net)
         assert "slack_v_complex" in id_map
         v = id_map["slack_v_complex"]
-        # Should be close to vm_pu * vn_kv * 1000 at va_degree angle
+        # vm_pu * vn_kv * 1000 / sqrt(3) (line-to-neutral) at va_degree angle
         vm_pu = float(net.ext_grid.at[0, "vm_pu"])
-        vn_v = float(net.bus.at[0, "vn_kv"]) * 1_000.0
+        vn_v = float(net.bus.at[0, "vn_kv"]) * 1_000.0 / 3.0**0.5
         expected_mag = vm_pu * vn_v
         assert abs(v) == pytest.approx(expected_mag, rel=1e-9)
 

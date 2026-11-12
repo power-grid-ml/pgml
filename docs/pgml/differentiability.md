@@ -282,23 +282,24 @@ for label, (line_id, elasticity) in (("top ranked", rank[0]), ("10th ranked", ra
 ```
 
 ```text
-voltage stress 0.34840, 37 lines ranked
-  line 71 (27->34)  dS/dln(k) -1.46713
-  line 63 (25->26)  dS/dln(k) -1.43799
-  line 64 (26->27)  dS/dln(k) -1.43799
-37 re-solves, largest difference 2.5e-02 (top value 1.47)
-  top ranked line 71 halved -> stress 0.04629 (87% less)
-  10th ranked line 55 halved -> stress 0.32430 (7% less)
+voltage stress 1.04520, 37 lines ranked
+  line 71 (27->34)  dS/dln(k) -4.40139
+  line 64 (26->27)  dS/dln(k) -4.31398
+  line 63 (25->26)  dS/dln(k) -4.31398
+37 re-solves, largest difference 7.6e-02 (top value 4.40)
+  top ranked line 71 halved -> stress 0.13888 (87% less)
+  10th ranked line 55 halved -> stress 0.97291 (7% less)
 ```
 
-Lines 63 and 64 are in series and carry the same current, so their elasticities are equal to
+Lines 64 and 63 are in series and carry the same current, so their elasticities are equal to
 the digits printed and the order between them is a tie-break.
 
 The first section of the lateral that feeds the worst nodes (36 and 37) and the two
 sections upstream of it come out on top.
 Thirty-seven separate re-solves with a 1 % lower impedance give the same numbers within
-2.5e-2, the first-order error of a 1 % step. Halving the impedance of the top-ranked line
-removes 87 % of the stress, halving the tenth-ranked line removes 7 %.
+7.6e-2 (under 2 % of the top value), the first-order error of a 1 % step. Halving the
+impedance of the top-ranked line removes 87 % of the stress, halving the tenth-ranked line
+removes 7 %.
 
 The derivative is local, so it ranks candidates rather than sizing them: `ln 2` times the top
 elasticity would predict more relief than there is stress. Use it to shortlist, then re-solve

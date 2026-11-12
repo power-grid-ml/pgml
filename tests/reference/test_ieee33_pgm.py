@@ -40,8 +40,9 @@ pgm voltage convention
 ``node.u_rated``).  ``out["node"]["u_pu"]`` = u / u_rated (line-to-line based).
 ``out["node"]["u_angle"]`` is in radians.
 
-Our single-phase nodes store ``u_rated_v = u_rated`` (LL) so the comparison is:
-    our_pu = |v_complex| / u_rated_v  ← same base as pgm u_pu.
+Our single-phase nodes store the line-to-neutral rating ``u_rated_v = u_rated /
+sqrt(3)`` and solve line-to-neutral voltages, so the comparison is:
+    our_pu = |v_complex| / u_rated_v  ← the same per-unit as pgm u_pu.
 
 Line parameter mapping (pgm -> our schema)
 ------------------------------------------
@@ -241,7 +242,9 @@ class TestPgmConverterUnit:
         for pgm_node_id, our_node_id in id_map["node"].items():
             node_obj = next(n for n in grid.nodes if n.id == our_node_id)
             pgm_row = next(r for r in input_data["node"] if int(r["id"]) == pgm_node_id)
-            assert node_obj.u_rated_v == pytest.approx(float(pgm_row["u_rated"]))
+            assert node_obj.u_rated_v == pytest.approx(
+                float(pgm_row["u_rated"]) / 3.0**0.5
+            )
 
     def test_line_impedance(self) -> None:
         """First line: r_per_m == r1 (virtual 1m length), l_per_m == x1/(2*pi*f0)."""
@@ -284,8 +287,8 @@ class TestPgmConverterUnit:
         _, id_map = to_grid(input_data, base_frequency_hz=60.0)
         assert id_map["slack_v_complex"] is not None
         v = id_map["slack_v_complex"]
-        # u_ref=1.0 pu → |v| ≈ u_rated = 12660 V
-        assert abs(v) == pytest.approx(12_660.0, rel=1e-6)
+        # u_ref=1.0 pu → |v| = u_rated / sqrt(3) = 7309 V (line-to-neutral phasor)
+        assert abs(v) == pytest.approx(12_660.0 / 3.0**0.5, rel=1e-6)
         # u_ref_angle=0 → angle ≈ 0
         assert math.degrees(_cmath_angle(v)) == pytest.approx(0.0, abs=1e-9)
 

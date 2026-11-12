@@ -37,7 +37,11 @@ element is the squared excess of its utilisation over the onset ``c``
 
     s = max(0, (u - c) / (1 - c)) ** 2
 
-and the total stress ``S`` is the sum over every element. ``S`` is continuously
+and the total stress ``S`` is the sum over every element. A row of a per-phase
+equivalent (``metadata.tags["phase_mode"] == "single_phase_equiv"``) stands for the
+three phase conductors of the system, so its voltage and THD terms count three times;
+``S`` is then the same number for a network in every representation that describes
+its conductors (per-phase equivalent, three-phase, as-built). ``S`` is continuously
 differentiable; it is zero (and so is every gradient) while every element stays below
 ``c`` of its limit, which is why the onset lies below ``1``: an element approaching its
 limit already contributes a gradient. ``S = 1`` means, for instance, one element exactly
@@ -60,7 +64,11 @@ magnitude ``n`` (``tap.ratio_magnitude``). Bus injections are ``dS / dP`` per kW
 ``dS / dQ`` per kvar of a new constant-power device connected wye over every phase
 conductor of the bus with the power split equally, in LOAD convention: positive ``P``
 is new demand, so new generation changes the stress by the negative of the reported
-value.
+value. ``P`` and ``Q`` are three-phase SYSTEM powers in every representation of a
+network: on a per-phase equivalent (``metadata.tags["phase_mode"] ==
+"single_phase_equiv"``, which stores a third of every power) one kW of new power is a
+third of a kW on the stored phase (:func:`pgml.representation.system_totals`), so the
+same network reports the same sensitivity per kW whatever its representation.
 
 The derivatives are local: they rank candidates at the base operating point rather
 than size them. Re-solve a shortlist with the actual upgrade before deciding.
@@ -78,6 +86,7 @@ import torch
 from torch import Tensor
 
 from pgml.errors import ConvergenceError, InputError
+from pgml.representation import system_totals
 from pgml.scenarios import batch_from_values
 from pgml.schemas.grid_schema import (
     Grid,
@@ -138,7 +147,9 @@ class EnhancementSensitivities:
         "node_id", "phase"}``, ``{"kind": "line" | "line_neutral" | "transformer",
         "branch_id"}``, ``{"kind": "vuf", "node_id"}``, ``{"kind": "thd", "node_id",
         "phase"}``) plus ``"value"`` (the checked quantity: pu, loading fraction, VUF
-        or THD fraction), ``"utilisation"`` (``1`` = at the limit) and ``"stress"``.
+        or THD fraction), ``"utilisation"`` (``1`` = at the limit) and ``"stress"``
+        (of one conductor: a voltage or THD entry of a per-phase equivalent counts
+        three times in :attr:`stress`).
     line_ids:
         Every in-service :class:`~pgml.schemas.grid_schema.Line`, in grid order
         (the order of the ``line_*`` arrays ``[L]``).
@@ -168,10 +179,11 @@ class EnhancementSensitivities:
         of the injection arrays ``[n]``).
     d_stress_d_p_per_kw:
         ``[n]`` float64, 1/kW: ``dS / dP`` of new constant-power demand at the bus
-        (load convention; new generation: the negative).
+        (load convention; new generation: the negative), per kW of three-phase system
+        power in every grid representation.
     d_stress_d_q_per_kvar:
         ``[n]`` float64, 1/kvar: ``dS / dQ`` of new reactive demand (inductive
-        positive) at the bus.
+        positive) at the bus, per kvar of three-phase system power.
     direction:
         ``"generation"`` or ``"load"``: the side a ``"worst_case"`` base was built for.
     base_operating_point:
@@ -366,8 +378,10 @@ def _as_real(value, real: torch.dtype, device) -> Tensor:
 class _Forward:
     """One forward pass: total stress, its split by kind, the terms and the state.
 
-    ``terms[kind]`` lists ``(descriptors, value, utilisation, stress)`` per limit of
-    that kind, the last three ``[E]`` float64 tensors on the tape.
+    ``terms[kind]`` lists ``(descriptors, value, utilisation, stress, weight)`` per
+    limit of that kind: ``value``, ``utilisation`` and ``stress`` ``[E]`` float64
+    tensors on the tape, ``weight`` the conductors each element stands for (``S`` sums
+    ``weight * stress``).
     """
 
     total: Tensor
@@ -379,7 +393,7 @@ class _Forward:
         """Every element with a positive stress term, largest first (host values)."""
         out = []
         for parts in self.terms.values():
-            for descs, value, u, s in parts:
+            for descs, value, u, s, _ in parts:
                 s_host = s.detach().cpu().numpy()
                 value_host = value.detach().cpu().numpy()
                 u_host = u.detach().cpu().numpy()
@@ -404,8 +418,9 @@ class _Problem:
     in-service transformer), ``tap`` ``[T]`` (off-nominal ratio magnitudes),
     ``ln_k_ampacity`` ``[L_rated]`` (log ampacity upgrade of every rated line, the
     order of ``elements.lines``), ``ln_k_s_rated`` ``[T_rated]`` (``elements.
-    transformers``), ``p_kw`` and ``q_kvar`` ``[n]`` (new power at every bus of
-    ``node_ids``). :meth:`initial_leaves` is the as-built grid at the base operating
+    transformers``), ``p_kw`` and ``q_kvar`` ``[n]`` (new system power at every bus of
+    ``node_ids``, three-phase kW / kvar; the probe setpoint is that over the
+    representation's power factor). :meth:`initial_leaves` is the as-built grid at the base operating
     point.
     """
 
@@ -435,6 +450,8 @@ class _Problem:
         harmonic = config.calculation == "harmonic"
         self.orders = [int(o) for o in config.harmonic_orders] if harmonic else [1]
         self.two_pi_f0 = 2.0 * math.pi * float(grid.base_frequency_hz)
+        # Stored watts per kW of system power: 1e3 / 3 on a per-phase equivalent.
+        self.stored_w_per_kw = 1.0e3 / system_totals(grid).power_factor
 
         # One zero-power constant-power probe load per bus carries the new-power leaves.
         self.node_ids = resolve_candidates(grid, None)
@@ -530,8 +547,9 @@ class _Problem:
         """Solve at the leaves' values and build the stress on the autograd tape."""
         p_w = {**self.base_values["p_w"]}
         q_var = {**self.base_values["q_var"]}
-        p_w.update({pid: 1.0e3 * p_kw[k] for k, pid in enumerate(self.probe_ids)})
-        q_var.update({pid: 1.0e3 * q_kvar[k] for k, pid in enumerate(self.probe_ids)})
+        scale = self.stored_w_per_kw
+        p_w.update({pid: scale * p_kw[k] for k, pid in enumerate(self.probe_ids)})
+        q_var.update({pid: scale * q_kvar[k] for k, pid in enumerate(self.probe_ids)})
         batch = batch_from_values(
             self.grid,
             n_samples=1,
@@ -564,8 +582,13 @@ class _Problem:
 
         terms: dict[str, list] = {kind: [] for kind in _STRESS_KINDS}
 
-        def _add(kind: str, descs: list, value: Tensor, u: Tensor) -> None:
-            terms[kind].append((descs, value, u, _stress(u, onset)))
+        def _add(
+            kind: str, descs: list, value: Tensor, u: Tensor, weight: float = 1.0
+        ) -> None:
+            terms[kind].append((descs, value, u, _stress(u, onset), weight))
+
+        # A per-phase-equivalent row stands for this many phase conductors.
+        per_row = el.conductors_per_row
 
         if "v_pu" in quantities:
             v_pu = quantities["v_pu"][0]
@@ -578,7 +601,8 @@ class _Problem:
                         {"kind": "voltage", "limit": key, "node_id": n, "phase": ph}
                         for n, ph in el.live_desc
                     ]
-                    _add("voltage", descs, v_pu, sign * (v_pu - 1.0) / abs(bound - 1.0))
+                    u = sign * (v_pu - 1.0) / abs(bound - 1.0)
+                    _add("voltage", descs, v_pu, u, per_row)
         ampacity = torch.exp(ln_k_ampacity.to(device=dev, dtype=torch.float64))
         if "line_loading" in quantities:
             value = quantities["line_loading"][0]
@@ -622,11 +646,11 @@ class _Problem:
             descs = [
                 {"kind": "thd", "node_id": n, "phase": ph} for n, ph in el.live_desc
             ]
-            _add("thd", descs, value, value / lim.thd_max)
+            _add("thd", descs, value, value / lim.thd_max, per_row)
 
         zero = torch.zeros((), dtype=torch.float64, device=dev)
         by_kind = {
-            kind: sum((part[3].sum() for part in parts), zero)
+            kind: sum((part[4] * part[3].sum() for part in parts), zero)
             for kind, parts in terms.items()
         }
         total = sum(by_kind.values(), zero)
@@ -667,7 +691,9 @@ def enhancement_sensitivities(
         (for generation every load at zero, for load every generator at zero); a
         mapping ``{appliance_id: {"p_w", "q_var", "p_per_phase_w",
         "q_per_phase_var"}}`` (W, var) overrides the named devices on top of
-        nameplate.
+        nameplate; its values are in the grid's stored units, like the appliance
+        fields they replace (on a per-phase equivalent a third of the device's
+        three-phase power).
     direction:
         ``"generation"`` (default) or ``"load"``: which worst case ``"worst_case"``
         builds. Not used by any other base.

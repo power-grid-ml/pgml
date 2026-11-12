@@ -17,7 +17,8 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   switching come from `pgml.solver._continuation`; the predictor, corrector, step control
   and event location (nose, reactive-limit switch, `λ` cap) live here.
 - `limits.py` — `branch_ratings` (line ampacity from the catalog type's `max_i_a`,
-  transformer `s_rated_va` from the component, else its type; every branch listed),
+  transformer `s_rated_va` from the component, else its type, as the three-phase total;
+  every branch listed),
   `HostingLimits` (voltage band, line phase-conductor / transformer loading, optional
   VUF, THD and neutral loading), and the private `_LimitElements`: the element tables of
   every limit and `evaluate`, the differentiable float64 limit quantities (`v_pu`, `vuf`,
@@ -47,6 +48,21 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   the result field and the `to_dict` key `direction`. (The `"kind"` key of a hosting
   `binding` entry names the limit kind, not the side.)
 - Per-phase arrays name the quantity first, the unit last: `q_phase_var`.
+- SYSTEM power at the interface, in every representation (`metadata.tags["phase_mode"]`):
+  every input and output in W / var / VA and every per-kW / per-kvar sensitivity is the
+  three-phase total, scaled through `pgml.representation.system_totals(grid).power_factor`
+  (3 on `"single_phase_equiv"`, else 1) exactly where a stored setpoint is set or a solved
+  power is read. Hosting: `p_max_w`, `tol_w`, `p_cap_w`, the bracket constants; the
+  bisection runs in system watts, so the trial sequence is representation-independent.
+  Enhancement: the `p_kw` / `q_kvar` leaves are system kW / kvar. P-V `p_total_w`, Q-V
+  `q_var`, `q_phase_var` (the one held phase of a per-phase equivalent carries the
+  total, so `q_var = q_phase_var.sum(1)` everywhere), `q_margin_var`. `branch_ratings`
+  `s_rated_va` is the three-phase rating. Voltages stay pu, currents A per conductor.
+  Setpoint mappings (`base_operating_point` mapping, `operating_point` of the impedance
+  scan and of `config`) stay in STORED units: they replace appliance fields. `legacy_ll`
+  grids (older converters) read as stored (factor 1), so their line currents remain
+  sqrt(3) too large; untagged grids are read by the schema rule (factor 1). Pinned by `tests/studies/test_system_power.py` (one network in four
+  representations, `tests/studies/representations.py`).
 - Every result has `to_dict()` (JSON-ready: plain lists, ids, units in the key names,
   `None` where JSON would need `NaN`) and `from_dict()`, its inverse. Every top-level
   `to_dict()` carries a `"study"` key naming the entry function (`"impedance_scan"`,
@@ -176,6 +192,12 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   carry the same loading while their tap slopes differ, and `amax` would pick a side by
   rounding (measured: tap gradient off by about 1 % and flipping with the solve
   tolerance). Hosting keeps the hard max.
+- A voltage / THD row of a per-phase equivalent counts `_LimitElements.conductors_per_row`
+  (3) times in `S`: it stands for three conductors, and the stress then equals that of
+  the phase-domain build of the same network (a `stressed` entry keeps the stress of one
+  conductor). Untagged one-phase grids count once (by the schema they are genuine
+  single-phase circuits), and so do `legacy_ll` grids. Transformer loading divides the three-phase rating over
+  `n_live * conductors_per_row` conductors.
 - `limits._sqrt` (zero slope at 0) under every RMS norm and THD: a branch with exactly
   zero current (a cable bridged by a closed switch, both ends fused) otherwise turns
   every gradient through the solve into NaN. The value equals `sqrt`.
@@ -192,6 +214,7 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   plain Newton solves on an unbalanced feeder, four-wire QV convention, unresolved nose,
   serialization, inputs),
   `tests/gpu/test_studies_continuation_parity.py`.
+- System power across representations: `tests/studies/test_system_power.py`.
 - Hosting capacity: `tests/studies/test_hosting.py` (closed forms, serial `simulate`
   reference, every limit kind, base-case violations, slicing, round trip), `tests/studies/test_limits.py`, shared test
   grids in `tests/studies/grids.py`, `tests/gpu/test_hosting_parity.py`.

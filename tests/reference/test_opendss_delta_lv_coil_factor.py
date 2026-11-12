@@ -125,8 +125,8 @@ def test_positive_sequence_voltage_matches_opendss(load_conn) -> None:
         grid, slack="ideal", tol=1e-13, max_iter=300, dtype=torch.complex128
     )
     assert res.converged
-    # The 1-phase equivalent carries the LINE-to-line magnitude; compare on the L-N base.
-    v_lv = complex(res.v[res.index.row(id_map["bus"]["lv"], Phase.A)]) / math.sqrt(3.0)
+    # The 1-phase equivalent is line-to-neutral, like the OpenDSS positive-sequence phasor.
+    v_lv = complex(res.v[res.index.row(id_map["bus"]["lv"], Phase.A)])
     assert abs(v_lv) == pytest.approx(abs(v1_dss), abs=1.0e-4)
 
 

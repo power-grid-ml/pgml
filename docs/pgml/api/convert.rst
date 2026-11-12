@@ -57,10 +57,20 @@ Every ``to_grid`` function accepts a ``phase_mode`` keyword (default
 
 ``PhaseMode.SINGLE_PHASE_EQUIV``
     The default. Every node and branch is ``phases=(Phase.A,)`` and every
-    line carries 1x1 matrices. This is the positive-sequence single-phase
-    equivalent that reproduces the historical converter output byte-for-byte.
-    The assembly's const-Z formula treats ``u_rated_v`` as line-to-line,
-    which is the convention all three converters follow.
+    line carries 1x1 matrices. The grid is one phase of the balanced
+    system, following the schema's one-phase convention: ``u_rated_v`` and
+    source voltages are line-to-neutral (``U_LL/sqrt(3)``), loads, generators,
+    storage, inverter ratings and transformer ratings are one third of the
+    three-phase total, and per-phase impedances, admittances and ampacities
+    are unchanged. Per-unit voltages and losses agree with the source tool and a
+    branch current is the conductor current the tool reports. See
+    :doc:`the conventions page <../modeling/conventions>` for the full rule.
+    Every converted grid records its representation in
+    ``metadata.tags["phase_mode"]`` (``"single_phase_equiv"`` or
+    ``"three_phase"``); a grid without the tag is read as the schema
+    defines it, and a file written by an older converter (line-to-line
+    one-phase node voltages, three-phase totals) is tagged ``"legacy_ll"``
+    with :func:`pgml.representation.mark_legacy`.
 
 ``PhaseMode.THREE_PHASE``
     Genuine per-phase abc representation. Nodes and branches become

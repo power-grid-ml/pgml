@@ -43,6 +43,7 @@ from pgml.convert._export import (
     scalar,
     shunt_is_unbalanced,
     shunt_positive_sequence,
+    system_view,
     validate_balanced_grid_phases,
 )
 from pgml.convert._model_differences import PGM, finalize_report
@@ -130,6 +131,7 @@ def from_grid(grid: Grid, *, allow_approximation: bool = False) -> PgmExport:
     from power_grid_model import initialize_array
 
     validate_balanced_grid_phases(grid)
+    grid = system_view(grid)
     f0 = float(grid.base_frequency_hz)
     w0 = 2.0 * math.pi * f0
     out = PgmExport(

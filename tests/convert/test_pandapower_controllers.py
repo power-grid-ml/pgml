@@ -60,8 +60,8 @@ def _pgml_vm_pu(grid, id_map, bus):
     assert bool(res.converged)
     v = res.v.detach().cpu().numpy().reshape(-1)
     phases = grid.nodes[0].phases
-    # The node rating is line-to-line; a three-phase node solves line-to-neutral.
-    v_nom = 400.0 if len(phases) == 1 else 400.0 / 3.0**0.5
+    # Both representations solve line-to-neutral: a one-phase node is rated line-to-neutral.
+    v_nom = 400.0 / 3.0**0.5
     return abs(v[res.index.row(id_map["bus"][bus], phases[0])]) / v_nom
 
 

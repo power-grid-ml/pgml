@@ -151,7 +151,8 @@ def _assert_matches_pandapower(
         row = result.index.row(node_id, Phase.A)
         v_complex = result.v.reshape(-1)[row].item()
 
-        u_rated_v = float(net.bus.at[pp_idx, "vn_kv"]) * 1_000.0
+        # one-phase node: pgml solves line-to-neutral, pandapower's base is line-to-line
+        u_rated_v = float(net.bus.at[pp_idx, "vn_kv"]) * 1_000.0 / math.sqrt(3.0)
         vm_pu_ours = abs(v_complex) / u_rated_v
         va_deg_ours = math.degrees(math.atan2(v_complex.imag, v_complex.real))
 
@@ -862,7 +863,9 @@ def test_parallel_default_is_byte_identical():
     assert line.series_inductance_h_per_m[0][0] == x1 / (2.0 * math.pi * net.f_hz)
     assert line.shunt_capacitance_f_per_m[0][0] == c1
     assert line.shunt_conductance_s_per_m[0][0] == g1
-    assert trafo.s_rated_va == float(net.trafo.at[0, "sn_mva"]) * 1.0e6
+    assert trafo.s_rated_va == pytest.approx(
+        float(net.trafo.at[0, "sn_mva"]) * 1.0e6 / 3.0, rel=1e-14
+    )
 
 
 # ---------------------------------------------------------------------------

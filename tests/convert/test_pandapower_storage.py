@@ -51,9 +51,14 @@ def test_storage_sign_scaling_state_and_service():
     discharge = by_id[id_map["storage"][discharging]]
 
     assert isinstance(charge, Storage) and isinstance(discharge, Storage)
-    assert (charge.p_nom_w, charge.q_nom_var) == (-300_000.0, -100_000.0)
-    assert (discharge.p_nom_w, discharge.q_nom_var) == (600_000.0, 200_000.0)
-    assert charge.energy_capacity_wh == 2_000_000.0
+    # one third of the system totals (single-phase equivalent), the energy with them
+    assert (charge.p_nom_w, charge.q_nom_var) == pytest.approx(
+        (-100_000.0, -100_000.0 / 3.0)
+    )
+    assert (discharge.p_nom_w, discharge.q_nom_var) == pytest.approx(
+        (200_000.0, 200_000.0 / 3.0)
+    )
+    assert charge.energy_capacity_wh == pytest.approx(2_000_000.0 / 3.0)
     assert charge.soc == 0.25 and charge.soc_min == 0.1
     assert offline not in id_map["storage"]
 

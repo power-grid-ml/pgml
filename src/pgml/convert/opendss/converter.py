@@ -37,19 +37,22 @@ following the OpenDSS convention (NeutralRules: grounded-wye path when phases=1)
 
 ``u_rated_v`` convention
 ~~~~~~~~~~~~~~~~~~~~~~~~
-The pgml schema convention (and the pandapower/pgm converters) stores the
-**line-to-line** rated voltage for all nodes, because the const-Z load shunt
-formula is ``y = conj(S) / u_rated_v^2`` with ``u_rated_v`` being L-L.
-OpenDSS ``Bus.kVBase()`` always returns ``BasekV_LL / sqrt(3)`` (line-to-neutral),
-regardless of the phase count on the element that established the base voltage.
-The converter therefore always applies ``u_rated_v = kVBase * sqrt(3) * 1000``.
+The system (line-to-line) nominal of a bus is recovered from OpenDSS ``Bus.kVBase()``,
+which always returns ``BasekV_LL / sqrt(3)`` (line-to-neutral), regardless of the phase
+count on the element that established the base voltage: ``U_LL = kVBase * sqrt(3) * 1000``.
+Under ``THREE_PHASE`` the node stores that line-to-line value. Under
+``SINGLE_PHASE_EQUIV`` the grid is one phase of the balanced system: ``build_node`` stores
+``U_LL / sqrt(3)`` (``kVBase * 1000``, the schema's one-phase line-to-neutral rating), loads,
+generators, storage, transformer ratings and control ratings are one third of the OpenDSS
+kW/kvar/kVA, and impedances are unchanged. Every grid carries
+``metadata.tags["phase_mode"]``; a grid without the tag predates the per-phase equivalent.
 
 For the canonical IEEE 33-bus (single-phase positive-sequence circuit built with
-``phases=1`` and ``basekv=12.66 kV``): OpenDSS stores ``kVBase = 12.66/sqrt(3) =
-7.31 kV``.  Applying ``* sqrt(3) * 1000`` recovers ``12660 V``, matching the
-pandapower reference; using ``kVBase`` directly (7309 V, L-N) would introduce a
-factor-of-sqrt(3) error into the const-Z load shunt for load-flow studies, though
-the passive Y-bus oracle test (no loads) is insensitive to it.
+``phases=1`` and ``basekv=12.66 kV``): ``kVBase = 7.31 kV``, the system nominal is
+``12660 V`` (as in the pandapower reference) and the per-phase-equivalent node is 7309 V.
+A genuinely one-phase OpenDSS circuit is read the same way (as one phase of a balanced
+system fed with the line-to-line nominal), so its voltages agree per unit but its
+absolute currents are the system's, not the one-phase circuit's.
 
 ``phase_mode`` controls the node/branch representation:
 
@@ -116,12 +119,16 @@ from typing import Any, Literal, Optional
 from pgml.assembly._params import phase_voltage_magnitude
 from pgml.convert._common import (
     IdCounter,
+    LineTypeCatalog,
     PhaseMode,
     build_generator,
     build_line_from_matrices,
     build_load,
     build_node,
     build_source,
+    build_storage,
+    equivalent_power,
+    equivalent_voltage,
     make_metadata,
     phases_for,
     resolve_converted_line_models,
@@ -144,7 +151,6 @@ from pgml.schemas.grid_schema import (
     Provenance,
     ShuntAppliance,
     SourceConvention,
-    Storage,
     StaticSpectrum,
     SpectrumPoint,
     Transformer,
@@ -175,8 +181,8 @@ _PROVENANCE = Provenance(
     notes=(
         "Converted from OpenDSS circuit (opendssdirect). "
         "Engineering units converted to SI. "
-        "u_rated_v is line-to-line for every bus (= kVBase * sqrt(3) * 1000), "
-        "following the pgml schema convention; OpenDSS kVBase() returns L-N. "
+        "System voltages are recovered line-to-line (kVBase * sqrt(3) * 1000); the "
+        "single-phase equivalent stores one phase (line-to-neutral, powers / 3). "
         "Load connection from IsDelta(); single-phase loads default to WYE (L-N)."
     ),
 )
@@ -264,7 +270,8 @@ def to_grid(
         - ``"generator"`` -> ``{dss_gen_name_lower: Generator.id}``
         - ``"pvsystem"``  -> ``{dss_pv_name_lower: Generator.id}``
         - ``"storage"``   -> ``{dss_storage_name_lower: Storage.id}``
-        - ``"slack_v_complex"`` -> complex slack voltage phasor (V, line-to-line)
+        - ``"slack_v_complex"`` -> complex slack voltage phasor (V; line-to-neutral under
+          ``SINGLE_PHASE_EQUIV``, line-to-line under ``THREE_PHASE``)
           from the first Vsource, for ideal-slack mode.
 
     Notes
@@ -287,10 +294,11 @@ def to_grid(
       (verified empirically against opendssdirect 0.9.4); every element loop
       below therefore only ever sees in-service elements without an explicit
       ``CktElement.Enabled()`` check.
-    - ``u_rated_v`` is line-to-line for every bus (kVBase * sqrt(3) * 1000),
-      consistent with the pandapower/pgm converters and the assembly const-Z
-      shunt formula. OpenDSS ``kVBase()`` returns L-N, recovered to L-L by the
-      sqrt(3) factor.
+    - The system nominal of a bus is line-to-line (kVBase * sqrt(3) * 1000);
+      ``build_node`` stores it as is under ``THREE_PHASE`` and divided by sqrt(3)
+      (line-to-neutral, the schema's one-phase convention) under
+      ``SINGLE_PHASE_EQUIV``, where appliance powers and ratings are also one
+      third (``pgml.convert._common``).
     - A WYE ``Load``/``Generator``/``PVSystem``/``Storage`` reads its OWN resolved
       return conductor (``CktElement.NodeOrder()``) and carries it over as
       :attr:`~pgml.schemas.grid_schema.InjectionAppliance.return_path`
@@ -411,6 +419,7 @@ def to_grid(
     # 2. Lines                                                                #
     # ---------------------------------------------------------------------- #
     branches: list = []
+    line_types = LineTypeCatalog("opendss")
 
     ret = dss.Lines.First()
     while ret:
@@ -501,19 +510,22 @@ def to_grid(
             line_to_phases = phases_for(phase_mode, native=tuple(to_phases))
 
         branches.append(
-            build_line_from_matrices(
-                id=line_id,
-                name=line_name,
-                from_node=bus_name_to_node_id[from_bus_name],
-                to_node=bus_name_to_node_id[to_bus_name],
-                phases=line_phases,
-                to_phases=line_to_phases,
-                length_m=length_m,
-                r_matrix=r_mat,
-                l_matrix=l_mat,
-                c_matrix=c_mat,
-                g_matrix=None,  # OpenDSS GMatrix is rare in distribution; omit
-                provenance=_PROVENANCE,
+            line_types.rate(
+                build_line_from_matrices(
+                    id=line_id,
+                    name=line_name,
+                    from_node=bus_name_to_node_id[from_bus_name],
+                    to_node=bus_name_to_node_id[to_bus_name],
+                    phases=line_phases,
+                    to_phases=line_to_phases,
+                    length_m=length_m,
+                    r_matrix=r_mat,
+                    l_matrix=l_mat,
+                    c_matrix=c_mat,
+                    g_matrix=None,  # OpenDSS GMatrix is rare in distribution; omit
+                    provenance=_PROVENANCE,
+                ),
+                float(dss.Lines.NormAmps()),
             )
         )
 
@@ -768,9 +780,9 @@ def to_grid(
                 to_node=bus_name_to_node_id[to_bus_name],
                 from_phases=tx_from_phases,
                 to_phases=tx_to_phases,
-                s_rated_va=s_rated_va,
-                u_rated_from_v=u_rated_from_v,
-                u_rated_to_v=u_rated_to_v,
+                s_rated_va=equivalent_power(phase_mode, s_rated_va),
+                u_rated_from_v=equivalent_voltage(phase_mode, u_rated_from_v),
+                u_rated_to_v=equivalent_voltage(phase_mode, u_rated_to_v),
                 from_connection=from_connection,
                 to_connection=to_connection,
                 series_resistance_ohm=r_lv_ohm,
@@ -858,7 +870,9 @@ def to_grid(
         u_ref_v = basekv * pu * 1_000.0  # V
 
         if id_map["slack_v_complex"] is None:
-            id_map["slack_v_complex"] = u_ref_v * complex(
+            id_map["slack_v_complex"] = equivalent_voltage(
+                phase_mode, u_ref_v
+            ) * complex(
                 math.cos(math.radians(angle_deg)),
                 math.sin(math.radians(angle_deg)),
             )
@@ -1350,10 +1364,8 @@ def to_grid(
     # ---------------------------------------------------------------------- #
     # 10. Storages -> Storage (signed, discharge-positive PQ injection)       #
     # ---------------------------------------------------------------------- #
-    # `Storages` has no `build_generator`-style helper in `convert._common`;
-    # the schema object is constructed directly here, mirroring the same
-    # mode/connection/native_phases decisions `build_load`/`build_generator`
-    # make. `kW`/`kvar` are read via text query (present output; DSS's own
+    # `build_storage` applies the per-phase-equivalent scaling like `build_load` and
+    # `build_generator`; connection and return path are added here for abc. `kW`/`kvar` are read via text query (present output; DSS's own
     # sign convention already matches the schema's discharge-positive /
     # charge-negative one -- verified empirically: `state=DISCHARGING` reads a
     # positive `kW`, `state=CHARGING` reads a negative one).
@@ -1394,26 +1406,18 @@ def to_grid(
         id_map["storage"][bat_name] = bat_id
 
         storage_kwargs: dict[str, Any] = {
-            "id": bat_id,
-            "name": bat_name,
-            "node": bus_name_to_node_id[bat_bus_name],
-            "p_nom_w": p_w,
-            "q_nom_var": q_var,
             "soc_min": max(0.0, min(1.0, pct_reserve / 100.0)),
             "efficiency_charge": max(1.0e-6, min(1.0, pct_eff_charge / 100.0)),
             "efficiency_discharge": max(1.0e-6, min(1.0, pct_eff_discharge / 100.0)),
             "consumer_type": ConsumerType.BATTERY,
         }
+        energy_capacity_wh = None
         if kwh_rated > 0.0:
-            storage_kwargs["energy_capacity_wh"] = kwh_rated * 1_000.0
+            energy_capacity_wh = kwh_rated * 1_000.0
             storage_kwargs["soc"] = max(0.0, min(1.0, pct_stored / 100.0))
-        if kw_rated > 0.0:
-            storage_kwargs["p_rated_w"] = kw_rated * 1_000.0
+        p_rated_w = kw_rated * 1_000.0 if kw_rated > 0.0 else None
 
-        if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
-            storage_kwargs["phases"] = (Phase.A,)
-        else:
-            storage_kwargs["phases"] = phases_for(phase_mode, native=tuple(bat_phases))
+        if phase_mode is not PhaseMode.SINGLE_PHASE_EQUIV:
             storage_kwargs["connection"] = conn
             if not is_delta:
                 rp = _resolve_wye_return_path(
@@ -1429,13 +1433,26 @@ def to_grid(
                 dss, "Storage", bat_name, n_phases, conn, phase_mode, f0_hz
             )
             storage_kwargs.update(harmonic_impedance=impedance, spectrum=spectrum)
-        appliances.append(Storage(**storage_kwargs))
+        appliances.append(
+            build_storage(
+                id=bat_id,
+                name=bat_name,
+                node=bus_name_to_node_id[bat_bus_name],
+                mode=phase_mode,
+                p_total_w=p_w,
+                q_total_var=q_var,
+                native_phases=tuple(bat_phases),
+                energy_capacity_wh=energy_capacity_wh,
+                p_rated_w=p_rated_w,
+                **storage_kwargs,
+            )
+        )
         ret = dss.Storages.Next()
 
     # ---------------------------------------------------------------------- #
     # 11. InvControl -> inverter control laws on the controlled DER            #
     # ---------------------------------------------------------------------- #
-    _import_inv_controls(dss, id_map, nodes, appliances, report)
+    _import_inv_controls(dss, id_map, nodes, appliances, report, phase_mode)
     if id_map["pvsystem"]:
         report.approximated(
             "pvsystem.snapshot",
@@ -1489,11 +1506,14 @@ def to_grid(
         else "Three-phase (abc) with real DSS phases, n×n line matrices, and load connections."
     )
     grid = Grid(
+        types=line_types.library(),
         base_frequency_hz=f0_hz,
         nodes=nodes,
         branches=branches,
         appliances=appliances,
-        metadata=make_metadata(name="opendss_import", description=description),
+        metadata=make_metadata(
+            name="opendss_import", description=description, phase_mode=phase_mode
+        ),
     )
     resolve_converted_line_models(
         grid, _logger, tool="OpenDSS", requested=harmonic_line_model
@@ -1522,7 +1542,12 @@ def _xy_curve(dss: Any, name: str) -> Characteristic:
 
 
 def _import_inv_controls(
-    dss: Any, id_map: dict, nodes: list, appliances: list, report
+    dss: Any,
+    id_map: dict,
+    nodes: list,
+    appliances: list,
+    report,
+    phase_mode: PhaseMode,
 ) -> None:
     """Attach each ``InvControl`` as an inverter control law on its DER.
 
@@ -1611,7 +1636,8 @@ def _import_inv_controls(
                 kv = float(dss.Properties.Value("kv")) * 1e3
                 kva = float(dss.Properties.Value("kva")) * 1e3
                 node = node_by_id[der.node]
-                if abs(kv - float(node.u_rated_v)) > 1e-6 * float(node.u_rated_v):
+                kv_node = equivalent_voltage(phase_mode, kv)
+                if abs(kv_node - float(node.u_rated_v)) > 1e-6 * float(node.u_rated_v):
                     raise ConversionError(
                         f"{entry}: element kv {kv:g} V differs from the node rated "
                         f"voltage {float(node.u_rated_v):g} V, so the curve voltage "
@@ -1624,17 +1650,18 @@ def _import_inv_controls(
                             f"{entry}: kvarMax {kvar_max:g} var differs from the kVA "
                             f"rating {kva:g} VA, which pgml uses as the Q base"
                         )
+                s_rated = equivalent_power(phase_mode, kva)
                 if law == "vv":
                     der.control = VoltVarControl(
-                        characteristic=vv, s_rated_va=kva, q_reference=q_reference
+                        characteristic=vv, s_rated_va=s_rated, q_reference=q_reference
                     )
                 elif law == "vw":
-                    der.control = VoltWattControl(characteristic=vw, s_rated_va=kva)
+                    der.control = VoltWattControl(characteristic=vw, s_rated_va=s_rated)
                 else:
                     der.control = VoltVarVoltWattControl(
                         volt_var=vv,
                         volt_watt=vw,
-                        s_rated_va=kva,
+                        s_rated_va=s_rated,
                         q_reference=q_reference,
                     )
                 if law != "vv" and cls == "pvsystem":
@@ -1643,7 +1670,7 @@ def _import_inv_controls(
                     irradiance = float(dss.PVsystems.Irradiance())
                     pct = float(dss.Properties.Value("%Pmpp")) / 100.0
                     available = pmpp * irradiance * pct
-                    der.p_nom_w = available
+                    der.p_nom_w = equivalent_power(phase_mode, available)
                     if vw_axis == "PMPPPU" and abs(irradiance * pct - 1.0) > 1e-9:
                         approximations.append(entry)
             mapped.append(name)

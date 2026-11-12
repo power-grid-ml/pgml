@@ -103,7 +103,7 @@ def test_pp_single_phase_equiv_default_phases_and_matrices():
         assert src.phases == (Phase.A,)
         ld = next(a for a in grid.appliances if isinstance(a, Load))
         assert ld.phases == (Phase.A,)
-        assert ld.p_nom_w == pytest.approx(0.5e6)
+        assert ld.p_nom_w == pytest.approx(0.5e6 / 3.0)  # one third of the total
 
     # id_map buckets and node ids identical regardless of explicit/default arg.
     assert idmap_default["bus"] == idmap_explicit["bus"]
@@ -179,8 +179,9 @@ def test_pp_multi_ext_grid_first_slack_wins():
     pp.create_ext_grid(net, bus=b1, vm_pu=0.95, va_degree=10.0)
 
     _, id_map = pp_to_grid(net)
-    # 1.0 pu * 20 kV * 1000 = 20000 V at 0 deg -> purely real.
-    assert id_map["slack_v_complex"] == pytest.approx(complex(20000.0, 0.0))
+    # 1.0 pu * 20 kV * 1000 / sqrt(3) = 11547 V at 0 deg -> purely real: the
+    # line-to-neutral phasor of the one-phase grid.
+    assert id_map["slack_v_complex"] == pytest.approx(complex(20000.0 / 3.0**0.5, 0.0))
 
 
 # ----------------------------------------------------------------------- #
@@ -243,9 +244,9 @@ def test_pp_asymmetric_load_single_phase_collapsed(caplog):
     asym = next(
         a
         for a in grid.appliances
-        if isinstance(a, Load) and a.phases == (Phase.A,) and a.p_nom_w > 0.55e6
+        if isinstance(a, Load) and a.phases == (Phase.A,) and a.p_nom_w > 0.55e6 / 3.0
     )
-    assert asym.p_nom_w == pytest.approx(0.6e6)
+    assert asym.p_nom_w == pytest.approx(0.6e6 / 3.0)
     assert asym.p_nom_per_phase_w is None
     assert any("collapsed" in r.message for r in caplog.records)
 
@@ -375,3 +376,16 @@ def _pgm_input(with_asym: bool = False):
         data["asym_load"] = asym
 
     return data
+
+
+def test_pgm_and_opendss_record_the_phase_mode_tag():
+    pytest.importorskip("power_grid_model")
+    from power_grid_model import initialize_array
+
+    from pgml.convert.pgm import to_grid as pgm_to_grid
+
+    node = initialize_array("input", "node", 1)
+    node["id"], node["u_rated"] = [1], [10e3]
+    for mode in PhaseMode:
+        grid, _ = pgm_to_grid({"node": node}, base_frequency_hz=50.0, phase_mode=mode)
+        assert grid.metadata.tags["phase_mode"] == mode.value
