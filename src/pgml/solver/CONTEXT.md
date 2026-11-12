@@ -153,8 +153,11 @@ pages `differentiability.md` and `modeling/solver-performance.md`.
   `h > 1` such a machine is an ordinary Norton current source.
 - `_dense_lapack`: a call is checked against a probe RHS with distinct entries, a failure
   latches a per-process repair (per-matrix factorization, then one thread) and a call
-  still wrong raises `ComputationError`. Single matrices, CUDA and the sparse backend are
-  untouched. The thread count is process-global. A negative LAPACK `info` raises; a
+  still wrong raises `ComputationError`. A stack above `_NESTED_ROWS` skips the batched
+  call while oneMKL would nest its threads in torch's batch loop
+  (`nested_lapack_threads`, true after `torch.set_num_threads(n > 1)`): that call can
+  hang, and a hang cannot be checked afterwards. Decided per call, never latched. Single
+  matrices, CUDA and the sparse backend are untouched. The thread count is process-global. A negative LAPACK `info` raises; a
   positive one (exact zero pivot) keeps torch's error.
 - Woodbury: the update never inverts `C`, so an open state (`s = 0`) is exact and a branch
   at its base state reproduces the base solve. The sweep base omits every switched branch
