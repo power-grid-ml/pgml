@@ -45,6 +45,11 @@ meaningful for WYE only — a non-``'auto'`` value on a DELTA appliance raises.
   per-phase powers are summed onto the element
   (:func:`pgml.assembly._params.resolve_operating_power`); a per-phase spectrum keys
   off ``phases[0]``. This is OpenDSS's ``phases=1 conn=delta`` Load.
+- A DELTA appliance on a node with fewer than three phase rows (``(A, B)``) needs the
+  node's ``u_rated_ln_v``. A delta element is rated at ``Node.u_rated_v``, which such
+  a node stores line-to-neutral unless ``u_rated_ln_v`` is set (then ``u_rated_v`` is
+  the phase-to-phase voltage); without it the element would be rated at the
+  line-to-neutral voltage, so it raises :class:`~pgml.errors.InputError`.
 - DELTA otherwise (one phase, a ``Phase.N`` among the phases, or more than three
   phases) raises :class:`~pgml.errors.ModelingError`; the schema already forbids
   DELTA on one phase.
@@ -62,7 +67,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from pgml.errors import ModelingError
+from pgml.errors import InputError, ModelingError
 from pgml.schemas.grid_schema import Phase, WindingConnection
 
 from .index import NodePhaseIndex
@@ -99,15 +104,18 @@ class IncidenceGroup:
     n_used: int
 
 
-def _group_key(appliance, node_phases) -> tuple:
+def _group_key(appliance, node) -> tuple:
     """Hashable grouping key ``(connection, n_phases, has_neutral_return)``.
 
     ``has_neutral_return`` folds the WYE ``return_path`` decision into the key so a
     GROUNDED and a NEUTRAL-returning WYE appliance on the SAME node land in different
     groups (different incidence ``M``). Raises :class:`ModelingError` for an ill-posed
     request: ``return_path='neutral'`` on a node without ``Phase.N``, or any
-    non-``'auto'`` ``return_path`` on a DELTA-resolved appliance.
+    non-``'auto'`` ``return_path`` on a DELTA-resolved appliance; and
+    :class:`InputError` for a DELTA-resolved appliance on a node whose rating does not
+    give its phase-to-phase voltage (:func:`_check_delta_rating`).
     """
+    node_phases = node.phases
     conn = resolve_connection(appliance)
     if conn in (WindingConnection.WYE, WindingConnection.WYE_GROUNDED):
         conn = WindingConnection.WYE
@@ -125,6 +133,7 @@ def _group_key(appliance, node_phases) -> tuple:
                 "for a WYE connection only; a DELTA appliance has no neutral return "
                 "(use return_path='auto')."
             )
+        _check_delta_rating(appliance, node)
         return (conn, n, False)
     node_has_neutral = Phase.N in node_phases
     if return_path == "ground":
@@ -142,17 +151,41 @@ def _group_key(appliance, node_phases) -> tuple:
     return (conn, n, has_neutral)
 
 
+def _check_delta_rating(appliance, node) -> None:
+    """Refuse a DELTA appliance whose node rating is not a phase-to-phase voltage.
+
+    A delta element is rated at ``Node.u_rated_v``
+    (:func:`pgml.assembly.node_voltage_magnitude` with ``line_to_line=True``). On a
+    node with three or more phase rows that is the line-to-line voltage. On a node
+    with fewer (``(A, B)``) it is the line-to-neutral voltage unless the node sets
+    ``u_rated_ln_v``, which makes ``u_rated_v`` the phase-to-phase voltage; without
+    it the element's power would be referred to the wrong voltage, so the appliance
+    is refused instead.
+    """
+    if len(node.phases) >= 3 or getattr(node, "u_rated_ln_v", None) is not None:
+        return
+    raise InputError(
+        f"appliance {appliance.id}: a DELTA (phase-to-phase) appliance on node "
+        f"{node.id}, which has {len(node.phases)} phase rows and no u_rated_ln_v. "
+        "Such a node stores u_rated_v line-to-neutral, so the phase-to-phase rating "
+        "of the element is undefined. Set `u_rated_ln_v` on the node (u_rated_v is "
+        "then its phase-to-phase voltage), or connect the appliance WYE."
+    )
+
+
 def group_appliances(appliances, node_map) -> list[IncidenceGroup]:
     """Group Load/Generator objects by ``(connection, n_phases, has_neutral_return)``.
 
     ``node_map`` maps node id -> node (for the ``Phase.N`` membership test, which is
     a property of the appliance's NODE, not its own phases). Raises for an
-    unsupported DELTA arity (anything but two or three phases).
+    unsupported DELTA arity (anything but two or three phases), and
+    :class:`~pgml.errors.InputError` for a DELTA appliance on a node with fewer than
+    three phase rows that does not set ``u_rated_ln_v``.
     """
     by_key: dict[tuple, list] = {}
     for a in appliances:
         node = node_map[a.node]
-        key = _group_key(a, node.phases)
+        key = _group_key(a, node)
         by_key.setdefault(key, []).append(a)
 
     groups: list[IncidenceGroup] = []
