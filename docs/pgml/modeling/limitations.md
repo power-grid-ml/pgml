@@ -114,10 +114,10 @@ Keep this in mind when pandapower serves as ground truth for such a grid.
 **Delta appliances.** A delta appliance is either three elements on three phases or one
 phase-to-phase element on two phases ({doc}`appliances`). An open delta (two elements on
 three conductors, OpenDSS `Load phases=2 conn=delta`) is not an appliance form; enter it as
-two two-phase delta appliances. The OpenDSS reader converts a `phases=1 conn=delta` load as a
-wye load, and sets no `u_rated_ln_v` on an imported bus; a delta element it reads onto a bus
-with only two conductor rows (`bus.1.2`) is therefore refused at assembly (a delta appliance on a node with
-fewer than three phase rows needs `u_rated_ln_v`, {doc}`appliances`). A voltage-regulating generator on a
+two two-phase delta appliances. The OpenDSS reader refuses an open delta of any appliance or
+shunt class with a `ConversionError` naming the element. It converts a `phases=1 conn=delta`
+load as a wye load, and sets no `u_rated_ln_v` on an imported bus (a delta appliance on a node
+with fewer than three phase rows needs `u_rated_ln_v`, {doc}`appliances`). A voltage-regulating generator on a
 delta connection and the `opendss_voltage` harmonic reference on a two-phase delta device
 raise.
 

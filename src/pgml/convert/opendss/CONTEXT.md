@@ -60,7 +60,9 @@ referral, vector-group mechanics, source impedance, converter coverage):
   and count and is recorded in the report. Out-of-scope inputs raise
   `ConversionError` instead: three-winding transformers, differing per-winding kVA,
   non-zero neutral node or `Rneut`/`Xneut` earthing impedance, non-cyclic winding
-  phase order, a DELTA `model=3` generator.
+  phase order, a DELTA `model=3` generator, an open delta (`phases=2 conn=delta` on
+  any appliance or shunt class: two legs on three conductors, while a two-phase
+  DELTA appliance is one element; refused in both phase modes).
 
 ## Conventions an edit must keep
 
