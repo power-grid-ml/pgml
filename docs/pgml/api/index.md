@@ -11,7 +11,8 @@ what you see here is the public surface.
 | {mod}`pgml.assembly` | `assemble_ybus`, device injections, branch currents, the node-phase row layout, the bus-fusion map |
 | {mod}`pgml.geometry` | Carson/Deri line constants from conductor geometry, and the analytic harmonic line models |
 | {mod}`pgml.topology` | Slack anchors, branch edges, distance from the slack, connectivity reports, grid fingerprints |
-| {mod}`pgml.studies` | Planning studies on a grid: the impedance scan (driving-point and transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins, hosting capacity and the branch ratings it checks |
+| {mod}`pgml.studies` | Planning studies on a grid: the impedance scan (driving-point and transfer impedance vs frequency, resonances), P-V curves through the nose by continuation power flow, Q-V curves and reactive margins, hosting capacity and the branch ratings it checks, and the spread of inverter emission (harmonics, interharmonics, supraharmonics) through the grid |
+| {mod}`pgml.inverter` | Physical harmonic emission models of grid-following inverters: LCL/EMC filter, current control, PLL, PWM, dead time, DC-link control and MPPT, evaluated as a frequency-domain Norton equivalent |
 | {mod}`pgml.scenarios` | Batched sampling of operating points, sweeps, the batched solve, parquet datasets |
 | {mod}`pgml.convert` | Readers for pandapower, power-grid-model and OpenDSS networks |
 | {mod}`pgml.grids` | Benchmark builders and the synthetic feeder |
@@ -33,6 +34,7 @@ assembly
 geometry
 topology
 studies
+inverter
 scenarios
 convert
 grids

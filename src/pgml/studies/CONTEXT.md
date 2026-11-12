@@ -21,6 +21,9 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
   `HostingLimits` (voltage band, line phase-conductor / transformer loading, optional
   VUF, THD and neutral loading).
 - `hosting.py` — `hosting_capacity` and `HostingCapacity`.
+- `emission.py` — `emission_flow` / `EmissionFlow` / `emission_frequencies`: the network
+  solve on an arbitrary frequency grid with `pgml.inverter` Norton models, coherent and
+  random-phase aggregation, primary/secondary split, per-unit stability margin.
 - `_common.py` — private helpers every study uses: `resolve_complex_dtype` (the `dtype`
   argument) and `check_study` (the `"study"` key check of `from_dict`).
 
@@ -84,6 +87,30 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Resonance refinement interpolates `1/|Z|^2` (peaks) and `|Z|^2` (dips), which are
   quadratic near a lightly damped resonance; `ln|Z|` was measured 20x less accurate.
 
+## Emission study decisions an edit must not undo
+
+- The network matrix is `_harmonic_admittance` (the harmonic flow's own `Y(f)`) at every
+  frequency; other devices' spectra and `node_sources` enter at integer orders exactly as in
+  `solve_harmonic_flow`. Without inverter models the study equals the harmonic flow (pinned
+  by `test_without_inverters_the_study_is_the_harmonic_flow`).
+- Modelled devices are silenced in the spectrum path (`harmonic_injection={id: {}}`); one
+  carrying `harmonic_impedance` or a derived generation shunt is refused, never doubled.
+- The units are never stamped into the dense `Y`. The network without them is factored
+  (with the `ybus_structure` pattern plus the diagonal, so the sparse backend gathers
+  instead of scanning) and solved for column 0 (everything not modelled) and one column
+  per unit element (port). The units' block-diagonal admittance `D` acts through
+  Woodbury in port space: `Y^-1 = Z0 - Z0 P D (I + Z_pp D)^-1 P^T Z0`, which never
+  inverts `D` (a unit may have none). Scenario batches of the unit parameters touch only
+  the `S x S` port system (`S` = number of unit elements); the network factorization is
+  batched only by the operating point. Agrees with stamping to ~1e-15 relative.
+- `v_rms` sums each unit's unlocked response in power, the locked ones as phasors.
+- Primary emission of a unit = closed-loop port impedance block of its own terminals
+  times its own Norton current (all other sources zero); the same block is the `Z_tt` of
+  the stability margin.
+- `admittance="passive"|"none"` swaps only the unit admittance `D`; the Norton currents are
+  unchanged.
+- The generation-shunt notice is suppressed when every generator is modelled.
+
 ## Continuation invariants
 
 - `λ` multiplies the selected appliances' complex power at the solved voltage; `λ = 1` is
@@ -139,6 +166,10 @@ Signatures: docstrings / API_INDEX.md. User guide: `docs/pgml/studies/`.
 - Not differentiable (feasibility is boolean); the search runs under `torch.no_grad()`.
 
 ## Tests
+
+- Emission study: `tests/inverter/test_emission_flow.py`, gates
+  `tests/differentiability/test_inverter_emission_gradcheck.py`,
+  `tests/gpu/test_inverter_emission_parity.py`.
 
 - Impedance scan: `tests/studies/test_impedance_scan.py` (closed forms, fusion, chunking,
   sparse backend, resonance prominence, contracts),
