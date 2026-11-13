@@ -137,8 +137,10 @@ from pgml.convert._common import (
 )
 from pgml.convert._model_differences import OPENDSS, finalize_report
 from pgml.convert._report import ConversionReport
+from pgml.convert.opendss.centre_tap import CentreTappedUnit, read_centre_tapped_unit
 from pgml.errors import ConversionError
 from pgml.schemas.grid_schema import (
+    CentreTap,
     Characteristic,
     ComplexTap,
     ConsumerType,
@@ -198,6 +200,7 @@ def to_grid(
     harmonic_line_model: Optional[str] = None,
     der_harmonics: bool = True,
     earth_return: Literal["pgml", "opendss"] = "pgml",
+    centre_tapped: Literal["raise", "centre_tap", "two_winding"] = "raise",
     return_report: bool = False,
 ) -> tuple[Grid, dict[str, Any]]:
     """Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
@@ -246,6 +249,31 @@ def to_grid(
         Import native Generator/PVSystem/Storage harmonic impedance and voltage
         spectra (default True). Supports one-phase WYE and three-phase WYE/DELTA.
         False explicitly requests fundamental-only DER conversion and omits both.
+    centre_tapped:
+        What to do with a split-phase service transformer, the single-phase
+        three-winding unit of North-American feeders
+        (``buses=(hv.3, lv.1.0, lv.0.2)``, two equal half secondaries in series).
+        ``"raise"`` (default) refuses every three-winding transformer.
+        ``"centre_tap"`` (``THREE_PHASE`` only) converts the unit faithfully to a
+        :class:`~pgml.schemas.grid_schema.Transformer` with a
+        :class:`~pgml.schemas.grid_schema.CentreTap` block: the secondary keeps its two
+        legs ``X1``/``X2`` (and the neutral row when the centre tap is node 4), the
+        centre tap is earthed solidly, and loads on either leg stay on their own leg.
+        The primary impedance is split into one star branch per winding from
+        ``XHL``/``XHT``/``XLT`` (see :mod:`pgml.convert.opendss.centre_tap`).
+        ``"two_winding"`` (``SINGLE_PHASE_EQUIV`` only) is a structural substitution
+        for per-phase studies, where a node has no legs: the unit becomes a plain
+        two-winding single-phase transformer of the same kVA, primary coil voltage
+        and ratio, whose secondary is one winding at the full ``2 * kV`` of a half
+        winding; the unit's legs merge into the one secondary node, and its series
+        impedance is the primary-to-full-secondary short-circuit impedance of the
+        three-winding data. The substituted node keeps the rated voltage of a leg
+        (120 V on a 240 V secondary), so only constant-power loads see the right
+        per-unit voltage there; the leg-to-leg imbalance, the centre-tap current and
+        the 120 V half-voltage level are not represented. Either value records the
+        unit names in ``id_map["centre_tapped"]``, the count in
+        ``grid.metadata.tags["centre_tapped_units"]`` and a report entry. A
+        three-winding unit that is not of this shape raises under every value.
     return_report:
         Also return the :class:`~pgml.convert.ConversionReport` of this conversion
         as a third tuple element: every dropped element kind, every approximation
@@ -289,7 +317,8 @@ def to_grid(
       :class:`~pgml.schemas.grid_schema.Transformer` (winding 1 = HV/from,
       winding 2 = LV/to; solidly grounded wye or delta windings only).
       Three-winding transformers and zigzag windings raise
-      :class:`~pgml.errors.ConversionError`.
+      :class:`~pgml.errors.ConversionError`, except the split-phase units that
+      ``centre_tapped`` converts.
     - ``First()``/``Next()`` class iterators already skip DISABLED elements
       (verified empirically against opendssdirect 0.9.4); every element loop
       below therefore only ever sees in-service elements without an explicit
@@ -343,6 +372,24 @@ def to_grid(
         raise ConversionError(
             f"earth_return must be 'pgml' or 'opendss', got {earth_return!r}"
         )
+    if centre_tapped not in ("raise", "centre_tap", "two_winding"):
+        raise ConversionError(
+            "centre_tapped must be 'raise', 'centre_tap' or 'two_winding', "
+            f"got {centre_tapped!r}"
+        )
+    if centre_tapped == "centre_tap" and phase_mode is not PhaseMode.THREE_PHASE:
+        raise ConversionError(
+            "centre_tapped='centre_tap' keeps the two legs of the secondary and needs "
+            "phase_mode=THREE_PHASE; use 'two_winding' for the single-phase equivalent."
+        )
+    if (
+        centre_tapped == "two_winding"
+        and phase_mode is not PhaseMode.SINGLE_PHASE_EQUIV
+    ):
+        raise ConversionError(
+            "centre_tapped='two_winding' merges the legs into one node and is only "
+            "defined for phase_mode=SINGLE_PHASE_EQUIV; use 'centre_tap' for THREE_PHASE."
+        )
     line_earth: dict[int, tuple[float, float, float]] = {}
 
     id_map: dict[str, Any] = {
@@ -356,6 +403,7 @@ def to_grid(
         "generator": {},
         "pvsystem": {},
         "storage": {},
+        "centre_tapped": {},
         "slack_v_complex": None,
     }
 
@@ -586,14 +634,41 @@ def to_grid(
     # (a genuinely floating or impedance-grounded neutral) is out of scope
     # (pgml's transformer assembly models solid grounding only) and raises.
     # ---------------------------------------------------------------------- #
+    asymmetric_halves: list[str] = []
     ret = dss.Transformers.First()
     while ret:
         trafo_name = dss.Transformers.Name().lower()
         n_wdg = dss.Transformers.NumWindings()
+        if n_wdg == 3 and centre_tapped != "raise":
+            unit = read_centre_tapped_unit(dss, trafo_name)
+            if (
+                unit.primary_bus not in bus_name_to_node_id
+                or unit.secondary_bus not in bus_name_to_node_id
+            ):
+                ret = dss.Transformers.Next()
+                continue
+            if centre_tapped == "centre_tap" and unit.asymmetry > 1e-6:
+                asymmetric_halves.append(trafo_name)
+            trafo_id = _id.next()
+            id_map["trafo"][trafo_name] = trafo_id
+            id_map["centre_tapped"][trafo_name] = trafo_id
+            branches.append(
+                _centre_tapped_transformer(
+                    unit,
+                    trafo_id,
+                    trafo_name,
+                    bus_name_to_node_id,
+                    phase_mode,
+                    two_pi_f0,
+                )
+            )
+            ret = dss.Transformers.Next()
+            continue
         if n_wdg != 2:
             raise ConversionError(
                 f"OpenDSS transformer '{trafo_name}' has {n_wdg} windings; "
-                "only two-winding transformers are supported."
+                "only two-winding transformers are supported (a split-phase "
+                "service transformer converts with the `centre_tapped` option)."
             )
 
         dss.Circuit.SetActiveElement(f"Transformer.{trafo_name}")
@@ -1484,8 +1559,8 @@ def to_grid(
     #     `StorageController`, `Fault`, `Relay`, `Recloser`, `Fuse`,         #
     #     `Sensor` (`InvControl` is read in step 11; its unmapped modes are  #
     #     reported there). A 3-winding `Transformer` is NOT counted here --  #
-    #     it already raises `ConversionError` above (a hard scope boundary, #
-    #     not a silent drop).                                               #
+    #     it is converted (`centre_tapped`) or raises `ConversionError`      #
+    #     above (a hard scope boundary, not a silent drop).                  #
     # ---------------------------------------------------------------------- #
     _handled_dss_classes = {
         "vsource",
@@ -1530,6 +1605,9 @@ def to_grid(
         grid, _logger, tool="OpenDSS", requested=harmonic_line_model
     )
     _apply_line_earth_return(grid, line_earth, f0_hz, earth_return, report)
+    _record_centre_tapped(
+        grid, id_map["centre_tapped"], centre_tapped, asymmetric_halves, report
+    )
     finalize_report(report, grid, _logger)
     if return_report:
         return grid, id_map, report
@@ -1539,6 +1617,114 @@ def to_grid(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _centre_tapped_transformer(
+    unit: CentreTappedUnit,
+    trafo_id: int,
+    name: str,
+    bus_name_to_node_id: dict[str, int],
+    phase_mode: PhaseMode,
+    two_pi_f0: float,
+) -> Transformer:
+    """Schema transformer of a split-phase unit (see ``to_grid`` ``centre_tapped``)."""
+    s_hv = unit.s_rated_va
+    g_m = unit.noload_loss_pct / 100.0 * s_hv / unit.u_rated_from_v**2
+    l_m: Optional[float] = None
+    if unit.imag_pct > 0.0:
+        b_m = unit.imag_pct / 100.0 * s_hv / unit.u_rated_from_v**2
+        l_m = 1.0 / (two_pi_f0 * b_m)
+    common: dict[str, Any] = dict(
+        id=trafo_id,
+        name=name,
+        from_node=bus_name_to_node_id[unit.primary_bus],
+        to_node=bus_name_to_node_id[unit.secondary_bus],
+        series_resistance_ohm=unit.series_resistance_ohm,
+        series_inductance_h=unit.series_reactance_ohm / two_pi_f0,
+        magnetizing_conductance_s=g_m,
+        magnetizing_inductance_h=l_m,
+        harmonic_xr_constant=unit.xr_constant,
+        provenance=_PROVENANCE,
+    )
+    if phase_mode is PhaseMode.SINGLE_PHASE_EQUIV:
+        return Transformer(
+            **common,
+            from_phases=phases_for(phase_mode),
+            to_phases=phases_for(phase_mode),
+            s_rated_va=equivalent_power(phase_mode, s_hv),
+            u_rated_from_v=equivalent_voltage(phase_mode, unit.u_rated_from_v),
+            u_rated_to_v=equivalent_voltage(phase_mode, unit.u_rated_to_v),
+            from_connection=WindingConnection.WYE_GROUNDED,
+            to_connection=WindingConnection.WYE_GROUNDED,
+            tap=ComplexTap(ratio_magnitude=unit.ratio, shift_deg=0.0),
+        )
+    neutral = (Phase.N,) if unit.centre == 4 else ()
+    return Transformer(
+        **common,
+        from_phases=unit.primary_phases,
+        to_phases=(unit.x1, unit.x2) + neutral,
+        s_rated_va=s_hv,
+        u_rated_from_v=unit.u_rated_from_v,
+        u_rated_to_v=unit.u_rated_to_v,
+        from_connection=(
+            WindingConnection.DELTA
+            if unit.primary_delta
+            else WindingConnection.WYE_GROUNDED
+        ),
+        to_connection=WindingConnection.WYE_GROUNDED,
+        tap=ComplexTap(ratio_magnitude=unit.ratio, shift_deg=0.0),
+        centre_tap=CentreTap(
+            half_resistance_ohm=unit.half_resistance_ohm,
+            half_inductance_h=unit.half_reactance_ohm / two_pi_f0,
+        ),
+    )
+
+
+def _record_centre_tapped(
+    grid: Grid,
+    names: dict[str, int],
+    option: str,
+    asymmetric: list[str],
+    report: ConversionReport,
+) -> None:
+    """Stamp the count on the grid and report the converted split-phase units."""
+    if not names:
+        return
+    grid.metadata.tags["centre_tapped_units"] = str(len(names))
+    grid.metadata.tags["centre_tapped_mode"] = option
+    if option == "two_winding":
+        message = (
+            f"{len(names)} split-phase (centre-tapped, three-winding) transformer(s) "
+            "replaced by a two-winding single-phase transformer of the same kVA, "
+            "with the secondary as one winding at the full voltage and the legs "
+            "merged into one node; the leg imbalance and centre-tap current are "
+            "not represented."
+        )
+        report.approximated(
+            "opendss.centre_tapped_two_winding",
+            message,
+            element_type="transformer",
+            ids=list(names),
+            affects=("fundamental", "unbalanced", "harmonic"),
+            announced=True,
+        )
+    else:
+        message = (
+            f"{len(names)} split-phase transformer(s) converted to a centre-tapped "
+            "transformer."
+        )
+    if asymmetric:
+        report.approximated(
+            "opendss.centre_tapped_halves",
+            f"{len(asymmetric)} split-phase transformer(s) have half windings of "
+            "different leakage (XHL != XHT); the centre-tap model has two equal "
+            "halves, so each takes the mean. The primary-to-full-secondary impedance "
+            "is exact; the voltage difference between unequally loaded legs is not.",
+            element_type="transformer",
+            ids=asymmetric,
+            affects=("unbalanced", "harmonic"),
+        )
+    _logger.warning("OpenDSS: %s Names: %s", message, ", ".join(list(names)[:20]))
 
 
 def _xy_curve(dss: Any, name: str) -> Characteristic:

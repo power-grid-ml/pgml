@@ -30,6 +30,11 @@ referral, vector-group mechanics, source impedance, converter coverage):
   - `_generator_voltage_regulation` — `model=3` → `VoltageRegulation`.
   - `_der_harmonic_model` — native DER harmonic impedance and spectrum.
   - `_apply_line_earth_return` — `earth_return="opendss"`.
+- `centre_tap.py` — `read_centre_tapped_unit`: recognises the single-phase three-winding
+  split-phase service transformer (`buses=(hv.3, lv.1.0, lv.0.2)`) and reduces its
+  `%R`/`XHL`/`XHT`/`XLT` data to the full-secondary short-circuit impedance and one
+  half-winding impedance (derivation in the module docstring). Used by `to_grid`
+  when `centre_tapped` is not `"raise"`.
 - `exporter.py` — `from_grid` → `OpenDSSExport` (live circuit + `ConversionReport`).
   The circuit itself is written by `pgml.evaluation.oracles.export_grid_to_opendss`;
   this module adds the matched earth-return parameters, the approximation guard for
@@ -58,7 +63,11 @@ referral, vector-group mechanics, source impedance, converter coverage):
   always WYE).
 - Nothing is dropped silently: each unhandled element class warns once with kind
   and count and is recorded in the report. Out-of-scope inputs raise
-  `ConversionError` instead: three-winding transformers, differing per-winding kVA,
+  `ConversionError` instead: three-winding transformers (except the split-phase units
+  that `centre_tapped="centre_tap"` (THREE_PHASE, faithful `CentreTap`) or
+  `"two_winding"` (SINGLE_PHASE_EQUIV, merged-leg substitution) convert; they are
+  listed in `id_map["centre_tapped"]`, `metadata.tags["centre_tapped_units"]` and the
+  report; unequal halves `XHL != XHT` are symmetrised and reported), differing per-winding kVA,
   non-zero neutral node or `Rneut`/`Xneut` earthing impedance, non-cyclic winding
   phase order, a DELTA `model=3` generator, an open delta (`phases=2 conn=delta` on
   any appliance or shunt class: two legs on three conductors, while a two-phase
