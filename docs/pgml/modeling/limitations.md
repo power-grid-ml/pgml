@@ -241,7 +241,7 @@ Not converted; a warning names every non-empty dropped kind:
 - pandapower: `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `motor`, `asymmetric_sgen`,
   `measurement`, and controllers other than the mapped DER controls (for example tap
   controllers and `CharacteristicControl`);
-- OpenDSS: three-winding transformers, `RegControl`, `XfmrCode` and frequency-correction
+- OpenDSS: three-winding transformers (except a split-phase service unit, `to_grid(centre_tapped=...)`), `RegControl`, `XfmrCode` and frequency-correction
   curves, explicit non-solid neutral nodes, unmapped `InvControl` modes, and `monVoltageCalc`;
 - power-grid-model: `three_winding_transformer`, `shunt`, `asym_gen`,
   `transformer_tap_regulator`.

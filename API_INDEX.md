@@ -85,7 +85,12 @@ Full documentation: the docstrings (published as the API reference).
 - `PhaseMode` — re-exported from `pgml.convert`
 - class `UnsupportedGridError` — A grid uses an element or option that an exporter cannot represent.
 - def `from_grid(grid: Grid, mode: str = 'matched', load_shunt: Optional[str] = None, allow_approximation: bool = False, circuit_name: str = 'pgml_export') -> OpenDSSExport` — Build the OpenDSS circuit of ``grid`` in the live ``opendssdirect`` engine.
-- def `to_grid(dss: Any, phase_mode: PhaseMode = …, harmonic_line_model: Optional[str] = None, der_harmonics: bool = True, earth_return: Literal['pgml', 'opendss'] = 'pgml', return_report: bool = False) -> tuple[Grid, dict[str, Any]]` — Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
+- def `to_grid(dss: Any, phase_mode: PhaseMode = …, harmonic_line_model: Optional[str] = None, der_harmonics: bool = True, earth_return: Literal['pgml', 'opendss'] = 'pgml', centre_tapped: Literal['raise', 'centre_tap', 'two_winding'] = 'raise', return_report: bool = False) -> tuple[Grid, dict[str, Any]]` — Convert the currently-loaded OpenDSS circuit to a :class:`~pgml.schemas.grid_schema.Grid`.
+
+## `pgml.convert.opendss.centre_tap`
+
+- class `CentreTappedUnit(primary_bus, secondary_bus, primary_phases, primary_delta, x1, x2, centre, s_rated_va, u_rated_from_v, u_rated_to_v, ratio, series_resistance_ohm, series_reactance_ohm, half_resistance_ohm, half_reactance_ohm, noload_loss_pct, imag_pct, xr_constant, asymmetry)` — A split-phase unit on the full-secondary basis (SI units).
+- def `read_centre_tapped_unit(dss: Any, name: str) -> CentreTappedUnit` — Read the active three-winding transformer as a split-phase unit.
 
 ## `pgml.convert.opendss.converter`
 

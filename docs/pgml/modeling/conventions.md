@@ -467,7 +467,7 @@ read, a foreign network under-converts, and these are the current gaps.
 
 | | converted | not read |
 |---|---|---|
-| OpenDSS | `Transformer` (scope above), `Line`, `Load`, `Capacitor`, `Reactor`, `Generator` (including `model=3`), `PVSystem`, `Storage` | three-winding transformers, regulators and tap-changer control, frequency-correction curves, a coupled `Rmatrix`/`Xmatrix` reactor, a non-grounded or two-bus terminal-2 shunt reference, a neutral earthing impedance (`Rneut`/`Xneut`) |
+| OpenDSS | `Transformer` (scope above), `Line`, `Load`, `Capacitor`, `Reactor`, `Generator` (including `model=3`), `PVSystem`, `Storage` | three-winding transformers (a split-phase service unit converts with `centre_tapped`), regulators and tap-changer control, frequency-correction curves, a coupled `Rmatrix`/`Xmatrix` reactor, a non-grounded or two-bus terminal-2 shunt reference, a neutral earthing impedance (`Rneut`/`Xneut`) |
 | pandapower | `trafo`, `line`, `load`, `sgen`, `gen`, `storage`, `shunt`, `asymmetric_load`, `switch`, `ext_grid` (including `x0x_max`/`r0x0_max`) | `trafo3w`, `impedance`, `ward`, `xward`, `dcline`, `motor`, `asymmetric_sgen`, `mag0_percent`/`mag0_rx`, `si0_hv_partial`, `xn_ohm`/`rn_ohm` |
 | pgm | `node`, `line`, `transformer`, `link`, `sym_load`, `asym_load`, `sym_gen` (with its `voltage_regulator`), `source` (including `z01_ratio`) | `asym_gen`, a `voltage_regulator` on anything other than a `sym_gen`, `three_winding_transformer`, `transformer_tap_regulator`, `shunt`, `uk_min`/`uk_max`/`pk_min`/`pk_max`, `i0_zero_sequence`/`p0_zero_sequence` |
 
