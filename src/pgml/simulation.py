@@ -49,6 +49,8 @@ Slack = Literal["ideal", "norton"]
 LoadShunt = Literal["none", "opendss", "motor"]
 LoadShuntBasis = Literal["operating_point", "nameplate"]
 Symmetry = Literal["auto", "symmetric", "asymmetric"]
+Criticality = Literal["auto", "always", "never"]
+_CRITICALITY = ("auto", "always", "never")
 _DTYPES = {"complex128": torch.complex128, "complex64": torch.complex64}
 
 
@@ -519,6 +521,7 @@ def simulate(
     block_rows: Optional[Sequence[Tensor]] = None,
     equilibrate: Optional[str] = None,
     harmonic_system: Optional[HarmonicFlowSystem] = None,
+    criticality: Criticality = "auto",
 ) -> SolvedState:
     """Run a simulation and return the differentiable :class:`SolvedState`.
 
@@ -576,11 +579,34 @@ def simulate(
     matrix as assembled). It changes the conditioning of the factorizations, not the
     result: see :func:`pgml.solver.solve_power_flow`.
 
+    ``criticality`` decides when the fundamental solve runs its Jacobian criticality
+    analysis (a dense ``[2N, 2N]`` state Jacobian and its SVD, on the hardest scenario of
+    a batch), for both calculations:
+
+    - ``"auto"`` (default) — only when the solve does not converge;
+    - ``"always"`` — also on a converged solve (a voltage-collapse margin naming the
+      weakest bus);
+    - ``"never"`` — skip it.
+
+    The analysis only feeds the diagnostics that :class:`~pgml.errors.ConvergenceError`
+    carries (``diagnostics["criticality"]``, and a ``likely_cause`` that names a
+    near-singular Jacobian); it never changes the voltages, the convergence flag, the
+    iteration count or the gradients. A caller that discards those diagnostics — a
+    search or optimisation loop that treats non-convergence as a verdict, e.g. with
+    ``strict=False`` or by catching the error — saves the dense analysis on every
+    non-converging solve with ``"never"``. With ``"never"``,
+    ``diagnostics["criticality"]`` is ``None`` and ``likely_cause`` falls back to the
+    cheap state diagnostics.
+
     Raises :class:`~pgml.errors.ConvergenceError` if the nonlinear power flow does not
     converge (``strict=True``, the default); pass ``strict=False`` to return the
     (non-converged) state with ``converged=False`` instead.
     """
     config = config or SimulationConfig()
+    if criticality not in _CRITICALITY:
+        raise InputError(
+            f"criticality must be one of {list(_CRITICALITY)}, got {criticality!r}"
+        )
     cdt = _resolve_dtype(dtype)
     dev = torch.device(device) if isinstance(device, str) else device
 
@@ -603,6 +629,7 @@ def simulate(
             block_rows=block_rows,
             on_disconnected=on_disconnected,
             equilibrate=equilibrate,
+            criticality=criticality,
         )
         v = pf.v.unsqueeze(-2)  # [*batch, 1, N]
         freqs = torch.tensor(
@@ -640,6 +667,7 @@ def simulate(
             linear_solver=linear_solver,
             block_rows=block_rows,
             equilibrate=equilibrate,
+            criticality=criticality,
             system=harmonic_system,
         )
         v, freqs, index = hf.v, hf.frequencies_hz, hf.index
@@ -692,7 +720,7 @@ def simulate_serializable(
 
     Returns the JSON-serializable :class:`ResultBundle` directly — the entry point a
     REST handler or a file-persistence step calls. Keyword arguments are forwarded to
-    :func:`simulate` (e.g. ``device``, ``dtype``, ``on_disconnected``).
+    :func:`simulate` (e.g. ``device``, ``dtype``, ``on_disconnected``, ``criticality``).
     """
     return simulate(grid, config, **kwargs).to_result_set(
         grid_id=getattr(grid, "id", None)

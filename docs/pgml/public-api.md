@@ -51,6 +51,14 @@ It is an execution keyword rather than a config field because it changes the
 conditioning of the factorizations and not the model. The result, its units and its gradients
 are the same either way. See {doc}`modeling/solver-performance`.
 
+`criticality` decides when the fundamental solve runs its Jacobian criticality analysis, a
+dense `[2N, 2N]` Jacobian and its SVD: `"auto"` (the default) only when the solve does not
+converge, `"always"` also on a converged solve, `"never"` not at all. It only feeds the
+diagnostics a {class}`~pgml.errors.ConvergenceError` carries, never the voltages, the
+convergence flag or the gradients. A caller that discards those diagnostics, such as a search
+loop that treats non-convergence as a verdict, passes `"never"` and saves the analysis on
+every non-converging solve.
+
 `param_overrides` is another keyword rather than a config field, because it carries live
 tensors instead of serialisable values. It maps
 `(component_kind, element_id, field_name)` to a tensor and substitutes individual grid
